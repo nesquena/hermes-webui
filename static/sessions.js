@@ -198,6 +198,42 @@ function _adoptRegenerationRevision(sessionPayload){
   }
 }
 
+// Centralized canonical session install for destructive rewrites (gate review
+// 221beca7 #1). Undo, retry, edit-truncate, regeneration, clear, and delete
+// all replace the visible transcript with a shorter canonical history; any
+// artifact projection derived from the replaced revision is stale the moment
+// the rows it harvested are gone. Every caller installs the returned
+// session/revision through this helper so revision ownership and the derived
+// projection retire and rebuild together, and late cross-session responses
+// can never re-apply another session's state.
+function _installCanonicalSession(sessionPayload){
+  if(!S||!sessionPayload||typeof sessionPayload!=='object'||!sessionPayload.session_id) return false;
+  // Late-response fence: a destructive-rewrite round-trip (undo/retry/edit/
+  // clear) must only apply to the session the pane still shows. A response
+  // that arrives after the user switched sessions is dropped entirely — its
+  // caller's own activeSid guard already dropped most of these, but this is
+  // the single place the invariant holds for every present and future caller.
+  if(!S.session||S.session.session_id!==sessionPayload.session_id ||
+     (sessionPayload.profile||S.activeProfile||'default')!==(S.activeProfile||'default')) return false;
+  S.session=sessionPayload;
+  // Derived evidence owned by the replaced revision is retired first: the
+  // projection carries the OLD revision and _artifactProjectionMatches will
+  // already reject it, but clearing prevents any path from re-adopting the
+  // stale object after a partial update.
+  delete sessionPayload._artifactProjection;
+  if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(sessionPayload);
+  // Rebuild from the canonical snapshot the server just returned. Only a
+  // provably complete source may own the projection; truncated or capped
+  // sources leave it unset (collectSessionArtifacts then falls back to
+  // resident-window harvesting only).
+  if(typeof _artifactProjectionForSnapshot==='function' &&
+     !sessionPayload._messages_truncated && !(sessionPayload._messages_offset>0) &&
+     !sessionPayload._state_db_rows_capped){
+    sessionPayload._artifactProjection=_artifactProjectionForSnapshot(sessionPayload);
+  }
+  return true;
+}
+
 async function _restoreRememberedNewChatDraftSession() {
   let sid = '';
   try { sid = localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) || ''; } catch (_) { sid = ''; }
@@ -3634,6 +3670,41 @@ function _currentLoadedRenderableMessageCount(){
   return count;
 }
 
+function _captureLoadedMessageWindow(sid){
+  if(!S.session||S.session.session_id!==sid||!_messagesTruncated||
+    !Number.isInteger(_oldestIdx)||_oldestIdx<=0||!S.messages||!S.messages.length) return null;
+  return {
+    session_id:sid,
+    offset:_oldestIdx,
+    message_count:S.session.message_count,
+    revision:S.session.regeneration_revision,
+    first:_loadedMessageBoundarySignature(S.messages[0]),
+  };
+}
+function _loadedMessageBoundarySignature(message){
+  if(!message||!message.role) return null;
+  return JSON.stringify([message.role,message.content,message.tool_call_id,message.tool_calls]);
+}
+function _preserveLoadedMessageWindow(session, loaded){
+  // Full transport snapshots need not implicitly load older history. Preserve
+  // the existing server-indexed boundary, never drop a row the reader loaded.
+  // A changed boundary/revision or shortened history takes the canonical path.
+  if(!loaded||!session||session.session_id!==loaded.session_id||
+    session.regeneration_revision!==loaded.revision||!Array.isArray(session.messages)) return session;
+  const offset=session._messages_offset===undefined?0:session._messages_offset;
+  if(!Number.isInteger(offset)||offset<0||offset>=loaded.offset) return session;
+  const start=loaded.offset-offset;
+  if(start>=session.messages.length||
+    session.messages.length+offset<loaded.message_count||!loaded.first||
+    _loadedMessageBoundarySignature(session.messages[start])!==loaded.first) return session;
+  // Full snapshot authority belongs to the returned session/revision, not a
+  // side cache that could outlive this owner. Compute before dropping rows.
+  const projection=typeof _artifactProjectionForSnapshot==='function' && offset===0
+    ? _artifactProjectionForSnapshot(session) : session._artifactProjection;
+  return {...session,_artifactProjection:projection,messages:session.messages.slice(start),
+    _messages_offset:loaded.offset,_messages_truncated:true};
+}
+
 function _captureSameSessionForceReloadHint(sid){
   const loadedRenderableCount=_currentLoadedRenderableMessageCount();
   const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
@@ -3648,6 +3719,7 @@ function _captureSameSessionForceReloadHint(sid){
     loaded_message_count:loadedMessageCount,
     message_count:knownMessageCount,
     truncated:!!_messagesTruncated,
+    loaded_window:_captureLoadedMessageWindow(sid),
   };
 }
 
@@ -3723,6 +3795,9 @@ async function _ensureMessagesLoaded(sid, opts) {
     return;
   }
   // Fetch session messages with a tail window for fast initial load.
+  const loadedWindow=_sameSessionForceReloadHint&&_sameSessionForceReloadHint.session_id===sid
+    ? _sameSessionForceReloadHint.loaded_window : null;
+  const windowAtRequest={messages:S.messages,offset:_oldestIdx,truncated:_messagesTruncated};
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
   // A reload window above the server's msg_limit ceiling would be clamped by
   // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
@@ -3749,9 +3824,35 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
+  if(typeof _hydrateSessionArtifactProjection==='function'){
+    if(S.session) delete S.session._artifactProjection;
+    const projection=await _hydrateSessionArtifactProjection(data.session,_ownsLoad);
+    if(!_ownsLoad()) return;
+    data.session._artifactProjection=projection;
+  }
+  // Loading older history while this request was in flight supersedes the
+  // captured window. Do not slice the response using an obsolete boundary.
+  const unchangedWindow=S.messages===windowAtRequest.messages&&
+    _messagesTruncated===windowAtRequest.truncated&&_oldestIdx===windowAtRequest.offset;
+  if(!unchangedWindow&&S.session&&S.session.session_id===sid&&
+    Number.isInteger(_oldestIdx)&&_oldestIdx>=0&&
+    Number.isInteger(data.session._messages_offset)&&data.session._messages_offset>_oldestIdx){
+    // The reader expanded history while this bounded request was pending.
+    // Fetch canonical full history once instead of dropping their loaded head
+    // or merging possibly revised rows from the stale client snapshot.
+    data=await api(
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,
+      {timeoutMs:120000}
+    );
+    if(!_ownsLoad()||!data||!data.session) return;
+    data.session=_preserveLoadedMessageWindow(data.session,_captureLoadedMessageWindow(sid));
+  }else{
+    data.session=_preserveLoadedMessageWindow(data.session,unchangedWindow?loadedWindow:null);
+  }
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
+  if(S.session) S.session._artifactProjection=data.session._artifactProjection;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
@@ -9836,6 +9937,9 @@ async function deleteSession(sid, beforeDelete=null){
   }
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
+    // Deletion retires every derived projection (gate review 221beca7 #1):
+    // the successor session loads through loadSession, which rebuilds its own
+    // projection — nothing here may survive into it.
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
     // load the most recent remaining session, or show blank if none left

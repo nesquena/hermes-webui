@@ -52,6 +52,17 @@ def complete_background(parent_sid: str, task_id: str, answer: str) -> None:
                 break
 
 
+def discard_background(parent_sid: str, task_id: str) -> None:
+    """Discard a tracked task whose worker never started."""
+    with _lock:
+        remaining = [task for task in _BACKGROUND_TASKS.get(parent_sid, [])
+                     if task["task_id"] != task_id]
+        if remaining:
+            _BACKGROUND_TASKS[parent_sid] = remaining
+        else:
+            _BACKGROUND_TASKS.pop(parent_sid, None)
+
+
 def get_results(parent_sid: str) -> list[dict[str, Any]]:
     """Return completed background task results and remove only the done ones
     from tracking.  Tasks still in ``status="running"`` MUST stay in the list
@@ -81,7 +92,9 @@ def get_background_tasks(parent_sid: str) -> list[dict[str, Any]]:
         return list(_BACKGROUND_TASKS.get(parent_sid, []))
 
 
-def cleanup_btw(parent_sid: str) -> dict[str, Any] | None:
+def cleanup_btw(parent_sid: str, *, stream_id: str | None = None) -> dict[str, Any] | None:
     """Remove and return btw tracking for a parent session."""
     with _lock:
+        if stream_id is not None and _BTW_TRACKING.get(parent_sid, {}).get("stream_id") != stream_id:
+            return None
         return _BTW_TRACKING.pop(parent_sid, None)

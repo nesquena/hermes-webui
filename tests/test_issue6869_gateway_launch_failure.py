@@ -94,6 +94,8 @@ def test_gateway_thread_start_failure_releases_writeback_owner_and_stream_state(
     for stream_id in registered_stream_ids:
         assert stream_id not in config.STREAM_SESSION_OWNERS
         assert stream_id not in config.STREAMS
+        assert stream_id not in config.ACTIVE_RUNS
+    assert not any(key.startswith('admission:') for key in config.ACTIVE_RUNS)
     for session_id in canonical_by_id:
         assert config.session_writeback_owner(session_id) is None
 

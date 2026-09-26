@@ -247,7 +247,18 @@ and 5; it does not mark every run-state boundary implemented.
 8. **Every mutation names its layer.** A PR touching streaming, recovery,
    context reconstruction, compression, replay, or sidebar metadata should state
    which layer it changes and what regression proves the invariant still holds.
-9. **Lifecycle-busy is not client-attachable.** `ACTIVE_RUNS` answers "may a new
+9. **Admission reservation handoff.** A request's `ACTIVE_RUNS` admitting row
+   is moved under `ACTIVE_RUNS_LOCK` to a concrete `starting` row before its
+   worker is released. A restart drain closes *new* reservations but does not
+   revoke a previously admitted request: the transfer requires the original
+   reservation key and matching admitting row. Worker registration upgrades
+   only the same session's concrete row after drain, with `STREAMS_LOCK` before
+   `ACTIVE_RUNS_LOCK`; missing or cross-session rows do not acquire admission.
+   Failed launches and canceled-before-registration workers retire their own
+   concrete row. The runner runtime adapter does not create an in-process
+   stream row; its external run lifecycle is governed by the adapter.
+
+10. **Lifecycle-busy is not client-attachable.** `ACTIVE_RUNS` answers "may a new
    turn start?", not "may a browser attach a renderer?". Cancellation splits the
    two: `cancel_stream()` keeps the row as `phase="cancelling"` so a successor
    cannot overlap the unwinding worker, but the client has already reached a

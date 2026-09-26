@@ -10,6 +10,8 @@
 >
 > Automated coverage: ~11,500 tests collected via `./scripts/test.sh tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13 (3 parallel shards each), alongside a ruff lint gate, a headless browser smoke test, and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 14 languages, and hundreds of issue/PR-pinned regression tests.
 > Run: `./scripts/test.sh`
+
+> Gateway/Agent update drain regression: run `./scripts/test.sh tests/test_gate_221beca7_blockers.py tests/test_update_banner_fixes.py tests/test_restart_drain_transaction.py` with isolated `HERMES_HOME` and `HERMES_WEBUI_STATE_DIR`. The update transaction owns the restart-admission marker across a failed Gateway command, retry wait, PID adjudication, and the WebUI scheduler handoff; a terminal failure or aborted replacement releases it. The standalone health Gateway restart retains its independent drain lifecycle.
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
 

@@ -2483,6 +2483,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
   }
   function _finalizeStreamEndFallback(source){
+    if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
     _clearStreamEndRecovery();
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
@@ -2516,7 +2517,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     _streamEndRecoveryTimer=null;
     const status=await _restoreSettledSession(source,{status:true});
-    if(status==='restored'){
+    if(status==='restored'||status==='stale'){
       _clearStreamEndRecovery();
       return;
     }
@@ -2696,6 +2697,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         if(streamId){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+          if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
           if(st.active){
             setComposerStatus('Reconnected',1000);
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -2705,7 +2707,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){
         if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000);
@@ -2775,8 +2777,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     : '';
   const _STREAM_FADE_MS=620;
   const _STREAM_FADE_MAX_MS=900;
-  const _STREAM_FADE_DONE_MAX_MS=1000;
-  const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400;
   const _anchorApi=(typeof window!=='undefined'&&window.HermesAssistantTurnAnchors)
     ? window.HermesAssistantTurnAnchors
     : null;
@@ -5299,45 +5299,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeDomText=String(next.text||'');
     return next.caughtUp;
   }
-  function _streamFadeCurrentDisplayText(){
-    const parsed=_parseStreamState();
-    return segmentStart===0
-      ? parsed.displayText
-      : _stripXmlToolCalls(assistantText.slice(segmentStart));
-  }
-  function _drainStreamFadeBeforeDone(onDone){
-    const drainStartedAt=performance.now();
-    let forcedDone=false;
-    const step=()=>{
-      if(!assistantBody){onDone();return;}
-      const target=_streamFadeCurrentDisplayText();
-      const caughtUp=_renderStreamingFadeMarkdown(target);
-      const anchorProcessText=_streamFadeDomText||target;
-      if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
-      scrollIfPinned();
-      if(caughtUp){
-        // parser_end can flush pending markdown text; include that final text in
-        // the fade wait instead of replacing it immediately in renderMessages().
-        if(_smdParser) _smdEndParser();
-        // Let the last released words visibly finish their stagger + fade before
-        // the final renderMessages() DOM replacement removes the live spans.
-        const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
-        setTimeout(onDone, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
-        return;
-      }
-      // Final SSE `done` means the canonical completed session is available.
-      // The optional word-fade playout must not keep that completed answer
-      // hidden behind the live Thinking state for large/bursty responses.
-      if(!forcedDone&&performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS){
-        forcedDone=true;
-        if(_smdParser) _smdEndParser();
-        onDone();
-        return;
-      }
-      setTimeout(()=>requestAnimationFrame(step), 33);
-    };
-    step();
-  }
   function _flushPendingSegmentRender(options={}){
     const force=!!(options&&options.force);
     const skipAnchorProcessProse=!!(options&&options.skipAnchorProcessProse);
@@ -6244,10 +6205,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
-      // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
-      // a stream_end event arriving during the fade window sees
-      // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
-      // S.messages with stale server data (issue #3195).
+      // Claim completion before settling, so a subsequent stream_end cannot
+      // restore stale server data over the completed session (issue #3195).
       _streamFinalized=true;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -6327,6 +6286,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
+          const _loadedWindow=typeof _captureLoadedMessageWindow==='function'
+            ? _captureLoadedMessageWindow(activeSid) : null;
+          if(typeof _preserveLoadedMessageWindow==='function'){
+            d.session=_preserveLoadedMessageWindow(d.session,_loadedWindow);
+          }
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
@@ -6548,11 +6512,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
-      if(_shouldUseLiveProseFade()&&assistantBody){
-        _cancelAnimationFramePendingStreamRender();
-        _drainStreamFadeBeforeDone(_finishDone);
-        return;
-      }
+      // The completed session is authoritative. Cosmetic word playout must not
+      // delay Markdown or idle state after the server is done.
       _finishDone();
     });
 
@@ -6577,7 +6538,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
       const status=await _restoreSettledSession(source,{status:true});
-      if(status==='restored'){
+      if(status==='restored'||status==='stale'){
         return;
       }
       if(status==='active'&&S.activeStreamId===streamId){
@@ -6765,6 +6726,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
+            // Keep the reader's loaded boundary on same-session terminal snapshots.
+            // Continuation/revision changes take the canonical helper fallback.
+            if(typeof _preserveLoadedMessageWindow==='function'){
+              d.session=_preserveLoadedMessageWindow(d.session,_captureLoadedMessageWindow(activeSid));
+            }
+            if(typeof _oldestIdx!=='undefined') _oldestIdx=d.session._messages_offset||0;
+            if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!d.session._messages_truncated;
             S.session=d.session;
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
@@ -6805,7 +6773,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isRecoveryControlMessage){
           (async()=>{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
             if(S.session&&S.session.session_id===activeSid){
               S.messages=_filterRecoveryControlMessages(S.messages||[]);
               _markSessionViewed(activeSid, S.messages.length);
@@ -6890,6 +6858,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(!_isSessionCurrentPane(activeSid)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+            if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
             if(st&&st.active){
               setComposerStatus('Reconnected',1000);
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -6903,7 +6872,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
-          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           const nextDelay=_retryDelays[attempt+1];
@@ -6920,6 +6889,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           setComposerStatus('Restoring session…');
           let _restoreTimedOut=false;
           const _restoreTimer=setTimeout(()=>{
+            if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
             // If _restoreSettledSession hangs (flaky Tailscale), don't leave
             // the UI stuck on "Restoring session…" forever. Fall through to
             // _handleStreamError after 8s.
@@ -6933,7 +6903,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           },8000);
           try{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})){
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)){
               if(_restoreTimedOut) return; // timer already fired _handleStreamError
               clearTimeout(_restoreTimer);
               return;
@@ -6955,7 +6925,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
         return;
       }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
       _flushReasoningToAnchor();
@@ -7010,6 +6980,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           && !((typeof _isMessageReaderUnpinned==='function')
             ? _isMessageReaderUnpinned()
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
+        if(typeof _preserveLoadedMessageWindow==='function'){
+          sessionPayload=_preserveLoadedMessageWindow(sessionPayload,_captureLoadedMessageWindow(activeSid));
+        }
         S.session=sessionPayload;
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
@@ -7142,8 +7115,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
-      const session=data&&data.session;
+      // A successor can acquire this pane while the recovery GET is pending.
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return returnStatus?'stale':false;
+      let session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
+      if(session.session_id!==activeSid) return returnStatus?'stale':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
@@ -7168,6 +7144,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
+        if(typeof _preserveLoadedMessageWindow==='function'){
+          session=_preserveLoadedMessageWindow(session,_captureLoadedMessageWindow(activeSid));
+        }
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
         S.session=session;
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
@@ -7257,11 +7238,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         syncTopbar();renderMessages({preserveScroll:true});
         if(typeof _restoreMessageRenderWindowAfterSettledRender==='function') _restoreMessageRenderWindowAfterSettledRender();
+        // Do not display stale artifacts while the complete projection loads.
         if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
       _setActivePaneIdleIfOwner();
+      // Full-history enrichment may take minutes or fail. It is not part of
+      // turn settlement: queued input can drain as soon as the pane is idle.
+      // Only the still-current snapshot may receive the eventual projection.
+      if(isActiveSession && S.session===session && _isSessionCurrentPane(completedSid) &&
+         typeof _hydrateSessionArtifactProjection==='function' &&
+         typeof _artifactProjectionMatches==='function' &&
+         !_artifactProjectionMatches(session,session._artifactProjection)){
+        const settledSnapshot=S.session;
+        _hydrateSessionArtifactProjection(settledSnapshot,
+          ()=>S.session===settledSnapshot && _isSessionCurrentPane(completedSid))
+          .then(projection=>{
+            if(projection && S.session===settledSnapshot && _isSessionCurrentPane(completedSid)){
+              settledSnapshot._artifactProjection=projection;
+              if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
+            }
+          }).catch(()=>{}); // Artifact enrichment cannot reopen a settled turn.
+      }
       return returnStatus?'restored':true;
     }catch(_){
       return returnStatus?'error':false;

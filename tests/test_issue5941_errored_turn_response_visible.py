@@ -72,7 +72,7 @@ def test_render_gate_wires_errored_terminal_state_into_collapse_decision():
         "render gate must classify the scene's terminal_state"
     )
     # ...an explicit user-collapsed worklog is still respected...
-    assert "_readActivityDisclosureState(activityKey)!=='closed'" in body, (
+    assert "_readActivityDisclosureState(disclosureKey)!=='closed'" in body, (
         "default-open must not override an explicit user collapse"
     )
     # ...and it feeds the collapsed:! decision alongside keepSettledWorklogOpen.

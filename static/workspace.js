@@ -517,29 +517,24 @@ async function refreshOpenPreviewIfMutated(){
   await openFile(_previewCurrentPath, { bustCache: true });
 }
 
-function collectSessionArtifacts(){
-  const items = [];
+// Extract artifact candidates from raw transcript rows: text-mined diff/patch
+// fences plus structured tool_calls (OpenAI) / tool_use blocks (Anthropic).
+// Shared by the resident-message scan in collectSessionArtifacts and the
+// dropped-head harvest so both surfaces agree on what counts as an artifact.
+function _harvestArtifactCandidatesFromMessages(messages){
+  const out = [];
   const seen = new Set();
-  const push = (path, source) => {
-    path = _normalizeArtifactPath(path);
-    if(!path || seen.has(path)) return;
-    seen.add(path); items.push({path, source});
+  const add = (a, fallbackKind) => {
+    if(!a || !a.path || seen.has(a.path)) return;
+    seen.add(a.path);
+    out.push({path: a.path, kind: a.kind || fallbackKind || 'tool'});
   };
-  // Source 1: session-level tool call summaries (may be empty when messages
-  // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
-  for(const tc of (S.toolCalls || [])){
-    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
-  }
-  // Source 2 & 3: message-level data — both text-mined diffs and structured
-  // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
-  for(const msg of (S.messages || [])){
+  for(const msg of (Array.isArray(messages) ? messages : [])){
     if(!msg) continue;
     const text = msg.content || msg.text || msg.message || '';
-    // Text-mined diff/patch fences (existing path).
     if(typeof text === 'string'){
-      for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
+      for(const a of _artifactCandidatesFromText(text)) add(a, 'diff');
     }
-    // Structured tool_calls array (OpenAI format: {function:{name,arguments}}).
     if(Array.isArray(msg.tool_calls)){
       for(const tc of msg.tool_calls){
         if(!tc || typeof tc !== 'object') continue;
@@ -548,31 +543,98 @@ function collectSessionArtifacts(){
         let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
         if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
         const fakeTc = {name, args, result: tc.result || tc.output || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool');
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) add(a, name || 'tool');
       }
     }
-    // Structured content array with tool_use blocks (Anthropic format).
     if(Array.isArray(msg.content)){
       for(const block of msg.content){
         if(!block || block.type !== 'tool_use') continue;
         let inp = block.input || {};
         if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
         const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool');
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) add(a, block.name || 'tool');
       }
     }
   }
+  return out;
+}
+
+// The current session object owns the artifact projection. It is rebuilt from
+// authoritative full history, never accumulated in a bare-session page cache.
+// A transcript slice may retain this small derived list, not the dropped rows.
+function _artifactProjectionForSnapshot(session){
+  if(!session) return null;
+  const items=_harvestArtifactCandidatesFromMessages(session.messages||[]);
+  for(const tc of (session.tool_calls||[])){
+    for(const a of _artifactCandidatesFromToolCall(tc)) items.push(a);
+  }
+  return {session_id:session.session_id, profile:session.profile||S.activeProfile||'default',
+    revision:session.regeneration_revision, generation:_loadSessionGeneration, items};
+}
+
+function _artifactProjectionMatches(session, projection){
+  return !!(session&&projection&&projection.session_id===session.session_id&&
+    projection.profile===(session.profile||S.activeProfile||'default')&&
+    projection.revision===session.regeneration_revision&&
+    projection.generation===_loadSessionGeneration);
+}
+
+async function _hydrateSessionArtifactProjection(session, ownsLoad){
+  const profile=S.activeProfile||'default';
+  const generation=_loadSessionGeneration;
+  let full=session;
+  // Truthful completeness (gate review 221beca7 #1): a server response whose
+  // state.db read hit the defensive row backstop is INCOMPLETE even when it
+  // looks like a full (no msg_limit) load — older mutation rows were silently
+  // dropped. Never install a projection that claims authority over rows the
+  // server did not send. Same for any explicitly truncated/paginated source.
+  if(session._messages_truncated || session._messages_offset>0 || session._state_db_rows_capped){
+    let data;
+    try{
+      data=await api(`/api/session?session_id=${encodeURIComponent(session.session_id)}&messages=1&resolve_model=0`,{timeoutMs:120000});
+    }catch(_){ return null; } // Artifact enrichment must not prevent transcript loading.
+    if(!ownsLoad() || generation!==_loadSessionGeneration || profile!==(S.activeProfile||'default')) return null;
+    full=data&&data.session;
+    if(!full || full.session_id!==session.session_id ||
+      (full.profile||profile)!==(session.profile||profile) ||
+      full.regeneration_revision!==session.regeneration_revision ||
+      full._messages_truncated || full._messages_offset>0 || full._state_db_rows_capped) return null;
+  }
+  return _artifactProjectionForSnapshot(full);
+}
+
+function collectSessionArtifacts(){
+  const items = [];
+  const seen = new Set();
+  const push = (path, source) => {
+    path = _normalizeArtifactPath(path);
+    if(!path || seen.has(path)) return;
+    seen.add(path); items.push({path, source});
+  };
+  const projection=S.session&&S.session._artifactProjection;
+  if(_artifactProjectionMatches(S.session,projection)){
+    for(const a of projection.items) push(a.path,a.kind||'tool');
+  }else if(S.session){
+    // Resident rows are not authoritative for settled history; never silently
+    // show a partial artifact list after a clipped or failed canonical load.
+    return null;
+  }
   return items.slice(0, 50);
 }
+
 
 function renderSessionArtifacts(){
   const root = $('workspaceArtifacts');
   const count = $('workspaceArtifactsCount');
   if(!root) return;
   const items = collectSessionArtifacts();
-  if(count) count.textContent = String(items.length);
+  if(count) count.textContent = items ? String(items.length) : '—';
   if(!S.session){
     root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
+    return;
+  }
+  if(!items){
+    root.innerHTML = '<div class="workspace-artifact-empty">Artifacts unavailable: complete session history could not be loaded.</div>';
     return;
   }
   if(!items.length){

@@ -207,6 +207,9 @@ def test_locked_postacceptance_workspace_exception_does_not_restore_turn(monkeyp
 
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     before = copy.deepcopy(session.__dict__)
+    from api import config
+    reservation = 'admission:6611-postacceptance'
+    config.register_active_run(reservation, phase='admitting')
     with pytest.raises(RuntimeError, match="workspace failed") as raised:
         routes._start_regeneration_stream_locked(
             session,
@@ -220,7 +223,9 @@ def test_locked_postacceptance_workspace_exception_does_not_restore_turn(monkeyp
             source="webui",
             moa_config=None,
             backend_is_gateway=False,
+            reservation=reservation,
         )
+    config.unregister_active_run(reservation)
     assert raised.value._regeneration_accepted is True
     assert session.active_stream_id is not None
     assert session.__dict__ != before

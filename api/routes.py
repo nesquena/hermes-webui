@@ -3159,6 +3159,76 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
+def _orphaned_tool_tail_kind(messages) -> str | None:
+    """Return the incomplete tool-tail kind that needs a terminal assistant marker."""
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role == "tool":
+            return "tool output"
+        if role == "assistant":
+            if message.get("_error") or message.get("type") == "interrupted":
+                return None
+            if (
+                message.get("tool_calls")
+                or message.get("_partial_tool_calls")
+                or message.get("finish_reason") == "tool_calls"
+            ):
+                return "a tool-call request"
+            return None
+        if role == "user":
+            return None
+    return None
+
+
+def _append_orphaned_tool_tail_interruption_marker(session, stream_id: str | None) -> bool:
+    """Seal stale transcripts whose tails end mid tool-call turn.
+
+    Server/process exits can occur after a tool result is persisted but before
+    the assistant writes the final post-tool response. Clearing active_stream_id
+    alone makes the next user turn append after ``role=tool``; providers require
+    that a tool result be followed by an assistant message. Append terminal
+    assistant markers so display and provider-facing context both stop at valid
+    boundaries, even if only one transcript copy is orphaned.
+    """
+
+    def _marker(kind: str) -> dict:
+        detail = f"the transcript ended on {kind}"
+        return {
+            "role": "assistant",
+            "content": (
+                "**Response interrupted.**\n\n"
+                "The live response stream stopped before this turn finished. "
+                f"Evidence: {detail}, so the assistant did not write a final "
+                "post-tool response before the WebUI process lost the stream. "
+                "Start a new turn to continue."
+            ),
+            "timestamp": int(time.time()),
+            "_error": True,
+            "type": "interrupted",
+            "interruption_cause": "lost_worker_bookkeeping" if stream_id else "unknown",
+            "_orphaned_tool_tail_repair": True,
+        }
+
+    repaired = False
+    messages = getattr(session, "messages", None)
+    kind = _orphaned_tool_tail_kind(messages)
+    if isinstance(messages, list) and kind:
+        messages.append(_marker(kind))
+        repaired = True
+
+    context_messages = getattr(session, "context_messages", None)
+    context_kind = _orphaned_tool_tail_kind(context_messages)
+    if isinstance(context_messages, list) and context_kind:
+        context_messages.append(_marker(context_kind))
+        repaired = True
+
+    return repaired
+
+
 def _clear_stale_stream_state(session) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
@@ -3324,6 +3394,7 @@ def _clear_stale_stream_state(session) -> bool:
                 return True
             if getattr(session, "active_stream_id", None) != stream_id:
                 return False
+        _append_orphaned_tool_tail_interruption_marker(session, stream_id)
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         if hasattr(session, "pending_user_message"):
@@ -9207,6 +9278,23 @@ def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
     return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
 
 
+def _state_db_read_capped_by_backstop(backstop, rows) -> bool:
+    """Return whether a backstop-capped display read actually clipped rows.
+
+    The display path reads one row past the backstop (limit+1 probe): a full
+    page proves older state.db rows exist that the response will never
+    contain. Callers must surface that as an incomplete source instead of
+    presenting the payload as a complete full-history read (gate review
+    221beca7 #1). Extracted for direct test coverage.
+    """
+    if backstop is None:
+        return False
+    try:
+        return len(rows or ()) > int(backstop)
+    except (TypeError, ValueError):
+        return False
+
+
 _LIMITED_TOOL_CONTENT_NOTICE = (
     "\n\n[Tool output truncated in paginated session response; "
     "load the full transcript to inspect the complete result.]"
@@ -12929,6 +13017,7 @@ def _handle_health(handler, parsed):
         "last_run_finished_at": run_check.get("last_run_finished_at"),
         "server_started_at": SERVER_START_TIME,
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
+        "restart_drain_supported": True,
         "accept_loop": _accept_loop_health(handler),
     }
     if "oldest_run_age_seconds" in run_check:
@@ -13202,16 +13291,37 @@ def _handle_shutdown(handler) -> bool:
         _shutdown_log_value(getattr(handler, "path", None), max_len=240),
         _shutdown_log_value(ua, default="no-ua", max_len=240),
     )
-    j(handler, {"status": "shutting_down"})
+    from api.config import enter_restart_drain, exit_restart_drain
+    from api.updates import _wait_until_restart_safe
+
+    try:
+        enter_restart_drain(reason='shutdown')
+    except (OSError, api_config.RunAdmissionDrainingError):
+        return j(handler, {'error': 'Unable to enter shutdown drain', 'code': 'restart_draining'}, status=503)
     import signal
     import threading
 
     def _do_shutdown():
-        import time
-        time.sleep(0.3)
-        os.kill(os.getpid(), signal.SIGINT)
+        signal_sent = False
+        try:
+            state = _wait_until_restart_safe()
+            if state.get('restart_blocked', True):
+                logger.warning('Shutdown aborted: drain remains blocked')
+                return
+            os.kill(os.getpid(), signal.SIGINT)
+            signal_sent = True
+        finally:
+            # A delivered signal unwinds the server asynchronously. Keep
+            # admission shut until exit; only a blocked/failed attempt rolls back.
+            if not signal_sent:
+                exit_restart_drain()
 
-    threading.Thread(target=_do_shutdown, daemon=True).start()
+    try:
+        threading.Thread(target=_do_shutdown, daemon=True).start()
+    except BaseException:
+        exit_restart_drain()
+        raise
+    j(handler, {"status": "shutting_down"})
     return True
 
 
@@ -13432,6 +13542,10 @@ def _handle_session_get(handler, parsed) -> bool:
         # branch below, including the ones that never probe the cache.
         _display_cache_hit = None
         _display_state_db_signature = None
+        # Set by the bounded-display path when the defensive row backstop
+        # clipped the state.db read (gate review 221beca7 #1); False for every
+        # other branch, including messaging sessions and metadata-only loads.
+        _state_db_rows_capped = False
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
@@ -13453,8 +13567,16 @@ def _handle_session_get(handler, parsed) -> bool:
             # sessions and msg_before paging need their full prefix rows for
             # correct reconciliation, so those stay uncapped.
             _backstop = _state_db_backstop_limit_for_display(s, msg_before)
+            _state_db_rows_capped = False
             if _backstop is not None:
-                _state_db_reader_kwargs["limit"] = _backstop
+                # Truthful-completeness probe (gate review 221beca7 #1): read
+                # one row past the backstop. A full page means the backstop
+                # CLIPPED the source — older state.db rows exist that this
+                # display payload will never contain. The response must say
+                # so; the artifact projection treats an uncapped-looking
+                # truncated source as authoritative-complete only when this
+                # signal is false. The extra row is discarded.
+                _state_db_reader_kwargs["limit"] = _backstop + 1
             # perf: on the limited-display path the state.db rows are only
             # consumed by the memoized merge below. Now that the cache key
             # is a bounded SQL signature rather than a fingerprint OF these
@@ -13500,6 +13622,9 @@ def _handle_session_get(handler, parsed) -> bool:
                         sid,
                         **_state_db_reader_kwargs,
                     )
+                if _state_db_read_capped_by_backstop(_backstop, state_db_messages):
+                    _state_db_rows_capped = True
+                    state_db_messages = state_db_messages[:_backstop]
         elif not is_messaging_session:
             # Metadata-only callers still need the same append-only
             # reconciliation contract as full loads so stale/replayed
@@ -13789,8 +13914,17 @@ def _handle_session_get(handler, parsed) -> bool:
         # message window cursor already reflects visible-row pagination and
         # avoids false positives when raw hidden tool rows exceed msg_limit.
         _truncated = load_messages and msg_limit is not None and _messages_offset > 0
+        # Truthful completeness (gate review 221beca7 #1): a clipped state.db
+        # backstop silently drops OLDER rows from a response that claims a
+        # full (no msg_limit) window. Mirror the cap into _messages_truncated
+        # so every consumer — artifact projection hydration included — sees
+        # an incomplete source, and expose the specific cause for callers
+        # that must distinguish paging from backstop clipping.
+        if load_messages and _state_db_rows_capped:
+            _truncated = True
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
+        raw["_state_db_rows_capped"] = bool(load_messages and _state_db_rows_capped)
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
@@ -23117,7 +23251,36 @@ def _handle_btw(handler, body):
 
     Creates a temporary hidden session, streams the answer via SSE, then
     discards the session. The parent session is not modified.
+
+    Admission (gate review 221beca7 #2): reserved before any session lookup or
+    hidden-session mutation, on the same restart-drain authority as chat
+    starts. A draining WebUI must not mint sessions or workers it will never
+    replace.
     """
+    try:
+        require(body, "session_id")
+        require(body, "question")
+    except ValueError as e:
+        return bad(handler, str(e))
+    reservation = 'admission:' + uuid.uuid4().hex
+    try:
+        api_config.register_active_run(reservation, phase='admitting')
+    except api_config.RunAdmissionDrainingError:
+        return j(
+            handler,
+            {
+                'error': 'WebUI is draining for restart',
+                'code': 'restart_draining',
+            },
+            status=503,
+        )
+    try:
+        return _handle_btw_admitted(handler, body, reservation=reservation)
+    finally:
+        api_config.unregister_active_run(reservation)
+
+
+def _handle_btw_admitted(handler, body, *, reservation=None):
     try:
         require(body, "session_id")
         require(body, "question")
@@ -23171,7 +23334,18 @@ def _handle_btw(handler, body):
         kwargs={"ephemeral": True, "model_provider": model_provider},
         daemon=True,
     )
-    thr.start()
+    try:
+        with STREAMS_LOCK:
+            api_config.transfer_run_admission(reservation, stream_id, session_id=ephemeral.session_id)
+        thr.start()
+        if not callable(getattr(thr, 'is_alive', None)) or not thr.is_alive():
+            api_config.unregister_active_run(stream_id)
+    except Exception:
+        api_config.unregister_active_run(stream_id)
+        _cleanup_chat_start_launch_failure(ephemeral, stream_id)
+        from api.background import cleanup_btw
+        cleanup_btw(body["session_id"], stream_id=stream_id)
+        raise
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
@@ -23180,7 +23354,36 @@ def _handle_background(handler, body):
 
     Creates a hidden session, starts streaming in a daemon thread.
     Frontend polls /api/background/status for completed results.
+
+    Admission (gate review 221beca7 #2): reserved before any session lookup or
+    hidden-session mutation, on the same restart-drain authority as chat
+    starts. A draining WebUI must not mint sessions or background workers it
+    will never replace.
     """
+    try:
+        require(body, "session_id")
+        require(body, "prompt")
+    except ValueError as e:
+        return bad(handler, str(e))
+    reservation = 'admission:' + uuid.uuid4().hex
+    try:
+        api_config.register_active_run(reservation, phase='admitting')
+    except api_config.RunAdmissionDrainingError:
+        return j(
+            handler,
+            {
+                'error': 'WebUI is draining for restart',
+                'code': 'restart_draining',
+            },
+            status=503,
+        )
+    try:
+        return _handle_background_admitted(handler, body, reservation=reservation)
+    finally:
+        api_config.unregister_active_run(reservation)
+
+
+def _handle_background_admitted(handler, body, *, reservation=None):
     try:
         require(body, "session_id")
         require(body, "prompt")
@@ -23267,7 +23470,18 @@ def _handle_background(handler, body):
                 pass
 
     thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
-    thr.start()
+    try:
+        with STREAMS_LOCK:
+            api_config.transfer_run_admission(reservation, stream_id, session_id=bg.session_id)
+        thr.start()
+        if not callable(getattr(thr, 'is_alive', None)) or not thr.is_alive():
+            api_config.unregister_active_run(stream_id)
+    except Exception:
+        api_config.unregister_active_run(stream_id)
+        _cleanup_chat_start_launch_failure(bg, stream_id)
+        from api.background import discard_background
+        discard_background(parent_sid, task_id)
+        raise
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
@@ -23533,6 +23747,7 @@ def _start_regeneration_stream_locked(
     source: str,
     moa_config,
     backend_is_gateway: bool,
+    reservation=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -23595,6 +23810,7 @@ def _start_regeneration_stream_locked(
         )
 
     def _cleanup_owned_start():
+        api_config.unregister_active_run(stream_id)
         if goal_related:
             STREAM_GOAL_RELATED.pop(stream_id, None)
         with STREAMS_LOCK:
@@ -23680,6 +23896,8 @@ def _start_regeneration_stream_locked(
 
         diag.stage("worker_thread_start") if diag else None
         worker_thread = threading.Thread(target=_gated_worker, daemon=True)
+        with STREAMS_LOCK:
+            api_config.transfer_run_admission(reservation, stream_id, session_id=s.session_id)
         worker_thread.start()
         thread_started = True
         save_attempted = True
@@ -23876,6 +24094,41 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _run_admission_guard(*, http=False):
+    """Reserve restart occupancy before any request-side session mutation.
+
+    This short-lived registry entry bridges admission to worker registration;
+    synchronous requests retain it through persistence. It has no session_id,
+    so it cannot masquerade as a client-attachable worker or self-block the
+    per-session admission checks. Worker-side drain checks remain mandatory.
+    """
+    from functools import wraps
+
+    def decorate(fn):
+        @wraps(fn)
+        def guarded(*args, **kwargs):
+            if kwargs.get("reservation") is not None:
+                return fn(*args, **kwargs)
+            reservation = 'admission:' + uuid.uuid4().hex
+            try:
+                api_config.register_active_run(reservation, phase='admitting')
+            except api_config.RunAdmissionDrainingError:
+                payload = {'error': 'WebUI is draining for restart', 'code': 'restart_draining'}
+                if http:
+                    if fn.__name__ == '_handle_chat_start':
+                        payload = {'status': 'restart_draining', 'retryable': True,
+                                   'error': 'Hermes WebUI is completing a supervised restart; retry shortly.'}
+                    return j(args[0], payload, status=503)
+                return dict(payload, _status=503)
+            try:
+                return fn(*args, reservation=reservation, **kwargs)
+            finally:
+                api_config.unregister_active_run(reservation)
+        return guarded
+    return decorate
+
+
+@_run_admission_guard()
 def _start_chat_stream_for_session(
     s,
     *,
@@ -23891,6 +24144,7 @@ def _start_chat_stream_for_session(
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
+    reservation=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -23972,6 +24226,7 @@ def _start_chat_stream_for_session(
                         source=source,
                         moa_config=moa_config,
                         backend_is_gateway=backend_is_gateway,
+                        reservation=reservation,
                     )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
@@ -24047,9 +24302,21 @@ def _start_chat_stream_for_session(
         kwargs=worker_kwargs,
         daemon=True,
     )
+    # Transfer the request-level admission reservation to the concrete stream
+    # before starting the asynchronous worker. The worker upgrades this
+    # starting row when it registers, so restart safety always sees either
+    # the request reservation or the worker itself.
     try:
+        with STREAMS_LOCK:
+            api_config.transfer_run_admission(reservation, stream_id, session_id=s.session_id)
         thr.start()
+        is_alive = getattr(thr, "is_alive", None)
+        if not callable(is_alive) or not is_alive():
+            # Test doubles and workers that completed synchronously own no
+            # post-response lifetime; do not strand their starting row.
+            api_config.unregister_active_run(stream_id)
     except Exception:
+        api_config.unregister_active_run(stream_id)
         if backend_is_gateway:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting
@@ -24142,6 +24409,7 @@ def _start_run(
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
+    reservation=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -24186,6 +24454,7 @@ def _start_run(
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                reservation=reservation,
             )
 
         def _legacy_adapter_factory():
@@ -24228,6 +24497,7 @@ def _start_run(
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        reservation=reservation,
     )
 
 
@@ -24327,6 +24597,30 @@ def start_session_turn(
         }
     if not msg:
         return {"error": "message is required", "_status": 400}
+    # Admission (gate review 221beca7 #2): process wakeups are chat producers.
+    # Reserve before session resolution or workspace/model mutation so a
+    # draining WebUI never starts a turn its replacement will never see. The
+    # reservation is retired in the finally below; the per-session duplicate
+    # guard inside _start_chat_stream_for_session still applies on top.
+    turn_source = str(source or "process_wakeup").strip() or "process_wakeup"
+    reservation = 'admission:' + uuid.uuid4().hex
+    try:
+        api_config.register_active_run(reservation, phase='admitting')
+    except api_config.RunAdmissionDrainingError:
+        return {
+            "error": "WebUI is draining for restart",
+            "code": "restart_draining",
+            "retryable": True,
+            "_status": 503,
+        }
+    try:
+        return _start_session_turn_admitted(session_id, msg, source=turn_source, reservation=reservation)
+    finally:
+        api_config.unregister_active_run(reservation)
+
+
+def _start_session_turn_admitted(session_id: str, msg: str, *, source: str = "process_wakeup", reservation=None):
+    """Body of start_session_turn after the admission reservation."""
     stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
     if stale_response is not None:
         stale_response["_status"] = 409
@@ -24484,6 +24778,7 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        reservation=reservation,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -24697,6 +24992,44 @@ def _handle_goal_command(handler, body):
         )
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot run /goal from WebUI", 400)
+    # Admission (gate review 221beca7 #2): a goal kickoff is a full chat
+    # producer (it reaches _start_chat_stream_for_session). Reserve before any
+    # session lookup or goal-state mutation — control-only actions
+    # (status/pause/resume/clear/stop/done) also hold the reservation for
+    # their short body, which mutates no worker-facing state and cannot
+    # self-block. The reservation is retired in the admitted helper's finally.
+    reservation = 'admission:' + uuid.uuid4().hex
+    try:
+        api_config.register_active_run(reservation, phase='admitting')
+    except api_config.RunAdmissionDrainingError:
+        return j(
+            handler,
+            {
+                'error': 'WebUI is draining for restart',
+                'code': 'restart_draining',
+            },
+            status=503,
+        )
+    try:
+        return _handle_goal_command_admitted(handler, body, reservation=reservation)
+    finally:
+        api_config.unregister_active_run(reservation)
+
+
+def _handle_goal_command_admitted(handler, body, *, reservation=None):
+    """Goal control/kickoff body, already holding an admission reservation."""
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    if _is_silent_control_message(body.get("args") or body.get("text")):
+        return j(
+            handler,
+            {"status": "suppressed", "reason": "silent_control_message"},
+            status=200,
+        )
+    if _session_is_subagent_view_only(str(body.get("session_id") or "")):
+        return bad(handler, "Subagent sessions are view-only and cannot run /goal from WebUI", 400)
     try:
         s = get_session(body["session_id"])
     except KeyError:
@@ -24854,6 +25187,7 @@ def _handle_goal_command(handler, body):
             model_provider=model_provider,
             normalized_model=normalized_model,
             goal_related=True,
+            reservation=reservation,
             external_runtime_owned=webui_gateway_chat_enabled(get_config()),
         )
         status = int(stream_response.pop("_status", 200) or 200)
@@ -24878,7 +25212,8 @@ def _is_silent_control_message(message) -> bool:
     return str(message or "").strip() == "[SILENT]"
 
 
-def _handle_chat_start(handler, body, diag=None):
+@_run_admission_guard(http=True)
+def _handle_chat_start(handler, body, diag=None, *, reservation=None):
     try:
         diag.stage("validate_session_id") if diag else None
         try:
@@ -24890,6 +25225,16 @@ def _handle_chat_start(handler, body, diag=None):
                 handler,
                 {"status": "suppressed", "reason": "silent_control_message"},
                 status=200,
+            )
+        if api_config.restart_drain_active():
+            return j(
+                handler,
+                {
+                    "status": "restart_draining",
+                    "retryable": True,
+                    "error": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                },
+                status=503,
             )
         if body.get("regenerate") is True:
             from api.runtime_adapter import runtime_adapter_runner_enabled
@@ -25169,6 +25514,7 @@ def _handle_chat_start(handler, body, diag=None):
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
             "regeneration": regeneration,
+            "reservation": reservation,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -25301,7 +25647,8 @@ def _normalize_chat_attachments(raw_attachments):
     return normalized
 
 
-def _handle_chat_sync(handler, body):
+@_run_admission_guard(http=True)
+def _handle_chat_sync(handler, body, *, reservation=None):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
     stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
     if stale_response is not None:

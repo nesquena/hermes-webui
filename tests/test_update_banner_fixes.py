@@ -637,6 +637,16 @@ class TestApplyUpdateRestartSafety:
 class TestSuccessfulUpdateReturnsRestartScheduled:
     """#814 — successful apply_update must return restart_scheduled: True."""
 
+    @pytest.fixture(autouse=True)
+    def isolated_restart_drain(self, monkeypatch, tmp_path):
+        # The mocked scheduler cannot claim/retire a parked gateway→WebUI
+        # handoff. Keep its marker and handoff scoped to this test.
+        from api import config, gateway_restart
+        monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+        yield
+        gateway_restart._GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+        config.exit_restart_drain()
+
     def test_apply_update_returns_restart_scheduled(self, tmp_path, monkeypatch):
         import api.updates as upd
 
@@ -830,6 +840,14 @@ class TestApplyForceUpdate:
 class TestAgentUpdateRequiresGatewayRestart:
     """Agent updates must prove gateway restart before returning ok=True."""
 
+    @pytest.fixture(autouse=True)
+    def isolated_restart_drain(self, monkeypatch, tmp_path):
+        from api import config, gateway_restart
+        monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+        yield
+        gateway_restart._GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+        config.exit_restart_drain()
+
     def test_agent_gateway_restart_retries_one_transient_failure(self, monkeypatch):
         import api.updates as upd
 
@@ -840,7 +858,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         restart_calls = []
         sleeps = []
 
-        def fake_restart(*, profile=None):
+        def fake_restart(*, profile=None, handoff_to_scheduler=False):
             restart_calls.append(profile)
             return next(restart_results)
 
@@ -856,6 +874,23 @@ class TestAgentUpdateRequiresGatewayRestart:
         assert 'bad file descriptor' in result['initial_failure']
         assert restart_calls == ['default', 'default']
         assert sleeps == [upd._AGENT_GATEWAY_RESTART_RETRY_DELAY_S]
+
+    def test_agent_gateway_restart_retry_in_progress_stays_fail_closed(self, monkeypatch):
+        import api.updates as upd
+
+        restart_results = iter([
+            {"status": "failed", "message": "Restart failed: first"},
+            {"status": "in_progress", "message": "Restart still running"},
+        ])
+        monkeypatch.setattr(upd, "restart_active_profile_gateway", lambda **kwargs: next(restart_results))
+        monkeypatch.setattr(upd.time, "sleep", lambda _delay: None)
+        monkeypatch.setattr(upd, "get_active_profile_gateway_running_pid", lambda *, profile=None: 101)
+
+        ok, result = upd._ensure_gateway_restart_for_agent_update()
+
+        assert ok is False
+        assert result["status"] == "in_progress"
+        assert result["retry_attempted"] is True
 
     def test_agent_gateway_restart_retry_busy_stays_fail_closed(self, monkeypatch):
         import api.updates as upd
@@ -895,7 +930,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         sleeps = []
         gateway_pids = iter([101, 202])
 
-        def fake_restart(*, profile=None):
+        def fake_restart(*, profile=None, handoff_to_scheduler=False):
             timeline.append('restart')
             return next(restart_results)
 
@@ -932,7 +967,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         restart_calls = []
         sleeps = []
 
-        def fake_restart(*, profile=None):
+        def fake_restart(*, profile=None, handoff_to_scheduler=False):
             restart_calls.append(profile)
             return next(restart_results)
 
@@ -962,7 +997,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         ])
         restart_profiles = []
 
-        def fake_restart(*, profile=None):
+        def fake_restart(*, profile=None, handoff_to_scheduler=False):
             effective_profile = profile or 'sticky-work'
             restart_profiles.append(effective_profile)
             if effective_profile == 'sticky-work':
@@ -1394,7 +1429,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                 return 'Already up to date.', True
             return '', True
 
-        def fake_gateway_restart(*, profile=None):
+        def fake_gateway_restart(*, profile=None, handoff_to_scheduler=False):
             gateway_restarts.append(profile)
             return {'status': 'completed', 'message': 'Gateway service restarted successfully'}
 
@@ -1444,9 +1479,9 @@ class TestAgentUpdateRequiresGatewayRestart:
                 return 'Updating', True
             return '', True
 
-        def fake_gateway_restart(*, profile=None):
+        def fake_gateway_restart(*, profile=None, handoff_to_scheduler=False):
             gateway_restarts.append(profile)
-            return {'status': 'in_progress', 'message': 'Gateway service restart initiated (in progress)'}
+            return {'status': 'completed', 'message': 'Gateway service restart initiated (in progress)'}
 
         monkeypatch.setattr(upd, '_run_git', fake_run)
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
@@ -1459,7 +1494,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         assert result['stash_conflict'] is True
         assert result['target'] == 'agent'
         assert result['restart_scheduled'] is True
-        assert result['gateway_restart'] == 'in_progress'
+        assert result['gateway_restart'] == 'completed'
         assert gateway_restarts == ['default']
 
     def test_apply_update_agent_without_gateway_restart_result_fails(self, tmp_path, monkeypatch):
@@ -2518,15 +2553,15 @@ class TestClearLockButton:
 # ── Regression: sequential webui+agent update — restart coordination ──────────
 
 class TestSequentialUpdateRestartCoordination:
-    """Regression guard for the two-target race: when both webui and agent
-    have updates, the client POSTs them sequentially (webui → agent). The
-    first update's success schedules a restart timer; without coordination
-    that timer fires while the second update's git-pull is still running,
-    killing it mid-stream and leaving the second repo partial.
+    """Regression guard for sequential updates and their restart timer."""
 
-    Fix: `_schedule_restart` must acquire `_apply_lock` before calling
-    `os.execv`, so a pending second update always completes first.
-    """
+    @pytest.fixture(autouse=True)
+    def isolated_restart_drain(self, monkeypatch, tmp_path):
+        from api import config, gateway_restart
+        monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+        yield
+        gateway_restart._GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+        config.exit_restart_drain()
 
     def test_schedule_restart_waits_for_apply_lock(self, monkeypatch):
         """The restart thread must wait for any in-flight update before

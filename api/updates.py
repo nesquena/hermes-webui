@@ -1756,7 +1756,47 @@ def _schedule_restart(delay: float = 2.0) -> None:
     import os
     import sys
 
+    from api.config import (
+        enter_restart_drain,
+        exit_restart_drain,
+        restart_drain_active as api_restart_drain_active,
+    )
+
+    # Single-ownership handoff (gate review 221beca7 #4): claim the parked
+    # gateway-restart drain BEFORE publishing our own. The gateway restart's
+    # completed status left admission closed; claiming the token here keeps
+    # one continuous drain from the gateway replacement through the WebUI
+    # replacement — the same marker, never released in between. With a parked
+    # token the marker is already ours, so publication is a no-op; without
+    # one, publication opens the drain exactly as before. On any rollback the
+    # scheduler releases the marker once — it owns the single live token at
+    # every point.
+    from api.gateway_restart import claim_parked_restart_drain
+
+    claimed_parked_drain = claim_parked_restart_drain()
+    if claimed_parked_drain:
+        if not api_restart_drain_active():
+            # Defensive: a claimed token whose marker vanished (external
+            # cleanup) is a plain publication with no continuity to preserve.
+            claimed_parked_drain = False
+    # Publication is synchronous and serialized with run admission. A failed
+    # publication raises before a restart worker can be launched.
+    if not claimed_parked_drain:
+        enter_restart_drain(reason="supervised_restart")
+
     def _do():
+        try:
+            _drain_and_reexec(delay)
+        except Exception:
+            logger.exception("WebUI restart aborted before replacement")
+        finally:
+            # Success never returns here: os.execv replaces the image and the
+            # Windows path exits the process, so a RETURN means the restart
+            # did not happen (wait exception, spawn failure). Roll the drain
+            # back so this still-running process resumes admitting work.
+            exit_restart_drain()
+
+    def _drain_and_reexec(delay: float) -> None:
         import time
         time.sleep(delay)
         # Hold _apply_lock through os.execv so no new update can start between
@@ -1768,7 +1808,10 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # Threads die when execv replaces the process image, so the lock is
         # released atomically by the kernel.
         with _apply_lock:
-            _wait_until_restart_safe()
+            state = _wait_until_restart_safe()
+            if state.get("restart_blocked", True):
+                logger.warning("WebUI restart aborted: drain remains blocked")
+                return
             # Purge bytecode caches so the new process imports from
             # current source.  Without this, Python may serve stale .pyc
             # files whose mtime matches the just-pulled .py files,
@@ -1822,10 +1865,30 @@ def _schedule_restart(delay: float = 2.0) -> None:
                 # Last-resort: let the process supervisor restart us.
                 _windows_restart_exit(0)
 
-    threading.Thread(target=_do, daemon=True).start()
+    # Return the thread so callers (and tests) can join it — the drain
+    # lifecycle spans marker write through lock release, and marker removal
+    # alone does not mean the thread finished unwinding.
+    try:
+        thread = threading.Thread(target=_do, daemon=True)
+        thread.start()
+    except BaseException:
+        exit_restart_drain()
+        raise
+    return thread
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
+    """Keep one admission owner across CLI attempts, PID proof and handoff."""
+    from api.gateway_restart import gateway_update_drain, park_gateway_update_drain
+
+    with gateway_update_drain():
+        ok, result = _adjudicate_gateway_restart_for_agent_update()
+        if ok:
+            park_gateway_update_drain()
+        return ok, result
+
+
+def _adjudicate_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     """Run the active-profile gateway restart when agent checkout changed.
 
     Returns:
@@ -1835,9 +1898,16 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     """
     target_profile = str(get_active_profile_name() or "default").strip() or "default"
     gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
-    restart_result = restart_active_profile_gateway(profile=target_profile)
+    # handoff_to_scheduler: keep the drain closed across the gateway→WebUI
+    # replacement handoff (gate review 221beca7 #4). Both in_progress and
+    # failed outcomes return without scheduling a replacement, so they release
+    # admission through the helper's own rollback paths.
+    restart_result = restart_active_profile_gateway(
+        profile=target_profile,
+        handoff_to_scheduler=True,
+    )
     status = str(restart_result.get("status") or "")
-    if status in {"completed", "in_progress"}:
+    if status == "completed":
         return True, restart_result
     if status != "failed":
         return False, restart_result
@@ -1847,9 +1917,12 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     # bounded delay so an already-applied Agent update is not reported as a
     # complete failure because of that transient process handoff.
     time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    retry_result = restart_active_profile_gateway(profile=target_profile)
+    retry_result = restart_active_profile_gateway(
+        profile=target_profile,
+        handoff_to_scheduler=True,
+    )
     retry_status = str(retry_result.get("status") or "")
-    if retry_status in {"completed", "in_progress"}:
+    if retry_status == "completed":
         return True, {
             **retry_result,
             "retry_attempted": True,
