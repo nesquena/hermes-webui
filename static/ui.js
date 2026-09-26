@@ -19034,6 +19034,13 @@ function renderMessages(options){
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+  // Apply any cached code highlights synchronously so blocks that were already
+  // highlighted in a prior render are NOT painted unhighlighted for one frame
+  // on virtualized rebuild (#7752). Genuinely new blocks (no cache hit) are
+  // untouched here — they keep the existing rAF deferral below and are
+  // highlighted the next frame by the post-process pass, preserving the
+  // deferred-frame design for first-appearance code blocks.
+  if(typeof _applyCachedCodeHighlights==='function') _applyCachedCodeHighlights(inner);
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
@@ -20295,6 +20302,126 @@ function postProcessRenderedMessages(container) {
   initTreeViews(container);
 }
 
+// Cache of pre-highlighted code blocks, keyed by `language + "\0" + textContent`
+// with the highlighted innerHTML as the value. Populated ONLY after the block
+// has actually been tokenized by Prism (so a future virtualized rebuild can
+// apply the highlight synchronously). Consulted by
+// _applyCachedCodeHighlights() at rebuild time. This is the #7752 + #7778
+// fix: when a virtualized render rebuilds the transcript, the freshly-built
+// <pre><code> nodes are missing `data-highlighted`, so they would otherwise
+// paint unhighlighted for one frame before the deferred rAF post-process
+// runs. For blocks whose source was already highlighted in a prior render,
+// the cached innerHTML is applied synchronously, eliminating the one-frame
+// flash without regressing the deferred-frame design for genuinely new
+// blocks. Capped at `_CODE_HIGHLIGHT_CACHE_MAX` entries (FIFO eviction) to
+// bound memory.
+//
+// #7778 invariant: the cache MUST only ever hold HTML that actually contains
+// tokenized spans. Prism's autoloader asynchronously fetches language
+// grammars from a CDN; the first `Prism.highlightElement` call for an
+// unloaded language returns the raw source text (no token spans) but still
+// mutates the element. If we cached that raw innerHTML, the cache would
+// permanently lock the block as "highlighted" with no tokens — the
+// subsequent rAF pass would skip it (data-highlighted='1' selector), and
+// the user would see an un-tokenized code block forever. We guard against
+// this with three layers:
+//   1. The cache writer (_writeCodeHighlightCache) refuses entries whose
+//      innerHTML has no `class="token"` span — so even if Prism's
+//      highlightElement returned without tokenizing, no bad entry lands.
+//   2. A `Prism.hooks.add('complete', …)` listener re-writes the cache
+//      when the autoloader finishes its async fetch and re-tokenizes
+//      (the `complete` hook is Prism's canonical "tokenization done"
+//      signal). Registered lazily on the first highlightCode() call.
+//   3. _applyCachedCodeHighlights() refuses to stamp data-highlighted='1'
+//      on a cache entry that lacks token spans — a belt-and-suspenders
+//      defense for legacy cache state and any future regression.
+const _CODE_HIGHLIGHT_CACHE_MAX = 512;
+const _codeHighlightCache = new Map();
+let _prismCompleteHookRegistered = false;
+// Matches `<span ... class="...token...">...</span>` — Prism's canonical
+// tokenized-form marker. Used as the "actually tokenized" gate for cache
+// writes and restores; see #7778. The regex tolerates token classes like
+// `token keyword`, `class="token punctuation"`, and any attribute order.
+const _CODE_HIGHLIGHT_TOKEN_RE = /<span\b[^>]*\bclass="[^"]*\btoken\b/i;
+function _codeHighlightCacheKey(block){
+  if(!block) return '';
+  // Read only the language-xxx class (set by the markdown renderer) and the
+  // block's own textContent (the source code). We deliberately do NOT walk
+  // siblings or ancestors: the copy-button lives in <pre> (or a header
+  // before <pre>), not inside <code>, so textContent is not polluted by it.
+  // There is no line-number injection in this codebase — verified by grep
+  // for `line-numbers` / `lineNumbers` / `pre-line-numbers` in static/.
+  const m=(block.className||'').match(/language-([\w-]+)/);
+  return (m?m[1]:'') + '\0' + (block.textContent||'');
+}
+function _writeCodeHighlightCache(block){
+  if(!block) return;
+  const inner=block.innerHTML;
+  if(!inner) return;
+  // Refuse to cache anything that is not actually tokenized. This is the
+  // primary #7778 guard — without it, Prism's autoloader returning early
+  // (no grammar yet) would lock the cache at the raw-source form and the
+  // block would never be re-tokenized on rebuild.
+  if(!_CODE_HIGHLIGHT_TOKEN_RE.test(inner)) return;
+  const cacheKey=_codeHighlightCacheKey(block);
+  if(!cacheKey) return;
+  if(_codeHighlightCache.has(cacheKey)) return;
+  if(_codeHighlightCache.size >= _CODE_HIGHLIGHT_CACHE_MAX){
+    // FIFO eviction — drop the oldest entry.
+    _codeHighlightCache.delete(_codeHighlightCache.keys().next().value);
+  }
+  _codeHighlightCache.set(cacheKey, inner);
+}
+function _maybeRegisterPrismCompleteHook(){
+  // Register the 'complete' hook lazily, once per page. Prism fires this
+  // hook after `Prism.highlight` finishes — including the autoloader's
+  // deferred re-highlight after a CDN fetch resolves. Capturing the
+  // post-fetch innerHTML into the cache is what makes the sync-rebuild
+  // pass show the correct tokens instead of the pre-fetch raw source
+  // (#7778).
+  if(_prismCompleteHookRegistered) return;
+  if(typeof Prism === 'undefined' || !Prism || !Prism.hooks || typeof Prism.hooks.add !== 'function') return;
+  try{
+    Prism.hooks.add('complete', function(env){
+      if(!env) return;
+      const block=env.element;
+      if(!block || !block.dataset) return;
+      // Only update the cache for blocks we've already stamped with
+      // data-highlighted='1' — that's our contract that the block is
+      // one of ours (and not an unrelated Prism tokenization happening
+      // elsewhere on the page).
+      if(block.dataset.highlighted !== '1') return;
+      _writeCodeHighlightCache(block);
+    });
+    _prismCompleteHookRegistered = true;
+  }catch(_e){
+    // Defensive: if Prism's hooks API throws (very old Prism, exotic
+    // monkey-patch), fall back to the sync-only write path. The
+    // autoloader case will not be auto-healed but at least we won't
+    // break the page.
+  }
+}
+function _applyCachedCodeHighlights(container){
+  if(!container) return 0;
+  const blocks = container.querySelectorAll('pre code:not([data-highlighted])');
+  if(blocks.length === 0) return 0;
+  let applied = 0;
+  for(let i = 0; i < blocks.length; i++){
+    const block = blocks[i];
+    const cached = _codeHighlightCache.get(_codeHighlightCacheKey(block));
+    if(cached === undefined) continue;
+    // Defensive #7778 guard: never stamp data-highlighted='1' on a cache
+    // entry that lacks token spans. If the cache somehow holds raw HTML
+    // (legacy state, pre-fix session, future regression), applying it AND
+    // marking the block as highlighted would cause the rAF post-process
+    // to skip it forever — the user sees un-tokenized code indefinitely.
+    if(!_CODE_HIGHLIGHT_TOKEN_RE.test(cached)) continue;
+    block.innerHTML = cached;
+    block.dataset.highlighted = '1';
+    applied++;
+  }
+  return applied;
+}
 function highlightCode(container) {
   // Apply Prism.js syntax highlighting only to *new* code blocks.
   // Previously every renderMessages() called Prism.highlightAllUnder() which
@@ -20302,6 +20429,10 @@ function highlightCode(container) {
   // long sessions with dozens of code blocks.  Now we only touch blocks that
   // don't already have the data-highlighted marker.
   if(typeof Prism === 'undefined') return;
+  // Register the Prism `complete` hook on the first call so the autoloader's
+  // deferred re-highlight can populate the cache with the actually-tokenized
+  // HTML (#7778). See _maybeRegisterPrismCompleteHook for details.
+  _maybeRegisterPrismCompleteHook();
   const el = container || $('msgInner');
   if(!el) return;
   // Prefer per-element highlight (avoids the full DOM walk of highlightAllUnder)
@@ -20311,6 +20442,13 @@ function highlightCode(container) {
     const block = blocks[i];
     if(typeof Prism.highlightElement === 'function') Prism.highlightElement(block);
     block.dataset.highlighted = '1';
+    // Populate the sync-rebuild cache. The writer itself enforces the
+    // "actually tokenized" invariant (#7778) — if Prism's autoloader
+    // returned early (no grammar yet) and the innerHTML is still raw
+    // source, _writeCodeHighlightCache refuses the entry. The
+    // 'complete' hook registered above will write the correct entry
+    // once the autoloader finishes its async fetch.
+    _writeCodeHighlightCache(block);
   }
 }
 
