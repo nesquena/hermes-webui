@@ -23577,6 +23577,11 @@ def _start_regeneration_stream_locked(
     }
     if backend_is_gateway:
         worker_kwargs["regeneration"] = True
+        # #7170: same dispatch-time session-profile config snapshot as the
+        # normal /api/chat/start path — the detached gateway worker must not
+        # resolve config on its own thread (ambient profile leak).
+        from api.gateway_chat import _gateway_session_owner_cfg
+        worker_kwargs["session_cfg"] = _gateway_session_owner_cfg(s)
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
 
@@ -24041,6 +24046,64 @@ def _start_chat_stream_for_session(
     if backend_is_gateway:
         from api.gateway_chat import _mark_gateway_run_starting
         _mark_gateway_run_starting(stream_id)
+        # #7170: capture the session-owning profile's config snapshot at
+        # dispatch time (the request thread) and hand it to the detached
+        # gateway worker, which uses it for per-model reasoning override
+        # selection and model-capability coercion. The worker cannot resolve
+        # config itself — a detached thread has no per-request profile context
+        # and would read the process-global profile instead.
+        from api.gateway_chat import _gateway_session_api_key, _gateway_session_base_url, _gateway_session_owner_cfg
+        # #7170 round-7: capture BOTH the session config snapshot AND the
+        # session Gateway API key on the request thread. The capture runs
+        # AFTER the stream/pending-run are already registered (lines
+        # 24034-24048) but BEFORE the worker thread is started (line 24072).
+        # A failure here (e.g. deep-copy raises on a pathological config,
+        # profile home cannot be resolved, .env parsing error) would
+        # previously propagate out of _start_chat_stream_for_session with
+        # the stream/pending-run state stranded — the cleanup at
+        # lines 24071-24083 only covers ``thr.start()`` failures, not the
+        # capture failures that fire BEFORE the thread exists. The session
+        # would then be permanently blocked: subsequent chat starts would
+        # see the active_stream_id and return 409 forever.
+        #
+        # Wrap the capture in the SAME cleanup contract that thread-start
+        # failures get: release the gateway run starting entry, drop the
+        # stream/run/goal-related registries, reset the session's
+        # active_stream_id and pending fields, then re-raise so the caller
+        # still surfaces the original error to the client.
+        try:
+            worker_kwargs["session_cfg"] = _gateway_session_owner_cfg(s)
+            # #7170 round-7 P1: capture the session-owning profile's Gateway
+            # API key on the same request thread. ``_gateway_api_key()`` reads
+            # ``os.environ`` which holds the AMBIENT process-active profile's
+            # key — pairing that with the session's gateway URL either fails
+            # auth or sends the wrong credential to the wrong endpoint. The
+            # worker prefers the captured ``session_api_key`` and only falls
+            # back to the env read for legacy direct callers.
+            worker_kwargs["session_api_key"] = _gateway_session_api_key(s)
+            # #7170 round-7 follow-up (greptile 2026-09-26 P1 "Gateway key
+            # crosses endpoints"): capture the session-owning profile's
+            # Gateway base URL on the same request thread. ``_gateway_base_url``
+            # reads ``os.environ`` first which holds the AMBIENT process-active
+            # profile's ``HERMES_WEBUI_GATEWAY_BASE_URL`` — pairing that with
+            # the session's captured API key either fails auth or sends the
+            # session profile's bearer token to the wrong gateway. The worker
+            # prefers the captured ``session_base_url`` and only falls back to
+            # ``_gateway_base_url(cfg)`` for legacy direct callers.
+            worker_kwargs["session_base_url"] = _gateway_session_base_url(s)
+        except Exception:
+            try:
+                from api.gateway_chat import _finish_gateway_run_starting
+                _finish_gateway_run_starting(stream_id)
+                from api.gateway_chat import _clear_gateway_run_starting
+                _clear_gateway_run_starting(stream_id)
+            except Exception:
+                logger.debug(
+                    "Failed to record gateway run-start failure for stream %s",
+                    stream_id, exc_info=True,
+                )
+            _cleanup_chat_start_launch_failure(s, stream_id)
+            raise
     thr = threading.Thread(
         target=worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
