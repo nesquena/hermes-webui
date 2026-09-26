@@ -9873,6 +9873,7 @@ function _hermesTabId(){
   let predecessorUnknown=false;
   try{ predecessorId=sessionStorage.getItem(TAB_ID_KEY); }catch(_){ predecessorUnknown=true; }
   window.__hermesTabId=id;
+  window.__hermesTabPredecessorId=predecessorId&&predecessorId!==id?predecessorId:null;
   try{ sessionStorage.setItem(TAB_ID_KEY,id); }catch(_){}
   if(predecessorId||predecessorUnknown){
     window.__hermesActiveSession=null;
@@ -9889,6 +9890,30 @@ function _hermesTabId(){
     }
   }catch(_){}
   return id;
+}
+
+// A live reload can save the same large snapshot under a fresh document id.
+// Before that replacement write, reclaim only the exact inherited predecessor
+// and only after its non-persisted pagehide release marker proves it stopped.
+// This is cleanup, never recovery: no predecessor bytes are read or adopted,
+// and unrelated released documents retain their normal 24-hour grace period.
+function _reclaimReleasedPredecessorInflight(){
+  try{
+    if(typeof window==='undefined') return false;
+    const predecessorId=window.__hermesTabPredecessorId;
+    const currentId=window.__hermesTabId;
+    if(!predecessorId||!currentId||predecessorId===currentId) return false;
+    const releasedRaw=localStorage.getItem(TAB_ID_RELEASED_BASE+'::'+predecessorId);
+    if(releasedRaw==null||!Number.isFinite(Number(releasedRaw))) return false;
+    let removed=false;
+    for(const base of [INFLIGHT_KEY_BASE,INFLIGHT_STATE_KEY_BASE]){
+      const key=base+'::'+predecessorId;
+      if(localStorage.getItem(key)==null) continue;
+      localStorage.removeItem(key);
+      removed=true;
+    }
+    return removed;
+  }catch(_){ return false; }
 }
 
 // ── Reconnect banner (B4/B5: reload resilience) ──
@@ -10145,11 +10170,13 @@ function saveInflightState(sid, state){
   try{
     const all=_readInflightStateMap();
     all[sid]=entry;
+    _reclaimReleasedPredecessorInflight();
     _writeInflightStateMap(all);
   }catch(err){
     if(!_isStorageQuotaError(err)) return;
     try{
       localStorage.removeItem(_inflightStateKey());
+      _reclaimReleasedPredecessorInflight();
       _writeInflightStateMap({[sid]:entry});
     }catch(_){
       try{localStorage.removeItem(_inflightStateKey());}catch(__){}

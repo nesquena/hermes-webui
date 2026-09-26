@@ -71,6 +71,7 @@ _HELPER_FUNCS = (
     "function _gcOrphanTabKeys",
     "function _releaseTabId",
     "function _hermesTabId",
+    "function _reclaimReleasedPredecessorInflight",
     "function _inflightKey",
     "function _inflightStateKey",
     "function _activeSessionKey",
@@ -89,7 +90,23 @@ _HELPER_FUNCS = (
 
 def _helpers() -> str:
     parts = [_const_line(UI_SRC, name).replace("const ", "var ", 1) for name in _HELPER_CONSTS]
+    parts.append(
+        "var INFLIGHT_STATE_DEFAULT_LIMITS = "
+        "{maxSessions:8,messages:24,toolCalls:48,stringChars:60000,jsonChars:1500000};"
+    )
     parts += [_function_body(UI_SRC, sig) for sig in _HELPER_FUNCS]
+    parts += [
+        _function_body(UI_SRC, sig)
+        for sig in (
+            "function _boundedInflightInt",
+            "function _getInflightStateLimits",
+            "function _isStorageQuotaError",
+            "function _truncateInflightValue",
+            "function _compactInflightState",
+            "function _writeInflightStateMap",
+            "function saveInflightState",
+        )
+    ]
     return "\n".join(parts)
 
 
@@ -373,12 +390,8 @@ useTab({tab}); _hermesTabId();
 TAB_ID_RELEASED_BASE_VALUE = "hermes-webui-tab-released"
 
 
-def test_repeated_reloads_do_not_multiply_snapshots_under_quota():
-    """Untrusted predecessor copies remain untouched and are never multiplied.
-
-    Recovery is deliberately unavailable until the user selects a durable
-    session. The age backstop eventually collects expired inflight snapshots.
-    """
+def test_repeated_live_reloads_reclaim_only_released_predecessor_under_quota():
+    """Twelve live reloads keep saving without touching another owner's bytes."""
     script = f"""
 {_HARNESS}
 {_helpers()}
@@ -424,8 +437,13 @@ const copies = [];
 for (let i = 0; i < 12; i++) {{
   __now += 1000;
   {_reload('tab')}
+  window._inflightStateLimits={{stringChars:500_000,jsonChars:1_500_000}};
+  saveInflightState('session-reload', {{
+    streamId:'stream-reload',
+    messages:[{{role:'assistant',content:big}}],
+  }});
   const state = loadInflightState('session-reload', 'stream-reload');
-  restores.push(!!(state && state.messages && state.messages[0].content.length === big.length));
+  restores.push(!!(state && state.messages && state.messages[0].content.startsWith('x')));
   copies.push(scopedCopies());
 }}
 const session = _rememberedActiveSession();
@@ -438,8 +456,8 @@ const releaseMarkers = localStorage._keys().filter(k => k.indexOf(TAB_ID_RELEASE
 console.log(JSON.stringify({{restores, copies, quotaErrors, session, markerSid: markerAfter && markerAfter.sid, otherSession, otherOwner: otherState && otherState.tabId, otherId, unrelatedKept, releaseMarkers}}));
 """
     out = _run(script)
-    assert not any(out["restores"]), "unknown successor must not inherit cached recovery"
-    # other live tab + unrelated released document + original: no further copies.
+    assert all(out["restores"]), "every live reload must save its replacement snapshot"
+    # Other live tab + unrelated released document + current replacement only.
     assert out["copies"] == [3] * 12
     assert out["quotaErrors"] == 0, "bounded reloads must never hit the storage quota"
     assert out["session"] is None
@@ -460,10 +478,13 @@ def test_predecessor_never_transfers_with_any_release_marker():
 const original = makeTab();
 useTab(original); const idOriginal = _hermesTabId();
 _rememberActiveSession('session-original');
+localStorage.setItem(_inflightStateKey(), JSON.stringify({{'session-original':{{streamId:'live',updated_at:__now,tabId:idOriginal}}}}));
 const clone = makeTab();
 for (const k of original.store._keys()) clone.store.setItem(k, original.store.getItem(k));
 useTab(clone); const idClone = _hermesTabId();
+saveInflightState('session-clone', {{streamId:'clone',messages:[{{role:'assistant',content:'clone'}}]}});
 const originalKept = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY + '::' + idOriginal);
+const originalInflightKept = localStorage.getItem(INFLIGHT_STATE_KEY_BASE + '::' + idOriginal);
 // (b) Malformed release marker: fail closed.
 const weird = makeTab();
 useTab(weird); const idWeird = _hermesTabId();
@@ -488,11 +509,12 @@ const migrated = loadInflightState('session-migrate', 's');
 const predecessorState = localStorage.getItem(INFLIGHT_STATE_KEY_BASE + '::' + idBefore);
 const predecessorMarker = localStorage.getItem(INFLIGHT_KEY_BASE + '::' + idBefore);
 const markerAfter = JSON.parse(localStorage.getItem(_inflightKey()));
-console.log(JSON.stringify({{idOriginal, idClone, originalKept, weirdKept, idBefore, idAfter, migratedOwner: migrated && migrated.tabId, predecessorState, predecessorMarker, markerSid: markerAfter && markerAfter.sid}}));
+console.log(JSON.stringify({{idOriginal, idClone, originalKept, originalInflightKept, weirdKept, idBefore, idAfter, migratedOwner: migrated && migrated.tabId, predecessorState, predecessorMarker, markerSid: markerAfter && markerAfter.sid}}));
 """
     out = _run(script)
     assert out["idClone"] != out["idOriginal"]
     assert out["originalKept"] == "session-original", "a live original's keys must not be reclaimed by its clone"
+    assert out["originalInflightKept"] is not None, "an unreleased predecessor's snapshot must survive"
     assert out["weirdKept"] == "session-weird", "a malformed release marker must fail closed"
     assert out["idAfter"] != out["idBefore"]
     assert out["migratedOwner"] is None

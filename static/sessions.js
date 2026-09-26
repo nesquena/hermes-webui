@@ -9723,15 +9723,25 @@ if(typeof window!=='undefined'){
   });
   window.addEventListener('popstate', () => {
     const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
-    if(!sid || (S.session && S.session.session_id===sid)) return;
-    // Refuse to switch sessions mid-stream — same UX guard the storage-event
-    // handler had. A user mid-turn who hits browser Back should NOT lose the
-    // active stream. They can hit Back again once the turn ends.
-    if(S.busy){
-      if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
+    const currentSid=S.session&&S.session.session_id;
+    const busy=S.busy;
+    const loadRequestedSession=()=>loadSession(sid);
+    const restoreCurrentRoute=()=>{
+      if(!currentSid) return;
+      const next=_sessionUrlForSid(currentSid);
+      if(next) window.history.replaceState({session_id:currentSid},'',next);
+    };
+    if(!sid || currentSid===sid){
+      restoreCurrentRoute();
       return;
     }
-    void loadSession(sid);
+    // Keep the active stream and make its current route reload-authoritative.
+    if(busy){
+      if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
+      restoreCurrentRoute();
+      return;
+    }
+    void loadRequestedSession();
   });
 }
 

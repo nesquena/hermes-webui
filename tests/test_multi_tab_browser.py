@@ -95,6 +95,73 @@ def test_two_browser_tabs_keep_separate_active_sessions_through_switch_and_reloa
             browser.close()
 
 
+def test_back_to_root_restores_session_route_before_real_reload(base_url):
+    """Keeping conversation A on Back must keep its URL reload-authoritative too."""
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    with playwright_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        try:
+            page = browser.new_page(base_url=base_url)
+            page.goto("/", wait_until="domcontentloaded")
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if page.evaluate("typeof S !== 'undefined' && S._bootReady === true"):
+                    break
+                time.sleep(0.1)
+            assert page.evaluate("S._bootReady === true")
+            sid = page.evaluate("""async () => {
+                await newSession(false, {worktree:false});
+                const sid = S.session.session_id;
+                // Give the zero-message session a real server-side draft so boot
+                // treats it as durable, without starting an agent turn.
+                await api('/api/session/draft', {
+                    method:'POST', body:JSON.stringify({session_id:sid, text:'reload fixture'})
+                });
+                return sid;
+            }""")
+            assert sid
+            assert page.url.endswith(f"/session/{sid}")
+
+            # The previous history entry is `/`. popstate deliberately keeps A
+            # rendered, so it must replace that entry with A's canonical route.
+            page.go_back(wait_until="domcontentloaded")
+            page.wait_for_url(f"**/session/{sid}")
+            assert page.evaluate("S.session.session_id") == sid
+
+            # A real new document rejects inherited per-document selection. The
+            # URL therefore has to be sufficient to restore the same session.
+            page.reload(wait_until="domcontentloaded")
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if page.evaluate("typeof S !== 'undefined' && S._bootReady === true"):
+                    break
+                time.sleep(0.1)
+            assert page.evaluate("S._bootReady === true")
+            assert page.url.endswith(f"/session/{sid}")
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if page.evaluate("sid => S.session && S.session.session_id === sid", sid):
+                    break
+                time.sleep(0.1)
+            assert page.evaluate("S.session && S.session.session_id") == sid
+
+            # Also cover Back to another session while streaming: the busy guard
+            # keeps A and must replace the rejected route before returning.
+            page.evaluate("""sid => {
+                history.pushState({session_id:'rejected'}, '', '/session/rejected');
+                history.pushState({session_id:sid}, '', '/session/' + encodeURIComponent(sid));
+                S.busy = true;
+            }""", sid)
+            page.go_back(wait_until="domcontentloaded")
+            page.wait_for_url(f"**/session/{sid}")
+            assert page.evaluate("S.session.session_id") == sid
+            page.evaluate("S.busy = false")
+        finally:
+            browser.close()
+
+
 def test_copied_browser_tab_waits_until_original_closes_before_initializing(base_url):
     """Real Chromium copies sessionStorage at popup creation; WebUI JS runs later."""
     playwright_api = pytest.importorskip("playwright.sync_api")

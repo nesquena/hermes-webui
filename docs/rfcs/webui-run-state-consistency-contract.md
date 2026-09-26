@@ -128,15 +128,22 @@ nor released predecessor-scoped `localStorage` entries authorize automatic
 active-session or in-flight transcript transfer. When no explicit URL route
 names the session, a reload may open without its previous selection and the
 user must select the durable conversation from the sidebar. In-flight browser
-cache recovery is unavailable across that ambiguous boundary; durable session
-transcript and run-journal replay remain the recovery sources when a session is
-explicitly reopened. Old scoped caches are never adopted by a new document.
-They are collected only after the owner's non-persisted pagehide release marker
-exceeds its grace window. Reader age alone cannot authorize deletion of another
-document's mutable inflight state; crashes/discards without a release can retain
-orphan snapshots and consume browser quota. The owner still rejects snapshots
-beyond the reader's ten-minute window. This deliberately sacrifices seamless
-reload recovery rather than granting a duplicated tab another tab's authority.
+cache recovery is unavailable across that ambiguous boundary;
+durable session transcript and run-journal replay remain the recovery sources
+when a session is explicitly reopened. Old scoped caches are never adopted by a
+new document. Before writing a replacement live snapshot, a new document may
+reclaim only the exact inherited predecessor's scoped inflight marker/state and
+only when that predecessor has a valid non-persisted pagehide release marker.
+It never reclaims an unreleased owner or an unrelated released document; those
+unrelated caches keep the 24-hour grace window. Reader age alone cannot
+authorize deletion of another document's mutable inflight state;
+crashes/discards without a release can retain orphan snapshots and consume
+browser quota. The owner still rejects snapshots beyond the reader's ten-minute
+window. This deliberately sacrifices seamless reload recovery rather than
+granting a duplicated tab another tab's authority. If `popstate` keeps the
+current conversation (including a root Back or a stream-busy rejection), it
+restores that conversation's canonical `/session/<id>` route with
+`history.replaceState` so the next document can reload the durable session.
 
 A session ID invalidated by a 404/delete is rejected through a key scoped
 to the resolved profile and ID, not removed from the shared legacy fallback
