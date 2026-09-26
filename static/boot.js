@@ -158,6 +158,54 @@ async function _finalizeComposerPrefillOnBoot(prefillIntent){
 
 // Mobile navigation.
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
+// When the user deliberately closes the panel (e.g. tapping the chat box to
+// type on mobile), the on-screen keyboard fires a viewport resize which
+// re-runs syncWorkspacePanelState(). That used to see the still-visible
+// preview + 'closed' mode and force the panel back open — intrusive while
+// typing. This flag records the deliberate close so the resize sync leaves
+// the panel alone; the preview DOM (file + scroll position) stays intact so
+// reopening restores exactly where the user was reading.
+let _workspacePanelUserDismissed=false;
+// Monotonic ACTION-generation counter, advanced by every deliberate
+// `closeWorkspacePanel()` on ANY viewport (never on a clear). An artifact open
+// captures it before its awaits and only promotes the panel if it is unchanged:
+// a read that was still pending when the user closed the panel must not erase
+// that newer intent and force the panel back open.
+//
+// The fence is deliberately NOT the same thing as `_workspacePanelUserDismissed`:
+// that flag is the mobile-only *resize* guard, while the generation guards the
+// caller-to-sink race (`openArtifactPath` → `ensureWorkspacePreviewVisible`) and
+// therefore has to advance on desktop too. Tying the fence to the flag alone left
+// a desktop hole: close during an in-flight read bumped nothing, so the read saw
+// an unchanged generation and reopened the panel over the newer close
+// (#6710 gate, 21 Sep).
+//
+// It must NOT bump when the flag is cleared. Clearing is a promote (explicit
+// reopen via `openWorkspacePanel`, or the artifact reveal itself), and the
+// user's newest intent there is "panel open" — the same thing the in-flight
+// reveal wants. Counting it as a change made the guard reject the very read
+// the reopen agreed with, so an explicit reopen during a pending read skipped
+// the promotion and left the panel in browse mode without the artifact
+// (#6710 review: "Reopen invalidates artifact reveal").
+let _workspacePanelDismissGen=0;
+function _setWorkspacePanelDismissed(dismissed){
+  if(dismissed) _workspacePanelDismissGen++;
+  _workspacePanelUserDismissed=dismissed;
+}
+// Deliberate close: always advance the action-generation fence (all viewports),
+// and record the resize guard only where it applies. Splitting the two is what
+// closes the desktop race: `closeWorkspacePanel()` used to call the setter only
+// on compact, so a desktop close during an in-flight artifact read advanced
+// nothing and the read's `_dismissalUnchanged()` check still passed.
+function _markWorkspacePanelClosedByUser(){
+  const compact=_isCompactWorkspaceViewport();
+  // The setter bumps the fence when it is told about a dismissal, so pass the
+  // compact result (on desktop that writes "not dismissed" but must still
+  // advance the fence) and bump explicitly only for the non-compact case —
+  // calling the setter twice would double-increment on compact.
+  _setWorkspacePanelDismissed(compact);
+  if(!compact) _workspacePanelDismissGen++;
+}
 
 function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
@@ -269,7 +317,14 @@ function _setWorkspacePanelMode(mode){
 function syncWorkspacePanelState(){
   const hasPreview=_hasWorkspacePreviewVisible();
   if(hasPreview){
-    if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
+    // Only auto-promote closed→preview when the user did NOT deliberately
+    // dismiss the panel (chat-tap close on mobile). The keyboard resize that
+    // follows typing would otherwise force the panel back open mid-reply.
+    // Scoped to compact viewports: the dismissal is a mobile-only concept (see
+    // closeWorkspacePanel), so desktop keeps its long-standing behaviour of
+    // restoring a still-visible preview on resize.
+    const dismissed=_isCompactWorkspaceViewport()&&_workspacePanelUserDismissed;
+    if(_workspacePanelMode==='closed'&&!dismissed) _setWorkspacePanelMode('preview');
     else syncWorkspacePanelUI();
     return;
   }
@@ -286,6 +341,9 @@ function syncWorkspacePanelState(){
 }
 
 function openWorkspacePanel(mode='browse'){
+  // Explicit user reopen — clear the dismissal flag so future previews
+  // auto-open the panel again normally.
+  _setWorkspacePanelDismissed(false);
   if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()&&!S._profileDefaultWorkspace)return;
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();
@@ -295,11 +353,31 @@ function openWorkspacePanel(mode='browse'){
 }
 
 function closeWorkspacePanel(){
+  // Deliberate user close. Two separate records come out of this:
+  //
+  // 1. The ACTION-GENERATION fence advances on EVERY viewport. It guards the
+  //    caller-to-sink race — an artifact read in flight must not reopen the
+  //    panel over this close. Previously the fence advanced only via the
+  //    dismissal flag, and that write was compact-only, so a desktop close
+  //    during a pending read changed nothing and the read promoted the panel
+  //    anyway (#6710 gate, 21 Sep).
+  // 2. The resize guard (`_workspacePanelUserDismissed`) is set on COMPACT
+  //    viewports only: the resurrection it prevents is the soft-keyboard
+  //    viewport churn, which does not exist on desktop. Marking it
+  //    unconditionally would silently change desktop behaviour, where a resize
+  //    has always restored the still-visible preview.
+  //
+  // The preview (file + scroll position) stays in the DOM and is restored when
+  // the user reopens the panel.
+  _markWorkspacePanelClosedByUser();
   _setWorkspacePanelMode('closed');
 }
 
 function ensureWorkspacePreviewVisible(){
-  if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
+  if(_workspacePanelMode==='closed'){
+    _setWorkspacePanelDismissed(false);
+    _setWorkspacePanelMode('preview');
+  }
   else syncWorkspacePanelUI();
 }
 
@@ -604,6 +682,10 @@ function closeMobileWorkspacePanelFromChat(e){
   if(!_isCompactWorkspaceViewport()||_workspacePanelMode==='closed') return;
   const panel=document.querySelector('.rightpanel');
   if(panel&&panel.contains(e.target)) return;
+  // Deliberate close (see closeWorkspacePanel): the keyboard-triggered
+  // resize must not force the panel back open in preview mode while the
+  // user is typing. The preview (file + scroll position) stays intact in
+  // the DOM and is restored when the user reopens the panel.
   closeWorkspacePanel();
 }
 function toggleWorkspacePanel(force){

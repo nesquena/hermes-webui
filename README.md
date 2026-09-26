@@ -238,6 +238,12 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Edit, create, delete, and rename files; create folders
 - Binary file download (auto-detected from server)
 - File preview auto-closes on directory navigation (with unsaved-edit guard)
+- Dismissing the workspace panel is respected: resizing the viewport or showing the
+  on-screen keyboard no longer force-reopens the panel after you close it (#6710)
+- Previews report their real load outcome -- a broken source is reported as a
+  failure instead of a silent success -- and a response that never settles is
+  released by a bounded wait so the panel still opens; the source keeps loading
+  and a late failure is surfaced in the status line (#6710)
 - Git detection -- branch name and dirty file count badge in workspace header
 - Right panel is drag-resizable
 - Syntax highlighted code preview (Prism.js)

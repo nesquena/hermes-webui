@@ -626,9 +626,189 @@ async function _workspacePathExists(path){
   return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
 }
 
+/**
+ * #6710: how long a browser-loaded preview may take to report readiness before
+ * the open is treated as failed. Shared by every preview branch so a stalled
+ * response can never leave `openFile()` (and therefore `openArtifactPath()`)
+ * pending forever — the user selected the file explicitly, so a hang is worse
+ * than a reported failure.
+ */
+const _PREVIEW_LOAD_TIMEOUT_MS = 8000;
+
+/**
+ * #6710: verify a `raw` preview route actually serves the file before reporting
+ * a successful reveal.
+ *
+ * Image / media / PDF / HTML previews hand the URL to a browser element and let
+ * the browser fetch it. That fetch is asynchronous and NOT covered by the
+ * `/api/list` existence check: the entry can exist while the raw request still
+ * fails (expired escape grant → 403, file removed between the two calls → 404,
+ * oversized/binary → attachment). Reporting success on the assignment alone made
+ * `openArtifactPath()` clear the user's dismissal and promote the panel before
+ * the outcome was known, leaving them on a broken preview in a panel that had
+ * just forced itself open.
+ *
+ * Probe with a 1-byte ranged GET: the file route honours Range and answers 206,
+ * so this costs a single byte of body instead of the whole file (a large image
+ * or PDF must not be downloaded twice). `api()` rejects with `.status` attached,
+ * and never throws on the 401 redirect path.
+ */
+async function _workspaceRawReachable(url){
+  try{
+    await api(url, {headers:{Range:'bytes=0-0'}, retries:0, timeoutMs:8000, timeoutToast:false});
+    return true;
+  }catch(_){
+    setStatus(t('file_open_failed'));
+    return false;
+  }
+}
+
+/**
+ * #6710: wait for an element that loads its own source (`<img>`) to report
+ * whether it succeeded, then return that outcome.
+ *
+ * `assign()` starts the request; the outcome arrives later as a `load` or
+ * `error` event. Resolving on either means a broken source is reported as a
+ * failure instead of an immediate success. Guarded for the Node harnesses and
+ * older test doubles that have no event plumbing: without `addEventListener`
+ * there is nothing to wait on, so the previous fire-and-forget behaviour is
+ * preserved rather than hanging forever.
+ */
+function _awaitElementLoad(el, assign, failKey){
+  if(!el||typeof el.addEventListener!=='function'){
+    assign();
+    return Promise.resolve(true);
+  }
+  return new Promise(resolve=>{
+    let settled=false;
+    const detach=()=>{
+      el.removeEventListener('load', onLoad);
+      el.removeEventListener('error', onError);
+    };
+    const finish=(ok)=>{
+      if(settled) return;
+      settled=true;
+      detach();
+      clearTimeout(timer);
+      if(!ok) setStatus(t(failKey));
+      resolve(ok);
+    };
+    const onLoad=()=>finish(true);
+    const onError=()=>finish(false);
+    // Late outcome after the anti-hang bound released the open: the panel is
+    // already up, so only a genuine error still needs surfacing — this restores
+    // the status reporting the fire-and-forget code had. A late success needs
+    // nothing: the content is visible by then.
+    //
+    // Both late handlers retire together. `{once:true}` only removes the handler
+    // that actually fired, and this element is shared (#previewImg), so an
+    // attempt that ends in `error` left its paired `load` handler attached for
+    // good — repeated timed-out failures stacked stale closures on the element
+    // and let old handlers consume events from later previews. Each terminal
+    // event now removes both.
+    const detachLate=()=>{
+      el.removeEventListener('load', onLateLoad);
+      el.removeEventListener('error', onLateError);
+    };
+    const onLateLoad=()=>detachLate();
+    const onLateError=()=>{detachLate();setStatus(t(failKey));};
+    el.addEventListener('load', onLoad);
+    el.addEventListener('error', onError);
+    // Anti-hang guard (Greptile): a response that stalls — proxy holding the
+    // socket open, server wedged — fires neither load nor error, so without
+    // this the promise never settles and openArtifactPath() stays pending
+    // forever. But this bound CANNOT tell "slow" from "dead", so it must not
+    // report failure: doing that hid legitimately slow images behind a closed
+    // panel even though the assigned src kept loading and would have appeared.
+    // It releases the wait and lets the panel open; the source keeps loading.
+    const timer=setTimeout(()=>{
+      if(settled) return;
+      settled=true;
+      clearTimeout(timer);
+      detach();
+      el.addEventListener('load', onLateLoad, {once:true});
+      el.addEventListener('error', onLateError, {once:true});
+      resolve(true);
+    }, _PREVIEW_LOAD_TIMEOUT_MS);
+    assign();
+    // A cached image can settle during assignment; `complete` covers that, and
+    // naturalWidth distinguishes a real bitmap from a decode failure.
+    if(el.complete){
+      if(el.naturalWidth>0) finish(true);
+      else finish(false);
+    }
+  });
+}
+
+/**
+ * #6710: mount a media player and hand back the `<video>`/`<audio>` element so
+ * the caller can await its outcome. Returns null when the markup cannot be
+ * inspected (harness doubles), which the caller treats as "cannot verify".
+ */
+function _mountMediaPlayer(wrap, html, mode){
+  wrap.innerHTML=html;
+  const el=wrap.querySelector?wrap.querySelector(mode):null;
+  if(!el||typeof el.addEventListener!=='function') return null;
+  return el;
+}
+
+/**
+ * #6710: resolve once a media element is playable, or fail on a hard error.
+ * `loadedmetadata` is the first point the source is known to be readable;
+ * waiting for the whole file would stall large videos. Never rejects.
+ *
+ * The bound follows the same contract as `_awaitElementLoad()`: it releases a
+ * stalled wait so `openArtifactPath()` cannot hang, but because it cannot tell
+ * "slow" from "dead" it must not report failure — a large file on a slow link
+ * would otherwise be hidden behind a closed panel while it was still loading.
+ * Only a real `error` event fails closed; a late error after the bound fired is
+ * still surfaced through the status line.
+ */
+function _awaitMediaReady(el){
+  return new Promise(resolve=>{
+    let settled=false;
+    const detach=()=>{
+      el.removeEventListener('loadedmetadata', onReady);
+      el.removeEventListener('error', onError);
+    };
+    const finish=(ok)=>{
+      if(settled) return;
+      settled=true;
+      detach();
+      clearTimeout(timer);
+      if(!ok) setStatus(t('file_open_failed'));
+      resolve(ok);
+    };
+    const onReady=()=>finish(true);
+    const onError=()=>finish(false);
+    const onLateReady=()=>el.removeEventListener('error', onLateError);
+    const onLateError=()=>setStatus(t('file_open_failed'));
+    const timer=setTimeout(()=>{
+      if(settled) return;
+      settled=true;
+      clearTimeout(timer);
+      detach();
+      el.addEventListener('loadedmetadata', onLateReady, {once:true});
+      el.addEventListener('error', onLateError, {once:true});
+      resolve(true);
+    }, _PREVIEW_LOAD_TIMEOUT_MS);
+    el.addEventListener('loadedmetadata', onReady);
+    el.addEventListener('error', onError);
+    if(el.readyState>=1) finish(true);
+  });
+}
+
 async function openArtifactPath(path){
-  if(!path) return;
+  if(!path) return false;
   switchWorkspacePanelTab('files');
+  // Capture the dismissal generation before any await. If the user dismisses the
+  // panel while the existence check or the read is in flight, that newer intent
+  // must win: promoting the panel afterwards would erase it and force the panel
+  // open over whatever the user just closed.
+  const dismissGen=typeof _workspacePanelDismissGen!=='undefined'?_workspacePanelDismissGen:null;
+  const _dismissalUnchanged=()=>dismissGen===null
+    ||typeof _workspacePanelDismissGen==='undefined'
+    ||_workspacePanelDismissGen===dismissGen;
   // Normalize backslash separators to '/' first — Windows absolute paths
   // (e.g. "D:\workspace\dir\file") otherwise break prefix-strip and the
   // /api/list existence check (which splits on '/').
@@ -644,13 +824,43 @@ async function openArtifactPath(path){
   try{
     if(!(await _workspacePathExists(rel))){
       setStatus(t('file_open_failed'));
-      return;
+      return false;
     }
   }catch(_){
     setStatus(t('file_open_failed'));
-    return;
+    return false;
   }
-  openFile(rel);
+  // User-initiated file open from chat (workspace:// link or artifact click):
+  // clear any prior dismissal so the panel auto-opens to show this file.
+  // This must happen only AFTER the async existence check resolves and only on
+  // the success path: clearing it up-front let a keyboard/rotation/URL-bar
+  // sync reopen the stale preview while the request was still pending, and a
+  // failed open (missing file / request error) then stripped the dismissal
+  // guard for good. Both are fixed by writing the flag only here.
+  //
+  // The read can ALSO fail after the existence check succeeded (403 grant
+  // expired, oversized, binary→download, network error). openFile() reports
+  // that, and a failed read must not clear the dismissal either: the panel
+  // would be force-opened onto stale or empty preview content, which is exactly
+  // the intrusion this flag exists to prevent.
+  //
+  // Only a literal `true` counts as a preview. A download-only artifact (e.g.
+  // .zip) or an unreadable file reports false, and must fail closed rather than
+  // being read as a reveal.
+  const opened = await openFile(rel);
+  if(opened !== true){
+    // Nothing was previewed (read failed or the file was downloaded instead).
+    // Leave the dismissal flag untouched and do not promote the panel.
+    return false;
+  }
+  if(!_dismissalUnchanged()){
+    // The user dismissed the panel while this open was in flight. Honour it.
+    return false;
+  }
+  if(typeof _setWorkspacePanelDismissed==='function') _setWorkspacePanelDismissed(false);
+  else if(typeof _workspacePanelUserDismissed!=='undefined') _workspacePanelUserDismissed=false;
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  return true;
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
@@ -1097,7 +1307,7 @@ function _prismLanguageForPath(path){
 }
 
 async function openFile(path, opts={}){
-  if(!S.session)return;
+  if(!S.session)return false;   // nothing can be previewed without a session
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
@@ -1106,7 +1316,7 @@ async function openFile(path, opts={}){
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
     downloadFile(path);
-    return;
+    return false;   // nothing was previewed — the caller must not treat this as a reveal
   }
 
   _previewServerEditable = null;
@@ -1124,25 +1334,37 @@ async function openFile(path, opts={}){
     // Image: load via raw endpoint, show as <img>
     showPreview('image');
     const url=_workspaceRouteForPath(path, 'raw') + cacheBust;
-    $('previewImg').alt=path;
-    $('previewImg').src=url;
-    $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
+    const img=$('previewImg');
+    img.alt=path;
+    // #6710: assigning src only STARTS the request. Report the real outcome so
+    // a broken image fails closed instead of promoting the panel onto a blank
+    // preview (see _awaitElementLoad).
+    if(!(await _awaitElementLoad(img, ()=>{img.src=url;}, 'image_load_failed'))) return false;
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     showPreview(mode);
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
     const wrap=$('previewMediaWrap');
     if(wrap){
-      wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
+      const html=(typeof _mediaPlayerHtml==='function')
         ? _mediaPlayerHtml(mode,url,path.split('/').pop()||path)
         : `<${mode} src="${url.replace(/"/g,'%22')}" controls preload="metadata"></${mode}>`;
+      // #6710: mount the player first so its outcome can be observed, then
+      // report it — a dead grant or missing file must not read as a reveal.
+      const mediaEl=_mountMediaPlayer(wrap, html, mode);
       if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
+      if(mediaEl && !(await _awaitMediaReady(mediaEl))) return false;
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
     const frame=$('previewPdfFrame');
     if(frame){
+      // #6710: an iframe that cannot fetch its document still fires `load`
+      // (the browser substitutes its own error page), so the event cannot
+      // report failure. Probe the route instead and commit the frame only once
+      // it is known to serve.
+      if(!(await _workspaceRawReachable(url))) return false;
       frame.src=''; // clear first to avoid stale content
       frame.src=url;
       frame.title=`PDF preview: ${path.split('/').pop()||path}`;
@@ -1165,10 +1387,10 @@ async function openFile(path, opts={}){
         $('previewCode').textContent=data.content;
         setLargeMarkdownForceRenderVisible(true);
         setStatus(largeMarkdownPlainTextStatus(data.content));
-        return;
+        return true;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){setStatus(t('file_open_failed'));}
+    }catch(e){setStatus(t('file_open_failed')); return false;}
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1182,6 +1404,9 @@ async function openFile(path, opts={}){
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
     const iframe=$('previewHtmlIframe');
     if(iframe){
+      // #6710: same iframe limitation as the PDF branch — a failed document
+      // still fires `load`, so probe the route before committing the frame.
+      if(!(await _workspaceRawReachable(url))) return false;
       iframe.src=''; // clear first to avoid stale content
       iframe.src=url;
     }
@@ -1190,12 +1415,13 @@ async function openFile(path, opts={}){
       const data=await api(_workspaceRouteForPath(path, 'read'));
       if(data.binary){
         downloadFile(path);
-        return;
+        return false;   // downloaded, nothing previewed
       }
-      if(renderCsvPreviewContent(path, data.content)) return;
+      if(renderCsvPreviewContent(path, data.content)) return true;
       renderCodePreviewContent(path, data.content);
     }catch(e){
       downloadFile(path);
+      return false;   // downloaded, nothing previewed
     }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
@@ -1204,7 +1430,7 @@ async function openFile(path, opts={}){
       if(data.binary){
         // Server flagged this as binary content
         downloadFile(path);
-        return;
+        return false;   // downloaded, nothing previewed
       }
       if(data.preview_kind==='office'){
         _previewRawContent = data.content || '';
@@ -1220,12 +1446,14 @@ async function openFile(path, opts={}){
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);
         showToast(t('external_link_grant_expired') || t('file_open_failed'), 5000, 'error');
-        return;
+        return false;
       }
       // If it's a 400/too-large error, offer download instead
       downloadFile(path);
+      return false;   // downloaded, nothing previewed
     }
   }
+  return true;
 }
 
 function downloadFile(path){

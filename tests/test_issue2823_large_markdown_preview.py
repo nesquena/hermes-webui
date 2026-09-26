@@ -1,5 +1,6 @@
 """Regression coverage for #2823 large Markdown workspace previews."""
 
+import re
 from pathlib import Path
 
 
@@ -83,7 +84,15 @@ def test_large_markdown_fallback_sets_raw_content_before_size_gate():
 def test_large_markdown_fallback_uses_code_view_without_rich_render_or_katex():
     branch = _markdown_branch()
     gate_pos = branch.find("if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){")
-    fallback_end = branch.find("return;", gate_pos)
+    # The fallback ends with an early exit from openFile(). It now returns a
+    # value (true = the open succeeded and something was previewed) so callers
+    # like openArtifactPath() can tell a failed read from a successful one, so
+    # match any `return <optional value>;` rather than the bare `return;` this
+    # block used before.
+    fallback_end = -1
+    m = re.search(r"\breturn(?:\s+[A-Za-z0-9_.]+)?;", branch[gate_pos:]) if gate_pos != -1 else None
+    if m:
+        fallback_end = gate_pos + m.start()
     assert gate_pos != -1 and fallback_end != -1, "Large Markdown fallback block not found"
 
     fallback = branch[gate_pos:fallback_end]
@@ -97,8 +106,11 @@ def test_large_markdown_fallback_uses_code_view_without_rich_render_or_katex():
 
 def test_small_markdown_uses_shared_rich_render_helper():
     branch = _markdown_branch()
-    fallback_end = branch.find("return;")
-    assert fallback_end != -1, "Large Markdown fallback must return before rich rendering"
+    # Same widening as above: the fallback's early exit may carry a return value
+    # now, so find the first `return ...;` rather than the literal `return;`.
+    m = re.search(r"\breturn(?:\s+[A-Za-z0-9_.]+)?;", branch)
+    assert m, "Large Markdown fallback must return before rich rendering"
+    fallback_end = m.start()
 
     rich = branch[fallback_end:]
     assert "renderMarkdownPreviewContent(data)" in rich
