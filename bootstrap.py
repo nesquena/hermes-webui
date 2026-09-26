@@ -250,7 +250,11 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
 
 
 def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
-    script = "import yaml\nfrom run_agent import AIAgent\n"
+    # Order matters: importing the agent first runs hermes_bootstrap, which puts
+    # the managed runtime's dependency path on sys.path. A bare "import yaml"
+    # before that fails on PM-managed installs (PyYAML is not on the default
+    # path of the managed interpreter).
+    script = "from run_agent import AIAgent\nimport yaml\n"
     env = os.environ.copy()
     if agent_dir:
         # PREPEND agent_dir to PYTHONPATH so an `agent_dir/run_agent.py` wins

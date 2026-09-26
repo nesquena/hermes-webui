@@ -96,6 +96,27 @@ PYTHONPATH=/path/to/hermes-agent $HERMES_WEBUI_PYTHON -c "from run_agent import 
 
 If adding PYTHONPATH fixes it, persist the path either via `pip install -e .` (preferred) or by setting `HERMES_WEBUI_AGENT_DIR` to that directory.
 
+### Step 5 — managed (PM) installs: the probe imports the agent *before* PyYAML
+
+**Symptom.** `python -c "import yaml"` succeeds for the interpreter, `PYTHONPATH=<agent dir> python -c "from run_agent import AIAgent"` succeeds — yet the launcher reports **"Python environment cannot import both WebUI dependencies and Hermes Agent"**, and under systemd the unit restart-loops.
+
+**Why.** On installs where Hermes manages its own interpreter (selected through `~/.hermes/bin/hermes`), importing the agent is not a plain import: `run_agent` imports `hermes_bootstrap`, whose `prepare_launch()` re-execs the caller into the managed runtime with `-I`. For a probe that means:
+
+- `-I` implies `-E -s`, so the `PYTHONPATH` the caller supplied is **discarded** in the new process;
+- the new process re-runs the caller's snippet **from the top**, and the generation's `site-packages` only reaches `sys.path` when the agent import executes.
+
+A probe written as `import yaml` *before* `from run_agent import AIAgent` therefore fails after the relaunch, even though the identical snippet passed before it — unsatisfiable on a managed install. Older `bootstrap.py` probed in exactly that order.
+
+**Fix.** Update the WebUI: the probe imports the agent first, so the dependency path is active before the WebUI dependency is requested. Check with the interpreter that reported the failure:
+
+```bash
+$HERMES_WEBUI_PYTHON -c "from run_agent import AIAgent
+import yaml
+print('probe ok')"
+```
+
+If you must stay on an older revision, point `HERMES_WEBUI_PYTHON` at a wrapper that sets `PYTHONPATH` to the generation's `site-packages` and then `exec`s the managed interpreter. This survives the relaunch because it prevents it: the probe is handed a process that is already the managed interpreter and already carries the dependency path, so `prepare_launch()` finds the interpreter it would otherwise have re-executed into and no `-I` relaunch happens — the old probe order (`import yaml` first) then succeeds. The wrapper must resolve the interpreter from `~/.hermes/bin/hermes` rather than hard-coding a version, so it keeps working across updates.
+
 ### When to file a bug
 
 If after running steps 1-4 the import still fails *and* `pip install -e .` succeeded *and* `PYTHONPATH=... python -c "from run_agent import AIAgent"` succeeds — that's a real WebUI bug. File at https://github.com/nesquena/hermes-webui/issues with:

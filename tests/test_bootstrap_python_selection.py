@@ -1,7 +1,9 @@
 import pathlib
+import sys
 from unittest.mock import patch
 
 import bootstrap
+import pytest
 
 
 def _repo_venv_python(repo_root: pathlib.Path) -> pathlib.Path:
@@ -121,3 +123,61 @@ def test_local_venv_is_created_with_symlinks(monkeypatch, tmp_path):
             pass  # expected — fake _python_can_run_webui_and_agent always returns False
 
         mock_builder.assert_called_once_with(with_pip=True, symlinks=True)
+
+
+def test_probe_imports_the_agent_before_webui_dependencies():
+    """Regression for #7848: the probe's import order is load-bearing.
+
+    On a managed (PM) install the agent import is what activates the runtime's
+    dependency path, and the runtime re-executes the caller's snippet from the
+    top under ``-I`` (which discards PYTHONPATH). A WebUI dependency imported
+    before the agent therefore fails in the relaunched process even though the
+    interpreter can run both — which made the probe unsatisfiable.
+    """
+    seen = {}
+
+    class _Result:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        seen["script"] = cmd[-1]
+        return _Result()
+
+    with patch.object(bootstrap.subprocess, "run", fake_run):
+        assert bootstrap._python_can_run_webui_and_agent("python", None) is True
+
+    script = seen["script"]
+    assert script.index("from run_agent import AIAgent") < script.index("import yaml"), (
+        "the probe must import the agent before any WebUI dependency: on managed "
+        "installs the dependency path lands on sys.path only with the agent import"
+    )
+
+
+def test_probe_succeeds_when_the_agent_import_provides_the_dependency(tmp_path):
+    """Regression for #7848: end-to-end probe against a managed-runtime shape.
+
+    The fixture mirrors the real asymmetry: ``yaml`` is reachable only through
+    the directory that importing ``run_agent`` adds to ``sys.path``, and the
+    interpreter is started with ``-S`` so site-packages cannot mask the
+    difference. Before the fix this test fails; after it, it passes.
+    """
+    if sys.platform == "win32":
+        pytest.skip("the interpreter wrapper below is a POSIX shell script")
+
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    deps = tmp_path / "generation-site-packages"
+    deps.mkdir()
+    (deps / "yaml.py").write_text("def safe_load(text):\n    return {}\n", encoding="utf-8")
+    (agent_dir / "run_agent.py").write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(deps)!r})\n"
+        "class AIAgent:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    wrapper = tmp_path / "python-no-site"
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" -S "$@"\n', encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    assert bootstrap._python_can_run_webui_and_agent(str(wrapper), agent_dir) is True
