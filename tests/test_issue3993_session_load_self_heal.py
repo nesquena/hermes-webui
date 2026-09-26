@@ -35,7 +35,8 @@ def test_clear_stuck_session_helper_exists_and_is_wired():
     # Guarded on the boot condition (no active session on screen).
     helper = js[js.index(marker): js.index(marker) + 260]
     assert "if(!currentSid){" in helper
-    assert "localStorage.removeItem('hermes-webui-session')" in helper
+    # A non-404 error does not prove that a legacy-only session is dead.
+    assert "_forgetActiveSession();" in helper
     assert "history.replaceState" in helper
 
 
@@ -48,13 +49,22 @@ def _run_helper(current_sid_js: str) -> dict:
     end = js.index("\n}", start) + 2
     helper_src = js[start:end]
     script = f"""
-let removed=false, replaced=false;
-const localStorage = {{ removeItem(k){{ if(k==='hermes-webui-session') removed=true; }} }};
+let removedScoped=false, removedLegacy=false, replaced=false;
+const localStorage = {{ removeItem(k){{
+  if(k==='hermes-webui-session::tab') removedScoped=true;
+  if(k==='hermes-webui-session') removedLegacy=true;
+}} }};
 const history = {{ replaceState(){{ replaced=true; }} }};
 function _appRootPath(){{ return '/'; }}
+// The real multi-tab test evaluates ui.js; this stub checks that the boot
+// helper passes no proof of death after a non-404 failure.
+function _forgetActiveSession(expectedSid){{
+  localStorage.removeItem('hermes-webui-session::tab');
+  if(expectedSid) localStorage.removeItem('hermes-webui-session');
+}}
 {helper_src}
 _clearStuckSessionOnBoot('dead-sid', {current_sid_js});
-process.stdout.write(JSON.stringify({{removed, replaced}}));
+process.stdout.write(JSON.stringify({{removedScoped, removedLegacy, replaced}}));
 """
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=20)
     assert out.returncode == 0, f"node failed: {out.stderr}"
@@ -62,10 +72,11 @@ process.stdout.write(JSON.stringify({{removed, replaced}}));
 
 
 def test_clears_stale_session_on_boot_failure():
-    """No active session (boot) + a failed load → clear the stale id so the next
-    boot doesn't retry the dead session."""
+    """A failed non-404 boot load clears this document and its URL; it does
+    not permanently reject a possibly valid session on the next boot."""
     data = _run_helper("null")
-    assert data["removed"] is True
+    assert data["removedScoped"] is True
+    assert data["removedLegacy"] is False
     assert data["replaced"] is True
 
 
@@ -73,7 +84,8 @@ def test_does_not_clear_when_viewing_a_healthy_session():
     """An active session on screen (currentSid set) → do NOT wipe localStorage/URL;
     the failure may be transient and the live session must survive (#2782/#4028)."""
     data = _run_helper("'live-session-123'")
-    assert data["removed"] is False
+    assert data["removedScoped"] is False
+    assert data["removedLegacy"] is False
     assert data["replaced"] is False
 
 
@@ -94,7 +106,7 @@ def test_stale_load_guard_present_before_self_heal():
     assert block.index(guard) < block.index("_clearStuckSessionOnBoot(sid, currentSid);"), \
         "stale-load guard must precede _clearStuckSessionOnBoot"
     # And before the 404 inline clear too.
-    assert block.index(guard) < block.index("localStorage.removeItem('hermes-webui-session')"), \
+    assert block.index(guard) < block.index("_forgetActiveSession(sid)"), \
         "stale-load guard must precede the 404 inline self-heal"
     # It re-arms the active stream rather than leaving it torn down.
     guard_tail = block[block.index(guard): block.index(guard) + 120]

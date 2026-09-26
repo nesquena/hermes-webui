@@ -499,7 +499,7 @@ async function startCompressionRecovery(btn){
     const data=await api('/api/session/compression-recovery/start',{method:'POST',body:JSON.stringify({session_id:sourceSid})});
     const sid=data&&data.session&&data.session.session_id;
     if(!sid) throw new Error('Compression recovery did not return a session.');
-    try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
+    try{_rememberActiveSession(sid);}catch(_){}
     if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
     else if(data.session){S.session=data.session;if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];syncTopbar();renderMessages();}
     if(typeof renderSessionList==='function') await renderSessionList();
@@ -9741,9 +9741,285 @@ function autoReadLastAssistant(){
   speechSynthesis.speak(utter);
 }
 
+// ── Per-document identity (multi-tab isolation) ──
+//
+// localStorage is shared by every document on the same origin, so an inherited
+// tab id cannot be made authoritative with a localStorage read/write/verify
+// sequence: those operations are not a transaction. Instead, every new
+// JavaScript document mints a fresh cryptographic id and never adopts the id
+// copied in sessionStorage by Duplicate Tab or session restore. Scoped state is
+// not transferable across documents: Duplicate Tab can copy sessionStorage
+// before the original closes, making a reload successor indistinguishable from
+// a duplicate whose first script runs after the original's pagehide. A new
+// document must select its own conversation; URL/sidebar selection remains
+// available, but automatic in-flight transcript recovery across reload is not.
+const TAB_ID_KEY = 'hermes-webui-tab-id';
+const TAB_ID_RELEASED_BASE = 'hermes-webui-tab-released';
+const _TAB_RELEASED_TTL_MS = 24 * 60 * 60 * 1000;
+// Oldest inflight marker/state either reader (checkInflightOnBoot,
+// loadInflightState) still accepts. Expiry is a reader decision, not authority
+// for another document to delete mutable storage.
+const _INFLIGHT_ACCEPT_WINDOW_MS = 10 * 60 * 1000;
+const INFLIGHT_KEY_BASE = 'hermes-webui-inflight'; // scoped base; unsuffixed form is legacy/ownerless
+const INFLIGHT_STATE_KEY_BASE = 'hermes-webui-inflight-state';
+const ACTIVE_SESSION_KEY_LEGACY = 'hermes-webui-session';
+const ACTIVE_SESSION_TOMBSTONE_BASE = 'hermes-webui-session-none';
+const ACTIVE_SESSION_REJECTED_BASE = 'hermes-webui-rejected-sid';
+const TAB_ACTIVE_SESSION_MIRROR_KEY = 'hermes-webui-tab-active-session';
+const TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY = 'hermes-webui-tab-active-session-none';
+const TAB_INFLIGHT_MIRROR_KEY = 'hermes-webui-tab-inflight';
+const TAB_INFLIGHT_STATE_MIRROR_KEY = 'hermes-webui-tab-inflight-state';
+
+function _newTabId(){
+  try{
+    if(typeof window==='undefined'||!window.crypto) return '';
+    if(typeof window.crypto.randomUUID==='function') return window.crypto.randomUUID();
+    if(typeof window.crypto.getRandomValues==='function'){
+      const bytes=new Uint8Array(16);
+      window.crypto.getRandomValues(bytes);
+      // RFC 4122 version/variant bits make the fallback the same 122-bit UUID
+      // identity class as randomUUID().
+      bytes[6]=(bytes[6]&15)|64;
+      bytes[8]=(bytes[8]&63)|128;
+      const hex=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+      return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+    }
+  }catch(_){}
+  return '';
+}
+function _scopedTabKey(base,id){
+  const owner=id||_hermesTabId();
+  // Without a cryptographic per-document identity, shared localStorage is not
+  // safe. Throw so existing guarded callers degrade to no recovery instead of
+  // reading or writing a shared fallback key.
+  if(!owner) throw new Error('secure per-document storage identity unavailable');
+  return base+'::'+owner;
+}
+function _mirrorTabValue(key,value){
+  try{
+    if(value==null) sessionStorage.removeItem(key);
+    else sessionStorage.setItem(key,String(value));
+  }catch(_){}
+}
+
+// A cached age verdict cannot authorize deletion: another document can save a
+// fresh marker/state between classification and removeItem(). Only the owner's
+// non-persisted pagehide release record authorizes GC of its scoped keys.
+// Missing/malformed release evidence retains even expired crash/discard state.
+function _gcOrphanTabKeys(){
+  try{
+    const now=Date.now();
+    const statePrefixes=[
+      INFLIGHT_KEY_BASE+'::',
+      INFLIGHT_STATE_KEY_BASE+'::',
+      ACTIVE_SESSION_KEY_LEGACY+'::',
+      ACTIVE_SESSION_TOMBSTONE_BASE+'::',
+    ];
+    const releasePrefix=TAB_ID_RELEASED_BASE+'::';
+    const selfId=(typeof window!=='undefined'&&window.__hermesTabId)||null;
+    const doomed=[];
+    for(let i=0;i<localStorage.length;i++){
+      const key=localStorage.key(i);
+      if(!key) continue;
+      const prefix=statePrefixes.find(p=>key.indexOf(p)===0);
+      if(!prefix) continue;
+      const owner=key.slice(prefix.length);
+      if(!owner||owner===selfId) continue;
+      const releasedRaw=localStorage.getItem(releasePrefix+owner);
+      if(releasedRaw==null) continue;
+      const releasedAt=Number(releasedRaw);
+      if(!Number.isFinite(releasedAt)||(now-releasedAt)<=_TAB_RELEASED_TTL_MS) continue;
+      doomed.push(key);
+    }
+    for(const key of doomed){
+      try{ localStorage.removeItem(key); }catch(_){}
+    }
+    const staleReleaseKeys=[];
+    for(let i=0;i<localStorage.length;i++){
+      const key=localStorage.key(i);
+      if(!key||key.indexOf(releasePrefix)!==0) continue;
+      const releasedAt=Number(localStorage.getItem(key));
+      if(Number.isFinite(releasedAt)&&(now-releasedAt)>_TAB_RELEASED_TTL_MS){
+        staleReleaseKeys.push(key);
+      }
+    }
+    for(const key of staleReleaseKeys){
+      try{ localStorage.removeItem(key); }catch(_){}
+    }
+  }catch(_){}
+}
+function _releaseTabId(event){
+  // A BFCache pagehide does not end the document; pageshow resumes the same
+  // in-memory identity. Only a real teardown proves this id is no longer used.
+  if(event&&event.persisted) return;
+  try{
+    if(typeof window==='undefined'||!window.__hermesTabId) return;
+    localStorage.setItem(_scopedTabKey(TAB_ID_RELEASED_BASE,window.__hermesTabId),String(Date.now()));
+  }catch(_){}
+}
+function _hermesTabId(){
+  if(typeof window==='undefined') return 'default';
+  if(window.__hermesTabId) return window.__hermesTabId;
+  const id=_newTabId();
+  if(!id){
+    window.__hermesTabAuthorityUnavailable=true;
+    return null;
+  }
+  // Deliberately overwrite (never adopt) any inherited id. A release marker
+  // cannot tell a reload from a duplicate initialized after the source closed.
+  // Neither copied mirrors nor the shared legacy session may authorize this
+  // document's selection; leave the predecessor's scoped keys untouched.
+  let predecessorId=null;
+  let predecessorUnknown=false;
+  try{ predecessorId=sessionStorage.getItem(TAB_ID_KEY); }catch(_){ predecessorUnknown=true; }
+  window.__hermesTabId=id;
+  try{ sessionStorage.setItem(TAB_ID_KEY,id); }catch(_){}
+  if(predecessorId||predecessorUnknown){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    for(const key of [TAB_ACTIVE_SESSION_MIRROR_KEY,TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,TAB_INFLIGHT_MIRROR_KEY,TAB_INFLIGHT_STATE_MIRROR_KEY]){
+      try{ sessionStorage.removeItem(key); }catch(_){}
+    }
+  }
+  _gcOrphanTabKeys();
+  try{
+    if(!window.__hermesTabReleaseBound){
+      window.__hermesTabReleaseBound=true;
+      window.addEventListener('pagehide',_releaseTabId);
+    }
+  }catch(_){}
+  return id;
+}
+
 // ── Reconnect banner (B4/B5: reload resilience) ──
-const INFLIGHT_KEY = 'hermes-webui-inflight'; // localStorage key for in-flight session tracking
-const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'; // localStorage snapshots for mid-stream reload recovery
+// Tab-scoped: each tab tracks its OWN in-flight stream, so a second tab
+// starting a turn can no longer overwrite the first tab's reconnect marker.
+// (INFLIGHT_KEY_BASE / INFLIGHT_STATE_KEY_BASE are declared with the per-tab
+// identity helpers above so the storage GC can reference them safely.)
+function _inflightKey(){ return _scopedTabKey(INFLIGHT_KEY_BASE); }
+function _inflightStateKey(){ return _scopedTabKey(INFLIGHT_STATE_KEY_BASE); }
+
+// Tab-scoped active session. The legacy global 'hermes-webui-session' key is
+// still written (so an unrelated/older tab and the boot fallback keep working),
+// but each tab ALSO records its own last-opened session and prefers it on
+// reload. Without this, reloading tab 1 could restore whatever conversation
+// tab 2 opened most recently.
+function _activeSessionKey(){ return _scopedTabKey(ACTIVE_SESSION_KEY_LEGACY); }
+function _activeSessionTombstoneKey(){ return _scopedTabKey(ACTIVE_SESSION_TOMBSTONE_BASE); }
+function _legacyProfile(){
+  // S begins with a provisional 'default'. Boot must resolve the server's
+  // active profile before an ownerless fallback can be adopted or rejected.
+  return typeof S!=='undefined'&&S&&S._legacyProfileResolved&&typeof S.activeProfile==='string'&&S.activeProfile
+    ? S.activeProfile : null;
+}
+function _rejectedSessionKey(profile,sid){
+  return ACTIVE_SESSION_REJECTED_BASE+'::'+encodeURIComponent(profile)+'::'+encodeURIComponent(sid);
+}
+function _rememberActiveSession(sid){
+  if(!sid) return;
+  if(!_hermesTabId()) return;
+  window.__hermesActiveSession=sid;
+  window.__hermesActiveSessionKnown=true;
+  try{ localStorage.setItem(_activeSessionKey(), sid); }catch(_){}
+  // Opening a session supersedes any earlier "no session" tombstone.
+  try{ localStorage.removeItem(_activeSessionTombstoneKey()); }catch(_){}
+  _mirrorTabValue(TAB_ACTIVE_SESSION_MIRROR_KEY,sid);
+  _mirrorTabValue(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,null);
+  // Keep the legacy key in sync for boot fallback + older code paths.
+  try{ localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, sid); }catch(_){}
+}
+function _rememberedActiveSession(){
+  if(!_hermesTabId()) return null;
+  if(window.__hermesActiveSessionKnown) return window.__hermesActiveSession||null;
+  // This tab's own choice always wins over the shared/global slot.
+  // Returns null when nothing is stored, matching the original
+  // localStorage.getItem() contract this helper replaced.
+  try{
+    const own=localStorage.getItem(_activeSessionKey());
+    if(own){
+      window.__hermesActiveSession=own;
+      window.__hermesActiveSessionKnown=true;
+      return own;
+    }
+  }catch(_){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    return null;
+  }
+  // Explicit per-tab tombstone: this tab deliberately forgot its session, so
+  // the shared legacy fallback must NOT bleed back in (another tab may keep
+  // rewriting it). Only a brand-new tab — no scoped value AND no tombstone —
+  // may consult the legacy slot.
+  try{
+    if(localStorage.getItem(_activeSessionTombstoneKey())){
+      window.__hermesActiveSession=null;
+      window.__hermesActiveSessionKnown=true;
+      return null;
+    }
+  }catch(_){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    return null;
+  }
+  const profile=_legacyProfile();
+  if(!profile){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    return null;
+  }
+  let legacy=null;
+  try{ legacy=localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY); }catch(_){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    return null;
+  }
+  // A rejected or foreign-profile SID remains in the ownerless slot for older
+  // clients, but this profile must not re-adopt it. The rejection lives in a
+  // distinct per-(profile,SID) key: no compare/remove race with a newer writer.
+  if(legacy){
+    try{ if(localStorage.getItem(_rejectedSessionKey(profile,legacy))) legacy=null; }
+    catch(_){ legacy=null; }
+  }
+  // One-shot adoption (upgrade path): copy the legacy value into this tab's
+  // scoped slot so every later read/forget goes through tab-owned state and a
+  // concurrent tab rewriting the shared slot can no longer change what THIS
+  // tab restores.
+  if(legacy){
+    try{ localStorage.setItem(_activeSessionKey(), legacy); }catch(_){}
+    _mirrorTabValue(TAB_ACTIVE_SESSION_MIRROR_KEY,legacy);
+  }
+  // The shared legacy slot is a one-shot boot fallback. Cache even an empty
+  // result so another document cannot change this document's later reads when
+  // scoped storage is unavailable or quota constrained.
+  window.__hermesActiveSession=legacy||null;
+  window.__hermesActiveSessionKnown=true;
+  return legacy;
+}
+function _forgetActiveSession(expectedSid){
+  if(!_hermesTabId()) return;
+  window.__hermesActiveSession=null;
+  window.__hermesActiveSessionKnown=true;
+  try{ localStorage.removeItem(_activeSessionKey()); }catch(_){}
+  // Persist an explicit "no session" tombstone so the legacy fallback cannot
+  // resurrect a forgotten (possibly dead/404) session on the next read.
+  try{ localStorage.setItem(_activeSessionTombstoneKey(), String(Date.now())); }catch(_){}
+  _mirrorTabValue(TAB_ACTIVE_SESSION_MIRROR_KEY,null);
+  _mirrorTabValue(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,String(Date.now()));
+  // The legacy slot is ownerless: even an exact matching read followed by a
+  // remove can erase a different tab's newer value. Reject a SID the caller
+  // explicitly invalidated (404/delete, failed boot restore, or a profile
+  // switch) on a separate, profile-scoped key instead.
+  if(typeof expectedSid!=='string'||!expectedSid) return;
+  try{
+    const profile=_legacyProfile();
+    if(profile) localStorage.setItem(_rejectedSessionKey(profile,expectedSid),'1');
+  }catch(_){}
+}
+if(typeof window!=='undefined'){
+  window._rememberActiveSession=_rememberActiveSession;
+  window._rememberedActiveSession=_rememberedActiveSession;
+  window._forgetActiveSession=_forgetActiveSession;
+}
 const INFLIGHT_STATE_DEFAULT_LIMITS = {
   maxSessions:8,
   messages:24,
@@ -9768,9 +10044,21 @@ function _getInflightStateLimits(){
   };
 }
 
+// Pre-upgrade inflight entries in the unsuffixed keys have no authoritative
+// document owner. Shape, SID and age cannot establish ownership: the first tab
+// loading the update may be unrelated to the stream that wrote them. Keep this
+// guard at both reader boundaries, but deliberately neither adopt nor delete
+// shared legacy bytes. New documents fail closed to their scoped state while a
+// still-running legacy document/client retains its recovery data.
+function _migrateLegacyInflight(){
+  return;
+}
 function _readInflightStateMap(){
   try{
-    const raw=localStorage.getItem(INFLIGHT_STATE_KEY);
+    _migrateLegacyInflight();
+  }catch(_){}
+  try{
+    const raw=localStorage.getItem(_inflightStateKey());
     const parsed=raw?JSON.parse(raw):{};
     return parsed&&typeof parsed==='object'?parsed:{};
   }catch(_){
@@ -9841,15 +10129,19 @@ function _writeInflightStateMap(all){
     json=JSON.stringify(current?{[current[0]]:current[1]}:{});
   }
   if(json.length>limits.jsonChars){
-    localStorage.removeItem(INFLIGHT_STATE_KEY);
+    localStorage.removeItem(_inflightStateKey());
+    _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,null);
     return false;
   }
-  localStorage.setItem(INFLIGHT_STATE_KEY,json);
+  localStorage.setItem(_inflightStateKey(),json);
+  _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,json);
   return true;
 }
 function saveInflightState(sid, state){
   if(!sid||!state) return;
-  const entry={..._compactInflightState(state),updated_at:Date.now()};
+  const tabId=_hermesTabId();
+  if(!tabId) return;
+  const entry={..._compactInflightState(state),updated_at:Date.now(),tabId};
   try{
     const all=_readInflightStateMap();
     all[sid]=entry;
@@ -9857,10 +10149,11 @@ function saveInflightState(sid, state){
   }catch(err){
     if(!_isStorageQuotaError(err)) return;
     try{
-      localStorage.removeItem(INFLIGHT_STATE_KEY);
+      localStorage.removeItem(_inflightStateKey());
       _writeInflightStateMap({[sid]:entry});
     }catch(_){
-      try{localStorage.removeItem(INFLIGHT_STATE_KEY);}catch(__){}
+      try{localStorage.removeItem(_inflightStateKey());}catch(__){}
+      _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,null);
     }
   }
 }
@@ -9869,8 +10162,13 @@ function loadInflightState(sid, streamId){
   const all=_readInflightStateMap();
   const entry=all[sid];
   if(!entry) return null;
+  // Every accepted snapshot is stamped with this document's fresh identity.
+  // Reload mirrors are re-stamped during _restoreDocumentScopedState(); an
+  // absent or foreign stamp is unverifiable and therefore rejected.
+  const tabId=_hermesTabId();
+  if(!tabId||entry.tabId!==tabId) return null;
   if(streamId&&entry.streamId&&entry.streamId!==streamId) return null;
-  if(entry.updated_at&&Date.now()-entry.updated_at>10*60*1000){
+  if(entry.updated_at&&Date.now()-entry.updated_at>_INFLIGHT_ACCEPT_WINDOW_MS){
     clearInflightState(sid);
     return null;
   }
@@ -9882,8 +10180,14 @@ function clearInflightState(sid){
     const all=_readInflightStateMap();
     if(!(sid in all)) return;
     delete all[sid];
-    if(Object.keys(all).length) localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
-    else localStorage.removeItem(INFLIGHT_STATE_KEY);
+    if(Object.keys(all).length){
+      const json=JSON.stringify(all);
+      localStorage.setItem(_inflightStateKey(),json);
+      _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,json);
+    }else{
+      localStorage.removeItem(_inflightStateKey());
+      _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,null);
+    }
   }catch(_){ }
 }
 
@@ -10307,18 +10611,20 @@ function restoreLiveTurnHtmlForSession(sid){
 
 function markInflight(sid, streamId) {
   const payload=JSON.stringify({sid, streamId, ts: Date.now()});
+  _mirrorTabValue(TAB_INFLIGHT_MIRROR_KEY,payload);
   try{
-    localStorage.setItem(INFLIGHT_KEY, payload);
+    localStorage.setItem(_inflightKey(), payload);
   }catch(err){
     if(!_isStorageQuotaError(err)) return;
     try{
-      localStorage.removeItem(INFLIGHT_STATE_KEY);
-      localStorage.setItem(INFLIGHT_KEY, payload);
+      localStorage.removeItem(_inflightStateKey());
+      localStorage.setItem(_inflightKey(), payload);
     }catch(_){}
   }
 }
 function clearInflight() {
-  localStorage.removeItem(INFLIGHT_KEY);
+  _mirrorTabValue(TAB_INFLIGHT_MIRROR_KEY,null);
+  try{ localStorage.removeItem(_inflightKey()); }catch(_){}
 }
 function showReconnectBanner(msg) {
   $('reconnectMsg').textContent = msg || 'A response may have been in progress when you last left.';
@@ -11462,14 +11768,20 @@ function getPendingSessionMessage(session, messagesOverride=null){
   };
 }
 async function checkInflightOnBoot(sid) {
-  const raw = localStorage.getItem(INFLIGHT_KEY);
+  // Enter the legacy quarantine boundary before reading this document's scoped
+  // marker. Ownerless unsuffixed state is never adopted or consumed here.
+  let raw=null;
+  try{
+    _migrateLegacyInflight();
+    raw=localStorage.getItem(_inflightKey());
+  }catch(_){ return; }
   if (!raw) return;
   try {
     const {sid: inflightSid, streamId, ts} = JSON.parse(raw);
     if (inflightSid !== sid) { clearInflight(); return; }
     if (S.activeStreamId && S.activeStreamId === streamId) return;
     // Only show banner if the in-flight entry is less than 10 minutes old
-    if (Date.now() - ts > 10 * 60 * 1000) { clearInflight(); return; }
+    if (Date.now() - ts > _INFLIGHT_ACCEPT_WINDOW_MS) { clearInflight(); return; }
     // Check if stream is still active
     const status = await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId || '')}`);
     if (status.active) {

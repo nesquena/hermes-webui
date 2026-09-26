@@ -120,6 +120,34 @@ Transparent Stream, or Final answer only; `S.messages`, `INFLIGHT`, renderer
 caches, and DOM remain projections or recovery caches rather than independent
 semantic owners.
 
+**Browser-tab recovery boundary:** a new JavaScript document gets a fresh tab
+identity. A reload and a duplicated tab whose original closes before its first
+script executes both inherit the same `sessionStorage` bytes; a finite pagehide
+release marker does not distinguish them. Consequently neither copied mirrors
+nor released predecessor-scoped `localStorage` entries authorize automatic
+active-session or in-flight transcript transfer. When no explicit URL route
+names the session, a reload may open without its previous selection and the
+user must select the durable conversation from the sidebar. In-flight browser
+cache recovery is unavailable across that ambiguous boundary; durable session
+transcript and run-journal replay remain the recovery sources when a session is
+explicitly reopened. Old scoped caches are never adopted by a new document.
+They are collected only after the owner's non-persisted pagehide release marker
+exceeds its grace window. Reader age alone cannot authorize deletion of another
+document's mutable inflight state; crashes/discards without a release can retain
+orphan snapshots and consume browser quota. The owner still rejects snapshots
+beyond the reader's ten-minute window. This deliberately sacrifices seamless
+reload recovery rather than granting a duplicated tab another tab's authority.
+
+A session ID invalidated by a 404/delete is rejected through a key scoped
+to the resolved profile and ID, not removed from the shared legacy fallback
+slot: another tab may have written a newer session between comparison and
+deletion. Profile switches reject the source ID in the target profile without
+invalidating the source profile. A non-404 boot failure only clears this
+document's selection and URL: a fresh document may retry the possibly valid
+session after the server recovers. An unresolved profile does not adopt the
+ownerless fallback. Older clients unaware of rejection keys can still read
+the legacy slot.
+
 This RFC remains `Proposed` because its broader cross-layer contract also covers
 model-context reconstruction, compression handoff, session metadata, and future
 runtime-adapter migration. Shipped Anchor coverage strengthens invariants 2, 3,
