@@ -3808,7 +3808,17 @@ def _append_journaled_partial_output(
                 # marker on every repeated repair cycle.
                 output_accounted_for = True
                 return existing_idx
-        if dedupe_existing and reasoning and not content:
+        # Reuse an existing empty recovered anchor for THIS stream even when the
+        # caller did not opt into content/tool dedupe. This is the same
+        # idempotence guard ``ensure_assistant_anchor()`` already applies
+        # unconditionally (#3875): a reasoning-only journal replay never emits
+        # content, so there is nothing to content-dedupe on, and without this
+        # guard every repair pass appended another empty recovered row — the
+        # 1024-duplicate transcript. It can only ever match rows that ARE
+        # recovery artifacts for this exact stream (empty content + matching
+        # reasoning), so unlike the content-dedupe branch it can never suppress a
+        # genuine current-turn row or consume an ordinary history row.
+        if reasoning and not content:
             for existing_idx in range(initial_message_count):
                 if existing_idx in claimed_existing_assistant_indexes:
                     continue
@@ -4457,12 +4467,32 @@ def _apply_core_sync_or_error_marker(
             ),
             None,
         )
+        # ``_already_checkpointed`` is the TOKEN-bound identity proof: it may
+        # only be used for decisions that suppress appending a recovered row
+        # (safe only when the row provably IS the pending turn). The tail
+        # predicate, however, has always been a *textual* tail check against
+        # the transcript's LAST message (master behaviour): the pending user
+        # row itself, with no assistant answer after it, must take the normal
+        # recovery branch. Reusing the token-bound value here made the
+        # "pending row + genuine final answer" case look like "tail already
+        # checkpointed" and skipped the #6366 transcript-advance suppression
+        # (test_full_recovery_suppresses_duplicates_on_turn_journal_completion).
         _already_checkpointed = _pending_user_row_already_materialized(
             session,
             _latest_user,
             session.pending_started_at,
         )
-        _tail_user_already_checkpointed = _already_checkpointed
+        _tail_message = session.messages[-1] if session.messages else None
+        _tail_user_already_checkpointed = _message_matches_pending_checkpoint(
+            _tail_message,
+            session.pending_user_message,
+            session.pending_started_at,
+            session.pending_user_source,
+            session.pending_attachments,
+        ) or _message_matches_pending_text(
+            _tail_message,
+            session.pending_user_message,
+        )
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
             if not _already_checkpointed:
@@ -4526,7 +4556,7 @@ def _apply_core_sync_or_error_marker(
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
-                dedupe_existing=True,
+                dedupe_existing=False,
                 terminal_recovery=_terminal_recovery,
             )
         )
