@@ -35,8 +35,8 @@ NODE = shutil.which("node")
 
 
 def _extract_function(source: str, name: str) -> str:
-    """Extract ``function name(...)`` with balanced braces (sync or plain)."""
-    for prefix in (f"function {name}(", f"async function {name}("):
+    """Extract a sync or async function with balanced braces."""
+    for prefix in (f"async function {name}(", f"function {name}("):
         start = source.find(prefix)
         if start >= 0:
             break
@@ -1066,15 +1066,33 @@ def test_boot_skips_lineage_resolve_only_for_exact_deep_link():
     """Boot passes `skipLineageResolve` only when the deep link is marked exact,
     so an ordinary deep link (e.g. an old lineage-segment URL) still lands on
     its lineage tip. Red-before: boot always resolved through the lineage row."""
-    exact_call = "await loadSession(saved, {preserveActiveInput:true, skipLineageResolve:true})"
-    assert exact_call in BOOT_JS
-    # The marker condition guards the exact call (within its preceding lines).
-    idx = BOOT_JS.index(exact_call)
-    guard = BOOT_JS[idx - 700:idx]
-    assert "_sessionUrlRequestsExactTarget()" in guard
-    assert "urlSession" in guard
-    # An ordinary deep link keeps the plain restore call.
-    assert "await loadSession(saved, {preserveActiveInput:true});" in BOOT_JS
+    helpers = "\n".join((
+        _extract_function(SESSIONS_JS, "_sessionUrlRequestsExactTarget"),
+        _extract_function(BOOT_JS, "_restoreBootSession"),
+    ))
+    out = _run_node({
+        "helpers": helpers,
+        "driver": r"""
+(async () => {
+  vm.runInContext(`var _capturedOptions; var _openSessionReference = async (sid, profile, options) => {
+    _capturedOptions = options; return true;
+  };`, sandbox);
+  vm.runInContext(`window.location.search = '?exact=1';`, sandbox);
+  await vm.runInContext(`_restoreBootSession('child', null, null, {exactTarget:_sessionUrlRequestsExactTarget()})`, sandbox);
+  ret.exactSkipsLineage = vm.runInContext(`_capturedOptions.loadOptions.skipLineageResolve === true`, sandbox);
+  vm.runInContext(`window.location.search = '';`, sandbox);
+  await vm.runInContext(`_restoreBootSession('child', null, null, {exactTarget:_sessionUrlRequestsExactTarget()})`, sandbox);
+  ret.ordinarySkipsLineage = vm.runInContext(`!!(_capturedOptions.loadOptions && _capturedOptions.loadOptions.skipLineageResolve)`, sandbox);
+  console.log(JSON.stringify(ret));
+})().catch(err => { console.error(err); process.exit(1); });
+""",
+    })
+    # Keep the shipped boot call tied to the URL marker, while exercising how
+    # _restoreBootSession translates exact and ordinary deep links.
+    assert "const exactTarget=typeof _sessionUrlRequestsExactTarget==='function'&&_sessionUrlRequestsExactTarget();" in BOOT_JS
+    assert "_restoreBootSession(urlSession,profileIntent,null,{exactTarget})" in BOOT_JS
+    assert out["exactSkipsLineage"] is True
+    assert out["ordinarySkipsLineage"] is False
 
 
 def test_child_new_tab_opens_child_deep_link_exact():
@@ -1207,7 +1225,39 @@ def test_load_session_keeps_the_exact_child_when_folding_lineage():
     """`loadSession()` consults the exact-target check inside its lineage block,
     so boot, popstate (Back) and same-session refreshes all keep the child; the
     `typeof` guard keeps harnesses that extract loadSession alone working."""
-    body = _extract_function(SESSIONS_JS, "loadSession")
-    assert "if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){" in body
-    assert ("const resolvedSid=(typeof _sessionUrlTargetsExactSid==='function' && _sessionUrlTargetsExactSid(sid))"
-            " ? sid : _resolveSessionIdFromSidebarLineage(sid);") in body
+    helpers = "\n".join((
+        _extract_function(SESSIONS_JS, "_sessionUrlRequestsExactTarget"),
+        _extract_function(SESSIONS_JS, "_sessionUrlTargetsExactSid"),
+        _extract_function(SESSIONS_JS, "loadSession"),
+    ))
+    out = _run_node({
+        "helpers": helpers,
+        "driver": r"""
+(async () => {
+  vm.runInContext(`
+    var S = {session:null, activeProfile:'profile-x'};
+    var _sessionNavigationRollbackAnchor = null;
+    var _sessionNavigationGeneration = 0;
+    var _lineageCalls = [];
+    var _preloadSid = null;
+    var _sessionIdFromLocation = () => 'child';
+    var _resolveSessionIdFromSidebarLineage = (sid, profile) => {
+      _lineageCalls.push([sid, profile]); return 'lineage-tip';
+    };
+    var _hermesNotifySessionOpen = sid => { _preloadSid = sid; return {cancel:true}; };
+  `, sandbox);
+  vm.runInContext(`window.location.search = '?exact=1';`, sandbox);
+  await vm.runInContext(`loadSession('child')`, sandbox);
+  ret.exact = vm.runInContext(`({sid:_preloadSid, calls:_lineageCalls.slice()})`, sandbox);
+  vm.runInContext(`_lineageCalls = []; _preloadSid = null; window.location.search = '';`, sandbox);
+  await vm.runInContext(`loadSession('child')`, sandbox);
+  ret.ordinary = vm.runInContext(`({sid:_preloadSid, calls:_lineageCalls.slice()})`, sandbox);
+  console.log(JSON.stringify(ret));
+})().catch(err => { console.error(err); process.exit(1); });
+""",
+    })
+    assert out["exact"] == {"sid": "child", "calls": []}
+    assert out["ordinary"] == {
+        "sid": "lineage-tip",
+        "calls": [["child", "profile-x"]],
+    }

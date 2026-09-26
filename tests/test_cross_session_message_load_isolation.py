@@ -160,7 +160,6 @@ COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
         "_rememberComposerDraftPayloadState",
         "_saveComposerDraftNow",
         "_restoreComposerDraft",
-        "_switchProfileForSessionLoad",
         "_clearComposerDraft",
     )
 )
@@ -312,7 +311,6 @@ function createEnvironment() {
   globalThis.hideClarifyCard = () => {};
   globalThis._saveComposerDraftNow = () => Promise.resolve();
   globalThis._sessionProfileMismatchFromError = () => null;
-  globalThis._switchProfileForSessionLoad = async () => {};
   globalThis._clearSameSessionForceReloadHint = () => { clearHintCalls += 1; };
   globalThis._setSessionViewedCount = () => {};
   // #4946: loadSession() now routes its viewed-count/unread clear through
@@ -746,12 +744,20 @@ async function runDraftSaveFailureNavigation() {
   assert.strictEqual(draftRequests.length, 3);
   draftRequests[2].reject(new Error('background steer draft rejected'));
   const backgroundWriteResult = await backgroundWrite;
-  await _switchProfileForSessionLoad('alternate');
+  // This minimal profile transition stands in for switchToProfile().
+  const switchProfileForHarness = async (name) => {
+    const data = await api('/api/profile/switch', {
+      method:'POST', body:JSON.stringify({name}), timeoutToast:false,
+    });
+    S.activeProfile = data.active || name;
+    S.activeProfileIsDefault = !!data.is_default;
+  };
+  await switchProfileForHarness('alternate');
   const backgroundFallbackAcrossProfile = (() => {
     const draft = _composerDraftLocalFallbackBySid.get('sid-background');
-    return !!draft && draft.files[0] === backgroundFile;
+    return S.activeProfile === 'alternate' && !!draft && draft.files[0] === backgroundFile;
   })();
-  await _switchProfileForSessionLoad('default');
+  await switchProfileForHarness('default');
   const backgroundLoad = observed(loadSession('sid-background'));
   assert.strictEqual(draftRequests.length, 4);
   draftRequests[3].resolve({session_id:'sid-source'});

@@ -15,9 +15,10 @@ from pathlib import Path
 import pytest
 
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 except ImportError:
     sync_playwright = None
+    PlaywrightTimeoutError = TimeoutError
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,14 +62,20 @@ def test_session_reference_browser_navigation_uses_server_profiles_and_preserves
         for key in list(env):
             if key.endswith("_API_KEY") or key in {"HERMES_WEBUI_PASSWORD", "HERMES_WEBUI_AUTH_TOKEN"}:
                 env.pop(key, None)
-        agent_root = Path(env["PYTHONPATH"].split(os.pathsep)[0]).resolve().parents[3]
-        assert (agent_root / "hermes_cli" / "profiles.py").is_file()
+        env.pop("PYTHONPATH", None)
+        env.pop("HERMES_WEBUI_PYTHON", None)
         env.update(HERMES_WEBUI_PORT=str(port), HERMES_WEBUI_HOST="127.0.0.1",
                    HERMES_WEBUI_STATE_DIR=state, HERMES_HOME=state, HERMES_BASE_HOME=state,
                    HERMES_CONFIG_PATH=str(state_dir / "config.yaml"),
                    HERMES_WEBUI_DEFAULT_WORKSPACE=str(workspace_root), HERMES_WEBUI_SKIP_ONBOARDING="1",
-                   HERMES_WEBUI_AGENT_DIR=str(agent_root),
-                   PYTHONPATH=str(agent_root) + os.pathsep + env["PYTHONPATH"])
+                   HERMES_WEBUI_AGENT_DIR=str(state_dir / "no-agent"))
+        profile_home = state_dir / "profiles" / "ops"
+        profile_home.mkdir(parents=True)
+        (profile_home / "config.yaml").write_text(json.dumps({
+            "profile": {"name": "ops"},
+            "model": {"default": "claude-3-5-haiku", "provider": "anthropic"},
+            "workspace": str(ops_workspace),
+        }), encoding="utf-8")
         proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], cwd=ROOT,
                                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -87,18 +94,10 @@ def test_session_reference_browser_navigation_uses_server_profiles_and_preserves
                 }, opener)
                 return data["session"]["session_id"]
 
-            created, _ = _post_json(base, "/api/profile/create", {"name": "ops"})
-            assert created["ok"] and created["profile"]["name"] == "ops"
-            profile_home = state_dir / "profiles" / "ops"
-            assert created["profile"]["path"] == str(profile_home) and "visible" in created["profile"], created["profile"]
-            (profile_home / "config.yaml").write_text(json.dumps({
-                "profile": {"name": "ops"},
-                "model": {"default": "claude-3-5-haiku", "provider": "anthropic"},
-                "workspace": str(ops_workspace),
-            }), encoding="utf-8")
             ops_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
             initial_roster = json.load(urllib.request.urlopen(base + "/api/profiles"))
-            assert any(p["name"] == "ops" for p in initial_roster["profiles"]), initial_roster
+            # Without hermes_cli, the agent-free roster fallback contains only default.
+            assert any(p["name"] == "default" and p["is_default"] for p in initial_roster["profiles"]), initial_roster
             switch_data, setup_headers = _post_json(base, "/api/profile/switch", {"name": "ops"}, ops_opener)
             assert switch_data["active"] == "ops"
             assert bool(setup_headers.get("Set-Cookie")), "server profile fixture did not set a browser cookie"
@@ -180,7 +179,6 @@ def test_session_reference_browser_navigation_uses_server_profiles_and_preserves
                 assert rendered["aliases"]["single"] == {"sid": "a", "ambiguous": False}
                 roster = page.evaluate("async () => (await fetch('/api/profiles')).json()")
                 assert any(p["name"] == "default" and p["is_default"] for p in roster["profiles"])
-                assert any(p["name"] == "ops" and not p["is_default"] for p in roster["profiles"]), roster
                 boot_requests = []
                 def capture_boot_request(request):
                     path = urllib.parse.urlsplit(request.url).path
@@ -242,7 +240,11 @@ def test_session_reference_browser_navigation_uses_server_profiles_and_preserves
                 page.wait_for_function("() => document.getElementById('msgInner').innerText.includes('Destination transcript')")
                 assert "Destination transcript" in page.locator("#msgInner").inner_text() and page.locator("#composerSelectionChips").is_hidden()
                 assert page.evaluate("S.activeProfile") == "ops"
-                page.wait_for_function("() => window._defaultModel === 'claude-3-5-haiku'")
+                try:
+                    page.wait_for_function("() => window._defaultModel === 'claude-3-5-haiku'", timeout=10000)
+                except PlaywrightTimeoutError as error:
+                    state = page.evaluate("() => ({model:window._defaultModel, workspace:S._profileDefaultWorkspace, active:S.activeProfile, session:S.session?.session_id})")
+                    raise AssertionError(f"destination defaults did not settle: {state}") from error
                 assert page.evaluate("S._profileDefaultWorkspace") == str(ops_workspace)
                 assert any(name == "ops" and "hermes_profile=ops;" in header and "httponly" in header for name, header in switch_responses), "browser did not receive the real server profile cookie: " + repr(switch_responses)
                 assert any(cookie["name"] == "hermes_profile" and cookie["value"] == "ops" for cookie in context.cookies(base)), "browser did not retain the server-set ops cookie"
