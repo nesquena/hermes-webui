@@ -1394,9 +1394,35 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
     return {"status": "loaded", "source": "script", "label": label, "messages": messages, "message_count": len(messages)}
 
 
+def _prefill_label_override(config_data: Optional[dict] = None) -> str:
+    """Operator-chosen display name for the prefill context, "" when unset.
+
+    The status line shows the prefill *filename* by default, and the composer row
+    is narrow enough to ellipsize it (``prefill_arr_guardrails.md`` renders as
+    ``prefill_arr_guar``).  This is display-only: the loader contract keeps
+    reporting the real source file, so ``/api`` consumers still see the truth.
+    """
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    # Strip before applying precedence: a whitespace-only environment value is
+    # "unset", and must not mask a valid config key.
+    env_label = os.getenv("HERMES_WEBUI_PREFILL_CONTEXT_LABEL", "").strip()
+    raw = env_label or cfg.get("webui_prefill_context_label")
+    return str(raw or "").strip()
+
+
 def _load_webui_prefill_context(
     config_data: Optional[dict] = None,
 ) -> dict:
+    """Load configured WebUI session prefill messages, label override applied."""
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    context = _resolve_prefill_context(cfg)
+    label = _prefill_label_override(cfg)
+    if label and context.get("status") == "loaded":
+        context["label"] = label
+    return context
+
+
+def _resolve_prefill_context(cfg: dict) -> dict:
     """Load configured WebUI session prefill messages.
 
     Supports the same bounded JSON-file shape used by Hermes Agent.  WebUI also
@@ -1404,7 +1430,6 @@ def _load_webui_prefill_context(
     Obsidian, Notion, llm-wiki, or another local notes source into ephemeral
     turn context without baking any one note provider into the WebUI.
     """
-    cfg = config_data if isinstance(config_data, dict) else get_config()
     script_context = _load_prefill_messages_script(cfg)
     file_raw = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or str(cfg.get("prefill_messages_file") or "")
     if script_context.get("status") == "not_configured":
@@ -9448,6 +9473,16 @@ def _compute_agent_cache_signature(
     _credential_pool = _bundle.get('credential_pool')
     _env = safe_profile_runtime_env if isinstance(safe_profile_runtime_env, dict) else {}
     _main_request_overrides = main_request_overrides if main_request_overrides is not None else _main_request_overrides
+    # The display label is cosmetic: an operator renaming the prefill context
+    # must not invalidate the session's cached agent. It never reaches the
+    # agent's constructor, so it stays out of the routing signature.
+    _prefill_signature_status = _public_prefill_context_status(prefill_context)
+    if isinstance(_prefill_signature_status, dict):
+        _prefill_signature_status = {
+            key: value
+            for key, value in _prefill_signature_status.items()
+            if key != 'label'
+        }
     _sig_blob = _json.dumps([
         resolved_model or '',
         _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
@@ -9463,7 +9498,7 @@ def _compute_agent_cache_signature(
         sorted(toolsets) if toolsets else [],
         reasoning_config or {},
         _main_request_overrides or {},
-        _public_prefill_context_status(prefill_context),
+        _prefill_signature_status,
         profile_home or '',
         _env.get('TERMINAL_ENV', '') or '',
         _env.get('TERMINAL_SSH_HOST', '') or '',
