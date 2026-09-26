@@ -72,6 +72,24 @@ manually titled. Image-only or metadata-only content does not provide title
 text. Existing manual-title protection and the title-generation setting still
 apply; this cleanup does not rewrite the transcript or native image parts.
 
+Title-model requests prefer a strict JSON object containing a string `title`.
+OpenAI-compatible routes that reject the schema, return empty content, or emit
+reasoning without a title are retried once with the route's compatibility
+request shape. Schema attempts accept only that JSON object; malformed
+JSON-looking output and sentinel strings (`none`, `null`, `undefined`) fail
+closed. Compatibility attempts still unwrap common JSON containers, including
+a top-level JSON string, and may use bare prose. MiniMax schema extras keep
+`reasoning_split` without adding the generic `reasoning` extension.
+
+Generated candidates are rejected rather than truncated when they resemble
+reasoning/meta commentary or exceed twelve words; rejected candidates fall
+through to the existing title retry or local-summary behavior. Fresh candidates
+also reject prompt-echo phrases such as `maybe`, `topic label`, and `3-8 words`.
+Already-persisted titles use a narrower structural check (leading thinking/analysis
+wrappers, a full "The title should…" sentence, or candidate-list syntax) so ordinary
+subject matter is not silently regenerated on later turns. Embedded wrappers,
+quoted alternatives, and bullet lists still reject fresh candidates.
+
 Automatic title-generation LLM calls honor the active Hermes profile's
 `auxiliary.title_generation.enabled` setting (default: `true`):
 
