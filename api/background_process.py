@@ -1765,6 +1765,9 @@ def _start_server_side_wakeup_turn(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
                     session_id,
                 )
+                # Deliberate suppression: re-queuing here would recreate the
+                # same provider-unavailable 409 on every subsequent teardown,
+                # so the prompt is intentionally dropped.
             elif status == 409:
                 # Raced an active turn (e.g. a human /api/chat/start, or a
                 # sibling deferred-wakeup thread). Re-defer this prompt so it
@@ -1781,8 +1784,20 @@ def _start_server_side_wakeup_turn(
                     session_id,
                 )
             elif status >= 400:
+                # The turn never started, and whoever called us
+                # (``drain_deferred_wakeups_for_session``) already popped this
+                # prompt from DEFERRED_PROCESS_WAKEUPS — so dropping it here
+                # loses the wakeup permanently. Keep it queued so a later turn
+                # teardown (or PR #2279's next-turn drain) still delivers it.
+                # This is the "launch-abort retry's own launch failed" case of
+                # #7680 finding 3: the prompt must survive, and it must NOT
+                # loop — the retry timer is one-shot and nothing here
+                # reschedules it.
+                if wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.warning(
-                    "server-side wakeup failed for session %s: status=%s err=%r",
+                    "server-side wakeup failed for session %s: status=%s err=%r; "
+                    "prompt kept queued for later delivery",
                     session_id,
                     status,
                     (resp or {}).get("error"),
@@ -1794,8 +1809,16 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
+            # A launch that RAISED (worker-thread construction/``start()``
+            # failure, session-load throw, model-resolution blow-up, …) is the
+            # same loss case as a 5xx: the entry was already claimed, so
+            # without a re-defer the prompt is gone with no retry. Re-defer it
+            # — idempotent per process_id, atomic claim, no reschedule (#7680).
+            if wakeup_prompt:
+                record_deferred_wakeup(session_id, process_id, wakeup_prompt)
             logger.warning(
-                "server-side wakeup turn raised for session %s",
+                "server-side wakeup turn raised for session %s; prompt kept "
+                "queued for later delivery",
                 session_id,
                 exc_info=True,
             )
