@@ -7074,6 +7074,21 @@ def _is_context_compression_marker(msg):
     return is_context_compression_marker(msg)
 
 
+def _is_lcm_recovery_envelope(message):
+    if not isinstance(message, dict) or message.get('role') not in {'user', 'assistant'}:
+        return False
+    text = _message_text(message.get('content')).lstrip()
+    return bool(re.match(
+        r"\[(?:Current user objective preserved from compacted history|"
+        r"(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\))\](?:\s|$)",
+        text,
+    ))
+
+
+def _is_marked_lcm_recovery_envelope(message):
+    return isinstance(message, dict) and message.get('_lcm_recovery_envelope') is True
+
+
 def _compact_summary_text(raw_text: str | None) -> str | None:
     """Normalize a text blob used in compression summary cards."""
     if not isinstance(raw_text, str):
@@ -7105,6 +7120,8 @@ def _compression_anchor_message_key(message):
 def _compression_summary_from_messages(messages):
     for m in reversed(messages or []):
         if not isinstance(m, dict):
+            continue
+        if _is_marked_lcm_recovery_envelope(m):
             continue
         if not _is_context_compression_marker(m):
             continue
@@ -7693,6 +7710,24 @@ def _merge_display_messages_after_agent_result(
         if active_turn_row_index is not None
         else None
     )
+    # Both sync and streaming writebacks share result/context row objects.
+    # Mark only the synthetic pre-turn gap there so the next turn's context
+    # backfill cannot promote these model-only rows into the UI transcript.
+    has_context_prefix = _messages_have_prefix(result_messages, previous_context)
+    prefix_count = len(previous_context) if has_context_prefix else 0
+    for idx in range(prefix_count):
+        if _is_marked_lcm_recovery_envelope(previous_context[idx]):
+            result_messages[idx]['_lcm_recovery_envelope'] = True
+    if active_turn_row_index is not None and active_turn_row_index > prefix_count:
+        for message in result_messages[prefix_count:active_turn_row_index]:
+            if _is_lcm_recovery_envelope(message):
+                message['_lcm_recovery_envelope'] = True
+        if has_context_prefix:
+            result_messages = [
+                message for idx, message in enumerate(result_messages)
+                if not (prefix_count <= idx < active_turn_row_index
+                        and _is_marked_lcm_recovery_envelope(message))
+            ]
     active_turn_display_text = None
     active_content = active_turn_row.get('content') if isinstance(active_turn_row, dict) else None
     if (
@@ -7749,6 +7784,7 @@ def _merge_display_messages_after_agent_result(
         _context_id_set = {
             _message_identity(m)
             for m in previous_context
+            if not _is_marked_lcm_recovery_envelope(m)
             if not (
                 isinstance(m, dict)
                 and m.get('_active_turn_token') in _displayed_native_image_context_tokens
@@ -7804,6 +7840,7 @@ def _merge_display_messages_after_agent_result(
                                 _ckey is not None
                                 and _ckey not in _context_inserted
                                 and _ckey not in _display_id_set
+                                and not _is_marked_lcm_recovery_envelope(_cmsg)
                                 and not _is_context_compression_marker(_cmsg)
                                 and not _is_compressed_context_tool_result_summary_message(_cmsg)
                             ):
@@ -7831,6 +7868,7 @@ def _merge_display_messages_after_agent_result(
                                 _ckey is not None
                                 and _ckey not in _context_inserted
                                 and _ckey not in _display_id_set
+                                and not _is_marked_lcm_recovery_envelope(_cmsg)
                                 and not _is_context_compression_marker(_cmsg)
                                 and not _is_compressed_context_tool_result_summary_message(_cmsg)
                             ):
@@ -7850,6 +7888,7 @@ def _merge_display_messages_after_agent_result(
                     _ckey is not None
                     and _ckey not in _context_inserted
                     and _ckey not in _display_id_set
+                    and not _is_marked_lcm_recovery_envelope(_cmsg)
                     and not _is_context_compression_marker(_cmsg)
                     and not _is_compressed_context_tool_result_summary_message(_cmsg)
                 ):
