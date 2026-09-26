@@ -159,6 +159,7 @@ def _make_db(tmp_path: Path):
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
             session_source TEXT,
+            model_config TEXT,
             model TEXT,
             started_at REAL NOT NULL,
             ended_at REAL,
@@ -355,6 +356,165 @@ def test_periodic_projection_recovers_role_only_sidebar_visibility_change(tmp_pa
     assert subscriber.empty()
 
 
+def test_marker_only_update_invalidates_projection_on_next_poll(tmp_path):
+    """model_config is projection authority, so its mutation cannot wait for parity."""
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "compression-parent", "telegram", mc=1, started=100.0)
+    _add_session(conn, "compression-child", "telegram", mc=1, started=199.0)
+    conn.execute(
+        "UPDATE sessions SET ended_at = 200.0, end_reason = 'compression' "
+        "WHERE id = 'compression-parent'"
+    )
+    conn.execute(
+        "UPDATE sessions SET parent_session_id = 'compression-parent' "
+        "WHERE id = 'compression-child'"
+    )
+    conn.commit()
+
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    initial = subscriber.get_nowait()
+    assert [row["session_id"] for row in initial["sessions"]] == [
+        "compression-child"
+    ]
+
+    # No timestamp, count, source, or message row changes. This one field turns
+    # the previously-collapsed child into a direct branch and must be visible on
+    # the ordinary five-second poll rather than the 60-second parity fallback.
+    conn.execute(
+        "UPDATE sessions SET model_config = ? WHERE id = 'compression-child'",
+        ('{"_branched_from":"compression-parent"}',),
+    )
+    conn.commit()
+
+    assert watcher._poll_once(now=2.0) is True
+    event = subscriber.get_nowait()
+    assert {row["session_id"] for row in event["sessions"]} == {
+        "compression-parent",
+        "compression-child",
+    }
+    assert subscriber.empty()
+
+
+def test_snapshot_hash_covers_every_published_field():
+    """Any emitted field change must change the hash; ordering must not."""
+    gw = importlib.import_module("api.gateway_watcher")
+    base = [
+        {
+            "session_id": "b",
+            "title": "Chat B",
+            "model": "m",
+            "message_count": 2,
+            "created_at": 100.0,
+            "updated_at": 150.0,
+            "source": "telegram",
+            "raw_source": "telegram",
+            "session_source": "messaging",
+            "source_label": "Telegram",
+        },
+        {
+            "session_id": "a",
+            "title": "Chat A",
+            "model": "m",
+            "message_count": 1,
+            "created_at": 50.0,
+            "updated_at": 60.0,
+            "source": "cli",
+            "raw_source": "cli",
+            "session_source": "cli",
+            "source_label": "CLI",
+        },
+    ]
+    reference = gw._snapshot_hash(base)
+    assert gw._snapshot_hash(list(reversed(base))) == reference, "order-independent"
+    assert gw._snapshot_hash([dict(row) for row in base]) == reference, "deterministic"
+    assert gw._snapshot_hash([]) != reference
+
+    # Mutating any single published field, including the ones the old
+    # id/updated_at/message_count triple ignored, changes the hash.
+    for field in base[0]:
+        mutated = [dict(row) for row in base]
+        mutated[0][field] = f"changed-{field}"
+        assert gw._snapshot_hash(mutated) != reference, field
+
+
+def test_marker_only_projection_change_emits_sse_event_without_row_churn(tmp_path):
+    """ID / message count / activity stay fixed; title + segments change → event.
+
+    Gate reproduction: a lineage-marker mutation reruns the projection (the
+    cheap fingerprint covers ``model_config``) and changes the published
+    title/segment projection of a row, but the session id set, every
+    ``message_count`` and every ``updated_at`` in the payload are unchanged.
+    The old snapshot hash saw no difference, so ``_last_sessions`` kept the
+    stale projection and no subscriber event was queued.
+    """
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    # A compression chain whose root segment holds no messages (its
+    # transcript moved to the continuation): the projection publishes ONE
+    # row under the tip's id carrying the root's title and a segment count
+    # of 2. A message-less root is hidden when it stands alone.
+    _add_session(conn, "root-a", "telegram", mc=0, started=100.0, title="Alpha")
+    _add_session(conn, "tip-b", "telegram", mc=1, started=150.0, title="Beta")
+    conn.execute(
+        "UPDATE sessions SET ended_at = 150.0, end_reason = 'compression' WHERE id = 'root-a'"
+    )
+    conn.execute("UPDATE sessions SET parent_session_id = 'root-a' WHERE id = 'tip-b'")
+    conn.commit()
+
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    initial = subscriber.get_nowait()
+    initial_rows = {row["session_id"]: row for row in initial["sessions"]}
+    assert set(initial_rows) == {"tip-b"}
+    assert initial_rows["tip-b"]["title"] == "Alpha"
+    assert initial_rows["tip-b"]["message_count"] == 1
+    assert initial_rows["tip-b"]["updated_at"] == 150.0
+    assert watcher._last_sessions == initial["sessions"]
+
+    # Marker-only flip: stamp _reset_from on the tip. No timestamp, count,
+    # source or message row changes anywhere. The tip is now a reset child
+    # (its own conversation, own title, one segment) and the message-less
+    # root drops out — the published id set, message_count and updated_at
+    # are byte-identical to the previous snapshot.
+    conn.execute(
+        "UPDATE sessions SET model_config = ? WHERE id = 'tip-b'",
+        ('{"_reset_from":"root-a"}',),
+    )
+    conn.commit()
+    assert gw._cheap_change_fingerprint(db) != watcher._last_cheap_fp
+
+    assert watcher._poll_once(now=2.0) is True
+    event = subscriber.get_nowait()
+    rows = {row["session_id"]: row for row in event["sessions"]}
+    assert set(rows) == {"tip-b"}
+    assert rows["tip-b"]["title"] == "Beta"
+    assert rows["tip-b"]["message_count"] == initial_rows["tip-b"]["message_count"]
+    assert rows["tip-b"]["updated_at"] == initial_rows["tip-b"]["updated_at"]
+    assert watcher._last_sessions == event["sessions"]
+    assert subscriber.empty()
+
+    # A title-only projection change on an otherwise identical row is also
+    # delivered on the ordinary poll.
+    conn.execute("UPDATE sessions SET title = 'Beta renamed' WHERE id = 'tip-b'")
+    conn.commit()
+    assert watcher._poll_once(now=3.0) is True
+    event = subscriber.get_nowait()
+    rows = {row["session_id"]: row for row in event["sessions"]}
+    assert set(rows) == {"tip-b"}
+    assert rows["tip-b"]["title"] == "Beta renamed"
+    assert rows["tip-b"]["updated_at"] == initial_rows["tip-b"]["updated_at"]
+    assert watcher._last_sessions == event["sessions"]
+    assert subscriber.empty()
+
+    # Unchanged payload: the parity projection reruns but emits nothing.
+    assert watcher._poll_once(now=3.0 + watcher.PROJECTION_PARITY_INTERVAL) is True
+    assert subscriber.empty()
+
+
 def test_initial_missing_db_does_not_publish_an_empty_snapshot(tmp_path):
     gw = importlib.import_module("api.gateway_watcher")
     watcher = gw.GatewayWatcher(state_db_path=tmp_path / "missing.db")
@@ -534,6 +694,7 @@ def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gw, "_get_agent_sessions_from_db", fake_projection)
     w = gw.GatewayWatcher(state_db_path=db)
+    w.subscribe()  # Idle watchers deliberately do not poll without observers.
 
     assert w._poll_once(now=1.0) is True
     assert projected == [True]
