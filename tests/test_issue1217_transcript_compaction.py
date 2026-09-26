@@ -692,6 +692,24 @@ def test_state_db_delta_preserves_fresh_rows_before_repeated_context_message():
     assert [m["content"] for m in delta] == ["fresh question", "ok", "after repeat"]
 
 
+def test_state_db_context_reconciliation_keeps_rows_with_distinct_provider_payloads():
+    from api.models import state_db_delta_after_context
+
+    context = [
+        {"role": "user", "content": "prior", "timestamp": 9.0},
+        {"role": "assistant", "content": "same", "timestamp": 10.0},
+    ]
+    state = [
+        {"role": "user", "content": "prior", "timestamp": 9.0},
+        {"role": "assistant", "content": "same", "timestamp": 10.0,
+         "_state_db_row_id": 1, "api_content": '{"text":"first"}'},
+        {"role": "assistant", "content": "same", "timestamp": 10.0,
+         "_state_db_row_id": 2, "api_content": '{"text":"second"}'},
+    ]
+
+    assert state_db_delta_after_context(context, state) == state
+
+
 def test_non_streaming_chat_writeback_dedupes_full_context_replay():
     previous_context = [
         {"role": "assistant", "content": "cron banner"},

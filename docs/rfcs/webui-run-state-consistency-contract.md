@@ -140,6 +140,39 @@ and 5; it does not mark every run-state boundary implemented.
 | Sidebar/session metadata | Helps the user find active and recent sessions | Must reflect meaningful user or assistant activity | Treat background cleanup as a fresh user-facing update |
 | Client-side unread stores (`localStorage`) | Backs the sidebar unread dot for every client on the origin | Converges counts/markers across clients and stores clear ordering independently per session | Let one client's stale cache lower a count or resurrect a cleared marker |
 
+LCM recovery headings `[Recent Summary (d<digits>, node <digits>)]` and
+`[Current user objective preserved from compacted history]` are context-only
+under provider `user` and `assistant` roles. Preserve those roles in model
+context; omit the envelopes from transcript projection and compression anchors.
+A nonblank server-owned `_active_turn_token` protects a genuine user submission
+with matching text. An unowned row beginning with either canonical heading is
+synthetic, including the rare literal paste of raw recovery text. Recovery must
+not claim that envelope using prompt text alone: preserve it in context and
+materialize the pending user turn separately. Active-turn lookup keeps the
+current Agent result index domain; never probe a shifted historical index.
+
+Messaging display merges retain the sidecar as primary, including its order and
+repeated rows. Compatible CLI mirrors may promote ownership/display metadata;
+only unmatched rows are inserted in source order. Sidecar truncation watermarks
+and boundaries also constrain incoming display rows, including clear-to-empty,
+without deleting the external transcript. Cancellation persists both the owned
+user and any partial assistant output in model context before saving cleanup.
+
+A reconciliation may associate an anonymous mirror with one compatible private
+claim; later conflicting claims remain distinct. Shared stable IDs, state row
+IDs, or active tokens can establish a mirror across timestamp restamps. Without
+a shared stable ID, state row ID, or active-turn token, rows with unequal known
+timestamps cannot be identified as replays by role/content/order/context shape.
+Preserve both sequences. Rows without stable IDs at exact timestamps may still
+use the existing per-row compatibility check, which also gates display
+metadata promotion. Conflicting private claims remain distinct; source-only
+active-turn tokens do not establish a cross-timestamp match.
+Equal nonempty provider content may accompany a mirror when timestamps agree,
+but does not establish cross-timestamp identity. Anonymous assistant output at
+different known timestamps remains distinct, including cumulative prefixes.
+Cancelled partial-output recovery deduplicates only within the current user
+turn.
+
 ## Core Invariants
 
 1. **Visible current turns enter model context.** If the user can see a current

@@ -1,5 +1,6 @@
 from collections import OrderedDict
 import base64
+import io
 from email.message import Message
 import json
 from pathlib import Path
@@ -8,6 +9,8 @@ import threading
 import time
 import urllib.error
 
+import pytest
+import api.config as config
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
@@ -465,6 +468,98 @@ def test_gateway_chat_worker_records_turn_journal_completion(tmp_path, monkeypat
     ), "the gateway success writeback must record a completed turn journal event"
 
 
+def test_gateway_success_save_failure_emits_current_run_error(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda req, timeout=0: FakeResponse(),
+    )
+
+    session = new_session()
+    stream_id = "stream-gateway-success-save-failure"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Say hello"
+    session.pending_attachments = []
+    session.pending_started_at = 456.25
+    session.save()
+    config.register_session_writeback_owner(session.session_id, stream_id)
+    events = []
+    channel = create_stream_channel()
+    channel.put_nowait = events.append
+    STREAMS[stream_id] = channel
+
+    original_save = models.Session.save
+    failed = False
+
+    def fail_success_save(current, *args, **kwargs):
+        nonlocal failed
+        if (
+            current is session
+            and not failed
+            and any(
+                message.get("role") == "assistant" and message.get("content") == "hello"
+                for message in current.messages
+            )
+        ):
+            failed = True
+            raise OSError("forced success writeback failure")
+        return original_save(current, *args, **kwargs)
+
+    monkeypatch.setattr(models.Session, "save", fail_success_save)
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    apperrors = [data for event, data, *_rest in events if event == "apperror"]
+    assert failed
+    assert apperrors
+    assert apperrors[-1]["session_id"] == session.session_id
+    assert apperrors[-1]["session"]["session_id"] == session.session_id
+    assert apperrors[-1]["session"]["messages"][-1]["_error"] is True
+    apperror_event = next(item for item in events if item[0] == "apperror")
+    assert apperror_event[2].startswith(f"{stream_id}:")
+
+    session.active_stream_id = "successor-stream"
+    session.pending_user_message = "successor prompt"
+    config.register_session_writeback_owner(session.session_id, "successor-stream")
+    before = list(session.messages)
+    assert gateway_chat._settle_gateway_terminal_error(
+        session.session_id,
+        stream_id,
+        str(tmp_path),
+        "test-model",
+        None,
+        "late stale error",
+    ) is None
+    assert session.messages == before
+    assert session.pending_user_message == "successor prompt"
+    assert config.session_writeback_owner(session.session_id) == "successor-stream"
+
+
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
     """Gateway terminal errors must survive an empty assistant stream."""
     from unittest.mock import MagicMock
@@ -656,6 +751,194 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert payload_messages[-2]["content"] == "partial"
     assert payload_messages[-1]["_error"] is True
     assert "_turnDuration" not in payload_messages[-1]
+
+
+@pytest.mark.parametrize(
+    "failure", ["empty", "http", "generic", "stale", "snapshot-fallback"]
+)
+def test_gateway_worker_settles_failure_before_cleanup(tmp_path, monkeypatch, failure):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "gateway-secret")
+    monkeypatch.setattr(gateway_chat, "_gateway_use_runs_api_enabled", lambda *args, **kwargs: False)
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *args, **kwargs: False)
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
+        "status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": [],
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    if failure == "snapshot-fallback":
+        def fail_partial_snapshot(*_args, **_kwargs):
+            raise RuntimeError("canonical partial snapshot failed")
+
+        monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", fail_partial_snapshot)
+
+    events = []
+
+    class CaptureChannel:
+        def put_nowait(self, item):
+            events.append(item)
+
+    stream_id = f"stream-gateway-failure-{failure}"
+    successor_stream_id = f"{stream_id}-successor"
+    s = new_session(workspace=str(tmp_path), model="test-model")
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Recover this prompt"
+    s.pending_attachments = []
+    s.pending_started_at = 123.25
+    s.save()
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b"event: reasoning.available\n"
+            yield b'data: {"text":"buffered reasoning"}\n'
+            yield b"\n"
+            if failure in {"empty", "stale"}:
+                if failure == "stale":
+                    s.active_stream_id = successor_stream_id
+                    s.pending_user_message = "Successor prompt"
+                    s.pending_started_at = 456.5
+                    s.save()
+                yield b"data: [DONE]\n"
+            elif failure == "http":
+                raise urllib.error.HTTPError(
+                    "http://gateway.local/v1/chat/completions",
+                    503,
+                    "Service Unavailable",
+                    hdrs=Message(),
+                    fp=io.BytesIO(b"gateway maintenance"),
+                )
+            else:
+                if failure == "snapshot-fallback":
+                    with config.STREAMS_LOCK:
+                        config.STREAM_PARTIAL_TEXT[stream_id] = "fallback visible answer"
+                        config.STREAM_REASONING_TEXT[stream_id] = "buffered reasoning"
+                        config.STREAM_LIVE_TOOL_CALLS[stream_id] = [{
+                            "name": "terminal",
+                            "args": {"command": "pytest"},
+                            "done": False,
+                            "tid": "call-fallback",
+                        }]
+                raise RuntimeError("gateway worker failed")
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+    with config.STREAMS_LOCK:
+        config.STREAMS[stream_id] = CaptureChannel()
+    try:
+        gateway_chat._run_gateway_chat_streaming(
+            s.session_id,
+            "Recover this prompt",
+            "test-model",
+            str(tmp_path),
+            stream_id,
+            [],
+        )
+        loaded = models.Session.load(s.session_id)
+        assert loaded is not None
+        apperrors = [payload for event, payload in events if event == "apperror"]
+        if failure == "stale":
+            assert apperrors == []
+            assert loaded.active_stream_id == successor_stream_id
+            assert loaded.pending_user_message == "Successor prompt"
+            assert not any(message.get("_error") for message in loaded.messages)
+            return
+
+        expected_event = {
+            "empty": {
+                "label": "Gateway returned no response",
+                "type": "gateway_empty_response",
+                "message": "Gateway returned no assistant message for this turn.",
+                "hint": "Check that Hermes Gateway API server is running and reachable.",
+            },
+            "http": {
+                "label": "Gateway request failed",
+                "type": "gateway_http_error",
+                "message": "Gateway returned HTTP 503.",
+                "hint": "gateway maintenance",
+            },
+            "generic": {
+                "label": "Gateway request failed",
+                "type": "gateway_error",
+                "message": "gateway worker failed",
+                "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
+            },
+            "snapshot-fallback": {
+                "label": "Gateway request failed",
+                "type": "gateway_error",
+                "message": "gateway worker failed",
+                "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
+            },
+        }[failure]
+        assert len(apperrors) == 1
+        payload = apperrors[0]
+        for key, expected in expected_event.items():
+            assert payload[key] == expected
+        assert payload["session_id"] == s.session_id
+        assert "session" in payload
+        assert loaded.pending_user_message is None
+        assert loaded.active_stream_id is None
+        assert any(
+            message.get("role") == "user" and message.get("content") == "Recover this prompt"
+            for message in loaded.messages
+        )
+        assert any(
+            message.get("_partial") is True and message.get("reasoning") == "buffered reasoning"
+            for message in loaded.messages
+        )
+        if failure == "snapshot-fallback":
+            partials = [message for message in loaded.messages if message.get("_partial") is True]
+            private_token = streaming.build_active_turn_token(stream_id, 123.25)
+            assert len(partials) == 1
+            assert partials[0]["content"] == "fallback visible answer"
+            assert partials[0]["reasoning"] == "buffered reasoning"
+            assert partials[0]["_partial_tool_calls"] == [{
+                "name": "terminal",
+                "args": {"command": "pytest"},
+                "done": True,
+                "tid": "call-fallback",
+                "_sealed_by_terminal_error": True,
+            }]
+            assert partials[0]["_active_turn_token"] == private_token
+        assert any(message.get("_error") is True for message in loaded.messages)
+        public_payload = json.dumps(payload)
+        private_token = streaming.build_active_turn_token(stream_id, 123.25)
+        assert "_active_turn_token" not in public_payload
+        assert private_token not in public_payload
+        public_messages = payload["session"]["messages"]
+        assert any(message.get("role") == "user" for message in public_messages)
+        assert any(message.get("_partial") is True for message in public_messages)
+        assert any(message.get("_error") is True for message in public_messages)
+        assert all("_active_turn_token" not in message for message in public_messages)
+        if failure == "snapshot-fallback":
+            public_partial = next(message for message in public_messages if message.get("_partial"))
+            assert public_partial["content"] == "fallback visible answer"
+            assert public_partial["reasoning"] == "buffered reasoning"
+            assert public_partial["_partial_tool_calls"][0]["name"] == "terminal"
+    finally:
+        with config.STREAMS_LOCK:
+            config.STREAMS.pop(stream_id, None)
+            config.STREAMS.pop(successor_stream_id, None)
+        for registry in (
+            config.CANCEL_FLAGS,
+            config.AGENT_INSTANCES,
+            config.STREAM_PARTIAL_TEXT,
+            config.STREAM_REASONING_TEXT,
+            config.STREAM_LIVE_TOOL_CALLS,
+            config.STREAM_GOAL_RELATED,
+            config.STREAM_LAST_EVENT_ID,
+        ):
+            registry.pop(stream_id, None)
+        config.SESSION_AGENT_LOCKS.pop(s.session_id, None)
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
 
 
 def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error(tmp_path, monkeypatch):

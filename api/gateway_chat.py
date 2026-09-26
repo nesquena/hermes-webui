@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ from api.config import (
     gateway_supports_approval,
     peek_stream,
     register_active_run,
+    session_writeback_owner,
     unregister_active_run,
     unregister_stream_owner,
     update_active_run,
@@ -113,6 +115,7 @@ def _retire_gateway_run_starting_if_done(stream_id: str) -> bool:
         return False
     _STREAM_RUN_LIFECYCLE.pop(stream_id, None)
     _STREAM_RUN_IDS.pop(stream_id, None)
+    _STREAM_ENDPOINTS.pop(stream_id, None)
     return True
 
 
@@ -130,7 +133,19 @@ def gateway_run_id_pending(stream_id: str) -> bool:
         return str((_STREAM_RUN_LIFECYCLE.get(stream_id) or {}).get("phase") or "").strip().lower() == "pending"
 
 
-def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str | None]:
+def gateway_stream_has_lifecycle(stream_id: str) -> bool:
+    """Whether Gateway owns this ID through startup state or a mapped run."""
+    with _STREAM_RUN_STARTING_CONDITION:
+        state = _STREAM_RUN_LIFECYCLE.get(stream_id) or {}
+        phase = str(state.get("phase") or "").strip().lower()
+        run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+        return phase in {"pending", "ready", "failed"} or bool(run_id)
+
+
+def wait_for_gateway_run_owner(
+    stream_id: str,
+    timeout: float,
+) -> tuple[bool, str | None, tuple[str, str] | None]:
     deadline = time.monotonic() + max(0.0, float(timeout))
     with _STREAM_RUN_STARTING_CONDITION:
         state = _STREAM_RUN_LIFECYCLE.get(stream_id)
@@ -141,20 +156,24 @@ def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str |
                 state = _STREAM_RUN_LIFECYCLE.get(stream_id)
                 phase = str((state or {}).get("phase") or "").strip().lower()
                 if phase == "fallback":
-                    return False, None
+                    return False, None, None
                 if phase == "failed":
-                    return True, None
+                    return True, None, None
                 run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
                 if phase == "ready":
                     stored_run_id = str((state or {}).get("run_id") or "").strip()
-                    return True, run_id or stored_run_id or None
+                    return (
+                        True,
+                        run_id or stored_run_id or None,
+                        _STREAM_ENDPOINTS.get(stream_id),
+                    )
                 if run_id:
-                    return True, run_id
+                    return True, run_id, _STREAM_ENDPOINTS.get(stream_id)
                 if not state:
-                    return False, None
+                    return False, None, None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return True, None
+                    return True, None, _STREAM_ENDPOINTS.get(stream_id)
                 _STREAM_RUN_STARTING_CONDITION.wait(timeout=remaining)
         finally:
             state = _STREAM_RUN_LIFECYCLE.get(stream_id)
@@ -163,6 +182,19 @@ def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str |
                 state["waiters"] = waiters
                 if _retire_gateway_run_starting_if_done(stream_id):
                     _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str | None]:
+    structured, run_id, _endpoint = wait_for_gateway_run_owner(stream_id, timeout)
+    return structured, run_id
+
+
+def _snapshot_gateway_run_owner(stream_id: str):
+    """Capture a mapped run and its owning endpoint before stream teardown."""
+    with _STREAM_RUN_STARTING_CONDITION:
+        run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+        endpoint = _STREAM_ENDPOINTS.get(stream_id)
+        return (run_id, endpoint) if run_id else None
 
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
@@ -830,12 +862,12 @@ def _run_gateway_runs_api_streaming(
     return final_text, usage
 
 
-def stop_gateway_run(run_id: str) -> bool:
+def stop_gateway_run(run_id: str, *, endpoint=None) -> bool:
     """Request gateway interruption and report whether it was acknowledged."""
     run_id = str(run_id or "").strip()
     if not run_id:
         return False
-    base_url, api_key = gateway_run_endpoint(run_id)
+    base_url, api_key = endpoint or gateway_run_endpoint(run_id)
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1034,20 +1066,55 @@ def _resume_gateway_run_for_session(session) -> bool:
     ).start()
     return True
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _settle_gateway_terminal_error(
+    session_id, stream_id, workspace, model, model_provider, terminal_error,
+    *, cancel_event=None,
+):
     from api.streaming import (
+        _active_turn_authority,
+        _build_partial_message,
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
         _provider_error_payload,
         _session_payload_with_full_messages,
         _snapshot_and_append_partial_on_error,
+        _stamp_active_turn_activity,
         _terminal_turn_duration,
+        _upsert_current_turn_partial,
     )
 
     with _get_session_agent_lock(session_id):
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         session = get_session(session_id)
         if not _stream_writeback_is_current(session, stream_id):
             return None
+        active_turn_identity = _active_turn_authority(
+            session,
+            stream_id,
+            getattr(session, "pending_user_message", None),
+        )
+        from api import config as _live_config
+
+        streams_lock = getattr(_live_config, "STREAMS_LOCK", STREAMS_LOCK)
+        cancel_flags = getattr(_live_config, "CANCEL_FLAGS", CANCEL_FLAGS)
+        partial_texts = getattr(_live_config, "STREAM_PARTIAL_TEXT", STREAM_PARTIAL_TEXT)
+        reasoning_texts = getattr(_live_config, "STREAM_REASONING_TEXT", STREAM_REASONING_TEXT)
+        live_tool_calls = getattr(_live_config, "STREAM_LIVE_TOOL_CALLS", STREAM_LIVE_TOOL_CALLS)
+        with streams_lock:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
+            registered_cancel_event = cancel_flags.get(stream_id)
+            if registered_cancel_event is not None and registered_cancel_event.is_set():
+                return None
+            partial_text = partial_texts.get(stream_id, "")
+            reasoning_text = reasoning_texts.get(stream_id, "")
+            raw_tool_calls = list(live_tool_calls.get(stream_id, []) or [])
+            try:
+                tool_calls = copy.deepcopy(raw_tool_calls)
+            except Exception:
+                tool_calls = [dict(call) if isinstance(call, dict) else call for call in raw_tool_calls]
+
         error_classification = _classify_provider_error(terminal_error)
         error_payload = _provider_error_payload(
             terminal_error,
@@ -1055,17 +1122,55 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             error_classification.get("hint", ""),
         )
         turn_duration = _terminal_turn_duration(session)
-        _materialize_pending_user_turn_before_error(session)
+        _materialize_pending_user_turn_before_error(
+            session,
+            active_turn_identity=active_turn_identity,
+        )
+        try:
+            _snapshot_and_append_partial_on_error(
+                session,
+                stream_id,
+                active_turn_identity=active_turn_identity,
+            )
+        except Exception:
+            logger.warning(
+                "Canonical gateway partial snapshot failed; trying captured buffers for stream %s",
+                stream_id,
+                exc_info=True,
+            )
+            try:
+                for tool_call in tool_calls:
+                    if isinstance(tool_call, dict) and not tool_call.get("done"):
+                        tool_call["done"] = True
+                        tool_call["_sealed_by_terminal_error"] = True
+                partial_message = _build_partial_message(
+                    partial_text,
+                    reasoning_text,
+                    tool_calls,
+                    active_turn_identity=active_turn_identity,
+                )
+                if partial_message is not None:
+                    if not isinstance(session.messages, list):
+                        session.messages = []
+                    partial_row = _upsert_current_turn_partial(
+                        session.messages,
+                        partial_message,
+                        active_turn_identity=active_turn_identity,
+                    )
+                    if partial_row is None:
+                        raise RuntimeError("captured gateway partial could not be upserted")
+            except Exception:
+                logger.error(
+                    "Failed to persist captured gateway partial for stream %s after canonical snapshot failure",
+                    stream_id,
+                    exc_info=True,
+                )
         session.active_stream_id = None
         session.gateway_run = None
         session.pending_user_message = None
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
-        try:
-            _snapshot_and_append_partial_on_error(session, stream_id)
-        except Exception:
-            logger.debug("Failed to snapshot gateway partials on terminal error", exc_info=True)
         error_message = {
             "role": "assistant",
             "content": (
@@ -1075,6 +1180,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             "timestamp": int(time.time()),
             "_error": True,
         }
+        _stamp_active_turn_activity(error_message, active_turn_identity)
         if turn_duration is not None:
             error_message["_turnDuration"] = turn_duration
         if error_payload.get("details"):
@@ -1194,12 +1300,28 @@ def _run_gateway_chat_streaming(
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
-    cancel_event = threading.Event()
+    startup_cancelled = False
     with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ""
-        STREAM_REASONING_TEXT[stream_id] = ""
-        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        # Stop removes the live stream and its retained cancellation event under
+        # this same lock. Never recreate an unset event after Stop wins.
+        cancel_event = CANCEL_FLAGS.get(stream_id)
+        if stream_id not in STREAMS or (cancel_event is not None and cancel_event.is_set()):
+            startup_cancelled = True
+        elif cancel_event is None:
+            cancel_event = threading.Event()
+            CANCEL_FLAGS[stream_id] = cancel_event
+        if not startup_cancelled:
+            STREAM_PARTIAL_TEXT[stream_id] = ""
+            STREAM_REASONING_TEXT[stream_id] = ""
+            STREAM_LIVE_TOOL_CALLS[stream_id] = []
+
+    if startup_cancelled:
+        _finish_gateway_run_starting(stream_id, result="fallback")
+        _clear_gateway_run_starting(stream_id)
+        unregister_stream_owner(stream_id)
+        unregister_active_run(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        return
 
     success_writeback_committed = False
     runs_api_pending_marked = True
@@ -1229,6 +1351,23 @@ def _run_gateway_chat_streaming(
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put gateway event to queue")
+
+    def settle_gateway_error_event(event_payload):
+        message = str(
+            event_payload.get("message") or event_payload.get("label") or "Gateway request failed."
+        )
+        settled_payload = _settle_gateway_terminal_error(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            message,
+            cancel_event=cancel_event,
+        )
+        if settled_payload is None:
+            return
+        put_gateway_event("apperror", {**settled_payload, **event_payload})
 
     s = None
     final_text = ""
@@ -1346,6 +1485,7 @@ def _run_gateway_chat_streaming(
                     model,
                     model_provider,
                     str(exc),
+                    cancel_event=cancel_event,
                 )
                 if error_payload is None:
                     return
@@ -1521,13 +1661,14 @@ def _run_gateway_chat_streaming(
                 model,
                 model_provider,
                 terminal_error,
+                cancel_event=cancel_event,
             )
             if error_payload is None:
                 return
             put_gateway_event("apperror", error_payload)
             return
         if not assistant_text:
-            put_gateway_event("apperror", {
+            settle_gateway_error_event({
                 "label": "Gateway returned no response",
                 "type": "gateway_empty_response",
                 "message": "Gateway returned no assistant message for this turn.",
@@ -1639,6 +1780,14 @@ def _run_gateway_chat_streaming(
                 ]
                 if len(current_display_rows) == 1:
                     current_display_rows[0]["timestamp"] = user_msg["timestamp"]
+            pending_writeback_state = (
+                s.active_stream_id,
+                s.gateway_run,
+                s.pending_user_message,
+                s.pending_attachments,
+                s.pending_started_at,
+                s.pending_user_source,
+            )
             s.active_stream_id = None
             s.gateway_run = None
             s.pending_user_message = None
@@ -1670,7 +1819,22 @@ def _run_gateway_chat_streaming(
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
-            s.save()
+            try:
+                s.save()
+            except Exception:
+                if (
+                    session_writeback_owner(session_id) == stream_id
+                    and getattr(s, "active_stream_id", None) in (None, stream_id)
+                ):
+                    (
+                        s.active_stream_id,
+                        s.gateway_run,
+                        s.pending_user_message,
+                        s.pending_attachments,
+                        s.pending_started_at,
+                        s.pending_user_source,
+                    ) = pending_writeback_state
+                raise
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
@@ -1748,13 +1912,12 @@ def _run_gateway_chat_streaming(
             err_body = exc.read(2048).decode("utf-8", errors="replace")
         except Exception:
             err_body = ""
-        put_gateway_event(
-            "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+        settle_gateway_error_event(
+            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key()))
         )
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]
-        put_gateway_event("apperror", {
+        settle_gateway_error_event({
             "label": "Gateway request failed",
             "type": "gateway_error",
             "message": safe or "Gateway request failed.",
@@ -1791,8 +1954,6 @@ def _run_gateway_chat_streaming(
         if runs_api_pending_marked and gateway_run_id_pending(stream_id):
             _finish_gateway_run_starting(stream_id)
         _clear_gateway_run_starting(stream_id)
-        with _STREAM_RUN_STARTING_CONDITION:
-            _STREAM_ENDPOINTS.pop(stream_id, None)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
         # Release the writeback-owner entry the route layer registered for this

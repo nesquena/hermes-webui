@@ -139,16 +139,65 @@ class TestIssue1298CancelPreservesUserMessage:
         )
         assert s2.active_stream_id is None
 
+    def test_cancel_mirrors_pending_user_into_context_without_retagging_lcm_envelope(self):
+        from api.compression_anchor import is_lcm_context_recovery_marker
+        from api.process_event_utils import build_active_turn_token
+
+        marker = "[Recent Summary (d0, node 418)]"
+        started_at = 1779348286.3954952
+        recovery_envelope = {
+            "role": "user",
+            "content": marker,
+            "timestamp": int(started_at),
+        }
+        s = _make_pending_session(
+            session_id="cancel_sid_context_lcm_envelope",
+            pending_msg=marker,
+            messages=[],
+            attachments=["synthetic.txt"],
+        )
+        s.context_messages = [recovery_envelope]
+        s.pending_started_at = started_at
+        s.pending_user_source = "synthetic"
+        s.save()
+        models.SESSIONS[s.session_id] = s
+        stream_id, _agent = _setup_cancel_stream_state(s.session_id)
+
+        assert cancel_stream(stream_id) is True
+
+        current_token = build_active_turn_token(stream_id, started_at)
+        visible_users = [
+            message for message in s.messages
+            if message.get("role") == "user"
+        ]
+        assert len(visible_users) == 1
+        recovered = visible_users[0]
+        assert recovered["_active_turn_token"] == current_token
+        assert recovered["_source"] == "synthetic"
+        assert recovered["attachments"] == ["synthetic.txt"]
+
+        assert s.context_messages[0] == recovery_envelope
+        assert is_lcm_context_recovery_marker(s.context_messages[0])
+        assert s.context_messages[0].get("_active_turn_token") is None
+        assert s.context_messages[1] == recovered
+
     def test_cancel_does_not_double_append_when_streaming_thread_already_merged(self):
         """If the streaming thread won the race and already merged the user turn
         into s.messages before cancel_stream() got the lock, cancel must not
         append a duplicate."""
-        prior_user = {"role": "user", "content": "Run a tool for me"}
+        prior_user = {
+            "role": "user",
+            "content": "[Workspace::v1: /fixture]\nRun a tool for me",
+            "timestamp": 1_000.0,
+        }
         s = _make_pending_session(
             session_id="cancel_sid_already_merged",
             pending_msg="Run a tool for me",
             messages=[prior_user],
         )
+        s.pending_started_at = 1_000.0
+        s.save()
+        models.SESSIONS[s.session_id] = s
         stream_id, _agent = _setup_cancel_stream_state(s.session_id)
 
         cancel_stream(stream_id)
@@ -162,6 +211,49 @@ class TestIssue1298CancelPreservesUserMessage:
         assert len(matching) == 1, (
             "Expected exactly one user turn matching pending_user_message — "
             f"got {len(matching)} ({user_messages})"
+        )
+
+    @pytest.mark.parametrize(
+        "prior_timestamp",
+        [pytest.param(None, id="missing"), pytest.param(1_001.0, id="later")],
+    )
+    def test_cancel_keeps_unproven_tokenless_row_and_materializes_pending_turn(
+        self, prior_timestamp,
+    ):
+        pending_started_at = 1_000.0
+        prior_user = {
+            "role": "user",
+            "content": "Continue the analysis",
+        }
+        if prior_timestamp is not None:
+            prior_user["timestamp"] = prior_timestamp
+        s = _make_pending_session(
+            session_id="cancel_sid_unproven_same_text",
+            pending_msg="Continue the analysis",
+            messages=[prior_user],
+        )
+        s.pending_started_at = pending_started_at
+        s.save()
+        models.SESSIONS[s.session_id] = s
+        stream_id, _agent = _setup_cancel_stream_state(s.session_id)
+
+        assert cancel_stream(stream_id) is True
+
+        user_messages = [
+            message for message in s.messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        assert len(user_messages) == 2
+        assert user_messages[0] == prior_user
+        assert user_messages[1]["content"] == "Continue the analysis"
+        assert user_messages[1]["timestamp"] == int(pending_started_at)
+        assert user_messages[1]["_active_turn_token"]
+        assert any(
+            message.get("role") == "user"
+            and message.get("content") == "Continue the analysis"
+            and message.get("_active_turn_token")
+            == user_messages[1]["_active_turn_token"]
+            for message in s.context_messages
         )
 
     def test_cancel_synthesized_user_message_carries_attachments(self):

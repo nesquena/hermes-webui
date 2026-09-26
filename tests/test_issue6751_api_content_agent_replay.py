@@ -371,6 +371,54 @@ def test_issue6751_public_session_projection_strips_context_aliases(monkeypatch)
     assert safe["runtime_journal_snapshot"]["messages"] == [{"role": "assistant"}]
 
 
+def test_journal_recovery_metadata_is_private_at_public_and_import_boundaries(monkeypatch):
+    import api.config as config
+    from api.helpers import public_session_projection, strip_public_internal_fields
+
+    monkeypatch.setattr(config, "load_settings", lambda: {"api_redact_enabled": False})
+    internal_fields = (
+        "_recovered_event_id",
+        "_pending_journal_recovery",
+        "_journal_retry_stream_id",
+        "_journal_retry_attempts",
+        "_journal_retry_first_seen_ts",
+    )
+    user_text = f"Keep this literal: {internal_fields[0]}"
+    opaque_arguments = json.dumps(
+        {field: field for field in internal_fields}, separators=(",", ":")
+    )
+    opaque_tool_args = {field: field for field in internal_fields}
+    source = {
+        "messages": [
+            {"role": "user", "content": user_text},
+            {
+                "role": "assistant",
+                "content": "",
+                **dict.fromkeys(internal_fields, "internal"),
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "echo",
+                            "arguments": opaque_arguments,
+                        }
+                    }
+                ],
+            },
+        ],
+        "tool_calls": [{"name": "echo", "args": opaque_tool_args}],
+    }
+
+    public = public_session_projection(source)
+    imported = strip_public_internal_fields(source)
+
+    for scrubbed in (public, imported):
+        user, assistant = scrubbed["messages"]
+        assert user["content"] == user_text
+        assert all(field not in assistant for field in internal_fields)
+        assert assistant["tool_calls"][0]["function"]["arguments"] == opaque_arguments
+        assert scrubbed["tool_calls"][0]["args"] == opaque_tool_args
+
+
 def test_issue6751_public_projection_preserves_non_message_alias_keys(monkeypatch):
     import api.config as config
     from api.helpers import public_session_projection
@@ -1059,6 +1107,42 @@ def test_issue6751_invalid_timestamp_rejects_metadata_free_fallback(bad_timestam
     assert merged[0].get("api_content") is None
 
 
+def test_state_db_identical_malformed_timestamps_do_not_generic_dedupe():
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [{"role": "user", "content": "same", "timestamp": "invalid-time"}]
+    state = [{"role": "user", "content": "same", "timestamp": "invalid-time"}]
+
+    merged = merge_session_messages_append_only(
+        sidecar, state, incoming_provenance="state_db",
+    )
+
+    assert [message for message in merged if message.get("role") == "user"] == [
+        sidecar[0], state[0],
+    ]
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"id": "stable-message"},
+        {"_state_db_row_id": 7},
+        {"_active_turn_token": "stream:100.25"},
+    ],
+)
+def test_state_db_shared_durable_identity_allows_malformed_timestamp_dedup(identity):
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [{"role": "user", "content": "same", "timestamp": "invalid-time", **identity}]
+    state = [{"role": "user", "content": "same", "timestamp": "invalid-time", **identity}]
+
+    merged = merge_session_messages_append_only(
+        sidecar, state, incoming_provenance="state_db",
+    )
+
+    assert len([message for message in merged if message.get("role") == "user"]) == 1
+
+
 def test_issue6751_distinct_state_sidecars_are_not_deduplicated():
     from api.models import merge_session_messages_append_only
 
@@ -1104,8 +1188,8 @@ def test_issue6751_same_row_id_different_sidecars_remain_distinct():
     ]
 
 
-def test_issue6751_unique_same_second_timestamp_drift_reconciles_before_merge_identity():
-    """One logical turn with sub-second storage drift must not persist twice."""
+def test_issue6751_anonymous_same_second_drift_keeps_both_rows():
+    """Sub-second timestamp proximity cannot claim an anonymous state row."""
     from api.models import merge_session_messages_append_only
 
     sidecar = [
@@ -1122,8 +1206,9 @@ def test_issue6751_unique_same_second_timestamp_drift_reconciles_before_merge_id
 
     merged = merge_session_messages_append_only(sidecar, state)
 
-    assert len(merged) == 1
-    assert merged[0]["api_content"] == "provider wire"
+    assert len(merged) == 2
+    assert merged[0].get("api_content") is None
+    assert merged[1]["api_content"] == "provider wire"
 
 
 def test_issue6751_same_second_drift_with_repeated_text_remains_ambiguous():
@@ -1325,10 +1410,10 @@ def test_issue6751_branch_endpoint_reconciles_provider_sidecars_into_first_agent
     ]
 
 
-def test_issue6751_real_state_reader_unique_row_id_reconciles_timestamp_drift(
+def test_issue6751_real_state_reader_row_id_without_shared_identity_stays_distinct(
     monkeypatch, tmp_path
 ):
-    """The real state.db reader's unique row identity must prevent a replay duplicate."""
+    """A one-sided state.db row ID is not shared identity for a sidecar row."""
     import api.models as models
 
     sid = "issue6751-reader-row-id"
@@ -1377,8 +1462,9 @@ def test_issue6751_real_state_reader_unique_row_id_reconciles_timestamp_drift(
         state_messages,
     )
 
-    assert len(merged) == 1
-    assert merged[0]["api_content"] == "provider wire"
+    assert len(merged) == 2
+    assert merged[0].get("api_content") is None
+    assert merged[1]["api_content"] == "provider wire"
 
 
 def test_issue6751_reconciliation_prefers_unique_stable_message_id_before_weaker_tiers():
@@ -1583,6 +1669,60 @@ def test_issue6751_exact_timestamp_bucket_matches_mutually_unique_content_pairs(
         "wire-one",
         "wire-two",
     ]
+
+
+def test_issue6751_same_second_drift_needs_durable_identity_for_sidecar_copy():
+    from api.models import _reconcile_api_content_sidecars
+
+    sidecar = [
+        {
+            "role": "user",
+            "content": "same visible text",
+            "timestamp": 500.1,
+        },
+        {"role": "user", "content": "other visible text", "timestamp": 500.3},
+    ]
+    state = [
+        {
+            "role": "user",
+            "content": "same visible text",
+            "timestamp": 500.2,
+            "api_content": "state-wire-one",
+        },
+        {
+            "role": "user",
+            "content": "other visible text",
+            "timestamp": 500.4,
+            "api_content": "state-wire-two",
+        },
+    ]
+
+    _reconcile_api_content_sidecars(sidecar, state)
+
+    assert "api_content" not in sidecar[0]
+    assert "api_content" not in sidecar[1]
+
+
+def test_issue6751_same_second_drift_with_shared_row_id_copies_sidecar():
+    from api.models import _reconcile_api_content_sidecars
+
+    sidecar = [{
+        "role": "user",
+        "content": "same visible text",
+        "timestamp": 500.1,
+        "_state_db_row_id": 7,
+    }]
+    state = [{
+        "role": "user",
+        "content": "same visible text",
+        "timestamp": 500.2,
+        "_state_db_row_id": 7,
+        "api_content": "state-wire",
+    }]
+
+    _reconcile_api_content_sidecars(sidecar, state)
+
+    assert sidecar[0]["api_content"] == "state-wire"
 
 
 def test_issue6751_incompatible_exact_timestamp_pair_keeps_mixed_fallback_open():

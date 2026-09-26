@@ -65,7 +65,11 @@ from api.helpers import (
     scrub_internal_replay_fields,
     _redact_text,
 )
-from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
+from api.compression_anchor import (
+    is_context_compression_marker,
+    is_lcm_context_recovery_marker,
+    visible_messages_for_anchor,
+)
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.gateway_chat import WEBUI_LOCAL_CHAT_BACKEND
 from api.metering import meter
@@ -76,6 +80,8 @@ from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
     _WEBUI_TRUSTED_AGENT_INPUT_FIELD,
+    _append_recovered_turn_to_context,
+    _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
@@ -154,13 +160,18 @@ def get_stream_runtime_snapshot() -> dict[str, object]:
     return result
 
 
-def _session_payload_with_full_messages(session, *, tool_calls=None):
+def _session_payload_with_full_messages(
+    session,
+    *,
+    tool_calls=None,
+):
     """Return compact session metadata plus the embedded full transcript.
 
     ``Session.compact()`` may intentionally use metadata-only counts from an
     index/sidebar load. A settled SSE payload that embeds ``session.messages``
     must report the count of that embedded transcript, otherwise completion and
     reconcile paths can mistake a complete payload for a stale short window.
+
     """
     messages = list(getattr(session, 'messages', None) or [])
     raw = session.compact() | {
@@ -2084,6 +2095,31 @@ def _mark_active_turn_checkpoint(message, identity):
     return message
 
 
+def _stamp_active_turn_activity(message, identity):
+    token = identity.get('token') if isinstance(identity, dict) else None
+    if (
+        isinstance(message, dict)
+        and isinstance(token, str)
+        and token
+        and not message.get('_active_turn_token')
+    ):
+        message['_active_turn_token'] = token
+    return message
+
+
+def _active_turn_checkpoint_candidate(message, identity, expected_text):
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    token = message.get('_active_turn_token')
+    current_token = identity.get('token') if isinstance(identity, dict) else None
+    if token and token != current_token:
+        return False
+    return (
+        not is_lcm_context_recovery_marker(message)
+        and _active_turn_user_text_matches(message, expected_text)
+    )
+
+
 def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, allow_index_fallback=True):
     messages = list(messages or [])
     if not isinstance(identity, dict):
@@ -2099,11 +2135,7 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, all
         return messages, False
     message = messages[idx]
     expected_text = identity.get('text') if identity.get('text') is not None else msg_text
-    if (
-        not isinstance(message, dict)
-        or message.get('role') != 'user'
-        or _normalize_user_text(_message_text(message.get('content'))) != _normalize_user_text(expected_text)
-    ):
+    if not _active_turn_checkpoint_candidate(message, identity, expected_text):
         return messages, False
     _mark_active_turn_checkpoint(message, identity)
     return messages, True
@@ -2202,14 +2234,14 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
         return None
     message = result_messages[idx]
     expected_text = identity.get('text') if identity.get('text') is not None else msg_text
-    if _active_turn_user_text_matches(message, expected_text):
+    if _active_turn_checkpoint_candidate(message, identity, expected_text):
         return idx
     trusted_agent_input = identity.get('trusted_agent_input_text')
     if (
         identity.get('text') == msg_text
         and isinstance(trusted_agent_input, str)
         and trusted_agent_input != expected_text
-        and _active_turn_user_text_matches(message, trusted_agent_input)
+        and _active_turn_checkpoint_candidate(message, identity, trusted_agent_input)
     ):
         return idx
     return None
@@ -2313,14 +2345,12 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             )
         return result_messages
     previous_context = list(previous_context or [])
-    if _messages_have_prefix(result_messages, previous_context):
-        insert_at = len(previous_context)
-    elif _active_turn_boundary_is_valid(identity):
-        insert_at = identity['current_turn_user_idx'] - len(previous_context)
-        if insert_at < 0 or insert_at > len(result_messages):
-            insert_at = identity['current_turn_user_idx']
+    if _active_turn_boundary_is_valid(identity):
+        insert_at = identity['current_turn_user_idx']
         if insert_at < 0 or insert_at > len(result_messages):
             insert_at = None
+    elif _messages_have_prefix(result_messages, previous_context):
+        insert_at = len(previous_context)
     else:
         insert_at = None
     if insert_at is None and all(
@@ -2443,6 +2473,25 @@ def _settle_result_messages(
     source,
     active_turn_identity,
 ):
+    if (
+        _active_turn_boundary_is_valid(active_turn_identity)
+        and (
+            active_turn_identity.get('agent_turn_boundary_source') == 'result'
+            or (
+                active_turn_identity.get('agent_turn_boundary_source') == 'agent'
+                and active_turn_identity['current_turn_user_idx'] < len(result_messages)
+                and not _is_synthetic_control_message(
+                    result_messages[active_turn_identity['current_turn_user_idx']]
+                )
+            )
+        )
+    ):
+        # Agent indices address the raw result, before cleaning or replay can
+        # change its coordinates. Later settlement finds this exact token.
+        result_messages = _settle_current_turn_boundary(
+            previous_context_messages, result_messages, active_turn_identity,
+            msg_text, source,
+        )
     (
         result_messages,
         next_context_messages,
@@ -2464,6 +2513,7 @@ def _settle_result_messages(
             previous_context_messages,
             next_context_messages,
             msg_text,
+            active_turn_identity=active_turn_identity,
         )
         next_context_messages = _settle_current_turn_boundary(
             previous_context_messages,
@@ -2749,14 +2799,25 @@ def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | 
     )
 
 
-def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
+def _persist_cancelled_turn(
+    session,
+    *,
+    message: str = 'Task cancelled.',
+    active_turn_identity=None,
+) -> None:
     """Persist a user-cancelled terminal state without provider-error wording.
 
     cancel_stream() usually writes this marker first, but the streaming thread can
     later unwind through the silent-failure or exception path. Those paths must
     not append a misleading provider no-response error after an explicit cancel.
     """
-    _materialize_pending_user_turn_before_error(session)
+    active_turn_identity = active_turn_identity or {
+        'token': build_active_turn_token(
+            getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_started_at', None),
+        ),
+    }
+    _materialize_pending_user_turn_before_error(session, active_turn_identity=active_turn_identity)
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
@@ -2764,14 +2825,16 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_user_source = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
-        session.messages.append({
+        error_message = {
             'role': 'assistant',
             'content': _cancelled_turn_content(message, agent_name),
             '_error': True,
             'provider_details': str(message or 'Task cancelled.').strip(),
             'provider_details_label': 'Cancellation details',
             'timestamp': int(time.time()),
-        })
+        }
+        _stamp_active_turn_activity(error_message, active_turn_identity)
+        session.messages.append(error_message)
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -2870,6 +2933,7 @@ def _finalize_cancelled_turn(
     ephemeral: bool = False,
     message: str = 'Task cancelled.',
     stream_id: str | None = None,
+    active_turn_identity=None,
 ) -> None:
     """Finalize a cancelled turn for persistent or ephemeral sessions.
 
@@ -2934,7 +2998,11 @@ def _finalize_cancelled_turn(
     if ephemeral:
         _cleanup_ephemeral_cancelled_turn(session)
         return
-    _persist_cancelled_turn(session, message=message)
+    _persist_cancelled_turn(
+        session,
+        message=message,
+        active_turn_identity=active_turn_identity,
+    )
     try:
         session.save()
     except Exception:
@@ -6380,24 +6448,30 @@ def _deduplicate_context_messages(messages):
     Prevents the agent from seeing the same message twice in conversation_history
     when result_messages contain duplicates that weren't caught by display-merge.
     Compression/reference markers are internal recovery material: keep at most
-    one canonical assistant reference so a mis-role ``user`` marker cannot become
-    the next active user instruction.
+    one canonical assistant reference for legacy markers. LCM recovery markers
+    retain their provider-facing role and replay identity.
     """
     if not messages:
         return messages
     seen = set()
     deduped = []
     user_exact_index = {}
+    user_output_scopes = {}
+    output_owner = None
     for msg in messages:
         if _is_context_compression_marker(msg):
+            lcm_marker = is_lcm_context_recovery_marker(msg)
             marker_key = (
-                '__context_compression_marker__',
-                " ".join(_message_text(msg.get('content', '')).split())[:500],
+                ('__lcm_recovery_marker__', _message_replay_key(msg))
+                if lcm_marker else (
+                    '__context_compression_marker__',
+                    " ".join(_message_text(msg.get('content', '')).split())[:500],
+                )
             )
             if marker_key in seen:
                 continue
             seen.add(marker_key)
-            if isinstance(msg, dict) and msg.get('role') != 'assistant':
+            if isinstance(msg, dict) and msg.get('role') != 'assistant' and not lcm_marker:
                 msg = copy.deepcopy(msg)
                 msg['role'] = 'assistant'
             deduped.append(msg)
@@ -6410,7 +6484,12 @@ def _deduplicate_context_messages(messages):
         # Keep the display identity unchanged so ordinary transcript dedup still
         # collapses the same visible row.
         key = _message_replay_key(msg)
+        # Identical output in different owned turns is not historical replay.
+        if key is not None and isinstance(msg, dict) and msg.get('role') != 'user':
+            key = (key, output_owner)
         if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
+            token = msg.get('_active_turn_token')
+            output_owner = token if isinstance(token, str) and token.strip() else None
             user_exact_key = (
                 key,
                 msg.get('timestamp'),
@@ -6418,18 +6497,26 @@ def _deduplicate_context_messages(messages):
                 msg.get('_source') or 'webui',
                 json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
             )
-            prior_exact_idx = user_exact_index.get(user_exact_key)
+            prior_exact_idx = next((
+                idx for idx in user_exact_index.get(user_exact_key, [])
+                if _message_private_identity_compatible(deduped[idx], msg)
+            ), None)
+            if prior_exact_idx is not None:
+                output_owner = user_output_scopes[prior_exact_idx]
+            else:
+                user_output_scopes[len(deduped)] = output_owner
             if msg.get('_active_turn_token'):
                 if prior_exact_idx is not None:
                     deduped[prior_exact_idx] = msg
                     continue
                 if key in seen:
                     deduped.append(msg)
-                    user_exact_index[user_exact_key] = len(deduped) - 1
+                    user_exact_index.setdefault(user_exact_key, []).append(len(deduped) - 1)
                     continue
             elif prior_exact_idx is not None:
                 continue
-            user_exact_index[user_exact_key] = len(deduped)
+            if key not in seen:
+                user_exact_index.setdefault(user_exact_key, []).append(len(deduped))
         if key is not None and key in seen:
             continue
         if key is not None:
@@ -6979,12 +7066,29 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
+def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None, *, active_turn_identity=None):
     """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
         return result_messages
+    current_idx = next((
+        idx for idx, row in enumerate(result_messages)
+        if _active_turn_token_matches(row, active_turn_identity)
+    ), None)
+    if current_idx is not None:
+        previous_idx = next((
+            idx for idx, row in enumerate(previous_context)
+            if _active_turn_token_matches(row, active_turn_identity)
+        ), len(previous_context))
+        previous_context = previous_context[:previous_idx]
+        # Current output is one owned suffix, never historical content replay.
+        leading = result_messages[:current_idx]
+        history = (
+            _dedupe_replayed_context_messages(previous_context, leading, msg_text)
+            if leading else previous_context
+        )
+        return history + result_messages[current_idx:]
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
     if not _messages_have_prefix(
         result_messages,
@@ -7036,6 +7140,7 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
                 return previous_context + candidates
         assistant_or_tool_only_result = bool(result_messages) and all(
             _is_context_compression_marker(m)
+            or _active_turn_token_matches(m, active_turn_identity)
             or (
                 isinstance(m, dict)
                 and m.get('role') in ('assistant', 'tool')
@@ -7106,7 +7211,7 @@ def _compression_summary_from_messages(messages):
     for m in reversed(messages or []):
         if not isinstance(m, dict):
             continue
-        if not _is_context_compression_marker(m):
+        if not _is_context_compression_marker(m) or is_lcm_context_recovery_marker(m):
             continue
         text = _message_text(m.get('content'))
         if text:
@@ -8263,7 +8368,11 @@ def _self_heal_result_succeeded(
         return False
     messages = result.get('messages') or []
     previous_context = list(previous_context or [])
-    if _messages_have_prefix(messages, previous_context):
+    if (
+        not _active_turn_boundary_is_valid(active_turn_identity)
+        and not _active_turn_has_checkpoint(messages, active_turn_identity)
+        and _messages_have_prefix(messages, previous_context)
+    ):
         current_turn_rows = list(messages[len(previous_context):])
         current_user_idx = next(
             (
@@ -8285,10 +8394,26 @@ def _self_heal_result_succeeded(
             active_turn_identity,
             msg_text,
         )
+        if current_user_idx is None and _active_turn_boundary_is_valid(active_turn_identity):
+            index = active_turn_identity['current_turn_user_idx']
+            if 0 <= index < len(messages):
+                row = messages[index]
+                if (
+                    is_lcm_context_recovery_marker(row)
+                    and row.get('role') == 'user'
+                    and _normalize_user_text(_message_text(row.get('content')))
+                    == _normalize_user_text(msg_text)
+                ):
+                    # The direct result index proves the retry boundary, not
+                    # ownership of the envelope; settlement creates its owner.
+                    current_user_idx = index
         if current_user_idx is None:
             current_turn_rows = []
         else:
             current_turn_rows = list(messages[current_user_idx + 1:])
+    current_turn_rows = [
+        row for row in current_turn_rows if not is_lcm_context_recovery_marker(row)
+    ]
     next_user_idx = next(
         (
             index
@@ -8564,9 +8689,23 @@ def _partial_marker_already_present(messages, candidate: dict, *, before_idx: in
             break
     candidate_sig = _partial_message_signature(candidate)
     for msg in messages[start:end]:
-        if isinstance(msg, dict) and msg.get('_partial') and _partial_message_signature(msg) == candidate_sig:
+        if (
+            isinstance(msg, dict)
+            and msg.get('_partial')
+            and _partial_message_signature(msg) == candidate_sig
+            and _partial_turn_tokens_compatible(msg, candidate)
+        ):
             return True
     return False
+
+
+def _partial_turn_tokens_compatible(existing: dict, candidate: dict) -> bool:
+    """Match partials only when both turn tokens agree or both are absent."""
+    existing_token = existing.get('_active_turn_token')
+    candidate_token = candidate.get('_active_turn_token')
+    if existing_token is None and candidate_token is None:
+        return True
+    return existing_token is not None and candidate_token is not None and existing_token == candidate_token
 
 
 def _partial_snapshot_prefers_candidate_text(current, candidate) -> bool:
@@ -8620,6 +8759,8 @@ def _upsert_current_turn_partial(
     """
     if not isinstance(messages, list) or not isinstance(candidate, dict):
         return None
+    _stamp_active_turn_activity(candidate, active_turn_identity)
+    candidate_token = candidate.get('_active_turn_token')
 
     current_user_idx = next(
         (
@@ -8657,6 +8798,17 @@ def _upsert_current_turn_partial(
             if isinstance(messages[index], dict)
             and messages[index].get('role') == 'assistant'
             and not messages[index].get('_error')
+            and (
+                _partial_turn_tokens_compatible(messages[index], candidate)
+                or (
+                    not messages[index].get('_partial')
+                    and messages[index].get('_active_turn_token') is None
+                    and isinstance(candidate_token, str)
+                    and bool(candidate_token)
+                    and isinstance(active_turn_identity, dict)
+                    and candidate_token == active_turn_identity.get('token')
+                )
+            )
             and str(messages[index].get('content') or '') == candidate_content
         ),
         None,
@@ -8668,14 +8820,17 @@ def _upsert_current_turn_partial(
         and messages[index].get('role') == 'assistant'
         and messages[index].get('_partial') is True
         and not messages[index].get('_error')
+        and _partial_turn_tokens_compatible(messages[index], candidate)
     ]
     if canonical_idx is None and partial_indices:
         canonical_idx = partial_indices[-1]
     if canonical_idx is None:
-        messages.append(dict(candidate))
-        return messages[-1]
+        messages.insert(end, dict(candidate))
+        return messages[end]
 
     canonical = messages[canonical_idx]
+    if candidate_token and not canonical.get('_active_turn_token'):
+        canonical['_active_turn_token'] = candidate_token
     for partial_idx in partial_indices:
         if partial_idx != canonical_idx:
             _merge_partial_snapshots(canonical, messages[partial_idx])
@@ -8778,10 +8933,10 @@ def _materialize_pending_user_turn_before_error(
     active_turn_token = (
         active_turn_identity.get('token')
         if isinstance(active_turn_identity, dict)
-        else build_active_turn_token(
-            getattr(session, 'active_stream_id', None),
-            pending_started_at,
-        )
+        else None
+    ) or build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        pending_started_at,
     )
     session_messages = getattr(session, 'messages', None)
     if active_turn_token and isinstance(session_messages, list):
@@ -8811,14 +8966,33 @@ def _materialize_pending_user_turn_before_error(
         existing = messages[-1]
         if not isinstance(existing, dict) or existing.get('role') != 'user':
             return False
-        existing_source = existing.get('_source') or 'webui'
-        try:
-            existing_ts = int(existing.get('timestamp'))
-        except (TypeError, ValueError):
+        if is_lcm_context_recovery_marker(existing):
             return False
+        existing_token = existing.get('_active_turn_token')
+        if active_turn_token:
+            if existing_token != active_turn_token:
+                return False
+        existing_source = existing.get('_source') or 'webui'
+        if not active_turn_token:
+            try:
+                existing_ts = existing.get('timestamp')
+                if (
+                    isinstance(existing_ts, bool)
+                    or not isinstance(existing_ts, (int, float))
+                    or isinstance(pending_started_at, bool)
+                    or not isinstance(pending_started_at, (int, float))
+                ):
+                    return False
+                existing_ts = float(existing_ts)
+                identity_ts = float(pending_started_at)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if not math.isfinite(existing_ts) or not math.isfinite(identity_ts):
+                return False
+            if existing_ts != identity_ts:
+                return False
         return (
             _normalize_user_text(_message_text(existing.get('content'))) == _normalize_user_text(pending_text)
-            and existing_ts == recovered_ts
             and existing_source == pending_source
             and list(existing.get('attachments') or []) == pending_attachments
         )
@@ -8833,7 +9007,7 @@ def _materialize_pending_user_turn_before_error(
     }
     if str(pending_source or '').strip().lower() == 'fork':
         recovered['_fork_child_turn'] = session.session_id
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(recovered, pending_source, active_turn_token=active_turn_token)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -8875,7 +9049,9 @@ def _terminal_turn_duration(session, *, now: float | None = None) -> float | Non
     return round(elapsed, 3)
 
 
-def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | None:
+def _build_partial_message(
+    content_text, reasoning_text, tool_calls, *, active_turn_identity=None,
+) -> dict | None:
     """Build a _partial assistant message from raw streaming buffers.
 
     Shared by cancel_stream() and _snapshot_and_append_partial_on_error().
@@ -8909,7 +9085,7 @@ def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | N
         _msg['reasoning'] = reasoning_text.strip()
     if _has_tools:
         _msg['_partial_tool_calls'] = list(tool_calls)
-    return _msg
+    return _stamp_active_turn_activity(_msg, active_turn_identity)
 
 
 def _snapshot_and_append_partial_on_error(
@@ -8975,7 +9151,12 @@ def _snapshot_and_append_partial_on_error(
                 _tc['done'] = True
                 _tc['_sealed_by_terminal_error'] = True
 
-    _partial_msg = _build_partial_message(_snap_partial_text, _snap_reasoning, _snap_tool_calls)
+    _partial_msg = _build_partial_message(
+        _snap_partial_text,
+        _snap_reasoning,
+        _snap_tool_calls,
+        active_turn_identity=active_turn_identity,
+    )
     if _partial_msg is None:
         return None
     if not isinstance(session.messages, list):
@@ -9001,27 +9182,35 @@ def _append_result_partial_on_error(
     messages = result.get('messages')
     if not isinstance(messages, list) or not isinstance(pre_call_context, list):
         return None
-    normalized_msg_text = _normalize_user_text(msg_text)
+    current_token = (
+        active_turn_identity.get('token')
+        if isinstance(active_turn_identity, dict)
+        else None
+    )
     if _messages_have_prefix(messages, pre_call_context):
         # Append-only result: only rows after the pre-call baseline can
         # belong to this call.
         current_turn_rows = messages[len(pre_call_context):]
         baseline_has_current_user = bool(
             pre_call_context
-            and isinstance(pre_call_context[-1], dict)
-            and pre_call_context[-1].get('role') == 'user'
-            and _normalize_user_text(_message_text(pre_call_context[-1].get('content')))
-            == normalized_msg_text
+            and _active_turn_checkpoint_candidate(
+                pre_call_context[-1], active_turn_identity, msg_text
+            )
         )
-        if not baseline_has_current_user:
+        if baseline_has_current_user:
+            leading_row = current_turn_rows[0] if current_turn_rows else None
+            if _active_turn_checkpoint_candidate(
+                leading_row, active_turn_identity, msg_text
+            ):
+                current_turn_rows = current_turn_rows[1:]
+        else:
             current_user_index = next(
                 (
                     index
                     for index, row in enumerate(current_turn_rows)
-                    if isinstance(row, dict)
-                    and row.get('role') == 'user'
-                    and _normalize_user_text(_message_text(row.get('content')))
-                    == normalized_msg_text
+                    if _active_turn_checkpoint_candidate(
+                        row, active_turn_identity, msg_text
+                    )
                 ),
                 None,
             )
@@ -9065,6 +9254,11 @@ def _append_result_partial_on_error(
             and row.get('role') == 'assistant'
             and row.get('content')
             and not row.get('_error')
+            and not is_lcm_context_recovery_marker(row)
+            and (
+                not row.get('_active_turn_token')
+                or row.get('_active_turn_token') == current_token
+            )
         ),
         None,
     )
@@ -9077,6 +9271,8 @@ def _append_result_partial_on_error(
     )
     if partial_msg is None:
         return None
+    if assistant_row.get('_active_turn_token'):
+        partial_msg['_active_turn_token'] = assistant_row['_active_turn_token']
     if not isinstance(session.messages, list):
         session.messages = []
     return _upsert_current_turn_partial(
@@ -9776,6 +9972,7 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to append worker_started turn journal event", exc_info=True)
     s = None
+    _active_turn_identity = None
     _rt = {}
     old_cwd = None
     old_exec_ask = None
@@ -10396,7 +10593,7 @@ def _run_agent_streaming(
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
             with _agent_lock:
-                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id, active_turn_identity=_active_turn_identity)
             put('cancel', _cancel_event_payload('Cancelled before start'))
             return
 
@@ -11669,7 +11866,7 @@ def _run_agent_streaming(
 
             if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):
                 with _agent_lock:
-                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id, active_turn_identity=_active_turn_identity)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
 
@@ -11995,7 +12192,7 @@ def _run_agent_streaming(
             _result_partial_pre_call_context = list(_previous_context_messages)
             if not _agent_can_invoke(agent):
                 with _agent_lock:
-                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id, active_turn_identity=_active_turn_identity)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
             result = agent.run_conversation(**_run_conversation_kwargs)
@@ -12017,10 +12214,10 @@ def _run_agent_streaming(
                     _ckpt_thread.join(timeout=15)
                 if ephemeral:
                     with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=True, stream_id=stream_id)
+                        _finalize_cancelled_turn(s, ephemeral=True, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                 else:
                     with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -12074,7 +12271,7 @@ def _run_agent_streaming(
                 _ckpt_thread.join(timeout=15)
             if cancel_event.is_set():
                 with _agent_lock:
-                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -12135,7 +12332,7 @@ def _run_agent_streaming(
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
                     if cancel_event.is_set():
-                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -12388,7 +12585,7 @@ def _run_agent_streaming(
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if _terminal_failure or (not _assistant_added and not _token_sent):
                     if cancel_event.is_set():
-                        _finalize_cancelled_turn(s, ephemeral=ephemeral, stream_id=stream_id)
+                        _finalize_cancelled_turn(s, ephemeral=ephemeral, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                         if not ephemeral:
                             try:
                                 append_turn_journal_event_for_stream(
@@ -12503,7 +12700,7 @@ def _run_agent_streaming(
                             )
                             if not _register_agent_if_current(agent, _agent_sig):
                                 # Returned-error settlement already owns _agent_lock.
-                                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id, active_turn_identity=_active_turn_identity)
                                 put('cancel', _cancel_event_payload('Cancelled by user'))
                                 return
                             # Retry the conversation once with fresh credentials
@@ -12549,7 +12746,7 @@ def _run_agent_streaming(
                                 )
                                 if not _agent_can_invoke(agent):
                                     # Returned-error settlement already owns the lock.
-                                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id, active_turn_identity=_active_turn_identity)
                                     put('cancel', _cancel_event_payload('Cancelled by user'))
                                     return
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
@@ -12683,10 +12880,7 @@ def _run_agent_streaming(
                                 )
                                 _error_payload['hint'] = _err_hint
                         _turn_duration = _terminal_turn_duration(s)
-                        _materialize_pending_user_turn_before_error(
-                            s,
-                            active_turn_identity=_active_turn_identity,
-                        )
+                        _materialize_pending_user_turn_before_error(s, active_turn_identity=_active_turn_identity)
                         s.active_stream_id = None
                         s.pending_user_message = None
                         s.pending_attachments = []
@@ -12717,6 +12911,7 @@ def _run_agent_streaming(
                             'timestamp': int(time.time()),
                             '_error': True,
                         }
+                        _stamp_active_turn_activity(_error_message, _active_turn_identity)
                         if _turn_duration is not None:
                             _error_message['_turnDuration'] = _turn_duration
                         if _err_type == 'compression_exhausted':
@@ -13160,7 +13355,7 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append assistant_started turn journal event", exc_info=True)
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -13178,7 +13373,7 @@ def _run_agent_streaming(
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -13282,7 +13477,7 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -13314,7 +13509,7 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
-                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -13337,7 +13532,7 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
-                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -13699,7 +13894,7 @@ def _run_agent_streaming(
                             model=_turn_route_model,
                             provider=_turn_route_provider,
                         )
-                    _finalize_cancelled_turn(s, ephemeral=ephemeral, stream_id=stream_id)
+                    _finalize_cancelled_turn(s, ephemeral=ephemeral, stream_id=stream_id, active_turn_identity=_active_turn_identity)
                     if not ephemeral:
                         try:
                             append_turn_journal_event_for_stream(
@@ -13871,7 +14066,7 @@ def _run_agent_streaming(
                     )
                     if not _register_agent_if_current(_heal_agent, _agent_sig):
                         with _agent_lock:
-                            _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                            _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id, active_turn_identity=_active_turn_identity)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
                     # Retry the conversation
@@ -13916,7 +14111,7 @@ def _run_agent_streaming(
                         )
                         if not _agent_can_invoke(_heal_agent):
                             with _agent_lock:
-                                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id, active_turn_identity=_active_turn_identity)
                             put('cancel', _cancel_event_payload('Cancelled by user'))
                             return
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
@@ -14104,12 +14299,9 @@ def _run_agent_streaming(
                         )
                         _error_payload['hint'] = _exc_hint
                 _turn_duration = _terminal_turn_duration(s)
-                # Keep the canonical one-argument error-settlement shape pinned
-                # by #1361/#2136. The helper derives the same stream-owned turn
-                # token from active_stream_id + pending_started_at when the
-                # explicit identity is omitted, so repeated prompts remain
-                # fenced without weakening pending-turn durability.
-                _materialize_pending_user_turn_before_error(s)
+                # Use the captured authority instead of rebuilding its token
+                # from pending fields that eager cancellation may have cleared.
+                _materialize_pending_user_turn_before_error(s, active_turn_identity=_active_turn_identity)
                 s.active_stream_id = None
                 s.pending_user_message = None
                 s.pending_attachments = []
@@ -14136,6 +14328,7 @@ def _run_agent_streaming(
                     'timestamp': int(time.time()),
                     '_error': True,
                 }
+                _stamp_active_turn_activity(_error_message, _active_turn_identity)
                 if _turn_duration is not None:
                     _error_message['_turnDuration'] = _turn_duration
                 if _exc_type == 'compression_exhausted':
@@ -14754,12 +14947,18 @@ def cancel_stream(stream_id: str) -> bool:
                 # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
                 # in unit tests using Mock sessions) cannot escape and skip the rest of
                 # the cleanup.
+                _expected_token = None
                 try:
                     _pending_user = getattr(_cs, 'pending_user_message', None)
                     _pending_source = getattr(_cs, 'pending_user_source', None)
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
-                    _pending_started = getattr(_cs, 'pending_started_at', None) or 0
+                    _pending_started_raw = getattr(_cs, 'pending_started_at', None)
+                    _pending_started = _pending_started_raw or 0
+                    _pending_started_ts = _message_timestamp_as_float(
+                        {'timestamp': _pending_started_raw}
+                    )
+                    _expected_token = build_active_turn_token(stream_id, _pending_started)
                     _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
                     if _pending_user and _msgs_for_recovery is not None:
                         _last_user = None
@@ -14770,17 +14969,19 @@ def cancel_stream(stream_id: str) -> bool:
                         _already_persisted = False
                         if _last_user is not None:
                             _last_content = _last_user.get('content')
-                            _last_ts = _last_user.get('timestamp') or 0
-                            # Only treat as already-persisted if the latest user turn
-                            # was created AT OR AFTER the current turn's pending_started_at.
-                            # An earlier turn whose content happens to be a substring
-                            # (e.g. prior reply was "ok", user now types "ok please continue")
-                            # must NOT short-circuit synthesis — that would re-introduce
-                            # the data-loss bug this guard is supposed to prevent.
-                            if isinstance(_last_content, str) and _last_ts >= _pending_started:
-                                # Tolerate the workspace prefix the streaming thread prepends.
-                                if _pending_user == _last_content or _pending_user in _last_content:
-                                    _already_persisted = True
+                            _last_ts = _message_timestamp_as_float(_last_user)
+                            _last_token = _last_user.get('_active_turn_token')
+                            if _expected_token and _last_token == _expected_token:
+                                _already_persisted = True
+                            elif not _last_token and not is_lcm_context_recovery_marker(_last_user):
+                                if (
+                                    isinstance(_last_content, str)
+                                    and _pending_started_ts is not None
+                                    and _last_ts is not None
+                                    and _last_ts == _pending_started_ts
+                                ):
+                                    # Tolerate the workspace prefix on tokenless provider replay.
+                                    _already_persisted = _pending_user == _last_content or _pending_user in _last_content
                         if not _already_persisted:
                             _recovered_ts = int(time.time())
                             if isinstance(_pending_started, (int, float)) and _pending_started > 0:
@@ -14790,10 +14991,29 @@ def cancel_stream(stream_id: str) -> bool:
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn, _pending_source,
+                                active_turn_token=_expected_token,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
+                        else:
+                            _user_turn = _last_user
+                        _context_messages = getattr(_cs, 'context_messages', None)
+                        _owner_in_context = (
+                            _expected_token
+                            and isinstance(_context_messages, list)
+                            and any(
+                                isinstance(_m, dict)
+                                and _m.get('role') == 'user'
+                                and _m.get('_active_turn_token') == _expected_token
+                                and _message_private_identity_compatible(_m, _user_turn)
+                                for _m in _context_messages
+                            )
+                        )
+                        if not _owner_in_context:
+                            _append_recovered_turn_to_context(_cs, _user_turn)
                 except Exception:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",
@@ -14825,7 +15045,10 @@ def cancel_stream(stream_id: str) -> bool:
                 # The underscore-prefixed key is not in the whitelist, so sanitize
                 # strips it. The UI reads it via static/messages.js. (v0.50.251.)
                 _partial_msg = _build_partial_message(
-                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
+                    _cancel_partial_text,
+                    _cancel_reasoning,
+                    _cancel_tool_calls,
+                    active_turn_identity={'token': _expected_token},
                 )
                 _cancel_marker_exists = _session_has_cancel_marker(_cs)
                 _cancel_marker_idx = len(_cs.messages)
@@ -14849,11 +15072,12 @@ def cancel_stream(stream_id: str) -> bool:
                         before_idx=_cancel_marker_idx,
                     ):
                         _cs.messages.insert(_cancel_marker_idx, _partial_msg)
+                    _append_recovered_turn_to_context(_cs, _partial_msg)
                 # Cancel marker — flagged _error=True so it is stripped from conversation
                 # history on the next turn (prevents model from seeing "Task cancelled."
                 # as a prior assistant reply).
                 if not _cancel_marker_exists:
-                    _cs.messages.append({
+                    _cancel_error = {
                         'role': 'assistant',
                         'content': _cancelled_turn_content(
                             'Task cancelled.',
@@ -14863,7 +15087,9 @@ def cancel_stream(stream_id: str) -> bool:
                         'provider_details': 'Task cancelled.',
                         'provider_details_label': 'Cancellation details',
                         'timestamp': int(time.time()),
-                    })
+                    }
+                    _stamp_active_turn_activity(_cancel_error, {'token': _expected_token})
+                    _cs.messages.append(_cancel_error)
                 _cs.save()
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:

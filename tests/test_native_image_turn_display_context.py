@@ -2095,7 +2095,7 @@ def test_unlinked_state_db_image_projection_uses_existing_reconciliation():
                 message for message in recovered
                 if message.get("role") == "user" and message.get("timestamp") == timestamp
             ]
-            assert len(users) == 1
+            assert len(users) == (2 if prefer_context and flushed else 1)
             display_users = [
                 message for message in session.messages
                 if message.get("role") == "user" and message.get("timestamp") == timestamp
@@ -2105,14 +2105,118 @@ def test_unlinked_state_db_image_projection_uses_existing_reconciliation():
             assert users[0]["content"] == (
                 context_user["content"] if prefer_context else "Describe this image"
             )
+            if prefer_context and flushed:
+                assert any(
+                    message.get("content") == _durable_agent_content(context_user["content"])
+                    for message in users
+                )
             if prefer_context:
                 next_turn = _new_turn_context_from_messages(
                     recovered,
                     "Tell me more",
                 )
                 replay_users = [message for message in next_turn if message.get("role") == "user"]
-                assert len(replay_users) == 1
-                assert replay_users[0]["content"] == context_user["content"]
+                assert context_user["content"] in [message["content"] for message in replay_users]
+
+
+def test_native_image_multimodal_replay_requires_shared_durable_row_id():
+    import api.models as models
+
+    timestamp = 950.0
+    session, identity, api_content = _settle_image_turn(
+        timestamp=timestamp,
+        extra_text=(RECALL_NOTE,),
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    scalar = {
+        "role": "user",
+        "content": _durable_agent_content(context_user["content"]),
+        "timestamp": timestamp,
+        "_state_db_row_id": 41,
+        "api_content": api_content,
+    }
+    merged = models.merge_session_messages_append_only(
+        [context_user], [scalar], incoming_provenance="state_db",
+    )
+    assert merged == [context_user]
+
+    scalar["_state_db_row_id"] = 42
+    merged = models.merge_session_messages_append_only(
+        [context_user], [scalar], incoming_provenance="state_db",
+    )
+    assert len(merged) == 2
+    assert scalar in merged
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("_active_turn_token", None),
+        ("_webui_trusted_agent_input_text", None),
+        ("_webui_trusted_agent_input_text", "Different submitted text"),
+    ],
+)
+def test_native_image_multimodal_replay_requires_trusted_turn_proof(field, value):
+    import api.models as models
+
+    timestamp = 960.0
+    session, identity, api_content = _settle_image_turn(
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    untrusted_user = dict(context_user)
+    if value is None:
+        untrusted_user.pop(field)
+    else:
+        untrusted_user[field] = value
+    scalar = {
+        "role": "user",
+        "content": _durable_agent_content(context_user["content"]),
+        "timestamp": timestamp,
+        "_state_db_row_id": 41,
+        "api_content": api_content,
+    }
+
+    merged = models.merge_session_messages_append_only(
+        [untrusted_user], [scalar], incoming_provenance="state_db",
+    )
+
+    assert scalar in merged
+
+
+def test_native_image_multimodal_replay_requires_unique_durable_row_ids():
+    import api.models as models
+
+    timestamp = 970.0
+    session, identity, api_content = _settle_image_turn(
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    scalar = {
+        "role": "user",
+        "content": _durable_agent_content(context_user["content"]),
+        "timestamp": timestamp,
+        "_state_db_row_id": 41,
+        "api_content": api_content,
+    }
+
+    merged = models.merge_session_messages_append_only(
+        [context_user], [scalar, dict(scalar)], incoming_provenance="state_db",
+    )
+
+    assert any(message.get("content") == scalar["content"] for message in merged)
 
 
 def test_agent_index_and_turn_id_do_not_claim_unrelated_user_row():
@@ -2138,3 +2242,49 @@ def test_agent_index_and_turn_id_do_not_claim_unrelated_user_row():
         identity,
         "Describe this image",
     ) == 0
+
+
+def test_trusted_input_fallback_rejects_foreign_token_on_rich_row():
+    text = "Describe this image"
+    trusted_text = "Queued process update.\n\nDescribe this image"
+    _, identity, _ = _settle_image_turn(text=text)
+    identity["trusted_agent_input_text"] = trusted_text
+    row = {
+        "role": "user",
+        "content": _native_user_content(trusted_text, IMAGE_A),
+        "_active_turn_token": "foreign-token",
+    }
+
+    assert _find_active_turn_checkpoint_index([row], [], identity, text) is None
+
+
+@pytest.mark.parametrize("rich", [False, True])
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "[Recent Summary (d0, node 418)]",
+        "[Current user objective preserved from compacted history]",
+    ],
+)
+def test_trusted_input_fallback_rejects_lcm_envelope_row(heading, rich):
+    text = "Describe this image"
+    _, identity, _ = _settle_image_turn(text=text)
+    identity["trusted_agent_input_text"] = heading
+    content = (
+        [{"type": "text", "text": heading}, {"type": "image_url", "image_url": {"url": IMAGE_A}}]
+        if rich
+        else heading
+    )
+    row = {"role": "user", "content": content}
+
+    assert _find_active_turn_checkpoint_index([row], [], identity, text) is None
+
+
+def test_trusted_input_fallback_accepts_rich_submitted_text():
+    text = "Describe this image"
+    trusted_text = "Queued process update.\n\nDescribe this image"
+    _, identity, _ = _settle_image_turn(text=text)
+    identity["trusted_agent_input_text"] = trusted_text
+    row = {"role": "user", "content": _native_user_content(trusted_text, IMAGE_A)}
+
+    assert _find_active_turn_checkpoint_index([row], [], identity, text) == 0
