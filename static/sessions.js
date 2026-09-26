@@ -227,8 +227,15 @@ function _saveComposerDraft(sid, text, files) {
     _composerDraftKnownPayloadSessions.add(sid);
   }
   _draftSaveTimer = setTimeout(() => {
+    // Background autosave on a very large session can legitimately take longer
+    // than the default 30s api() timeout (full-transcript rewrite behind the
+    // per-session lock, issue #7839). Raise the timeout and suppress the
+    // generic "Request timed out" toast: the debounced autosave re-issues the
+    // latest payload on the next keystroke, so a failed save self-heals.
     api('/api/session/draft', {
       method: 'POST',
+      timeoutMs: 120000,
+      timeoutToast: false,
       body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
     }).then(() => {
       _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);

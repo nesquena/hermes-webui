@@ -8425,6 +8425,238 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     return _state_db_session_source(sid) == "subagent"
 
 
+# ── Composer-draft save coalescing (issue #7839, gate redesign) ──────────────
+# On very large sessions one Session.save() serializes the whole transcript
+# behind the per-session agent lock (seconds per save). Naively queueing
+# debounced draft POSTs therefore produces a lock convoy: every queued request
+# later performs its own full rewrite of the SAME payload and every other
+# endpoint for that session stalls behind the pile-up (measured: 21-182 s lock
+# waits, "Request timed out" toasts, chats appearing to vanish until refresh).
+#
+# Instead, every POST publishes its payload to a per-session state object and
+# waits on a generation-tagged settlement: exactly ONE worker per session
+# (claimed atomically under _DRAFT_CV) performs one save per distinct
+# payload, serialized with the same per-session agent lock as before.
+# Invariants (each pinned by tests, gate findings #7840):
+#   - A request returns 200 only after its generation — or a newer generation
+#     that supersedes it — is durably saved, and the response carries the
+#     actual durable draft (not the request fields).
+#   - Settlements are never reset by later requests, so a failed save can
+#     never surface as a later false ok:true.
+#   - Eviction is identity-checked; a retiring worker can never drop a newer
+#     state that holds a fresher request's intent.
+#   - Every load failure settles (never strands the owner), a missing session
+#     settles as 404, and a bounded self-heal timer respawns a retired worker
+#     so a queued intent becomes durable even if no further request arrives
+#     (the pre-coalescing code waited synchronously and always saved).
+_DRAFT_COALESCE = {}
+_DRAFT_CV = threading.Condition()
+_DRAFT_SAVE_LOCK_WAIT = 20.0
+_DRAFT_SAVE_REQUEST_WAIT = 30.0
+_DRAFT_SAVE_RETRY_DELAY = 5.0
+_DRAFT_SAVE_MAX_RETRIES = 12
+
+
+class _DraftSaveIntent:
+
+    __slots__ = ("text", "files")
+
+    def __init__(self, text=None, files=None):
+        self.text = text
+        self.files = files
+
+
+class _DraftSaveState:
+
+    __slots__ = (
+        "pending", "published", "published_gen", "generation",
+        "owner_alive", "outcomes", "retries",
+    )
+
+    def __init__(self):
+        self.pending = None            # newest intent not yet picked up
+        self.published = None          # intent the worker is saving
+        self.published_gen = 0
+        self.generation = 0            # monotonic; newest queued/published gen
+        self.owner_alive = False       # a worker owns this state right now
+        # Per-generation settlements: gen -> (outcome, unchanged, durable).
+        # A request reads ONLY its own entry — or a newer "ok" that superseded
+        # it — so a later failure can never flip an earlier success into a
+        # false 503, and an earlier failure can never produce a false ok:true.
+        self.outcomes = {}
+        self.retries = 0               # consecutive retryable failures
+
+
+def _maybe_spawn_draft_worker(sid, state):
+    """Claim + start the worker for `state` if it is retired but work remains.
+
+    MUST be called while holding _DRAFT_CV: the owner claim is atomic with the
+    pending check, so two concurrent POSTs can never both start a worker.
+    """
+    if _DRAFT_COALESCE.get(sid) is not state:
+        return
+    if state.owner_alive:
+        return
+    if state.pending is None and state.published is None:
+        return
+    state.owner_alive = True
+    threading.Thread(
+        target=_draft_save_worker,
+        args=(sid,),
+        name=f"draft-save-{sid}",
+        daemon=True,
+    ).start()
+
+
+def _draft_save_retry_wake(sid, state):
+    """Self-heal: respawn the worker for a requeued intent after a failure."""
+    with _DRAFT_CV:
+        if _DRAFT_COALESCE.get(sid) is not state:
+            return
+        if state.owner_alive or (state.pending is None and state.published is None):
+            return
+        state.owner_alive = True
+    threading.Thread(
+        target=_draft_save_worker,
+        args=(sid,),
+        name=f"draft-save-{sid}",
+        daemon=True,
+    ).start()
+
+
+def _draft_save_worker(sid):
+    """Persist queued draft intents for `sid`; one save per distinct payload.
+
+    Owns `state.published` between CV windows. Every exit path settles the
+    waiters (notify_all under _DRAFT_CV) and retires ownership atomically, so
+    a load failure can never strand later saves.
+    """
+    while True:
+        with _DRAFT_CV:
+            state = _DRAFT_COALESCE.get(sid)
+            if state is None or (state.pending is None and state.published is None):
+                if state is not None and _DRAFT_COALESCE.get(sid) is state:
+                    state.owner_alive = False
+                    _DRAFT_COALESCE.pop(sid, None)
+                    _DRAFT_CV.notify_all()
+                return
+            if state.pending is not None:
+                state.published = state.pending
+                state.published_gen = state.generation
+                state.pending = None
+            intent = state.published
+            gen = state.published_gen
+
+        missing = False
+        failed = False
+        unchanged_flag = False
+        durable = None
+        acquired = False
+        s = None
+        try:
+            s = get_session(sid)
+        except KeyError:
+            missing = True
+        except Exception:
+            failed = True
+            logger.exception("Draft save worker failed to load session %s", sid)
+        if s is not None and getattr(s, "_loaded_metadata_only", False):
+            # Never save a metadata-only stub (#1558); upgrade to full load.
+            try:
+                from api.models import Session as _Session
+                s = _Session.load(sid)
+            except Exception:
+                logger.exception("Draft save worker failed to load session %s", sid)
+            if s is None:
+                missing = True
+        if not missing and not failed and s is not None:
+            lock = _get_session_agent_lock(sid)
+            try:
+                acquired = lock.acquire(timeout=_DRAFT_SAVE_LOCK_WAIT)
+                if not acquired:
+                    # Bounded wait expired (a very large save or another heavy
+                    # operation holds the lock): retryable failure.
+                    failed = True
+                else:
+                    current_draft = dict(getattr(s, "composer_draft", {}) or {})
+                    next_draft = dict(current_draft)
+                    if intent.text is not None:
+                        next_draft["text"] = intent.text
+                    if intent.files is not None:
+                        next_draft["files"] = intent.files
+                    if next_draft == current_draft:
+                        unchanged_flag = True
+                        durable = current_draft
+                    else:
+                        s.composer_draft = next_draft
+                        # Draft persistence is not conversation activity. Touching updated_at
+                        # here makes the active-session external-refresh poll force-reload the
+                        # current chat every few seconds while the user is typing, and that
+                        # delayed reload can restore an older draft over newer local input.
+                        s.save(touch_updated_at=False, skip_index=True)
+                        durable = next_draft
+            except Exception:
+                failed = True
+                logger.exception("Draft save worker failed for session %s", sid)
+            finally:
+                if acquired:
+                    lock.release()
+
+        with _DRAFT_CV:
+            state = _DRAFT_COALESCE.get(sid)
+            if state is None:
+                # The state was removed while we saved; nothing to settle —
+                # a newer owner owns the session now.
+                return
+            if state.published is intent:
+                state.published = None
+            outcome = "missing" if missing else ("failed" if failed else "ok")
+            state.outcomes[gen] = (outcome, unchanged_flag, durable)
+            if len(state.outcomes) > 64:
+                for old_gen in sorted(state.outcomes)[: len(state.outcomes) - 64]:
+                    del state.outcomes[old_gen]
+            if outcome == "ok":
+                state.retries = 0
+                if state.pending is None:
+                    state.owner_alive = False
+                    if _DRAFT_COALESCE.get(sid) is state:
+                        _DRAFT_COALESCE.pop(sid, None)
+                    _DRAFT_CV.notify_all()
+                    return
+                # A newer intent is queued: keep ownership, save it next loop.
+                _DRAFT_CV.notify_all()
+                continue
+            if outcome == "missing":
+                # The session vanished mid-flight (deleted after the request's
+                # preflight). Nothing can be saved onto it; settle honestly
+                # and drop the intent — retrying cannot resurrect the session.
+                state.pending = None
+                state.owner_alive = False
+                _DRAFT_CV.notify_all()
+                if _DRAFT_COALESCE.get(sid) is state:
+                    _DRAFT_COALESCE.pop(sid, None)
+                return
+            # Retryable failure (lock wait expired or save raised): keep the
+            # newest queued intent so the next request — or the bounded
+            # self-heal timer — can persist it, but retire THIS worker so a
+            # persistent failure cannot retry-spin. The settlement stays
+            # readable for its waiters (never reset by later publishes).
+            if state.pending is None:
+                state.pending = intent
+            state.retries += 1
+            state.owner_alive = False
+            _DRAFT_CV.notify_all()
+            if state.retries <= _DRAFT_SAVE_MAX_RETRIES:
+                timer = threading.Timer(
+                    _DRAFT_SAVE_RETRY_DELAY,
+                    _draft_save_retry_wake,
+                    args=(sid, state),
+                )
+                timer.daemon = True
+                timer.start()
+            return
+
+
 def _session_is_subagent_view_only(sid: str) -> bool:
     """Return True when ``sid`` is a delegated subagent child by ANY signal —
     state.db source OR a persisted WebUI sidecar tagged subagent.
@@ -16450,34 +16682,88 @@ def handle_post(handler, parsed) -> bool:
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
         try:
-            s = get_session(sid)
+            get_session(sid, metadata_only=True)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        _draft_mark("after_get_session")
-        unchanged = False
-        with _get_session_agent_lock(sid):
-            _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
+        # Publish the save intent and wait for a generation-tagged settlement.
+        # Exactly one worker per session performs the actual Session.save();
+        # the request path never touches the per-session agent lock, so
+        # debounced autosaves cannot form a lock convoy (#7839). A request
+        # returns 200 only once its generation — or a newer generation that
+        # supersedes it — is durably saved, and the response carries the
+        # actual durable draft.
+        deadline = _draft_time.monotonic() + _DRAFT_SAVE_REQUEST_WAIT
+        with _DRAFT_CV:
+            state = _DRAFT_COALESCE.get(sid)
+            if state is None:
+                state = _DraftSaveState()
+                _DRAFT_COALESCE[sid] = state
+            state.generation += 1
+            gen = state.generation
+            if state.pending is None:
+                state.pending = _DraftSaveIntent(text, files)
             else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
-                _draft_mark("after_save")
-                saved_draft = s.composer_draft
-        _draft_mark("released_lock")
-        payload = {"ok": True, "draft": saved_draft}
+                # Worker hasn't consumed the queued intent yet: mutate it.
+                # A leftover _DraftSaveIntent can't be shared elsewhere.
+                if text is not None:
+                    state.pending.text = text
+                if files is not None:
+                    state.pending.files = files
+            _maybe_spawn_draft_worker(sid, state)
+            while True:
+                # This generation's own settlement, or a strictly newer "ok"
+                # that superseded this payload: both mean this request's draft
+                # (or newer) is durable. A newer "failed"/"missing" must NOT
+                # flip this request's earlier success into a false 503 — and
+                # this generation's failure never yields a false ok:true.
+                if gen in state.outcomes:
+                    outcome, unchanged, durable = state.outcomes[gen]
+                    settled = True
+                    break
+                newer_ok = None
+                for g in state.outcomes:
+                    if g > gen and state.outcomes[g][0] == "ok":
+                        newer_ok = g
+                        break
+                if newer_ok is not None:
+                    # Superseded by a newer durable save that includes this
+                    # request's payload (or a superset of it).
+                    outcome, unchanged, durable = state.outcomes[newer_ok]
+                    unchanged = False
+                    settled = True
+                    break
+                remaining = deadline - _draft_time.monotonic()
+                if remaining <= 0:
+                    settled = False
+                    outcome = None
+                    unchanged = False
+                    durable = None
+                    break
+                _DRAFT_CV.wait(remaining)
+        _draft_mark("settled")
+        if not settled:
+            # The worker is still saving (very large session or a heavy
+            # concurrent operation). Answer 503 instead of stacking this
+            # handler thread behind the convoy; the bounded self-heal retry
+            # still persists the intent, and the debounced autosave re-issues
+            # the latest payload on its next run.
+            handler._safe_webui_print(
+                "[SLOW] /api/session/draft worker wait timeout after %.0fms session=%s" % (
+                    (_draft_time.monotonic() - _draft_t0) * 1000,
+                    sid,
+                )
+            )
+            return bad(handler, "Draft save still in progress; retry shortly", 503)
+        if outcome == "missing":
+            # The session vanished between the request's existence preflight
+            # and the worker's load. Never report durability for that.
+            return bad(handler, "Session not found", 404)
+        if outcome != "ok":
+            return bad(handler, "Draft save failed; will retry on next edit", 503)
+        payload = {
+            "ok": True,
+            "draft": durable if durable is not None else {"text": text if text is not None else "", "files": files if files is not None else []},
+        }
         if unchanged:
             payload["unchanged"] = True
         _draft_mark("before_json")
