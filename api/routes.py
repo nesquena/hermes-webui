@@ -18821,8 +18821,17 @@ def _handle_escape_file_raw(handler, parsed):
 
 
 def _sse_with_id(handler, event, data, event_id=None):
+    """Emit one SSE event carrying a journal id.
+
+    The ``id:`` prefix is a write like any other, so it goes through the same
+    conversion boundary as the event body: a peer that vanished at the network
+    layer (a routing errno such as EHOSTUNREACH) must be classified as a
+    disconnect here too. Writing it directly let that OSError escape every
+    handler's ``except _CLIENT_DISCONNECT_ERRORS`` and turn a normal disconnect
+    of an id-carrying stream into a 500 plus traceback.
+    """
     if event_id:
-        handler.wfile.write(f"id: {event_id}\n".encode("utf-8"))
+        _sse_write(handler, f"id: {event_id}\n".encode("utf-8"))
     _sse(handler, event, data)
 
 

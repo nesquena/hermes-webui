@@ -169,5 +169,54 @@ class TestSSELoopSwallowsUnreachablePeer(unittest.TestCase):
         self.assertEqual(unsubscribed, [True])  # subscriber still released
 
 
+class TestSSEWithIdClassification(unittest.TestCase):
+    """The ``id:`` prefix is a write too, and must convert like the body.
+
+    An SSE frame that carries a journal id writes the id line *before* the
+    event body. Writing it directly left that first write outside the boundary,
+    so a vanished peer still produced the 500 this change exists to prevent.
+    """
+
+    def test_id_prefix_write_with_unreachable_peer_is_swallowed(self):
+        from api.routes import _sse_with_id
+
+        handler = MockSSEHandler(OSError(errno.EHOSTUNREACH, "No route to host"))
+        try:
+            _sse_with_id(handler, "token", {"text": "x"}, "42")
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
+        self.fail(
+            "EHOSTUNREACH escaped the id-prefix write: an id-carrying stream "
+            "would still log a 500 + traceback"
+        )
+
+    def test_id_prefix_real_oserror_still_propagates(self):
+        from api.routes import _sse_with_id
+
+        handler = MockSSEHandler(OSError(errno.ENOSPC, "No space left on device"))
+        with self.assertRaises(OSError) as ctx:
+            _sse_with_id(handler, "token", {"text": "x"}, "42")
+        self.assertNotIsInstance(ctx.exception, _CLIENT_DISCONNECT_ERRORS)
+        self.assertEqual(ctx.exception.errno, errno.ENOSPC)
+
+    def test_healthy_id_prefixed_write_is_unchanged(self):
+        from api.routes import _sse_with_id
+
+        handler = MockSSEHandler()
+        _sse_with_id(handler, "token", {"text": "x"}, "42")
+        self.assertEqual(handler.wfile.written[0], b"id: 42\n")
+        self.assertTrue(handler.wfile.written[1].startswith(b"event: token\n"))
+        self.assertIn(b'"text": "x"', handler.wfile.written[1])
+        self.assertEqual(handler.wfile.flushes, 2)
+
+    def test_without_event_id_no_prefix_is_written(self):
+        from api.routes import _sse_with_id
+
+        handler = MockSSEHandler()
+        _sse_with_id(handler, "token", {"text": "x"})
+        self.assertEqual(len(handler.wfile.written), 1)
+        self.assertTrue(handler.wfile.written[0].startswith(b"event: token\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
