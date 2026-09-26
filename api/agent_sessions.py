@@ -882,20 +882,52 @@ def read_importable_agent_session_rows(
                 if wanted == 'assigned':
                     return _result([])
             elif {'parent_session_id', 'end_reason'} <= session_cols:
-                continuation_checks = [
-                    "parent.end_reason IN ('compression', 'cli_close')",
-                    "(parent.source IS NULL OR child.source IS NULL "
-                    "OR LOWER(TRIM(parent.source)) = LOWER(TRIM(child.source)))",
-                ]
-                if 'ended_at' in session_cols:
-                    continuation_checks.append(
-                        "(parent.ended_at IS NULL OR child.started_at >= parent.ended_at)"
-                    )
-                if 'session_source' in session_cols:
-                    continuation_checks.append(
-                        "LOWER(TRIM(COALESCE(child.session_source, ''))) != 'fork'"
-                    )
-                continuation_where = " AND ".join(continuation_checks)
+                def _sql_is_continuation(
+                    parent_id,
+                    parent_source,
+                    parent_end_reason,
+                    parent_ended_at,
+                    child_source,
+                    child_started_at,
+                    child_session_source,
+                    child_model_config,
+                ):
+                    return int(_is_continuation_session(
+                        {
+                            'id': parent_id,
+                            'source': parent_source,
+                            'end_reason': parent_end_reason,
+                            'ended_at': parent_ended_at,
+                        },
+                        {
+                            'source': child_source,
+                            'started_at': child_started_at,
+                            'session_source': child_session_source,
+                            'model_config': child_model_config,
+                        },
+                    ))
+
+                # Keep project membership on the exact same continuation
+                # predicate as sidebar projection. Registering a read-only UDF
+                # avoids a second SQL approximation drifting on overlap,
+                # branch/delegate/reset markers, forks, or tool children.
+                conn.create_function(
+                    'webui_is_continuation_session',
+                    8,
+                    _sql_is_continuation,
+                )
+
+                def _lineage_col(alias: str, name: str) -> str:
+                    return f"{alias}.{name}" if name in session_cols else "NULL"
+
+                continuation_where = (
+                    "webui_is_continuation_session("
+                    "parent.id, parent.source, parent.end_reason, "
+                    f"{_lineage_col('parent', 'ended_at')}, child.source, child.started_at, "
+                    f"{_lineage_col('child', 'session_source')}, "
+                    f"{_lineage_col('child', 'model_config')}"
+                    ") = 1"
+                )
                 # An assignment anywhere in a compression lineage assigns the
                 # whole logical conversation, so both filters must key on the
                 # lineage, not the individual row: 'unassigned' is the exact

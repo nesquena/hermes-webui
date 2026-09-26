@@ -52,6 +52,8 @@ def _session(
     ended_at=None,
     end_reason=None,
     source="cli",
+    session_source=None,
+    model_config=None,
     messages=1,
     title=None,
 ):
@@ -63,6 +65,8 @@ def _session(
         "message_count": messages,
         "started_at": started_at,
         "source": source,
+        "session_source": session_source,
+        "model_config": model_config,
         "project_id": project_id,
         "parent_session_id": parent,
         "ended_at": ended_at,
@@ -78,8 +82,13 @@ def _write_state_db(db_path, rows, *, lineage_columns=True):
     ]
     lineage_ddl = ""
     if lineage_columns:
-        columns += ["parent_session_id", "ended_at", "end_reason"]
-        lineage_ddl = ", parent_session_id TEXT, ended_at REAL, end_reason TEXT"
+        columns += [
+            "parent_session_id", "ended_at", "end_reason", "session_source", "model_config",
+        ]
+        lineage_ddl = (
+            ", parent_session_id TEXT, ended_at REAL, end_reason TEXT, "
+            "session_source TEXT, model_config TEXT"
+        )
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "CREATE TABLE sessions ("
@@ -1211,6 +1220,129 @@ def test_project_ids_narrows_the_assigned_query_to_one_project(tmp_path):
     assert _ids(project_assignment="assigned", project_ids=("project-a",)) == ["a-1"]
     # Unknown ids are not an error, they simply select nothing.
     assert _ids(project_assignment="assigned", project_ids=("nope",)) == []
+
+
+def test_project_filter_uses_overlap_tolerance_for_old_compression_parent(tmp_path):
+    """An assigned empty tip must recover its old, importable parent conversation."""
+    db_path = tmp_path / "state.db"
+    rows = [
+        _session(
+            "old-parent",
+            BASE_TS,
+            ended_at=BASE_TS + 100,
+            end_reason="compression",
+        ),
+        _session(
+            "assigned-tip",
+            BASE_TS + 99,
+            parent="old-parent",
+            project_id="project-a",
+            messages=0,
+        ),
+    ]
+    rows.extend(
+        _session(f"recent-{index}", BASE_TS + 200 + index)
+        for index in range(12)
+    )
+    _write_state_db(db_path, rows)
+
+    recent = agent_sessions.read_importable_agent_session_rows(
+        db_path, limit=1, exclude_sources=None
+    )
+    assigned = agent_sessions.read_importable_agent_session_rows(
+        db_path,
+        limit=1,
+        exclude_sources=None,
+        project_assignment="assigned",
+        project_ids=("project-a",),
+    )
+
+    assert [row["id"] for row in recent] == ["recent-11"]
+    assert [row["id"] for row in assigned] == ["old-parent"]
+    assert assigned[0]["project_id"] == "project-a"
+
+
+def test_project_filter_does_not_extend_overlap_tolerance(tmp_path):
+    """A child outside the two-second overlap remains a separate conversation."""
+    db_path = tmp_path / "state.db"
+    _write_state_db(
+        db_path,
+        [
+            _session(
+                "assigned-parent",
+                BASE_TS,
+                project_id="project-a",
+                ended_at=BASE_TS + 100,
+                end_reason="compression",
+            ),
+            _session(
+                "early-child",
+                BASE_TS + 97,
+                parent="assigned-parent",
+            ),
+        ],
+    )
+
+    unassigned = agent_sessions.read_importable_agent_session_rows(
+        db_path,
+        limit=10,
+        exclude_sources=None,
+        project_assignment="unassigned",
+    )
+
+    assert [row["id"] for row in unassigned] == ["early-child"]
+
+
+@pytest.mark.parametrize(
+    ("boundary", "child_source", "model_config"),
+    [
+        ("branch", "cli", json.dumps({"_branched_from": "assigned-parent"})),
+        ("delegate", "cli", json.dumps({"_delegate_from": "assigned-parent"})),
+        ("reset", "cli", json.dumps({"_reset_from": "assigned-parent"})),
+        ("tool", "tool", None),
+    ],
+)
+def test_project_filter_keeps_non_continuation_children_unassigned(
+    tmp_path, boundary, child_source, model_config
+):
+    """Project membership must stop at every canonical lineage boundary."""
+    db_path = tmp_path / "state.db"
+    parent_source = None if boundary == "tool" else "cli"
+    _write_state_db(
+        db_path,
+        [
+            _session(
+                "assigned-parent",
+                BASE_TS,
+                source=parent_source,
+                project_id="project-a",
+                ended_at=BASE_TS + 1,
+                end_reason="compression",
+            ),
+            _session(
+                f"{boundary}-child",
+                BASE_TS + 2,
+                parent="assigned-parent",
+                source=child_source,
+                model_config=model_config,
+            ),
+        ],
+    )
+
+    def _ids(project_assignment):
+        return {
+            row["id"]
+            for row in agent_sessions.read_importable_agent_session_rows(
+                db_path,
+                limit=10,
+                exclude_sources=None,
+                project_assignment=project_assignment,
+            )
+        }
+
+    child_id = f"{boundary}-child"
+    assert child_id in _ids("unassigned")
+    assert child_id not in _ids("assigned")
 
 
 def test_project_ids_requires_the_assigned_filter(tmp_path):
