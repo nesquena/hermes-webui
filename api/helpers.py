@@ -559,12 +559,67 @@ _SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
 _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
 
 
+_LAST_REDACTION_GENERATION = None
+
+
+def get_redaction_pattern_generation() -> object:
+    """Return an immutable snapshot representing current active redaction patterns.
+
+    When `agent.redact` is present, returns an immutable tuple of registered
+    patterns so newly registered patterns immediately invalidate cached
+    transcripts. If `agent.redact` is unavailable, returns a static sentinel.
+    If the pattern registry cannot expose generation or raises an error,
+    returns None to indicate unknown/unverifiable state (disabling prefix cache reuse).
+    """
+    try:
+        import agent.redact as agent_redact
+        if hasattr(agent_redact, "get_redaction_generation"):
+            return agent_redact.get_redaction_generation()
+        if hasattr(agent_redact, "_plugin_patterns"):
+            return tuple(agent_redact._plugin_patterns())
+        if hasattr(agent_redact, "_PLUGIN_PREFIX_PATTERNS"):
+            return tuple(p for patterns in agent_redact._PLUGIN_PREFIX_PATTERNS.values() for p in patterns)
+        return ()
+    except ImportError:
+        return 0
+    except Exception:
+        return None
+
+
+def get_redaction_policy_snapshot() -> tuple[bool, object]:
+    """Single immutable snapshot of the active redaction policy.
+
+    Includes the enabled setting and the pattern registry generation.
+    Threaded through the settled-payload path so `load_settings()` and
+    the pattern registry are sampled once per call.
+    """
+    from api.config import load_settings
+    _enabled = bool(load_settings().get("api_redact_enabled", True))
+    _generation = get_redaction_pattern_generation()
+    return (_enabled, _generation)
+
+
+def _check_redaction_generation() -> None:
+    global _LAST_REDACTION_GENERATION
+    current = get_redaction_pattern_generation()
+    if current != _LAST_REDACTION_GENERATION:
+        _LAST_REDACTION_GENERATION = current
+        _redact_fn_lru.cache_clear()
+
+
 def _might_contain_sensitive_text(text: str) -> bool:
     """Cheap prefilter before the full agent+fallback redaction pass."""
     if not isinstance(text, str) or not text:
         return False
     if any(marker in text for marker in _SENSITIVE_CASE_MARKERS):
         return True
+    try:
+        import agent.redact as agent_redact
+        plugin_substrings = getattr(agent_redact, "_PREFIX_SUBSTRINGS", None)
+        if plugin_substrings and any(s in text for s in plugin_substrings):
+            return True
+    except Exception:
+        pass
     lower = text.lower()
     if any(marker in lower for marker in _SENSITIVE_LOWER_MARKERS):
         return True
@@ -592,9 +647,11 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
         _enabled = bool(load_settings().get("api_redact_enabled", True))
     if not _enabled:
         return text
+    _check_redaction_generation()
     if not _might_contain_sensitive_text(text):
         return text
     return _redact_fn_cached(text)
+
 
 
 _RASTER_IMAGE_DATA_URI_PREFIXES = (
@@ -1213,10 +1270,11 @@ def _copy_json_value(value):
     return value
 
 
-def redact_session_data(session_dict: dict) -> dict:
+def redact_session_data(session_dict: dict, *, _enabled: bool | None = None) -> dict:
     """Redact credentials in the public session response without mutation."""
-    from api.config import load_settings
-    _enabled = bool(load_settings().get("api_redact_enabled", True))
+    if _enabled is None:
+        from api.config import load_settings
+        _enabled = bool(load_settings().get("api_redact_enabled", True))
     if not isinstance(session_dict, dict):
         return {}
     result = {}
@@ -1250,6 +1308,7 @@ def redact_session_data_incremental(
     prefix_count: int,
     prefix_redacted: list,
     _active_turn_token: str | None = None,
+    _policy: tuple[bool, object] | None = None,
 ) -> dict:
     """Redact a session payload, reusing an already-redacted transcript prefix.
 
@@ -1269,10 +1328,13 @@ def redact_session_data_incremental(
     ``prefix_redacted`` length) falls back to a full redaction pass, so a
     stale cache can never leak unredacted content.
     """
-    from api.config import load_settings
+    if _policy is not None:
+        _enabled = bool(_policy[0])
+    else:
+        from api.config import load_settings
+        _enabled = bool(load_settings().get("api_redact_enabled", True))
     from api.process_event_utils import build_active_turn_token
 
-    _enabled = bool(load_settings().get("api_redact_enabled", True))
     if not isinstance(session_dict, dict):
         return {}
     if _active_turn_token is None:
@@ -1288,7 +1350,7 @@ def redact_session_data_incremental(
         and len(prefix_redacted) == prefix_count
     )
     if not prefix_ok:
-        return redact_session_data(session_dict)
+        return redact_session_data(session_dict, _enabled=_enabled)
     result = {}
     for key, value in session_dict.items():
         if key in _PUBLIC_MESSAGE_INTERNAL_FIELDS:

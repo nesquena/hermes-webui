@@ -5,6 +5,7 @@ Includes Sprint 10 cancel support via CANCEL_FLAGS.
 import base64
 import contextlib
 import contextvars
+import hashlib
 import json
 import logging
 import math
@@ -53,6 +54,7 @@ from api.config import (
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
 from api.helpers import (
+    get_redaction_policy_snapshot,
     redact_session_data,
     redact_session_data_incremental,
     scrub_internal_replay_fields,
@@ -219,19 +221,26 @@ def _estimate_redacted_bytes(messages: list) -> int:
     return total
 
 
+def _compute_message_fingerprint(message: object) -> str:
+    """Deterministic hash of a single message dictionary or object."""
+    try:
+        raw = json.dumps(message, sort_keys=True, default=str)
+    except Exception:
+        raw = repr(message)
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
+
+
 def _evict_done_redaction_cache_entries() -> None:
     """Enforce the bounded done-redaction cache (count + approximate bytes).
 
-    Called with ``_DONE_REDACTION_LOCK`` held. Never evicts the entry that was
-    just stored (the newest, at the tail): a single huge session may exceed
-    the byte budget by itself, and the budget only bounds *additional*
-    retained transcripts.
+    Called with ``_DONE_REDACTION_LOCK`` held. Enforces byte budget and entry
+    count across all cached sessions, including single-session transcripts.
     """
     total = sum(entry.get('approx_bytes', 0) for entry in _DONE_REDACTION_CACHE.values())
-    while (
+    while _DONE_REDACTION_CACHE_ORDER and (
         len(_DONE_REDACTION_CACHE_ORDER) > _DONE_REDACTION_CACHE_MAX
-        or (total > _DONE_REDACTION_CACHE_MAX_BYTES and len(_DONE_REDACTION_CACHE_ORDER) > 1)
-    ) and len(_DONE_REDACTION_CACHE_ORDER) > 1:
+        or total > _DONE_REDACTION_CACHE_MAX_BYTES
+    ):
         key = _DONE_REDACTION_CACHE_ORDER.pop(0)
         evicted = _DONE_REDACTION_CACHE.pop(key, None)
         if evicted:
@@ -246,36 +255,44 @@ def _redact_settled_session_payload(raw_session: dict, session: object) -> dict:
     previous settled turn, reusing the cached redacted prefix. Falls back to a
     full ``redact_session_data`` pass whenever the prefix cannot be proven
     unchanged (first turn, compaction, retry truncation, eviction, an
-    ``api_redact_enabled`` toggle, or a mismatched active-turn token). See
-    ``_DONE_REDACTION_CACHE``.
+    ``api_redact_enabled`` toggle, pattern registration change, or a mismatched
+    active-turn token). See ``_DONE_REDACTION_CACHE``.
     """
     session_id = getattr(session, 'session_id', None)
     profile = getattr(session, 'profile', None)
     messages = raw_session.get('messages')
+    policy_snapshot = get_redaction_policy_snapshot()
+    _enabled, _generation = policy_snapshot
     if not isinstance(messages, list) or not messages or not session_id:
-        return redact_session_data(raw_session)
+        return redact_session_data(raw_session, _enabled=_enabled)
     active_turn_token = build_active_turn_token(
         raw_session.get('active_stream_id'),
         raw_session.get('pending_started_at'),
     )
-    # Mirror redact_session_data's settings read exactly: a mid-session toggle
-    # of api_redact_enabled must invalidate the cached prefix, because a prefix
-    # produced under different settings (notably redaction disabled) can never
-    # be proven safe to reuse. Local import keeps this consistent with
-    # api/helpers.py and monkeypatchable in tests.
-    from api.config import load_settings
-    _enabled = bool(load_settings().get("api_redact_enabled", True))
+    can_cache = (_generation is not None)
     cache_key = (profile, session_id)
     with _DONE_REDACTION_LOCK:
         entry = _DONE_REDACTION_CACHE.get(cache_key)
-    cache_hit = (
-        entry is not None
-        and entry.get('enabled') == _enabled
-        and entry.get('active_turn_token') == active_turn_token
-        and 0 < entry['count'] <= len(messages)
-        and len(entry['redacted']) == entry['count']
-        and messages[entry['count'] - 1] == entry['boundary']
-    )
+
+    cache_hit = False
+    if can_cache and entry is not None:
+        if (
+            entry.get('policy') == policy_snapshot
+            and entry.get('active_turn_token') == active_turn_token
+            and 0 < entry.get('count', 0) <= len(messages)
+            and len(entry.get('redacted', [])) == entry['count']
+            and len(entry.get('fingerprints', [])) == entry['count']
+        ):
+            # Verify whole-prefix fingerprints to catch edits/mutations on earlier rows
+            expected_fps = entry['fingerprints']
+            match = True
+            for i in range(entry['count']):
+                if _compute_message_fingerprint(messages[i]) != expected_fps[i]:
+                    match = False
+                    break
+            if match:
+                cache_hit = True
+
     if cache_hit:
         prefix_count = entry['count']
         result = redact_session_data_incremental(
@@ -283,32 +300,49 @@ def _redact_settled_session_payload(raw_session: dict, session: object) -> dict:
             prefix_count=prefix_count,
             prefix_redacted=entry['redacted'],
             _active_turn_token=active_turn_token,
+            _policy=policy_snapshot,
         )
     else:
         prefix_count = 0
-        result = redact_session_data(raw_session)
-    # Refresh the cache with the transcript we just redacted. The byte
-    # estimate accumulates only the delta (O(delta) per turn, never O(transcript)).
+        result = redact_session_data(raw_session, _enabled=_enabled)
+
+    # Refresh the cache with the transcript we just redacted.
     redacted_messages = result.get('messages')
-    if isinstance(redacted_messages, list) and len(redacted_messages) == len(messages) and messages:
+    if (
+        can_cache
+        and isinstance(redacted_messages, list)
+        and len(redacted_messages) == len(messages)
+        and messages
+    ):
         delta_bytes = _estimate_redacted_bytes(redacted_messages[prefix_count:])
         prev_bytes = entry.get('approx_bytes', 0) if cache_hit else 0
-        new_entry = {
-            'count': len(messages),
-            'boundary': copy.deepcopy(messages[-1]),
-            # Fresh list object: downstream consumers may mutate the outgoing
-            # payload's messages list without corrupting the cached prefix.
-            'redacted': list(redacted_messages),
-            'active_turn_token': active_turn_token,
-            'enabled': _enabled,
-            'approx_bytes': prev_bytes + delta_bytes + 1024,
-        }
-        with _DONE_REDACTION_LOCK:
-            if cache_key in _DONE_REDACTION_CACHE_ORDER:
-                _DONE_REDACTION_CACHE_ORDER.remove(cache_key)
-            _DONE_REDACTION_CACHE_ORDER.append(cache_key)
-            _DONE_REDACTION_CACHE[cache_key] = new_entry
-            _evict_done_redaction_cache_entries()
+        entry_bytes = (prev_bytes + delta_bytes + 1024) if cache_hit else (_estimate_redacted_bytes(redacted_messages) + 1024)
+        if entry_bytes <= _DONE_REDACTION_CACHE_MAX_BYTES:
+            if cache_hit:
+                new_fingerprints = list(entry['fingerprints']) + [
+                    _compute_message_fingerprint(m) for m in messages[prefix_count:]
+                ]
+            else:
+                new_fingerprints = [_compute_message_fingerprint(m) for m in messages]
+            new_entry = {
+                'count': len(messages),
+                'fingerprints': new_fingerprints,
+                'redacted': list(redacted_messages),
+                'active_turn_token': active_turn_token,
+                'policy': policy_snapshot,
+                'approx_bytes': entry_bytes,
+            }
+            with _DONE_REDACTION_LOCK:
+                if cache_key in _DONE_REDACTION_CACHE_ORDER:
+                    _DONE_REDACTION_CACHE_ORDER.remove(cache_key)
+                _DONE_REDACTION_CACHE_ORDER.append(cache_key)
+                _DONE_REDACTION_CACHE[cache_key] = new_entry
+                _evict_done_redaction_cache_entries()
+        else:
+            with _DONE_REDACTION_LOCK:
+                if cache_key in _DONE_REDACTION_CACHE_ORDER:
+                    _DONE_REDACTION_CACHE_ORDER.remove(cache_key)
+                _DONE_REDACTION_CACHE.pop(cache_key, None)
     return result
 
 

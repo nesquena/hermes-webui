@@ -258,3 +258,106 @@ def test_cache_stays_bounded_across_sessions():
         assert len(_DONE_REDACTION_CACHE) <= _DONE_REDACTION_CACHE_MAX
         assert len(_DONE_REDACTION_CACHE_ORDER) <= _DONE_REDACTION_CACHE_MAX
         assert len(_DONE_REDACTION_CACHE) == len(_DONE_REDACTION_CACHE_ORDER)
+
+
+def test_non_boundary_message_mutation_invalidates_cache_and_matches_full_redaction(monkeypatch):
+    """Mutating message 0 or middle message invalidates the cache via whole-prefix fingerprinting.
+
+    Previous implementation only verified the last prefix row (boundary).
+    Editing earlier rows (e.g. compaction rewrite, retry-and-replace, or user edit)
+    must fail the whole-prefix fingerprint check, trigger a full redaction pass,
+    and match redact_session_data exactly without leaking stale unredacted content.
+    """
+    calls = _counting_projection(monkeypatch)
+
+    base = [_message("user", f"q{i}", ts=i) for i in range(15)]
+    session = _session(base)
+    raw = _session_payload_with_full_messages(session, tool_calls=[])
+    first = _redact_settled_session_payload(raw, session)
+    assert calls["n"] == 15
+    assert first == redact_session_data(raw)
+
+    # Mutate message 0 while keeping boundary (base[-1]) and count identical
+    mutated = [_message("user", f"q{i}", ts=i) for i in range(15)]
+    mutated[0] = _message("user", "mutated-start with sk-1234567890abcdef", ts=0)
+    session2 = _session(mutated)
+    raw2 = _session_payload_with_full_messages(session2, tool_calls=[])
+    calls["n"] = 0
+    second = _redact_settled_session_payload(raw2, session2)
+
+    assert calls["n"] == 15  # whole prefix invalidated, re-redacted
+    assert second == redact_session_data(raw2)
+    assert "sk-1234567890abcdef" not in str(second["messages"])
+    assert second["messages"][0]["content"] != "q0"
+
+    # Mutate middle message (index 7) while keeping boundary identical
+    mutated[7] = _message("user", "mutated-middle with sk-abcdef1234567890", ts=7)
+    session3 = _session(mutated)
+    raw3 = _session_payload_with_full_messages(session3, tool_calls=[])
+    calls["n"] = 0
+    third = _redact_settled_session_payload(raw3, session3)
+
+    assert calls["n"] == 15
+    assert third == redact_session_data(raw3)
+    assert "sk-abcdef1234567890" not in str(third["messages"])
+
+
+def test_runtime_pattern_registration_invalidates_cache_and_masks_token():
+    """Registering a new pattern in agent.redact invalidates the cached prefix."""
+    import pathlib
+    import sys
+    hermes_agent_dir = str(pathlib.Path(__file__).parents[2] / "hermes-agent")
+    if hermes_agent_dir not in sys.path:
+        sys.path.insert(0, hermes_agent_dir)
+    try:
+        import agent.redact as agent_redact
+    except ImportError:
+        pytest.skip("agent.redact not available")
+
+    agent_redact._reset_plugin_redaction_patterns()
+    try:
+        base = [
+            _message("user", "first message", ts=0),
+            _message("assistant", "customtok_xyz1234567890", ts=1),
+        ]
+        session = _session(base)
+        raw = _session_payload_with_full_messages(session, tool_calls=[])
+
+        # Cold pass without pattern: custom token is unredacted
+        first = _redact_settled_session_payload(raw, session)
+        assert "customtok_xyz1234567890" in str(first["messages"])
+
+        # Dynamically register custom pattern
+        accepted = agent_redact.register_redaction_patterns([r"customtok_[a-z0-9]{10,}"])
+        assert accepted == 1
+
+        # Append turn: cache must be invalidated due to pattern generation change
+        grown = base + [_message("user", "next question", ts=2)]
+        session2 = _session(grown)
+        raw2 = _session_payload_with_full_messages(session2, tool_calls=[])
+
+        second = _redact_settled_session_payload(raw2, session2)
+        assert second == redact_session_data(raw2)
+        # Token in the prefix must now be masked
+        assert "customtok_xyz1234567890" not in str(second["messages"])
+    finally:
+        agent_redact._reset_plugin_redaction_patterns()
+
+
+def test_single_session_exceeding_byte_budget_is_not_cached(monkeypatch):
+    """Enforce byte budget even when only a single session exists in cache."""
+    # Set very small budget (e.g. 64 bytes)
+    monkeypatch.setattr("api.streaming._DONE_REDACTION_CACHE_MAX_BYTES", 64)
+
+    base = [_message("user", f"long question with data {i} " * 5, ts=i) for i in range(10)]
+    session = _session(base)
+    raw = _session_payload_with_full_messages(session, tool_calls=[])
+
+    result = _redact_settled_session_payload(raw, session)
+    assert result == redact_session_data(raw)
+
+    with _DONE_REDACTION_LOCK:
+        # The single session exceeds 64 bytes and must not be retained in cache
+        assert len(_DONE_REDACTION_CACHE) == 0
+        assert len(_DONE_REDACTION_CACHE_ORDER) == 0
+
