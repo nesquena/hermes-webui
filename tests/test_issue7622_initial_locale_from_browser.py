@@ -92,7 +92,7 @@ global.localStorage = {stored_literal};
 
 // Mock document (i18n.js calls setLocale → document.documentElement.lang = ...)
 global.document = {{
-  documentElement: {{ set lang(_) {{}} }},
+  documentElement: {{ set lang(_) {{}}, dir: '', setAttribute: () => {{}} }},
   querySelectorAll: () => [],
   querySelector: () => null,
   addEventListener: () => {{}},
@@ -152,7 +152,7 @@ def _run(driver_src: str) -> str:
     """Run a driver in a fresh node subprocess and return stdout."""
     import tempfile
 
-    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
         f.write(driver_src)
         path = f.name
     try:
@@ -494,7 +494,7 @@ const ctx = {{
     setItem: (k, v) => {{ storage[k] = String(v); }},
   }},
   document: {{
-    documentElement: {{ lang: '' }},
+    documentElement: {{ lang: '', dir: '', setAttribute: () => {{}} }},
     querySelectorAll: () => [],
   }},
   navigator: {nav_literal},
