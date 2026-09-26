@@ -147,12 +147,11 @@ def test_concurrent_turns_keep_their_own_policies(tmp_path, monkeypatch):
     thread B flips the shared environ to profile B's export; A's reads must
     stay on A. Mirrors two interleaved streaming turns."""
     home_a = _seed_profile_home(tmp_path, "alpha", backend="local")
-    home_b = _seed_profile_home(tmp_path, "beta", backend="docker")
+    _seed_profile_home(tmp_path, "beta", backend="docker")  # sibling B (docker)
 
     monkeypatch.delenv("TERMINAL_ENV", raising=False)
     results = {}
     barrier = threading.Barrier(2)
-    _ = home_b  # B's export targets the environ only; B itself stays unscoped
 
     def turn_a():
         token = terminal_scope.install_profile_terminal_scope(home_a)
@@ -160,15 +159,19 @@ def test_concurrent_turns_keep_their_own_policies(tmp_path, monkeypatch):
             barrier.wait()  # both turns "start" together
             barrier.wait()  # B's export is now live
             results["a_backend"] = terminal_scope.terminal_env("TERMINAL_ENV", "local")
+            barrier.wait()  # A has recorded its result; B may now clean up
         finally:
             terminal_scope.reset_terminal_scope(token)
 
     def turn_b():
         # B's turn-start env export (runs outside the env lock, like the
-        # streaming path: agent runs unlocked).
+        # streaming path: agent runs unlocked). The export STAYS in the
+        # environ until A has recorded its read — removing it earlier would
+        # let the test pass on a cleaned environ even with no scope bound.
         barrier.wait()
-        os.environ["TERMINAL_ENV"] = "docker"
+        os.environ["TERMINAL_ENV"] = "docker"  # sibling B's export (docker)
         try:
+            barrier.wait()
             barrier.wait()
         finally:
             os.environ.pop("TERMINAL_ENV", None)
@@ -184,3 +187,34 @@ def test_concurrent_turns_keep_their_own_policies(tmp_path, monkeypatch):
         "concurrent local-profile turn resolved the docker-profile sibling's "
         f"environ export: {results.get('a_backend')!r}"
     )
+
+
+@pytest.mark.skipif(not HAS_SCOPE, reason="requires scope machinery")
+def test_streaming_helpers_bind_and_reset_the_scope(tmp_path, monkeypatch):
+    """The streaming binding path itself: _set_streaming_terminal_scope
+    installs the profile's policy and _reset_streaming_terminal_scope
+    restores the prior state (the reset semantics the streaming finally
+    relies on). Guards against the helpers silently becoming no-ops."""
+    from api.streaming import (
+        _set_streaming_terminal_scope,
+        _reset_streaming_terminal_scope,
+    )
+
+    home_a = _seed_profile_home(tmp_path, "alpha", backend="docker")
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+
+    scope_mod, token, installed = _set_streaming_terminal_scope(str(home_a))
+    try:
+        assert installed and token is not None, "helper must install the scope"
+        assert terminal_scope.terminal_env("TERMINAL_ENV", "local") == "docker", (
+            "bound scope must resolve the profile's own backend (docker)"
+        )
+    finally:
+        _reset_streaming_terminal_scope(scope_mod, token, installed)
+
+    # After reset the scope is gone: reads fall back to the environ.
+    assert terminal_scope.get_terminal_scope() is None
+
+    # Degenerate inputs stay no-ops, never raise.
+    assert _set_streaming_terminal_scope("") == (None, None, False)
+    _reset_streaming_terminal_scope(None, None, False)
