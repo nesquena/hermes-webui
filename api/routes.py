@@ -2973,6 +2973,8 @@ from api.config import (
     _parse_provider_qualified_model_id,
 )
 from api import config as api_config
+from api.goal_continuation_store import snapshot_pending_goal_continuations
+
 from api.helpers import (
     require,
     bad,
