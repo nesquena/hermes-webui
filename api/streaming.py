@@ -7215,6 +7215,75 @@ def _message_identity(msg):
     )
 
 
+# Fields that participate in the model-facing row comparison for an EXACT prefix
+# proof. These are the keys the Agent actually sent to the provider; comparing
+# them verbatim (no whitespace normalization, no 500-char truncation) is the
+# only way to prove a projected-history prefix. Restoration-only metadata
+# (id, timestamp, reasoning, attachments, _recovered, _partial, _error, etc.)
+# is display-side bookkeeping and is intentionally excluded.
+_EXACT_PREFIX_MODEL_FIELDS = (
+    'role',
+    'content',
+    'tool_calls',
+    'tool_call_id',
+    'name',
+    'refusal',
+    'reasoning_content',
+    'codex_reasoning_items',
+    'codex_message_items',
+    'finish_reason',
+)
+
+
+def _model_row_exact_equal(actual, expected):
+    """Return True iff ``actual`` matches ``expected`` on every model-facing field.
+
+    Used by the strict projected-prefix proof. Unlike ``_message_replay_key`` /
+    ``_message_identity`` — which normalize whitespace and truncate content at
+    500 characters — this comparison is byte-exact on the wire payload the
+    provider actually receives. Two rows that differ only in whitespace or
+    past character 500 are NOT equal here, so a sanitizer rewrite or a
+    transformer that drifts from the sent projection cannot be accepted as
+    the same prefix (#7237 review ownership finding 3, nesquena-hermes
+    2026-09-26).
+    """
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return False
+    for field in _EXACT_PREFIX_MODEL_FIELDS:
+        if actual.get(field) != expected.get(field):
+            return False
+    # ``api_content`` is the Agent replay sidecar: include it when the
+    # projection carried one. Both sides are absent-or-equal (the projection
+    # path sets it via ``preserve_api_content=True``; the Agent's return
+    # either keeps it or strips it in lockstep).
+    if 'api_content' in expected or 'api_content' in actual:
+        if actual.get('api_content') != expected.get('api_content'):
+            return False
+    return True
+
+
+def _messages_have_prefix_exact(messages, prefix):
+    """Strict exact-prefix check on model-facing row values.
+
+    Unlike ``_messages_have_prefix`` (which delegates to ``_message_replay_key``
+    and therefore normalizes whitespace and truncates at 500 characters), this
+    helper compares complete row values for every row in ``prefix``. A
+    sanitizer-rewritten historical row, a row that drifted in whitespace, or
+    a row whose content diverges after character 500 is rejected as a
+    non-match — the projected-prefix proof is the only authority for current-
+    turn suffix ownership, so it must be strict (#7237 review ownership
+    finding 3, nesquena-hermes 2026-09-26).
+    """
+    messages = list(messages or [])
+    prefix = list(prefix or [])
+    if len(messages) < len(prefix):
+        return False
+    for idx, expected in enumerate(prefix):
+        if not _model_row_exact_equal(messages[idx], expected):
+            return False
+    return True
+
+
 def _messages_have_prefix(messages, prefix, *, key_fn=None):
     key_fn = key_fn or _message_identity
     if len(messages or []) < len(prefix or []):
@@ -7391,23 +7460,47 @@ def _proven_current_turn_suffix(projected_history, result_messages):
     authoritative raw history and duplicated into the next model context
     (#7237 review data-regression finding, nesquena-hermes 2026-09-23).
 
+    The supplied ``projected_history`` distinguishes three states that the
+    previous implementation collapsed into one:
+
+    * ``None`` — caller did not supply a projection. No proof available;
+      return ``None`` so the caller fails closed.
+    * ``[]`` — caller supplied an EXPLICITLY EMPTY projection. The Agent was
+      sent no history, so the FULL returned list is this turn's output (it
+      may be ``[]`` if the turn produced no rows). This is valid and
+      authoritative: when non-empty raw history sanitizes to ``[]``
+      (reasoning-only, error, empty-partial, or orphan rows) the Agent was
+      sent nothing and the entire return is the current-turn suffix
+      (#7237 review ownership finding 2, nesquena-hermes 2026-09-26).
+    * non-empty list — caller supplied a projection. Use the STRICT
+      exact-prefix check (no whitespace normalization, no 500-char
+      truncation — compare complete model-facing row values) so two rows
+      that differ only in whitespace or after character 500 cannot be
+      accepted as the same sent projection (#7237 review ownership finding
+      3, nesquena-hermes 2026-09-26).
+
     The projection length gates how many rows are compared, so a stale
     ``previous_context`` can never widen the match: only rows the Agent was
     actually sent count.
 
     Returns None when no suffix is proven — the caller must then fail closed
-    and append NOTHING (empty suffix included: there is no current-turn output
-    worth persisting, and guessing one would append unproven rows).
+    and append NOTHING. An empty list return value is reserved for the
+    ``[]`` projection / empty-current-turn case and means "the proven suffix
+    is empty", which the caller appends as zero rows.
     """
-    projection = list(projected_history or [])
-    result_messages = list(result_messages or [])
-    if not projection or len(result_messages) <= len(projection):
+    if projected_history is None:
+        # Not supplied: no proof available.
         return None
-    if not _messages_have_prefix(
-        result_messages,
-        projection,
-        key_fn=_message_replay_key,
-    ):
+    projection = list(projected_history)
+    result_messages = list(result_messages or [])
+    if not projection:
+        # Explicitly empty: the Agent was sent no history. The full returned
+        # list (if any) is the current-turn suffix. An empty result is also
+        # valid — the turn produced no rows.
+        return list(result_messages)
+    if len(result_messages) <= len(projection):
+        return None
+    if not _messages_have_prefix_exact(result_messages, projection):
         return None
     # Proven: everything past the sent projection is this turn's output.
     # It is appended verbatim — the current turn's user row can legitimately
@@ -7518,6 +7611,43 @@ def _dedupe_replayed_context_messages(
             _is_context_compression_marker(m) for m in result_messages
         )
         if not _has_compression_marker:
+            # When the caller threaded ``projected_history`` through, it is the
+            # most authoritative ownership signal we have. The Agent's replay
+            # guarantees the projection we sent is verbatim at the head of the
+            # returned list — resolve that proof FIRST. A prompt match inside
+            # the projected prefix must not become current-turn ownership: if
+            # a sanitizer-rewritten historical user row happens to equal
+            # ``msg_text`` while the real current user row is transformed and
+            # a later synthetic user also does not match, the prompt scan
+            # would otherwise locate the historical row and slice from it,
+            # appending the sanitized historical projection beside the
+            # authoritative raw history and recreating the duplication this
+            # round was intended to close (#7237 review ownership finding 1,
+            # nesquena-hermes 2026-09-26). When the projection is supplied
+            # but is not a verbatim prefix of the returned list, we have no
+            # ownership signal and the settle fails closed.
+            if projected_history is not None:
+                _proven_suffix = _proven_current_turn_suffix(
+                    projected_history, result_messages,
+                )
+                if _proven_suffix is not None:
+                    logger.info(
+                        "Prefix mismatch without compression and projected "
+                        "history supplied: keeping raw pre-turn context "
+                        "(%d rows) + %d proven current-turn row(s) from the "
+                        "projected replay; sanitized historical projection "
+                        "dropped (#7237 ownership finding 1)",
+                        len(previous_context), len(_proven_suffix),
+                    )
+                    return list(previous_context) + list(_proven_suffix)
+                logger.info(
+                    "Prefix mismatch without compression and projected "
+                    "history supplied but not a verbatim prefix: keeping raw "
+                    "pre-turn context (%d rows) verbatim; no unproven "
+                    "historical rows appended (#7237 ownership finding 1)",
+                    len(previous_context),
+                )
+                return list(previous_context)
             _boundary_idx = _find_active_turn_checkpoint_index(
                 result_messages, previous_context, active_turn_identity, msg_text,
             )
@@ -7565,18 +7695,6 @@ def _dedupe_replayed_context_messages(
             # exact projection sent to the Agent is threaded through, only rows
             # proven to belong to the current turn may be appended; otherwise
             # nothing is appended at all (fail closed).
-            _proven_suffix = _proven_current_turn_suffix(
-                projected_history, result_messages,
-            )
-            if _proven_suffix is not None:
-                logger.info(
-                    "Prefix mismatch without compression and no proven current-turn "
-                    "boundary: keeping raw pre-turn context (%d rows) + %d proven "
-                    "current-turn row(s) from the projected replay; sanitized "
-                    "historical projection dropped (#7237 data-regression finding)",
-                    len(previous_context), len(_proven_suffix),
-                )
-                return list(previous_context) + _proven_suffix
             logger.info(
                 "Prefix mismatch without compression and no proven current-turn "
                 "boundary nor projected-history prefix: keeping raw pre-turn "

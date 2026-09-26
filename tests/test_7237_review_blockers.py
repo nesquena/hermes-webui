@@ -1207,3 +1207,429 @@ class TestVerificationSupersessionSurvivorIndex:
         assert len(out) == 1
         assert out[0]["content"] == "final answer"
         assert not out[0].get("tool_calls")
+
+
+class TestReGate20260926OwnershipFindings:
+    """#7237 re-gate (nesquena-hermes 2026-09-26) three remaining ownership
+    defects, all in ``_dedupe_replayed_context_messages`` / its projected-
+    prefix proof helper.
+
+    1. *Historical repeated prompt can still win before the projected-prefix
+       proof runs.* The no-compression path used to scan the full returned
+       conversation for ``msg_text`` and only THEN consult
+       ``_proven_current_turn_suffix``. If a sanitizer-rewritten historical
+       user row happened to equal ``msg_text`` while the real current user
+       row was transformed and a later synthetic user also did not match,
+       the scan selected the historical row and the sanitized historical
+       projection was appended beside the authoritative raw history —
+       recreating the duplication this round was intended to close. Fix:
+       when ``projected_history`` is supplied, resolve that authority first.
+       If the projection is a verbatim prefix, append exactly the returned
+       suffix; a prompt match inside that historical prefix must NOT
+       become current-turn ownership.
+
+    2. *Explicitly empty projected history treated as "not supplied".* The
+       previous implementation collapsed ``None`` and ``[]`` via
+       ``list(projected_history or [])`` and rejected both with
+       ``if not projection``. An empty projection is valid and authoritative
+       when non-empty raw history sanitizes to ``[]`` (reasoning-only,
+       error, empty-partial, or orphan rows). In that case the Agent was
+       sent no history and the FULL returned list is the current-turn
+       suffix. The previous code instead reached the fail-closed return and
+       dropped the entire transformed current turn. Fix: distinguish
+       ``None`` (not supplied) from ``[]`` (supplied empty) — ``[]`` proves
+       the entire returned list is the suffix.
+
+    3. *The claimed exact prefix check is NOT exact.* ``_proven_current_turn_suffix``
+       delegated to ``_message_replay_key`` / ``_message_identity``, which
+       normalize whitespace and truncate content at 500 characters. Two
+       model-facing rows that differ only in whitespace or after character
+       500 were therefore accepted as the same sent projection, granting
+       ownership to an unproven suffix. Fix: compare complete model-facing
+       row values (role, content, tool_calls, tool_call_id, name, refusal,
+       reasoning_content, codex_*/finish_reason, api_content) — NOT the
+       replay/dedup key.
+
+    Each regression below pins the defect and is built from the REAL
+    ``_sanitize_messages_for_agent(raw)`` so the projection genuinely
+    diverges from the raw history in the way the production shape does.
+    """
+
+    # --- helpers ---------------------------------------------------------
+
+    PROMPT = "please refactor streaming.py"
+
+    def _historical_user_matching_prompt_fixture(self):
+        """Raw history where the sanitizer rewrites consecutive assistant
+        rows into a single merged row AND the prompt appears in a historical
+        user row. The merge means the projection no longer matches the raw
+        tail by replay key, so the previous prompt-scan path would leave the
+        sanitized merged rows in the slice as a residual duplication.
+
+        The sanitizer merges ``[asst(call k1), asst("progress")]`` into a
+        single ``asst(call k1, "progress")`` row, so the projection's row
+        count is one less than the raw context's. The replay-key tail-match
+        in ``_strip_replayed_prefix`` therefore cannot strip the rewritten
+        projection rows after a prompt-scan boundary inside the projection,
+        and the sanitized historical rows are appended beside the raw
+        history — the exact defect finding 1 describes.
+        """
+        raw = [
+            {"role": "user", "content": "first question", "timestamp": 1.0},
+            {"role": "assistant", "content": "first answer", "timestamp": 2.0},
+            {"role": "user", "content": self.PROMPT, "timestamp": 3.0},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [_call("k1")],
+                "timestamp": 4.0,
+            },
+            {"role": "assistant", "content": "progress", "timestamp": 4.5},
+            {"role": "tool", "tool_call_id": "k1", "content": "tool output", "timestamp": 5.0},
+            {"role": "assistant", "content": "second answer", "timestamp": 6.0},
+        ]
+        projected = _sanitize_messages_for_agent([copy.deepcopy(m) for m in raw])
+        # Sanity: the sanitizer really merged the consecutive assistant
+        # rows, so the projection is shorter than the raw context. Without
+        # that divergence the replay-key strip would mask the defect.
+        assert len(projected) < len(raw), (
+            "fixture premise: the sanitizer must rewrite the raw context "
+            "so the projection diverges from the raw tail; otherwise the "
+            "defect is masked by _strip_replayed_prefix"
+        )
+        # The projection still carries the historical user row whose content
+        # equals the prompt — the row the old prompt scan would mis-pick.
+        assert any(
+            m.get("role") == "user" and m.get("content") == self.PROMPT
+            for m in projected
+        ), "fixture premise: the projection must contain a user row equal to msg_text"
+        return raw, projected
+
+    def _current_turn_transformed_real_user(self):
+        """Current turn: a transformed real user row, intervening assistant
+        / tool output, then a later synthetic continuation user row the
+        agent loop appended after the real turn. None of the user rows
+        match ``self.PROMPT`` via the strict match path, so a prompt scan
+        against the full returned list would fall through to the historical
+        match — which is exactly the defect."""
+        return [
+            {"role": "user", "content": "Mid-turn correction (steer): " + self.PROMPT},
+            {"role": "assistant", "content": "worked on the refactor"},
+            {"role": "assistant", "content": "", "tool_calls": [_call("k2")]},
+            {"role": "tool", "tool_call_id": "k2", "content": "refactor output"},
+            {"role": "user", "content": "Continue from where you stopped"},
+            {"role": "assistant", "content": "synthetic answer"},
+        ]
+
+    # --- finding 1: historical repeated prompt must not win --------------
+
+    def test_historical_repeated_prompt_does_not_win_when_projection_supplied(self):
+        """Direct regression for ownership finding 1 (2026-09-26).
+
+        The projection is supplied, the projection is a verbatim prefix of
+        the returned list, and the projection contains a historical user
+        row equal to ``msg_text`` while the real current user row is
+        transformed. The settle must resolve the projection authority
+        FIRST and append exactly the returned suffix — the sanitized
+        historical projection must not be appended beside the raw history
+        as a duplicated residual.
+        """
+        raw, projected = self._historical_user_matching_prompt_fixture()
+        current_turn = self._current_turn_transformed_real_user()
+        result_messages = list(projected) + [copy.deepcopy(m) for m in current_turn]
+
+        # Sanity: the prompt scan would mis-pick the historical user row
+        # if it were allowed to run before the projection proof.
+        scan_idx = _looks_like_current_user_turn_scan(result_messages, self.PROMPT)
+        assert scan_idx is not None, (
+            "fixture premise: the prompt scan must find the historical user "
+            "row inside the projection so the defect is exercisable"
+        )
+        assert scan_idx < len(projected), (
+            "fixture premise: the scan must locate the row inside the "
+            "projected prefix, not in the real current turn"
+        )
+
+        settled = _dedupe_replayed_context_messages(
+            list(raw), list(result_messages), self.PROMPT, None,
+            projected_history=list(projected),
+        )
+
+        # The settle must be exactly the raw pre-turn context plus the real
+        # current-turn suffix. No sanitized historical row may ride along.
+        assert settled == list(raw) + current_turn, (
+            "with the projection supplied and verbatim, the settle must be "
+            "raw context + the proven current-turn suffix; a prompt match "
+            "inside the projected historical prefix must not become "
+            "current-turn ownership (#7237 ownership finding 1, "
+            "nesquena-hermes 2026-09-26)"
+        )
+        # Belt and braces: the sanitized historical merged assistant row
+        # must not appear as a residual in the settle.
+        sanitized_merged_signatures = [
+            m for m in settled
+            if m.get("role") == "assistant"
+            and any(tc.get("id") == "k1" for tc in (m.get("tool_calls") or []))
+            and m.get("content") == "progress"
+        ]
+        assert sanitized_merged_signatures == [], (
+            "the sanitizer-merged historical assistant row must not be "
+            "appended beside the raw history; the projection proof runs "
+            "first so the historical prefix is never sliced into the "
+            "current-turn delta"
+        )
+
+    def test_historical_repeated_prompt_full_settle_preserves_raw_history(self):
+        """Full ``_settle_result_messages`` regression for finding 1: the
+        persisted context is the raw pre-turn history plus the real
+        current-turn suffix only, with no projected historical residual.
+        """
+        raw, projected = self._historical_user_matching_prompt_fixture()
+        current_turn = self._current_turn_transformed_real_user()
+        result_messages = list(projected) + [copy.deepcopy(m) for m in current_turn]
+
+        session = SimpleNamespace(
+            messages=[copy.deepcopy(m) for m in raw],
+            context_messages=[copy.deepcopy(m) for m in raw],
+            truncation_watermark=None,
+        )
+        _settle_result_messages(
+            session,
+            [copy.deepcopy(m) for m in raw],
+            [copy.deepcopy(m) for m in raw],
+            result_messages,
+            self.PROMPT,
+            "webui",
+            None,
+            list(projected),
+        )
+        persisted = session.context_messages
+        expected_tail = [copy.deepcopy(m) for m in current_turn]
+        assert [(m.get("role"), m.get("content")) for m in persisted] == [
+            (m.get("role"), m.get("content")) for m in list(raw) + expected_tail
+        ], (
+            "full settle must persist raw history + proven current-turn "
+            "suffix only; a historical residual from a mis-picked prompt "
+            "match is the #7237 ownership finding 1 defect"
+        )
+
+    # --- finding 2: explicitly empty projection is authoritative --------
+
+    def test_empty_projection_proves_full_returned_list_is_suffix(self):
+        """Direct regression for ownership finding 2 (2026-09-26).
+
+        Non-empty raw history that sanitizes to ``[]`` (reasoning-only,
+        error, empty-partial, or orphan rows) means the Agent was sent no
+        history. An explicitly supplied ``[]`` projection is therefore
+        authoritative: the FULL returned list is the current-turn suffix.
+        The previous implementation collapsed ``None`` and ``[]`` and
+        dropped the entire current turn. The fix returns the raw context
+        plus the full returned list.
+        """
+        # A history whose every row is dropped by the outbound sanitizer:
+        # a reasoning-only assistant row (no visible content, no tool calls)
+        # and an orphan tool row whose call was never made. Both are
+        # dropped, so the projection is the explicit empty list.
+        raw = [
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "hidden thought",
+                "timestamp": 1.0,
+            },
+            {"role": "tool", "tool_call_id": "ghost", "content": "orphan", "timestamp": 2.0},
+        ]
+        projected = _sanitize_messages_for_agent([copy.deepcopy(m) for m in raw])
+        assert projected == [], (
+            "fixture premise: non-empty raw history that sanitizes to [] "
+            "is the exact shape the empty-projection branch must handle"
+        )
+
+        current_turn = [
+            {"role": "user", "content": self.PROMPT},
+            {"role": "assistant", "content": "fresh answer"},
+        ]
+        result_messages = list(projected) + [copy.deepcopy(m) for m in current_turn]
+        # The Agent return is the empty projection + the current turn.
+        assert result_messages == [copy.deepcopy(m) for m in current_turn]
+
+        settled = _dedupe_replayed_context_messages(
+            list(raw), list(result_messages), self.PROMPT, None,
+            projected_history=list(projected),  # explicit []
+        )
+        # The full returned list survives as the current-turn suffix.
+        assert settled == list(raw) + current_turn, (
+            "an explicit [] projection proves the full returned list is the "
+            "current-turn suffix; the previous code dropped the entire "
+            "current turn (#7237 ownership finding 2, nesquena-hermes "
+            "2026-09-26)"
+        )
+
+    def test_empty_projection_with_empty_result_returns_raw_only(self):
+        """Edge case for finding 2: the projection is ``[]`` and the
+        Agent also returned ``[]`` (the current turn produced no rows).
+        The settle returns the empty result list — the early-return
+        contract for an empty result is preserved, and there is no
+        current-turn suffix to append. This pins that the
+        ``[]``-projection branch does not accidentally turn an empty
+        result into a wholesale-replace of the raw context.
+        """
+        raw = [
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "hidden thought",
+                "timestamp": 1.0,
+            },
+        ]
+        projected = _sanitize_messages_for_agent([copy.deepcopy(m) for m in raw])
+        assert projected == []
+
+        settled = _dedupe_replayed_context_messages(
+            list(raw), [], self.PROMPT, None,
+            projected_history=list(projected),  # explicit []
+        )
+        assert settled == [], (
+            "an explicit [] projection with an empty result returns the "
+            "empty list (the early-return contract); the raw context is "
+            "preserved only when there is something to settle"
+        )
+
+    def test_none_projection_still_fails_closed(self):
+        """``None`` (not supplied) must remain a no-proof signal: when
+        no prompt-derived boundary is proven either, the settle fails
+        closed to the raw context alone. This pins the ``None`` vs
+        ``[]`` distinction introduced in finding 2.
+        """
+        raw = [
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "hidden thought",
+                "timestamp": 1.0,
+            },
+        ]
+        projected = _sanitize_messages_for_agent([copy.deepcopy(m) for m in raw])
+        assert projected == []
+        # A transformed real user row (steer preamble) and a later
+        # synthetic continuation user row — neither matches the strict
+        # prompt, so the scan returns None and the no-projection branch
+        # must fail closed.
+        result_messages = list(projected) + [
+            {"role": "user", "content": "Mid-turn correction (steer): " + self.PROMPT},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "Continue from where you stopped"},
+            {"role": "assistant", "content": "synthetic answer"},
+        ]
+        # No projection threaded — the settle has no ownership signal and
+        # must fail closed to the raw context alone.
+        settled = _dedupe_replayed_context_messages(
+            list(raw), list(result_messages), self.PROMPT, None,
+        )
+        assert settled == list(raw), (
+            "without a threaded projection and without a prompt-derived "
+            "boundary the settle must fail closed; the [] vs None "
+            "distinction in finding 2 must not turn 'not supplied' into "
+            "'supplied empty'"
+        )
+
+    # --- finding 3: strict exact prefix check ---------------------------
+
+    def test_prefix_check_fails_closed_when_rows_differ_after_500_chars(self):
+        """Direct regression for ownership finding 3 (2026-09-26).
+
+        Two model-facing rows that differ only AFTER character 500 must
+        not be accepted as the same sent projection. The previous
+        ``_message_identity`` truncated content at 500 characters, so the
+        drift past that point was invisible to the prefix proof. The new
+        strict check compares complete model-facing row values and must
+        fail closed in that case.
+
+        The end-to-end settle path is not exercised here: the replay-key
+        prefix check (``_messages_have_prefix`` with ``_message_replay_key``)
+        ALSO truncates at 500, so in this fixture it accepts the drift
+        and the settle takes the "result is a prefix of previous" path
+        — a separate code path that does not consult
+        ``_proven_current_turn_suffix``. The direct assertion below
+        proves the strict proof helper itself rejects the drift, which
+        is the exact fix finding 3 requires.
+        """
+        long_content = "x" * 500
+        projected = [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": long_content},
+        ]
+        # The returned list's assistant row diverges past character 500 —
+        # the truncated replay key would have matched, the strict check
+        # must not.
+        result_messages = [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": long_content + "TAIL_DRIFT"},
+            {"role": "user", "content": "next question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        # Old behavior: _message_replay_key truncates at 500 → match.
+        from api.streaming import _message_replay_key
+        assert _message_replay_key(projected[1]) == _message_replay_key(result_messages[1]), (
+            "fixture premise: the replay key must accept the post-500 "
+            "drift so the strict check is the only thing standing between "
+            "us and a false positive"
+        )
+        # New behavior: strict proof returns None — no suffix proven.
+        from api.streaming import _proven_current_turn_suffix
+        assert _proven_current_turn_suffix(projected, result_messages) is None, (
+            "strict exact prefix check must reject rows that diverge past "
+            "character 500; the truncated replay key would have accepted "
+            "them (#7237 ownership finding 3, nesquena-hermes 2026-09-26)"
+        )
+
+    def test_prefix_check_fails_closed_when_rows_differ_in_whitespace(self):
+        """Direct regression for ownership finding 3 (2026-09-26).
+
+        Two model-facing rows that differ only in whitespace must not be
+        accepted as the same sent projection. The previous
+        ``_message_identity`` normalized whitespace via
+        ``" ".join(text.split())``, so a row with a double space was
+        indistinguishable from one with a single space. The new strict
+        check must fail closed in that case.
+        """
+        projected = [
+            {"role": "user", "content": "hello world"},
+        ]
+        result_messages = [
+            {"role": "user", "content": "hello  world"},  # double space
+            {"role": "assistant", "content": "answer"},
+        ]
+        from api.streaming import _message_replay_key
+        assert _message_replay_key(projected[0]) == _message_replay_key(result_messages[0]), (
+            "fixture premise: the replay key normalizes whitespace so the "
+            "drift is invisible to it; the strict check is the only thing "
+            "that can fail closed"
+        )
+        from api.streaming import _proven_current_turn_suffix
+        assert _proven_current_turn_suffix(projected, result_messages) is None, (
+            "strict exact prefix check must reject rows that differ only "
+            "in whitespace; the normalized replay key would have accepted "
+            "them (#7237 ownership finding 3, nesquena-hermes 2026-09-26)"
+        )
+
+    def test_strict_prefix_still_accepts_verbatim_projection(self):
+        """Positive control for finding 3: when the projection IS a
+        verbatim prefix, the strict check still returns the suffix.
+        The new check must not over-reject legitimate exact matches.
+        """
+        projected = [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+        ]
+        current_turn = [
+            {"role": "user", "content": "second question"},
+            {"role": "assistant", "content": "second answer"},
+        ]
+        result_messages = list(projected) + [copy.deepcopy(m) for m in current_turn]
+        from api.streaming import _proven_current_turn_suffix
+        suffix = _proven_current_turn_suffix(projected, result_messages)
+        assert suffix == current_turn, (
+            "strict exact prefix check must still accept a verbatim "
+            "projection and return the proven current-turn suffix"
+        )
