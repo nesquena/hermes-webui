@@ -893,7 +893,14 @@ def test_busy_path_intercepts_stop_before_mode_routing():
     mode_idx = MESSAGES_JS.find("const defaultMessageMode=", busy_idx)
     assert mode_idx != -1
     busy_block = MESSAGES_JS[busy_idx:mode_idx]
-    assert "['steer','interrupt','queue','terminal','goal','yolo','stop']" in busy_block
+    # Assert /stop's membership rather than the exact list literal, so adding
+    # another passthrough command (#6597 added /btw and /background) does not
+    # break this test.
+    passthrough = re.search(
+        r"if\(_pc&&\[([^\]]*)\]\.includes\(_pc\.name\)\)", busy_block
+    )
+    assert passthrough, "busy-command passthrough list not found in messages.js"
+    assert "'stop'" in passthrough.group(1)
     assert "cmdStop" in busy_block or "COMMANDS.find(c=>c.name===_pc.name)" in busy_block
 
 
