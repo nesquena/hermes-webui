@@ -7061,6 +7061,10 @@ def _minimal_static_models_catalog() -> dict:
             "configured_model_badges": {},
             "groups": groups,
             "aliases": {},
+            # Marker: this catalog lists only the active provider's default
+            # model. Ownership decisions must not treat it as complete
+            # discovery evidence (#7585 review).
+            "catalog_minimal": True,
         })
     except Exception:
         logger.debug("minimal static models catalog build failed", exc_info=True)

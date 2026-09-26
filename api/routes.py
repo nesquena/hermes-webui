@@ -6786,6 +6786,55 @@ def _catalog_group_owns_exact_model(group: dict, model: str) -> bool:
     return False
 
 
+def _stored_provider_can_legitimately_own_model(stored_provider: str) -> bool:
+    """Return True when a catalog absence is not evidence against ownership.
+
+    Self-hosted, plugin, and custom-endpoint providers serve arbitrary
+    local/external models that never appear in any catalog (vLLM or
+    llama-server behind a named ``custom_providers`` entry need no API key),
+    so a missing model there does not prove the stored provider is stale
+    (#7585 review; #5731 fail-safe).
+    """
+    provider = str(stored_provider or "").strip().lower()
+    if provider in _SELF_HOSTED_PROVIDER_IDS:
+        return True
+    if provider == "custom" or provider.startswith("custom:"):
+        return True
+    try:
+        from api.config import _named_custom_provider_slug_for_provider
+
+        if _named_custom_provider_slug_for_provider(provider):
+            return True
+    except Exception:
+        return True
+    try:
+        return bool(is_plugin_model_provider(provider))
+    except Exception:
+        return True
+
+
+def _catalog_evidence_is_incomplete(catalog: dict, groups: list[dict]) -> bool:
+    """Return True when the catalog cannot prove anything about ownership.
+
+    A cold/emergency minimal catalog lists only the active provider's
+    default model, and an errored group never discovered anything —
+    neither may clear a stale provider (#7585 and its review).
+    """
+    if catalog.get("catalog_minimal"):
+        return True
+    for group in groups:
+        if group.get("models_endpoint_error"):
+            return True
+    return False
+
+
+def _stored_provider_has_live_credential(stored_provider: str) -> bool:
+    try:
+        return bool(provider_has_usable_credential(stored_provider))
+    except Exception:
+        return True
+
+
 def _repair_foreign_session_model_provider(
     session,
     *,
@@ -6834,11 +6883,26 @@ def _repair_foreign_session_model_provider(
         if str(group.get("provider_id") or "").strip().lower() == stored_provider
     ]
     if (
-        not stored_groups
-        or any(group.get("models_endpoint_error") for group in stored_groups)
+        any(group.get("models_endpoint_error") for group in stored_groups)
         or any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups)
     ):
         return resolved_provider
+    if not stored_groups:
+        # A missing stored group used to preserve the lane unconditionally,
+        # which let a stale catalog-backed provider (e.g. "openrouter" left on
+        # a session after moving to another provider without an OpenRouter
+        # key) survive into every agent construction and re-trigger paid
+        # fallback probes (#7585). A catalog-backed provider is expected to
+        # have a group even with zero credentials, so its absence plus
+        # complete catalog evidence proves non-ownership. Self-hosted/plugin
+        # providers may legitimately own unlisted models, and an incomplete
+        # or credential-live stored lane stays fail-safe preserved (#5731).
+        if _stored_provider_can_legitimately_own_model(stored_provider):
+            return resolved_provider
+        if _catalog_evidence_is_incomplete(catalog, groups):
+            return resolved_provider
+        if _stored_provider_has_live_credential(stored_provider):
+            return resolved_provider
     owners = [
         group
         for group in groups
@@ -11077,10 +11141,13 @@ from api.run_journal import (
 )
 from api.todo_state import attach_todo_state
 from api.providers import (
+    _SELF_HOSTED_PROVIDER_IDS,
     get_providers,
     get_provider_quota,
     get_provider_cost_history,
+    is_plugin_model_provider,
     provider_has_process_wakeup_recovery_credential,
+    provider_has_usable_credential,
     set_provider_key,
     remove_provider_key,
 )
