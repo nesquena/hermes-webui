@@ -115,7 +115,7 @@ import yaml
 print('probe ok')"
 ```
 
-If you must stay on an older revision, point `HERMES_WEBUI_PYTHON` at a wrapper that exports the generation's `site-packages` on `PYTHONPATH` before `exec`-ing the managed interpreter: the wrapper is started with the caller's environment intact, so the old probe order works through it.
+If you must stay on an older revision, point `HERMES_WEBUI_PYTHON` at a wrapper that sets `PYTHONPATH` to the generation's `site-packages` and then `exec`s the managed interpreter. This survives the relaunch because it prevents it: the probe is handed a process that is already the managed interpreter and already carries the dependency path, so `prepare_launch()` finds the interpreter it would otherwise have re-executed into and no `-I` relaunch happens — the old probe order (`import yaml` first) then succeeds. The wrapper must resolve the interpreter from `~/.hermes/bin/hermes` rather than hard-coding a version, so it keeps working across updates.
 
 ### When to file a bug
 
