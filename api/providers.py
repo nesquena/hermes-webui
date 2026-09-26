@@ -11,8 +11,11 @@ import atexit
 import base64
 import copy
 import hashlib
+import http.client
+import ipaddress
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -20,12 +23,14 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:  # POSIX-only; Windows-style environments fall back to process-local locking.
     import fcntl
@@ -761,6 +766,9 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     # show the groups as configured while chat fails the no-key path.
     "opencode-zen": ("OPENCODE_API_KEY",),
     "opencode-go": ("OPENCODE_API_KEY",),
+    # Z.AI: GLM_API_KEY is canonical (agent runtime); both compact spellings
+    # are established Agent aliases (hermes_cli/auth.py + providers.py).
+    "zai": ("ZAI_API_KEY", "Z_AI_API_KEY"),
 }
 
 _SELF_HOSTED_PROVIDER_IDS = frozenset({"ollama", "lmstudio"})
@@ -2087,6 +2095,766 @@ def _fetch_account_usage_with_profile_context(provider: str, *, refresh: bool = 
         return None
 
 
+# ── Z.AI (GLM Coding Plan) quota status ─────────────────────────────────────
+# Community-documented monitor endpoint (same one the Z.AI subscription
+# dashboard uses; reverse-engineered by CodexBar / zai-status). Unofficial:
+# parsed defensively, fails soft, fixture-tested.
+
+_ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+_ZAI_MONITOR_PATH = "/api/monitor/usage/quota/limit"
+# A terminal fetch failure is cached briefly so an outage does not turn into
+# one transport call per waiter/caller. Short by design: the next caller after
+# this TTL may open a fresh flight.
+_ZAI_QUOTA_FAILURE_TTL_SECONDS = 15.0
+# The monitor payload is a small JSON document (~1 KiB). Anything larger is
+# not a quota response; fail closed instead of buffering it.
+_ZAI_QUOTA_MAX_RESPONSE_BYTES = 262144
+_ZAI_UNIT_NAMES = {1: "day", 3: "hour", 5: "minute", 6: "week"}
+_ZAI_PEAK_START_HOUR = 14  # local billing time, inclusive
+_ZAI_PEAK_END_HOUR = 18  # local billing time, exclusive
+_ZAI_DEFAULT_BILLING_TZ = "Asia/Shanghai"
+# Window priority for chip/card ordering: most actionable first. The 5-hour
+# window is the plan's headline limit; Monthly is the long-horizon budget.
+_ZAI_WINDOW_PRIORITY = {"5-hour": 0, "Daily": 1, "Weekly": 2, "Monthly": 3}
+
+# z.ai exposes no billing-rule API (verified by full response dump 2026-08-20):
+# multipliers are plan-doc annotations, env-overridable per install, and drift
+# by plan generation (V1: 3x/1x; current docs: 3x/2x for advanced models).
+_ZAI_DEFAULT_PEAK_MULTIPLIER = 3
+_ZAI_DEFAULT_OFFPEAK_MULTIPLIER = 2
+
+_ZAI_QUOTA_CACHE_TTL_SECONDS = 60.0
+_ZAI_QUOTA_CACHE_MAX_ENTRIES = 64
+# How long a joining caller waits for the in-flight owner before electing a
+# bounded replacement (the "steal" path). Tracks the transport budget.
+_ZAI_QUOTA_JOIN_TIMEOUT_SECONDS = _PROVIDER_QUOTA_TIMEOUT_SECONDS + 2.0
+# How long a replacement owner waits for the per-key PHYSICAL transport lock
+# (the prior owner's body owns it until its transport returns). Failing soft
+# after this bound is the documented contract: one live body per key.
+_ZAI_QUOTA_TRANSPORT_WAIT_SECONDS = _PROVIDER_QUOTA_TIMEOUT_SECONDS + 2.0
+_zai_quota_cache: dict[str, tuple[float, Any, Any]] = {}
+_zai_quota_flights: dict[str, "_ZaiFlight"] = {}
+# Per-key physical transport locks: the live transport body holds its key's
+# lock until the body returns, so a replacement owner cannot START while the
+# prior body is still live (logical flight identity is not enough — a stolen
+# flight's old body may still be mid-read).
+_zai_quota_transport_locks: dict[str, threading.Lock] = {}
+_zai_quota_epoch = 0
+_zai_quota_cache_lock = threading.Lock()
+
+
+class _ZaiQuotaFailure:
+    """Terminal failure cached briefly so one outage is one transport call.
+
+    A short-lived sanitized failure marker (status + user-safe message only)
+    absorbs immediate retries after a failed flight; it never carries payload
+    data or credentials.
+    """
+
+    __slots__ = ("status", "message")
+
+    def __init__(self, status: str, message: str):
+        self.status = status
+        self.message = message
+
+
+class _ZaiFlight:
+    """Single-flight registration: one event, one shared terminal result."""
+
+    __slots__ = ("event", "result", "claimed")
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.result: Any = None  # (payload, fetched_at) or _ZaiQuotaFailure
+        self.claimed = False  # set when a waiter elects itself replacement owner
+
+
+def _zai_configured_origin() -> str | None:
+    """The operator-configured origin for the z.ai provider, if any.
+
+    Returns the raw base_url string or None when nothing is configured
+    (callers then use the canonical z.ai host). Config-lookup failures raise
+    so the caller can fail closed instead of silently defaulting.
+    """
+    from api.config import _get_provider_base_url
+
+    for candidate in ("zai",):
+        direct = _get_provider_base_url(candidate)
+        if direct:
+            return direct
+    # Alias-configured providers (providers.glm.base_url etc.) resolve to
+    # zai; check those keys too so a regional endpoint set under an alias is
+    # honored rather than ignored.
+    try:
+        from api.config import _PROVIDER_ALIASES
+    except ImportError:
+        return None
+    for alias, canonical in (_PROVIDER_ALIASES or {}).items():
+        if canonical == "zai":
+            value = _get_provider_base_url(alias)
+            if value:
+                return value
+    return None
+
+
+def _zai_host_is_loopback(host: str) -> bool:
+    """True only for genuine loopback destinations.
+
+    DNS names never qualify except localhost/*.localhost (a name like
+    127.evil.example resolves to an attacker's server). Numeric hosts are
+    parsed with the ipaddress module, so malformed octets (127.999.999.999,
+    127.0.0.256, leading-zero forms) are rejected, and IPv6-mapped loopback
+    (::ffff:127.0.0.1) is recognized.
+    """
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    if "%" in host:
+        # IPv6 zone/scope IDs (::1%eth0) are interface-local but not a
+        # stable destination origin — never treated as loopback here.
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if addr.is_loopback:
+        return True
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return bool(mapped is not None and mapped.is_loopback)
+
+
+def _zai_monitor_url(base_url: str | None) -> str | None:
+    """Derive the monitor URL from the provider's configured origin.
+
+    The credential is only ever sent to the origin the operator configured
+    for this provider (default: z.ai's canonical monitor host). Any origin we
+    cannot verify as https (or genuine loopback http for local proxies) fails
+    closed with ``None`` — callers must not send the bearer anywhere.
+    """
+    raw = str(base_url or "").strip()
+    if not raw:
+        return _ZAI_QUOTA_URL
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        host = (parts.hostname or "").strip().lower()
+        if not host or parts.username or parts.password:
+            return None
+        if not _zai_host_is_loopback(host):
+            if parts.scheme != "https":
+                return None
+        elif parts.scheme not in ("https", "http"):
+            return None
+        port = parts.port  # raises ValueError for an invalid port
+        if port is not None and not (0 < port < 65536):
+            return None
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, _ZAI_MONITOR_PATH, "", ""))
+    except ValueError:
+        return None
+
+
+class _ZaiNoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so the bearer can never reach another origin.
+
+    Returning ``None`` makes urllib surface the 3xx instead of re-sending the
+    request (with our Authorization header) to the redirect target.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _zai_http_opener():
+    """Opener for z.ai monitor requests: no redirect following."""
+    return urllib.request.build_opener(_ZaiNoRedirectHandler())
+
+
+def _zai_positive_float_env(name: str) -> float | None:
+    """Read a strictly positive finite float from an env override."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _zai_rate_multipliers() -> tuple[float, float]:
+    """(peak, offpeak) multipliers from env, else current-docs defaults.
+
+    Plan-doc annotation only -- z.ai exposes no billing API.
+    """
+    peak = _zai_positive_float_env("ZAI_PEAK_MULTIPLIER") or _ZAI_DEFAULT_PEAK_MULTIPLIER
+    offpeak = _zai_positive_float_env("ZAI_OFFPEAK_MULTIPLIER") or _ZAI_DEFAULT_OFFPEAK_MULTIPLIER
+    return peak, offpeak
+
+
+_ZAI_TZ_WARNED = False
+
+
+def _zai_billing_tz():
+    """Resolve z.ai's billing timezone.
+
+    ZAI_PEAK_TZ deliberately overrides billing-window membership (dangerous by
+    design, operator's choice); invalid values warn once and fall back to
+    Asia/Shanghai, then to a fixed UTC+8 offset on tzdata-less hosts.
+    """
+    global _ZAI_TZ_WARNED
+    configured = (os.environ.get("ZAI_PEAK_TZ") or "").strip()
+    name = configured or _ZAI_DEFAULT_BILLING_TZ
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        if not _ZAI_TZ_WARNED:
+            logger.warning("Invalid ZAI_PEAK_TZ %r; falling back to %s (warning once)", configured, _ZAI_DEFAULT_BILLING_TZ)
+            _ZAI_TZ_WARNED = True
+    try:
+        return ZoneInfo(_ZAI_DEFAULT_BILLING_TZ)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone(timedelta(hours=8), name="CST")
+
+
+def _zai_peak_status(now_utc: datetime | None = None, display_tz=None) -> dict:
+    """Compute z.ai peak-rate window membership from the clock.
+
+    Membership is anchored to z.ai's billing timezone (never the server's
+    local clock: the window is defined in UTC+8). All user-facing times are
+    rendered in display_tz (tzinfo) or the server's local timezone.
+    Multipliers are plan-doc annotations, env-overridable.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+        raise ValueError("now_utc must be timezone-aware")
+    if display_tz is not None:
+        # Duck-typed check: a usable tzinfo answers utcoffset(None) safely
+        # (ZoneInfo returns None; fixed-offset returns an offset; strings raise).
+        try:
+            display_tz.utcoffset(None)
+        except Exception:
+            raise TypeError("display_tz must be a tzinfo object, not a string") from None
+    billing_tz = _zai_billing_tz()
+    local = now_utc.astimezone(billing_tz)
+    is_peak = local.weekday() < 5 and _ZAI_PEAK_START_HOUR <= local.hour < _ZAI_PEAK_END_HOUR
+    if is_peak:
+        boundary = local.replace(hour=_ZAI_PEAK_END_HOUR, minute=0, second=0, microsecond=0)
+    else:
+        boundary = local.replace(hour=_ZAI_PEAK_START_HOUR, minute=0, second=0, microsecond=0)
+        for _ in range(8):
+            if boundary.weekday() < 5 and boundary > local:
+                break
+            boundary = (boundary + timedelta(days=1)).replace(
+                hour=_ZAI_PEAK_START_HOUR, minute=0, second=0, microsecond=0)
+    peak_mult, offpeak_mult = _zai_rate_multipliers()
+    multiplier = peak_mult if is_peak else offpeak_mult
+    label = f"Peak {multiplier:g}x" if is_peak else f"Off-peak {multiplier:g}x"
+    render_tz = display_tz if display_tz is not None else boundary.astimezone().tzinfo
+    local_str = boundary.astimezone(render_tz).strftime("%a %H:%M %Z")
+    tz_name = getattr(billing_tz, "key", None) or "UTC+8"
+    return {
+        "is_peak": is_peak,
+        "multiplier": multiplier,
+        "window": f"weekdays 14:00-18:00 {tz_name}",
+        "next_change": boundary.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "next_change_local": local_str,
+        "summary": f"{label} (weekdays 14:00-18:00 {tz_name}); switches {local_str}",
+        "source": "plan_docs",
+    }
+
+
+def _zai_window_label(limit: dict) -> str:
+    if limit.get("type") == "TIME_LIMIT" and limit.get("unit") == 5 and limit.get("number") == 1:
+        return "Monthly"  # z.ai monthly-reset sentinel row
+    unit = _ZAI_UNIT_NAMES.get(limit.get("unit"))
+    if not unit:
+        return ""
+    label = f"{limit.get('number')}-{unit}"
+    if label == "1-day":
+        return "Daily"
+    if label == "1-week":
+        return "Weekly"
+    return label
+
+
+def _zai_used_percent(limit: dict) -> float | None:
+    pct = _quota_number(limit.get("percentage"))
+    if pct is not None and math.isfinite(pct):
+        return max(0.0, min(100.0, float(pct)))
+    usage = _quota_number(limit.get("usage"))
+    remaining = _quota_number(limit.get("remaining"))
+    if usage is not None and remaining is not None and math.isfinite(usage) and math.isfinite(remaining) and usage > 0:
+        return max(0.0, min(100.0, 100.0 * (usage - remaining) / usage))
+    return None
+
+
+def _zai_reset_at(limit: dict) -> datetime | None:
+    raw = limit.get("nextResetTime")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if not math.isfinite(raw):
+        return None
+    try:
+        return datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _sanitize_zai_quota(payload: Any, *, fetched_at: datetime | None = None) -> Any:
+    """Parse the z.ai monitor response into a serializer-compatible snapshot.
+
+    Pure: never reads the clock and never computes peak state. Defensive:
+    malformed shapes are skipped (or the whole payload marked unavailable)
+    rather than raising.
+    """
+    reason = None
+    if not isinstance(payload, dict):
+        payload, reason = {}, "Malformed response payload."
+    data = payload.get("data")
+    if reason is None and not isinstance(data, dict):
+        reason = "Malformed response data."
+    if reason is None and payload.get("success") is not True and "success" in payload:
+        reason = "z.ai reported failure for the quota request."
+    if reason is None and payload.get("code") not in (None, 200):
+        reason = f"z.ai returned code {payload.get('code')}."
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if reason is None and not isinstance(limits, (list, tuple)):
+        reason = "Malformed limits list."
+
+    windows: list[Any] = []
+    if reason is None:
+        seen: set[str] = set()
+        for limit in limits:
+            if not isinstance(limit, dict):
+                continue
+            try:
+                label = _zai_window_label(limit)
+                used = _zai_used_percent(limit)
+                reset_at = _zai_reset_at(limit)
+            except (TypeError, OverflowError, ValueError):
+                continue  # hostile shapes (unhashable units, huge ints) skipped
+            if not label or used is None or label in seen:
+                continue
+            seen.add(label)
+            windows.append(SimpleNamespace(
+                label=label,
+                used_percent=used,
+                reset_at=reset_at,
+                detail=None,
+            ))
+    if reason is None and not windows:
+        reason = "No supported quota windows were returned."
+
+    def _sort_key(window):
+        priority = _ZAI_WINDOW_PRIORITY.get(window.label, 4)
+        reset = window.reset_at
+        reset_key = reset.timestamp() if reset is not None else float("inf")
+        return (priority, reset_key)
+
+    windows.sort(key=_sort_key)
+    level = data.get("level") if isinstance(data, dict) else None
+    plan = (str(level).strip() or None) if level is not None else None
+    return SimpleNamespace(
+        provider="zai",
+        source="zai_monitor_api",
+        title="Account limits",
+        plan=plan,
+        windows=windows,
+        details=[],
+        available=not reason and bool(windows),
+        unavailable_reason=reason,
+        fetched_at=fetched_at or datetime.now(timezone.utc),
+    )
+
+
+def invalidate_zai_quota_cache(provider_id: str | None = None) -> None:
+    """Clear cached z.ai quota data (called on credential mutation)."""
+    from api.config import _resolve_provider_alias
+
+    canonical = None
+    if provider_id is not None:
+        canonical = _resolve_provider_alias(str(provider_id).strip().lower())
+        if canonical != "zai":
+            return  # unrelated credentials cannot invalidate in-flight Z.AI work
+
+    global _zai_quota_epoch
+    with _zai_quota_cache_lock:
+        _zai_quota_epoch += 1
+        if canonical is None:
+            _zai_quota_cache.clear()
+        else:
+            prefix = f"{canonical}|"
+            for key in [k for k in _zai_quota_cache if k.startswith(prefix)]:
+                _zai_quota_cache.pop(key, None)
+
+
+def _zai_fetch_quota_payload(api_key: str, monitor_url: str | None = None) -> dict | None:
+    """Fetch the raw z.ai monitor payload (single-flight per key not here).
+
+    Security invariants (gate-cert #7203):
+    - the bearer goes only to *monitor_url* (the verified configured origin);
+    - redirects are never followed (a 3xx surfaces as HTTPError instead);
+    - the response body is capped: cap bytes plus exactly one probe byte, so
+      an oversized body fails closed instead of buffering unbounded data.
+    """
+    request = urllib.request.Request(
+        monitor_url or _ZAI_QUOTA_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+    )
+    with _zai_http_opener().open(request, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as response:
+        raw = response.read(_ZAI_QUOTA_MAX_RESPONSE_BYTES + 1)
+    if len(raw) > _ZAI_QUOTA_MAX_RESPONSE_BYTES:
+        raise ValueError("z.ai quota response exceeded the size cap")
+    text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    return json.loads(text)
+
+
+def _zai_cache_origin_id(monitor_url: str | None) -> str:
+    parts = urllib.parse.urlsplit(monitor_url or _ZAI_QUOTA_URL)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _zai_pool_envelope(provider: str, display_name: str) -> dict[str, Any] | None:
+    """Pre-existing local credential-pool snapshot, if this install has one.
+
+    Preserves the pinned-master behavior for Z.AI: the pool breakdown stays
+    visible when the monitor path cannot produce data (no key, unusable
+    origin, auth/transport/parser failure).
+    """
+    try:
+        snapshot = _local_pool_snapshot(provider)
+    except Exception:
+        return None
+    if snapshot is None:
+        return None
+    account_limits = _serialize_account_usage_snapshot(snapshot)
+    if not account_limits:
+        return None
+    if account_limits.get("available"):
+        return {
+            "ok": True, "provider": provider, "display_name": display_name,
+            "supported": True, "status": "available", "label": "Credential pool",
+            "quota": None, "account_limits": account_limits,
+            "message": f"{display_name} credential pool status loaded.",
+        }
+    reason = str(account_limits.get("unavailable_reason") or "").strip()
+    message = (
+        f"{display_name} credential pool: all credentials are unavailable. {reason}".strip()
+        if reason else f"{display_name} credential pool: all credentials are unavailable."
+    )
+    return {
+        "ok": False, "provider": provider, "display_name": display_name,
+        "supported": True, "status": "unavailable", "quota": None,
+        "account_limits": account_limits, "message": message,
+    }
+
+
+def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: bool = False) -> dict[str, Any]:
+    """Quota status for the z.ai GLM Coding Plan (monitor endpoint + peak).
+
+    Trust boundary: the configured provider origin (``base_url``) decides
+    where the credential may go. No verified https origin (or loopback http)
+    means no request at all — the local pool snapshot (if any) answers
+    instead, else the feature reports unavailable.
+
+    Single-flight: one transport call per cache key in flight. The owner
+    atomically publishes either a success payload (60 s TTL) or a sanitized
+    failure marker (short TTL) *before* signaling waiters, so a failed
+    forced refresh evicts the stale success instead of resurrecting it, and
+    waiters share one terminal result instead of fanning out. A forced
+    refresh skips the completed cache but JOINS any in-flight request for
+    the same key — it never registers a second concurrent transport owner;
+    a replacement owner is elected only through the bounded steal path when
+    an owner exceeds the join timeout. The single-flight guarantee is
+    PHYSICAL, not just logical: each cache key has a transport lock the
+    live request body holds until it returns, so a replacement owner cannot
+    START a second body while the prior one is still live (it fails soft
+    after a bounded wait). Before any transport starts, the caller
+    re-validates the flight epoch, current ownership, and the LIVE key and
+    origin — a caller that waited (or a waiter from before a credential
+    mutation) can never launch a retired credential or origin.
+    """
+    from api.config import _resolve_provider_alias
+
+    def _failure(status: str, message: str) -> dict[str, Any]:
+        return {
+            "ok": False, "provider": provider, "display_name": display_name,
+            "supported": True, "status": status, "quota": None, "message": message,
+        }
+
+    api_key = _get_provider_api_key("zai")
+    if not api_key:
+        pool = _zai_pool_envelope(provider, display_name)
+        if pool is not None:
+            return pool
+        return _failure(
+            "no_key",
+            "Z.AI quota status needs a ZAI_API_KEY/GLM_API_KEY configured on the server.")
+
+    monitor_url = None
+    origin_lookup_failed = False
+    try:
+        monitor_url = _zai_monitor_url(_zai_configured_origin())
+    except Exception:
+        origin_lookup_failed = True
+    if monitor_url is None:
+        pool = _zai_pool_envelope(provider, display_name)
+        if pool is not None:
+            return pool
+        if origin_lookup_failed:
+            return _failure(
+                "unavailable",
+                "Z.AI quota monitor is unavailable: the configured base_url "
+                "could not be read. No request was made.")
+        return _failure(
+            "unavailable",
+            "Z.AI quota monitor is disabled: the configured base_url must be an "
+            "https origin (loopback http allowed for local proxies).")
+
+    home = str(_get_hermes_home())
+    key_fp = hashlib.sha256(api_key.encode("utf-8", "replace")).hexdigest()
+    cache_key = (
+        f"{_resolve_provider_alias(provider)}|{home}|{key_fp}|"
+        f"{_zai_cache_origin_id(monitor_url)}"
+    )
+
+    payload: dict | None = None
+    fetched_at: datetime | None = None
+    failure: _ZaiQuotaFailure | None = None
+    my_flight: _ZaiFlight | None = None
+    join_target: _ZaiFlight | None = None
+    epoch_at_start = 0
+    with _zai_quota_cache_lock:
+        epoch_at_start = _zai_quota_epoch
+        cached = _zai_quota_cache.get(cache_key)
+        if cached is not None:
+            ts, cached_payload, cached_at = cached
+            if isinstance(cached_payload, _ZaiQuotaFailure):
+                if not refresh and time.monotonic() - ts <= _ZAI_QUOTA_FAILURE_TTL_SECONDS:
+                    failure = cached_payload
+                else:
+                    _zai_quota_cache.pop(cache_key, None)
+            elif not refresh and time.monotonic() - ts <= _ZAI_QUOTA_CACHE_TTL_SECONDS:
+                payload, fetched_at = cached_payload, cached_at
+        if payload is None and failure is None:
+            flight = _zai_quota_flights.get(cache_key)
+            if flight is None:
+                my_flight = _ZaiFlight()
+                _zai_quota_flights[cache_key] = my_flight
+            else:
+                # refresh=True bypasses only the COMPLETED cache above. An
+                # in-flight request is already newer than any cached entry,
+                # so a forced refresh JOINS it — exactly one transport owner
+                # exists per cache key at a time (the documented single-flight
+                # contract). A replacement owner is elected only through the
+                # bounded steal path below, when an owner hangs past the wait
+                # timeout.
+                join_target = flight
+
+    if join_target is not None:
+        join_timeout = _ZAI_QUOTA_JOIN_TIMEOUT_SECONDS
+        join_target.event.wait(timeout=join_timeout)
+        result = join_target.result
+        if isinstance(result, _ZaiQuotaFailure):
+            failure = result
+        elif result is not None:
+            payload, fetched_at = result
+            # Post-wait epoch guard: a credential mutation landing after the
+            # owner published invalidates this success for us as well.
+            with _zai_quota_cache_lock:
+                epoch_moved = _zai_quota_epoch != epoch_at_start
+            if result[0] is not None and epoch_moved:
+                payload, fetched_at = None, None
+        else:
+            # Owner superseded or hung. Elect ONE bounded replacement owner:
+            # claim the registration so at most one waiter fetches.
+            with _zai_quota_cache_lock:
+                can_steal = (
+                    not join_target.claimed
+                    and _zai_quota_flights.get(cache_key) is join_target
+                )
+                if can_steal:
+                    join_target.claimed = True
+                    my_flight = _ZaiFlight()
+                    _zai_quota_flights[cache_key] = my_flight
+            if my_flight is None:
+                failure = _ZaiQuotaFailure(
+                    "unavailable", "Z.AI quota status is temporarily unavailable.")
+
+    if my_flight is not None:
+        transport_lock: threading.Lock | None = None
+        transport_acquired = False
+        try:
+            with _zai_quota_cache_lock:
+                existing_lock = _zai_quota_transport_locks.get(cache_key)
+                if existing_lock is None:
+                    existing_lock = threading.Lock()
+                    _zai_quota_transport_locks[cache_key] = existing_lock
+                transport_lock = existing_lock
+            # PHYSICAL single-flight: the live transport body owns this
+            # per-key lock until the body returns. A replacement owner
+            # (bounded steal) or a fresh owner may not START a second body
+            # while the prior one is still live — logical flight identity
+            # alone does not bound live network bodies. If the prior body
+            # has not acknowledged exit within the bounded wait, fail soft
+            # (unavailable) instead of stacking transports.
+            transport_acquired = transport_lock.acquire(
+                timeout=_ZAI_QUOTA_TRANSPORT_WAIT_SECONDS)
+            if not transport_acquired:
+                failure = _ZaiQuotaFailure(
+                    "unavailable", "Z.AI quota status is temporarily unavailable.")
+            else:
+                # Re-validate immediately BEFORE the transport side effect:
+                # a caller that captured its key/origin before a wait can be
+                # holding a RETIRED credential or origin by now. The flight
+                # epoch, current ownership, and the live key/origin must all
+                # still match, or no request is made at all.
+                live_key = _get_provider_api_key("zai")
+                live_url: str | None = None
+                live_key_ok = False
+                if live_key:
+                    try:
+                        live_url = _zai_monitor_url(_zai_configured_origin())
+                    except Exception:
+                        live_url = None
+                    if live_url is not None:
+                        live_fp = hashlib.sha256(
+                            live_key.encode("utf-8", "replace")).hexdigest()
+                        live_key_ok = (
+                            f"{_resolve_provider_alias(provider)}|{home}|{live_fp}|"
+                            f"{_zai_cache_origin_id(live_url)}" == cache_key
+                        )
+                with _zai_quota_cache_lock:
+                    preflight_ok = (
+                        _zai_quota_epoch == epoch_at_start
+                        and _zai_quota_flights.get(cache_key) is my_flight
+                    )
+                if not (preflight_ok and live_key_ok):
+                    # Stand down: a credential mutation (epoch change), a
+                    # newer registered owner, or a changed key/origin retired
+                    # this transport before it started. No request is made.
+                    failure = _ZaiQuotaFailure(
+                        "unavailable",
+                        "Z.AI quota status is temporarily unavailable.")
+                else:
+                    api_key, monitor_url = live_key, live_url
+                    try:
+                        payload = _zai_fetch_quota_payload(api_key, monitor_url)
+                        fetched_at = datetime.now(timezone.utc)
+                    except urllib.error.HTTPError as exc:
+                        if 300 <= exc.code < 400:
+                            failure = _ZaiQuotaFailure(
+                                "unavailable",
+                                "Z.AI quota endpoint redirected the request; "
+                                "refusing to follow redirects.")
+                        elif exc.code in (401, 403):
+                            failure = _ZaiQuotaFailure(
+                                "invalid_key", "Z.AI rejected the configured API key.")
+                        else:
+                            failure = _ZaiQuotaFailure(
+                                "unavailable", "Z.AI quota status is temporarily unavailable.")
+                    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError,
+                            OSError, ValueError, http.client.HTTPException):
+                        failure = _ZaiQuotaFailure(
+                            "unavailable", "Z.AI quota status is temporarily unavailable.")
+        finally:
+            if transport_acquired and transport_lock is not None:
+                transport_lock.release()
+            # Publish decision, flight removal, result assignment, and the
+            # waiter signal all happen atomically under ONE lock hold: there
+            # is never a state where the flight is gone but its result is
+            # unassigned. A woken waiter can never observe "flight gone,
+            # result missing", and a failed owner's marker atomically
+            # REPLACES any stale success (no resurrection later).
+            if failure is None and payload is None:
+                # A None payload (e.g. JSON null body) is a terminal parser
+                # failure: publish the failure marker so retries stay bounded.
+                failure = _ZaiQuotaFailure(
+                    "unavailable", "Z.AI quota status is temporarily unavailable.")
+            with _zai_quota_cache_lock:
+                still_owner = _zai_quota_flights.get(cache_key) is my_flight
+                superseded = (not still_owner) or (_zai_quota_epoch != epoch_at_start)
+                if still_owner and _zai_quota_epoch == epoch_at_start:
+                    if failure is not None:
+                        _zai_quota_cache[cache_key] = (time.monotonic(), failure, None)
+                    else:
+                        _zai_quota_cache[cache_key] = (time.monotonic(), payload, fetched_at)
+                    _zai_quota_cache_limit()
+                if still_owner:
+                    _zai_quota_flights.pop(cache_key, None)
+                if superseded and failure is None:
+                    # A superseded owner (newer refresh registered, or a
+                    # credential mutation landed) must not hand its older
+                    # success to waiters or to its own caller: the newer
+                    # state owns the truth now.
+                    failure = _ZaiQuotaFailure(
+                        "unavailable", "Z.AI quota status is temporarily unavailable.")
+                my_flight.result = failure if failure is not None else (payload, fetched_at)
+                my_flight.event.set()
+
+    if failure is not None:
+        pool = _zai_pool_envelope(provider, display_name)
+        if pool is not None:
+            return pool
+        return _failure(failure.status, failure.message)
+
+    snapshot = _sanitize_zai_quota(payload, fetched_at=fetched_at)
+    account_limits = _serialize_account_usage_snapshot(snapshot)
+    if account_limits and account_limits.get("available"):
+        peak = _zai_peak_status()  # exactly once per available response
+        details = [peak["summary"]]
+        # Preserve/merge the pre-existing local pool envelope when present:
+        # the pool breakdown stays visible alongside the remote windows.
+        try:
+            pool_snapshot = _local_pool_snapshot(provider)
+        except Exception:
+            pool_snapshot = None
+        if pool_snapshot is not None:
+            snapshot.pool = getattr(pool_snapshot, "pool", None)
+            details.extend(
+                str(d) for d in (getattr(pool_snapshot, "details", ()) or ())
+                if str(d).strip()
+            )
+        snapshot.details = details
+        account_limits = _serialize_account_usage_snapshot(snapshot)
+        return {
+            "ok": True, "provider": provider, "display_name": display_name,
+            "supported": True, "status": "available", "label": "Account limits",
+            "quota": None, "account_limits": account_limits, "peak": peak,
+            "message": f"{display_name} quota loaded. {peak['summary']}.",
+        }
+    reason = ""
+    if account_limits:
+        reason = str(account_limits.get("unavailable_reason") or "").strip()
+    pool = _zai_pool_envelope(provider, display_name)
+    if pool is not None:
+        return pool
+    message = f"{display_name} quota is unavailable. {reason}" if reason else \
+        f"{display_name} quota is unavailable. Confirm the API key and try again."
+    return {
+        "ok": False, "provider": provider, "display_name": display_name,
+        "supported": True, "status": "unavailable", "quota": None,
+        "account_limits": account_limits,
+        "message": message,
+    }
+
+
+def _zai_quota_cache_limit() -> None:
+    """Bound the z.ai quota cache (expired cleanup + LRU trim)."""
+    if len(_zai_quota_cache) <= _ZAI_QUOTA_CACHE_MAX_ENTRIES:
+        now = time.monotonic()
+        expired = [k for k, (ts, _, _) in _zai_quota_cache.items() if now - ts > _ZAI_QUOTA_CACHE_TTL_SECONDS]
+        for key in expired:
+            _zai_quota_cache.pop(key, None)
+        return
+    ordered = sorted(_zai_quota_cache.items(), key=lambda kv: kv[1][0])
+    excess = len(_zai_quota_cache) - _ZAI_QUOTA_CACHE_MAX_ENTRIES
+    for key, _ in ordered[:excess]:
+        _zai_quota_cache.pop(key, None)
+
+
 def _provider_account_usage_status(provider: str, display_name: str, *, refresh: bool = False) -> dict[str, Any]:
     snapshot = _fetch_account_usage_with_profile_context(provider, refresh=refresh)
     account_limits = _serialize_account_usage_snapshot(snapshot)
@@ -2206,6 +2974,11 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
                 "quota": None,
                 "message": "OpenRouter quota status is temporarily unavailable.",
             }
+
+    from api.config import _resolve_provider_alias as _zai_resolve_alias
+    if _zai_resolve_alias(provider) == "zai":
+        canonical_name = _PROVIDER_DISPLAY.get("zai", "Z.AI / GLM")
+        return _provider_zai_quota_status(provider, canonical_name, refresh=refresh)
 
     local_snapshot = _local_pool_snapshot(provider)
     if local_snapshot is not None:
@@ -2938,8 +3711,20 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
             return {"ok": False, "error": "API key appears too short."}
 
     env_path = _get_hermes_home() / ".env"
+    env_updates: dict[str, str | None] = {env_var: api_key}
+    if not api_key:
+        # Key removal must also clear read-only legacy aliases, otherwise
+        # _get_provider_api_key keeps resolving a "removed" key. Aliases
+        # shared by other providers (e.g. the OPENCODE_API_KEY bridge) are
+        # preserved — clearing them would destroy the sibling provider's key.
+        mine = set(_PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ())
+        shared = set()
+        for other, aliases in _PROVIDER_ENV_VAR_ALIASES.items():
+            if other != provider_id:
+                shared.update(aliases or ())
+        env_updates.update({alias: None for alias in mine - shared})
     try:
-        _write_env_file(env_path, {env_var: api_key})
+        _write_env_file(env_path, env_updates)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
@@ -2951,6 +3736,7 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     # disrupting active streaming sessions that may be reading config.cfg.
     invalidate_models_cache()
     invalidate_account_usage_status_cache(provider_id)
+    invalidate_zai_quota_cache(provider_id)
     invalidate_providers_cache()
 
     return {
