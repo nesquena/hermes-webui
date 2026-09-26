@@ -73,7 +73,7 @@ def test_successful_profile_switch_resets_unread_cron_state():
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_session_load_profile_switch_resets_unread_cron_state():
-    switch = _extract_function(SESSIONS_JS, "_switchProfileForSessionLoad")
+    switch = _extract_function(PANELS_JS, "switchToProfile")
     reset = _extract_function(PANELS_JS, "_resetCronUnreadForProfileSwitch")
     script = f"""
 let _cronPollSince=10;
@@ -81,14 +81,23 @@ let _cronUnreadCount=1;
 let _cronPollGeneration=0;
 const _cronNewJobIds=new Set(['old-profile-job']);
 global.S={{activeProfile:'default'}};
+global.$=()=>null;
+global.window={{}};
 global.api=async()=>({{active:'alternate',is_default:false}});
 global.localStorage={{removeItem(){{}}}};
+global.renderSessionList=async()=>{{}};
+global.syncTopbar=()=>{{}};
+global.showToast=()=>{{}};
+global.t=key=>key;
+global._profileSwitchPanelLoad=async()=>{{}};
+global._refreshProfileSwitchBackground=()=>{{}};
+let _profileSwitchGeneration=0;
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 function _clearCronSessionCompletionUnreadForInactiveProfiles(){{}}
 {reset}
 {switch}
 (async()=>{{
-  await _switchProfileForSessionLoad('alternate');
+  await switchToProfile('alternate', {{openExistingSession:true}});
   process.stdout.write(JSON.stringify({{
     profile:S.activeProfile,
     unread:Array.from(_cronNewJobIds),
@@ -174,7 +183,7 @@ def test_profile_switch_clears_persisted_old_profile_cron_markers_only():
     has_unread = _extract_function(SESSIONS_JS, "_hasUnreadForSession")
     has_marker = _extract_function(SESSIONS_JS, "_hasSessionCompletionUnread")
     reset = _extract_function(PANELS_JS, "_resetCronUnreadForProfileSwitch")
-    switch = _extract_function(SESSIONS_JS, "_switchProfileForSessionLoad")
+    switch = _extract_function(PANELS_JS, "switchToProfile")
     script = f"""
 const store={{'hermes-session-completion-unread':JSON.stringify({{}})}};
 global.localStorage={{
@@ -193,10 +202,19 @@ let _cronPollGeneration=0;
 const _cronNewJobIds=new Set(['old-cron-job']);
 let renders=0;
 global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
+global.$=()=>null;
+global.window={{}};
 global._allSessions=[];
 global.api=async()=>({{active:'profile-b',is_default:false}});
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 global.renderSessionListFromCache=()=>{{ renders+=1; }};
+global.renderSessionList=async()=>{{ renders+=1; }};
+global.syncTopbar=()=>{{}};
+global.showToast=()=>{{}};
+global.t=key=>key;
+global._profileSwitchPanelLoad=async()=>{{}};
+global._refreshProfileSwitchBackground=()=>{{}};
+let _profileSwitchGeneration=0;
 function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
 function _saveSessionViewedCounts(){{}}
 function _setSessionViewedCount(sid, count){{
@@ -225,7 +243,7 @@ function _clearSessionCompletionUnread(sid){{
     chat:_hasUnreadForSession({{session_id:'chat-session'}}),
     newCron:_hasUnreadForSession({{session_id:'new-cron-session'}}),
   }};
-  await _switchProfileForSessionLoad('profile-b');
+  await switchToProfile('profile-b', {{openExistingSession:true}});
   const after={{
     oldCron:_hasUnreadForSession({{session_id:'old-cron-session'}}),
     chat:_hasUnreadForSession({{session_id:'chat-session'}}),

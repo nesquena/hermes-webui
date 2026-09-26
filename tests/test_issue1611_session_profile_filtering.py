@@ -196,14 +196,15 @@ def test_static_sessions_js_switches_profile_before_opening_all_profiles_row():
     repo_root = Path(__file__).parent.parent
     src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
 
-    ensure_idx = src.index("async function _ensureSidebarSessionProfile(session)")
     open_idx = src.index("async function _openSidebarSession(session, loadOpts={})")
-    ensure_body = src[ensure_idx:open_idx]
     open_body = src[open_idx:src.index("function _isReadOnlySession", open_idx)]
+    reference_idx = src.index("async function _openSessionReference(sid,profile,options)")
+    reference_body = src[reference_idx:src.index("\nasync function loadSession(", reference_idx)]
 
-    assert "await switchToProfile(targetProfile);" in ensure_body
-    assert "_profileSwitchOpeningExistingSession=true;" in ensure_body
-    assert open_body.index("await _ensureSidebarSessionProfile(session);") < open_body.index("await loadSession(session.session_id,")
+    assert "_openSessionReference(session.session_id,targetProfile" in open_body
+    assert "await switchToProfile(targetProfile,profileSwitchOptions)" in reference_body
+    assert reference_body.index("await switchToProfile(targetProfile,profileSwitchOptions)") < reference_body.index("loadSession(parsed.sid")
+    assert "skipProfileResolve:true" in reference_body
     assert "await _openSidebarSession(s);" in src
     assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in src
     assert "await _openSidebarSession(childSession, {skipLineageResolve:true});" in src

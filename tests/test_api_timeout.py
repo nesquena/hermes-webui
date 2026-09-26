@@ -99,6 +99,7 @@ def test_api_rejects_hung_fetch_with_timeout_and_toast():
     script = textwrap.dedent(
         f"""
         const events=[];
+        global.S={{_profileCookieOwnershipUncertain:false}};
         global.document={{baseURI:'http://example.test/hermes/'}};
         global.location={{href:'http://example.test/hermes/',pathname:'/hermes/',search:''}};
         global.window={{location:global.location}};
@@ -131,6 +132,7 @@ def test_api_rejects_stalled_response_body_with_timeout():
     script = textwrap.dedent(
         f"""
         const events=[];
+        global.S={{_profileCookieOwnershipUncertain:false}};
         global.document={{baseURI:'http://example.test/hermes/'}};
         global.location={{href:'http://example.test/hermes/',pathname:'/hermes/',search:''}};
         global.window={{location:global.location}};
@@ -166,6 +168,7 @@ def test_api_can_suppress_timeout_toast_for_background_pollers():
     script = textwrap.dedent(
         f"""
         const events=[];
+        global.S={{_profileCookieOwnershipUncertain:false}};
         global.document={{baseURI:'http://example.test/hermes/'}};
         global.location={{href:'http://example.test/hermes/',pathname:'/hermes/',search:''}};
         global.window={{location:global.location}};

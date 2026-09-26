@@ -95,6 +95,17 @@ correct visible session target, not moving execution ownership.
 | Direct session open | programmatic call/search/import link | Use the shared requested-ID resolver unless the caller explicitly opts into archive inspection. |
 | Browser boot restore | URL and/or localStorage state after reload/auth/PWA resume | Prefer explicit URL/query input, then localStorage, then canonicalize the requested ID. |
 
+## Settled Message References
+
+Settled message text may use `@session:<sid>` or
+`@session:<profile>/<sid>` to link to a session. Navigation validates the
+session ID and optional profile against the session API before switching
+profiles or loading the target. Streaming message content is excluded until it
+settles, and references inside protected markup spans are left as text. If the
+target fails validation or loading, the prior session view and navigation
+state are restored when that is the latest navigation. A successful newer
+navigation remains visible and does not restore the old view.
+
 ## Review Checklist
 
 For PRs that touch session routing, compression lineage, sidebar collapse, boot

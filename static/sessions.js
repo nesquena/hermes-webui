@@ -24,6 +24,44 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+let _sessionNavigationGeneration = 0;
+let _sessionNavigationRollbackAnchor = null;
+function _sessionReferenceIdIsValid(value){
+  const sid=String(value||'');
+  return sid.length>0&&sid.length<=256&&/^[A-Za-z0-9_-]+$/.test(sid);
+}
+function _sessionReferenceProfileIsValid(value){
+  const profile=String(value||'');
+  return profile.length>0&&profile.length<=64&&/^[a-z0-9][a-z0-9_-]*$/.test(profile);
+}
+function _parseSessionReference(sid,profile){
+  if(!_sessionReferenceIdIsValid(sid)) return null;
+  if(profile==null||profile==='') return {sid:String(sid),profile:null};
+  const name=String(profile); return _sessionReferenceProfileIsValid(name)?{sid:String(sid),profile:name}:null;
+}
+function _profileMatchesProfileState(profile,activeProfile,activeIsDefault){
+  const expected=(typeof profile==='string'&&profile.trim())?profile.trim():'default';
+  const active=(typeof activeProfile==='string'&&activeProfile.trim())?activeProfile.trim():'default';
+  return expected===active||(expected==='default'&&!!activeIsDefault)
+    ||(active==='default'&&expected!=='default'&&typeof _cronProfileNameIsRootAlias==='function'&&_cronProfileNameIsRootAlias(expected));
+}
+function _sessionProfilesMatch(expected,actual){
+  const left=(typeof expected==='string'&&expected.trim())?expected.trim():'default';
+  const right=(typeof actual==='string'&&actual.trim())?actual.trim():'default';
+  const isRoot=name=>typeof _cronProfileNameIsRootAlias==='function'&&_cronProfileNameIsRootAlias(name);
+  return left===right||(left==='default'&&isRoot(right))||(right==='default'&&isRoot(left))
+    ||!!(typeof S!=='undefined'&&S&&S.activeProfileIsDefault&&(
+      (left===S.activeProfile&&(right==='default'||isRoot(right)))
+      ||(right===S.activeProfile&&(left==='default'||isRoot(left)))
+    ));
+}
+function _sessionPayloadProfileForExpected(session,expectedProfile){
+  if(!expectedProfile) return (session&&_sessionReferenceProfileIsValid(session.profile))?String(session.profile):null;
+  const actual=session&&typeof session.profile==='string'?session.profile.trim():'';
+  if(actual&&_sessionReferenceProfileIsValid(actual)&&_sessionProfilesMatch(expectedProfile,actual)) return actual;
+  return !actual&&_profileMatchesProfileState(expectedProfile,typeof S!=='undefined'&&S?S.activeProfile:null,
+    typeof S!=='undefined'&&S?S.activeProfileIsDefault:false)?expectedProfile:null;
+}
 // #3306: Snapshot of S.messages captured by loadSession() right before it
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
@@ -1942,12 +1980,21 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
+  if(S._profileCookieOwnershipUncertain){showToast('Profile could not be confirmed. Switch profiles before continuing.',5000,'error');return false;}
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
   }
+  const pendingReference=_sessionNavigationRollbackAnchor;
+  ++_sessionNavigationGeneration;
+  _sessionNavigationRollbackAnchor=null;
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    if(pendingReference&&(!_profileMatchesProfileState(pendingReference.snapshot.activeProfile,S.activeProfile,S.activeProfileIsDefault)
+      ||_profileSwitchApiPending||S._profileCookieOwnershipUncertain)){
+      if(!await _restoreSessionReference(pendingReference.snapshot,_sessionNavigationGeneration,
+        !!_profileSwitchApiPending||!!S._profileCookieOwnershipUncertain)) return false;
+    }
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -2195,58 +2242,279 @@ function _sessionProfileMismatchFromError(e){
   return null;
 }
 
-async function _switchProfileForSessionLoad(profile){
-  const name=String(profile||'').trim();
-  if(!name) throw new Error('missing profile');
-  if(name===S.activeProfile) return;
-  if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
-  if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
-  if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
-  try{
-    const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
-    S.activeProfile=data.active||name;
-    S.activeProfileIsDefault=!!data.is_default;
-    if(typeof _resetCronUnreadForProfileSwitch==='function'){
-      _resetCronUnreadForProfileSwitch();
-    }
-    // #7509: mirror the canonical switch in panels.js — the slash-skill caches still
-    // hold the previous profile's /api/skills payload, so drop them (and any reply
-    // still in flight) once the switch has succeeded.
-    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
-    if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-    else localStorage.removeItem('hermes-webui-model');
-    if(data.default_model) window._defaultModel=data.default_model;
-    if(data.default_model_provider) window._activeProvider=data.default_model_provider;
-    if(typeof refreshProfileTransitionReasoningChip==='function'){
-      refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
-    }
-    if(typeof startGatewaySSE==='function') startGatewaySSE();
-    if(typeof syncTopbar==='function') syncTopbar();
-    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
-    if(typeof renderSessionList==='function') await renderSessionList();
-  }catch(switchErr){
-    // The switch POST failed, so we're still on the previous profile and its
-    // caches are intact. Clear the up-front skeleton and re-render the real
-    // list so the sidebar doesn't strand on the skeleton (the #4671 strand bug
-    // — _sessionListSkeletonActive hard-gates renderSessionListFromCache + the
-    // SSE/poll repaints until an unrelated full render fires). Mirror the
-    // canonical switch's catch in panels.js, then rethrow so loadSession's
-    // catch(switchErr) still routes into the generic error handler.
-    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
-    _sessionListSkeletonActive=false;
-    if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-    throw switchErr;
+function _captureSessionNavigationView(){
+  const msg=$('msg'), msgInner=$('msgInner'), emptyState=$('emptyState'), modelSelect=$('modelSelect'), fileTree=$('fileTree');
+  const local=(key)=>{try{return localStorage.getItem(key);}catch(_){return null;}};
+  const url=typeof window!=='undefined'&&window.location
+    ? window.location.pathname+window.location.search+window.location.hash : (S._lastSessionNavigationUrl||'');
+  return {
+    session:S.session,messages:Array.isArray(S.messages)?S.messages.slice():[],
+    entries:Array.isArray(S.entries)?S.entries.slice():[],toolCalls:Array.isArray(S.toolCalls)?S.toolCalls.slice():[],
+    pendingFiles:Array.isArray(S.pendingFiles)?S.pendingFiles.slice():[],
+    pendingSelections:typeof window!=='undefined'&&typeof window._capturePendingSelections==='function'?window._capturePendingSelections():null,
+    pendingSessionToolsets:Array.isArray(S._pendingSessionToolsets)?S._pendingSessionToolsets.slice():S._pendingSessionToolsets,
+    busy:!!S.busy,yoloEnabled:typeof _yoloEnabled!=='undefined'?_yoloEnabled:undefined,
+    activeStreamId:S.activeStreamId||null,lastUsage:S.lastUsage,activeProfile:S.activeProfile,
+    activeProfileIsDefault:!!S.activeProfileIsDefault,profileCookieOwnershipUncertain:!!S._profileCookieOwnershipUncertain,
+    currentDir:S.currentDir,profileDefaultWorkspace:S._profileDefaultWorkspace,profileSwitchWorkspace:S._profileSwitchWorkspace,
+    verifiedProfileIntent:S._verifiedSessionProfileIntent||null,
+    lastSessionNavigationUrl:url,defaultModel:typeof window!=='undefined'?window._defaultModel:undefined,
+    activeProvider:typeof window!=='undefined'?window._activeProvider:undefined,url,
+    historyState:typeof window!=='undefined'&&window.history?window.history.state:null,
+    innerHtml:msgInner?msgInner.innerHTML:null,fileTreeHtml:fileTree?fileTree.innerHTML:null,
+    fileTreeDisplay:fileTree?fileTree.style.display:null,workspacePanelMode:typeof _workspacePanelMode!=='undefined'?_workspacePanelMode:null,
+    emptyDisplay:emptyState?emptyState.style.display:null,inputValue:msg?msg.value:'',
+    localSession:local('hermes-webui-session'),localModel:local('hermes-webui-model'),
+    localModelState:local('hermes-webui-model-state'),modelValue:modelSelect?modelSelect.value:null,
+  };
+}
+
+function _restoreSessionNavigationView(snapshot){
+  if(!snapshot) return;if(typeof snapshot.pendingSelections==='function') snapshot.pendingSelections();
+  Object.assign(S,{session:snapshot.session,messages:snapshot.messages||[],entries:snapshot.entries||[],
+    toolCalls:snapshot.toolCalls||[],pendingFiles:snapshot.pendingFiles||[],
+    _pendingSessionToolsets:Array.isArray(snapshot.pendingSessionToolsets)?snapshot.pendingSessionToolsets.slice():snapshot.pendingSessionToolsets,
+    busy:!!snapshot.busy,activeStreamId:snapshot.activeStreamId||null,lastUsage:snapshot.lastUsage,
+    activeProfile:snapshot.activeProfile,activeProfileIsDefault:!!snapshot.activeProfileIsDefault,
+    _profileCookieOwnershipUncertain:!!snapshot.profileCookieOwnershipUncertain,currentDir:snapshot.currentDir,
+    _profileDefaultWorkspace:snapshot.profileDefaultWorkspace,_profileSwitchWorkspace:snapshot.profileSwitchWorkspace,
+    _verifiedSessionProfileIntent:snapshot.verifiedProfileIntent||null,
+    _lastSessionNavigationUrl:snapshot.lastSessionNavigationUrl||snapshot.url||''});
+  if(snapshot.yoloEnabled!==undefined&&typeof _yoloEnabled!=='undefined'){
+    _yoloEnabled=snapshot.yoloEnabled;
+    if(typeof _updateYoloPill==='function') _updateYoloPill();
   }
+  if(typeof window!=='undefined') Object.assign(window,{_defaultModel:snapshot.defaultModel,_activeProvider:snapshot.activeProvider});
+  const msg=$('msg'),msgInner=$('msgInner'),emptyState=$('emptyState'),modelSelect=$('modelSelect');
+  if(msg) msg.value=snapshot.inputValue||'';
+  if(msgInner&&snapshot.innerHtml!==null) msgInner.innerHTML=snapshot.innerHtml;
+  const fileTree=$('fileTree');
+  if(fileTree&&snapshot.fileTreeHtml!==null){fileTree.innerHTML=snapshot.fileTreeHtml;fileTree.style.display=snapshot.fileTreeDisplay||'';}
+  if(snapshot.workspacePanelMode!==null&&typeof _workspacePanelMode!=='undefined'){
+    if(typeof _setWorkspacePanelMode==='function') _setWorkspacePanelMode(snapshot.workspacePanelMode);
+    else _workspacePanelMode=snapshot.workspacePanelMode;
+  }
+  if(emptyState&&snapshot.emptyDisplay!==null) emptyState.style.display=snapshot.emptyDisplay;
+  if(modelSelect&&snapshot.modelValue!==null) modelSelect.value=snapshot.modelValue;
+  if(typeof _syncToolsetsChip==='function') _syncToolsetsChip();
+  const restoreLocal=(key,value)=>{try{if(value===null)localStorage.removeItem(key);else localStorage.setItem(key,value);}catch(_){} };
+  restoreLocal('hermes-webui-session',snapshot.localSession);restoreLocal('hermes-webui-model',snapshot.localModel);
+  restoreLocal('hermes-webui-model-state',snapshot.localModelState);
+  if(typeof window!=='undefined'&&window.history&&snapshot.url){
+    try{window.history.replaceState(snapshot.historyState||null,'',snapshot.url);}catch(_){}
+  }
+  if(S.session&&S.session.session_id&&S.activeStreamId&&typeof startSessionStream==='function') startSessionStream(S.session.session_id);
+  const restoredSid=S.session&&S.session.session_id;
+  if(restoredSid&&typeof updateQueueBadge==='function') updateQueueBadge(restoredSid);
+  if(restoredSid&&typeof _renderPendingPromptsForActiveSession==='function'){
+    const hasApproval=typeof _approvalPendingBySession!=='undefined'&&_approvalPendingBySession instanceof Map&&_approvalPendingBySession.has(restoredSid);
+    const hasClarify=typeof _clarifyPendingBySession!=='undefined'&&_clarifyPendingBySession instanceof Map&&_clarifyPendingBySession.has(restoredSid);
+    if(hasApproval||hasClarify){
+      _renderPendingPromptsForActiveSession();
+      if(hasApproval&&typeof startApprovalPolling==='function') startApprovalPolling(restoredSid);
+      if(hasClarify&&typeof startClarifyPolling==='function') startClarifyPolling(restoredSid);
+    }
+  }
+  if(typeof syncTopbar==='function') syncTopbar();
+  if(typeof updateSendBtn==='function') updateSendBtn();
+}
+
+function _commitDeferredProfileDefaults(defaults){
+  if(!defaults||typeof defaults!=='object') return;
+  const model=defaults.default_model?String(defaults.default_model):null;
+  const provider=defaults.default_model_provider?String(defaults.default_model_provider):null;
+  const workspace=defaults.default_workspace?String(defaults.default_workspace):null;
+  if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
+  else {try{localStorage.removeItem('hermes-webui-model');localStorage.removeItem('hermes-webui-model-state');}catch(_){} }
+  if(typeof window!=='undefined') Object.assign(window,{_defaultModel:model,_activeProvider:provider});
+  S._pendingProfileModel=model;
+  S._pendingProfileModelProvider=provider;
+  S._profileDefaultWorkspace=workspace;
+  S._profileSwitchWorkspace=workspace;
+  if(model&&typeof _applyModelToDropdown==='function') _applyModelToDropdown(model,$('modelSelect'),provider);
+}
+
+async function _preflightSessionReference(sid,expectedProfile){
+  let session=null, rawOwner='';
+  try{
+    const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
+    session=data&&data.session;
+    if(!session||String(session.session_id||'')!==String(sid)) return null;
+    rawOwner=typeof session.profile==='string'?session.profile.trim():'';
+  }catch(e){
+    let body=null;
+    try{body=typeof e.body==='string'?JSON.parse(e.body):e.body;}catch(_){}
+    if(e&&e.status===409&&body&&body.code==='session_profile_mismatch'
+      &&String(body.session_id||'')===String(sid)&&_sessionReferenceProfileIsValid(body.profile)){
+      rawOwner=String(body.profile);
+    }else return null;
+  }
+  if(expectedProfile&&rawOwner&&expectedProfile!==rawOwner
+    &&(expectedProfile==='default'||rawOwner==='default')
+    &&typeof _profileDropdownFetchFresh==='function'){
+    try{await _profileDropdownFetchFresh();}catch(_){return null;}
+  }
+  const owner=session?_sessionPayloadProfileForExpected(session,expectedProfile):rawOwner;
+  if(expectedProfile&&(!owner||!_sessionProfilesMatch(expectedProfile,owner))) return null;
+  return {profile:owner,session};
+}
+
+async function _restoreSessionReference(snapshot,generation,cookieUncertain=false){
+  if(!_sessionNavigationGenerationIsCurrent(generation)) return false;
+  const needsSwitch=!_profileMatchesProfileState(snapshot.activeProfile,S.activeProfile,S.activeProfileIsDefault)||!!S._profileCookieOwnershipUncertain||(typeof _profileSwitchApiPending!=='undefined'&&!!_profileSwitchApiPending);
+  if(needsSwitch||cookieUncertain){
+    const switchOptions={openExistingSession:true,deferDefaults:true,navigationGeneration:generation,navigationRollback:true,force:cookieUncertain};
+    let restored=false;
+    try{restored=typeof switchToProfile==='function'&&await switchToProfile(snapshot.activeProfile||'default',switchOptions);}catch(_){ }
+    if(!_sessionNavigationGenerationIsCurrent(generation)) return false;
+    if(!restored||!_profileMatchesProfileState(snapshot.activeProfile,S.activeProfile,S.activeProfileIsDefault)
+      ||switchOptions._profileCookieOwnershipUncertain){
+      const confirmedProfile=S.activeProfile, confirmedDefault=S.activeProfileIsDefault;
+      _restoreSessionNavigationView(snapshot);
+      Object.assign(S,{activeProfile:switchOptions._profileCookieOwnershipUncertain?'unconfirmed':confirmedProfile,
+        activeProfileIsDefault:switchOptions._profileCookieOwnershipUncertain?false:confirmedDefault,_profileCookieOwnershipUncertain:true});
+      if(typeof stopSessionStream==='function') stopSessionStream(); if(typeof stopApprovalPolling==='function') stopApprovalPolling();
+      if(typeof stopClarifyPolling==='function') stopClarifyPolling(); if(typeof stopGatewaySSE==='function') stopGatewaySSE();
+      if(typeof syncTopbar==='function') syncTopbar();
+      if(typeof updateSendBtn==='function') updateSendBtn();
+      return false;
+    }
+  }
+  _restoreSessionNavigationView(snapshot);
+  return true;
+}
+
+function _sessionNavigationGenerationIsCurrent(generation){
+  return Number.isFinite(generation)&&generation===_sessionNavigationGeneration;
+}
+
+async function _openSessionReference(sid,profile,options){
+  options=options||{};
+  const parsed=_parseSessionReference(sid,profile);
+  if(!parsed) return false;
+  const generation=Number.isFinite(options.navigationGeneration)
+    ? Number(options.navigationGeneration)
+    : ++_sessionNavigationGeneration;
+  if(!_sessionNavigationGenerationIsCurrent(generation)) return false;
+  if(S.busy&&S.session&&S.session.session_id!==parsed.sid){
+    if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
+    return false;
+  }
+  let anchor=_sessionNavigationRollbackAnchor;
+  if(!anchor){
+    anchor={snapshot:_captureSessionNavigationView()};
+    _sessionNavigationRollbackAnchor=anchor;
+    if(typeof options.previousUrl==='string'&&options.previousUrl){
+      anchor.snapshot.url=options.previousUrl;
+      anchor.snapshot.lastSessionNavigationUrl=options.previousUrl;
+    }
+  }
+  const snapshot=anchor.snapshot;
+  const deferredDefaults={};
+  const navigationResolution={sessionId:parsed.sid};
+  const restoreFailedNavigation=async(cookieUncertain=false)=>{
+    if(!_sessionNavigationGenerationIsCurrent(generation)) return false;
+    await _restoreSessionReference(snapshot,generation,cookieUncertain);
+    if(_sessionNavigationGenerationIsCurrent(generation)&&_sessionNavigationRollbackAnchor===anchor){
+      _sessionNavigationRollbackAnchor=null;
+    }
+    return false;
+  };
+  const preflight=await _preflightSessionReference(parsed.sid,parsed.profile);
+  if(!_sessionNavigationGenerationIsCurrent(generation)) return false;
+  if(!preflight) return restoreFailedNavigation();
+  const targetProfile=parsed.profile||preflight.profile||null;
+  if(parsed.profile&&preflight.profile&&!_sessionProfilesMatch(parsed.profile,preflight.profile)) return restoreFailedNavigation();
+  if(targetProfile&&(!_profileMatchesProfileState(targetProfile,S.activeProfile,S.activeProfileIsDefault)
+    ||(typeof _profileSwitchApiPending!=='undefined'&&_profileSwitchApiPending)
+    ||S._profileCookieOwnershipUncertain)){
+    try{
+      if(typeof _saveComposerDraftNow==='function'&&S.session&&S.session.session_id){
+        await _saveComposerDraftNow(S.session.session_id,($('msg')||{}).value||'',S.pendingFiles?[...S.pendingFiles]:[]);
+      }
+    }catch(_){
+      return restoreFailedNavigation();
+    }
+    if(!_sessionNavigationGenerationIsCurrent(generation)||typeof switchToProfile!=='function') return restoreFailedNavigation();
+    let switched=false;
+    const profileSwitchOptions={
+      openExistingSession:true,
+      deferDefaults:true,
+      navigationGeneration:generation,
+      _deferredProfileDefaults:deferredDefaults,
+      force:!!S._profileCookieOwnershipUncertain,
+    };
+    try{
+      switched=await switchToProfile(targetProfile,profileSwitchOptions);
+    }catch(_){ }
+    if(!switched) return restoreFailedNavigation(!!profileSwitchOptions._profileCookieOwnershipUncertain);
+    if(!_sessionNavigationGenerationIsCurrent(generation)) return false;
+  }
+  let loaded=false;
+  try{
+    if(S.session&&S.session.session_id===parsed.sid
+      &&(!targetProfile||_sessionPayloadProfileForExpected(S.session,targetProfile))){
+      loaded=true;
+    }else if(typeof loadSession==='function'){
+      loaded=await loadSession(parsed.sid,{
+        ...(options.loadOptions||{}),
+        force:false,
+        skipProfileResolve:true,
+        _preloadNotified:true,
+        _explicitNavigation:true,
+        _preserveNavigationOnFailure:true,
+        _navigationGeneration:generation,
+        expectedSessionId:parsed.sid,
+        expectedProfile:targetProfile,
+        _navigationResolution:navigationResolution,
+      })===true;
+    }
+  }catch(_){loaded=false;}
+  if(!_sessionNavigationGenerationIsCurrent(generation)) return false;
+  const visibleSid=navigationResolution.sessionId||parsed.sid;
+  if(!loaded||!S.session||S.session.session_id!==visibleSid
+    ||(targetProfile&&!_sessionPayloadProfileForExpected(S.session,targetProfile))){
+    return restoreFailedNavigation();
+  }
+  if(parsed.profile) S._verifiedSessionProfileIntent={sid:visibleSid,profile:parsed.profile};
+  else S._verifiedSessionProfileIntent=null;
+  _setActiveSessionUrl(visibleSid,parsed.profile);
+  if(Object.keys(deferredDefaults).length) _commitDeferredProfileDefaults(deferredDefaults);
+  if(_sessionNavigationGenerationIsCurrent(generation)&&_sessionNavigationRollbackAnchor===anchor){
+    _sessionNavigationRollbackAnchor=null;
+  }
+  return true;
 }
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  if(!opts._explicitNavigation&&!opts.externalRefreshReason&&typeof _sessionNavigationRollbackAnchor!=='undefined'){
+    _sessionNavigationRollbackAnchor=null;
+  }
+  const _navigationSnapshot=S.session&&typeof _captureSessionNavigationView==='function'?_captureSessionNavigationView():null;
+  const _navigationResult=ok=>opts._explicitNavigation?ok:undefined;
+  const _hasNavigationGeneration=typeof _sessionNavigationGeneration!=='undefined';
+  const _navigationGeneration=Number.isFinite(opts._navigationGeneration)
+    ? Number(opts._navigationGeneration)
+    : (opts.externalRefreshReason
+      ? (_hasNavigationGeneration?_sessionNavigationGeneration:null)
+      : (_hasNavigationGeneration?++_sessionNavigationGeneration:null));
+  const _isCurrentNavigation=()=>_navigationGeneration===null
+    || typeof _sessionNavigationGenerationIsCurrent!=='function'
+    || _sessionNavigationGenerationIsCurrent(_navigationGeneration);
+  if(!_isCurrentNavigation()) return _navigationResult(false);
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
-    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
-    if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+    const expectedProfile=opts.expectedProfile||(S.session&&S.session.session_id===sid
+      ? (S.session.profile||S.activeProfile||'default')
+      : (S.activeProfile||'default'));
+    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid,expectedProfile);
+    if(resolvedSid&&resolvedSid!==sid){
+      sid=resolvedSid;
+      if(opts._navigationResolution) opts._navigationResolution.sessionId=resolvedSid;
+    }
   }
   // Extension pre-open hook — fires once per sidebar click, not on every call.
   // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
@@ -2254,7 +2522,7 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
-      return;
+      return _navigationResult(false);
     }
   }
   const forceReload = !!opts.force;
@@ -2287,12 +2555,14 @@ async function loadSession(sid){
         Number(S.session.last_message_at || S.session.updated_at || 0)
       );
     }
+    if(opts._explicitNavigation) return true;
     return;
   }
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration
+    && _isCurrentNavigation();
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -2330,7 +2600,7 @@ async function loadSession(sid){
     // continuation can't wipe S.messages / write the loading placeholder /
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) return _navigationResult(false);
     // Snapshot the live turn before msgInner is replaced. Preserves the activity
     // timer, partial response, and tool cards so switching back does not rebuild
     // the stream UI from scratch.
@@ -2411,25 +2681,15 @@ async function loadSession(sid){
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
-        return;
+        return _navigationResult(false);
       }
-      try{
-        if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
-        await _switchProfileForSessionLoad(profileMismatch.profile);
-        // Post-await stale-load guard (Codex): the profile switch above does a
-        // network POST + session-list re-render, during which the user may have
-        // navigated to a different session. If we no longer own the load, bail
-        // before clearing _loadingSessionId or retrying so the stale
-        // continuation can't hijack the UI back to the old target.
-        if (!_isCurrentLoad()) {
-          _rearmActiveSessionStream();
-          return;
-        }
-        if (_isCurrentLoad()) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
-      }catch(switchErr){
-        e=switchErr;
+      _loadingSessionId=null;
+      if(!_sessionNavigationRollbackAnchor&&_navigationSnapshot){
+        _sessionNavigationRollbackAnchor={snapshot:_navigationSnapshot};
       }
+      return _navigationResult(await _openSessionReference(sid,profileMismatch.profile,{
+        navigationGeneration:_navigationGeneration,
+      }));
     }
     const _msgInner = $('msgInner');
     // Stale-load guard (Codex): a newer loadSession() may have started while this
@@ -2441,7 +2701,7 @@ async function loadSession(sid){
     // or self-heal.
     if (!_isCurrentLoad()) {
       _rearmActiveSessionStream();
-      return;
+      return _navigationResult(false);
     }
     if(_msgInner){
       if(e.status===404){
@@ -2457,12 +2717,14 @@ async function loadSession(sid){
         // case because _sessionIdFromLocation() re-injects the id on reload.
         // Only the rethrow stays gated on !currentSid: boot rethrows to fall
         // through to empty-state; mid-session there is no boot path to reach.
-        if(!currentSid || currentSid===sid){
-          try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-          try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-          if (_isCurrentLoad()) _loadingSessionId = null;
-          if(!currentSid){
-            throw e;
+        if(!opts._preserveNavigationOnFailure){
+          if(!currentSid || currentSid===sid){
+            try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+            try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
+            if (_isCurrentLoad()) _loadingSessionId = null;
+            if(!currentSid){
+              throw e;
+            }
           }
         }
       } else {
@@ -2472,7 +2734,7 @@ async function loadSession(sid){
         // (!currentSid) so the next boot doesn't retry the same dead session.
         // When currentSid is set, a 500/network error may be transient — the
         // session might still exist on the server (#4028 follow-up).
-        _clearStuckSessionOnBoot(sid, currentSid);
+        if(!opts._preserveNavigationOnFailure) _clearStuckSessionOnBoot(sid, currentSid);
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
@@ -2504,7 +2766,7 @@ async function loadSession(sid){
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
     }
-    return;
+    return _navigationResult(false);
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
@@ -2517,7 +2779,7 @@ async function loadSession(sid){
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
     _rearmActiveSessionStream();
-    return;
+    return _navigationResult(false);
   }
   // Stale response? A newer loadSession() call has already started (#1060).
   if (!_isCurrentLoad()) {
@@ -2527,18 +2789,22 @@ async function loadSession(sid){
     // Re-arm the genuinely-displayed S.session (idempotent — no-ops once the
     // newer load arms its own sid).
     _rearmActiveSessionStream();
-    return;
+    return _navigationResult(false);
   }
-  // #2980: if this (current) load resolved a hidden pre-compression snapshot,
-  // follow the backend's continuation hint to the visible continuation so a
-  // mobile reload mid-compression doesn't strand the user on a hidden snapshot.
-  // Do NOT write URL/localStorage here — let the re-entrant loadSession update
-  // them only once the continuation actually loads, so a rejected/deleted/
-  // cross-profile continuation can't poison restore state with an unusable id.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
     _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
+    if(opts._navigationResolution) opts._navigationResolution.sessionId=continuationSid;
+    return loadSession(continuationSid,{...opts,_preloadNotified:true,skipLineageResolve:true,skipContinuationResolve:true,force:true,_navigationGeneration,expectedSessionId:continuationSid});
+  }
+  const expectedSessionId=(opts._navigationResolution&&opts._navigationResolution.sessionId)||opts.expectedSessionId;
+  if(expectedSessionId&&String(data.session&&data.session.session_id||'')!==String(expectedSessionId)){
+    if(_isCurrentLoad()) _loadingSessionId=null;
+    return _navigationResult(false);
+  }
+  if(opts.expectedProfile&&!_sessionPayloadProfileForExpected(data.session,opts.expectedProfile)){
+    if(_isCurrentLoad()) _loadingSessionId=null;
+    return _navigationResult(false);
   }
   S.session=data.session;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
@@ -2616,7 +2882,15 @@ async function loadSession(sid){
     Number(data.session.last_message_at || data.session.updated_at || 0)
   );
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-  _setActiveSessionUrl(S.session.session_id);
+  if(opts.expectedProfile){
+    S._verifiedSessionProfileIntent={sid:S.session.session_id,profile:opts.expectedProfile};
+    _setActiveSessionUrl(S.session.session_id,opts.expectedProfile);
+  }else if(opts._explicitNavigation){
+    S._verifiedSessionProfileIntent=null;
+    _setActiveSessionUrl(S.session.session_id,null);
+  }else{
+    _setActiveSessionUrl(S.session.session_id);
+  }
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
 
@@ -2692,13 +2966,13 @@ async function loadSession(sid){
     } catch(e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
-        return;
+        return _navigationResult(false);
       }
       S.messages=inflightMessages;
     }
     if (!_isCurrentLoad()) {
       _rearmActiveSessionStream();
-      return;
+      return _navigationResult(false);
     }
     const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
     if(liveTailPrepared){
@@ -2738,7 +3012,7 @@ async function loadSession(sid){
     let didReconnect=false;
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
-      if (!_isCurrentLoad()) return;
+      if (!_isCurrentLoad()) return _navigationResult(false);
       // #7640: validate the selected recovery object at the moment of reattach
       // rather than trusting its existence. A cache that kept `lastRunJournalSeq`
       // but lost the live assistant projection would otherwise seed the replay
@@ -2809,7 +3083,7 @@ async function loadSession(sid){
     } catch (e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
-        return;
+        return _navigationResult(false);
       }
       // Network errors, server failures, or SSE drops (Chrome error codes 4/5)
       // can cause _ensureMessagesLoaded to throw. Without a try/catch here the
@@ -2821,10 +3095,10 @@ async function loadSession(sid){
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
       if (_isCurrentLoad()) _loadingSessionId = null;
-      return;
+      return _navigationResult(false);
     }
     // Stale? A newer loadSession() call has already started (#1060).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) return _navigationResult(false);
 
     // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
@@ -2982,6 +3256,7 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
   }
+  return _navigationResult(true);
 }
 
 // ── Handoff hint logic ──────────────────────────────────────────────────────
@@ -3049,21 +3324,6 @@ function _sidebarSessionProfileName(session){
   return raw||'';
 }
 
-async function _ensureSidebarSessionProfile(session){
-  const targetProfile=_sidebarSessionProfileName(session);
-  if(!_showAllProfiles||!targetProfile) return false;
-  const activeProfile=S.activeProfile||'default';
-  if(_profileMatchesActiveProfile(targetProfile,activeProfile)) return false;
-  if(typeof switchToProfile!=='function') return false;
-  _profileSwitchOpeningExistingSession=true;
-  try{
-    await switchToProfile(targetProfile);
-  }finally{
-    _profileSwitchOpeningExistingSession=false;
-  }
-  return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
-}
-
 async function _openSidebarSession(session, loadOpts={}){
   if(!session||!session.session_id) return;
   // Extension pre-open hook — before any side-effects (external import, profile switching).
@@ -3078,9 +3338,13 @@ async function _openSidebarSession(session, loadOpts={}){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
-  await _ensureSidebarSessionProfile(session);
   // Tell loadSession to skip its pre-hook — we already ran it above.
-  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
+  const targetProfile=_sidebarSessionProfileName(session);
+  if(_showAllProfiles&&targetProfile&&!_profileMatchesActiveProfile(targetProfile,S.activeProfile||'default')){
+    await _openSessionReference(session.session_id,targetProfile,{loadOptions:{...loadOpts,_preloadNotified:true}});
+  }else{
+    await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
+  }
   renderSessionListFromCache();
 }
 
@@ -4529,7 +4793,6 @@ const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
 const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
-let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
 let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested
@@ -4713,17 +4976,46 @@ function _optimisticallyRemoveSessionFromList(sid){
 
 function _sessionIdFromLocation(){
   if(typeof window==='undefined'||!window.location) return null;
+  if(typeof S!=='undefined'&&S) S._ambiguousSessionUrlIntent=false;
+  let qs,querySession=null;
+  try{
+    qs=new URLSearchParams(window.location.search||'');
+    const sessions=qs.getAll('session'), sessionIds=qs.getAll('session_id');
+    if(sessions.length>1||sessionIds.length>1||(sessions.length&&sessionIds.length)){
+      if(typeof S!=='undefined'&&S) S._ambiguousSessionUrlIntent=true;
+      return null;
+    }
+    querySession=qs.has('session')?sessions[0]:(qs.has('session_id')?sessionIds[0]:null);
+    const validQuerySession=querySession!==null&&(typeof _sessionReferenceIdIsValid==='function'
+      ?_sessionReferenceIdIsValid(querySession)
+      :String(querySession).length>0&&String(querySession).length<=256&&/^[A-Za-z0-9_-]+$/.test(String(querySession)));
+    if(querySession!==null&&!validQuerySession){
+      if(typeof S!=='undefined'&&S) S._ambiguousSessionUrlIntent=true;
+      return null;
+    }
+  }catch(_e){return null;}
   const marker='/session/';
   const path=window.location.pathname||'';
   const idx=path.indexOf(marker);
   if(idx>=0){
-    const raw=path.slice(idx+marker.length).split('/')[0];
-    if(raw){try{return decodeURIComponent(raw);}catch(_e){return raw;}}
+    // Only one non-empty ID segment is valid; preserve empty segments so
+    // malformed routes such as /session//sid fail closed.
+    const route=path.slice(idx+marker.length);
+    const match=route.match(/^([^/]+)\/?$/);
+    if(!match){
+      if(typeof S!=='undefined'&&S) S._ambiguousSessionUrlIntent=true;
+      return null;
+    }
+    const raw=match[1];
+    if(raw){
+      if(qs.has('session')||qs.has('session_id')){
+        if(typeof S!=='undefined'&&S) S._ambiguousSessionUrlIntent=true;
+        return null;
+      }
+      try{return decodeURIComponent(raw);}catch(_e){return raw;}
+    }
   }
-  try{
-    const qs=new URLSearchParams(window.location.search||'');
-    return qs.get('session')||qs.get('session_id')||null;
-  }catch(_e){return null;}
+  return querySession;
 }
 function _composerPrefillIntentFromLocation(){
   const empty={hasParams:false,hasText:false,text:'',autoSend:false};
@@ -4749,10 +5041,12 @@ function _profileQueryIntentFromLocation(){
   try{
     const qs=new URLSearchParams(window.location.search||'');
     if(!qs.has('profile')) return empty;
-    const name=String(qs.get('profile')||'');
+    const values=qs.getAll('profile');
+    const name=String(values[0]||'');
+    const validProfile=values.length===1&&String(name).length>0&&String(name).length<=64&&/^[a-z0-9][a-z0-9_-]*$/.test(name);
     return {
       hasParam:true,
-      valid:/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name),
+      valid:validProfile,
       name
     };
   }catch(_e){return empty;}
@@ -4789,7 +5083,7 @@ function _appRootPath(){
     return base.pathname || '/';
   }catch(_e){return '/';}
 }
-function _sessionUrlForSid(sid){
+function _sessionUrlForSid(sid,explicitProfile){
   const encoded=encodeURIComponent(sid);
   let base;
   try{base=new URL(`session/${encoded}`, document.baseURI||window.location.origin+'/');}
@@ -4801,6 +5095,10 @@ function _sessionUrlForSid(sid){
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
+    if(arguments.length>1){
+      current.searchParams.delete('profile');
+      if(explicitProfile&&_sessionReferenceProfileIsValid(explicitProfile)) current.searchParams.set('profile',String(explicitProfile));
+    }
     const retained=new URLSearchParams();
     current.searchParams.forEach((value,key)=>{
       if(key!=='action'||value!=='new-chat') retained.append(key,value);
@@ -4812,7 +5110,15 @@ function _sessionUrlForSid(sid){
 }
 function _setActiveSessionUrl(sid){
   if(typeof window==='undefined'||!window.history||!sid) return;
-  const next=_sessionUrlForSid(sid);
+  let profile=null;
+  if(arguments.length>1){
+    const explicitProfile=arguments[1];
+    profile=explicitProfile&&_sessionReferenceProfileIsValid(explicitProfile)?String(explicitProfile):null;
+  }else if(typeof S!=='undefined'&&S&&S._verifiedSessionProfileIntent&&S._verifiedSessionProfileIntent.sid===sid){
+    profile=S._verifiedSessionProfileIntent.profile||null;
+  }
+  const next=_sessionUrlForSid(sid,profile);
+  if(typeof S!=='undefined'&&S) S._lastSessionNavigationUrl=next;
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
     let consumeLaunchAction=false;
     try{
@@ -7380,10 +7686,12 @@ function _authoritativeLineageTipId(s){
   return s._lineage_tip_id||s._parent_lineage_tip_id||null;
 }
 
-function _resolveSessionIdFromSidebarLineage(sid){
+function _resolveSessionIdFromSidebarLineage(sid,expectedProfile){
   sid=String(sid||'').trim();
   if(!sid||!Array.isArray(_allSessions)||!_allSessions.length) return sid||null;
-  const visibleRows=_collapseSessionLineageForSidebar(_allSessions).filter(row=>row&&!_isChildSession(row));
+  const profileMatches=row=>!expectedProfile||(_sessionReferenceProfileIsValid(row.profile)&&_sessionProfilesMatch(expectedProfile,row.profile));
+  const sourceRows=expectedProfile?_allSessions.filter(profileMatches):_allSessions;
+  const visibleRows=_collapseSessionLineageForSidebar(sourceRows).filter(row=>row&&!_isChildSession(row));
   if(visibleRows.some(row=>row&&row.session_id===sid)) return sid;
   const candidates=[];
   for(const row of visibleRows){
@@ -9703,17 +10011,39 @@ if(typeof window!=='undefined'){
     void _handleShowAllProfilesStorageEvent(e);
     void _handleUnreadStorageEvent(e);
   });
-  window.addEventListener('popstate', () => {
-    const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
-    if(!sid || (S.session && S.session.session_id===sid)) return;
-    // Refuse to switch sessions mid-stream — same UX guard the storage-event
-    // handler had. A user mid-turn who hits browser Back should NOT lose the
-    // active stream. They can hit Back again once the turn ends.
-    if(S.busy){
-      if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
-      return;
-    }
-    void loadSession(sid);
+  window.addEventListener('popstate', () => { void _handleSessionPopstate(); });
+}
+
+async function _handleSessionPopstate(){
+  const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
+  const intent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
+  const currentSid=S.session&&S.session.session_id;
+  const previousUrl=currentSid
+    ? (S._lastSessionNavigationUrl||_sessionUrlForSid(currentSid,S._verifiedSessionProfileIntent&&S._verifiedSessionProfileIntent.sid===currentSid
+      ? S._verifiedSessionProfileIntent.profile : null))
+    : '';
+  if(!sid){
+    if(previousUrl&&window.history) try{window.history.replaceState(window.history.state||null,'',previousUrl);}catch(_){ }
+    return false;
+  }
+  if(intent&&intent.hasParam&&!intent.valid){
+    if(previousUrl&&window.history) try{window.history.replaceState(window.history.state||null,'',previousUrl);}catch(_){}
+    return false;
+  }
+  if(currentSid===sid&&!intent?.hasParam){
+    S._verifiedSessionProfileIntent=null;
+    S._lastSessionNavigationUrl=window.location.pathname+window.location.search+window.location.hash;
+    return true;
+  }
+  if(S.busy&&currentSid!==sid){
+    if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
+    if(previousUrl&&window.history) try{window.history.replaceState(window.history.state||null,'',previousUrl);}catch(_){}
+    return false;
+  }
+  const generation=++_sessionNavigationGeneration;
+  return _openSessionReference(sid,intent&&intent.hasParam?intent.name:null,{
+    navigationGeneration:generation,
+    previousUrl,
   });
 }
 
