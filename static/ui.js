@@ -8542,17 +8542,22 @@ function setComposerStatus(t,timeoutMs){
   if(statusHidden){
     el.style.display='none';
     el.textContent='';
+    el.removeAttribute('title');
     return;
   }
   if(!t){
     el.style.display='none';
     el.textContent='';
+    el.removeAttribute('title');
     return;
   }
   // Defensive reset: a stale hidden class should never block live status text.
   el.classList.remove('composer-control-hidden');
   el.removeAttribute('aria-hidden');
   el.textContent=t;
+  // The row is narrow and ellipsizes long text (e.g. a prefill filename), so keep
+  // the full value reachable on hover instead of leaving a cut-off fragment.
+  el.title=t;
   el.style.display='';
   if(timeoutMs>0){
     const timer=setTimeout(()=>{

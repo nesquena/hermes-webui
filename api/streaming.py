@@ -1394,9 +1394,32 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
     return {"status": "loaded", "source": "script", "label": label, "messages": messages, "message_count": len(messages)}
 
 
+def _prefill_label_override(config_data: Optional[dict] = None) -> str:
+    """Operator-chosen display name for the prefill context, "" when unset.
+
+    The status line shows the prefill *filename* by default, and the composer row
+    is narrow enough to ellipsize it (``prefill_arr_guardrails.md`` renders as
+    ``prefill_arr_guar``).  This is display-only: the loader contract keeps
+    reporting the real source file, so ``/api`` consumers still see the truth.
+    """
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    raw = os.getenv("HERMES_WEBUI_PREFILL_CONTEXT_LABEL", "") or cfg.get("webui_prefill_context_label")
+    return str(raw or "").strip()
+
+
 def _load_webui_prefill_context(
     config_data: Optional[dict] = None,
 ) -> dict:
+    """Load configured WebUI session prefill messages, label override applied."""
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    context = _resolve_prefill_context(cfg)
+    label = _prefill_label_override(cfg)
+    if label and context.get("status") == "loaded":
+        context["label"] = label
+    return context
+
+
+def _resolve_prefill_context(cfg: dict) -> dict:
     """Load configured WebUI session prefill messages.
 
     Supports the same bounded JSON-file shape used by Hermes Agent.  WebUI also
@@ -1404,7 +1427,6 @@ def _load_webui_prefill_context(
     Obsidian, Notion, llm-wiki, or another local notes source into ephemeral
     turn context without baking any one note provider into the WebUI.
     """
-    cfg = config_data if isinstance(config_data, dict) else get_config()
     script_context = _load_prefill_messages_script(cfg)
     file_raw = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or str(cfg.get("prefill_messages_file") or "")
     if script_context.get("status") == "not_configured":

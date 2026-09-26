@@ -241,6 +241,42 @@ def test_webui_prefill_context_budget_can_be_disabled(tmp_path):
     assert "compacted" not in result
 
 
+def test_prefill_label_can_be_named_by_the_operator(monkeypatch, tmp_path):
+    """The status line shows a cut-off filename unless a label is configured.
+
+    Default (contract): the loader reports the real source file.  The composer row
+    is narrow, so "prefill_arr_guardrails.md" renders as "prefill_arr_guar"; an
+    operator-set label replaces it for display only.
+    """
+    from api.streaming import _load_webui_prefill_context
+
+    monkeypatch.delenv("HERMES_PREFILL_MESSAGES_FILE", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_PREFILL_CONTEXT_LABEL", raising=False)
+    prefill = tmp_path / "prefill_arr_guardrails.md"
+    prefill.write_text(json.dumps([{"role": "system", "content": "rules"}]), encoding="utf-8")
+    cfg = {"prefill_messages_file": str(prefill)}
+
+    assert _load_webui_prefill_context(cfg)["label"] == "prefill_arr_guardrails.md"
+
+    cfg["webui_prefill_context_label"] = "Arr guardrails"
+    assert _load_webui_prefill_context(cfg)["label"] == "Arr guardrails"
+
+    # environment wins over config, like every other prefill key
+    monkeypatch.setenv("HERMES_WEBUI_PREFILL_CONTEXT_LABEL", "Env label")
+    assert _load_webui_prefill_context(cfg)["label"] == "Env label"
+
+    # a blank label must NOT blank the status line: fall back to the filename
+    cfg["webui_prefill_context_label"] = "   "
+    monkeypatch.delenv("HERMES_WEBUI_PREFILL_CONTEXT_LABEL")
+    assert _load_webui_prefill_context(cfg)["label"] == "prefill_arr_guardrails.md"
+
+    # not_configured stays not_configured: the label never invents a source
+    monkeypatch.delenv("HERMES_PREFILL_MESSAGES_FILE", raising=False)
+    empty = _load_webui_prefill_context({"webui_prefill_context_label": "Arr guardrails"})
+    assert empty["status"] == "not_configured"
+    assert empty["label"] == ""
+
+
 def test_public_prefill_status_strips_message_bodies():
     from api.streaming import _public_prefill_context_status
 
