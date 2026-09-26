@@ -1167,39 +1167,54 @@ def _run_gateway_chat_streaming(
     the configured Gateway API server into those local events and persists the
     final user/assistant turn back into the WebUI session.
     """
+    cancel_event = threading.Event()
     q = peek_stream(stream_id)
+    if q is not None:
+        # A snapshot lookup is not admission. A concurrent chat/start can classify
+        # this stream as an orphan (registered, no live worker, no pending turn in
+        # the registration window) and clear it between peek_stream() and the
+        # registration below; publishing ourselves active afterwards would run a
+        # turn with no transport/owner state, allowing overlapping turns and
+        # duplicate provider/tool effects. Claim the stream, its retained cancel
+        # signal and the ACTIVE_RUNS registration on ONE STREAMS_LOCK ->
+        # ACTIVE_RUNS_LOCK edge -- the order Stop/Steer use, and the same edge the
+        # in-process worker uses (api/streaming.py) -- revalidating stream
+        # membership and cancellation in-lock and failing closed when ownership is
+        # already gone.
+        with STREAMS_LOCK:
+            cancel_event = CANCEL_FLAGS.get(stream_id, cancel_event)
+            if stream_id not in STREAMS or cancel_event.is_set():
+                q = None
+            else:
+                CANCEL_FLAGS[stream_id] = cancel_event
+                STREAM_PARTIAL_TEXT[stream_id] = ""
+                STREAM_REASONING_TEXT[stream_id] = ""
+                STREAM_LIVE_TOOL_CALLS[stream_id] = []
+                register_active_run(
+                    stream_id,
+                    session_id=session_id,
+                    started_at=time.time(),
+                    phase="gateway-starting",
+                    workspace=str(workspace),
+                    model=model,
+                    provider=model_provider,
+                    backend="gateway",
+                )
     if q is None:
         _finish_gateway_run_starting(stream_id, result="fallback")
         _clear_gateway_run_starting(stream_id)
-        # Cancelled before the worker started; release the owner entry the route
-        # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
+        # Cancelled or orphan-cleared before the worker started; release the owner
+        # entries the route layer registered so STREAM_SESSION_OWNERS and
+        # SESSION_WRITEBACK_OWNERS do not leak (no teardown finally runs on this
+        # early-return path).
         unregister_stream_owner(stream_id)
-        # Also release the writeback-owner entry the route layer registered, so
-        # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
-        # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="gateway-starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        backend="gateway",
-    )
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
-    cancel_event = threading.Event()
-    with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ""
-        STREAM_REASONING_TEXT[stream_id] = ""
-        STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
     runs_api_pending_marked = True

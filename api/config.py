@@ -11285,6 +11285,13 @@ DEFERRED_PROCESS_WAKEUPS_LOCK = threading.Lock()
 # subscribers-empty grace path (60s) handles ordinary tab-close traffic.
 SESSION_CHANNEL_IDLE_TTL_SECS: int = 14400  # 4 hours
 SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
+# Positive dead-subscriber signal. How long a subscriber's queue
+# must reject broadcasts CONTINUOUSLY before the reaper may treat it as dead
+# (a ghost/half-open tab that never drains). A healthy tab drains on every
+# event, so it can never accumulate a run this long; 300s is well above the
+# SSE heartbeat interval and any plausible transient backpressure. Age alone
+# never collects a subscribed channel — only this signal or an explicit close.
+SESSION_CHANNEL_SUBSCRIBER_STALL_SECS: int = 300  # 5 minutes
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
 # than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is

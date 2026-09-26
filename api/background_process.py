@@ -137,6 +137,19 @@ class SessionChannel:
         self.created_at = now
         self.last_event_at = now
         self.last_subscriber_drop_at: float | None = None
+        # Explicit-close protocol (#7302). ``_closed`` latches once
+        # ``close()`` has signalled every subscriber, so the registry entry is
+        # collectible on the next reaper tick and a late ``subscribe()`` can be
+        # told to reconnect immediately instead of hanging on keepalives.
+        self._closed = False
+        self.closed_at: float | None = None
+        self.close_reason: str | None = None
+        # Positive dead-subscriber signal: per-queue timestamp of the FIRST
+        # consecutive ``queue.Full`` in the current stall run. Cleared the
+        # moment that subscriber drains. A healthy tab drains on every event,
+        # so it never accumulates a stall run — only a genuinely stuck/ghost
+        # subscriber does.
+        self._stalled_since: dict[queue.Queue, float] = {}
 
     def subscribe(self, maxsize: int = 16) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=maxsize)
@@ -144,6 +157,18 @@ class SessionChannel:
             self._subscribers.append(q)
             # Cancel any pending subscribers-empty grace timer.
             self.last_subscriber_drop_at = None
+            already_closed = self._closed
+        if already_closed:
+            # Late-subscriber race (mirrors gateway_watcher.subscribe): the
+            # channel was closed between the caller resolving it and appending
+            # here, so it will never receive a broadcast. Enqueue the sentinel
+            # ourselves so the SSE handler breaks out, calls unsubscribe(), and
+            # the browser reconnects onto the replacement channel instead of
+            # hanging open on keepalives forever.
+            try:
+                q.put_nowait(None)
+            except Exception:
+                logger.debug("Failed to send close sentinel to late subscriber")
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
@@ -152,6 +177,7 @@ class SessionChannel:
                 self._subscribers.remove(q)
             except ValueError:
                 pass
+            self._stalled_since.pop(q, None)
             if not self._subscribers:
                 self.last_subscriber_drop_at = time.time()
 
@@ -165,10 +191,16 @@ class SessionChannel:
         with self._lock:
             subs = list(self._subscribers)
             self.last_event_at = time.time()
+        now = time.time()
         for q in subs:
             try:
                 q.put_nowait((event, data))
                 delivered += 1
+                # Drained — any previous stall run is over. A live tab lands
+                # here on every event, which is exactly why the stall window
+                # below can never be reached by a healthy connection.
+                with self._lock:
+                    self._stalled_since.pop(q, None)
             except queue.Full:
                 # Slow tab: drop this event for that tab. SSE-level disconnect
                 # detection will eventually tear the connection down and the
@@ -177,10 +209,162 @@ class SessionChannel:
                 # idempotent (frontend dedupes by ``(session_id, event_id)``
                 # using a small ring-buffer in static/messages.js — see the
                 # bg_task_complete consumer-side dedupe introduced in PR #2971).
+                #
+                # Record the START of the stall run. If this queue
+                # keeps rejecting for the whole stall window it becomes positive
+                # evidence that the subscriber is dead rather than merely slow,
+                # which is the only signal allowed to evict a subscribed channel.
+                with self._lock:
+                    self._stalled_since.setdefault(q, now)
                 logger.debug("SessionChannel emit: subscriber buffer full, dropping")
             except Exception:
                 logger.debug("SessionChannel emit failed", exc_info=True)
         return delivered
+
+    def close(self, reason: str = "") -> int:
+        """Explicitly close the channel and unblock every subscriber.
+
+        This is the ONLY supported way to end a channel that still has
+        subscribers. Merely dropping the registry entry leaves the live
+        ``_handle_session_sse_stream()`` loop holding local references to the
+        channel and its queue: it keeps `q.get(timeout=...)`-ing and writing
+        keepalives forever, and the tab is stranded on an orphaned channel that
+        receives no further events.
+
+        Contract:
+          1. Latch ``_closed`` and detach all subscribers under ``self._lock``
+             (lock order: ``SESSION_CHANNELS_LOCK`` -> ``self._lock``, the same
+             order ``subscribe_to_session_channel`` documents).
+          2. Put the ``None`` sentinel into EVERY detached queue. The handler
+             already treats ``None`` as end-of-stream (``api/routes.py``), so it
+             breaks the loop, runs ``unsubscribe()`` in its ``finally``, closes
+             the response, and the browser's ``EventSource`` auto-reconnects.
+          3. Idempotent: a second call signals nobody and returns 0.
+
+        Signals are sent OUTSIDE ``self._lock`` (same shape as ``emit``) so a
+        queue whose ``put_nowait`` blocks on a slow consumer can never hold the
+        channel lock. A saturated queue cannot accept the sentinel, so one
+        stale entry is evicted first to guarantee the sentinel lands.
+
+        Returns the number of subscribers that received the sentinel.
+        """
+        with self._lock:
+            subs = self._latch_close_locked(reason)
+            if subs is None:
+                return 0
+
+        return self._signal_close_sentinels(subs)
+
+    def _latch_close_locked(self, reason: str):
+        """Latch ``_closed`` and detach every subscriber; caller holds ``self._lock``.
+
+        Returns the detached queues, or ``None`` when the channel was already
+        closed (idempotent no-op). Detaching here rather than in :meth:`close` is
+        what allows the reaper to revalidate eligibility, claim the close and
+        detach subscribers as one transition -- see :meth:`collect_if_eligible`.
+        """
+        if self._closed:
+            return None
+        self._closed = True
+        self.closed_at = time.time()
+        self.close_reason = reason or "close"
+        subs = list(self._subscribers)
+        self._subscribers.clear()
+        self._stalled_since.clear()
+        return subs
+
+    def _signal_close_sentinels(self, subs) -> int:
+        """Hand the ``None`` end-of-stream sentinel to every detached queue."""
+        signalled = 0
+        for q in subs:
+            try:
+                q.put_nowait(None)
+                signalled += 1
+                continue
+            except queue.Full:
+                pass
+            except Exception:
+                logger.debug("SessionChannel close: sentinel failed", exc_info=True)
+                continue
+            # Buffer saturated: make room for the sentinel, otherwise the
+            # handler would never see it and the connection would stay open.
+            try:
+                q.get_nowait()
+            except Exception:
+                pass
+            try:
+                q.put_nowait(None)
+                signalled += 1
+            except Exception:
+                logger.debug("SessionChannel close: sentinel dropped (queue full)")
+        logger.debug(
+            "SessionChannel close(%s) for %s signalled %d subscriber(s)",
+            self.close_reason, self.session_id, signalled,
+        )
+        return signalled
+
+    def collect_if_eligible(self, now: float, reason: str = "reaper") -> bool:
+        """Revalidate eligibility, claim the close and detach subscribers atomically.
+
+        Called by ``_reaper_loop`` with ``SESSION_CHANNELS_LOCK`` held (lock order
+        ``SESSION_CHANNELS_LOCK`` -> ``self._lock``, the order
+        ``subscribe_to_session_channel`` documents). The reaper's registry entry is
+        removed by the caller in the same ``SESSION_CHANNELS_LOCK`` transition.
+
+        Deciding collectability in one lock acquisition and acting on it in
+        another IS the race the review flagged: a stalled subscriber can drain and
+        accept a completion in that gap -- which clears its stall evidence in
+        ``emit()`` -- and the stale decision would still close the channel,
+        evicting the just-delivered event to make room for the sentinel. Because
+        the revalidation runs under the same ``self._lock`` that ``emit()`` uses to
+        clear stall evidence, either the drain lands first (no longer eligible, so
+        nothing is collected) or this claim lands first (subscribers detached, and
+        the later drain is no longer evidence of liveness).
+
+        Returns True when this call collected the channel.
+        """
+        with self._lock:
+            if not self._reaper_should_collect_locked(now):
+                return False
+            subs = self._latch_close_locked(reason)
+        # Sentinels go out with ``self._lock`` released (same shape as ``close``).
+        self._signal_close_sentinels(subs or [])
+        return True
+
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`close` has latched."""
+        with self._lock:
+            return self._closed
+
+    def _dead_subscriber_signal(self, now: float) -> bool:
+        """Positive evidence that EVERY attached subscriber is dead/stuck.
+
+        A subscriber counts as stalled when its queue has rejected a broadcast
+        (``queue.Full``) continuously for ``SESSION_CHANNEL_SUBSCRIBER_STALL_SECS``
+        — i.e. it has not drained a single event in that whole window. A live
+        tab drains on each event, so a healthy connection can never accumulate
+        a stall run. Returns False when there is no subscriber or when any one
+        of them is still draining (a single live subscriber protects the
+        channel, per the Option X contract).
+        """
+        with self._lock:
+            return self._dead_subscriber_signal_locked(now)
+
+    def _dead_subscriber_signal_locked(self, now: float) -> bool:
+        """``_dead_subscriber_signal`` body; the caller holds ``self._lock``."""
+        from api import config as _cfg
+
+        sub_count = len(self._subscribers)
+        stalled = [
+            self._stalled_since[q]
+            for q in self._subscribers
+            if q in self._stalled_since
+        ]
+        if sub_count == 0 or len(stalled) != sub_count:
+            return False
+        window = float(getattr(_cfg, "SESSION_CHANNEL_SUBSCRIBER_STALL_SECS", 300))
+        return all((now - since) >= window for since in stalled)
 
     def reaper_should_collect(self, now: float) -> bool:
         """True when the reaper should remove this channel.
@@ -190,18 +374,43 @@ class SessionChannel:
              SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS (normal teardown).
           2. created_at older than SESSION_CHANNEL_IDLE_TTL_SECS AND
              subscribers empty (zombie cap — survived too long).
+          3. ``close()`` was called on a channel that still had subscribers
+             (explicit-close protocol — collectible on the next tick).
+          4. POSITIVE dead-subscriber evidence: every attached subscriber has
+             been stalled past SESSION_CHANNEL_SUBSCRIBER_STALL_SECS. This is
+             the only path that may collect a channel with ``sub_count > 0``
+             without an explicit ``close()`` — age alone never does.
+
+        The live-subscriber invariant is deliberately unchanged: an attached,
+        draining subscriber keeps the channel alive regardless of age. Age is
+        not evidence of death; a saturated queue that never drains is.
+        """
+        with self._lock:
+            return self._reaper_should_collect_locked(now)
+
+    def _reaper_should_collect_locked(self, now: float) -> bool:
+        """``reaper_should_collect`` body; the caller holds ``self._lock``.
+
+        Split out so :meth:`collect_if_eligible` can revalidate eligibility and
+        claim the close as ONE transition, which is what removes the window the
+        review flagged.
         """
         from api import config as _cfg
 
-        with self._lock:
-            sub_count = len(self._subscribers)
-            drop_at = self.last_subscriber_drop_at
-            created_at = self.created_at
+        sub_count = len(self._subscribers)
+        drop_at = self.last_subscriber_drop_at
+        created_at = self.created_at
+        closed = self._closed
 
+        if closed:
+            # Explicitly closed with subscribers still attached: the reaper has
+            # already signalled them, so the entry is now collectible.
+            return True
         if sub_count > 0:
-            # Live subscriber — never collect, even past idle TTL (a tab is
-            # genuinely listening). The browser will close on its own.
-            return False
+            # Live (or at least draining) subscriber — NOT collectible by age.
+            # Only a positive dead-subscriber signal may evict it, and the
+            # caller must close() first so the handler actually unblocks.
+            return self._dead_subscriber_signal_locked(now)
         # No subscribers — check grace period.
         grace = float(getattr(_cfg, "SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS", 60))
         if drop_at is not None and (now - drop_at) >= grace:
@@ -442,7 +651,27 @@ def _reaper_loop() -> None:
             collected: list[str] = []
             with SESSION_CHANNELS_LOCK:
                 for sid, ch in list(SESSION_CHANNELS.items()):
-                    if ch.reaper_should_collect(now):
+                    # One atomic transition per channel: revalidate eligibility,
+                    # claim the close and detach subscribers under ch._lock, then
+                    # drop the registry entry -- all inside this same
+                    # SESSION_CHANNELS_LOCK acquisition (explicit-close protocol,
+                    # #7302). Lock order: SESSION_CHANNELS_LOCK -> ch._lock, the
+                    # order subscribe_to_session_channel documents. Deciding
+                    # outside the lock and closing after it is what let a
+                    # subscriber's drain in that gap be overwritten by the
+                    # sentinel. collect_if_eligible() signals every still-attached
+                    # subscriber BEFORE the registry entry is dropped, otherwise
+                    # the live SSE handler keeps looping on keepalives forever and
+                    # the tab is stranded on an orphan channel.
+                    try:
+                        collect = ch.collect_if_eligible(now, "reaper")
+                    except Exception:
+                        logger.debug(
+                            "SessionChannel reaper collect failed for %s",
+                            sid, exc_info=True,
+                        )
+                        collect = False
+                    if collect:
                         SESSION_CHANNELS.pop(sid, None)
                         collected.append(sid)
             if collected:
