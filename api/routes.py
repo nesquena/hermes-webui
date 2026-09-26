@@ -8470,8 +8470,7 @@ class _DraftSaveState:
 
     __slots__ = (
         "pending", "published", "published_gen", "generation",
-        "owner_alive", "settled_gen", "settled_outcome",
-        "settled_unchanged", "durable_draft", "retries",
+        "owner_alive", "outcomes", "retries",
     )
 
     def __init__(self):
@@ -8480,10 +8479,11 @@ class _DraftSaveState:
         self.published_gen = 0
         self.generation = 0            # monotonic; newest queued/published gen
         self.owner_alive = False       # a worker owns this state right now
-        self.settled_gen = 0           # newest settled generation
-        self.settled_outcome = None    # "ok" | "failed" | "missing"
-        self.settled_unchanged = False
-        self.durable_draft = None      # last durably saved draft (dict)
+        # Per-generation settlements: gen -> (outcome, unchanged, durable).
+        # A request reads ONLY its own entry — or a newer "ok" that superseded
+        # it — so a later failure can never flip an earlier success into a
+        # false 503, and an earlier failure can never produce a false ok:true.
+        self.outcomes = {}
         self.retries = 0               # consecutive retryable failures
 
 
@@ -8611,12 +8611,10 @@ def _draft_save_worker(sid):
             if state.published is intent:
                 state.published = None
             outcome = "missing" if missing else ("failed" if failed else "ok")
-            if gen >= state.settled_gen:
-                state.settled_gen = gen
-                state.settled_outcome = outcome
-                state.settled_unchanged = unchanged_flag
-                if outcome == "ok":
-                    state.durable_draft = durable
+            state.outcomes[gen] = (outcome, unchanged_flag, durable)
+            if len(state.outcomes) > 64:
+                for old_gen in sorted(state.outcomes)[: len(state.outcomes) - 64]:
+                    del state.outcomes[old_gen]
             if outcome == "ok":
                 state.retries = 0
                 if state.pending is None:
@@ -16712,15 +16710,36 @@ def handle_post(handler, parsed) -> bool:
                 if files is not None:
                     state.pending.files = files
             _maybe_spawn_draft_worker(sid, state)
-            while state.settled_gen < gen:
+            while True:
+                # This generation's own settlement, or a strictly newer "ok"
+                # that superseded this payload: both mean this request's draft
+                # (or newer) is durable. A newer "failed"/"missing" must NOT
+                # flip this request's earlier success into a false 503 — and
+                # this generation's failure never yields a false ok:true.
+                if gen in state.outcomes:
+                    outcome, unchanged, durable = state.outcomes[gen]
+                    settled = True
+                    break
+                newer_ok = None
+                for g in state.outcomes:
+                    if g > gen and state.outcomes[g][0] == "ok":
+                        newer_ok = g
+                        break
+                if newer_ok is not None:
+                    # Superseded by a newer durable save that includes this
+                    # request's payload (or a superset of it).
+                    outcome, unchanged, durable = state.outcomes[newer_ok]
+                    unchanged = False
+                    settled = True
+                    break
                 remaining = deadline - _draft_time.monotonic()
                 if remaining <= 0:
+                    settled = False
+                    outcome = None
+                    unchanged = False
+                    durable = None
                     break
                 _DRAFT_CV.wait(remaining)
-            settled = state.settled_gen >= gen
-            outcome = state.settled_outcome
-            unchanged = state.settled_unchanged
-            durable = state.durable_draft
         _draft_mark("settled")
         if not settled:
             # The worker is still saving (very large session or a heavy

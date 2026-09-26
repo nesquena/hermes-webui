@@ -57,20 +57,22 @@ def test_worker_claim_is_atomic_under_the_condition():
 
 
 def test_settlements_are_generation_tagged_and_never_reset():
-    """A failed settle can never surface as a later false ok:true (gate)."""
+    """A failed settle can never surface as a later false ok:true, and an
+    earlier success can never be flipped by a later failure (gate P1)."""
     worker_body = _block(ROUTES, "def _draft_save_worker(", "def _session_is_subagent_view_only(")
-    assert "state.settled_gen" in worker_body and "state.generation" in worker_body, (
-        "settlements must be generation-tagged"
+    assert "state.outcomes[gen]" in worker_body, (
+        "settlements must be recorded per generation"
     )
-    assert "settled_outcome = outcome" in worker_body, (
-        "settlement outcome is only ever assigned from the settled generation's result"
+    handler_body = _block(
+        ROUTES,
+        'if parsed.path == "/api/session/draft":',
+        'if parsed.path == "/api/session/update":',
     )
-    assert "settled_outcome = None" not in worker_body, (
-        "the worker must never reset a settlement outcome at runtime"
+    assert "if gen in state.outcomes:" in handler_body, (
+        "a request must resolve its OWN generation's settlement"
     )
-    state_body = _block(ROUTES, "class _DraftSaveState", "def _maybe_spawn_draft_worker(")
-    assert "self.settled_outcome = None" in state_body, (
-        "reset only in the constructor, never at runtime"
+    assert 'state.outcomes[g][0] == "ok"' in handler_body, (
+        "only a newer ok may supersede an earlier generation"
     )
 
 

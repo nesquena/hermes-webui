@@ -211,21 +211,25 @@ def test_worker_coalesces_pending_to_latest_payload(isolated_session_env):
 
 
 def test_missing_session_settles_missing(isolated_session_env, monkeypatch, draft_responses):
-    """Preflight passes, the worker's load 404s: settle honestly (404)."""
+    """The WORKER's load 404s after a passing preflight: settle honestly (404).
+
+    Regression guard for the Greptile P2: the previous version of this test
+    never created the session, so the handler 404'd in its existence check and
+    the post-preflight missing path stayed untested."""
     from api import routes
 
     sid = "dwkr-deleted"
-    full_loads = {"n": 0}
+    _make_persisted_session(sid)  # preflight must pass
     real_get = routes.get_session
 
     def get_session_stub(_sid, metadata_only=False):
         if metadata_only:
             # Handler preflight / subagent check: session still exists here.
             return real_get(_sid, metadata_only=True)
-        full_loads["n"] += 1
-        if full_loads["n"] == 1:
-            raise KeyError(_sid)  # worker full load: session vanished
-        return real_get(_sid, metadata_only=False)
+        # Every FULL load fails: the session vanished after the preflight.
+        # (The subagent check swallows this inside its own try/except; the
+        # worker must see it and settle "missing".)
+        raise KeyError(_sid)
 
     monkeypatch.setattr(routes, "get_session", get_session_stub)
 
@@ -383,6 +387,76 @@ def test_response_carries_durable_draft_with_files(isolated_session_env, draft_r
     assert draft.get("text") == "new text"
     assert draft.get("files") == ["upload-1.png"], (
         f"response must carry the durable draft's files, got {draft}"
+    )
+
+
+def test_earlier_success_not_flipped_by_later_failure(isolated_session_env, monkeypatch, draft_responses):
+    """Gate P1: A (gen 1) and B (gen 2) overlap; A's save succeeds, B's fails.
+    A must still answer 200 (its generation settled ok) and B must 503 —
+    the earlier success must not be flipped by the later failure."""
+    from api import routes
+    from api.models import Session
+
+    sid = "dwkr0010"
+    _make_persisted_session(sid)
+
+    class FirstOkThenFailLock:
+        """Lock free for the first acquire, busy afterwards."""
+
+        def __init__(self):
+            self.runs = 0
+
+        def acquire(self, timeout=None):
+            self.runs += 1
+            return self.runs <= 1
+
+        def release(self):
+            pass
+
+    lock_shim = FirstOkThenFailLock()  # ONE instance: acquire calls count across workers
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock_shim)
+    monkeypatch.setattr(routes, "_DRAFT_SAVE_LOCK_WAIT", 0.05)
+    monkeypatch.setattr(routes, "_DRAFT_SAVE_RETRY_DELAY", 3600.0)  # no self-heal
+
+    real_save = Session.save
+
+    def slow_first_save(self, *a, **kw):
+        # Keep the worker busy so B queues while gen 1 is still saving —
+        # both requests are then in flight when the outcomes are written.
+        slow_first_save.calls += 1
+        if slow_first_save.calls == 1:
+            time.sleep(0.4)
+        return real_save(self, *a, **kw)
+
+    slow_first_save.calls = 0
+    Session.save = slow_first_save
+    try:
+        results = {}
+
+        def run(key, text):
+            results[key] = _post_draft(sid, text)
+
+        t1 = threading.Thread(target=run, args=("a", "first-ok"))
+        t2 = threading.Thread(target=run, args=("b", "second-fails"))
+        t1.start()
+        time.sleep(0.1)  # A is inside its slow save when B publishes
+        t2.start()
+        t1.join(30)
+        t2.join(30)
+
+        assert results["a"].status == 200, (
+            f"A's generation settled ok; must not be flipped to 503 by B's failure, got {results['a'].status} {results['a'].response}"
+        )
+        assert results["b"].status == 503, (
+            f"B's failed save must be 503, got {results['b'].status} {results['b'].response}"
+        )
+    finally:
+        Session.save = real_save
+
+    from api.models import Session as _S
+    s = _S.load(sid)
+    assert (getattr(s, "composer_draft", {}) or {}).get("text") == "first-ok", (
+        "A's durable draft must survive B's failure"
     )
 
 
