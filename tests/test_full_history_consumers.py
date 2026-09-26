@@ -40,7 +40,7 @@ def page(browser):
         '"':'&quot;',"'":'&#39;'}[c]));
       const setStatus=v=>window.statusText=v;
       window.requests=[]; window.downloads=[];
-      window.full={session_id:'a',_messages_truncated:false,_messages_start:0,
+      window.full={session_id:'a',_messages_truncated:false,_messages_offset:0,
         messages:[{role:'user',content:'OLDEST MESSAGE'},
           {role:'assistant',content:'old',tool_calls:[{function:{name:'write_file',
             arguments:JSON.stringify({path:'old.md'})}}]},
@@ -104,7 +104,7 @@ def test_export_rejects_departed_owner(page, switch):
     'full._messages_truncated=true;resolveFetch()',
     "full.session_id='b';resolveFetch()",
     'full.messages=null;resolveFetch()',
-    'full._messages_start=10;resolveFetch()',
+    'full._messages_offset=10;resolveFetch()',
 ])
 def test_export_never_silently_downloads_partial_history(page, failure):
     page.click('#btnDownload')
@@ -116,7 +116,9 @@ def test_export_never_silently_downloads_partial_history(page, failure):
 
 
 def test_artifacts_load_on_demand_and_keep_live_tail(page):
-    page.evaluate('renderSessionArtifacts()')
+    # Production loads metadata first; its truncation flag is false even when
+    # _ensureMessagesLoaded has only loaded a page into S.messages.
+    page.evaluate('S.session._messages_truncated=false;renderSessionArtifacts()')
     assert page.evaluate('requests.length') == 0
     page.evaluate("switchWorkspacePanelTab('artifacts')")
     assert page.evaluate('requests.length') == 1

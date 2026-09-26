@@ -574,7 +574,6 @@ let _artifactHistory=null;
 function _loadArtifactHistory(){
   if(typeof _sessionSnapshotOwner!=='function' || !S.session) return null;
   if(_artifactHistory && !_artifactHistory.owner.isCurrent()) _artifactHistory=null;
-  if(!S.session._messages_truncated) return null;
   if(_artifactHistory || _workspacePanelActiveTab!=='artifacts') return _artifactHistory;
   const state={owner:_sessionSnapshotOwner(), status:'loading', items:[]};
   _artifactHistory=state;
@@ -601,7 +600,7 @@ function renderSessionArtifacts(){
   for(const item of history?.items || []){
     if(!seen.has(item.path)){items.push(item);seen.add(item.path);}
   }
-  const incomplete = !!S.session?._messages_truncated && history?.status!=='ready';
+  const incomplete = !!S.session && typeof _sessionSnapshotOwner==='function' && history?.status!=='ready';
   if(count) count.textContent = String(items.length) + (incomplete ? '…' : '');
   const notice = incomplete ? `<div class="workspace-artifact-empty">${esc(history?.status==='error'?'Could not load complete session history.':t('loading'))}${history?.status==='error'?` <button type="button" data-artifacts-retry>${esc(t('steer_recovery_retry'))}</button>`:''}</div>` : '';
   const bindRetry = ()=>{

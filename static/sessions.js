@@ -4524,7 +4524,7 @@ async function _readFullSessionSnapshot(owner = _sessionSnapshotOwner()){
   if(!owner.isCurrent()) return null;
   const session = data?.session;
   if(!session || session.session_id!==owner.sid || !Array.isArray(session.messages)
-      || session._messages_truncated || Number(session._messages_start||0)>0){
+      || session._messages_truncated || Number(session._messages_offset||0)>0){
     throw new Error('Incomplete session history');
   }
   return {session, isCurrent:owner.isCurrent};
