@@ -1087,6 +1087,16 @@ def recover_all_sessions_on_startup(
                 _rebuild_recovery_session_index(session_dir)
         except Exception as exc:
             logger.warning("recover_all_sessions_on_startup: index rebuild failed: %s", exc)
+    # #6885 slice 2a: durable pending goal continuations ride the startup
+    # recovery path so a restart resumes goal turns without server.py growth.
+    try:
+        from api.goal_continuation_store import restore_at_startup
+
+        restore_at_startup()
+    except Exception as exc:
+        logger.warning(
+            "recover_all_sessions_on_startup: goal continuation restore failed: %s", exc
+        )
     return {
         "scanned": scanned,
         "restored": restored,

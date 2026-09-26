@@ -2971,6 +2971,8 @@ from api.config import (
     _parse_provider_qualified_model_id,
 )
 from api import config as api_config
+from api.goal_continuation_store import snapshot_pending_goal_continuations
+
 from api.helpers import (
     require,
     bad,
@@ -23926,6 +23928,7 @@ def _start_chat_stream_for_session(
     if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
         goal_related = True
         PENDING_GOAL_CONTINUATION.discard(s.session_id)
+        snapshot_pending_goal_continuations()
 
     # process_complete wakeup (ours-original, Option B): if this session has a
     # pending process_complete marker (set by api/background_process.py drain),
