@@ -151,6 +151,8 @@ _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
 _CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
+# Hard cap on singleflight re-claim loop iterations before falling back to own rebuild (#4966).
+_CLI_SESSIONS_CACHE_MAX_RECLAIMS = 5
 
 # Per-file parse cache for Claude Code JSONL transcripts (#4718/#4662 phase 4).
 # ``~/.claude/projects`` is a GLOBAL, profile-independent directory, but the
@@ -7950,7 +7952,11 @@ def _reload_cli_sessions_after_inflight(
     load_sessions,
     all_profiles: bool,
     db_path: str,
+    max_reclaims=None,
 ) -> list:
+    if max_reclaims is None:
+        max_reclaims = _CLI_SESSIONS_CACHE_MAX_RECLAIMS
+    reclaims = 0
     while True:
         event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
         if is_owner:
@@ -7971,7 +7977,8 @@ def _reload_cli_sessions_after_inflight(
             return cached_sessions
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
-        if not wait_finished:
+        reclaims += 1
+        if not wait_finished or (max_reclaims is not None and reclaims >= max_reclaims):
             fallback_invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
             return _load_and_cache_cli_sessions(
                 cache_key=cache_key,
