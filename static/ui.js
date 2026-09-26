@@ -5540,7 +5540,7 @@ let _lastReasoningFetchKey=null;
 // a different agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
 
-function fetchReasoningChip(keyOverride){
+function fetchReasoningChip(keyOverride, fallbackStatus){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
   // while this GET is in flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
@@ -5558,22 +5558,49 @@ function fetchReasoningChip(keyOverride){
     // routine syncs retry after a genuine transient failure.
     if(seq!==_reasoningFetchSeq) return;
     _lastReasoningFetchKey=null;
-    _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
+    if(fallbackStatus && typeof fallbackStatus==='object'){
+      _applyReasoningChip(fallbackStatus.reasoning_effort||'', fallbackStatus);
+    } else {
+      _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
+    }
   });
 }
 
-function refreshProfileTransitionReasoningChip(model, provider){
+function refreshProfileTransitionReasoningChip(model, provider, reasoningStatus){
   _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
   _currentReasoningEffort=null;
   _currentReasoningEffortsSupported=null;
   _currentReasoningToggleSupported=undefined;
   _lastReasoningFetchKey=null;
   ++_reasoningFetchSeq;
-  _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
+
+  // Validate the destination profile's reasoning status object (#7206).
+  // A complete, validated object includes reasoning_effort (string),
+  // supported_efforts (array), and supports_thinking_toggle (boolean).
+  const isValidStatus = Boolean(
+    reasoningStatus &&
+    typeof reasoningStatus === 'object' &&
+    typeof reasoningStatus.reasoning_effort === 'string' &&
+    Array.isArray(reasoningStatus.supported_efforts) &&
+    typeof reasoningStatus.supports_thinking_toggle === 'boolean'
+  );
+
+  if(isValidStatus){
+    // Seed and synchronously render the destination profile's EFFECTIVE status
+    // (explicit contract of /api/profile/switch, coerced by the backend through
+    // the same authority as /api/reasoning) — paint the label and controls immediately
+    // without waiting for the follow-up GET (#7206).
+    _applyReasoningChip(reasoningStatus.reasoning_effort, reasoningStatus);
+  } else {
+    // Missing, null, or malformed status: treat as no override, allowing the
+    // destination-scoped GET to provide both effort and capability metadata.
+    _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
+  }
+
   const params=new URLSearchParams();
   if(model) params.set('model',model);
   if(provider) params.set('provider',provider);
-  fetchReasoningChip(params.size?'?'+params.toString():undefined);
+  fetchReasoningChip(params.size?'?'+params.toString():undefined, isValidStatus ? reasoningStatus : null);
 }
 
 function clearProfileTransitionReasoningContext(){

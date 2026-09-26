@@ -5650,6 +5650,8 @@ def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
@@ -5660,7 +5662,9 @@ def resolve_model_reasoning_efforts(
     retained for GPT-5.6 and other models whose native ladder includes it, and
     stripped where it would be rejected or mishandled.
     """
-    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    raw = _resolve_model_reasoning_efforts_impl(
+        model_id, provider_id, base_url, config_data=config_data
+    )
     if not raw:
         return raw
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
@@ -5712,8 +5716,11 @@ def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none."""
+    target_cfg = config_data if isinstance(config_data, dict) else cfg
     model = str(model_id or "").strip()
     if not model:
         return []
@@ -5724,7 +5731,7 @@ def _resolve_model_reasoning_efforts_impl(
         try:
             _, provider, resolved_base_url = resolve_model_provider(model)
         except Exception:
-            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+            provider = str((target_cfg.get("model") or {}).get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
 
@@ -5748,14 +5755,14 @@ def _resolve_model_reasoning_efforts_impl(
     _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
-            for _entry in _custom_provider_entries():
+            for _entry in _custom_provider_entries(target_cfg):
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = (target_cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model
@@ -5827,6 +5834,8 @@ def coerce_reasoning_effort_for_model(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> str:
     """Return the closest supported effort for the target model/provider."""
     raw = str(effort or "").strip().lower()
@@ -5847,6 +5856,7 @@ def coerce_reasoning_effort_for_model(
         model_id,
         provider_id=provider_id,
         base_url=base_url,
+        config_data=config_data,
     )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
@@ -5926,20 +5936,27 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
-def get_reasoning_status(
+def reasoning_status_for_config(
+    config_data,
     *,
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
 ) -> dict:
-    """Return current reasoning configuration from the active profile's
-    config.yaml — the same source of truth the CLI reads from.
+    """Compute the effective reasoning status from a supplied config dict.
+
+    Same keys and the same provider/model capability + effort-coercion
+    authority as :func:`get_reasoning_status`, but the config data comes from
+    the caller instead of the active profile — used by the profile switch
+    path to resolve the DESTINATION profile's effective reasoning status
+    without mutating process-global state (#7206).
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
-      - reasoning_effort: str — from ``agent.reasoning_effort`` ('' = default)
+      - reasoning_effort: str — COERCED effort for the resolved model/provider
+        ('' = default); raw ``agent.reasoning_effort`` is never exposed
+        verbatim, matching what streaming actually sends.
     """
-    config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
@@ -5961,6 +5978,7 @@ def get_reasoning_status(
         resolve_model,
         provider_id=resolve_provider,
         base_url=resolve_base_url,
+        config_data=config_data,
     )
     # supports_thinking_toggle: can the user turn thinking on/off at all? An
     # effort-capable model obviously can. The ZAI gate separately exposes the
@@ -5983,6 +6001,7 @@ def get_reasoning_status(
             resolve_model,
             provider_id=resolve_provider,
             base_url=resolve_base_url,
+            config_data=config_data,
         ),
         "supported_efforts": supported_efforts,
         "supports_reasoning_effort": bool(supported_efforts),
@@ -5991,6 +6010,31 @@ def get_reasoning_status(
         # toggle but not the effort ladder. False hides the chip entirely.
         "supports_thinking_toggle": supports_thinking_toggle,
     }
+
+
+def get_reasoning_status(
+    *,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> dict:
+    """Return current reasoning configuration from the active profile's
+    config.yaml — the same source of truth the CLI reads from.
+
+    Delegates to :func:`reasoning_status_for_config` so the /api/profile/switch
+    contract (#7206) shares the exact same coercion authority.
+
+    Keys:
+      - show_reasoning: bool — from ``display.show_reasoning`` (default True)
+      - reasoning_effort: str — COERCED effort ('' = default)
+    """
+    config_data = _load_yaml_config_file(_get_config_path())
+    return reasoning_status_for_config(
+        config_data,
+        model_id=model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
 
 
 def _parse_positive_int_config_value(raw) -> int | None:
