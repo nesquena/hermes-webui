@@ -11,8 +11,8 @@ Implementation:
 
   - api/config.py adds `STREAM_LAST_EVENT_ID: dict = {}` module-level dict.
   - api/streaming.py `put()` captures `journaled["event_id"]` from
-    `RunJournalWriter.append_sse_event()` return and writes it to
-    `STREAM_LAST_EVENT_ID[stream_id]`.
+    `RunJournalWriter.append_and_publish_sse_event()` and writes it to
+    `STREAM_LAST_EVENT_ID[stream_id]` only after queue publication succeeds.
   - StreamChannel queue items carry `(event, data, event_id)` so active
     subscribers emit each frame with its own id instead of the latest global id.
   - Legacy plain queues keep `(event, data)` and use `STREAM_LAST_EVENT_ID` as a
@@ -44,8 +44,8 @@ def test_put_writes_event_id_to_side_channel_dict():
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     assert put_def_idx != -1, "put(event, data) not found in api/streaming.py"
     put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert "journaled = run_journal.append_sse_event(event, data)" in put_body, (
-        "put() must capture append_sse_event return value"
+    assert "run_journal.append_and_publish_sse_event(event, data, _publish_journaled)" in put_body, (
+        "put() must capture the canonical journal event inside the append+publish transaction"
     )
     assert "STREAM_LAST_EVENT_ID[stream_id]" in put_body, (
         "put() must write event_id to STREAM_LAST_EVENT_ID[stream_id] — "
@@ -56,10 +56,11 @@ def test_put_writes_event_id_to_side_channel_dict():
 def test_stream_channel_queue_item_carries_per_event_id_with_legacy_fallback():
     """StreamChannel queue items need per-frame ids; legacy queues stay 2-tuples."""
     put_def_idx = STREAMING_PY.find("def put(event, data):")
-    put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
-        "StreamChannel events must carry their own event_id while legacy queue "
-        "consumers retain the 2-tuple shape"
+    put_body = STREAMING_PY[put_def_idx:put_def_idx + 3000]
+    assert 'queue_item = (event, data, None) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+        "StreamChannel events must keep the 3-tuple shape for snapshot-capable "
+        "queues while legacy queue consumers retain the 2-tuple shape "
+        "(upstream #7272 metering events carry no event id)"
     )
     assert "q.put_nowait(queue_item)" in put_body
 
@@ -69,9 +70,10 @@ def test_gateway_queue_item_carries_per_event_id_with_legacy_fallback():
     put_def_idx = GATEWAY_CHAT_PY.find("def put_gateway_event(event, data):")
     assert put_def_idx != -1, "put_gateway_event(event, data) not found"
     put_body = GATEWAY_CHAT_PY[put_def_idx:put_def_idx + 1800]
-    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
-        "Gateway live events must carry their own event_id for StreamChannel "
-        "subscribers while preserving legacy queue compatibility"
+    assert 'queue_item = (event, data, None) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+        "Gateway live events must keep the 3-tuple shape for StreamChannel "
+        "subscribers while preserving legacy queue compatibility "
+        "(upstream #7272 metering events carry no event id)"
     )
     assert "q.put_nowait(queue_item)" in put_body
 

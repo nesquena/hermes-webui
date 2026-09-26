@@ -1,12 +1,13 @@
 """Tests for real /steer functionality (follow-up to PR #1062).
 
-Covers the new POST /api/chat/steer endpoint which mirrors the CLI's /steer
-command (cli.py:6140-6155): the endpoint looks up the cached AIAgent for the
-session, calls agent.steer(text), and the agent's run loop appends the steer
-text to the next tool-result message — no interruption.
+Covers the POST /api/chat/steer endpoint which mirrors the CLI's /steer
+command (cli.py:6140-6155): the endpoint resolves the AIAgent owned by the
+session's exact active stream, calls agent.steer(text), and the agent's run loop
+appends the steer text to the next tool-result message — no interruption.
 
 Falls back to {"accepted": false, "fallback": "<reason>"} when the agent
-isn't running, isn't cached, or doesn't support steer (older agent versions).
+isn't running, has not registered against the active stream, or doesn't support
+steer (older agent versions).
 The frontend uses the fallback signal to restore the draft without cancelling
 the active run.
 
@@ -44,6 +45,7 @@ def _clear_caches():
     from api.config import (
         ACTIVE_RUNS,
         ACTIVE_RUNS_LOCK,
+        AGENT_INSTANCES,
         SESSION_AGENT_CACHE,
         SESSION_AGENT_CACHE_LOCK,
         STREAMS,
@@ -55,6 +57,8 @@ def _clear_caches():
     with STREAMS_LOCK:
         streams_snap = dict(STREAMS)
         STREAMS.clear()
+        agents_snap = dict(AGENT_INSTANCES)
+        AGENT_INSTANCES.clear()
     with ACTIVE_RUNS_LOCK:
         active_runs_snap = dict(ACTIVE_RUNS)
         ACTIVE_RUNS.clear()
@@ -65,6 +69,8 @@ def _clear_caches():
     with STREAMS_LOCK:
         STREAMS.clear()
         STREAMS.update(streams_snap)
+        AGENT_INSTANCES.clear()
+        AGENT_INSTANCES.update(agents_snap)
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS.clear()
         ACTIVE_RUNS.update(active_runs_snap)
@@ -107,6 +113,7 @@ class TestHandleChatSteerHappyPath:
         from api.config import (
             ACTIVE_RUNS,
             ACTIVE_RUNS_LOCK,
+            AGENT_INSTANCES,
             SESSION_AGENT_CACHE,
             SESSION_AGENT_CACHE_LOCK,
             STREAMS,
@@ -125,6 +132,7 @@ class TestHandleChatSteerHappyPath:
         monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
         with ACTIVE_RUNS_LOCK:
             ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "legacy", "phase": "running"}
+            AGENT_INSTANCES[stream_id] = agent
 
         sess = MagicMock()
         sess.active_stream_id = stream_id
@@ -134,7 +142,59 @@ class TestHandleChatSteerHappyPath:
 
         agent.steer.assert_called_once_with("Use Python instead")
         body = _captured_response(handler)
-        assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
+        assert body["accepted"] is True
+        assert body["fallback"] is None
+        assert body["stream_id"] == stream_id
+        assert body["durable"] is True
+        assert body["published"] is True
+        assert body["steer_event"]["type"] == "steer_delivered"
+
+    def test_steers_exact_active_stream_agent_not_retired_session_cache(self, _clear_caches, monkeypatch):
+        from api.streaming import _handle_chat_steer
+        from api import config
+        from api.config import (
+            ACTIVE_RUNS,
+            ACTIVE_RUNS_LOCK,
+            AGENT_INSTANCES,
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+            STREAMS,
+            STREAMS_LOCK,
+        )
+        import queue as _q
+
+        sid, stream_id = "sid_generation", "stream_current"
+        retired_agent = MagicMock()
+        active_agent = MagicMock()
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[sid] = (retired_agent, "old-sig")
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+            AGENT_INSTANCES[stream_id] = active_agent
+        # Master's positive-ownership gate: the stream-bound worker is only
+        # selected when the owner registry and active run name this session.
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "legacy", "phase": "running"}
+
+        session = MagicMock(active_stream_id=stream_id)
+        with patch("api.streaming.get_session", return_value=session), patch(
+            "api.streaming._accept_and_publish_steer_event",
+            return_value={
+                "accepted": True,
+                "fallback": None,
+                "durable": True,
+                "published": True,
+                "event": None,
+                "payload": {},
+            },
+        ) as publish:
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "current run only"})
+
+        assert publish.call_args.args[0] is active_agent
+        retired_agent.steer.assert_not_called()
+        assert _captured_response(handler)["accepted"] is True
 
 
 class TestHandleChatSteerFallbacks:
@@ -142,8 +202,15 @@ class TestHandleChatSteerFallbacks:
 
     def test_no_cached_agent(self, _clear_caches):
         from api.streaming import _handle_chat_steer
-        handler = _make_handler()
-        _handle_chat_steer(handler, {"session_id": "sid_x", "text": "hint"})
+        from api.config import STREAMS, STREAMS_LOCK
+        import queue as _q
+
+        sid, stream_id = "sid_x", "stream_x"
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+        with patch("api.streaming.get_session", return_value=MagicMock(active_stream_id=stream_id)):
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "hint"})
         body = _captured_response(handler)
         assert body["accepted"] is False
         assert body["fallback"] == "no_cached_agent"
@@ -174,16 +241,32 @@ class TestHandleChatSteerFallbacks:
             "stream_id": stream_id,
         }
 
-    def test_agent_lacks_steer_method(self, _clear_caches):
+    def test_agent_lacks_steer_method(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
-        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-        sid = "sid_old"
+        from api import config
+        from api.config import (
+            ACTIVE_RUNS,
+            ACTIVE_RUNS_LOCK,
+            AGENT_INSTANCES,
+            STREAMS,
+            STREAMS_LOCK,
+        )
+        import queue as _q
+
+        sid, stream_id = "sid_old", "stream_old"
         # Older agent without steer() — use spec to suppress MagicMock auto-create
         agent = MagicMock(spec=["interrupt", "run_conversation"])
-        with SESSION_AGENT_CACHE_LOCK:
-            SESSION_AGENT_CACHE[sid] = (agent, "sig")
-        handler = _make_handler()
-        _handle_chat_steer(handler, {"session_id": sid, "text": "hint"})
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+            AGENT_INSTANCES[stream_id] = agent
+        # Master's positive-ownership gate must pass so the test reaches the
+        # agent-capability check rather than failing closed on missing ownership.
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "legacy", "phase": "running"}
+        with patch("api.streaming.get_session", return_value=MagicMock(active_stream_id=stream_id)):
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "hint"})
         body = _captured_response(handler)
         assert body["accepted"] is False
         assert body["fallback"] == "agent_lacks_steer"
@@ -248,6 +331,7 @@ class TestHandleChatSteerFallbacks:
         from api.config import (
             ACTIVE_RUNS,
             ACTIVE_RUNS_LOCK,
+            AGENT_INSTANCES,
             SESSION_AGENT_CACHE,
             SESSION_AGENT_CACHE_LOCK,
             STREAMS,
@@ -264,6 +348,7 @@ class TestHandleChatSteerFallbacks:
         monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
         with ACTIVE_RUNS_LOCK:
             ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "legacy", "phase": "running"}
+            AGENT_INSTANCES[stream_id] = agent
         sess = MagicMock()
         sess.active_stream_id = stream_id
         with patch("api.streaming.get_session", return_value=sess):
@@ -363,9 +448,10 @@ class TestFrontendWiring:
         assert "const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;" in body
         assert "const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in body
         assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot)" in body
-        assert "body:JSON.stringify({session_id:ownerSid,text:steerText})" in body, (
-            "steer endpoint must receive the captured owner session id and attachment-enriched text"
-        )
+        assert "session_id:ownerSid" in body
+        assert "user_text:originalMsg" in body, "one user-authored value must own visible and runtime text"
+        assert "attachment_paths:attachmentPaths" in body, "uploaded paths must cross as structured data"
+        assert "display_text:originalMsg" not in body
         assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in body
         assert "if(_steerOwnerIsCurrent(ownerSid))" in body
         assert "S.pendingFiles=_remaining" in body, "accepted steer should clear the delivered files (by identity) after paths are injected"
@@ -385,7 +471,7 @@ class TestFrontendWiring:
             "post-await tray/DOM mutations must be guarded by the captured owner session"
         )
 
-    def test_file_steer_upload_status_and_indicator_are_owner_scoped(self):
+    def test_file_steer_upload_status_and_degraded_indicator_are_owner_scoped(self):
         steer_helpers = _source_between(
             self.cmds,
             "function _steerOwnerIsCurrent",
@@ -396,12 +482,14 @@ class TestFrontendWiring:
         assert "_steerSetComposerStatusForOwner(ownerSid,t('uploading')||'Uploading…')" in steer_helpers
         assert "_steerSetComposerStatusForOwner(ownerSid,'')" in steer_helpers
         assert "function _steerIndicatorText" in steer_helpers
-        assert "_showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot))" in try_body, (
-            "visible steer indicator must use original text or a file-only display label, not attachment tool instructions"
+        degraded_idx = try_body.index("if(persistenceDegraded)")
+        indicator_idx = try_body.index("_showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot))")
+        assert indicator_idx > degraded_idx, (
+            "the legacy banner may appear only when accepted delivery could not be journaled"
         )
         assert "_showSteerIndicator(steerText)" not in try_body
 
-    def test_file_steer_indicator_omits_attachment_tool_note(self):
+    def test_file_steer_sends_clean_display_payload_without_transient_indicator(self):
         import json
         import shutil
         import subprocess
@@ -441,16 +529,17 @@ class TestFrontendWiring:
             (async()=>{{
               const delivered = await _trySteer('hint', false);
               assert.strictEqual(delivered, true);
-              assert.strictEqual(indicatorText, 'hint');
-              assert.ok(apiPayload.text.includes('[Attached files for this steer: /tmp/a.pdf]'));
-              assert.ok(!indicatorText.includes('Attached files'));
-              assert.ok(!indicatorText.includes('file tools/read_file'));
+              assert.strictEqual(indicatorText, null);
+              assert.strictEqual(apiPayload.user_text, 'hint');
+              assert.deepStrictEqual(apiPayload.attachment_paths, ['/tmp/a.pdf']);
+              assert.ok(!apiPayload.user_text.includes('Attached files'));
+              assert.ok(!apiPayload.user_text.includes('file tools/read_file'));
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
         subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
 
-    def test_attachment_only_steer_indicator_uses_file_label(self):
+    def test_attachment_only_steer_sends_file_label_as_display_metadata(self):
         import json
         import shutil
         import subprocess
@@ -490,9 +579,9 @@ class TestFrontendWiring:
             (async()=>{{
               const delivered = await _trySteer('', false);
               assert.strictEqual(delivered, true);
-              assert.strictEqual(indicatorText, 'Attached files: a.pdf');
-              assert.ok(apiPayload.text.includes('[Attached files for this steer: /tmp/a.pdf]'));
-              assert.ok(!indicatorText.includes('file tools/read_file'));
+              assert.strictEqual(indicatorText, null);
+              assert.strictEqual(apiPayload.user_text, '');
+              assert.deepStrictEqual(apiPayload.attachment_paths, ['/tmp/a.pdf']);
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
@@ -641,7 +730,7 @@ class TestFrontendWiring:
 
               const delivered = await _trySteer(msg, explicitSteer);
               assert.strictEqual(delivered, false);
-              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg}});
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', user_text:msg, attachment_paths:[]}});
               assert.strictEqual(S.busy, false);
               assert.strictEqual(S.activeStreamId, null);
               assert.strictEqual(S.session.active_stream_id, null);
@@ -688,7 +777,7 @@ class TestFrontendWiring:
 
               const delivered = await _trySteer(msg, explicitSteer);
               assert.strictEqual(delivered, false);
-              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg}});
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', user_text:msg, attachment_paths:[]}});
               assert.strictEqual(S.busy, true);
               assert.strictEqual(S.activeStreamId, 'stream-1');
               assert.strictEqual(S.session.active_stream_id, 'stream-1');
@@ -752,7 +841,7 @@ class TestFrontendWiring:
 
               const delivered = await _trySteer('queue me', false);
               assert.strictEqual(delivered, true);
-              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:'queue me'}});
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', user_text:'queue me', attachment_paths:[]}});
               assert.strictEqual(S.busy, true);
               assert.ok(Object.prototype.hasOwnProperty.call(INFLIGHT, 'A'));
               assert.deepStrictEqual(clearInflightCalls, []);
@@ -986,7 +1075,7 @@ class TestFrontendWiring:
 # ── i18n keys ─────────────────────────────────────────────────────────────
 
 class TestI18nKeys:
-    """The two new keys (cmd_steer_delivered, steer_leftover_queued) must be in all 6 locales."""
+    """Steer delivery and replay copy must be present in every locale block."""
 
     @classmethod
     def setup_class(cls):
@@ -1002,6 +1091,12 @@ class TestI18nKeys:
         assert self.i18n.count("steer_leftover_queued:") >= 6, (
             f"steer_leftover_queued appears {self.i18n.count('steer_leftover_queued:')} times; "
             f"expected ≥6 (one per locale)"
+        )
+
+    def test_steer_message_label_in_all_locales(self):
+        assert self.i18n.count("steer_message_label:") >= 15, (
+            f"steer_message_label appears {self.i18n.count('steer_message_label:')} times; "
+            "expected one per locale"
         )
 
 

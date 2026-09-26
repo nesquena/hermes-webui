@@ -69,7 +69,7 @@ from api.compression_anchor import is_context_compression_marker, visible_messag
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.gateway_chat import WEBUI_LOCAL_CHAT_BACKEND
 from api.metering import meter
-from api.run_journal import RunJournalWriter
+from api.run_journal import RunJournalWriter, TERMINAL_SSE_EVENTS
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -10113,6 +10113,27 @@ def _run_agent_streaming(
             target = AGENT_INSTANCES.get(stream_id) or agent
             if stream_id in STREAMS and not cancel_event.is_set():
                 update_active_run(stream_id, phase="finalizing")
+        # Greptile outside-diff P1 (PR head 9e8c41913e): close the journal's
+        # acceptance fence BEFORE the final drain. A Steer that passed the
+        # ownership check while the run was still steerable could otherwise
+        # acquire the open journal transaction after the drain began and be
+        # journaled as delivered guidance the runtime never consumes. With the
+        # fence closed first, that transaction is rejected (fence_closed ->
+        # not_running, since the owned stream stays live in the finalizing
+        # phase). Lock ordering is preserved: close_acceptance_fence
+        # takes the per-run journal lock BEFORE the fence lock, matching
+        # accept_and_append_if_nonterminal, so an in-flight acceptance cannot
+        # be overtaken by the fence close + drain. Journal identity is
+        # unchanged: the fence closes through the admission-time writer.
+        if run_journal is not None:
+            try:
+                run_journal.close_acceptance_fence()
+            except Exception:
+                logger.debug(
+                    "Failed to close acceptance fence before final steer drain "
+                    "for session %s stream %s", session_id, stream_id,
+                    exc_info=True,
+                )
         leftovers = list(_returned_pending_steer)
         try:
             drain = getattr(target, '_drain_pending_steer', None)
@@ -10132,27 +10153,46 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
-        event_id = None
-        if run_journal is not None:
+        def _publish_journaled(journaled):
+            event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
             try:
-                journaled = run_journal.append_sse_event(event, data)
-                # Carry the exact journal id for this queued frame. A global
-                # "latest event" side channel is still kept for legacy queues,
-                # but StreamChannel subscribers need the per-item id so a
-                # queued backlog cannot advance the browser cursor past an
-                # undelivered event.
-                event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
+                queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
+                q.put_nowait(queue_item)
                 if event_id:
+                    # StreamChannel records the per-item id atomically with its
+                    # queue mutation. Advance the legacy side channel only after
+                    # that publication succeeds; never advertise an unseen frame.
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
-                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
-        if event_id and hasattr(q, "note_last_event_id"):
+                logger.debug("Failed to put event to queue")
+
+        if run_journal is not None:
             try:
-                q.note_last_event_id(event_id)
+                # Terminal events (done/cancel/apperror/stream_end) close the
+                # acceptance fence atomically with their journal append, so a
+                # late Steer cannot be accepted after the turn is effectively
+                # over (#7188 rework). The completion path also calls
+                # run_journal.close_acceptance_fence() before its Steer drain
+                # to close the window between drain and done-append.
+                if event in TERMINAL_SSE_EVENTS:
+                    run_journal.close_acceptance_fence_and_publish_terminal(
+                        event, data, _publish_journaled
+                    )
+                else:
+                    # Journal append and queue publication share the per-run lock.
+                    # Otherwise a concurrent Steer can append N+1 and queue before
+                    # this already-appended N, reversing live order vs replay.
+                    run_journal.append_and_publish_sse_event(event, data, _publish_journaled)
+                return
             except Exception:
-                logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
+                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
+        # Journal-miss fallback (run_journal is None or the journaled publish
+        # path raised). Upstream #7272: metering and other snapshot-only events
+        # are no longer journaled, so the queue item may legitimately carry no
+        # event id — but snapshot-capable queues still accept (and rely on)
+        # id-bearing items for reconnect cursors, so keep the 3-tuple shape.
         try:
-            queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
+            queue_item = (event, data, None) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put event to queue")
@@ -14259,6 +14299,29 @@ def _run_agent_streaming(
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
 
+        # ── #7188 rework: server-side terminal settlement ─────────────────
+        # Materialize the canonical journal scene into anchor_activity_scenes
+        # so Steer deliveries survive settle/replay WITHOUT relying on the
+        # browser's async scene POST (static/messages.js:~3775). Terminal
+        # sessions have no active_stream_id, so /api/session never projects
+        # their run journal — if the tab closed before POST landed, the Steer
+        # was gone from the settled transcript. This runs for completion,
+        # cancellation, and error paths alike.
+        try:
+            from api.routes import _persist_terminal_anchor_scene_from_journal
+            from api.run_journal import read_run_events, select_authoritative_terminal_event
+            _settle_events = read_run_events(session_id, stream_id).get("events") or []
+            _terminal = select_authoritative_terminal_event(_settle_events)
+            _terminal_state = _terminal.get("terminal_state") if _terminal else None
+            _persist_terminal_anchor_scene_from_journal(
+                session_id, stream_id, terminal_state=_terminal_state
+            )
+        except Exception:
+            logger.debug(
+                "Server-side terminal anchor-scene settlement failed for session %s stream %s",
+                session_id, stream_id, exc_info=True,
+            )
+
         # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
         # The session has just transitioned active→idle: unregister_active_run
         # above cleared this stream's ACTIVE_RUNS row (under ACTIVE_RUNS_LOCK,
@@ -14302,13 +14365,27 @@ def _run_agent_streaming(
 _LOCAL_STEERABLE_PHASES = frozenset({"starting", "running"})
 
 
-def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
+def _steer_bound_stream(
+    sid: str,
+    stream_id: str,
+    text: str,
+    *,
+    display_text: str,
+    files=None,
+) -> dict | None:
     """Deliver to a verified live worker; None retains cache-only compatibility.
 
-    Never perform HTTP writes or cache/database teardown under stream locks.
+    Ownership verification happens under STREAMS_LOCK; the durable acceptance
+    transaction runs OUTSIDE it. The run journal's per-run lock plus the
+    acceptance fence serialize delivery with terminal teardown (a fence closed
+    by cancel/completion rejects the Steer with stream_dead, or not_running
+    when the owned stream is still live in the finalizing phase), so no stream
+    lock needs to be held across journal I/O. Never perform HTTP writes or
+    cache/database teardown under stream locks.
     """
     from api import config as cfg
 
+    verified_agent = None
     with cfg.STREAMS_LOCK:
         agent = cfg.AGENT_INSTANCES.get(stream_id)
         owner = cfg.stream_owner_session_id(stream_id)
@@ -14341,14 +14418,253 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
             return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
         if not callable(getattr(agent, "steer", None)):
             return {"accepted": False, "fallback": "agent_lacks_steer", "stream_id": None}
-        # steer() only stashes input; serializing it with stream teardown keeps
-        # cancel from detaching the selected worker before delivery.
-        try:
-            accepted = bool(agent.steer(text))
-        except Exception:
-            logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
-            return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
-        return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
+        # steer() only stashes input; the verified worker is handed to the
+        # journal transaction below, OUTSIDE the stream lock. The transaction
+        # (not this lock) serializes acceptance with cancel/completion: the
+        # acceptance fence is closed under the per-run journal lock before any
+        # terminal append, so a Steer racing teardown is rejected stream_dead
+        # instead of being journaled into a finished turn.
+        verified_agent = agent
+
+    if verified_agent is None:
+        return None
+    try:
+        outcome = _accept_and_publish_steer_event(
+            verified_agent,
+            sid,
+            stream_id,
+            text,
+            display_text=display_text,
+            files=files,
+        )
+    except Exception:
+        logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
+        return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
+    response = {
+        "accepted": bool(outcome.get("accepted")),
+        "fallback": outcome.get("fallback"),
+        "stream_id": stream_id,
+    }
+    if response["accepted"]:
+        response["durable"] = bool(outcome.get("durable"))
+        response["published"] = bool(outcome.get("published"))
+        journaled = outcome.get("event")
+        if isinstance(journaled, dict):
+            response["steer_event"] = {
+                "version": journaled.get("version", 1),
+                "type": "steer_delivered",
+                "event": "steer_delivered",
+                "event_id": journaled.get("event_id"),
+                "seq": journaled.get("seq"),
+                "run_id": journaled.get("run_id"),
+                "session_id": journaled.get("session_id", sid),
+                "stream_id": stream_id,
+                "created_at": journaled.get("created_at"),
+                "payload": dict(outcome.get("payload") or {}),
+            }
+    return response
+
+
+def _steer_attachment_paths(value) -> list[str]:
+    """Return bounded, single-line attachment paths for runtime guidance."""
+    if not isinstance(value, list):
+        return []
+    paths = []
+    for raw in value[:20]:
+        path = re.sub(r"[\x00-\x1f\x7f]+", " ", str(raw or "").strip()).strip()[:2048]
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _verified_steer_attachment_paths(session_id: str, value) -> list[str]:
+    """Accept only real files from this session's server-owned upload inbox.
+
+    Archive-backed Steer (#7188 rework): ``/api/upload/extract`` returns the
+    extracted **directory** (static/ui.js:~21743), not a concrete file. The old
+    Steer path passed that directory through as runtime guidance. Permit a
+    contained extracted directory (excluding the inbox root itself) by expanding
+    it to its concrete member file paths. Each resolved path must still live
+    under the session root.
+
+    Security (#7188 CORE #3): symlinks inside the upload directory pointing
+    outside ``session_root`` were accepted because the old check used the
+    UNRESOLVED lexical path. Every member is now ``resolve(strict=True)``-d and
+    verified to be (a) under ``session_root`` and (b) a regular file. Symlinks
+    are rejected outright — a member whose resolved target escapes the session
+    root raises ``ValueError``.
+    """
+    from api.upload import _session_attachment_dir
+
+    session_root = _session_attachment_dir(str(session_id)).resolve()
+    verified = []
+    for raw in _steer_attachment_paths(value):
+        candidate = Path(raw).expanduser().resolve()
+        if not candidate.is_relative_to(session_root):
+            raise ValueError("Steer attachment path is not a session upload")
+        if candidate.is_file() and not candidate.is_symlink():
+            verified.append(str(candidate))
+        elif candidate.is_file() and candidate.is_symlink():
+            # A symlink at the top level: resolve strictly and re-verify.
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_relative_to(session_root) or not resolved.is_file() or resolved.is_symlink():
+                raise ValueError("Steer attachment symlink escapes session root")
+            verified.append(str(resolved))
+        elif candidate.is_dir() and candidate != session_root:
+            # Archive extraction directory: expand to concrete member files.
+            # Bound the walk so a maliciously large tree cannot stall the request.
+            for member in sorted(candidate.rglob("*")):
+                # Reject symlinks outright — a symlink inside the archive
+                # pointing outside session_root is a traversal hole (#7188 #3).
+                if member.is_symlink():
+                    raise ValueError("Steer archive member is a symlink")
+                # resolve(strict=True) every member so the REAL path is checked,
+                # not the lexical one. A member whose resolved target is outside
+                # session_root or not a regular file is rejected.
+                try:
+                    resolved_member = member.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    # Broken symlink or dangling path — skip, don't accept.
+                    continue
+                if not resolved_member.is_relative_to(session_root):
+                    raise ValueError("Steer archive member escapes session root")
+                if resolved_member.is_file():
+                    verified.append(str(resolved_member))
+                if len(verified) >= 200:
+                    break
+        else:
+            raise ValueError("Steer attachment path is not a session upload")
+    return verified
+
+
+def _steer_display_file_names(value) -> list[str]:
+    """Return bounded, path-free attachment labels for the visible steer row."""
+    names = []
+    for path in _steer_attachment_paths(value):
+        label = re.split(r"[/\\\\]", path)[-1].strip()[:255]
+        if label:
+            names.append(label)
+    return names
+
+
+def _steer_runtime_text(user_text: str, attachment_paths) -> str:
+    """Build the model-facing Steer from one visible text + structured paths."""
+    text = str(user_text or "").strip()
+    paths = _steer_attachment_paths(attachment_paths)
+    if not paths:
+        return text
+    note = (
+        f"[Attached files for this steer: {', '.join(paths)}]\n"
+        "Use the file tools/read_file to inspect these documents if needed."
+    )
+    return f"{text}\n\n{note}" if text else note
+
+
+def _accept_and_publish_steer_event(
+    agent,
+    session_id: str,
+    stream_id: str,
+    runtime_text: str,
+    *,
+    display_text: str,
+    files=None,
+):
+    """Accept, durably journal, and publish one ordered Steer event."""
+    created_at = time.time()
+    payload = {
+        "session_id": str(session_id),
+        "stream_id": str(stream_id),
+        # Attachment steers append an internal read_file hint to ``runtime_text``;
+        # that belongs in model context, not in the visible transcript.
+        "text": str(display_text),
+        "files": _steer_display_file_names(files),
+        "status": "delivered",
+        "created_at": created_at,
+    }
+    stream = peek_stream(str(stream_id))
+    writer = RunJournalWriter(str(session_id), str(stream_id))
+
+    def publish(journaled):
+        event_id = journaled.get("event_id")
+        payload["created_at"] = journaled.get("created_at", created_at)
+        if stream is None or not callable(getattr(stream, "put_nowait", None)):
+            raise RuntimeError("active stream channel unavailable during steer publication")
+        item = (
+            ("steer_delivered", payload, event_id)
+            if event_id
+            else ("steer_delivered", payload)
+        )
+        stream.put_nowait(item)
+        if event_id:
+            STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
+
+    accepted, journaled, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        payload,
+        lambda: agent.steer(runtime_text),
+        publish=publish,
+    )
+    outcome = {
+        "accepted": bool(accepted),
+        "fallback": None,
+        "durable": False,
+        "published": False,
+        "event": journaled if isinstance(journaled, dict) else None,
+        "payload": payload,
+    }
+    if reason in ("terminal", "fence_closed"):
+        # Both a durable terminal row and an early-closed fence reject Steer.
+        # The prior ownership check can race the per-run journal transaction:
+        # completion can write done before this verified Steer gets the lock,
+        # while the owned stream remains live and finalizing. Classify that
+        # orderly rejection as not_running rather than a vanished stream.
+        # Re-check ownership under STREAMS_LOCK; Stop may already have detached
+        # the stream, in which case fail closed to stream_dead.
+        from api import config as cfg
+        with cfg.STREAMS_LOCK:
+            stream_live = str(stream_id) in cfg.STREAMS
+            owner = cfg.stream_owner_session_id(str(stream_id)) if stream_live else None
+            if stream_live:
+                with cfg.ACTIVE_RUNS_LOCK:
+                    run = dict(cfg.ACTIVE_RUNS.get(str(stream_id)) or {})
+            else:
+                run = {}
+        if (stream_live
+                and owner == str(session_id)
+                and run.get("session_id") == str(session_id)
+                and run.get("backend") == WEBUI_LOCAL_CHAT_BACKEND
+                and run.get("phase") == "finalizing"):
+            outcome["fallback"] = "not_running"
+        else:
+            outcome["fallback"] = "stream_dead"
+        return outcome
+    if reason == "journal_malformed":
+        outcome["fallback"] = "steer_error"
+        return outcome
+    if reason == "persistence_error" or (error is not None and journaled is None):
+        logger.warning(
+            "Failed to persist accepted steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=(type(error), error, error.__traceback__) if error is not None else None,
+        )
+        outcome["fallback"] = "persistence_error"
+        return outcome
+    if not accepted or not isinstance(journaled, dict):
+        return outcome
+
+    outcome["durable"] = True
+    if reason == "publication_error":
+        logger.warning(
+            "Failed to broadcast durable steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=(type(error), error, error.__traceback__) if error is not None else None,
+        )
+        outcome["fallback"] = "publication_error"
+        return outcome
+    outcome["published"] = True
+    return outcome
 
 
 def _handle_chat_steer(handler, body: dict) -> bool:
@@ -14374,14 +14690,31 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     Steer is active-run guidance, not implicit permission to Queue, Interrupt,
     or Stop-and-send.
 
-    Returns 200 with {"accepted": bool, "fallback": str|None,
-    "stream_id": str|None}.
+    Returns 200 with the legacy accepted/fallback/stream_id fields plus explicit
+    durable/published state and the canonical journal envelope when accepted.
     """
     from api.helpers import j, bad
     from api import config as _cfg
 
     sid = str((body or {}).get("session_id", "") or "").strip()
-    text = str((body or {}).get("text", "") or "").strip()
+    structured_input = "user_text" in (body or {}) or "attachment_paths" in (body or {})
+    if structured_input:
+        display_text = str((body or {}).get("user_text") or "").strip()
+        try:
+            attachment_paths = _verified_steer_attachment_paths(
+                sid,
+                (body or {}).get("attachment_paths"),
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        text = _steer_runtime_text(display_text, attachment_paths)
+        display_files = _steer_display_file_names(attachment_paths)
+    else:
+        # Legacy clients send one authoritative text string. Ignore any separate
+        # display_text so the transcript can never hide different runtime input.
+        text = str((body or {}).get("text", "") or "").strip()
+        display_text = text
+        display_files = _steer_display_file_names((body or {}).get("files"))
     if not sid:
         return bad(handler, "session_id required")
     if not text:
@@ -14396,7 +14729,10 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         session = None
     stream_id = getattr(session, "active_stream_id", None) or None
     if stream_id:
-        result = _steer_bound_stream(sid, stream_id, text)
+        result = _steer_bound_stream(
+            sid, stream_id, text,
+            display_text=display_text, files=display_files,
+        )
         if result is not None:
             return j(handler, result)
 
@@ -14451,23 +14787,15 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                            "stream_id": None})
 
     # Cache-only compatibility: no registered worker for this stream. The
-    # liveness/ownership revalidation and the enqueue must share the same
-    # stream-ownership edge as Stop (STREAMS_LOCK -> ACTIVE_RUNS_LOCK). A Stop
-    # that claims cancellation between an unlocked check and agent.steer()
-    # would strand guidance this response still reports as accepted. steer()
-    # only stashes input; interrupt, persistence, and HTTP writes stay outside
-    # the lock, and the cached agent is never evicted or closed here.
-    #
-    # Ownership must be proven positively, not merely unrefuted: BOTH the
-    # stream owner AND the active-run session must equal the requesting
-    # session. Missing metadata is ambiguous and fails closed (stream_dead);
-    # an unfenced cache object is never steered on absent ownership.
-    #
-    # The active-run backend is revalidated the same way. With no registered
-    # worker, the backend tag is the only proof that an in-process runtime
-    # owns this run: Gateway resolves to its own outcome, the explicit local
-    # tag may enqueue, and a missing, empty, or foreign backend fails closed.
+    # liveness/ownership revalidation shares the same stream-ownership edge as
+    # Stop (STREAMS_LOCK -> ACTIVE_RUNS_LOCK). Ownership must be proven
+    # positively — BOTH the stream owner AND the active-run session must equal
+    # the requesting session; missing metadata is ambiguous and fails closed
+    # (stream_dead). The durable acceptance transaction itself runs OUTSIDE
+    # the stream lock: the acceptance fence closed by cancel/completion under
+    # the per-run journal lock is what rejects a delivery racing teardown.
     result = {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+    verified = False
     with _cfg.STREAMS_LOCK:
         if active_stream_id in _cfg.STREAMS:
             owner = _cfg.stream_owner_session_id(active_stream_id)
@@ -14486,17 +14814,51 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                               "stream_id": active_stream_id}
                 elif (backend == WEBUI_LOCAL_CHAT_BACKEND
                       and run.get("phase") in _LOCAL_STEERABLE_PHASES):
-                    try:
-                        accepted = bool(agent.steer(text))
-                    except Exception as exc:
-                        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
-                        result = {"accepted": False, "fallback": "steer_error",
-                                  "stream_id": active_stream_id}
-                    else:
-                        result = {"accepted": accepted, "fallback": None,
-                                  "stream_id": active_stream_id}
+                    verified = True
 
-    return j(handler, result)
+    if not verified:
+        return j(handler, result)
+
+    # Cache-only compatibility delivery. steer() only stashes input; the
+    # durable acceptance transaction below runs OUTSIDE the stream lock —
+    # the acceptance fence closed by cancel/completion under the per-run
+    # journal lock is what rejects a delivery racing teardown (stream_dead),
+    # never this ownership edge.
+    try:
+        outcome = _accept_and_publish_steer_event(
+            agent,
+            sid,
+            active_stream_id,
+            text,
+            display_text=display_text,
+            files=display_files,
+        )
+    except Exception as exc:
+        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
+        return j(handler, {"accepted": False, "fallback": "steer_error",
+                           "stream_id": active_stream_id})
+
+    accepted = bool(outcome.get("accepted"))
+    response = {"accepted": accepted, "fallback": outcome.get("fallback"),
+                "stream_id": active_stream_id}
+    if accepted:
+        response["durable"] = bool(outcome.get("durable"))
+        response["published"] = bool(outcome.get("published"))
+        journaled = outcome.get("event")
+        if isinstance(journaled, dict):
+            response["steer_event"] = {
+                "version": journaled.get("version", 1),
+                "type": "steer_delivered",
+                "event": "steer_delivered",
+                "event_id": journaled.get("event_id"),
+                "seq": journaled.get("seq"),
+                "run_id": journaled.get("run_id"),
+                "session_id": journaled.get("session_id", sid),
+                "stream_id": active_stream_id,
+                "created_at": journaled.get("created_at"),
+                "payload": dict(outcome.get("payload") or {}),
+            }
+    return j(handler, response)
 
 
 def cancel_stream(stream_id: str) -> bool:
@@ -14612,6 +14974,24 @@ def cancel_stream(stream_id: str) -> bool:
         # Stop and Steer share STREAMS_LOCK -> ACTIVE_RUNS_LOCK ordering.
         # Publish cancellation and detach ownership before releasing the edge;
         # later Steer cannot enqueue into a turn already claimed by Stop.
+        #
+        # #7188 rework: close the acceptance fence BEFORE the eager pop so a
+        # late Steer arriving after cancel_stream() has popped STREAMS but
+        # before the cancel event is journaled is rejected. The fence is
+        # path-shared with the completion and error teardowns.
+        #
+        # #7188 CORE #5 (run-journal identity split): capture ONE immutable
+        # journal session id from the admission-time ACTIVE_RUNS row (stamped
+        # before any compression rotation) and use it for every fence operation
+        # AND every terminal-event publish. The continuation id (rotated by
+        # compression into agent.session_id) is used only for session/scene
+        # persistence, never for run-journal identity.
+        _journal_session_id = active_run_session_id or _snap_owner_session_id
+        if _journal_session_id:
+            try:
+                RunJournalWriter(str(_journal_session_id), str(stream_id)).close_acceptance_fence()
+            except Exception:
+                logger.debug("Failed to close acceptance fence on cancel for stream %s", stream_id)
         if stream_present:
             streams.pop(stream_id, None)
             cancel_flags.pop(stream_id, None)
@@ -14878,8 +15258,66 @@ def cancel_stream(stream_id: str) -> bool:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
             _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
-            q.put_nowait(('cancel', _payload))
+            # #7188 rework: eager cancellation must journal+publish the cancel
+            # event through the run journal's per-run-lifecycle transaction,
+            # closing the acceptance fence atomically so a late Steer cannot be
+            # accepted after cancel. Previously this published directly to the
+            # queue, bypassing the journal entirely — the cancel event had no
+            # canonical event ID and a late Steer could land after it.
+            _cancel_run_journal = None
+            try:
+                # #7188 CORE #5: use the immutable journal session id
+                # (captured at run admission) for the terminal journal,
+                # NOT _cancel_session_id which may be the compression
+                # continuation id. The fence was closed under
+                # _journal_session_id above; the terminal must land in
+                # the SAME journal so the run's events are not split
+                # across two session journals.
+                _cancel_run_journal = RunJournalWriter(
+                    str(_journal_session_id or active_run_session_id or _cancel_session_id or ""),
+                    str(stream_id),
+                )
+            except Exception:
+                _cancel_run_journal = None
+            if _cancel_run_journal is not None:
+                def _publish_cancel_journaled(journaled):
+                    _cancel_event_id_local = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
+                    queue_item = (
+                        ('cancel', _payload, str(_cancel_event_id_local))
+                        if _cancel_event_id_local and hasattr(q, "subscribe_with_snapshot")
+                        else ('cancel', _payload)
+                    )
+                    q.put_nowait(queue_item)
+                    if _cancel_event_id_local:
+                        STREAM_LAST_EVENT_ID[stream_id] = str(_cancel_event_id_local)
+                try:
+                    _cancel_run_journal.close_acceptance_fence_and_publish_terminal(
+                        'cancel', _payload, _publish_cancel_journaled
+                    )
+                except Exception:
+                    logger.debug("Failed to journal cancel event for stream %s", stream_id)
+                    q.put_nowait(('cancel', _payload))
+            else:
+                q.put_nowait(('cancel', _payload))
         except Exception:
             logger.debug("Failed to put cancel event to queue")
+
+    # #7188 rework: server-side terminal settlement for cancellation. The
+    # streaming finally block handles completion/error, but cancel_stream()
+    # does its own session cleanup and may not reach that finally (the worker
+    # may still be unwinding). Settle the anchor scene here too so a cancelled
+    # turn's Steer deliveries survive even if the tab closed before the
+    # browser's scene POST landed.
+    if _cancel_session_id:
+        try:
+            from api.routes import _persist_terminal_anchor_scene_from_journal
+            _persist_terminal_anchor_scene_from_journal(
+                _cancel_session_id, stream_id, terminal_state="interrupted-by-user"
+            )
+        except Exception:
+            logger.debug(
+                "Server-side cancel anchor-scene settlement failed for session %s stream %s",
+                _cancel_session_id, stream_id, exc_info=True,
+            )
 
     return True
