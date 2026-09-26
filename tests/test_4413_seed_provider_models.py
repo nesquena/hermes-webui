@@ -103,24 +103,19 @@ class TestSeederAddsMissingModels:
             f"glm-5.2 appears {zai_ids.count('glm-5.2')} times — should be 1"
         )
 
-    def test_codex_entitlement_models_are_not_seeded(self, restore_providers):
-        """Core Codex entries must not become static WebUI fallback entries."""
-        retired_or_account_specific = {"gpt-5.3-codex", "gpt-5.3-codex-spark"}
-        _PROVIDER_MODELS["openai-codex"] = [
-            model
-            for model in _PROVIDER_MODELS["openai-codex"]
-            if model["id"] not in retired_or_account_specific
-        ]
+    def test_codex_is_not_seeded_but_other_providers_are(self, restore_providers):
+        """The generic seeder must leave the account-aware Codex catalog alone."""
         fake_pm = {
-            "openai-codex": sorted(retired_or_account_specific),
+            "openai-codex": ["codex-core-only-test"],
             "zai": ["glm-9.99-experimental"],
         }
 
         with _patch_core_pm(fake_pm):
             _seed_provider_models_from_core()
 
-        codex_ids = {model["id"] for model in _PROVIDER_MODELS["openai-codex"]}
-        assert retired_or_account_specific.isdisjoint(codex_ids)
+        assert "codex-core-only-test" not in {
+            model["id"] for model in _PROVIDER_MODELS["openai-codex"]
+        }
         assert "glm-9.99-experimental" in {
             model["id"] for model in _PROVIDER_MODELS["zai"]
         }
