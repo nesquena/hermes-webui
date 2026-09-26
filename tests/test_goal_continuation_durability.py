@@ -7,7 +7,6 @@ turn and the standing goal never resumes (#6888's "durable intent" step,
 kept intentionally bounded: no DB schema change, atomic file registry only).
 """
 
-import re
 from pathlib import Path
 
 import pytest

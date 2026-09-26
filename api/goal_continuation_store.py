@@ -77,6 +77,21 @@ def snapshot_pending_goal_continuations() -> None:
     save_pending_goal_continuations(PENDING_GOAL_CONTINUATION)
 
 
+def restore_at_startup() -> None:
+    """Restore durable pending goal continuations; never raise into startup.
+
+    Kept in the store (rather than inline in ``server.py``) so the process
+    entrypoint stays minimal — server.py is guarded under a 750-line ceiling
+    by ``tests/test_sprint10.py`` and inline recovery blocks pushed it over.
+    """
+    try:
+        recover_pending_goal_continuations()
+    except Exception as _recover_exc:  # pragma: no cover - defensive guard
+        logger.warning(
+            "Could not restore pending goal continuations: %s", _recover_exc
+        )
+
+
 # Import-time hygiene: ensure the state dir exists before any snapshot (and
 # give failures a home in the log instead of the chat path).
 STATE_DIR.mkdir(parents=True, exist_ok=True)

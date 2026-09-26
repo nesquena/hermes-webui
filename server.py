@@ -630,14 +630,6 @@ def main() -> None:
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
-    # #6885 slice 2a: restore durable pending goal continuations so a turn
-    # interrupted by the previous process's exit still resumes its goal.
-    try:
-        from api.goal_continuation_store import recover_pending_goal_continuations
-        recover_pending_goal_continuations()
-    except Exception as _recover_exc:
-        logger.warning("Could not restore pending goal continuations: %s", _recover_exc)
-
     try:
         from api.gateway_watcher import start_watcher
 
