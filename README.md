@@ -241,6 +241,10 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Git detection -- branch name and dirty file count badge in workspace header
 - Right panel is drag-resizable
 - Syntax highlighted code preview (Prism.js)
+- Collapsing the workspace panel is presentation-only -- an open preview keeps its
+  file, unsaved Edit draft, and scroll position, and reopening the panel restores
+  the preview instead of showing an empty file tree. Only the explicit preview
+  close action tears the preview down (#6709)
 
 ### Voice input
 - Microphone button in the composer (Web Speech API)

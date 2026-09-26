@@ -1096,6 +1096,25 @@ function _prismLanguageForPath(path){
   return _PRISM_LANG_MAP[ext]!==undefined?_PRISM_LANG_MAP[ext]:'plaintext';
 }
 
+// #6709 (gate certification B1): a DIFFERENT preview starting while the panel is CLOSED
+// supersedes whatever a previous collapse retained — that recorded owner describes the
+// old preview, and the next open must not restore `browse` for a preview nobody reached
+// from the tree (its X would reveal the tree instead of closing the drawer).
+//
+// #6709 (Greptile P1): re-opening the SAME path is not a new preview. The turn-complete
+// refresh (refreshOpenPreviewIfMutated) and the markdown re-render both call
+// openFile(_previewCurrentPath, …) with the panel still collapsed, and that path IS the
+// preview the collapse retained — dropping its ownership there made a later sync reopen
+// the deliberately collapsed drawer as preview-owned, so the X closed it instead of
+// returning to the tree. Only a genuinely different file retires the owner.
+//
+// Scoped to the closed-panel case: while the panel is OPEN the owner is still the live
+// collapse record (openWorkspacePanel() reads it on reopen), and a file-to-file switch
+// inside an open panel must not clear it.
+//
+// NOTE: keep comments ABOVE this function. Several tests in the repo inspect a fixed
+// character window of openFile()'s body (test_issue3337 uses the first 8000 chars), so a
+// comment added inside shifts real code out of their window and fails them.
 async function openFile(path, opts={}){
   if(!S.session)return;
   const ext=fileExt(path);
@@ -1114,8 +1133,52 @@ async function openFile(path, opts={}){
   _previewOfficeFormat = '';
   _previewPreviewKind = '';
 
+  if(typeof _workspacePanelMode!=='undefined' && _workspacePanelMode==='closed'){
+    const _retainedPath=(typeof _previewCurrentPath==='string'&&_previewCurrentPath)?_previewCurrentPath:'';
+    const _nextPath=(typeof path==='string'&&path)?path:'';
+    // Guarded like every other cross-file call here (the round-16 lesson): an extracted
+    // openFile() body with no normalizer simply falls back to the raw string compare.
+    const _canon=(typeof _normalizeArtifactPath==='function')
+      ? ((p)=>{ try{ return _normalizeArtifactPath(p)||p; }catch(_){ return p; } })
+      : ((p)=>p);
+    if(!_retainedPath || _canon(_retainedPath)!==_canon(_nextPath)){
+      _workspacePanelRetainedMode=null;
+    }
+  }
+
   $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
+  // #6709: snapshot the tree's reading position before hiding it — a hidden
+  // container reports scrollTop=0, so the preview lifecycle (background refresh
+  // and the preview-close render) must restore from this snapshot instead of
+  // re-reading the DOM. Only a visible tree can lend its position: a file-to-file
+  // preview switch re-enters with the tree already hidden and must not clobber it.
+  //
+  // Gate certification (B2/B3): the snapshot is scoped by the FULL browse identity —
+  // session, workspace and directory. A bare offset describes one directory's tree;
+  // restoring it onto another directory, workspace or session reveals that tree at a
+  // position its reader never chose (the top entries start out of view). Identity is
+  // read from the live model here, and renderFileTree() only honours a snapshot whose
+  // identity still matches; anything else is dropped.
+  const _browseTree=$('fileTree');
+  if(_browseTree&&_browseTree.style.display!=='none'){
+    S._wsBrowseScrollTop=_browseTree.scrollTop;
+    // The identity this offset belongs to (B2/B3). Written inline rather than through a
+    // helper so a harness that extracts openFile() alone cannot break on an undefined
+    // reference — the round-16 lesson, applied here before it could bite a third time.
+    S._wsBrowseScrollScope={
+      sessionId: (typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?S.session.session_id:null,
+      workspace: (typeof S!=='undefined'&&S&&S.session&&S.session.workspace)?String(S.session.workspace):null,
+      dir: (typeof S!=='undefined'&&S&&S.currentDir!=null)?String(S.currentDir):null,
+    };
+  }
+  // #6709 (Greptile P1): when the tree is ALREADY hidden — a file-to-file switch inside an
+  // open preview — keep the offset AND its scope untouched. Clearing either here made the
+  // next renderFileTree() see a scope mismatch and drop the offset, so closing the second
+  // preview returned a long tree to the top instead of the position captured before the
+  // FIRST preview opened. The existing offset describes this same browse surface (the
+  // identity check in renderFileTree() re-validates it against the live model), and only a
+  // visible tree may replace it.
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;

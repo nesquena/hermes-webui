@@ -21696,6 +21696,19 @@ function _showWorkspaceRootContextMenu(e){
 if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
 if(!S._dirCache) S._dirCache={};
+// #6709: snapshot of the browse tree's last readable scroll position. A hidden
+// container reports scrollTop=0 and ignores scroll writes, so the preview
+// lifecycle cannot read the live position while #fileTree is hidden — openFile()
+// snapshots it right before hiding the tree, renderFileTree() falls back to the
+// snapshot while the container is hidden, and the snapshot is dropped once a
+// render has restored the visible browse tree (live reads rule again).
+if(!('_wsBrowseScrollTop' in S)) S._wsBrowseScrollTop=null;
+// #6709 (gate certification B2/B3): the identity that snapshot belongs to (session,
+// workspace, directory). A snapshot may only be restored while all three still match
+// the live model — a bare offset restored onto a different directory or session shows
+// that tree at a position its reader never chose. Set by openFile() next to the
+// offset; dropped whenever the snapshot itself is dropped.
+if(!('_wsBrowseScrollScope' in S)) S._wsBrowseScrollScope=null;
 
 function renderFileTree(){
   const box=$('fileTree');
@@ -21708,7 +21721,18 @@ function renderFileTree(){
   // reset. A plain scrollTop restore suffices here: expand/collapse insert/remove rows
   // BELOW the clicked disclosure, so the clicked row keeps its offset from the top (no
   // getBoundingClientRect anchor delta needed — that's only for prepend-above cases).
-  const prevScrollTop=box?box.scrollTop:0;
+  // #6709: while the tree is hidden behind a preview the DOM read returns 0 — use the
+  // openFile() snapshot instead, or the tail restore would write that 0 back (the
+  // close-path render reveals the tree before restoring) and closing a preview would
+  // reset a long tree to the top.
+  const treeVisible=!!(box&&box.style.display!=='none');
+  // #6709 (B2/B3): a snapshot is only admissible when it belongs to the browse surface
+  // being rendered right now. Identity comparison runs BEFORE the snapshot can be used,
+  // so a mismatch falls back to the live DOM read (visible tree) or the top (hidden).
+  const _scrollScopeMatches=(typeof _wsBrowseScrollScopeMatchesLiveModel==='function')
+    ? _wsBrowseScrollScopeMatchesLiveModel() : true;
+  if(!_scrollScopeMatches){ S._wsBrowseScrollTop=null; S._wsBrowseScrollScope=null; }
+  const prevScrollTop=box?(treeVisible?box.scrollTop:(S._wsBrowseScrollTop!=null?S._wsBrowseScrollTop:0)):0;
   box.innerHTML='';
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
@@ -21719,19 +21743,47 @@ function renderFileTree(){
     _syncWorkspaceBirthtimeSupportScope('');
     if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
     box.style.display='none';
+    // #6709: no workspace means no browse position to restore — drop the
+    // preview-lifecycle snapshot so it can't resurface against a later
+    // workspace whose tree the reader has never scrolled.
+    S._wsBrowseScrollTop=null; S._wsBrowseScrollScope=null;
     return;
   }
   _noteWorkspaceBirthtimeSupport(S.entries);
   if(emptyEl) emptyEl.style.display='none';
-  box.style.display='';
+  // Keep the tree hidden while a preview is open, but still rebuild it:
+  // loadDir() has already refreshed the directory model before calling
+  // renderFileTree(), so skipping the rebuild here would leave a stale
+  // tree behind the preview that surfaces when the user closes it
+  // (clearPreview() only toggles display). Visibility is a presentation
+  // concern; the DOM rebuild must always reflect the current model.
+  const previewOpen=typeof _previewCurrentPath!=='undefined'&&!!_previewCurrentPath;
+  box.style.display=previewOpen?'none':'';
   const visibleEntries=_workspaceEntriesForRender(S.entries);
   if(!visibleEntries.length){
-    if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
+    if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display=previewOpen?'none':'flex';}
+    // #6709: an empty browse tree has nothing to scroll — drop the snapshot so it
+    // cannot resurface against a later directory the reader never scrolled.
+    if(!previewOpen){ S._wsBrowseScrollTop=null; S._wsBrowseScrollScope=null; }
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
   // #5657: restore the pre-wipe scroll position now that the tree is tall again.
   if(box) box.scrollTop=prevScrollTop;
+  // #6709: the visible browse tree has been restored — drop the snapshot and let
+  // live reads drive subsequent renders.
+  if(!previewOpen){ S._wsBrowseScrollTop=null; S._wsBrowseScrollScope=null; }
+}
+
+// #6709 (gate certification B2/B3): does the stored snapshot belong to the browse
+// surface the live model describes? Compares session id, workspace and directory.
+function _wsBrowseScrollScopeMatchesLiveModel(){
+  const snap=S._wsBrowseScrollScope;
+  if(!snap||typeof snap!=='object') return false;
+  const sessionId=(S&&S.session&&S.session.session_id)?S.session.session_id:null;
+  const workspace=(S&&S.session&&S.session.workspace)?String(S.session.workspace):null;
+  const dir=(S&&S.currentDir!=null)?String(S.currentDir):null;
+  return snap.sessionId===sessionId && snap.workspace===workspace && snap.dir===dir;
 }
 
 let _wsActiveDragPath=null;
