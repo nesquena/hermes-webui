@@ -170,13 +170,17 @@ class _ComposerLeftDropdownParser(HTMLParser):
 # ── Mobile breakpoint rules ───────────────────────────────────────────────────
 
 def test_mobile_breakpoint_900px_present():
-    """@media(max-width:900px) must hide the right panel and show mobile-files-btn."""
+    """@media(max-width:900px) must switch to compact mode and show mobile-files-btn."""
     assert "@media(max-width:900px)" in CSS or "@media (max-width: 900px)" in CSS, \
         "Missing @media(max-width:900px) breakpoint in style.css"
-    # Right panel should be hidden at 900px, replaced by slide-over
-    assert ".rightpanel{display:none" in CSS or ".rightpanel {display:none" in CSS or \
-           re.search(r'max-width:900px\).*?\.rightpanel\{display:none', CSS, re.DOTALL), \
-        ".rightpanel must be display:none at max-width:900px (slide-over replaces it)"
+    # The 900px compact breakpoint must NOT hard-hide the right panel: the
+    # 641-900px band uses the off-canvas slide-over instead (see
+    # tests/test_workspace_panel_641_900.py).
+    idx = CSS.find("@media(max-width:900px){")
+    assert idx > 0, "@media(max-width:900px) block not found"
+    body = CSS[idx:idx + 400]
+    assert ".rightpanel{display:none}" not in body, \
+        ".rightpanel must NOT be display:none at max-width:900px — the 641-900px band uses the slide-over"
 
 
 def test_mobile_breakpoint_640px_present():
@@ -579,8 +583,10 @@ def test_compact_titlebar_keeps_hamburger_available():
     assert re.search(r'\.app-titlebar-hamburger,\s*\.app-titlebar-spacer\{[^}]*display:\s*flex', compact_css), (
         "Compact titlebar should expose the hamburger before true phone width"
     )
-    assert ".rightpanel{display:none}" in compact_css.replace(" ", ""), (
-        "The compact titlebar breakpoint should match the hidden workspace-panel breakpoint"
+    assert ".rightpanel{display:none}" not in compact_css.replace(" ", ""), (
+        "The compact breakpoint must not hide the workspace panel: the "
+        "641-900px band uses the slide-in overlay instead (see "
+        "tests/test_workspace_panel_641_900.py)"
     )
 
 
