@@ -6759,9 +6759,22 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-list-status{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);}
 .kanban-list-title{font-size:13px;font-weight:600;line-height:1.35;}
 .kanban-board-wrap{flex:1;min-height:0;overflow:auto;padding:16px;background:var(--bg);}
-.kanban-board{display:flex;gap:12px;min-height:100%;overflow-x:auto;padding-bottom:8px;}
+.kanban-board{display:flex;gap:12px;min-height:100%;padding-bottom:14px;scroll-snap-type:x proximity;}
+.kanban-board:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:10px;}
+/* Horizontal scroll lives on the innermost .kanban-board (a lane board in
+   profile-lane mode, the board itself otherwise) — the outer one must not
+   also scroll or you get nested horizontal scrollbars. */
+.kanban-board::-webkit-scrollbar{height:14px;}
+.kanban-board::-webkit-scrollbar-track{background:transparent;}
+.kanban-board::-webkit-scrollbar-thumb{background:var(--border);border-radius:7px;border:3px solid var(--bg);}
+.kanban-board::-webkit-scrollbar-thumb:hover{background:var(--muted);}
 .kanban-board.kanban-board-consolidated{height:100%;}
-.kanban-column{display:flex;flex-direction:column;min-width:260px;max-width:320px;flex:1;background:var(--panel);border:1px solid var(--border);border-radius:10px;min-height:240px;}
+.kanban-board-in-lane{overflow-x:auto;}
+.kanban-column{display:flex;flex-direction:column;flex:0 0 280px;background:var(--panel);border:1px solid var(--border);border-radius:10px;min-height:240px;scroll-snap-align:start;}
+/* Focus mode: hide the app sidebars so only the active board fills the screen. */
+body.kanban-focus .sidebar,
+body.kanban-focus .rightpanel{display:none !important;}
+body.kanban-focus .kanban-focus-toggle{background:var(--accent);color:#fff;border-color:var(--accent);}
 .kanban-column-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600;color:var(--text);}
 .kanban-count{font-size:11px;color:var(--muted);background:var(--input-bg);border:1px solid var(--border);border-radius:999px;padding:1px 7px;}
 .kanban-column-body{display:flex;flex-direction:column;gap:8px;padding:10px;min-height:0;max-height:min(68vh,720px);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;}

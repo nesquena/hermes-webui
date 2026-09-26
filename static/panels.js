@@ -420,6 +420,11 @@ async function switchPanel(name, opts = {}) {
   // so we don't keep a stale connection open in the background.
   if (prevPanel === 'kanban' && nextPanel !== 'kanban') {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
+    // Visually drop focus mode (keep the persisted setting) so the sidebars
+    // aren't hidden on the next panel; loadKanban restores it on return.
+    document.body.classList.remove('kanban-focus');
+    const fbtn = $('btnKanbanFocus');
+    if (fbtn) fbtn.setAttribute('aria-pressed', 'false');
   }
   _currentPanel = nextPanel;
   // Mobile drawer visibility: a rail/tab click on a phone should surface the
@@ -2635,6 +2640,74 @@ function _kanbanRenderBoard(){
   board.innerHTML = _kanbanLanesByProfile ? _kanbanRenderProfileLanes(columns) : columns.map(_kanbanRenderColumn).join('');
 }
 
+// Horizontal scrolling for mouse+keyboard users: the board is a focusable
+// region, so arrow keys / PageUp-PageDown / Home-End scroll it, and the
+// header ‹ › buttons nudge one column at a time (column width + gap).
+// In profile-lane mode the scrollable rows are the inner lane boards —
+// scroll them all in sync.
+function _kanbanScrollBoards(){
+  const board = $('kanbanBoard');
+  if (!board) return [];
+  const lanes = board.querySelectorAll('.kanban-board-in-lane');
+  if (lanes.length) return Array.from(lanes);
+  // Normal mode: the horizontal scroll container is the WRAPPER
+  // (.kanban-board-wrap has overflow:auto; #kanbanBoard itself has none and
+  // just grows to fit its columns). Scrolling the board was a no-op.
+  const wrap = board.closest('.kanban-board-wrap');
+  return wrap ? [wrap] : [board];
+}
+function scrollKanbanBoard(dir){
+  const boards = _kanbanScrollBoards();
+  if (!boards.length) return;
+  const col = boards[0].querySelector('.kanban-column');
+  const step = col ? (col.getBoundingClientRect().width + 12) : 300;
+  boards.forEach(b => b.scrollBy({left: dir * step, behavior: 'smooth'}));
+}
+function kanbanBoardKeydown(event){
+  const boards = _kanbanScrollBoards();
+  if (!boards.length) return;
+  const col = boards[0].querySelector('.kanban-column');
+  const step = col ? (col.getBoundingClientRect().width + 12) : 300;
+  let handled = true;
+  const scroll = (left, opts) => boards.forEach(b => b.scrollTo({left, ...opts}));
+  const nudge = (dx) => boards.forEach(b => b.scrollBy({left: dx, behavior: 'smooth'}));
+  switch (event.key) {
+    case 'ArrowRight': nudge(step); break;
+    case 'ArrowLeft':  nudge(-step); break;
+    case 'PageDown':   nudge(step * 3); break;
+    case 'PageUp':     nudge(-step * 3); break;
+    case 'Home':       scroll(0, {behavior: 'smooth'}); break;
+    case 'End': {
+      // Each owner scrolls to its OWN end, not the widest lane's range
+      // applied to every lane (a shorter lane would overshoot and bounce).
+      boards.forEach(b => b.scrollTo({left: b.scrollWidth - b.clientWidth, behavior: 'smooth'}));
+      break;
+    }
+    default: handled = false;
+  }
+  if (handled) event.preventDefault();
+}
+
+// Focus mode: hide the app sidebars so only the active board fills the screen.
+// Esc exits. Persisted to localStorage so refresh keeps the user in focus.
+function _kanbanSetFocus(on){
+  document.body.classList.toggle('kanban-focus', on);
+  const btn = $('btnKanbanFocus');
+  if (btn) btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  try { localStorage.setItem('kanban-focus', on ? '1' : '0'); } catch(_) {}
+  if (on) { const b = $('kanbanBoard'); if (b) b.focus(); }
+}
+function toggleKanbanFocus(){
+  _kanbanSetFocus(!document.body.classList.contains('kanban-focus'));
+}
+document.addEventListener('keydown', function(event){
+  if (event.key === 'Escape' && document.body.classList.contains('kanban-focus')) {
+    const el = document.activeElement;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+    toggleKanbanFocus();
+  }
+});
+
 function _kanbanCard(task, status){
   const priority = Number(task.priority || 0);
   const links = task.link_counts || {};
@@ -2808,6 +2881,11 @@ async function loadKanban(animate){
     // state changes that arrive after this render.
     _kanbanStartPolling();
     _kanbanRenderBoard();
+    // Restore persisted focus mode (only when kanban is the active panel, so
+    // SSE-driven refreshes don't re-apply it while the user is elsewhere).
+    if (_currentPanel === 'kanban') {
+      try { _kanbanSetFocus(localStorage.getItem('kanban-focus') === '1'); } catch(_) {}
+    }
   } catch(e) {
     const html = _kanbanUnavailableHtml(e);
     if (board) board.innerHTML = html;
