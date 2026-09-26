@@ -6384,6 +6384,28 @@ def _forwarded_client_ip_from_trusted_proxy(handler):
     return _request_client_ip(handler)
 
 
+def trusted_forwarded_client_ip(handler) -> str | None:
+    """Forwarded client IP for the request log, or None.
+
+    #7863: the structured request log must never record a spoofable client IP.
+    The left-most X-Forwarded-For hop is attacker-controlled, so a forwarded IP
+    is asserted only when the RAW socket peer is a trusted proxy (loopback or
+    allowlisted); the chain then resolves right-to-left. Direct clients fail
+    closed (no field at all), and a resolution that merely echoes the raw peer
+    is suppressed as redundant.
+
+    Kept here (not inline in server.py) so the process entrypoint stays under
+    its 750-line guard — see tests/test_sprint10.py.
+    """
+    remote = _request_client_ip(handler)
+    if not _raw_peer_is_trusted_proxy(handler):
+        return None
+    resolved = _forwarded_client_ip_from_trusted_proxy(handler)
+    if resolved and resolved != remote:
+        return resolved
+    return None
+
+
 def _onboarding_request_is_local(handler) -> bool:
     """Return True when an unauthenticated onboarding request is local/private.
 

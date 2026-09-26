@@ -100,6 +100,7 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 from api.request_logging import emit_request_log
+from api.routes import trusted_forwarded_client_ip  # #7863
 from api.auth import check_auth_or_close, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
@@ -353,9 +354,8 @@ class Handler(BaseHTTPRequestHandler):
                 remote = str(self.client_address[0])
         except Exception:
             remote = '-'
-        forwarded_for = None
         try:
-            forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
+            forwarded_for = trusted_forwarded_client_ip(self)
         except Exception:
             forwarded_for = None
         record_data = {
