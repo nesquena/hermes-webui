@@ -22,6 +22,26 @@ def test_github_actions_quotes_pyyaml_version_specifier():
     assert "pip install pyyaml>=6.0" not in text
 
 
+def test_pr_ci_keeps_full_suite_and_fast_cross_version_compatibility_gate():
+    """PR CI should cut duplicate runner time without losing the full-suite gate."""
+    workflow = ROOT / ".github" / "workflows" / "tests.yml"
+    text = workflow.read_text(encoding="utf-8")
+
+    assert "github.event_name == 'push'" in text
+    assert '["3.11", "3.12", "3.13"]' in text
+    assert '["3.12"]' in text
+    assert "shard: [0, 1, 2, 3, 4]" in text
+    assert "Run tests (shard ${{ matrix.shard }} of 5)" in text
+    assert "--shard-id=${{ matrix.shard }} --num-shards=5" in text
+
+    compat_body = text.split("  compat:", 1)[1]
+    assert "if: github.event_name == 'pull_request'" in compat_body
+    assert "python-version: ['3.11', '3.13']" in compat_body
+    assert "python3 -m compileall -q api server.py bootstrap.py mcp_server.py tests scripts" in compat_body
+    assert "pytest tests/ --collect-only -q" in compat_body
+    assert "playwright install" not in compat_body
+
+
 def test_pytest_integration_marker_is_registered():
     config = ROOT / "pytest.ini"
     text = config.read_text(encoding="utf-8")
