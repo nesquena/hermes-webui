@@ -10564,6 +10564,65 @@ function _formatUpdateTargetStatus(label,info){
   const noun=info.release_based?'release':'update';
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
 }
+function _isForceCleanTarget(info){
+  // #7679 ONE predicate for the destructive force-clean affordance
+  // (reviewer CORE #2 + SILENT #4). The banner status parts and the
+  // force button must answer the same question: is this checkout
+  // dirty, at-latest, and actually forceable?
+  //
+  //  - ``dirty === true`` (exact): a missing/falsy flag means the
+  //    probe never ran or reported clean — never a reason to offer
+  //    a destructive reset.
+  //  - ``behind === 0``: an install with pending upstream commits is
+  //    served by Apply, not by discarding local changes.
+  //  - ``!error``: a stale/failed check payload must not gate a
+  //    destructive action. This is the gate the old ``webuiDirty``
+  //    flag omitted, so a WebUI fetch error plus an Agent update
+  //    left the force button visible (targeting "webui") on a
+  //    payload whose force endpoint was not forceable at all.
+  //  - ``!no_git && !manual_update``: there is no checkout to reset
+  //    (Docker / pip installs); /api/updates/force refuses those
+  //    targets as well.
+  //
+  // Deliberately target-agnostic (SILENT #4): /api/updates/force
+  // accepts both ``webui`` and ``agent``, and the check payload
+  // probes ``dirty`` for BOTH, so an Agent-only dirty install gets
+  // the same recovery action instead of a banner with nowhere to go.
+  return !!(info&&info.dirty===true&&!(info.behind>0)&&!info.error&&!info.no_git&&!info.manual_update);
+}
+function _updatePayloadHasActionableState(data){
+  // #7679 SILENT #3: does a check payload carry any state the update
+  // banner exists for? Used by the unattended boot-time check in
+  // boot.js, which previously only looked at ``behind > 0`` — so a
+  // dirty-at-latest payload was fetched, parsed, and thrown away,
+  // and the user only discovered the "Local changes detected" state
+  // by manually opening Settings and pressing Check for updates.
+  //
+  // ``behind > 0`` keeps its own semantics (a real update is
+  // available); the dirty branch adds the at-latest destructive
+  // recovery case. ``error``-only and ``no_git``-only payloads are
+  // deliberately excluded — they have their own surfaces, and the
+  // banner would have nothing actionable to show for them.
+  if(!data) return false;
+  if((data.webui&&data.webui.behind>0)||(data.agent&&data.agent.behind>0)) return true;
+  return _isForceCleanTarget(data.webui)||_isForceCleanTarget(data.agent);
+}
+function _formatUpdateDirtyStatus(label,info){
+  // #4085: a dirty install at-or-past latest is a distinct
+  // surfaced state, not a bare "up to date." The Settings
+  // panel renders this as a separate "Local changes detected"
+  // banner with a destructive force-clean action wired to
+  // /api/updates/force (reuses ``forceUpdate()`` and its
+  // existing danger confirm). Skips the no_git case —
+  // manual-update installs have no checkout to dirty, and the
+  // /api/updates/force endpoint refuses no_git targets.
+  //
+  // Shares ``_isForceCleanTarget`` with ``_showUpdateBanner``
+  // so the banner text and the destructive button can never
+  // disagree about whether the state is forceable.
+  if(!_isForceCleanTarget(info)) return null;
+  return `${label}: ${t('update_dirty_local_changes','Local changes detected')}`;
+}
 function _formatManualUpdateInstruction(info){
   if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
   return t('settings_update_manual_docker','docker pull ghcr.io/nesquena/hermes-webui:latest');
@@ -10873,8 +10932,47 @@ function _showUpdateBanner(data){
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
   if(webuiPart) parts.push(webuiPart);
   if(agentPart) parts.push(agentPart);
+  // #4085: also surface dirty-at-latest as a distinct banner
+  // state. ``_formatUpdateDirtyStatus`` returns null when
+  // ``behind > 0`` (the upstream banner covers it) or when
+  // ``no_git``/``error`` apply, so this only adds a banner for
+  // a real "dirty and at latest" install.
+  const webuiDirtyPart=_formatUpdateDirtyStatus('WebUI',data.webui);
+  const agentDirtyPart=_formatUpdateDirtyStatus('Agent',data.agent);
+  if(webuiDirtyPart) parts.push(webuiDirtyPart);
+  if(agentDirtyPart) parts.push(agentDirtyPart);
   window._updateData=data;
   const btnApply=$('btnApplyUpdate');
+  // #4085: the dirty-at-latest state is destructive-only,
+  // so expose the existing force button rather than the
+  // plain Apply (which would no-op on behind == 0). The
+  // existing ``forceUpdate()`` already wires the destructive
+  // endpoint, carries the channel from the check payload,
+  // and gates on a danger confirm — see line 10822.
+  //
+  // ONE shared predicate drives every dirty banner part and the
+  // destructive button (reviewer CORE #2 + SILENT #4). The old code
+  // derived ``webuiDirty`` and ``webuiForceable`` separately and only
+  // for WebUI, so they could disagree: a WebUI fetch ``error`` was
+  // dropped by ``_formatUpdateDirtyStatus`` but still satisfied
+  // ``webuiDirty`` (it never read ``error``), leaving the force
+  // button visible on a payload whose force target is not even
+  // forceable. Deriving BOTH visibility and target from the one
+  // predicate removes that class of bug, and makes an Agent-only
+  // dirty install recoverable (SILENT #4) — the backend force
+  // endpoint accepts the agent target too, and forceUpdate() reads
+  // the channel from ``window._updateData[target]``, so that target
+  // needs no new plumbing (the agent is channel-neutral server-side).
+  //
+  // Both-dirty precedence: WebUI wins. The WebUI checkout is the
+  // one the Settings panel is looking at, and resetting it is what a
+  // user in that panel most likely intends; the banner text still
+  // lists BOTH dirty states, so nothing is hidden — only the single
+  // destructive button's target is decided here.
+  const webuiForceClean=_isForceCleanTarget(data.webui);
+  const agentForceClean=_isForceCleanTarget(data.agent);
+  const forceTarget=webuiForceClean?'webui':(agentForceClean?'agent':'');
+  const forceable=!!forceTarget;
   if(btnApply){
     const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
     const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
@@ -10888,6 +10986,46 @@ function _showUpdateBanner(data){
       const clearLockBtn=$('btnClearUpdateLock');
       if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
     }
+  }
+  // #4085: when a dirty install is the only signal, surface
+  // the force button so the user has a destructive recovery
+  // path.
+  //
+  // Reset on EVERY fresh render before deciding (reviewer CORE
+  // #2): previously the button was only ever shown, so once a
+  // dirty check exposed it, a later clean check — or a check that
+  // stopped being forceable (error, manual, no_git) — left it
+  // visible and pointing at "webui", offering git clean -fd on an
+  // install with no local changes. Hiding unless the predicate
+  // holds makes "ding" and "stale button" the same code path.
+  //
+  // ``forceTarget`` is derived from the SAME predicate above, so
+  // the button can never be visible while pointing at a target that
+  // predicate just rejected (SILENT #4: an Agent-only dirty state
+  // targets "agent", never the WebUI checkout the user did not
+  // report as dirty).
+  const forceBtn=$('btnForceUpdate');
+  if(forceBtn){
+    if(forceable){
+      forceBtn.dataset.target=forceTarget;
+      forceBtn.style.display='inline-block';
+      forceBtn.disabled=false;
+      forceBtn.textContent=t('update_force','Force update');
+    }else{
+      forceBtn.disabled=true;
+      forceBtn.style.display='none';
+      forceBtn.dataset.target='';
+    }
+  }
+  // Clear-lock is a conflict/lock recovery control, not a dirty-state
+  // one, so it is reset here too — otherwise a lock error from a
+  // previous apply leaves it pinned on a target that no longer
+  // applies (same stale-button class as CORE #2).
+  const clearLockBtn=$('btnClearUpdateLock');
+  if(clearLockBtn&&!forceable){
+    clearLockBtn.disabled=true;
+    clearLockBtn.style.display='none';
+    clearLockBtn.dataset.target='';
   }
   if(!parts.length){
     _renderUpdateWhatsNewLinks(data);

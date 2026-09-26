@@ -74,7 +74,7 @@ def test_detect_webui_version_recovers_via_launchd_fallback(tmp_path):
         assert cmd[0] == '/usr/bin/git'
         if cmd[1:] == ['describe', '--tags', '--always']:
             return MagicMock(returncode=0, stdout='v0.51.999\n', stderr='')
-        if cmd[1:] == ['diff-index', '--quiet', 'HEAD', '--']:
+        if cmd[1:] == ['diff', '--quiet', 'HEAD', '--']:
             return MagicMock(returncode=0, stdout='', stderr='')
         raise AssertionError(f'unexpected git args: {cmd[1:]!r}')
 
@@ -114,7 +114,7 @@ def test_check_repo_does_not_report_git_not_found_via_launchd_fallback(tmp_path)
                 stdout='https://github.com/nesquena/hermes-webui.git\n',
                 stderr='',
             )
-        if git_args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if git_args == ['diff', '--quiet', 'HEAD', '--']:
             return MagicMock(returncode=0, stdout='', stderr='')
         raise AssertionError(f'unexpected git args: {git_args!r}')
 

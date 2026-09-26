@@ -457,10 +457,16 @@ def _resolve_git_executable():
 
 def _dirty_suffix(path: Path, timeout=1) -> str:
     """Return a best-effort ``-dirty`` suffix without blocking version display."""
-    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    # ``git diff --quiet HEAD --`` — NOT ``git diff-index --quiet HEAD --``.
+    # diff-index keys off the index stat cache, so a tracked file whose
+    # mtime moved but whose content is identical (fresh clone, rsync,
+    # branch checkout) reads as dirty and badges a clean install
+    # ``-dirty``. ``git diff`` compares blob content, so only real edits
+    # are reported.
+    out, ok = _run_git(['diff', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return ""
-    # Only diff-index status 1 means dirty. Keep version display consistent
+    # Only diff status 1 means dirty. Keep version display consistent
     # with the strict action-time probe; all other failures suppress the suffix.
     if out != 'git exited with status 1':
         return ""
@@ -1307,7 +1313,17 @@ def _probe_dirty(
     path: Path, timeout: int = 1, *, legacy_empty_is_dirty: bool = False,
 ) -> bool | None:
     """Return dirty, clean, or unknown for a working-tree probe."""
-    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    # ``git diff --quiet HEAD --`` — deliberately NOT ``git diff-index
+    # --quiet HEAD --``. diff-index consults the index stat cache, so a
+    # tracked file whose mtime moved without a content change reports
+    # "dirty" (verified: `touch` an unchanged file → diff-index exits 1,
+    # `git diff --quiet` exits 0). A stat-only false positive here told
+    # the Settings panel to offer force-clean, and force update then ran
+    # ``git clean -fd`` (:1920) and deleted unrelated untracked work for
+    # a user who had changed nothing. ``git diff`` compares blob content,
+    # so only real edits read as dirty. The force-update gate therefore
+    # keys on the same content-truth as the text diff.
+    out, ok = _run_git(['diff', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return False
     if out == 'git exited with status 1' or (legacy_empty_is_dirty and (not out or out.startswith('git exited with status '))):
@@ -1322,13 +1338,18 @@ def _probe_dirty(
 def _is_dirty(path: Path, timeout: int = 1) -> bool:
     """Return True when the working tree has uncommitted changes vs HEAD.
 
-    Same primitive as ``_dirty_suffix`` (issue #4085): ``git diff-index
-    --quiet HEAD --`` exits 0 on a clean tree and 1 on a dirty tree (not an
+    Same primitive as ``_dirty_suffix`` (issue #4085): ``git diff --quiet
+    HEAD --`` exits 0 on a clean tree and 1 on a dirty tree (not an
     error). Real errors (timeout, missing git, fatal) are conservatively
     reported as clean so a transient probe failure never produces a false-
     positive "local changes" alert.
+
+    Content-based on purpose: ``git diff-index`` is stat-cache sensitive,
+    so an mtime-only change to an unchanged tracked file would otherwise
+    report dirty, surface the destructive force-clean affordance, and let
+    ``git clean -fd`` remove untracked work for a user with no edits.
     """
-    # Older checker consumers model diff-index status 1 as ('', False). Keep
+    # Older checker consumers model diff status 1 as ('', False). Keep
     # that boolean contract here; force updates use the strict tri-state form.
     return _probe_dirty(
         path, timeout=timeout, legacy_empty_is_dirty=True,

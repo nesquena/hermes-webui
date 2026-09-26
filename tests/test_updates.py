@@ -54,7 +54,7 @@ def _prevent_test_process_restart(monkeypatch):
 
 
 def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
-    if args == ['diff-index', '--quiet', 'HEAD', '--']:
+    if args == ['diff', '--quiet', 'HEAD', '--']:
         return '', True  # clean tree
     if args == ['fetch', 'origin', '--tags', '--force']:
         return 'would clobber existing tag v0.50.294', False
@@ -126,6 +126,98 @@ def test_probe_dirty_keeps_non_status_one_failures_unknown(tmp_path, monkeypatch
     assert updates._probe_dirty(tmp_path) is None
 
 
+# ---------------------------------------------------------------------------
+# #7679 — the dirty probe must compare CONTENT, not the index stat cache.
+#
+# `git diff-index --quiet HEAD --` exits 1 on a tracked file whose mtime
+# moved but whose content is identical (fresh clone, rsync, branch
+# checkout). That false positive surfaced "Local changes detected" and
+# offered the destructive force-clean, whose `git clean -fd` then deleted
+# unrelated untracked work — for a user who had changed nothing.
+#
+# `git diff --quiet HEAD --` compares blob content, so an mtime-only
+# change reads as clean and a real edit still reads as dirty. These two
+# probes pin the replacement command in BOTH directions.
+# ---------------------------------------------------------------------------
+
+
+def _stat_only_repo(tmp_path):
+    """A real repo with one tracked file whose mtime moved, content unchanged."""
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    tracked = repo / 'tracked.txt'
+    tracked.write_text('stable content\n', encoding='utf-8')
+    _git(repo, 'add', 'tracked.txt')
+    _git(repo, 'commit', '-q', '-m', 'base')
+    # `git commit` refreshes the index, so sleep first: without a real mtime
+    # delta the touch below is a no-op even for a stat-cache-sensitive probe.
+    time.sleep(1.1)
+    tracked.touch()
+    return repo
+
+
+def test_stat_only_change_is_not_dirty(tmp_path):
+    """A touched-but-unchanged tracked file must NOT read as dirty.
+
+    Reviewer CORE #1 regression probe: this is the exact sequence that used
+    to report dirty and offer force-clean, whose `git clean -fd` then
+    deleted unrelated untracked work.
+    """
+    repo = _stat_only_repo(tmp_path)
+
+    # Sanity: the old diff-index probe would have answered "dirty" here.
+    index_out, index_ok = updates._run_git(
+        ['diff-index', '--quiet', 'HEAD', '--'], repo,
+    )
+    assert index_ok is False, (
+        'precondition: diff-index must be stat-cache sensitive for this '
+        'probe to be meaningful (it was not — check the mtime delta)'
+    )
+    # The replacement probe must answer "clean".
+    assert updates._run_git(['diff', '--quiet', 'HEAD', '--'], repo)[1] is True
+
+    assert updates._probe_dirty(repo) is False
+    assert updates._is_dirty(repo) is False
+    # Version display must not badge a clean install `-dirty` either.
+    assert updates._dirty_suffix(repo) == ''
+
+
+def test_real_edit_is_still_dirty(tmp_path):
+    """A real content change must still read as dirty (probe not neutered)."""
+    repo = _stat_only_repo(tmp_path)
+    (repo / 'tracked.txt').write_text('local edit\n', encoding='utf-8')
+
+    assert updates._run_git(['diff', '--quiet', 'HEAD', '--'], repo)[1] is False
+    assert updates._probe_dirty(repo) is True
+    assert updates._is_dirty(repo) is True
+    # Version display badges the edit (with a diff digest when readable).
+    assert updates._dirty_suffix(repo).startswith('-dirty')
+
+
+def test_probe_dirty_uses_content_diff_not_diff_index(tmp_path, monkeypatch):
+    """The probe must call `git diff --quiet HEAD --`, never `diff-index`.
+
+    diff-index consults the index stat cache, so it reports an mtime-only
+    change as dirty (#7679 CORE #1). Pin the exact argv.
+    """
+    (tmp_path / '.git').mkdir()
+    calls = []
+
+    def fake_git(args, cwd, timeout=10):
+        calls.append(args)
+        if args == ['diff', '--quiet', 'HEAD', '--']:
+            return '', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+
+    assert updates._is_dirty(tmp_path) is False
+    assert calls == [['diff', '--quiet', 'HEAD', '--']]
+
+
 def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
     """Update-check errors must not expose credentials from git remotes."""
     (tmp_path / '.git').mkdir()
@@ -137,7 +229,7 @@ def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
     )
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if args == ['diff', '--quiet', 'HEAD', '--']:
             return '', True
         if args == ['fetch', 'origin', '--tags', '--force']:
             return raw_error, False
@@ -230,7 +322,7 @@ def test_check_repo_fetch_failure_without_tags_is_not_up_to_date(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if args == ['diff', '--quiet', 'HEAD', '--']:
             return '', True
         if args == ['fetch', 'origin', '--tags', '--force']:
             return 'network unavailable', False
@@ -489,7 +581,7 @@ def test_force_update_dirty_probe_error_keeps_stable_no_ref_as_an_exact_noop(tmp
         calls.append(args)
         if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
             return '', True
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if args == ['diff', '--quiet', 'HEAD', '--']:
             return 'fatal: unable to read index', False
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -517,7 +609,7 @@ def test_force_update_dirty_probe_error_keeps_stable_no_ref_as_an_exact_noop(tmp
     }
     assert calls == [
         ['fetch', 'origin', '--quiet', '--tags', '--force'],
-        ['diff-index', '--quiet', 'HEAD', '--'],
+        ['diff', '--quiet', 'HEAD', '--'],
     ]
     restart.assert_not_called()
 
@@ -532,8 +624,8 @@ def test_force_update_dirty_probe_timeout_keeps_stable_no_ref_as_an_exact_noop(
         calls.append((args, timeout))
         if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
             return '', True
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
-            return 'git diff-index --quiet HEAD -- timed out after 5s', False
+        if args == ['diff', '--quiet', 'HEAD', '--']:
+            return 'git diff --quiet HEAD -- timed out after 5s', False
         raise AssertionError(f'unexpected git args: {args!r}')
 
     monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
@@ -561,7 +653,7 @@ def test_force_update_dirty_probe_timeout_keeps_stable_no_ref_as_an_exact_noop(
     }
     assert calls == [
         (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
-        (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
+        (['diff', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
     ]
     assert 'working-tree state as unknown' in caplog.text
     restart.assert_not_called()
@@ -577,7 +669,7 @@ def test_force_update_dirty_probe_non_dirty_status_keeps_stable_no_ref_as_an_exa
         calls.append((args, timeout))
         if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
             return '', True
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if args == ['diff', '--quiet', 'HEAD', '--']:
             return 'git exited with status 2', False
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -606,7 +698,7 @@ def test_force_update_dirty_probe_non_dirty_status_keeps_stable_no_ref_as_an_exa
     }
     assert calls == [
         (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
-        (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
+        (['diff', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
     ]
     assert 'working-tree state as unknown' in caplog.text
     restart.assert_not_called()
@@ -620,7 +712,7 @@ def test_force_update_dirty_stable_reset_failure_reports_head(tmp_path, monkeypa
         calls.append(args)
         if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
             return '', True
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if args == ['diff', '--quiet', 'HEAD', '--']:
             return 'git exited with status 1', False
         if args == ['checkout', '.']:
             return '', True
@@ -647,7 +739,7 @@ def test_force_update_dirty_stable_reset_failure_reports_head(tmp_path, monkeypa
     assert result == {'ok': False, 'message': 'Force reset to HEAD failed'}
     assert calls == [
         ['fetch', 'origin', '--quiet', '--tags', '--force'],
-        ['diff-index', '--quiet', 'HEAD', '--'],
+        ['diff', '--quiet', 'HEAD', '--'],
         ['merge-base', '--is-ancestor', 'HEAD', 'HEAD'],
         ['merge-base', '--is-ancestor', 'HEAD', 'HEAD'],
         ['checkout', '.'],
@@ -840,7 +932,7 @@ def test_describe_git_version_suppresses_unknown_dirty_probe_status(
         calls.append(args)
         if args == ['describe', '--tags', '--always']:
             return 'v0.52.5', True
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if args == ['diff', '--quiet', 'HEAD', '--']:
             return probe_output, False
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -849,7 +941,7 @@ def test_describe_git_version_suppresses_unknown_dirty_probe_status(
     assert updates._describe_git_version(tmp_path) == 'v0.52.5'
     assert calls == [
         ['describe', '--tags', '--always'],
-        ['diff-index', '--quiet', 'HEAD', '--'],
+        ['diff', '--quiet', 'HEAD', '--'],
     ]
 
 
@@ -857,7 +949,7 @@ def test_describe_git_version_marks_exact_dirty_probe_status(tmp_path, monkeypat
     def fake_git(args, cwd, timeout=10):
         if args == ['describe', '--tags', '--always']:
             return 'v0.52.5', True
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if args == ['diff', '--quiet', 'HEAD', '--']:
             return 'git exited with status 1', False
         if args == ['diff', '--binary', 'HEAD', '--']:
             return 'diff --git a/tracked.txt b/tracked.txt', True
@@ -895,7 +987,7 @@ def test_check_repo_fetches_tags_with_force(tmp_path):
 
     def fake_git(args, cwd, timeout=10):
         seen_args.append(args)
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if args == ['diff', '--quiet', 'HEAD', '--']:
             return '', True
         if args[:2] == ['fetch', 'origin']:
             # Force a fetch failure path so we don't have to mock the rest of
