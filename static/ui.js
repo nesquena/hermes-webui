@@ -4779,6 +4779,13 @@ function renderModelDropdown(){
       // position / group-open state across show-more.
       const _hasSubgroupBodies=!!(wrap.querySelector&&wrap.querySelector('.model-group-body.sub'));
       if(_hasSubgroupBodies){
+        // Persist the user's "show more" intent on the global cross-render
+        // force-open set BEFORE the full re-render. `_groupOpenState` is
+        // rebuilt per render and defaults to collapsed for a non-selected
+        // group, so without this add the re-render would re-collapse the
+        // just-revealed group and hide the overflow rows the user asked
+        // for (greptile P1 "Expanded group closes again", 2026-09-26).
+        _forceOpenGroups.add(groupKey);
         _fullReRender();
         return;
       }

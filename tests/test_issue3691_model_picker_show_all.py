@@ -2432,17 +2432,25 @@ for (const name of [
 }
 eval(extractConst('_expandOverflowGroup'));
 
-// Force-open the openrouter group so the subgroups render with their bodies
-// visible — without this, the default collapsed state hides the bodies and
-// their rows wouldn't be observable.
+// Initialize the cross-render force-open set empty so the openrouter group
+// starts in its default (collapsed) state. The subgroup partition still
+// renders its per-vendor `.model-group-body.sub` wrappers inside the (hidden)
+// outer wrapper — those rows are still observable via deep querySelector.
+// The selected model lives in a SEPARATE non-subgrouped group below so
+// openrouter is the non-selected, non-force-opened group, which is exactly
+// the regression vector: a Show more click must persist "open" across the
+// resulting full re-render. Pre-fix the subgroup branch early-returns
+// before `_forceOpenGroups.add(groupKey)`, so the re-render collapses the
+// openrouter wrapper again and the overflow rows vanish.
 window.__modelGroupForceOpenByPicker = { composer: new Set() };
-window.__modelGroupForceOpenByPicker.composer.add('openrouter');
 
 renderModelDropdown();
 
 // Pre-expand snapshot: subgroups are expected to be present (the production
 // branch with 10 visible rows and SUB_GROUP_PROVIDERS={'openrouter','nous'}
-// triggers them when visible >= 8).
+// triggers them when visible >= 8). The outer openrouter wrapper is
+// collapsed (display:none) at this point — sub-bodies are inside it, so
+// findInTree / deep querySelector still see them.
 const groupWrapperBefore = querySelectorAllImpl(dropdown, '.model-group-body[data-group="openrouter"]')[0];
 const subBodiesBefore = groupWrapperBefore ? querySelectorAllImpl(groupWrapperBefore, '.model-group-body.sub') : [];
 const subHeadingsBefore = groupWrapperBefore ? querySelectorAllImpl(groupWrapperBefore, '.model-group.sub') : [];
@@ -2454,8 +2462,14 @@ const beforeSnapshot = subBodiesBefore.map((sub) => {
   }).filter(Boolean);
   return { key: sub.dataset.group, count: rows.length, ids };
 });
+const beforeOuterDisplay = groupWrapperBefore
+  ? (('display' in groupWrapperBefore.style) ? groupWrapperBefore.style.display : '')
+  : 'missing';
+const beforeForceOpenHasOpenRouter = !!(window.__modelGroupForceOpenByPicker.composer && window.__modelGroupForceOpenByPicker.composer.has('openrouter'));
 
-// Click the "Show all" expander
+// Click the "Show all" expander — the showAll row lives inside the (still
+// collapsed) outer wrapper; findInTree does a depth-first traversal that
+// ignores CSS display, so this still finds and clicks it.
 const showAllRow = findInTree(dropdown, node => String(node._innerHTML || '').includes('Show all'));
 showAllRow.onclick({ stopPropagation() {} });
 
@@ -2479,14 +2493,35 @@ const showAllGone = !findInTree(dropdown, node => String(node._innerHTML || '').
 const subHeadingClickable = subHeadingsAfter.every(h => h._listeners && h._listeners.click);
 const firstSubBodyClickable = subBodiesAfter.length > 0 &&
   subBodiesAfter.every(b => b.style.display !== 'none');
+// Regression vector (#7528 greptile 2026-09-26 "Expanded group closes
+// again"): after the click + re-render the openrouter outer wrapper MUST
+// stay open and the cross-render force-open set MUST carry the key. Without
+// the fix, the subgroup branch early-returns before the add, the re-render
+// rebuilds `_groupOpenState` from the (empty) force-open set + the
+// (non-matching) selected key, and the wrapper collapses again. The
+// `style.display` test is a string-vs-undefined check: a collapsed
+// wrapper has `display:'none'` (set by renderModelDropdown when the
+// group is closed), an open wrapper has the property absent.
+const afterOuterDisplay = groupWrapperAfter
+  ? (('display' in groupWrapperAfter.style) ? groupWrapperAfter.style.display : '')
+  : 'missing';
+const afterHeadingHasOpen = !!(groupWrapperAfter && groupWrapperAfter.previousElementSibling
+  && groupWrapperAfter.previousElementSibling.classList
+  && groupWrapperAfter.previousElementSibling.classList.contains('open'));
+const afterForceOpenHasOpenRouter = !!(window.__modelGroupForceOpenByPicker.composer && window.__modelGroupForceOpenByPicker.composer.has('openrouter'));
 
 process.stdout.write(JSON.stringify({
   beforeSubgroupCount: subBodiesBefore.length,
   beforeSubHeadingCount: subHeadingsBefore.length,
   beforeSnapshot,
+  beforeOuterDisplay,
+  beforeForceOpenHasOpenRouter,
   afterSubgroupCount: subBodiesAfter.length,
   afterSubHeadingCount: subHeadingsAfter.length,
   afterSnapshot,
+  afterOuterDisplay,
+  afterHeadingHasOpen,
+  afterForceOpenHasOpenRouter,
   outerRowsAfter,
   showAllGone,
   subHeadingClickable,
@@ -2510,7 +2545,17 @@ def test_show_more_preserves_openrouter_subgroup_bodies(_subgroup_driver_path):
     into the outer provider wrapper, emptying each `.model-group-body.sub`
     and dropping its heading. The fix routes subgrouped groups through a
     full re-render instead of the in-place re-sort, so subgroup bodies and
-    their headings must stay populated and clickable after expansion."""
+    their headings must stay populated and clickable after expansion.
+
+    #7528 greptile 2026-09-26 "Expanded group closes again": the full
+    re-render path also has to record the user's "stay open" intent on
+    the cross-render force-open set BEFORE the re-render, otherwise a
+    non-selected subgrouped group collapses again and the just-revealed
+    overflow rows vanish. This payload puts the selected model in a
+    second (non-subgrouped) group so openrouter is exactly that
+    non-selected, non-force-opened group; the regression vector is
+    only exercisable in that shape.
+    """
     payload = {
         "groups": [
             {
@@ -2524,9 +2569,16 @@ def test_show_more_preserves_openrouter_subgroup_bodies(_subgroup_driver_path):
                     {"id": f"vendor{i % 4}/overflow-{i}", "label": f"O{i}"}
                     for i in range(4)
                 ],
-            }
+            },
+            {
+                "provider": "Anthropic",
+                "provider_id": "anthropic",
+                "models": [
+                    {"id": "anthropic/claude-3-5-sonnet", "label": "Claude 3.5 Sonnet"},
+                ],
+            },
         ],
-        "selectedValue": "vendor0/visible-0",
+        "selectedValue": "anthropic/claude-3-5-sonnet",
     }
     result = subprocess.run(
         [NODE, _subgroup_driver_path, str(REPO / "static" / "ui.js"), json.dumps(payload)],
@@ -2587,6 +2639,46 @@ def test_show_more_preserves_openrouter_subgroup_bodies(_subgroup_driver_path):
     )
     assert out["firstSubBodyClickable"], (
         "Subgroup bodies must remain visible (not display:none) after expand."
+    )
+    # #7528 greptile 2026-09-26 "Expanded group closes again": a click on
+    # Show more in a non-selected subgrouped group must keep that group
+    # open across the resulting full re-render. Pre-fix the subgroup
+    # branch early-returns before `_forceOpenGroups.add(groupKey)`, so
+    # the re-render rebuilds `_groupOpenState` from an empty force-open
+    # set + the (non-matching) selected key, the openrouter wrapper
+    # collapses to display:none, and the just-revealed overflow rows
+    # vanish. The setup above puts the selected model in a separate
+    # non-subgrouped group so openrouter is exactly that
+    # non-selected, non-force-opened group — the only shape that
+    # exercises this bug.
+    assert out["beforeOuterDisplay"] == "none", (
+        "Pre-click the openrouter wrapper must be collapsed (display:none) "
+        "so the regression vector is the bug under test, not a no-op. "
+        f"Got beforeOuterDisplay={out['beforeOuterDisplay']!r}."
+    )
+    assert out["beforeForceOpenHasOpenRouter"] is False, (
+        "Pre-click the cross-render force-open set must not carry "
+        f"'openrouter' yet. Got {out['beforeForceOpenHasOpenRouter']!r}."
+    )
+    assert out["afterOuterDisplay"] != "none", (
+        "Post-click the openrouter wrapper must stay expanded (display "
+        f"!= 'none') across the full re-render. Got afterOuterDisplay="
+        f"{out['afterOuterDisplay']!r}. Pre-fix the subgroup branch "
+        "early-returns before `_forceOpenGroups.add(groupKey)`, so the "
+        "re-render collapses the wrapper again (greptile P1 'Expanded "
+        "group closes again', 2026-09-26)."
+    )
+    assert out["afterHeadingHasOpen"] is True, (
+        "Post-click the openrouter heading must carry the 'open' class "
+        "so the user can re-collapse the group they just expanded. "
+        f"Got afterHeadingHasOpen={out['afterHeadingHasOpen']!r}."
+    )
+    assert out["afterForceOpenHasOpenRouter"] is True, (
+        "Post-click the cross-render force-open set must carry "
+        "'openrouter' so the next render still treats the group as "
+        f"user-expanded. Got afterForceOpenHasOpenRouter="
+        f"{out['afterForceOpenHasOpenRouter']!r}. Pre-fix the subgroup "
+        "branch skips the add, so the next render collapses the group."
     )
 
 
