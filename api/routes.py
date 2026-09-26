@@ -8445,6 +8445,12 @@ _DRAFT_COALESCE = {}
 _DRAFT_COALESCE_LOCK = threading.Lock()
 _DRAFT_SAVE_LOCK_WAIT = 20.0
 _DRAFT_SAVE_REQUEST_WAIT = 30.0
+# After a retryable failure the worker retires and a bounded self-heal timer
+# respawns it, so a queued intent becomes durable even if no further draft
+# request arrives (the pre-coalescing code waited synchronously on the lock
+# and always saved). Bounded attempts keep a persistent failure from spinning.
+_DRAFT_SAVE_RETRY_DELAY = 5.0
+_DRAFT_SAVE_MAX_RETRIES = 12
 
 
 class _DraftSaveIntent:
@@ -8454,6 +8460,24 @@ class _DraftSaveIntent:
     def __init__(self, text=None, files=None):
         self.text = text
         self.files = files
+
+
+def _maybe_spawn_draft_worker(sid, state):
+    """Start the per-session draft worker if it is retired but work remains."""
+    with _DRAFT_COALESCE_LOCK:
+        if _DRAFT_COALESCE.get(sid) is not state:
+            return
+        if state["worker_alive"].is_set():
+            return
+        if state["pending"] is None and state["published"] is None:
+            return
+        state["worker_alive"].set()
+    threading.Thread(
+        target=_draft_save_worker,
+        args=(sid,),
+        name=f"draft-save-{sid}",
+        daemon=True,
+    ).start()
 
 
 def _draft_save_worker(sid):
@@ -8538,6 +8562,7 @@ def _draft_save_worker(sid):
                     state["pending"] = None
                 state["settled_unchanged"] = unchanged_flag
                 state["settled_failed"] = False
+                state["retries"] = 0
             drained = state["pending"] is None and state["published"] is None
             if drained or missing:
                 state["worker_alive"].clear()
@@ -8546,6 +8571,16 @@ def _draft_save_worker(sid):
             elif failed:
                 state["worker_alive"].clear()
                 state["worker_event"].set()
+                retries = state.get("retries", 0) + 1
+                state["retries"] = retries
+                if retries <= _DRAFT_SAVE_MAX_RETRIES:
+                    timer = threading.Timer(
+                        _DRAFT_SAVE_RETRY_DELAY,
+                        _maybe_spawn_draft_worker,
+                        args=(sid, state),
+                    )
+                    timer.daemon = True
+                    timer.start()
                 return
 
 
@@ -16593,6 +16628,7 @@ def handle_post(handler, parsed) -> bool:
                     "worker_event": threading.Event(),
                     "settled_unchanged": False,
                     "settled_failed": False,
+                    "retries": 0,
                 }
                 _DRAFT_COALESCE[sid] = state
             if state["pending"] is None:
@@ -16609,14 +16645,7 @@ def handle_post(handler, parsed) -> bool:
             worker_event = state["worker_event"]
             worker_event.clear()
         if not worker_alive:
-            worker = threading.Thread(
-                target=_draft_save_worker,
-                args=(sid,),
-                name=f"draft-save-{sid}",
-                daemon=True,
-            )
-            state["worker_alive"].set()
-            worker.start()
+            _maybe_spawn_draft_worker(sid, state)
         if worker_event.wait(_DRAFT_SAVE_REQUEST_WAIT):
             with _DRAFT_COALESCE_LOCK:
                 settled = state["settled_unchanged"]

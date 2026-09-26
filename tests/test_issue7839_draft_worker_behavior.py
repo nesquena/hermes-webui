@@ -185,3 +185,97 @@ def test_lock_timeout_requeues_intent_instead_of_dropping(isolated_session_env, 
         )
         assert state["published"] is None
         assert not state["worker_alive"].is_set()
+
+
+def test_failed_settle_self_heals_once_lock_frees(isolated_session_env, monkeypatch):
+    """A queued intent must become durable even if no further request comes.
+
+    The pre-coalescing code waited synchronously on the agent lock and always
+    saved; after a failed settle the coalescing worker must therefore respawn
+    itself and persist the intent (bounded retry timer), not silently lose it.
+    """
+    from api import routes
+
+    sid = "dwkr0005"
+    _make_persisted_session(sid)
+    routes._DRAFT_COALESCE.clear()
+
+    class FlakyLock:
+        def __init__(self):
+            self.calls = 0
+
+        def acquire(self, timeout=None):
+            self.calls += 1
+            return self.calls > 2
+
+        def release(self):
+            pass
+
+    flaky = FlakyLock()
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: flaky)
+    monkeypatch.setattr(routes, "_DRAFT_SAVE_LOCK_WAIT", 0.05)
+    monkeypatch.setattr(routes, "_DRAFT_SAVE_RETRY_DELAY", 0.2)
+
+    with routes._DRAFT_COALESCE_LOCK:
+        routes._DRAFT_COALESCE[sid] = {
+            "pending": None,
+            "published": routes._DraftSaveIntent(text="self healed", files=None),
+            "worker_alive": threading.Event(),
+            "worker_event": threading.Event(),
+            "settled_unchanged": False,
+        }
+    routes._draft_save_worker(sid)  # fails, requeues, schedules the retry timer
+
+    draft = _wait_for_draft(sid, "self healed", timeout=10.0)
+    assert draft is not None, "bounded self-heal retry must persist the queued intent"
+    with routes._DRAFT_COALESCE_LOCK:
+        assert routes._DRAFT_COALESCE.get(sid) is None, "drained state must be evicted after self-heal"
+
+
+def test_self_heal_retries_are_bounded(isolated_session_env, monkeypatch):
+    """A persistent failure must stop retrying instead of spinning forever."""
+    import time as _time
+
+    from api import routes
+
+    sid = "dwkr0006"
+    _make_persisted_session(sid)
+    routes._DRAFT_COALESCE.clear()
+
+    class BusyLock:
+        def acquire(self, timeout=None):
+            return False
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: BusyLock())
+    monkeypatch.setattr(routes, "_DRAFT_SAVE_LOCK_WAIT", 0.02)
+    monkeypatch.setattr(routes, "_DRAFT_SAVE_RETRY_DELAY", 0.05)
+    monkeypatch.setattr(routes, "_DRAFT_SAVE_MAX_RETRIES", 2)
+
+    with routes._DRAFT_COALESCE_LOCK:
+        routes._DRAFT_COALESCE[sid] = {
+            "pending": None,
+            "published": routes._DraftSaveIntent(text="never lands", files=None),
+            "worker_alive": threading.Event(),
+            "worker_event": threading.Event(),
+            "settled_unchanged": False,
+        }
+    routes._draft_save_worker(sid)
+    deadline = _time.monotonic() + 5.0
+    while _time.monotonic() < deadline:
+        with routes._DRAFT_COALESCE_LOCK:
+            state = routes._DRAFT_COALESCE.get(sid)
+            if state and state.get("retries", 0) >= 3:
+                break
+        _time.sleep(0.05)
+    _time.sleep(0.5)  # would-be fourth retry window
+    with routes._DRAFT_COALESCE_LOCK:
+        state = routes._DRAFT_COALESCE.get(sid)
+        assert state is not None, "state must remain for the next real request"
+        assert state.get("retries", 0) == 3, (
+            f"initial run + {routes._DRAFT_SAVE_MAX_RETRIES} retry spawns, then stop; got {state.get('retries')}"
+        )
+        assert state["pending"] is not None and state["pending"].text == "never lands"
+        assert not state["worker_alive"].is_set()
