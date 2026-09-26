@@ -16,6 +16,7 @@ This test verifies that:
 Implementation reference: api/streaming.py around line 2188 (the per-turn
 post-merge save) writes from getattr(agent, 'context_compressor', None).
 """
+import ast
 import re
 from pathlib import Path
 
@@ -74,13 +75,29 @@ def test_streaming_persists_context_fields_on_session_before_save():
 def test_session_init_accepts_context_fields():
     """Session.__init__ must accept the three fields as named kwargs."""
     src = MODELS.read_text(encoding="utf-8")
-    # The init signature spans many lines — read the full def block
-    init_match = re.search(r"def __init__\(self,(.*?)\):", src, re.DOTALL)
-    assert init_match, "Session.__init__ signature not found"
-    sig = init_match.group(1)
-    assert "context_length" in sig, "Session.__init__ must accept context_length"
-    assert "threshold_tokens" in sig, "Session.__init__ must accept threshold_tokens"
-    assert "last_prompt_tokens" in sig, "Session.__init__ must accept last_prompt_tokens"
+    module = ast.parse(src)
+    session_class = next(
+        (
+            node
+            for node in module.body
+            if isinstance(node, ast.ClassDef) and node.name == "Session"
+        ),
+        None,
+    )
+    assert session_class is not None, "Session class not found"
+    init = next(
+        (
+            node
+            for node in session_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        ),
+        None,
+    )
+    assert init is not None, "Session.__init__ signature not found"
+    parameters = {arg.arg for arg in (*init.args.args, *init.args.kwonlyargs)}
+    assert "context_length" in parameters, "Session.__init__ must accept context_length"
+    assert "threshold_tokens" in parameters, "Session.__init__ must accept threshold_tokens"
+    assert "last_prompt_tokens" in parameters, "Session.__init__ must accept last_prompt_tokens"
 
 
 def test_session_metadata_fields_includes_context_fields():

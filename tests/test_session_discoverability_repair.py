@@ -1,7 +1,9 @@
+import errno
 import json
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from api.session_discoverability import repair_session_discoverability
@@ -145,6 +147,205 @@ def test_repair_discoverability_apply_backs_up_and_repairs_safe_findings(tmp_pat
     assert f"{stale}.json" in backed_up
     assert "_index.json" in backed_up
     assert "state.db" in backed_up
+
+
+def test_materialize_sidecar_fsync_failure_invalidates_absent_cached_owner(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    sid = "state-only-partially-published"
+    db = _state_db(
+        tmp_path,
+        [{"id": sid, "source": "webui", "message_count": 1}],
+        {sid: 1},
+    )
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    cached = models.Session(session_id=sid, workspace=str(tmp_path), messages=[])
+    with models.LOCK:
+        models.SESSIONS.clear()
+        models.SESSIONS[sid] = cached
+
+    real_fsync = models._fsync_sidecar_directory
+    attempts = 0
+
+    def fail_first_directory_fsync(directory):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(errno.EIO, "directory fsync failed after link")
+        real_fsync(directory)
+
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        fail_first_directory_fsync,
+    )
+    result = repair_session_discoverability(
+        tmp_path,
+        state_db_path=db,
+        dry_run=False,
+        backup_dir=tmp_path / "backup",
+    )
+
+    target = tmp_path / f"{sid}.json"
+    assert result["ok"] is False
+    assert target.exists()
+    assert json.loads(target.read_text(encoding="utf-8"))["_sidecar_generation_v1"] == 1
+    with models.LOCK:
+        assert sid not in models.SESSIONS
+
+    reloaded = models.Session.load(sid)
+    assert reloaded is not None
+    reloaded.messages.append({"role": "assistant", "content": "retry works"})
+    reloaded.save(skip_index=True)
+    assert json.loads(target.read_text(encoding="utf-8"))["_sidecar_generation_v1"] == 2
+
+
+def test_clear_sidecar_cli_flag_never_silently_overwrites_successful_save(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+    from api import session_discoverability as discoverability
+
+    sid = "repair-save-race"
+    session_path = _write_sidecar(
+        tmp_path,
+        sid,
+        messages=1,
+        title="repair snapshot",
+        source_tag="webui",
+        session_source="webui",
+        is_cli_session=True,
+    )
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    writer = models.Session.load(sid)
+    assert writer is not None
+    writer.title = "concurrent writer"
+    repair_paused = threading.Event()
+    release_repair = threading.Event()
+    writer_done = threading.Event()
+    real_backup = discoverability._backup_file
+
+    def blocking_backup(path, backup_dir, backed_up):
+        if Path(path) == session_path:
+            repair_paused.set()
+            assert release_repair.wait(timeout=10)
+        return real_backup(path, backup_dir, backed_up)
+
+    monkeypatch.setattr(discoverability, "_backup_file", blocking_backup)
+    repair_result = {}
+    writer_result = {}
+
+    def run_repair():
+        repair_result.update(
+            discoverability._clear_sidecar_cli_flag(
+                tmp_path,
+                sid,
+                tmp_path / "backup",
+                {},
+            )
+        )
+
+    def run_writer():
+        try:
+            writer.save(skip_index=True)
+        except models.StaleSessionGenerationError:
+            writer_result["status"] = "stale"
+        else:
+            writer_result["status"] = "saved"
+        finally:
+            writer_done.set()
+
+    repair_thread = threading.Thread(target=run_repair)
+    writer_thread = threading.Thread(target=run_writer)
+    repair_thread.start()
+    assert repair_paused.wait(timeout=10)
+    writer_thread.start()
+    writer_finished_before_repair = writer_done.wait(timeout=0.25)
+    release_repair.set()
+    repair_thread.join(timeout=10)
+    writer_thread.join(timeout=10)
+    assert not repair_thread.is_alive()
+    assert not writer_thread.is_alive()
+
+    persisted = json.loads(session_path.read_text(encoding="utf-8"))
+    assert repair_result["applied"] is True
+    assert persisted["is_cli_session"] is False
+    assert not (
+        writer_result["status"] == "saved"
+        and persisted["title"] != "concurrent writer"
+    )
+    assert writer_finished_before_repair is False
+    assert writer_result["status"] == "stale"
+
+
+def test_materialize_sidecar_does_not_resurrect_concurrent_tombstone(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+    from api import session_discoverability as discoverability
+
+    sid = "repair-delete-race"
+    db = _state_db(
+        tmp_path,
+        [{"id": sid, "source": "webui", "message_count": 1}],
+        {sid: 1},
+    )
+    target = tmp_path / f"{sid}.json"
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    repair_paused = threading.Event()
+    release_repair = threading.Event()
+    delete_done = threading.Event()
+    real_backup = discoverability._backup_file
+
+    def blocking_backup(path, backup_dir, backed_up):
+        if Path(path) == db:
+            repair_paused.set()
+            assert release_repair.wait(timeout=10)
+        return real_backup(path, backup_dir, backed_up)
+
+    monkeypatch.setattr(discoverability, "_backup_file", blocking_backup)
+    repair_result = {}
+
+    def run_repair():
+        repair_result.update(
+            discoverability._materialize_sidecar_from_state_db(
+                tmp_path,
+                db,
+                sid,
+                tmp_path / "backup",
+                {},
+            )
+        )
+
+    def run_delete():
+        with models._session_sidecar_authority(sid, session_dir=tmp_path):
+            models._record_webui_deleted_session_tombstone(sid)
+            target.unlink(missing_ok=True)
+        delete_done.set()
+
+    repair_thread = threading.Thread(target=run_repair)
+    delete_thread = threading.Thread(target=run_delete)
+    repair_thread.start()
+    assert repair_paused.wait(timeout=10)
+    delete_thread.start()
+    delete_finished_before_repair = delete_done.wait(timeout=0.25)
+    release_repair.set()
+    repair_thread.join(timeout=10)
+    delete_thread.join(timeout=10)
+    assert not repair_thread.is_alive()
+    assert not delete_thread.is_alive()
+
+    assert repair_result["applied"] is True
+    assert delete_finished_before_repair is False
+    assert not target.exists()
 
 
 def test_repair_discoverability_cli_defaults_to_dry_run(tmp_path):

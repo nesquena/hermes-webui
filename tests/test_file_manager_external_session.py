@@ -194,9 +194,10 @@ def test_get_session_for_file_ops_recovers_missing_implicit_workspace(
 
     recovered = models_module.get_session_for_file_ops(metadata_session.session_id)
 
-    assert recovered is metadata_session
+    assert recovered is not metadata_session
     assert recovered.session_id == metadata_session.session_id
     assert Path(recovered.workspace) == fallback.resolve()
+    assert metadata_session.workspace == str(stale)
     persisted = json.loads(sidecar.read_text(encoding="utf-8"))
     assert persisted["workspace"] == str(fallback.resolve())
     assert persisted["messages"] == [{"role": "user", "content": "preserve me"}]
@@ -452,7 +453,7 @@ def test_delete_serializes_with_workspace_recovery_and_sidecar_stays_deleted(
     )
     monkeypatch.setattr(routes_module, "prune_session_from_index", lambda _sid: None)
     monkeypatch.setattr(
-        routes_module, "_record_webui_deleted_session_tombstone", lambda _sid: None
+        models_module, "_record_webui_deleted_session_tombstone", lambda _sid: None
     )
     monkeypatch.setattr(
         routes_module, "_publish_session_list_changed", lambda *_args, **_kwargs: None
@@ -564,7 +565,7 @@ def test_delete_returns_503_without_mutation_when_session_lock_is_busy(
         lambda _sid: observed["mutations"].append("index"),
     )
     monkeypatch.setattr(
-        routes_module,
+        models_module,
         "_record_webui_deleted_session_tombstone",
         lambda _sid: observed["mutations"].append("tombstone"),
     )
