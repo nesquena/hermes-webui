@@ -25,6 +25,7 @@ The fix:
 
 import os
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -370,7 +371,12 @@ def test_providers_and_models_routes_wrap_in_profile_env():
       - /api/models relies on get_available_models() using the mirrored request
         scope for the budget<=0 sync rebuild plus profile_scope_for_detached_worker
         for the detached rebuild worker (the request-thread wrapper cannot reach
-        the worker thread — Codex CORE finding).
+        the worker thread — Codex CORE finding). The synchronous-budget path
+        MUST use the REQUEST-thread scope ``profile_scope_for_active_request``
+        (not the detached-worker one): it runs on a request thread, so clearing
+        the request TLS on scope exit would drop the foreground request onto the
+        process-level named profile and publish the rebuilt cache to that
+        profile's file (#7724 re-gate maintainer finding).
     """
     routes_src = Path(profiles.__file__).resolve().parent.joinpath("routes.py").read_text(
         encoding="utf-8"
@@ -378,9 +384,30 @@ def test_providers_and_models_routes_wrap_in_profile_env():
     assert 'with profile_env_for_active_request("/api/models/live"' in routes_src
     assert "profile_env_for_active_request_readonly" in routes_src
     config_src = Path(config.__file__).resolve().read_text(encoding="utf-8")
-    assert "profile_env_for_active_request as _prof_env_request" in config_src
     assert "profile_scope_for_detached_worker" in config_src
     assert "_get_models_cache_path" in config_src
+    # Both scopes are imported on get_available_models(): the detached-worker
+    # one for the bounded rebuild worker thread, the request-thread one for the
+    # synchronous-budget path that runs ON the request thread.
+    assert "profile_scope_for_detached_worker as _prof_scope_worker" in config_src
+    assert "profile_scope_for_active_request as _prof_scope_request" in config_src
+    # The synchronous (budget<=0) rebuild must enter the request-thread scope.
+    sync_start = config_src.index("# Legacy synchronous (unbounded) rebuild")
+    sync_next_section = config_src.find(
+        "# ── Bounded rebuild (defense-in-depth)", sync_start
+    )
+    sync_block = config_src[sync_start:sync_next_section]
+    assert "_prof_scope_request(" in sync_block, (
+        "the synchronous-budget rebuild must enter the request-thread scope "
+        "``profile_scope_for_active_request``; using the detached-worker scope "
+        "there clears the foreground request profile before cache publication "
+        "(#7724 re-gate)"
+    )
+    assert "_prof_scope_worker(" not in sync_block, (
+        "the synchronous-budget rebuild must NOT enter the detached-worker "
+        "scope: it runs on a request thread, so that scope's clear-on-exit "
+        "contract wipes the foreground request profile before publication"
+    )
 
 
 def test_models_sync_rebuild_uses_legacy_mirrored_env(monkeypatch, tmp_path):
@@ -405,6 +432,10 @@ def test_models_sync_rebuild_uses_legacy_mirrored_env(monkeypatch, tmp_path):
     def _capture_rebuild(_builder):
         seen["process_env"] = os.environ.get("ISSUE_3957_PROBE")
         seen["thread_env"] = config._thread_local_env_value("ISSUE_3957_PROBE")
+        seen["name_inside"] = profiles.get_active_profile_name()
+        # Cache publication resolves through the request thread's profile
+        # state; capture what it WOULD write (name + profile-keyed file).
+        seen["path_inside"] = config._get_models_cache_path().name
         return {"active_provider": None, "default_model": "", "groups": []}
 
     monkeypatch.setattr(config, "_invoke_models_rebuild", _capture_rebuild)
@@ -419,6 +450,117 @@ def test_models_sync_rebuild_uses_legacy_mirrored_env(monkeypatch, tmp_path):
     assert seen["thread_env"] == "from-work-profile"
     assert os.environ.get("ISSUE_3957_PROBE") == "from-process-env"
     assert result["groups"] == []
+    # The rebuild ran under the captured request profile, not the process default.
+    assert seen["name_inside"] == "work"
+    assert seen["path_inside"] == "models_cache.work.json"
+
+
+def test_models_sync_rebuild_preserves_request_profile_after_publication(
+    monkeypatch, tmp_path
+):
+    """The sync rebuild must NOT clear the foreground request profile (#7724).
+
+    Maintainer finding (re-gate): the legacy synchronous (budget<=0) rebuild
+    entered ``profile_scope_for_detached_worker``, whose contract is for a NEW
+    thread — it SETS and then CLEARS the request-profile TLS. On the calling
+    REQUEST thread that wipes the foreground profile mid-request, so everything
+    the request does after the rebuild — above all the cache publication
+    (memory assignment + ``_sync_models_cache_provenance`` +
+    ``_save_models_cache_to_disk``) — resolves the process-level profile instead
+    of the request's. A root/``default`` request on a server whose process
+    profile is NAMED (``work``) therefore rebuilt the root catalog but published
+    it into ``models_cache.work.json``, and the rest of the request kept
+    answering as ``work``.
+
+    The fix enters the REQUEST-thread scope
+    (``profile_scope_for_active_request``), which restores the ambient TLS.
+    This test pins both observables: the published cache file is the request
+    profile's, and the request profile is still bound after the call returns.
+    """
+    base = tmp_path / ".hermes"
+    root_cache = tmp_path / "models_cache.json"
+    named_cache = tmp_path / "models_cache.work.json"
+    for cache in (root_cache, named_cache):
+        cache.write_text("{}", encoding="utf-8")
+    named_home = base / "profiles" / "work"
+    named_home.mkdir(parents=True)
+    (named_home / ".env").write_text(
+        "ISSUE_7724_PROBE=named-profile-value\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(config, "_models_cache_path", root_cache)
+    monkeypatch.delenv("ISSUE_7724_PROBE", raising=False)
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0)
+    monkeypatch.setattr(config, "_available_models_cache", None)
+    monkeypatch.setattr(config, "_available_models_cache_ts", 0.0)
+    monkeypatch.setattr(config, "_available_models_cache_source_fingerprint", None)
+    monkeypatch.setattr(config, "_cache_build_in_progress", False)
+    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: "issue-7724")
+
+    seen = {}
+
+    def _capture_rebuild(_builder):
+        seen["name_inside"] = profiles.get_active_profile_name()
+        seen["path_inside"] = config._get_models_cache_path().name
+        seen["home_inside"] = os.environ.get("HERMES_HOME")
+        return {
+            "active_provider": None,
+            "default_model": "rebuilt",
+            "configured_model_badges": {},
+            "groups": [],
+        }
+
+    monkeypatch.setattr(config, "_invoke_models_rebuild", _capture_rebuild)
+
+    real_save = config._save_models_cache_to_disk
+
+    def _save_probe(cache):
+        seen["save_name"] = profiles.get_active_profile_name()
+        seen["save_path"] = config._get_models_cache_path().name
+        seen["save_hermes_home"] = os.environ.get("HERMES_HOME")
+        return real_save(cache)
+
+    monkeypatch.setattr(config, "_save_models_cache_to_disk", _save_probe)
+
+    old_mtime = time.time() - 600.0
+    os.utime(root_cache, (old_mtime, old_mtime))
+    os.utime(named_cache, (old_mtime, old_mtime))
+
+    # A ROOT/default request while the PROCESS-level active profile is NAMED.
+    prev_process_profile = profiles._active_profile
+    profiles._active_profile = "work"
+    profiles.set_request_profile("default")
+    try:
+        result = config.get_available_models()
+        seen["name_after"] = profiles.get_active_profile_name()
+        seen["path_after"] = config._get_models_cache_path().name
+    finally:
+        profiles.clear_request_profile()
+        profiles._active_profile = prev_process_profile
+
+    assert result["default_model"] == "rebuilt"
+    # 1. The rebuild itself ran on the ROOT profile (the request's), not 'work'.
+    assert seen["name_inside"] in ("", "default")
+    assert seen["path_inside"] == "models_cache.json"
+    # 2. The PUBLICATION resolved the same profile as the rebuild. With the
+    #    detached-worker scope this was 'work' / 'models_cache.work.json'.
+    assert seen["save_name"] in ("", "default"), (
+        f"cache publication must still resolve the request profile, got "
+        f"{seen['save_name']!r} (the detached-worker scope cleared it, so "
+        f"publication fell through to the NAMED process profile)"
+    )
+    assert seen["save_path"] == "models_cache.json"
+    # 3. The disk write landed on the ROOT file; the NAMED profile's file is
+    #    untouched (the wrong-profile publication the bug produced).
+    assert root_cache.stat().st_mtime > old_mtime + 1.0
+    assert abs(named_cache.stat().st_mtime - old_mtime) < 0.01
+    # 4. The foreground request profile SURVIVED the rebuild + publication.
+    assert seen["name_after"] in ("", "default"), (
+        f"the request thread must keep its request profile after the sync "
+        f"rebuild, got {seen['name_after']!r}"
+    )
+    assert seen["path_after"] == "models_cache.json"
 
 
 def test_thread_local_env_value_none_default_returns_empty_string(monkeypatch):

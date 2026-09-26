@@ -6707,6 +6707,20 @@ _available_models_cache_lock = threading.RLock()  # must be RLock: cold path ref
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
 
+# Per-profile in-flight tracker for the session-visit stale-while-revalidate
+# background rebuild (#7723 review). The session-visit 300 s freshness horizon
+# is checked against the on-disk mtime (which only advances when
+# ``_save_models_cache_to_disk`` writes a fresh live rebuild). When the disk
+# catalog is stale, ``get_available_models_for_session_visit`` immediately
+# returns it (no foreground rebuild) AND fires a background ``force_refresh``
+# for the *active* profile. This dict coalesces that background work per
+# profile: a second stale visit while the first rebuild is still running
+# reuses the in-flight Thread instead of starting a duplicate. Keyed on the
+# profile name (or "" for the default / root profile) so a multi-profile
+# server never blocks profile A's first paint on profile B's slow probe.
+_session_visit_rebuild_threads: dict[str, threading.Thread] = {}
+_session_visit_rebuild_lock = threading.Lock()
+
 # Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
 # the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
 # to answer "did this endpoint actually advertise this exact id?" in O(1) per
@@ -10308,29 +10322,54 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         from contextlib import nullcontext as _nullcontext
 
         _active_profile_name = ""
-        _prof_env_request = None
         _prof_scope_worker = None
+        _prof_scope_request = None
+        _worker_bind_root = False
         try:
             from api.profiles import (
                 get_active_profile_name as _gapn,
-                profile_env_for_active_request as _prof_env_request,
+                profile_scope_for_active_request as _prof_scope_request,
                 profile_scope_for_detached_worker as _prof_scope_worker,
             )
             _active_profile_name = (_gapn() or "").strip()
+            # A root/default request while the process-level active profile is
+            # NAMED needs the root profile bound explicitly: the scopes no-op
+            # for 'default' alone, so the rebuild would inherit the named
+            # process profile and publish to the wrong cache file (#7724).
+            _worker_bind_root = _is_root_profile_key(_active_profile_name) and (
+                _is_root_active_profile()
+            )
         except Exception:
-            _prof_env_request = None
             _prof_scope_worker = None
+            _prof_scope_request = None
 
         # Legacy synchronous (unbounded) rebuild — opt-in via budget<=0.
         if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
             try:
-                # Foreground thread already carries the request-profile TLS;
-                # apply the mirrored profile env (no-op for default) for the
-                # live probe because provider_model_ids() still has raw
-                # os.getenv()/HERMES_HOME readers on this synchronous path.
+                # This is a REQUEST thread (a direct /api/models caller, or the
+                # SWR worker's inner cold path where the outer worker already
+                # bound the captured request TLS). It therefore uses the
+                # REQUEST-thread scope — NOT the detached-worker one: this scope
+                # restores the ambient request-profile TLS on exit instead of
+                # CLEARING it, so the publication below (cache assignment +
+                # ``_sync_models_cache_provenance`` + ``_save_models_cache_to_disk``)
+                # still resolves the SAME profile that the rebuild just probed.
+                # Clearing it (the detached-worker contract) would drop the
+                # foreground request onto the process-level named profile
+                # mid-request and write the wrong profile's cache file (#7724).
+                #
+                # ``bind_root=_worker_bind_root`` keeps the explicit
+                # root/default binding a root request under a NAMED process
+                # profile needs. It is named ``_worker_bind_root`` because the
+                # same flag is reused verbatim by the bounded rebuild worker
+                # below.
                 _sync_scope = (
-                    _prof_env_request("models rebuild (sync)")
-                    if _prof_env_request is not None
+                    _prof_scope_request(
+                        _active_profile_name,
+                        "models rebuild (sync)",
+                        bind_root=_worker_bind_root,
+                    )
+                    if _prof_scope_request is not None
                     else _nullcontext()
                 )
                 with _sync_scope:
@@ -10426,9 +10465,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # (#3957): the daemon inherits neither the request-profile TLS nor
             # os.environ, so without this it would probe the default profile's
             # credentials and, over budget, publish the rebuilt catalog to the
-            # DEFAULT profile's disk cache. No-op for the default profile.
+            # DEFAULT profile's disk cache. For a default/root request under a
+            # NAMED process profile, ``bind_root=True`` additionally pins the
+            # root profile explicitly so the worker cannot inherit the named
+            # profile's home, credentials and cache file (#7724).
             _worker_scope = (
-                _prof_scope_worker(_active_profile_name, "models rebuild (worker)")
+                _prof_scope_worker(
+                    _active_profile_name,
+                    "models rebuild (worker)",
+                    bind_root=_worker_bind_root,
+                )
                 if _prof_scope_worker is not None
                 else _nullcontext()
             )
@@ -10644,10 +10690,34 @@ def get_available_models_for_session_visit() -> dict:
             return copy.deepcopy(disk_cached)
 
     _mark("cache_age_stale_or_missing")
+    # Stale-while-revalidate, per profile (#7723 review): the on-disk mtime
+    # only advances when ``_save_models_cache_to_disk`` writes a fresh live
+    # rebuild, so the file *going stale* is the per-profile revalidation
+    # signal. When that happens we return the disk/stale catalog immediately
+    # (no foreground rebuild — the catalog payload is shape-valid and trusted
+    # for serving, the freshness decision is about *which* catalog to serve
+    # next, not whether to serve *something*) and fire a coalesced
+    # background ``force_refresh`` for the *active* profile. The background
+    # rebuild publishes through the normal ``get_available_models(force_refresh
+    # =True)`` path, which is the *only* code that calls
+    # ``_save_models_cache_to_disk`` — so the on-disk mtime advances as a
+    # side effect of a real rebuild, not of a read. Per-profile coalescing
+    # keeps a multi-profile alternation from firing N parallel probes for the
+    # same profile (the memory cache is process-global so the in-memory warm
+    # path is already shared, but the disk catalog is per-profile).
     stale_cached = disk_cached or _load_stale_models_cache_from_disk()
     _mark(f"stale_cached_loaded:{bool(stale_cached)}")
+    if stale_cached is not None:
+        _mark("swr_return_stale_cached")
+        _maybe_start_session_visit_background_rebuild()
+        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+        return copy.deepcopy(stale_cached)
+    # No disk cache to serve stale — must rebuild in the foreground so the
+    # caller gets *something* (and populates the on-disk file for the next
+    # visit). Same foreground path as before, just only when there's truly
+    # no payload to return.
+    _mark("force_refresh_start_foreground")
     try:
-        _mark("force_refresh_start")
         result = get_available_models(force_refresh=True)
         _mark("force_refresh_done")
         _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
@@ -10655,13 +10725,146 @@ def get_available_models_for_session_visit() -> dict:
     except Exception:
         _mark("force_refresh_failed")
         logger.debug("session-visit models refresh failed", exc_info=True)
-        if stale_cached is not None:
-            _mark("stale_fallback_return")
-            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-            return copy.deepcopy(stale_cached)
         _mark("prefer_cache_fallback")
         _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
         return get_available_models(prefer_cache=True)
+
+
+def _session_visit_active_profile_name() -> str:
+    """Return the active profile name (or "" for default) for SWR coalescing.
+
+    Resolved per-call from the request TLS — the same source
+    ``_get_models_cache_path`` uses to pick the per-profile disk file. Falls
+    back to "" when the profiles module is unavailable (very early boot /
+    import cycle), so SWR coalescing stays correct for the default / root
+    profile path.
+    """
+    try:
+        from api.profiles import get_active_profile_name
+        return (get_active_profile_name() or "").strip()
+    except Exception:
+        return ""
+
+
+def _is_root_profile_key(profile_key: str) -> bool:
+    """True when *profile_key* denotes the root/default profile.
+
+    Same predicate the detached-worker scope uses to take its no-op branch: an
+    empty key (profiles module unavailable / root resolution) or any name
+    ``_is_root_profile()`` accepts — the legacy ``default`` alias plus a renamed
+    root.
+    """
+    key = str(profile_key or "").strip()
+    if not key:
+        return True
+    try:
+        from api.profiles import _is_root_profile
+
+        return bool(_is_root_profile(key))
+    except Exception:
+        return key == "default"
+
+
+def _is_root_active_profile() -> bool:
+    """True when the PROCESS-LEVEL active profile is a NAMED (non-root) one.
+
+    Reads the process-global ``api.profiles._active_profile`` directly, NOT
+    ``get_active_profile_name()``: the calling thread is a request thread whose
+    TLS legitimately holds the request profile (``default``), so the global is
+    the only source that answers "what would a detached worker thread that finds
+    no request TLS inherit?". The background rebuild workers use it to decide
+    whether a root/default request needs the root profile bound explicitly on the
+    worker (#7724).
+    """
+    try:
+        import api.profiles as _profiles
+
+        process_profile = str(getattr(_profiles, "_active_profile", "default") or "").strip()
+        return bool(process_profile) and not _is_root_profile_key(process_profile)
+    except Exception:
+        return False
+
+
+def _maybe_start_session_visit_background_rebuild() -> None:
+    """Fire-and-forget coalesced per-profile rebuild for stale session visits.
+
+    Coalesces by profile name so a burst of stale visits on the same profile
+    launches exactly one background ``force_refresh``. The rebuild goes
+    through the normal ``get_available_models(force_refresh=True)`` path,
+    which writes the on-disk cache (and therefore advances the mtime) only
+    on a successful live rebuild — preserving the "mtime records last live
+    rebuild" semantic the 300 s horizon is defined against.
+
+    The OUTER SWR worker only binds the captured request-profile TLS via
+    ``profile_tls_scope_for_detached_worker`` (no process-wide env
+    mutation) so two concurrent SWR workers — one per profile — cannot
+    interleave their env mutations and pair profile A's catalog build
+    with profile B's provider credentials (#7724 re-gate). The env
+    application is the bounded rebuild worker's job: it runs serialized
+    by the cache-build lock inside the cold path, so at most one env
+    owner is in flight at any time. The synchronous-budget path (budget <= 0)
+    runs on a REQUEST thread — this same worker's inner cold path, or a
+    direct /api/models caller — so it uses the request-thread scope
+    ``profile_scope_for_active_request``, which restores (never clears) the
+    ambient request TLS so its cache publication stays on the request's
+    profile.
+
+    No-op for the default / root profile in the single-profile case
+    (``profile_tls_scope_for_detached_worker`` is a no-op there); under a
+    NAMED process profile the root profile is bound explicitly instead
+    (TLS only, on the outer worker), so the inner cold path cannot
+    inherit the named profile's home, credentials and cache file (#7724).
+    """
+    profile_key = _session_visit_active_profile_name()
+    # Root/default key: the worker must bind the root profile explicitly when the
+    # PROCESS-level active profile is a named one (the no-op branch of
+    # profile_scope_for_detached_worker would otherwise leak it in).
+    _bind_root = _is_root_profile_key(profile_key) and _is_root_active_profile()
+    with _session_visit_rebuild_lock:
+        existing = _session_visit_rebuild_threads.get(profile_key)
+        if existing is not None and existing.is_alive():
+            return  # already rebuilding for this profile
+        box: dict = {}
+
+        def _worker() -> None:
+            # Bind ONLY the per-request profile on the worker thread so the
+            # inner ``get_available_models(force_refresh=True)`` cold path
+            # resolves the right profile-keyed cache/config paths via the
+            # TLS, but do NOT mutate ``os.environ`` here — the bounded
+            # rebuild worker inside the cold path is the sole env owner, so
+            # two concurrent SWR workers (one per profile) cannot interleave
+            # their env mutations and steal each other's provider credentials
+            # (#7724 re-gate). The bounded rebuild worker's own
+            # ``profile_scope_for_detached_worker`` call applies the env
+            # AFTER cache-build admission, and only one cold-path rebuild
+            # is in flight at a time.
+            try:
+                from api.profiles import profile_tls_scope_for_detached_worker
+                _scope = profile_tls_scope_for_detached_worker(
+                    profile_key,
+                    bind_root=_bind_root,
+                )
+            except Exception:
+                from contextlib import nullcontext as _nullcontext
+                _scope = _nullcontext()
+            try:
+                with _scope:
+                    box["result"] = get_available_models(force_refresh=True)
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+            finally:
+                with _session_visit_rebuild_lock:
+                    tracked = _session_visit_rebuild_threads.get(profile_key)
+                    if tracked is threading.current_thread():
+                        _session_visit_rebuild_threads.pop(profile_key, None)
+
+        thread = threading.Thread(
+            target=_worker,
+            name=f"models-session-visit-swr-{profile_key or 'default'}",
+            daemon=True,
+        )
+        _session_visit_rebuild_threads[profile_key] = thread
+        thread.start()
 
 
 def _maybe_log_slow_stages(
