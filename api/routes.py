@@ -15051,6 +15051,24 @@ def handle_get(handler, parsed) -> bool:
             "other_profile_count": hidden_other_count,
         })
 
+    # #2316: Scripts subtab -- list and read-only view of the profile's
+    # ~/.hermes/scripts/ directory. Read-only is the first slice; edit
+    # from WebUI is intentionally out of scope.
+    if parsed.path == "/api/scripts/list":
+        from api.scripts_panel import list_scripts
+        return j(handler, list_scripts())
+
+    if parsed.path == "/api/scripts/raw":
+        qs = parse_qs(parsed.query or "")
+        name = (qs.get("name") or [None])[0]
+        if not name:
+            return bad(handler, "name query parameter is required", 400)
+        from api.scripts_panel import read_script
+        result = read_script(name)
+        if result is None:
+            return bad(handler, "script not found", 404)
+        return j(handler, result)
+
     if parsed.path == "/api/crons/output":
         from api.profiles import cron_profile_context
 

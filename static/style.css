@@ -2157,6 +2157,20 @@
   .panel-view.active{display:flex;}
   /* Cron panel */
   .cron-list{flex:1;overflow-y:auto;padding:8px;}
+  /* #2316: Scripts subtab styles. Layout mirrors .cron-list so the
+     subtab swap feels native; .scripts-item mirrors .cron-item with a
+     simpler header (no status badge -- read-only, no run state). */
+  .tasks-subtab{display:flex;gap:0;border-bottom:1px solid var(--border);padding:0 8px;}
+  .tasks-subtab-btn{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);padding:8px 12px;font-size:12px;font-weight:600;cursor:pointer;letter-spacing:.02em;text-transform:uppercase;}
+  .tasks-subtab-btn:hover{color:var(--text);}
+  .tasks-subtab-btn.active{color:var(--text);border-bottom-color:var(--accent);}
+  .scripts-list{flex:1;overflow-y:auto;padding:8px;}
+  .scripts-item{width:100%;min-width:0;box-sizing:border-box;border-radius:10px;border:1px solid var(--border);margin-bottom:6px;padding:10px 12px;background:rgba(255,255,255,.02);transition:border-color .15s,background .15s;}
+  .scripts-item:hover{border-color:var(--border2);}
+  .scripts-item-head{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+  .scripts-item-name{flex:1;font-size:13px;color:var(--text);font-weight:500;font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .scripts-item-size{font-size:10px;color:var(--muted);font-weight:600;flex-shrink:0;padding:2px 6px;background:rgba(255,255,255,.04);border-radius:99px;}
+  .scripts-item-desc{font-size:12px;color:var(--muted);line-height:1.4;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
   .cron-gateway-notice{margin:8px 8px 0;}
   .cron-item{width:100%;min-width:0;box-sizing:border-box;border-radius:10px;border:1px solid var(--border);margin-bottom:6px;overflow:hidden;transition:border-color .15s,background .15s;background:rgba(255,255,255,.02);cursor:pointer;}
   .cron-item:hover{border-color:var(--border2);}

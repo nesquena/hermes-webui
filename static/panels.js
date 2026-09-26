@@ -1033,6 +1033,69 @@ async function loadCronGatewayNotice() {
   }
 }
 
+// #2316: Scripts subtab -- list and read-only view of the profile's
+// ~/.hermes/scripts/ directory. Read-only is the first slice.
+async function loadScriptsList(animate){
+  const box=$('scriptsList');
+  if(!box) return;
+  if(animate&&box) box.style.opacity='0.5';
+  let data;
+  try{
+    data=await api('/api/scripts/list');
+  }catch(_e){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_load_failed')||'Could not load scripts.')}</div>`;
+    if(animate) box.style.opacity='';
+    return;
+  }
+  if(animate) box.style.opacity='';
+  if(!data.exists){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_no_directory')||'No scripts directory yet.')}</div>`;
+    return;
+  }
+  if(!data.scripts.length){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_empty')||'No scripts in this profile yet.')}</div>`;
+    return;
+  }
+  box.innerHTML=data.scripts.map(s=>_renderScriptItem(s)).join('');
+}
+
+function _renderScriptItem(s){
+  const name=esc(s.name||'');
+  const desc=s.description?`<div class="scripts-item-desc">${esc(s.description)}</div>`:'';
+  const size=s.size!=null?`<span class="scripts-item-size">${_formatScriptSize(s.size)}</span>`:'';
+  return `<div class="scripts-item" data-script-name="${name}">
+    <div class="scripts-item-head">
+      <span class="scripts-item-name">${name}</span>
+      ${size}
+    </div>
+    ${desc}
+  </div>`;
+}
+
+function _formatScriptSize(bytes){
+  if(bytes==null) return '';
+  if(bytes<1024) return `${bytes} B`;
+  if(bytes<1024*1024) return `${Math.round(bytes/1024)} KB`;
+  return `${(bytes/1024/1024).toFixed(1)} MB`;
+}
+
+let _currentTasksSubtab='jobs';
+function switchTasksSubtab(name){
+  if(name!=='jobs'&&name!=='scripts') return;
+  _currentTasksSubtab=name;
+  const jobsBtn=$('tasksTabJobs');
+  const scriptsBtn=$('tasksTabScripts');
+  if(jobsBtn) jobsBtn.classList.toggle('active',name==='jobs');
+  if(scriptsBtn) scriptsBtn.classList.toggle('active',name==='scripts');
+  if(jobsBtn) jobsBtn.setAttribute('aria-selected',String(name==='jobs'));
+  if(scriptsBtn) scriptsBtn.setAttribute('aria-selected',String(name==='scripts'));
+  const cronList=$('cronList');
+  const scriptsList=$('scriptsList');
+  if(cronList) cronList.hidden=(name!=='jobs');
+  if(scriptsList) scriptsList.hidden=(name!=='scripts');
+  if(name==='scripts') loadScriptsList(true);
+}
+
 async function loadCrons(animate) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
