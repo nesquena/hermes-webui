@@ -1609,7 +1609,13 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const anchorActivityScene=(snapshot.anchor_activity_scene&&snapshot.anchor_activity_scene.version==='activity_scene_v1')
     ? snapshot.anchor_activity_scene
     : ((snapshot.anchorActivityScene&&snapshot.anchorActivityScene.version==='activity_scene_v1')?snapshot.anchorActivityScene:null);
-  const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
+  const hasAnchorActivityScene=!!(
+    anchorActivityScene&&(
+      (Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length)
+      || (Array.isArray(anchorActivityScene.side_effects)&&anchorActivityScene.side_effects.length)
+      || anchorActivityScene.side_effects_truncated===true
+    )
+  );
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
     streamId:String(snapshot.stream_id||snapshot.streamId||''),
@@ -1629,6 +1635,34 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
     activityBurstAnchors,
   };
+}
+
+function _notifyRunJournalSideEffectRecoveryTruncation(inflight, sid, activeStreamId){
+  const scene=inflight&&inflight.anchorActivityScene;
+  if(!scene||scene.version!=='activity_scene_v1'||scene.side_effects_truncated!==true) return false;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const sceneStreamId=String(identity.stream_id||inflight.streamId||'').trim();
+  const requestedStreamId=String(activeStreamId||'').trim();
+  if(requestedStreamId&&sceneStreamId&&sceneStreamId!==requestedStreamId) return false;
+  const sessionId=String(sid||identity.session_id||'').trim();
+  if(!sessionId||!sceneStreamId||typeof showToast!=='function') return false;
+  const cursor=String(inflight.lastRunJournalEventId||inflight.lastRunJournalSeq||'').trim();
+  const key=[sessionId,sceneStreamId,cursor].join('|');
+  const root=(typeof window!=='undefined')?window:globalThis;
+  const notified=root._runJournalSideEffectRecoveryTruncationNotified
+    || (root._runJournalSideEffectRecoveryTruncationNotified=new Set());
+  if(notified.has(key)) return false;
+  if(notified.size>=128){
+    const first=notified.values().next();
+    if(first&&!first.done) notified.delete(first.value);
+  }
+  notified.add(key);
+  showToast(
+    'Some saved-state updates could not be fully restored after reconnect.',
+    7000,
+    'warning'
+  );
+  return true;
 }
 
 function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
@@ -2674,8 +2708,12 @@ async function loadSession(sid){
     : null;
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
-  if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
-  else if(hadLiveRecoveryInflight&&activeStreamId){
+  if(liveRecoveryInflight){
+    INFLIGHT[sid]=liveRecoveryInflight;
+    _notifyRunJournalSideEffectRecoveryTruncation(
+      liveRecoveryInflight,sid,activeStreamId
+    );
+  }else if(hadLiveRecoveryInflight&&activeStreamId){
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }

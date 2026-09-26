@@ -4316,18 +4316,43 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _hydrateAnchorRegistryFromActivityScene(scene){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
-    if(!scene||scene.version!=='activity_scene_v1'||!Array.isArray(scene.activity_rows)||!scene.activity_rows.length) return false;
+    if(!scene||scene.version!=='activity_scene_v1') return false;
+    const rows=Array.isArray(scene.activity_rows)?scene.activity_rows:[];
+    const sideEffects=Array.isArray(scene.side_effects)?scene.side_effects:[];
+    if(!rows.length&&!sideEffects.length) return false;
     const sceneIdentity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
     const sceneStreamId=sceneIdentity.stream_id||streamId;
     const sceneRunId=sceneIdentity.run_id||sceneStreamId;
-    const sceneKey=[
+    const outcomeKey=(items)=>items.map((item,index)=>{
+      if(!item||typeof item!=='object') return `invalid:${index}`;
+      const source=String(item.source_event_type||'');
+      const eventId=String(item.event_id||'');
+      const seq=(item.seq===undefined||item.seq===null)?'':String(item.seq);
+      return [source,eventId,seq].join('@');
+    }).join('|');
+    const sceneKey=JSON.stringify([
       sceneRunId||'',
       sceneStreamId||'',
-      scene.activity_rows.length,
-      scene.activity_rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
-    ].join(':');
+      rows.map(row=>row&&row.row_id||row&&row.local_id||''),
+      outcomeKey(sideEffects),
+    ]);
     if(_anchorRegistry._hydrated_activity_scene_key===sceneKey) return true;
-    const rows=scene.activity_rows;
+    const applySourceEvent=(sourceEvent)=>{
+      try{
+        _anchorApi.applyAssistantTurnAnchorSourceEvent(
+          _anchorRegistry,
+          sourceEvent,
+          {session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId}
+        );
+        return true;
+      }catch(err){
+        if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
+          _anchorShadowWarned=true;
+          console.warn('assistant turn anchor snapshot hydration failed',err);
+        }
+        return false;
+      }
+    };
     for(let i=0;i<rows.length;i+=1){
       const row=rows[i];
       if(!row||typeof row!=='object') continue;
@@ -4366,16 +4391,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // (payload may not carry created_at even when the row does). (#5739 gate.)
         created_at:payload.created_at??row.created_at??undefined,
       };
-      try{
-        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId});
-      }catch(err){
-        if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
-          _anchorShadowWarned=true;
-          console.warn('assistant turn anchor snapshot hydration failed',err);
-        }
-        return false;
-      }
+      if(!applySourceEvent(sourceEvent)) return false;
     }
+    const applyOwnedOutcomes=(items,expectedSource,offset)=>{
+      for(let i=0;i<items.length;i+=1){
+        const outcome=items[i];
+        if(!outcome||typeof outcome!=='object') continue;
+        const sourceType=String(outcome.source_event_type||expectedSource).trim();
+        if(sourceType!==expectedSource) continue;
+        const payload=(outcome.payload&&typeof outcome.payload==='object')
+          ? {...outcome.payload}
+          : {};
+        const sourceEvent={
+          ...outcome,
+          payload,
+          source_event_type:sourceType,
+          local_id:outcome.local_id||`snapshot-outcome:${sceneStreamId}:${offset+i}`,
+          event_id:outcome.event_id||null,
+          seq:outcome.seq??undefined,
+          session_id:outcome.session_id||activeSid,
+          stream_id:outcome.stream_id||sceneStreamId,
+          run_id:outcome.run_id||sceneRunId,
+          created_at:outcome.created_at??undefined,
+        };
+        if(!applySourceEvent(sourceEvent)) return false;
+      }
+      return true;
+    };
+    if(!applyOwnedOutcomes(sideEffects,'state_saved',rows.length)) return false;
     _anchorRegistry._hydrated_activity_scene_key=sceneKey;
     return true;
   }

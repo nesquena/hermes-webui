@@ -3475,6 +3475,85 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
+_RUN_JOURNAL_STATE_SAVED_MAX_EVENTS = 128
+_RUN_JOURNAL_STATE_SAVED_MAX_BYTES = 64_000
+
+
+def _run_journal_state_saved_side_effect(
+    event: dict,
+    *,
+    session_id: str,
+    run_id: str,
+    stream_id: str,
+) -> dict | None:
+    """Return one canonical server-owned ``state_saved`` Anchor outcome.
+
+    Run-journal envelopes are durable server evidence. Recovery must not infer
+    ownership from payload text or a transport fallback: session id, run id,
+    event id, and sequence must all agree before the side effect can enter the
+    Anchor scene. Only the bounded public state metadata is projected; any
+    additional producer payload stays in the journal.
+    """
+    if not isinstance(event, dict):
+        return None
+    if str(event.get("event") or event.get("type") or "").strip() != "state_saved":
+        return None
+    if not isinstance(event.get("session_id"), str) or event.get("session_id").strip() != session_id:
+        return None
+    event_run_id, malformed_run_id = _run_journal_envelope_run_id_result(event)
+    if malformed_run_id or event_run_id != run_id:
+        return None
+    seq = event.get("seq")
+    if type(seq) is not int or seq <= 0:
+        return None
+    raw_event_id = event.get("event_id")
+    if not isinstance(raw_event_id, str) or not raw_event_id.strip():
+        return None
+    event_id = raw_event_id.strip()
+    event_id_run, event_id_seq = _shared_parse_run_journal_event_id(event_id)
+    if event_id_run != run_id or event_id_seq != seq:
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    payload_session_id = payload.get("session_id")
+    if not isinstance(payload_session_id, str) or payload_session_id.strip() != session_id:
+        return None
+    kind = payload.get("kind")
+    action = payload.get("action")
+    if not isinstance(kind, str) or not kind.strip() or len(kind.strip()) > 128:
+        return None
+    if not isinstance(action, str) or not action.strip() or len(action.strip()) > 128:
+        return None
+    canonical_payload = {
+        "session_id": session_id,
+        "kind": kind.strip(),
+        "action": action.strip(),
+    }
+    if "name" in payload:
+        name = payload.get("name")
+        if not isinstance(name, str) or len(name) > 512:
+            return None
+        if name.strip():
+            canonical_payload["name"] = name.strip()
+    created_at = event.get("created_at")
+    if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
+        return None
+    created_at = float(created_at)
+    if created_at != created_at or created_at in (float("inf"), float("-inf")):
+        return None
+    return {
+        "source_event_type": "state_saved",
+        "event_id": event_id,
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": stream_id,
+        "seq": seq,
+        "created_at": created_at,
+        "payload": canonical_payload,
+    }
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3543,6 +3622,10 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_index = _CompactEchoIndex()
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    side_effects: list[dict] = []
+    seen_side_effect_event_ids: set[str] = set()
+    side_effect_bytes = 0
+    side_effects_truncated = False
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3655,6 +3738,36 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             # their per-row work while preserving the last_ts watermark they
             # carry.
             last_ts = event.get("created_at", last_ts)
+            continue
+        if event_name == "state_saved":
+            last_ts = event.get("created_at", last_ts)
+            side_effect = _run_journal_state_saved_side_effect(
+                event,
+                session_id=session_id,
+                run_id=run_id,
+                stream_id=stream_id,
+            )
+            if (
+                side_effect is not None
+                and side_effect["event_id"] not in seen_side_effect_event_ids
+            ):
+                if side_effects_truncated:
+                    continue
+                encoded_side_effect = json.dumps(
+                    side_effect,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                if (
+                    len(side_effects) >= _RUN_JOURNAL_STATE_SAVED_MAX_EVENTS
+                    or side_effect_bytes + len(encoded_side_effect)
+                    > _RUN_JOURNAL_STATE_SAVED_MAX_BYTES
+                ):
+                    side_effects_truncated = True
+                    continue
+                seen_side_effect_event_ids.add(side_effect["event_id"])
+                side_effects.append(side_effect)
+                side_effect_bytes += len(encoded_side_effect)
             continue
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
@@ -4088,6 +4201,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "final_message_ref": None,
             "terminal_state": None,
             "activity_rows": anchor_activity_rows,
+            "side_effects": side_effects,
+            "side_effects_truncated": side_effects_truncated,
         },
     }
 

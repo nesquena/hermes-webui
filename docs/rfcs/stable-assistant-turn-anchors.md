@@ -633,6 +633,20 @@ anchor after `/api/chat/start` succeeds and returns `stream_id`. Reconstruction
 is for reload, reconnect, session switch, SSE replay, and recovery cases where
 the local anchor is missing or incomplete.
 
+Current WebUI run-journal reconstruction also restores server-emitted
+`state_saved` events into `anchor.side_effects[]`. Recovery accepts only an
+exact durable journal envelope whose session id, run id, event id, and sequence
+agree, and it projects only bounded `session_id` / `kind` / `action` / `name`
+metadata. Extra producer payload is not copied into the Anchor scene. Recovery
+keeps at most 128 side effects and 64KB of their canonical encoded envelopes per
+run; exceeding either limit stops side-effect projection and sets
+`side_effects_truncated=true` on the scene. Session recovery hydrates recovered
+side effects back into the live Anchor registry before replay resumes, and a
+truncated selected recovery snapshot shows a one-per-snapshot warning toast so
+bounded recovery is not mistaken for a complete outcome list. This does not
+authorize reconstruction of `artifact_reference` until a server-owned artifact
+producer/authority contract is present on the current mainline.
+
 During migration, `INFLIGHT` remains a recovery cache until an anchor-backed
 field takes over. The handoff order should be:
 
