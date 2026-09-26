@@ -3730,9 +3730,43 @@ async function populateModelDropdown(opts={}){
       // (test_4737) that lack module-level picker helpers: never reference them
       // here, and keep the body short so contract-sniffing tests that window
       // the first chars of populateModelDropdown still see extra_models (#1567).
+      // The fallback must stay locale-INDEPENDENT: no `localeCompare(numeric:true)`,
+      // because the browser collation would tokenize digits under the host
+      // locale and can disagree with the Python ``_natural_model_id_key``
+      // backend (review blocker 3, 2026-09-19). When the contract function
+      // is in scope, delegate to it; otherwise do a deterministic ASCII-aware
+      // [0-9] run split that matches the shared contract tokenization.
+      const _compare=(a,b)=>{
+        if(typeof _modelPickerCompareContract==='function'){
+          return _modelPickerCompareContract(String(a||''),String(b||''));
+        }
+        const _runs=(s)=>String(s||'').toLowerCase().match(/[0-9]+|[^0-9]+/g)||[];
+        const _cmpRuns=(x,y)=>{
+          const _xd=/^[0-9]+$/.test(x), _yd=/^[0-9]+$/.test(y);
+          if(_xd&&_yd){
+            const _xc=(x.replace(/^0+/,'')||'0'), _yc=(y.replace(/^0+/,'')||'0');
+            if(_xc.length!==_yc.length) return _xc.length<_yc.length?-1:1;
+            if(_xc!==_yc) return _xc<_yc?-1:1;
+            if(x!==y) return x<y?-1:1;
+            return 0;
+          }
+          if(!_xd&&!_yd){
+            if(x<y) return -1; if(x>y) return 1; return 0;
+          }
+          return _xd?-1:1;
+        };
+        const _ra=_runs(a), _rb=_runs(b);
+        const _common=Math.min(_ra.length,_rb.length);
+        for(let _i=0;_i<_common;_i++){
+          const _c=_cmpRuns(_ra[_i],_rb[_i]);
+          if(_c!==0) return _c;
+        }
+        if(_ra.length!==_rb.length) return _ra.length<_rb.length?-1:1;
+        return 0;
+      };
       return values.sort((a,b)=>{
         const _aid=String(a&&a.id!=null?a.id:a||''), _bid=String(b&&b.id!=null?b.id:b||'');
-        return _aid.localeCompare(_bid,undefined,{numeric:true,sensitivity:'base'});
+        return _compare(_aid,_bid);
       });
     };
     // Keep g.extra_models label hydration in this function for /model and tail selections.
@@ -4471,10 +4505,49 @@ function renderModelDropdown(){
         };
         const av=valueOf(a);
         const bv=valueOf(b);
+        // Locale-INDEPENDENT comparator contract — no localeCompare(numeric:true)
+        // here, because the browser collation would tokenize digits under the
+        // host locale and could disagree with the Python backend
+        // ``_natural_model_id_key`` (review blocker 3, 2026-09-19). When the
+        // contract function is in scope, delegate to it; otherwise inline the
+        // shared [0-9] run split so an isolated eval harness still tokenizes
+        // identically to the Python side.
+        const _contract=typeof _modelPickerCompareContract==='function'
+          ? _modelPickerCompareContract
+          : null;
+        if(_contract){
+          const rawA=String(a&&a.value!=null?a.value:(a&&a.id!=null?a.id:a)||'');
+          const rawB=String(b&&b.value!=null?b.value:(b&&b.id!=null?b.id:b)||'');
+          return _contract(av,bv)||_contract(rawA,rawB);
+        }
+        const _runs=(s)=>String(s||'').toLowerCase().match(/[0-9]+|[^0-9]+/g)||[];
+        const _cmpRuns=(x,y)=>{
+          const _xd=/^[0-9]+$/.test(x), _yd=/^[0-9]+$/.test(y);
+          if(_xd&&_yd){
+            const _xc=(x.replace(/^0+/,'')||'0'), _yc=(y.replace(/^0+/,'')||'0');
+            if(_xc.length!==_yc.length) return _xc.length<_yc.length?-1:1;
+            if(_xc!==_yc) return _xc<_yc?-1:1;
+            if(x!==y) return x<y?-1:1;
+            return 0;
+          }
+          if(!_xd&&!_yd){
+            if(x<y) return -1; if(x>y) return 1; return 0;
+          }
+          return _xd?-1:1;
+        };
+        const _cmpStr=(p,q)=>{
+          const _rp=_runs(p), _rq=_runs(q);
+          const _common=Math.min(_rp.length,_rq.length);
+          for(let _i=0;_i<_common;_i++){
+            const _c=_cmpRuns(_rp[_i],_rq[_i]);
+            if(_c!==0) return _c;
+          }
+          if(_rp.length!==_rq.length) return _rp.length<_rq.length?-1:1;
+          return 0;
+        };
         const rawA=String(a&&a.value!=null?a.value:(a&&a.id!=null?a.id:a)||'');
         const rawB=String(b&&b.value!=null?b.value:(b&&b.id!=null?b.id:b)||'');
-        return av.localeCompare(bv,undefined,{numeric:true,sensitivity:'base'})
-          ||rawA.localeCompare(rawB,undefined,{numeric:true,sensitivity:'base'});
+        return _cmpStr(av,bv)||_cmpStr(rawA,rawB);
       });
   const _ensureGroupMeta=(groupKey,groupLabel,providerId,optgroup)=>{
     if(!_groupMeta.has(groupKey)){
@@ -4695,6 +4768,20 @@ function renderModelDropdown(){
       // not be globally ordered ([z-*] visible … [a-*] revealed). Re-position
       // ALL `.model-opt` rows of the group in one picker-order pass so the
       // fully expanded group is a contiguous alphabetical sequence (#7528).
+      // GUARD: a subgrouped group (OpenRouter/Nous with >= SUB_GROUP_MIN_MODELS
+      // visible rows) nests rows inside `.model-group-body.sub` wrappers. The
+      // in-place re-sort collects rows via `wrap.querySelectorAll('.model-opt')`
+      // and `wrap.appendChild(...)` MOVES them into the outer wrapper, emptying
+      // the subgroup bodies. Subgrouped groups need the full re-render path so
+      // the existing partition/renderer re-creates the per-prefix bodies
+      // (review blocker 1, 2026-09-19). Flat groups keep the in-place path
+      // because it's a cheap contiguous-ordering pass and preserves scroll
+      // position / group-open state across show-more.
+      const _hasSubgroupBodies=!!(wrap.querySelector&&wrap.querySelector('.model-group-body.sub'));
+      if(_hasSubgroupBodies){
+        _fullReRender();
+        return;
+      }
       try{
         const _allRows=Array.from(wrap.querySelectorAll('.model-opt'));
         const _rowIds=[];

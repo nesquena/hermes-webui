@@ -51,8 +51,8 @@ HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 
 
-def _natural_model_id_key(_m):
-    """Locale-independent natural sort key for model ids (#7528 round-3).
+def _natural_model_id_key(_m, _provider_id: str = ""):
+    """Locale-independent natural sort key for model ids (#7528 round-4).
 
     Contract shared with the frontend ``_compareModelPickerEntries`` in
     ``static/ui.js``: no localeCompare, no browser collation — both sides run
@@ -60,11 +60,16 @@ def _natural_model_id_key(_m):
     and JS boundaries:
 
     1. lowercase the id;
-    2. strip one provider-routing ``@...:`` segment when present (mirrors the
-       frontend ``_modelPickerSortableId`` — a bare lowercase+tokenize would
-       sort ``@custom:abc:z-model`` before ``@custom:abc:a-model`` only after
-       the full raw string, which diverges from the UI);
-    3. split into digit runs and text runs (``\\d+|[^\\d]+``);
+    2. strip ONE provider-routing ``@<provider>:`` segment when the exact
+       provider id is known — a named custom provider such as
+       ``custom:abc`` must strip the FULL ``@custom:abc:`` prefix so the
+       underlying model id is compared (``@custom:abc:z-model`` →
+       ``z-model``), matching the frontend's provider-aware branch. Without
+       the provider id we fall back to a single leading ``@...:`` strip so
+       bare routing prefixes still collapse to the model id;
+    3. split into ASCII digit runs and text runs (``[0-9]+|[^0-9]+`` — ASCII
+       on purpose so JS ``/\d+/`` and Python agree on what counts as a digit;
+       Arabic-Indic ٢ etc. stay in the text run);
     4. digit run vs digit run: compare numeric value (strip leading zeros,
        compare core length then core text), tie-break by raw run text so
        ``007`` vs ``7`` is deterministic;
@@ -76,22 +81,46 @@ def _natural_model_id_key(_m):
     ``model-10`` first. The returned key is a comparable wrapper, so callers
     keep using ``sort(key=_natural_model_id_key)`` unchanged.
     """
-    return _NaturalModelKey(_natural_model_routing_stripped((_m or {}).get("id") or ""))
+    return _NaturalModelKey(
+        _natural_model_routing_stripped((_m or {}).get("id") or "", _provider_id)
+    )
 
 
-def _natural_model_routing_stripped(value) -> str:
-    """Strip one leading ``@provider:`` routing segment, mirroring the
-    frontend's provider-aware ``_modelPickerSortableId`` fallback branch."""
+def _natural_model_routing_stripped(value, _provider_id: str = "") -> str:
+    """Strip one leading ``@<provider>:`` routing segment.
+
+    When ``_provider_id`` is supplied AND the value carries that exact
+    routing prefix (case-insensitive), the FULL ``@<provider>:`` segment is
+    removed. This mirrors the frontend ``_modelPickerSortableId`` provider-
+    aware branch: a named custom provider id like ``custom:abc`` must strip
+    ``@custom:abc:`` (not just the first colon) so the underlying model id
+    is what gets compared, with the api and the picker agreeing on order
+    for mixed bare / @custom:<name>:routed entries (review blocker 2,
+    2026-09-19). When the prefix doesn't match (e.g. a legacy alias) or no
+    provider is given, drop a single leading ``@...:`` segment so the common
+    routing shapes still collapse cleanly.
+    """
     _s = str(value or "")
     if _s.startswith("@"):
+        _pid = str(_provider_id or "").strip()
+        if _pid:
+            _prefix = "@" + _pid + ":"
+            if _s[: len(_prefix)].lower() == _prefix.lower():
+                return _s[len(_prefix):]
         colon = _s.find(":")
         if colon >= 0:
-            _s = _s[colon + 1 :]
+            return _s[colon + 1:]
     return _s
 
 
 def _natural_model_key_runs(text: str) -> list:
-    return re.findall(r"\d+|[^\d]+", str(text or "").lower())
+    # ASCII-only digit definition; see _natural_model_id_key docstring. Using
+    # an explicit [0-9] class guarantees the Python side agrees with the JS
+    # /\d+/ (ASCII) so the two runtime comparators tokenize identically for
+    # every input — including non-ASCII decimal digits such as Arabic-Indic
+    # U+0662, which must fall into the text run on both sides (review
+    # blocker 3, 2026-09-19).
+    return re.findall(r"[0-9]+|[^0-9]+", str(text or "").lower())
 
 
 class _NaturalModelKey:
@@ -7477,8 +7506,17 @@ def _static_models_catalog_without_live_probes() -> dict:
         for _group in groups:
             _group_models = _group.get("models")
             if isinstance(_group_models, list) and len(_group_models) > 1:
+                # Thread the exact provider_id so a named custom provider such
+                # as `custom:abc` strips the FULL `@custom:abc:` prefix when
+                # sorting — without this, `@custom:abc:z-model` compares on
+                # `abc:z-model` while the picker strips `@custom:abc:` and
+                # compares `z-model`, and the api/picker order can disagree
+                # on mixed bare/routed entries (review blocker 2, 2026-09-19).
+                _group_provider_id = str(_group.get("provider_id") or "")
                 try:
-                    _group_models.sort(key=_natural_model_id_key)
+                    _group_models.sort(
+                        key=lambda _m, _pid=_group_provider_id: _natural_model_id_key(_m, _pid)
+                    )
                 except Exception:
                     pass
 
@@ -10091,8 +10129,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         for _group in groups:
             _group_models = _group.get("models")
             if isinstance(_group_models, list) and len(_group_models) > 1:
+                # Thread the exact provider_id so a named custom provider such
+                # as `custom:abc` strips the FULL `@custom:abc:` prefix when
+                # sorting — see the static-catalog path for the full rationale
+                # (review blocker 2, 2026-09-19).
+                _group_provider_id = str(_group.get("provider_id") or "")
                 try:
-                    _group_models.sort(key=_natural_model_id_key)
+                    _group_models.sort(
+                        key=lambda _m, _pid=_group_provider_id: _natural_model_id_key(_m, _pid)
+                    )
                 except Exception:
                     pass
 
