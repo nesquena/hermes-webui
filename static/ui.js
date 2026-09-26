@@ -8543,12 +8543,14 @@ function setComposerStatus(t,timeoutMs){
     el.style.display='none';
     el.textContent='';
     el.removeAttribute('title');
+    el.removeAttribute('tabindex');
     return;
   }
   if(!t){
     el.style.display='none';
     el.textContent='';
     el.removeAttribute('title');
+    el.removeAttribute('tabindex');
     return;
   }
   // Defensive reset: a stale hidden class should never block live status text.
@@ -8556,8 +8558,11 @@ function setComposerStatus(t,timeoutMs){
   el.removeAttribute('aria-hidden');
   el.textContent=t;
   // The row is narrow and ellipsizes long text (e.g. a prefill filename), so keep
-  // the full value reachable on hover instead of leaving a cut-off fragment.
+  // the full value reachable instead of leaving a cut-off fragment: `title` for
+  // hover, and a focusable row so touch and keyboard users (who never hover) can
+  // reveal it too — see the `.composer-status:focus` rule in style.css.
   el.title=t;
+  el.setAttribute('tabindex','0');
   el.style.display='';
   if(timeoutMs>0){
     const timer=setTimeout(()=>{

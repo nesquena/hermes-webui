@@ -1403,7 +1403,10 @@ def _prefill_label_override(config_data: Optional[dict] = None) -> str:
     reporting the real source file, so ``/api`` consumers still see the truth.
     """
     cfg = config_data if isinstance(config_data, dict) else get_config()
-    raw = os.getenv("HERMES_WEBUI_PREFILL_CONTEXT_LABEL", "") or cfg.get("webui_prefill_context_label")
+    # Strip before applying precedence: a whitespace-only environment value is
+    # "unset", and must not mask a valid config key.
+    env_label = os.getenv("HERMES_WEBUI_PREFILL_CONTEXT_LABEL", "").strip()
+    raw = env_label or cfg.get("webui_prefill_context_label")
     return str(raw or "").strip()
 
 
@@ -9470,6 +9473,16 @@ def _compute_agent_cache_signature(
     _credential_pool = _bundle.get('credential_pool')
     _env = safe_profile_runtime_env if isinstance(safe_profile_runtime_env, dict) else {}
     _main_request_overrides = main_request_overrides if main_request_overrides is not None else _main_request_overrides
+    # The display label is cosmetic: an operator renaming the prefill context
+    # must not invalidate the session's cached agent. It never reaches the
+    # agent's constructor, so it stays out of the routing signature.
+    _prefill_signature_status = _public_prefill_context_status(prefill_context)
+    if isinstance(_prefill_signature_status, dict):
+        _prefill_signature_status = {
+            key: value
+            for key, value in _prefill_signature_status.items()
+            if key != 'label'
+        }
     _sig_blob = _json.dumps([
         resolved_model or '',
         _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
@@ -9485,7 +9498,7 @@ def _compute_agent_cache_signature(
         sorted(toolsets) if toolsets else [],
         reasoning_config or {},
         _main_request_overrides or {},
-        _public_prefill_context_status(prefill_context),
+        _prefill_signature_status,
         profile_home or '',
         _env.get('TERMINAL_ENV', '') or '',
         _env.get('TERMINAL_SSH_HOST', '') or '',
