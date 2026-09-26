@@ -436,16 +436,84 @@ def test_thread_local_env_value_none_default_returns_empty_string(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_detached_worker_scope_noop_for_default_profile(monkeypatch):
-    """profile_scope_for_detached_worker is a no-op for the default profile."""
+def test_detached_worker_scope_binds_default_on_fresh_reused_executor_thread(monkeypatch):
+    """An explicit default scope overrides process state without leaking into reuse."""
+    import concurrent.futures
+    import threading
+
+    monkeypatch.setattr(profiles, "_active_profile", "work")
     monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
-    monkeypatch.delenv("ISSUE_3957_WPROBE", raising=False)
-    # Default/empty name → no TLS set, no env applied.
-    with profiles.profile_scope_for_detached_worker("default", "test"):
-        assert profiles.get_active_profile_name() in ("", "default")
-        assert os.environ.get("ISSUE_3957_WPROBE") is None
-    with profiles.profile_scope_for_detached_worker("", "test"):
-        assert os.environ.get("ISSUE_3957_WPROBE") is None
+
+    def scoped_default():
+        thread_id = threading.get_ident()
+        before = profiles.get_active_profile_name()
+        with profiles.profile_scope_for_detached_worker("default", "test"):
+            inside = profiles.get_active_profile_name()
+        after = profiles.get_active_profile_name()
+        return thread_id, before, inside, after
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(scoped_default).result(timeout=5)
+        reused = executor.submit(
+            lambda: (threading.get_ident(), profiles.get_active_profile_name())
+        ).result(timeout=5)
+
+    assert first == (reused[0], "work", "default", "work")
+    assert reused[1] == "work"
+
+
+def test_detached_worker_scope_restores_outer_profile_after_nested_scope(monkeypatch):
+    """A nested worker scope restores outer request-profile TLS on normal exit."""
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(
+        profiles,
+        "profile_env_for_background_worker",
+        lambda *args, **kwargs: nullcontext(),
+    )
+    profiles.set_request_profile("outer")
+    try:
+        assert profiles.get_active_profile_name() == "outer"
+        with profiles.profile_scope_for_detached_worker("inner", "test"):
+            assert profiles.get_active_profile_name() == "inner"
+        assert profiles.get_active_profile_name() == "outer"
+    finally:
+        profiles.clear_request_profile()
+
+
+def test_detached_worker_scope_restores_outer_profile_after_exception(monkeypatch):
+    """A nested worker scope restores outer request-profile TLS on exception unwind."""
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(
+        profiles,
+        "profile_env_for_background_worker",
+        lambda *args, **kwargs: nullcontext(),
+    )
+    profiles.set_request_profile("outer")
+    try:
+        try:
+            with profiles.profile_scope_for_detached_worker("inner", "test"):
+                assert profiles.get_active_profile_name() == "inner"
+                raise RuntimeError("boom")
+        except RuntimeError as exc:
+            assert str(exc) == "boom"
+        else:
+            raise AssertionError("expected nested worker scope to raise")
+        assert profiles.get_active_profile_name() == "outer"
+    finally:
+        profiles.clear_request_profile()
+
+
+def test_detached_worker_scope_empty_profile_keeps_existing_tls():
+    """An absent profile name remains a no-op and does not disturb request TLS."""
+    profiles.set_request_profile("outer")
+    try:
+        with profiles.profile_scope_for_detached_worker("", "test"):
+            assert profiles.get_active_profile_name() == "outer"
+        assert profiles.get_active_profile_name() == "outer"
+    finally:
+        profiles.clear_request_profile()
 
 
 def test_detached_worker_scope_binds_profile_on_new_thread(monkeypatch, tmp_path):
