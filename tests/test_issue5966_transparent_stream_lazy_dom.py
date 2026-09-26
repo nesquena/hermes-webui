@@ -130,12 +130,11 @@ def test_dataset_recovery_maps_row_to_scene():
 
 def test_settled_transparent_render_caps_rows():
     body = _function_body(UI_JS, "_renderSettledAnchorSceneTransparentForMessage")
-    # Cap only when over cap+slack, and only when NOT just-settled / not revealed.
+    # A bounded page replaces the former unbounded reveal exemption.
     assert "rows.length>cap+slack" in body
-    assert "!justSettled&&!alreadyRevealed" in body
-    assert "startIdx=rows.length-cap" in body
-    # Just-settled exemption keyed off the keep-open token (no STREAM_DONE shrink).
-    assert "_shouldKeepSettledWorklogOpenForStreamSettle(streamId)" in body
+    assert "pageState.rows===scene.activity_rows" in body
+    assert "endIdx=Math.min(rows.length,startIdx+cap)" in body
+    assert "idx<endIdx" in body
     # True tool count stashed so the Trace label stays honest while capped.
     assert "data-transparent-total-tool-count" in body
 
@@ -156,15 +155,16 @@ def test_earlier_steps_affordance_is_accessible_and_counted():
     assert "earlier steps" in body
 
 
-def test_reveal_holds_viewport_and_clears_cap_count():
+def test_page_navigation_holds_viewport_and_disclosure():
     body = _function_body(UI_JS, "_revealTransparentEarlierSteps")
-    # Full run mounted -> drop the capped-count stash so the label recomputes.
-    assert "removeAttribute('data-transparent-total-tool-count')" in body
-    # Viewport compensation: add the inserted height delta to scrollTop.
-    assert "msgsEl.scrollHeight-prevScrollHeight" in body
-    assert "msgsEl.scrollTop=prevScrollTop+delta" in body
-    # Marks the turn revealed so rebuilds don't re-cap it.
-    assert "data-transparent-earlier-revealed" in body
+    assert "data-scene-page-direction" in body
+    assert "msgsEl.scrollTop+=target.getBoundingClientRect().top-top" in body
+    assert "target.focus({preventScroll:true})" in body
+    assert "_captureWorklogDetailDisclosureState(blocks)" in body
+    assert "_restoreWorklogDetailDisclosureState(blocks,disclosure)" in body
+    # Detached controls may never resurrect replaced scenes.
+    assert "!segment.isConnected" in body
+    assert "message=S.messages&&S.messages[rawIdx]" in body
 
 
 def test_trace_count_uses_stashed_total_when_capped():
@@ -173,10 +173,11 @@ def test_trace_count_uses_stashed_total_when_capped():
     assert "stashedTotal>mountedToolCount" in body
 
 
-def test_expand_all_reveals_capped_rows_first():
+def test_expand_all_opens_only_mounted_page_without_navigation():
     body = _function_body(UI_JS, "_setTransparentRowsExpanded")
-    assert "transparent-earlier-steps" in body
-    assert "el.click()" in body
+    assert "el.click()" not in body
+    assert ".transparent-event-row .tool-card" in body
+    assert "_setTransparentCardOpen(card,!!expanded)" in body
 
 
 def test_cache_restore_rewires_affordance():
@@ -277,14 +278,15 @@ def test_rehydrate_binds_affordance_to_owner_message():
 
 
 def test_reveal_state_persists_and_invalidates_cache():
-    # Codex F3: the DOM-only revealed flag is lost across the HTML-cache round-trip,
-    # silently re-capping a turn the user already expanded. Reveal state lives in a
-    # persistent session/owner-keyed set, and reveal invalidates the session cache.
-    assert "const _transparentRevealedTurns=new Set()" in UI_JS
+    # Page position survives HTML round-trips for the same scene, without a
+    # session/index keyed strong set leaking state onto replacement scenes.
+    assert "const _transparentScenePages=new WeakMap()" in UI_JS
+    assert "_transparentRevealedTurns" not in UI_JS
     render = _function_body(UI_JS, "_renderSettledAnchorSceneTransparentForMessage")
-    assert "_transparentRevealedTurns.has(revealKey)" in render
+    assert "_transparentScenePages.get(scene)" in render
+    assert "pageState.rows===scene.activity_rows" in render
     reveal = _function_body(UI_JS, "_revealTransparentEarlierSteps")
-    assert "_transparentRevealedTurns.add(revealKey)" in reveal
+    assert "_transparentScenePages.set(scene,{start:next,rows:scene.activity_rows})" in reveal
     assert "_sessionHtmlCache.delete(sid)" in reveal
 
 

@@ -249,4 +249,7 @@ jobs:
 
       - name: Run tests (shard ${{ matrix.shard }} of 5)
         if: needs.changes.outputs.docs_only != 'true'
+        env:
+          # Match the installed engine; local fixtures retain multi-engine coverage.
+          BROWSERS: chromium
         run: pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5

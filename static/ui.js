@@ -703,15 +703,26 @@ function _messageVirtualWindow(opts){
   const tailStart=Math.max(0, total-keepTailCount);
   const heights=Array.isArray(opts&&opts.heights)?opts.heights:[];
   const roleForIdx=typeof (opts&&opts.roleForIdx)==='function'?opts.roleForIdx:null;
+  const reader=opts&&opts.reader;
   const rowHeightFor=(idx)=>{
+    if(reader&&idx===reader.index&&reader.height>0) return reader.height;
     const cached=Number(heights[idx]);
-    if(Number.isFinite(cached)&&cached>0) return cached;
+    if(typeof heights[idx]==='number'&&Number.isFinite(cached)&&cached>=0) return cached;
+    if(opts&&typeof opts.collapsedForIdx==='function'&&opts.collapsedForIdx(idx)) return 0;
+    const estimate=opts&&typeof opts.estimateForIdx==='function'?opts.estimateForIdx(idx):null;
+    if(Number.isFinite(estimate)&&estimate>0) return estimate;
     return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
   };
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
   }
-  const scrollTop=Math.max(0, Number(opts&&opts.scrollTop)||0);
+  let scrollTop=Math.max(0, Number(opts&&opts.scrollTop)||0);
+  // Geometry wins over the estimated prefix: never window out the actual reader.
+  if(reader&&Number.isInteger(reader.index)&&reader.index>=0&&reader.index<total){
+    scrollTop=0;
+    for(let i=0;i<reader.index;i++) scrollTop+=rowHeightFor(i);
+    scrollTop=Math.max(0,scrollTop-(Number(reader.offset)||0));
+  }
   const targetTop=Math.max(0, scrollTop-bufferPx);
   const targetBottom=scrollTop+viewportHeight+bufferPx;
   let start=0;
@@ -934,15 +945,69 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     const tailStart=Math.max(0, total-Math.max(0, Number(keepTailCount)||0));
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
   }
-  return _messageVirtualWindow({
+  // Compact tool-only transparent rows are much shorter than the expanded
+  // tool-call fallback. Use one current measurement per source, not render
+  // frequency, to cover cold neighbors without retaining an entire turn.
+  const transparent=typeof chatActivityMode==='function'&&chatActivityMode()==='transparent_stream';
+  const toolCount=entry=>{
+    const m=entry&&entry.m;
+    return m&&m.role==='assistant'&&!m.content&&!m.reasoning&&Array.isArray(m.tool_calls)?m.tool_calls.length:0;
+  };
+  let toolHeight=0,measuredTools=0;
+  if(transparent){
+    for(let i=0;i<visWithIdx.length;i++){
+      const count=toolCount(visWithIdx[i]),height=_messageVirtualHeightCache[i];
+      if(count&&Number.isFinite(height)&&height>0){toolHeight+=height;measuredTools+=count;}
+    }
+  }
+  const result=_messageVirtualWindow({
     total:visWithIdx.length,
     scrollTop:container?container.scrollTop:0,
     viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
     heights:_messageVirtualHeightCache,
     defaultHeight:_messageVirtualEstimatedRowHeight,
+    estimateForIdx:idx=>transparent&&measuredTools&&toolCount(visWithIdx[idx])
+      ? toolCount(visWithIdx[idx])*toolHeight/measuredTools : null,
     roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
+    collapsedForIdx:idx=>{
+      const m=visWithIdx[idx]?.m;
+      const next=visWithIdx[idx+1]?.m;
+      return !S.busy&&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'&&
+        _assistantMessageBelongsInWorklog(m,visWithIdx[idx]?.rawIdx,null,undefined,
+          {isTurnFinalAssistant:!next||next.role!=='assistant'});
+    },
     keepTailCount,
+    reader:typeof _messageWindowReader==='function'?_messageWindowReader(visWithIdx):null,
   });
+  if(result.virtualized&&!(typeof chatActivityMode==='function'&&chatActivityMode()==='transparent_stream')){
+    // Compact/hidden projections own their worklog and final-answer geometry
+    // together. Transparent Stream paints source rows independently: aligning
+    // its window (including the pinned tail) to a whole turn is unbounded.
+    // Its context maps still consume the full source list, not the mounted slice.
+    // Cutting a folded turn at an arbitrary raw message changes which segments fold.
+    const startOfTurn=index=>{
+      while(index>0&&visWithIdx[index]?.m?.role==='assistant'&&visWithIdx[index-1]?.m?.role==='assistant') index--;
+      return index;
+    };
+    const height=index=>{
+      const cached=_messageVirtualHeightCache[index];
+      if(typeof cached==='number'&&cached>=0) return cached;
+      const m=visWithIdx[index]?.m, next=visWithIdx[index+1]?.m;
+      if(!S.busy&&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'&&
+         _assistantMessageBelongsInWorklog(m,visWithIdx[index]?.rawIdx,null,undefined,{isTurnFinalAssistant:!next||next.role!=='assistant'})) return 0;
+      return _messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[index]));
+    };
+    const originalStart=result.start;
+    result.start=startOfTurn(result.start);
+    result.tailStart=startOfTurn(result.tailStart);
+    while(result.end<result.tailStart&&visWithIdx[result.end]?.m?.role==='assistant'&&visWithIdx[result.end-1]?.m?.role==='assistant') result.end++;
+    if(result.end>=result.tailStart){result.end=Math.max(result.end,result.tailStart);result.tailStart=result.end;}
+    for(let i=result.start;i<originalStart;i++) result.topPad-=height(i);
+    result.topPad=Math.max(0,result.topPad);
+    result.bottomPad=0;
+    for(let i=result.end;i<result.tailStart;i++) result.bottomPad+=height(i);
+  }
+  return result;
 }
 function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   const count=Math.max(0, Number(prependedRenderableCount)||0);
@@ -1435,13 +1500,37 @@ function _measureMessageVirtualRow(inner, entry){
   if(!inner||!entry) return 0;
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
   if(!primary) return 0;
-  let totalHeight=Math.max(0, primary.getBoundingClientRect().height||0);
+  // Transparent event rows reserve a trailing CSS margin outside their border
+  // box. Omitting it makes each window eviction shrink the prefix by one pixel
+  // per event, forcing a compensating scroll write during native wheel input.
+  const measuredHeight=node=>{
+    const height=Math.max(0,node.getBoundingClientRect().height||0);
+    if(height>0&&node.matches&&node.matches('.transparent-event-row')){
+      return height+(parseFloat(getComputedStyle(node).marginBottom)||0);
+    }
+    return height;
+  };
+  let totalHeight=measuredHeight(primary);
   if(primary.classList.contains('assistant-segment')){
+    // Transparent reasoning precedes its visible source segment. Charge it to
+    // that source, not the previous row: otherwise mounting the next source
+    // changes the previous row's measured height and oscillates the window.
+    const isLeadingThinking=node=>node&&node.matches&&node.matches('.transparent-thinking-event');
+    if(!primary.classList.contains('assistant-segment-worklog-source')){
+      for(let before=primary.previousElementSibling;isLeadingThinking(before);before=before.previousElementSibling){
+        totalHeight+=measuredHeight(before);
+      }
+    }
     let sibling=primary.nextElementSibling;
     while(sibling){
       if(sibling.hasAttribute('data-msg-idx')) break;
+      if(isLeadingThinking(sibling)){
+        let owner=sibling.nextElementSibling;
+        while(isLeadingThinking(owner)) owner=owner.nextElementSibling;
+        if(owner&&owner.matches('.assistant-segment[data-msg-idx]:not(.assistant-segment-worklog-source)')) break;
+      }
       if(!(sibling.matches&&sibling.matches('.tool-call-group,.tool-card-row,.agent-activity-thinking,.thinking-card-row'))) break;
-      totalHeight+=Math.max(0, sibling.getBoundingClientRect().height||0);
+      totalHeight+=measuredHeight(sibling);
       sibling=sibling.nextElementSibling;
     }
   }
@@ -1467,10 +1556,11 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     const entry=renderVisWithIdx[vi];
     if(!entry) continue;
     const totalHeight=_measureMessageVirtualRow(inner, entry);
-    if(totalHeight<=0) continue;
+    // Zero is a measured collapsed anchor, distinct from an unmeasured slot.
+    if(totalHeight<=0&&!inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`)) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
-    if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+    if(!Number.isFinite(_messageVirtualHeightCache[visibleIdx])||Math.abs(_messageVirtualHeightCache[visibleIdx]-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
     }
@@ -1550,6 +1640,347 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     }
   }
 }
+// Window mutations are staged off-DOM and committed once. No scroll snapshot is
+// carried across a frame: the reader is sampled at the synchronous mutation.
+let _messageWindowRevision=0;
+function _messageWindowSnapshot(){
+  const container=$('messages');
+  const inner=$('msgInner');
+  if(!container||!inner||inner.dataset.windowSession!==S.session?.session_id) return null;
+  const top=container.getBoundingClientRect().top;
+  const viewportHeight=container.clientHeight;
+  const sources=Array.from(inner.querySelectorAll('[data-msg-idx]'));
+  // Snapshot capture is read-only. Reuse each geometry/style read within this
+  // capture, not across frames: sorting many candidates must not repeatedly
+  // walk and measure the same clipped ancestor chain on every comparison.
+  const rects=new Map(),styles=new Map(),painted=new Map();
+  const rectFor=node=>{
+    if(!rects.has(node)) rects.set(node,node.getBoundingClientRect());
+    return rects.get(node);
+  };
+  const styleFor=node=>{
+    if(!styles.has(node)) styles.set(node,getComputedStyle(node));
+    return styles.get(node);
+  };
+  // Worklog projections are siblings of their hidden source segments. Do not
+  // give projections data-msg-idx: measurement must count the source only once.
+  const paintedRect=node=>{
+    if(painted.has(node)) return painted.get(node);
+    const rect=rectFor(node);
+    let top=rect.top,bottom=rect.bottom;
+    if(styleFor(node).visibility==='hidden'){
+      const hidden={top,bottom:top,height:0};painted.set(node,hidden);return hidden;
+    }
+    for(let parent=node.parentElement;parent&&parent!==container;parent=parent.parentElement){
+      if(['hidden','clip','auto','scroll'].includes(styleFor(parent).overflowY)){
+        const bounds=rectFor(parent);
+        top=Math.max(top,bounds.top);bottom=Math.min(bottom,bounds.bottom);
+      }
+    }
+    const result={top,bottom,height:Math.max(0,bottom-top)};
+    painted.set(node,result);
+    return result;
+  };
+  const candidates=Array.from(inner.querySelectorAll('[data-msg-idx],.wl-reason[data-worklog-anchor-key],.tool-card-row[data-tool-disclosure-key]'))
+    .filter(node=>paintedRect(node).height>0);
+  const sourceFor=node=>{
+    if(node.matches('[data-msg-idx]')) return node;
+    if(node.dataset.worklogAnchorKey) return sources.find(source=>source.dataset.worklogAnchorKey===node.dataset.worklogAnchorKey);
+    const sourceIndex=node.dataset.toolSourceSessionIdx;
+    if(sourceIndex!==undefined&&sourceIndex!==''&&Number.isFinite(Number(sourceIndex)))
+      return {dataset:{sessionMsgIdx:sourceIndex}};
+    const key=node.dataset.toolDisclosureKey;
+    const rawIdx=(S.messages||[]).findIndex(message=>(message.tool_calls||[]).some(tc=>_toolDisclosureIdentity(tc)===key));
+    return rawIdx<0?null:{dataset:{sessionMsgIdx:_messageSessionIndexForRawIdx(rawIdx)}};
+  };
+  // Keep a nearest content reference even when the viewport crosses a spacer.
+  // Rejecting every offscreen row here abandons ownership precisely at a cold
+  // boundary, when estimates are being replaced by measured content.
+  candidates.sort((a,b)=>{
+    const distance=node=>{const r=paintedRect(node);return r.bottom<=top?top-r.bottom:r.top>=top+viewportHeight?r.top-top-viewportHeight:0;};
+    return distance(a)-distance(b);
+  });
+  for(const node of candidates){
+    const rect=rectFor(node);
+    const source=sourceFor(node);
+    if(rect.height>0&&source){
+      const landmarks=Array.from(node.querySelectorAll('p,pre,table,li,h1,h2,h3,h4'));
+      const landmarkIndex=landmarks.findIndex(el=>{
+        // A collapsed detail can still have a layout box inside the viewport.
+        // Only actually painted content may own the reader's within-row offset.
+        const r=paintedRect(el);return r.height>0&&r.bottom>top&&r.top<top+viewportHeight;
+      });
+      const landmark=landmarks[landmarkIndex]||node;
+      return {node:landmark,row:node,landmarkIndex,sessionIndex:Number(source.dataset.sessionMsgIdx),
+        activityKind:node===source?'':node.dataset.worklogAnchorKey?'reason':'tool',
+        activityKey:node.dataset.toolDisclosureKey||'',
+        activitySourceIndex:node.dataset.toolSourceSessionIdx??null,
+        key:source.dataset.messageAnchorKey||'',offset:rectFor(landmark).top-top,rowOffset:rect.top-top};
+    }
+  }
+  return null;
+}
+function _messageWindowReader(entries){
+  const anchor=_messageWindowSnapshot();
+  if(!anchor) return null;
+  let index=Number.isFinite(anchor.sessionIndex)
+    ? entries.findIndex(e=>_messageSessionIndexForRawIdx(e.rawIdx)===anchor.sessionIndex):-1;
+  if(index<0&&anchor.key) index=_messageVisibleIndexForAnchorKey(anchor.key,entries);
+  // Some activity-only source messages are omitted from the visible entries.
+  // Keep their owning predecessor in range, rather than abandoning the reader.
+  if(index<0&&anchor.activityKind&&Number.isFinite(anchor.sessionIndex)){
+    for(let i=0;i<entries.length;i++){
+      if(_messageSessionIndexForRawIdx(entries[i].rawIdx)<=anchor.sessionIndex) index=i;
+      else break;
+    }
+  }
+  return index<0?null:{index,offset:anchor.rowOffset,height:anchor.row.getBoundingClientRect().height};
+}
+function _messageWindowNodeKey(node){
+  if(node.id==='liveAssistantTurn') return 'live';
+  const rows=node.matches('[data-msg-idx]')?[node]:Array.from(node.querySelectorAll('[data-msg-idx]'));
+  return rows.length?rows.map(row=>row.dataset.sessionMsgIdx+':'+(row.dataset.messageAnchorKey||'')).join(';'):'';
+}
+function _reconcilePreservedLiveTurn(inner, _preservedLiveTurn){
+  // Re-attach the preserved live turn (#3877). The rebuild above recreated a
+  // live turn from S.messages, but the live assistant message's content lags the
+  // stream (it is only persisted to S.messages on a throttled write-back) — so the
+  // fresh node often shows LESS streamed text than the ORIGINAL node, which is
+  // still referenced by the smd parser and holds the real in-progress reply. Swap
+  // the preserved (parser) node back in so the parser target stays connected and
+  // the visible text never blanks.
+  //
+  // The swap fires when the preserved node carries at least as much streamed text
+  // as the rebuilt one (`_rebuiltLen <= _preservedLen`). The `<=` (not `<`) is
+  // load-bearing: at the throttled-persist boundary the rebuilt turn's live
+  // content can EQUAL the preserved length, and the old `<` guard then skipped the
+  // swap — leaving the smd parser writing into the detached original node, which
+  // is exactly the residual "disappears, then reappears" frame (#3877 reopen). On
+  // a tie the preserved node is strictly preferable (it holds the live parser
+  // reference; identical length means nothing is lost). When the rebuilt turn
+  // genuinely has MORE content (e.g. a reconnect where S.messages caught up past
+  // the parser), the guard correctly skips and lets the parser re-resolve to the
+  // fuller node.
+  //
+  // Swap at the SEGMENT level — replace only the rebuilt live segment with the
+  // preserved one — so a multi-segment turn (earlier settled segments + tool/
+  // worklog groups built by the rebuild) keeps that rebuilt-only structure; a
+  // whole-turn replaceWith would discard it when the preserved snapshot predates
+  // those segments. Fall back to whole-turn replace only when the rebuilt turn has
+  // no live segment to swap into. No-op for a settled turn or when nothing was
+  // streaming.
+  if(_preservedLiveTurn){
+    const _rebuilt=inner.querySelector('#liveAssistantTurn');
+    // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
+    // post-tool activity boundaries a live turn can carry MULTIPLE
+    // [data-live-assistant="1"] segments, and the smd parser writes into the
+    // LAST (tail) one (see ensureAssistantRow in messages.js — it re-attaches to
+    // the last live segment). Prefer the preserved segment whose
+    // data-live-segment-seq matches the rebuilt tail (same logical segment), then
+    // fall back to the last preserved live segment. Using querySelector() (first)
+    // here would move the wrong segment and leave the parser-owned tail detached
+    // in a multi-segment turn.
+    const _rebuiltSegs=_rebuilt?_rebuilt.querySelectorAll('[data-live-assistant="1"]'):null;
+    const _rebuiltSeg=(_rebuiltSegs&&_rebuiltSegs.length)?_rebuiltSegs[_rebuiltSegs.length-1]:null;
+    const _preservedSegs=_preservedLiveTurn.querySelectorAll('[data-live-assistant="1"]');
+    let _preservedSeg=_preservedSegs.length?_preservedSegs[_preservedSegs.length-1]:null;
+    const _rebuiltSeq=_rebuiltSeg?_rebuiltSeg.getAttribute('data-live-segment-seq'):null;
+    if(_rebuiltSeq){
+      for(const _seg of _preservedSegs){
+        if(_seg.getAttribute('data-live-segment-seq')===_rebuiltSeq){_preservedSeg=_seg;break;}
+      }
+    }
+    const _preservedLen=_liveAssistantSegmentTextLength(_preservedSeg||_preservedLiveTurn);
+    // Structural-block counts: a live turn can be AHEAD of S.messages with
+    // Activity/tool/worklog blocks that haven't persisted yet — even with ZERO
+    // streamed text (e.g. an Activity-only turn mid-tool-call). The text-length
+    // gate alone would skip preservation in that case, so a scroll-triggered
+    // rebuild on a long (virtualized) transcript could blink those live-only
+    // blocks for a frame. Also restore when the preserved turn carries more
+    // structure than the rebuilt (lagging-S.messages) turn. (#3714 ship-review)
+    const _structuralCount=(turn)=> turn?turn.querySelectorAll(
+      '[data-live-assistant="1"],.tool-call-group,.tool-card-row,'+
+      '.tool-worklog-group,.live-worklog[data-live-worklog-shell="1"],'+
+      '.wl-reason,.agent-activity-thinking,.thinking-card-row'
+    ).length:0;
+    const _preservedStructure=_structuralCount(_preservedLiveTurn);
+    const _rebuiltStructure=_structuralCount(_rebuilt);
+    if(_preservedLen>0 || _preservedStructure>_rebuiltStructure){
+      const _rebuiltLen=_rebuilt?_liveAssistantSegmentTextLength(_rebuiltSeg||_rebuilt):-1;
+      if(_rebuiltLen<=_preservedLen){
+        // Decide segment-level vs whole-turn restore. Segment-level keeps the
+        // rebuilt turn's structure (good when the rebuild is the structural
+        // superset). But the whole premise here is that the live DOM can be
+        // AHEAD of S.messages: a tool/worklog group can land in the live turn
+        // between the last throttled persist and this rebuild, so the rebuilt
+        // turn (built from the lagging S.messages) may have FEWER structural
+        // blocks. In that case a segment-only swap would drop those live-only
+        // blocks for a frame — so restore the WHOLE preserved turn instead.
+        // Otherwise (rebuild has >= the preserved turn's structural blocks) do
+        // the precise segment swap so rebuilt-only structure is kept.
+        if(_rebuilt&&_rebuiltSeg&&_preservedSeg&&_rebuiltStructure>=_preservedStructure){
+          // Rebuild is the structural superset — swap only the parser-owned
+          // (tail) live segment, keeping rebuilt-only segments / tool groups.
+          // (No dataset.sessionId stamp here: only the segment enters the DOM;
+          // the rebuilt turn was already stamped at build time, see above.)
+          _rebuiltSeg.replaceWith(_preservedSeg);
+        }else if(_rebuilt){
+          // Rebuilt turn lacks structure the live turn already has (live-only
+          // tool card not yet persisted), or has no live segment to target —
+          // restore the whole preserved turn so nothing the user saw vanishes.
+          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
+          _rebuilt.replaceWith(_preservedLiveTurn);
+        }else if(!_settledTranscriptOwnsLiveTurn(S.session?.session_id,_preservedLiveTurn)){
+          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
+          inner.appendChild(_preservedLiveTurn);
+        }
+      }
+    }
+  }
+}
+
+function _commitMessageWindow(target, staged, anchor, reuse){
+  const container=$('messages');
+  // Browser anchoring and JS compensation must not both own this transaction.
+  const previousAnchor=container.style.overflowAnchor||'';
+  const previousPriority=container.style.getPropertyPriority?.('overflow-anchor')||'';
+  container.style.overflowAnchor='none';
+  try{
+    const previous=new Map();
+    for(const node of Array.from(target.children)){
+      const key=_messageWindowNodeKey(node);
+      if(key&&key!=='live'&&reuse&&target.dataset.windowSession===S.session?.session_id) previous.set(key,node);
+    }
+    const desired=Array.from(staged.children).map(node=>{
+      const key=_messageWindowNodeKey(node), old=previous.get(key);
+      // Identity alone is not a content version: anchor keys intentionally use a
+      // short prefix. Compare the unenhanced render, not the mutated live DOM
+      // (syntax highlighting, disclosures, media and selection live there).
+      node._messageWindowMarkup=node.outerHTML.replace(/contain-intrinsic-size: auto [\d.]+px;/g,'');
+      return old&&old._messageWindowMarkup===node._messageWindowMarkup?old:node;
+    });
+    // Insert before removing: the live scroller never sees an empty transcript.
+    for(let i=0;i<desired.length;i++){
+      const node=desired[i];
+      if(node.parentElement===target) continue;
+      const successor=desired.slice(i+1).find(next=>next.parentElement===target)||null;
+      target.insertBefore(node,successor);
+    }
+    const keep=new Set(desired);
+    for(const node of Array.from(target.children)) if(!keep.has(node)) node.remove();
+    for(let i=0;i<desired.length;i++){
+      if(target.children[i]!==desired[i]) target.insertBefore(desired[i],target.children[i]||null);
+    }
+    _restoreMessageWindowReader(target,anchor);
+    for(const node of target.querySelectorAll('[data-session-msg-idx]')){
+      node.dataset.msgIdx=String(_messageRawIdxForSessionIndex(Number(node.dataset.sessionMsgIdx)));
+    }
+    _initializeMessageWindowOwnership(target);
+  }finally{
+    // Flush this synchronous transaction while JS still owns anchoring. Restore
+    // before yielding: queued mobile/viewport suppression releases cannot race
+    // us, and a pre-existing 'none' remains owned by its original release.
+    void container.offsetHeight;
+    if(previousPriority) container.style.setProperty('overflow-anchor',previousAnchor,previousPriority);
+    else container.style.overflowAnchor=previousAnchor;
+  }
+}
+function _initializeMessageWindowOwnership(inner){
+  inner.dataset.windowSession=S.session?.session_id||'';
+  _messageWindowRevision++;
+  _rememberMessageWindowReader();
+}
+function _restoreMessageWindowReader(target,anchor, maxDelta=Infinity){
+  const container=$('messages');
+  if(anchor){
+    // A node may still be connected to a different subtree after a staged
+    // replacement. Only geometry inside the current transcript can own scroll.
+    let row=anchor.node&&target.contains(anchor.node)?anchor.node:null;
+    if(!row){
+      const sources=Array.from(target.querySelectorAll('[data-msg-idx]'));
+      // Content-prefix keys can repeat in earlier messages. Resolve the stable
+      // session-relative source first, regardless of DOM order.
+      row=sources.find(node=>Number(node.dataset.sessionMsgIdx)===anchor.sessionIndex);
+      if(!row&&anchor.key){
+        const matches=sources.filter(node=>node.dataset.messageAnchorKey===anchor.key);
+        // If the source disappeared, only a unique content match may own the
+        // compensation; guessing among repeated prefixes moves the wrong text.
+        row=matches.length===1?matches[0]:null;
+      }
+      if(anchor.activityKind==='reason'){
+        // msg:<rawIdx> worklog keys can change on prepend. Resolve through the
+        // stable source identity before looking up its current visible clone.
+        const key=row&&row.dataset.worklogAnchorKey;
+        // A formerly folded reason may become the visible final answer when
+        // paging completes its turn. Its source remains the same content owner.
+        row=(key?Array.from(target.querySelectorAll('.wl-reason[data-worklog-anchor-key]'))
+          .find(node=>node.dataset.worklogAnchorKey===key):null)||row;
+      }else if(anchor.activityKind==='tool'){
+        const matches=Array.from(target.querySelectorAll('.tool-card-row[data-tool-disclosure-key]'))
+          .filter(node=>node.dataset.toolDisclosureKey===anchor.activityKey&&
+            (anchor.activitySourceIndex==null||node.dataset.toolSourceSessionIdx===String(anchor.activitySourceIndex)));
+        // Disclosure identity alone is not source identity (replayed calls can
+        // share a tool ID). Never compensate against an ambiguous replacement.
+        row=matches.length===1?matches[0]:null;
+      }
+      if(row&&anchor.landmarkIndex>=0) row=row.querySelectorAll('p,pre,table,li,h1,h2,h3,h4')[anchor.landmarkIndex]||row;
+    }
+    if(row&&target.contains(row)){
+      const delta=row.getBoundingClientRect().top-container.getBoundingClientRect().top-anchor.offset;
+      if(Math.abs(delta)>maxDelta) return false;
+      if(Math.abs(delta)>0.5){
+        _programmaticScroll=true;
+        _programmaticScrollSetAt=performance.now();
+        container.scrollTop+=delta;
+        // The follow listener may already have a queued rAF. Give it the
+        // corrected baseline so it does not interpret geometry as reader input.
+        _lastScrollTop=container.scrollTop;
+        _deferClearProgrammaticScroll();
+      }
+    }
+  }
+}
+let _messageWindowResizeObserver=null;
+let _messageWindowObserved=null;
+let _messageWindowInputEpoch=0;
+function _rememberMessageWindowReader(){
+  const container=$('messages'), inner=$('msgInner');
+  if(!container||!inner) return;
+  _messageWindowObserved={anchor:_messageWindowSnapshot(),top:container.scrollTop,
+    sid:S.session?.session_id,data:S.messages,revision:_messageWindowRevision,input:_messageWindowInputEpoch};
+  if(_messageWindowResizeObserver||typeof ResizeObserver==='undefined') return;
+  for(const event of ['wheel','touchstart','pointerdown','keydown']){
+    container.addEventListener(event,()=>{_messageWindowInputEpoch++;},{passive:true});
+  }
+  container.addEventListener('scroll',()=>{
+    // A queued event from our own correction must not replace the landmark
+    // after a later layout change but before ResizeObserver delivers it.
+    if(!_messageWindowObserved||container.scrollTop!==_messageWindowObserved.top) _rememberMessageWindowReader();
+  },{passive:true});
+  _messageWindowResizeObserver=new ResizeObserver(()=>{
+    _settleMessageWindowReader();
+    _scheduleMessageVirtualizedRender();
+  });
+  _messageWindowResizeObserver.observe(inner);
+}
+function _settleMessageWindowReader(){
+  const container=$('messages'), inner=$('msgInner'), saved=_messageWindowObserved;
+  if(!container||!inner) return;
+  if(saved&&saved.sid===S.session?.session_id&&saved.data===S.messages&&
+     saved.revision===_messageWindowRevision&&saved.input===_messageWindowInputEpoch&&
+     saved.top===container.scrollTop&&(_messageUserUnpinned||!_scrollPinned)){
+    // A resize notification may arrive after a window replacement. Refuse
+    // stale, offscreen geometry rather than compensating across whole windows.
+    if(_restoreMessageWindowReader(inner,saved.anchor,container.clientHeight*2)===false){
+      _rememberMessageWindowReader();
+      return;
+    }
+    // Keep the same content landmark through successive asynchronous layouts.
+    saved.top=container.scrollTop;
+  }else{
+    _rememberMessageWindowReader();
+  }
+}
 function _scheduleMessageVirtualizedRender(force, request){
   const container=$('messages');
   const inner=$('msgInner');
@@ -1585,22 +2016,13 @@ function _scheduleMessageVirtualizedRender(force, request){
     const internalMeasurement=_messageVirtualRenderQueuedOrigin==='internal';
     _messageVirtualRenderQueuedOrigin=null;
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
+    _settleMessageWindowReader();
     const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
     if(!force&&liveKey===_messageVirtualWindowKey) return;
-    if(_scrollbarDragActive){
-      _programmaticScroll=true;
-      _programmaticScrollSetAt=performance.now();
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true, _internalMeasurement: internalMeasurement }); });
-      _deferClearProgrammaticScroll();
-      _messageVirtualWindowKey=liveKey;
-      return;
-    }
-    _msgNodeRecycleEnabled=true;
-    try{
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true, _internalMeasurement: internalMeasurement }); });
-    }
-    finally{ _msgNodeRecycleEnabled=false; }
+    // The owned window performs the only scroll compensation, including during
+    // scrollbar drag. Preserve upstream measurement provenance for burst reset.
+    renderMessages({preserveScroll:true, _windowOnly:true, _internalMeasurement:internalMeasurement});
   });
 }
 
@@ -1615,11 +2037,10 @@ function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
   const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
-  // Short content: use the full string as key (cheap Map lookup).
-  // Long content: length + prefix + suffix is good enough — collisions on
-  // 20-char prefix+suffix are vanishingly rare for chat messages.
-  if(text.length <= 500) return p + ':' + text;
-  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+  // Distinct long messages can share length, prefix and suffix (for example
+  // numbered answers). Cache by the complete input so reused rows cannot paint
+  // another message's body. The bounded Map already limits retained entries.
+  return p + ':' + text;
 }
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
@@ -6324,6 +6745,10 @@ function _recordNonMessageScrollIntent(e){
   // the programmatic flag and jump owner, but a low-delta upward wheel must still
   // count as reader takeover when it interrupted an owned scroll.
   const wheelUp=typeof e.deltaY==='number'&&e.deltaY<0;
+  // At a loaded-history boundary, an outward gesture produces no scroll event.
+  // Continue paging on actual input even when the page contains only collapsed
+  // activity. The loader owns deduplication and validates session/data identity.
+  if(wheelUp&&e.isTrusted&&el.scrollTop<=1&&_olderMessagesPrefetchReady()) _loadOlderMessages();
   const guardedWheelUp=wheelUp&&_freshProgrammaticScrollActive();
   const jumpScrollOwned=typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner;
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
@@ -6618,8 +7043,10 @@ if(typeof window!=='undefined'){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
     }
-    if(_freshProgrammaticScrollActive()) return;
+    // Compensation suppresses follow/unpin interpretation, not mounting. Real
+    // input can advance into a spacer while that short-lived guard is armed.
     _scheduleMessageVirtualizedRender();
+    if(_freshProgrammaticScrollActive()) return;
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -7319,6 +7746,7 @@ document.addEventListener('DOMContentLoaded',function(){
 function _setMessageScrollToBottom(){
   const el=$('messages');
   if(!el) return;
+  const inputGeneration=_messageScrollInputGeneration;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=el.scrollHeight;
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
@@ -7331,7 +7759,7 @@ function _setMessageScrollToBottom(){
     // scrolled up — under the sticky-unpin model (#3343) _messageUserUnpinned
     // is the authoritative "user scrolled away" signal, so DON'T snap them back
     // or re-pin if so; only release the programmatic-scroll latch.
-    if(_messageUserUnpinned || !_scrollPinned || _recentNonMessageScrollIntent()){
+    if(inputGeneration!==_messageScrollInputGeneration || !_bottomFollowOwnsReader(el)){
       _deferClearProgrammaticScroll();
       return;
     }
@@ -7341,6 +7769,12 @@ function _setMessageScrollToBottom(){
     _scrollPinned=true;
     _deferClearProgrammaticScroll();
   });
+}
+// A deferred follow write cannot reclaim a reader who moved above the last
+// position we wrote, even while the programmatic-scroll latch hides scroll events.
+function _bottomFollowOwnsReader(el){
+  return !_messageUserUnpinned && _scrollPinned && !_recentNonMessageScrollIntent()
+    && !(el.scrollTop<_lastScrollTop-2 && el.scrollHeight-el.scrollTop-el.clientHeight>1);
 }
 function _isMessagePaneNearBottom(threshold=250){
   const el=$('messages');
@@ -7427,7 +7861,7 @@ function _settleMessageScrollToBottom(force, explicit){
   // active one that may now be in the global _settleRO. (Codex review #3.)
   const ro=new ResizeObserver(()=>{
     if(token!==_bottomSettleToken){ ro.disconnect(); if(_settleRO===ro) _settleRO=null; return; }
-    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
+    if((!window._autoScrollFollow&&!explicit)||!_bottomFollowOwnsReader(el)){
       ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _programmaticScroll=false;
       return;
@@ -7436,13 +7870,13 @@ function _settleMessageScrollToBottom(force, explicit){
     // notifications per frame, so this is at most one write per frame.
     cancelAnimationFrame(_settleRAF);
     _settleRAF=requestAnimationFrame(()=>{
-      if(token!==_bottomSettleToken) return;
+      if(token!==_bottomSettleToken||!_bottomFollowOwnsReader(el)) return;
       _setMessageScrollToBottom();
     });
     // After 300ms of quiet, disconnect — layout is stable.
     clearTimeout(_settleTimer);
     _settleTimer=setTimeout(()=>{
-      if(token!==_bottomSettleToken) return;
+      if(token!==_bottomSettleToken||!_bottomFollowOwnsReader(el)) return;
       ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _setMessageScrollToBottom();
     },300);
@@ -7466,7 +7900,7 @@ function _settleMessageScrollToBottom(force, explicit){
   _settleFinalTimer=setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
     ro.disconnect(); if(_settleRO===ro) _settleRO=null;
-    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
+    if((!window._autoScrollFollow&&!explicit)||!_bottomFollowOwnsReader(el)){ _programmaticScroll=false; return; }
     _settleFinalScroll(token);
   },2000);
 }
@@ -7475,7 +7909,7 @@ function _settleFinalScroll(token){
   if(token!==_bottomSettleToken) return;
   const el=document.getElementById('messages');
   if(!el){ _programmaticScroll=false; return; }
-  if(_messageUserUnpinned||!_scrollPinned||_recentNonMessageScrollIntent()||_recentMessageTouchScrollIntent()){
+  if(!_bottomFollowOwnsReader(el)||_recentMessageTouchScrollIntent()){
     _programmaticScroll=false;
     return;
   }
@@ -12901,14 +13335,8 @@ function _attachProgressBar(row, opts){
 }
 function _setTransparentRowsExpanded(root, expanded){
   const scope=root||document;
-  // #5966: "Expand all" must include a capped turn's hidden earlier steps —
-  // reveal them first so expansion genuinely opens the whole run. (Collapse-all
-  // leaves the cap as-is; it only closes what's mounted.)
-  if(expanded){
-    scope.querySelectorAll('.transparent-earlier-steps[data-anchor-earlier-steps="1"]').forEach(el=>{
-      if(typeof el.click==='function') el.click();
-    });
-  }
+  // Expansion applies only to the mounted page. Pagination is an explicit
+  // navigation action, not disclosure; clicking both controls here changes pages.
   scope.querySelectorAll('.transparent-event-row .tool-card,.transparent-event-row .thinking-card').forEach(card=>{
     _setTransparentCardOpen(card,!!expanded);
   });
@@ -14627,6 +15055,7 @@ function _anchorSceneHasErroredTerminalState(scene){
   return _ANCHOR_SCENE_ERRORED_TERMINAL_STATES.has(state);
 }
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
+  if(_sourceWindowOwnsHistoricalScene(message)) return false;
   if(!message||!message._anchor_activity_scene||!segment) return false;
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
@@ -14653,37 +15082,24 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
       node.hidden=true;
     }
   });
-  // #5966: per-turn row cap. A reasoning-heavy settled turn can carry hundreds of
-  // activity rows; rendering them all inline is the node-count half of the
-  // Transparent-Stream memory blowup (detail-deferral above handles per-row
-  // weight). Render only the last _TRANSPARENT_SETTLED_ROW_CAP rows and, when the
-  // turn exceeds cap + slack, prepend a single "Show earlier steps (N)" affordance
-  // that materializes the omitted prefix in place on click. Two exemptions keep
-  // behavior identical where a cap would be wrong or unhelpful:
-  //   • the JUST-SETTLED turn (its stream id matches the keep-open token) renders
-  //     in full — capping it at STREAM_DONE would shrink the transcript and cause
-  //     the backward-jump the keep-open token exists to prevent;
-  //   • a turn already revealed this session (data flag) stays fully rendered
-  //     across ordinary rebuilds / virtualize-out+in cycles.
+  // Page only the presentation; the canonical server scene remains authoritative.
+  // Weak ownership resets disclosure on replacement and releases it on teardown.
   const turnEl=segment.closest('.assistant-turn');
-  const streamId=String(message._anchor_stream_id||scene.stream_id||(scene.identity&&scene.identity.stream_id)||'');
-  const justSettled=_shouldKeepSettledWorklogOpenForStreamSettle(streamId);
-  // #5966 (Codex F3): revealed-state is authoritative from the persistent set
-  // (survives cache round-trip / rebuild / switch-away), with the DOM flag as a
-  // same-render fast path.
-  const revealKey=_transparentRevealKey(S.session&&S.session.session_id, rawIdx);
-  const alreadyRevealed=_transparentRevealedTurns.has(revealKey)
-    || !!(turnEl&&turnEl.getAttribute('data-transparent-earlier-revealed')==='1');
-  const cap=_TRANSPARENT_SETTLED_ROW_CAP;
-  const slack=_TRANSPARENT_SETTLED_ROW_CAP_SLACK;
+  const cap=_transparentScenePageSize();
+  const slack=cap===_TRANSPARENT_SETTLED_ROW_CAP?_TRANSPARENT_SETTLED_ROW_CAP_SLACK:0;
+  const pageState=_transparentScenePages.get(scene);
   let startIdx=0;
-  if(!justSettled&&!alreadyRevealed&&rows.length>cap+slack){
-    startIdx=rows.length-cap;
+  let endIdx=rows.length;
+  if(rows.length>cap+slack){
+    startIdx=pageState&&pageState.rows===scene.activity_rows
+      ? Math.max(0,Math.min(pageState.start,rows.length-cap)) : rows.length-cap;
+    endIdx=Math.min(rows.length,startIdx+cap);
   }
+  _transparentScenePages.set(scene,{start:startIdx,rows:scene.activity_rows});
   // Stash the TRUE tool-row count so "Trace: N tools" reflects the whole run even
-  // while the prefix is capped; cleared on full reveal. (uncapped → remove it.)
+  // while a page is mounted; removed when the complete scene fits in one page.
   if(turnEl){
-    if(startIdx>0){
+    if(startIdx>0||endIdx<rows.length){
       const totalTools=rows.filter(r=>String(r.role||'')==='tool').length;
       turnEl.setAttribute('data-transparent-total-tool-count',String(totalTools));
     }else{
@@ -14718,8 +15134,22 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
     });
     wrote=true;
   }
-  for(let idx=startIdx;idx<rows.length;idx+=1){
+  for(let idx=startIdx;idx<endIdx;idx+=1){
     if(renderRowAt(idx)) wrote=true;
+  }
+  if(endIdx<rows.length){
+    const later=_buildTransparentEarlierStepsAffordance(rows.length-endIdx);
+    later.setAttribute('data-scene-page-direction','later');
+    later.setAttribute('data-anchor-owner-idx',String(rawIdx));
+    const label=_tOrDefault('show_later_steps','Show later steps ({0})',rows.length-endIdx)
+      .replace('{0}',String(rows.length-endIdx));
+    later.setAttribute('aria-label',label);
+    later.querySelector('.transparent-earlier-steps-label').textContent=label;
+    later.querySelector('.transparent-earlier-steps-chevron').innerHTML=li('chevron-down',13);
+    later.addEventListener('click',()=>_revealTransparentEarlierSteps(message,segment,rawIdx,later));
+    if(segment.parentElement===blocks) blocks.insertBefore(later,segment);
+    else blocks.appendChild(later);
+    wrote=true;
   }
   if(wrote){
     const turn=segment.closest('.assistant-turn');
@@ -14728,11 +15158,21 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   return wrote;
 }
 // #5966 tunables. Cap chosen so a normal multi-tool turn (a handful to a couple
-// dozen rows) is NEVER capped — only genuinely long reasoning runs are. Slack
-// prevents a "Show 3 earlier steps" stub: only cap when the omitted prefix is
-// worth its own row.
+// dozen rows) keeps its full page when the shared scene budget permits. Slack
+// avoids tiny omitted prefixes for the normal page size; a crowded transcript
+// uses smaller pages to keep the combined projection bounded.
+const _transparentScenePages=new WeakMap();
 const _TRANSPARENT_SETTLED_ROW_CAP=30;
 const _TRANSPARENT_SETTLED_ROW_CAP_SLACK=10;
+// Source-message virtualization cannot see rows nested inside server scenes.
+// Share a presentation budget among loaded canonical scene owners, independent
+// of the transient DOM. Include both page controls; retain access to every row.
+function _transparentScenePageSize(){
+  // Source ownership is stable across virtual remounts; mounted DOM is not.
+  const owners=(S.messages||[]).filter(message=>message&&message._anchor_activity_scene
+    &&!_sourceWindowOwnsHistoricalScene(message)).length;
+  return Math.max(1,Math.min(_TRANSPARENT_SETTLED_ROW_CAP,Math.floor(120/Math.max(1,owners))-2));
+}
 // t() returns the key name itself for an unknown key, so `t(k)||literal` doesn't
 // fall back. This resolves via t() only when the key is genuinely defined,
 // otherwise uses the English literal — keeping the label correct before the
@@ -14772,69 +15212,50 @@ function _buildTransparentEarlierStepsAffordance(hiddenCount){
   return el;
 }
 // Materialize the omitted prefix rows for a capped settled transparent turn,
-// preserving the reader's viewport position (rows are inserted ABOVE the clicked
-// affordance, so without compensation the content below would jump down).
+// preserving the navigation point in the viewport. Each page replaces the prior
+// page instead of materializing an ever-growing prefix.
 function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
-  const turnEl=segment.closest('.assistant-turn');
-  // #5966 (Codex F3): record the reveal in the PERSISTENT set (survives rebuild /
-  // switch-away / cache round-trip) and invalidate this session's cached HTML so
-  // the stored markup isn't re-served stale-capped.
-  const revealKey=_transparentRevealKey(S.session&&S.session.session_id, rawIdx);
-  _transparentRevealedTurns.add(revealKey);
+  // Resolve current ownership at click time: detached/cache-era handlers must not
+  // resurrect an obsolete scene after message replacement.
+  if(!segment||!segment.isConnected||!affordanceEl||!affordanceEl.isConnected) return;
+  const currentIdx=Number(segment.getAttribute('data-msg-idx'));
+  if(!Number.isInteger(currentIdx)||currentIdx<0) return;
+  rawIdx=currentIdx;
+  message=S.messages&&S.messages[rawIdx];
+  const scene=message&&message._anchor_activity_scene;
+  if(!scene||_sourceWindowOwnsHistoricalScene(message)) return;
+  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const state=_transparentScenePages.get(scene);
+  const start=state&&state.rows===scene.activity_rows?state.start:_computeTransparentHiddenPrefixCount(rows);
+  const later=affordanceEl.getAttribute('data-scene-page-direction')==='later';
+  const cap=_transparentScenePageSize();
+  const next=later?Math.min(rows.length-cap,start+cap)
+    :Math.max(0,start-cap);
+  _transparentScenePages.set(scene,{start:next,rows:scene.activity_rows});
+  const top=affordanceEl.getBoundingClientRect().top;
+  const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
+  const disclosure=_captureWorklogDetailDisclosureState(blocks);
+  _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
+  _restoreWorklogDetailDisclosureState(blocks,disclosure);
+  const target=blocks.querySelector('.transparent-earlier-steps,.transparent-event-row');
+  const msgsEl=$('messages');
+  if(target&&msgsEl){
+    msgsEl.scrollTop+=target.getBoundingClientRect().top-top;
+    target.setAttribute('tabindex','0');
+    target.focus({preventScroll:true});
+  }
   try{
     const sid=S.session&&S.session.session_id;
     if(sid&&_sessionHtmlCache&&typeof _sessionHtmlCache.delete==='function') _sessionHtmlCache.delete(sid);
   }catch(_){ }
-  if(turnEl){
-    turnEl.setAttribute('data-transparent-earlier-revealed','1');
-    // Full run now mounted → drop the capped-count stash so the Trace label
-    // recomputes from the (now complete) DOM.
-    turnEl.removeAttribute('data-transparent-total-tool-count');
-  }
-  const msgsEl=$('messages');
-  const prevScrollTop=msgsEl?msgsEl.scrollTop:0;
-  const prevScrollHeight=msgsEl?msgsEl.scrollHeight:0;
-  const scene=message&&message._anchor_activity_scene;
-  const blocks=_assistantTurnBlocks(turnEl);
-  if(!scene||!blocks){ if(affordanceEl) affordanceEl.remove(); return; }
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];
-  const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
-  const finalAnswer=String(
-    (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
-    || _assistantAnchorSceneFinalAnswerText(message)
-    || (typeof msgContent==='function'?msgContent(message):'')
-    || ''
-  );
-  // The affordance's data-count tells us how many prefix rows to build (the rows
-  // rendered on the initial pass are the tail after that index).
-  const hidden=Number(affordanceEl&&affordanceEl.getAttribute('data-earlier-count'))||0;
-  const stopIdx=hidden>0?hidden:_computeTransparentHiddenPrefixCount(rows);
-  const frag=document.createDocumentFragment();
-  for(let idx=0;idx<stopIdx;idx+=1){
-    const node=_anchorSceneTransparentNodeForRow(rows[idx],{settled:true,finalAnswer,liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex});
-    if(node){ node.setAttribute('data-earlier-revealed','1'); frag.appendChild(node); }
-  }
-  // Insert the prefix where the affordance sits, then drop the affordance.
-  if(affordanceEl&&affordanceEl.parentElement===blocks){
-    blocks.insertBefore(frag,affordanceEl);
-    affordanceEl.remove();
-  }else{
-    blocks.appendChild(frag);
-  }
-  if(turnEl) _syncTransparentEventControls(turnEl);
-  // Hold the reader's position: rows landed above the old affordance point, so
-  // add the height delta to scrollTop (the app's own load-earlier idiom).
-  if(msgsEl){
-    const delta=msgsEl.scrollHeight-prevScrollHeight;
-    msgsEl.scrollTop=prevScrollTop+delta;
-  }
+  if(typeof _postProcessWithAnchorSuppression==='function') _postProcessWithAnchorSuppression(blocks);
 }
 // The initial capped render omits rows[0 .. rows.length-cap-1]; recompute that
 // prefix length from the current scene so the reveal is exact even if the count
 // attribute is missing (cache round-trip).
 function _computeTransparentHiddenPrefixCount(rows){
-  const cap=_TRANSPARENT_SETTLED_ROW_CAP;
-  const slack=_TRANSPARENT_SETTLED_ROW_CAP_SLACK;
+  const cap=_transparentScenePageSize();
+  const slack=cap===_TRANSPARENT_SETTLED_ROW_CAP?_TRANSPARENT_SETTLED_ROW_CAP_SLACK:0;
   return (rows.length>cap+slack)?(rows.length-cap):0;
 }
 // One-shot token: the stream id of the turn that JUST settled at STREAM_DONE.
@@ -15122,7 +15543,8 @@ function ensureActivityGroup(inner, opts){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
     if(window._worklogDetailsExpandedByDefault===true) collapsed=false;
-    const savedState=_readActivityDisclosureState(activityKey);
+    const disclosureKey=opts.disclosureKey||activityKey;
+    const savedState=_readActivityDisclosureState(disclosureKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
     // state win across session switches and reloads. Saved closed-state should
@@ -15130,14 +15552,14 @@ function ensureActivityGroup(inner, opts){
     // explicitly collapsed.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
-    if(live && savedState==='open') collapsed=false;
-    else if(live && savedState==='closed') collapsed=true;
+    if((live||opts.restoreDisclosure) && savedState==='open') collapsed=false;
+    else if((live||opts.restoreDisclosure) && savedState==='closed') collapsed=true;
     group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
     group.setAttribute('data-tool-worklog-group','1');
     group.setAttribute('data-tool-worklog-key',activityKey||'');
-    if(activityKey) group.setAttribute('data-activity-disclosure-key',activityKey);
+    if(disclosureKey) group.setAttribute('data-activity-disclosure-key',disclosureKey);
     if(live){
       group.setAttribute('data-live-tool-worklog-group','1');
       group.setAttribute('data-live-tool-call-group','1');
@@ -15153,8 +15575,8 @@ function ensureActivityGroup(inner, opts){
       else anchor.insertAdjacentElement('afterend', group);
     }
     else inner.appendChild(group);
-  }else if(activityKey&&!group.getAttribute('data-activity-disclosure-key')){
-    group.setAttribute('data-activity-disclosure-key',activityKey);
+  }else if((opts.disclosureKey||activityKey)&&!group.getAttribute('data-activity-disclosure-key')){
+    group.setAttribute('data-activity-disclosure-key',opts.disclosureKey||activityKey);
   }
   if(burstId&&!group.getAttribute('data-activity-burst-id')) group.setAttribute('data-activity-burst-id',burstId);
   if(segmentSeq&&!group.getAttribute('data-live-segment-seq')) group.setAttribute('data-live-segment-seq',segmentSeq);
@@ -16051,16 +16473,6 @@ function renderCompressionUi(){
 // in-session updates (new messages, edits, stream events).
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
-// #5966 (Codex F3): persist which capped Transparent-Stream turns the user has
-// revealed, keyed by `${session_id}:${ownerRawIdx}`, so a switch-away/back or a
-// normal rebuild does NOT silently re-cap a turn the user already expanded. The
-// DOM `data-transparent-earlier-revealed` flag alone is lost across the
-// _sessionHtmlCache innerHTML round-trip; this survives it. Reveal also
-// invalidates that session's cached HTML so the stored markup isn't stale-capped.
-const _transparentRevealedTurns=new Set();
-function _transparentRevealKey(sessionId, ownerIdx){
-  return String(sessionId||(S.session&&S.session.session_id)||'')+':'+String(ownerIdx);
-}
 function clearMessageRenderCache(){
   _clearRenderCache();
   _sessionHtmlCache.clear();
@@ -16518,6 +16930,16 @@ function _idLinkedHistoricalTurnScene(messages, turnStart, turnEnd, options){
   return {ownerIndex,scene};
 }
 
+// These scenes are derived from individually addressable source messages. In a
+// transparent virtual window those sources, not the final-summary aggregate,
+// own projection. Weak identity keeps this distinction browser-local and does
+// not change persisted scenes or retain discarded session data.
+const _sourceWindowHistoricalScenes=new WeakSet();
+function _sourceWindowOwnsHistoricalScene(message){
+  return typeof window!=='undefined'&&window._virtualizeTranscript!==false&&
+    typeof isTransparentStream==='function'&&isTransparentStream()&&
+    !!message&&!!message._anchor_activity_scene&&_sourceWindowHistoricalScenes.has(message._anchor_activity_scene);
+}
 function _hydrateIdLinkedHistoricalToolScenes(messages, options){
   const list=Array.isArray(messages)?messages:[];
   let turnStart=-1;
@@ -16531,7 +16953,10 @@ function _hydrateIdLinkedHistoricalToolScenes(messages, options){
     const owner=list[hydratedTurn.ownerIndex];
     try{owner._anchor_activity_scene=hydratedTurn.scene;}
     catch(e){return;}
-    if(owner._anchor_activity_scene===hydratedTurn.scene) hydrated+=1;
+    if(owner._anchor_activity_scene===hydratedTurn.scene){
+      _sourceWindowHistoricalScenes.add(hydratedTurn.scene);
+      hydrated+=1;
+    }
   };
   for(let rawIdx=0;rawIdx<list.length;rawIdx++){
     const message=list[rawIdx];
@@ -16543,6 +16968,59 @@ function _hydrateIdLinkedHistoricalToolScenes(messages, options){
   return hydrated;
 }
 
+// Row identity, rather than the containing assistant message, owns a reader
+// inside a transparent server scene. This also bridges live -> settled paging.
+function _transparentSceneReaderStreamId(row){
+  const liveId=row.getAttribute('data-anchor-stream-id');
+  if(liveId) return liveId;
+  const owner=row.getAttribute('data-anchor-owner-idx');
+  const message=owner!==null&&S.messages&&S.messages[Number(owner)];
+  const scene=message&&message._anchor_activity_scene;
+  return String(message&&message._anchor_stream_id||scene&&(scene.stream_id||scene.identity&&scene.identity.stream_id)||'');
+}
+function _captureTransparentSceneReader(){
+  if(!isTransparentStream()) return null;
+  const el=$('messages');
+  if(!el) return null;
+  const top=el.getBoundingClientRect().top;
+  const bottom=top+el.clientHeight;
+  const row=Array.from(el.querySelectorAll('.transparent-event-row[data-anchor-row-id]'))
+    .find(node=>{const r=node.getBoundingClientRect();return r.height>0&&r.bottom>top&&r.top<bottom;});
+  return row?{id:row.getAttribute('data-anchor-row-id'),offset:row.getBoundingClientRect().top-top,
+    sid:S.session&&S.session.session_id,streamId:_transparentSceneReaderStreamId(row)}:null;
+}
+function _retainTransparentSceneReader(snapshot){
+  const reader=snapshot&&snapshot.transparentSceneReader;
+  if(!reader||snapshot.pinned===true||reader.sid!==(S.session&&S.session.session_id)) return;
+  for(const message of S.messages||[]){
+    const scene=message&&message._anchor_activity_scene;
+    if(!scene||_sourceWindowOwnsHistoricalScene(message)) continue;
+    const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');
+    if(!reader.streamId||streamId!==reader.streamId) continue;
+    const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+    const idx=rows.findIndex(row=>String(row.row_id||row.local_id||'')===reader.id);
+    if(idx<0) continue;
+    const cap=_transparentScenePageSize();
+    const state=_transparentScenePages.get(scene);
+    if(!state||state.rows!==scene.activity_rows||idx<state.start||idx>=state.start+cap){
+      _transparentScenePages.set(scene,{start:Math.max(0,idx-3),rows:scene.activity_rows});
+    }
+    break;
+  }
+}
+function _restoreTransparentSceneReader(reader){
+  if(!reader||reader.sid!==(S.session&&S.session.session_id)) return false;
+  const el=$('messages');
+  if(!el) return false;
+  const row=Array.from(el.querySelectorAll('.transparent-event-row[data-anchor-row-id]'))
+    .find(node=>node.getAttribute('data-anchor-row-id')===reader.id&&
+      !!reader.streamId&&_transparentSceneReaderStreamId(node)===reader.streamId);
+  if(!row) return false;
+  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  el.scrollTop+=row.getBoundingClientRect().top-el.getBoundingClientRect().top-reader.offset;
+  if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+  return true;
+}
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
@@ -16553,6 +17031,7 @@ function _captureMessageScrollSnapshot(){
     (typeof _recentMessageScrollIntent==='function'&&_recentMessageScrollIntent())
   );
   return {
+    transparentSceneReader:typeof _captureTransparentSceneReader==='function'?_captureTransparentSceneReader():null,
     anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null,
     top:el.scrollTop,
     bottom,
@@ -16623,9 +17102,10 @@ function _restoreMessageScrollSnapshot(snapshot){
     return;
   }
   if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
-  let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
-    ? _restoreMessageViewportAnchor(snapshot.anchor,0)
-    : false;
+  let restoredViaAnchor=(typeof _restoreTransparentSceneReader==='function'&&_restoreTransparentSceneReader(snapshot.transparentSceneReader))||
+    ((snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
+      ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+      : false);
   if(!restoredViaAnchor&&typeof _remountMessageViewportAnchor==='function'&&_remountMessageViewportAnchor(snapshot.anchor)){
     restoredViaAnchor=(typeof _restoreMessageViewportAnchor==='function')
       ? _restoreMessageViewportAnchor(snapshot.anchor,0)
@@ -16848,9 +17328,10 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   // A delayed rAF restore must not overwrite a position the reader changed
   // after capture. Recent-intent timestamps are lossy; the generation is
   // monotonic and therefore preserves snapshot ownership exactly.
-  let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
-    ? _restoreMessageViewportAnchor(snapshot.anchor,0)
-    : false;
+  let restoredViaAnchor=(typeof _restoreTransparentSceneReader==='function'&&_restoreTransparentSceneReader(snapshot.transparentSceneReader))||
+    ((snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
+      ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+      : false);
   if(!restoredViaAnchor&&typeof _remountMessageViewportAnchor==='function'&&_remountMessageViewportAnchor(snapshot.anchor)){
     restoredViaAnchor=(typeof _restoreMessageViewportAnchor==='function')
       ? _restoreMessageViewportAnchor(snapshot.anchor,0)
@@ -17223,7 +17704,7 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
     _sessionHtmlCache.delete(_sessionHtmlCacheSid);
   }
   _messageVirtualWindowKey='';
-  renderMessages({preserveScroll:true,_virtualFallback:true});
+  _scheduleMessageVirtualizedRender(true);
   return true;
 }
 
@@ -17314,12 +17795,17 @@ function renderMessages(options){
   // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
   if(!(options&&options._internalMeasurement) && typeof _resetMessageVirtualMeasurementBurst==='function'){ _resetMessageVirtualMeasurementBurst(); }
   const preserveScroll=!!(options&&options.preserveScroll);
-  const virtualFallback=!!(options&&options._virtualFallback);
+
   // Capture the pre-wipe scroll position when preserving OR when the reader has
   // manually unpinned; both need to restore the reader's position after the DOM
   // rebuild rather than snap to the bottom. (Codex #4006 r3 follow-up.)
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
-  const inner=$('msgInner');
+  if(typeof _retainTransparentSceneReader==='function') _retainTransparentSceneReader(scrollSnapshot);
+  const windowOnly=!!(options&&options._windowOnly);
+  const ownedWindow=windowOnly||!!(options&&options._ownedPrepend);
+  const liveInner=$('msgInner');
+  const windowAnchor=ownedWindow?((options&&options._prependAnchor)||_messageWindowSnapshot()):null;
+  const inner=ownedWindow?document.createElement('div'):liveInner;
   const sid=S.session?S.session.session_id:null;
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
@@ -17340,9 +17826,7 @@ function renderMessages(options){
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
   $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
-  const virtualWindow=virtualFallback
-    ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
-    : _currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
   const renderWindowKey=_messageVirtualWindowKeyFor(virtualWindow);
   const windowStart=virtualWindow.start;
   const windowEnd=virtualWindow.end;
@@ -17366,7 +17850,7 @@ function renderMessages(options){
   // Also skip cache for transient transcript cards such as /compress and
   // cross-channel handoff summaries; otherwise the cached transcript returns
   // before those cards can be inserted.
-  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
+  if(!ownedWindow&&sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const renderSignature=_messageRenderCacheSignature();
     cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
@@ -17376,6 +17860,7 @@ function renderMessages(options){
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
       _rehydrateDeferredWorklogsFromCache(inner);
+      _initializeMessageWindowOwnership(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
@@ -17448,7 +17933,7 @@ function renderMessages(options){
   const sessionCompressionSummary=(
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
-  const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
+  const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(liveInner);
   _recycleStash.clear();
   if(_msgNodeRecycleEnabled){
     for(const child of Array.from(inner.children)){
@@ -17460,7 +17945,7 @@ function renderMessages(options){
   }
   // Mobile scroll-jank fix: temporarily disable overflow-anchor so Chromium
   // cannot re-anchor to the topmost row during the DOM wipe-and-rebuild gap.
-  if(window._fixMobileScrollJank) window._fixMobileScrollJank();
+  if(!ownedWindow&&window._fixMobileScrollJank) window._fixMobileScrollJank();
   // Capture whether the reader was at/near the tail BEFORE the wipe. A tail-follower
   // hit by a mid-stream re-render gets a one-frame jitter: the wipe+rebuild lands the
   // sync scrollTop write against a transient layout whose above-viewport height is a
@@ -17739,7 +18224,7 @@ function renderMessages(options){
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
-    if(virtualWindow.virtualized&&virtualWindow.bottomPad>0&&vi===headRenderCount){
+    if(virtualWindow.virtualized&&renderTailStart>windowEnd&&vi===headRenderCount){
       // The virtual gap breaks assistant-turn adjacency. Reset the current
       // turn before rendering the always-visible tail so assistant segments do
       // not merge across the spacer boundary.
@@ -17825,7 +18310,9 @@ function renderMessages(options){
       thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
-    const nextRendered=renderVisWithIdx[vi+1];
+    // Finality is a source property, not the edge of a mounted window. In
+    // Transparent Stream a turn can continue beyond either virtual spacer.
+    const nextRendered=visWithIdx[renderVisibleIdxs[vi]+1];
     const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
@@ -18247,7 +18734,7 @@ function renderMessages(options){
   const anchorOwnedAssistantRawIdxs=new Set();
   for(const [rawIdx,seg] of assistantSegments){
     const msg=S.messages[rawIdx];
-    if(!msg||!msg._anchor_activity_scene||!seg) continue;
+    if(!msg||!msg._anchor_activity_scene||!seg||_sourceWindowOwnsHistoricalScene(msg)) continue;
     const turn=seg.closest('.assistant-turn');
     if(!turn) continue;
     turn.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
@@ -18339,7 +18826,9 @@ function renderMessages(options){
       return next;
     };
     fallbackToolSources.forEach(({m,rawIdx})=>{
-      const assistantToolAnchorIdx=_assistantToolAnchorIdxForMessage(S.messages,rawIdx);
+      // Transparent cards belong to their declaring source even when an older
+      // turn's visible answer is loaded later or outside the mounted window.
+      const assistantToolAnchorIdx=isTransparentStream()?rawIdx:_assistantToolAnchorIdxForMessage(S.messages,rawIdx);
       // OpenAI format: top-level tool_calls field on the assistant message
       (m.tool_calls||[]).forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
@@ -18575,6 +19064,11 @@ function renderMessages(options){
             beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
             syncAnchorReason:anchorIsWorklogSource,
             activityKey,
+            // Raw indices move when older history is prepended. Persist the
+            // disclosure against the session-relative source, not its slot in
+            // the current loaded slice. Do not migrate ambiguous old slot keys.
+            disclosureKey:`assistant-session:${_messageSessionIndexForRawIdx(aIdx)}`,
+            restoreDisclosure:true,
             burstId:burstId||'',
             segmentSeq:segmentSeq||'',
             turnDuration:includeTurnDuration?_turnDurationForAnchor(anchorRow):undefined,
@@ -18673,6 +19167,8 @@ function renderMessages(options){
             segmentSeq,
             burstId,
           });
+          if(Number.isInteger(aIdx)&&aIdx>=0&&S.messages[aIdx])
+            toolRow.dataset.toolSourceSessionIdx=String(_messageSessionIndexForRawIdx(aIdx));
           insertAfterCursor(toolRow);
         }
         _syncTransparentEventControls(turn);
@@ -18923,117 +19419,37 @@ function renderMessages(options){
       }
     }
   }
-  // Re-attach the preserved live turn (#3877). The rebuild above recreated a
-  // live turn from S.messages, but the live assistant message's content lags the
-  // stream (it is only persisted to S.messages on a throttled write-back) — so the
-  // fresh node often shows LESS streamed text than the ORIGINAL node, which is
-  // still referenced by the smd parser and holds the real in-progress reply. Swap
-  // the preserved (parser) node back in so the parser target stays connected and
-  // the visible text never blanks.
-  //
-  // The swap fires when the preserved node carries at least as much streamed text
-  // as the rebuilt one (`_rebuiltLen <= _preservedLen`). The `<=` (not `<`) is
-  // load-bearing: at the throttled-persist boundary the rebuilt turn's live
-  // content can EQUAL the preserved length, and the old `<` guard then skipped the
-  // swap — leaving the smd parser writing into the detached original node, which
-  // is exactly the residual "disappears, then reappears" frame (#3877 reopen). On
-  // a tie the preserved node is strictly preferable (it holds the live parser
-  // reference; identical length means nothing is lost). When the rebuilt turn
-  // genuinely has MORE content (e.g. a reconnect where S.messages caught up past
-  // the parser), the guard correctly skips and lets the parser re-resolve to the
-  // fuller node.
-  //
-  // Swap at the SEGMENT level — replace only the rebuilt live segment with the
-  // preserved one — so a multi-segment turn (earlier settled segments + tool/
-  // worklog groups built by the rebuild) keeps that rebuilt-only structure; a
-  // whole-turn replaceWith would discard it when the preserved snapshot predates
-  // those segments. Fall back to whole-turn replace only when the rebuilt turn has
-  // no live segment to swap into. No-op for a settled turn or when nothing was
-  // streaming.
-  if(_preservedLiveTurn){
-    const _rebuilt=document.getElementById('liveAssistantTurn');
-    // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
-    // post-tool activity boundaries a live turn can carry MULTIPLE
-    // [data-live-assistant="1"] segments, and the smd parser writes into the
-    // LAST (tail) one (see ensureAssistantRow in messages.js — it re-attaches to
-    // the last live segment). Prefer the preserved segment whose
-    // data-live-segment-seq matches the rebuilt tail (same logical segment), then
-    // fall back to the last preserved live segment. Using querySelector() (first)
-    // here would move the wrong segment and leave the parser-owned tail detached
-    // in a multi-segment turn.
-    const _rebuiltSegs=_rebuilt?_rebuilt.querySelectorAll('[data-live-assistant="1"]'):null;
-    const _rebuiltSeg=(_rebuiltSegs&&_rebuiltSegs.length)?_rebuiltSegs[_rebuiltSegs.length-1]:null;
-    const _preservedSegs=_preservedLiveTurn.querySelectorAll('[data-live-assistant="1"]');
-    let _preservedSeg=_preservedSegs.length?_preservedSegs[_preservedSegs.length-1]:null;
-    const _rebuiltSeq=_rebuiltSeg?_rebuiltSeg.getAttribute('data-live-segment-seq'):null;
-    if(_rebuiltSeq){
-      for(const _seg of _preservedSegs){
-        if(_seg.getAttribute('data-live-segment-seq')===_rebuiltSeq){_preservedSeg=_seg;break;}
-      }
-    }
-    const _preservedLen=_liveAssistantSegmentTextLength(_preservedSeg||_preservedLiveTurn);
-    // Structural-block counts: a live turn can be AHEAD of S.messages with
-    // Activity/tool/worklog blocks that haven't persisted yet — even with ZERO
-    // streamed text (e.g. an Activity-only turn mid-tool-call). The text-length
-    // gate alone would skip preservation in that case, so a scroll-triggered
-    // rebuild on a long (virtualized) transcript could blink those live-only
-    // blocks for a frame. Also restore when the preserved turn carries more
-    // structure than the rebuilt (lagging-S.messages) turn. (#3714 ship-review)
-    const _structuralCount=(turn)=> turn?turn.querySelectorAll(
-      '[data-live-assistant="1"],.tool-call-group,.tool-card-row,'+
-      '.tool-worklog-group,.live-worklog[data-live-worklog-shell="1"],'+
-      '.wl-reason,.agent-activity-thinking,.thinking-card-row'
-    ).length:0;
-    const _preservedStructure=_structuralCount(_preservedLiveTurn);
-    const _rebuiltStructure=_structuralCount(_rebuilt);
-    if(_preservedLen>0 || _preservedStructure>_rebuiltStructure){
-      const _rebuiltLen=_rebuilt?_liveAssistantSegmentTextLength(_rebuiltSeg||_rebuilt):-1;
-      if(_rebuiltLen<=_preservedLen){
-        // Decide segment-level vs whole-turn restore. Segment-level keeps the
-        // rebuilt turn's structure (good when the rebuild is the structural
-        // superset). But the whole premise here is that the live DOM can be
-        // AHEAD of S.messages: a tool/worklog group can land in the live turn
-        // between the last throttled persist and this rebuild, so the rebuilt
-        // turn (built from the lagging S.messages) may have FEWER structural
-        // blocks. In that case a segment-only swap would drop those live-only
-        // blocks for a frame — so restore the WHOLE preserved turn instead.
-        // Otherwise (rebuild has >= the preserved turn's structural blocks) do
-        // the precise segment swap so rebuilt-only structure is kept.
-        if(_rebuilt&&_rebuiltSeg&&_preservedSeg&&_rebuiltStructure>=_preservedStructure){
-          // Rebuild is the structural superset — swap only the parser-owned
-          // (tail) live segment, keeping rebuilt-only segments / tool groups.
-          // (No dataset.sessionId stamp here: only the segment enters the DOM;
-          // the rebuilt turn was already stamped at build time, see above.)
-          _rebuiltSeg.replaceWith(_preservedSeg);
-        }else if(_rebuilt){
-          // Rebuilt turn lacks structure the live turn already has (live-only
-          // tool card not yet persisted), or has no live segment to target —
-          // restore the whole preserved turn so nothing the user saw vanishes.
-          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
-          _rebuilt.replaceWith(_preservedLiveTurn);
-        }else if(!(typeof _settledTranscriptOwnsLiveTurn==='function'
-                   &&_settledTranscriptOwnsLiveTurn(sid,_preservedLiveTurn))){
-          // #6948 follow-up (duplicate assistant answer; #2051): this is the
-          // only branch that ADDS a turn — the rebuild produced no live turn of
-          // its own. When the settled transcript already ends with THIS stream's
-          // own answer and the preserved node carries nothing unpersisted, the
-          // node is a dead leftover (the row persisted and the turn settled while
-          // INFLIGHT[sid] was not yet cleaned) and appending pins a SECOND copy
-          // that re-preserves itself on every later render until a reload.
-          // Mid-stream the transcript ends with the user turn (or still carries a
-          // live projection), so #3877 preservation is untouched.
-          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
-          inner.appendChild(_preservedLiveTurn);
-        }
-      }
-    }
+  if(ownedWindow){
+    for(const row of inner.querySelectorAll('[data-msg-idx]')) row.style.contentVisibility='visible';
+    _reconcilePreservedLiveTurn(inner,_preservedLiveTurn);
+    _commitMessageWindow(liveInner,inner,windowAnchor,windowOnly);
+    // Open-state restoration during staging has no laid-out nested geometry.
+    // Restore result-body offsets only after the staged nodes are connected.
+    _restoreWorklogDetailDisclosureState(liveInner,worklogDetailDisclosureState);
+    _messageVirtualWindowKey=renderWindowKey;
+    _wireMessageWindowLoadEarlierButton();
+    _updateMessageVirtualMeasurements(renderVisWithIdx,renderVisibleIdxs,virtualWindow);
+    const revision=_messageWindowRevision, data=S.messages;
+    requestAnimationFrame(()=>{
+      if(revision!==_messageWindowRevision||S.messages!==data||S.session?.session_id!==sid) return;
+      // Post-processing may grow mounted content, but must not restore an old
+      // reader after wheel/touch input. The next window pass samples live geometry.
+      _postProcessWithAnchorSuppression(liveInner);
+    });
+    if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+    return;
+
   }
+  if(virtualWindow.virtualized) for(const row of inner.querySelectorAll('[data-msg-idx]')) row.style.contentVisibility='visible';
+  _reconcilePreservedLiveTurn(inner,_preservedLiveTurn);
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+  // Remember render output before DOM-only enhancements mutate it.
+  for(const node of inner.children) node._messageWindowMarkup=node.outerHTML.replace(/contain-intrinsic-size: auto [\d.]+px;/g,'');
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
@@ -19061,6 +19477,7 @@ function renderMessages(options){
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
+  _initializeMessageWindowOwnership(inner);
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
   // not synchronously: inside this render sync stack the browser still reports a transient

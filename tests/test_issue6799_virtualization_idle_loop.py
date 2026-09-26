@@ -14,13 +14,9 @@ def _scroll_listener_body() -> str:
     return UI_JS[start:end]
 
 
-def test_programmatic_scroll_cannot_schedule_virtualized_rerender():
-    listener = _scroll_listener_body()
-
-    guard_pos = listener.index("if(_freshProgrammaticScrollActive()) return;")
-    schedule_pos = listener.index("_scheduleMessageVirtualizedRender();")
-
-    assert guard_pos < schedule_pos
+# Guard/mount ordering and idle convergence are tested behaviorally in
+# test_scroll_owner_mount_guard.py. Follow suppression must not prevent mounting
+# content needed by a subsequent native scroll while compensation is fresh.
 
 
 def test_settled_full_window_is_restored_to_default_after_render():

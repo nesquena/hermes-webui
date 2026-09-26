@@ -54,6 +54,7 @@ _REAL_FUNCTIONS = (
     # evaluated with it. The shim's createElement() returns no template `content`, so the
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
     "_insertSegmentBlock",
+    "_reconcilePreservedLiveTurn",
     "renderMessages",
 )
 
@@ -129,6 +130,10 @@ class FakeElement {
     this._pendingHtml = this._innerHTML ? this._innerHTML : null;
   }
   get innerHTML() { return this._innerHTML; }
+  get outerHTML() {
+    const attrs = Object.entries(this.attributes).map(([key, value]) => ` ${key}="${value}"`).join('');
+    return `<${this.tagName.toLowerCase()}${attrs}>${this.children.map(child => child.outerHTML).join('')}</${this.tagName.toLowerCase()}>`;
+  }
   get firstElementChild() {
     if (this._pendingHtml !== null) {
       const html = this._pendingHtml;
@@ -403,6 +408,7 @@ function buildMessages() {
   }
   return messages;
 }
+function _initializeMessageWindowOwnership(inner) { inner.dataset.windowSession=S.session?.session_id||''; }
 function render(opts) {
   elements.msgInner = new FakeElement('div');
   _sessionHtmlCache.clear();
