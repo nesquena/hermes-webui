@@ -177,7 +177,7 @@ def test_probe_succeeds_when_the_agent_import_provides_the_dependency(tmp_path):
         encoding="utf-8",
     )
     wrapper = tmp_path / "python-no-site"
-    wrapper.write_text(f'#!/bin/sh\nexec {sys.executable} -S "$@"\n', encoding="utf-8")
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" -S "$@"\n', encoding="utf-8")
     wrapper.chmod(0o755)
 
     assert bootstrap._python_can_run_webui_and_agent(str(wrapper), agent_dir) is True
