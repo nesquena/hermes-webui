@@ -1686,6 +1686,7 @@ def _run_gateway_chat_streaming(
                     session_id,
                     stream_id,
                     {"event": "completed", "created_at": time.time()},
+                    _persistence=getattr(run_journal, "_persistence", None),
                 )
             except Exception:
                 logger.debug("Failed to append completed turn journal event", exc_info=True)

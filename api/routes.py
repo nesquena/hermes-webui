@@ -31,6 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
+from api.session_persistence import session_persistence_gate, revoke_session_persistence
 from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
@@ -16599,27 +16600,33 @@ def handle_post(handler, parsed) -> bool:
             event_profile = None
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
+        deadline = time.monotonic() + 5
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
+            persistence_gate = session_persistence_gate(sid, SESSION_DIR)
+        except Exception:
+            session_lock.release()
+            raise
+        if not persistence_gate.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            session_lock.release()
+            return bad(handler, "Session busy, try again", 503)
+        try:
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
+            revoke_session_persistence(persistence_gate)
+            with LOCK:
+                SESSIONS.pop(sid, None)
             sidecar_deleted = False
             try:
                 p.unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
-            try:
-                prune_session_from_index(sid)
-            except Exception:
-                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
             try:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
@@ -16629,8 +16636,32 @@ def handle_post(handler, parsed) -> bool:
                     _record_webui_deleted_session_tombstone(sid)
                 except Exception:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+            # Remove the turn-journal shards and the run-journal directory so a
+            # deleted conversation is not recoverable from disk. The session JSON +
+            # state.db rows are cleared above, but these journals retain the user's
+            # messages (turn journal) and the full request/response payloads (run
+            # journal) in plaintext. (#3802)
+            try:
+                from api.turn_journal import delete_turn_journal
+
+                delete_turn_journal(sid)
+            except Exception:
+                logger.debug("Failed to delete turn journal for deleted session %s", sid)
+            try:
+                from api.run_journal import delete_run_journal
+
+                delete_run_journal(sid)
+            except Exception:
+                logger.debug("Failed to delete run journal for deleted session %s", sid)
         finally:
+            persistence_gate.lock.release()
             session_lock.release()
+        # Index writes serialize separately. A late save is filtered by its
+        # captured lifetime in _write_session_index; do not invert index/gate locks.
+        try:
+            prune_session_from_index(sid)
+        except Exception:
+            logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
@@ -16641,23 +16672,6 @@ def handle_post(handler, parsed) -> bool:
             shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
         except Exception:
             logger.debug("Failed to clean attachment dir for deleted session %s", sid)
-        # Remove the turn-journal shards and the run-journal directory so a
-        # deleted conversation is not recoverable from disk. The session JSON +
-        # state.db rows are cleared above, but these journals retain the user's
-        # messages (turn journal) and the full request/response payloads (run
-        # journal) in plaintext. (#3802)
-        try:
-            from api.turn_journal import delete_turn_journal
-
-            delete_turn_journal(sid)
-        except Exception:
-            logger.debug("Failed to delete turn journal for deleted session %s", sid)
-        try:
-            from api.run_journal import delete_run_journal
-
-            delete_run_journal(sid)
-        except Exception:
-            logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
         # Prune the completion-dedup entry too. The reaper sweeps it once the
