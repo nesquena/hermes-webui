@@ -2192,7 +2192,8 @@ async function newSession(flash, options={}){
     // intent start the one shared request; B will observe the same result when
     // its queued coordinator slot is eventually released.
     if(existingContextIntent&&!_newSessionRequest.started){
-      Promise.resolve(_newSessionRequest.start(existingContextIntent)).catch(()=>{});
+      // Forward this owning intent's explicit options; see the merge in start().
+      Promise.resolve(_newSessionRequest.start(existingContextIntent,options)).catch(()=>{});
     }
     return await _newSessionRequest.promise;
   }
@@ -2213,9 +2214,17 @@ async function newSession(flash, options={}){
   let focusRestoredComposerAfterAbort=false;
   let restoredComposerOwnerSid=null;
   let restoredComposerOwnerProfile=null;
-  request.start=async contextIntent=>{
+  request.start=async (contextIntent,takeoverOptions)=>{
     if(request.started)return request.promise;
     request.started=true;
+    // A request queued by one caller can be started by a different owning
+    // intent (the take-over above). Merge the starter's explicit options over
+    // the queued caller's so keys like `worktree:false` (three-value contract,
+    // #6022) still reach the server instead of falling back to the agent's
+    // config-level worktree default.
+    if(takeoverOptions&&typeof takeoverOptions==='object'){
+      options={...options,...takeoverOptions};
+    }
     try{
     _setNewSessionPending(true);
     try{

@@ -48,6 +48,15 @@ function _composerOwnerIsVisible(sid,profile){
   ).trim()||'default';
   return visibleSid===sid&&_composerProfilesMatch(profile,visibleProfile);
 }
+// The text the active ownership transition has buffered for its destination:
+// what the composer will hold once a pending New Session handoff drains.
+// Programmatic producers (Voice Mode) consult this while their writes are
+// buffered and the visible textarea is still empty.
+function _composerPendingText(){
+  const tx=_composerOwnershipTransition;
+  if(!tx)return '';
+  return String(tx.destinationText||'');
+}
 function _rememberComposerOwnerState(sid,profile,state,generation){
   if(!sid||!state)return null;
   const snapshot={

@@ -128,6 +128,14 @@ def _composer_authority_helpers() -> str:
     return UI_JS[start:end]
 
 
+def _voice_mode_block() -> str:
+    sr = BOOT_JS.rindex("const SpeechRecognition=window.SpeechRecognition")
+    start = BOOT_JS.rindex("(function(){", 0, sr)
+    end = BOOT_JS.index("\n})();", BOOT_JS.index(
+        "window._voiceModeImmediateSend=_voiceModeSend;")) + len("\n})();")
+    return BOOT_JS[start:end]
+
+
 def _review_race_production_helpers() -> str:
     names_and_markers = (
         ("_appendComposerText", "\n\nfunction insertSavedPromptIntoComposer"),
@@ -1296,6 +1304,305 @@ def test_profile_owned_new_chat_cannot_deadlock_with_a_queued_new_chat():
     assert result["createCalls"] == 1
     assert result["activeSid"] == "new-session"
     assert result["activeProfile"] == "beta"
+
+
+def test_profile_owned_new_chat_takeover_forwards_explicit_worktree_opt_out():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_new_session_function()}
+        {_switch_to_profile_function()}
+
+        function deferred(){{
+          let resolve;
+          const promise=new Promise(res=>{{resolve=res;}});
+          return {{promise,resolve}};
+        }}
+        async function spinUntil(predicate){{
+          for(let i=0;i<200;i++){{if(predicate())return;await Promise.resolve();}}
+          throw new Error('timed out waiting for controlled schedule');
+        }}
+
+        let _sessionSourceFilter='webui';
+        let _activeProject=null;
+        const NO_PROJECT_FILTER='__none__';
+        let _messagesTruncated=false;
+        let _oldestIdx=0;
+        let _profileSwitchGeneration=0;
+        let _profileSwitchOpeningExistingSession=false;
+        let _workspacePanelMode='closed';
+        let _renamingSid=null;
+        let _skillsData=null;
+        let _workspaceList=null;
+        let _sessionListSkeletonActive=false;
+        const profileSwitch=deferred();
+        const apiCalls=[];
+        let createCalls=0;
+        const createBodies=[];
+        const msg={{value:'source draft',focus(){{}}}};
+        const elements={{
+          msg,
+          btnNewChat:{{disabled:false,setAttribute(){{}}}},
+          btnTitlebarNewChat:{{disabled:false,setAttribute(){{}}}},
+          composerStatus:{{textContent:''}},
+          modelSelect:{{value:''}},
+          profileChip:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},
+          profileChipLabel:{{textContent:'default'}},
+          titlebarProfileBtn:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},
+          titlebarProfileLabel:{{textContent:'default'}},
+        }};
+        const $=id=>elements[id]||null;
+        const S={{
+          session:{{
+            session_id:'source-session',profile:'default',workspace:'/workspace-a',
+            message_count:1,composer_draft:{{text:'source draft',files:[]}},
+          }},
+          messages:[{{role:'user',content:'A'}}],pendingFiles:[],toolCalls:[],
+          activeProfile:'default',activeProfileIsDefault:true,
+          _profileSwitchWorkspace:null,_profileDefaultWorkspace:'/workspace-a',
+          _pendingSessionToolsets:null,busy:false,activeStreamId:null,
+          _dirCache:{{}},currentDir:'.',
+        }};
+        const window={{_defaultModel:null}};
+        const localStorage={{setItem(){{}},getItem(){{return null;}},removeItem(){{}}}};
+        const document={{createElement(){{return {{dataset:{{}}}};}}}};
+
+        function api(path,options){{
+          apiCalls.push(path);
+          if(path==='/api/profile/switch')return profileSwitch.promise;
+          if(path==='/api/session/new'){{
+            createCalls+=1;
+            const body=JSON.parse(options.body);
+            createBodies.push(body);
+            return Promise.resolve({{session:{{
+              session_id:'new-session',profile:body.profile,workspace:body.workspace,
+              messages:[],composer_draft:{{text:'',files:[]}},message_count:0,
+            }}}});
+          }}
+          throw new Error(`unexpected API call: ${{path}}`);
+        }}
+        function _setNewSessionPending(){{}}
+        function _newSessionPendingText(){{return 'Starting';}}
+        function showToast(){{}}
+        function setComposerStatus(){{}}
+        function updateQueueBadge(){{}}
+        function clearLiveToolCards(){{}}
+        function _saveComposerDraftNow(){{return Promise.resolve();}}
+        function _restoreComposerDraft(draft){{msg.value=(draft&&draft.text)||'';S.pendingFiles=[];}}
+        function _hydrateTodosFromSession(){{}}
+        function _rememberNewChatDraftSession(){{}}
+        function _setActiveSessionUrl(){{}}
+        function startSessionStream(){{}}
+        function _setSessionViewedCount(){{}}
+        function autoResize(){{}}
+        function renderTray(){{}}
+        function updateSendBtn(){{}}
+        function setStatus(){{}}
+        function syncTopbar(){{}}
+        function renderMessages(){{}}
+        function loadDir(){{return Promise.resolve();}}
+        function refreshSessionList(){{return Promise.resolve();}}
+        function closeSessionActionMenu(){{}}
+        function _invalidateSessionListRenders(){{}}
+        function _setProfileSwitchListEmbargo(){{}}
+        function showSessionListSkeleton(){{}}
+        function bumpWorkspaceTreeGen(){{}}
+        function t(key){{return key;}}
+        function startGatewaySSE(){{}}
+        function applyBotName(){{}}
+        function _clearPersistedModelState(){{}}
+        function refreshProfileTransitionReasoningChip(){{}}
+        function animateNextSessionListRefresh(){{}}
+        function renderSessionList(){{return Promise.resolve();}}
+        function _openProfileSwitchSessionBrowser(){{}}
+        function clearWorkspaceTreeSkeleton(){{}}
+        function _profileSwitchPanelLoad(){{return Promise.resolve();}}
+        function _refreshProfileSwitchBackground(){{}}
+        function renderSessionListFromCache(){{}}
+
+        (async()=>{{
+          const switching=switchToProfile('beta');
+          await spinUntil(()=>apiCalls.includes('/api/profile/switch'));
+          const queuedNewChat=newSession(false);
+          for(let i=0;i<20;i++)await Promise.resolve();
+          const createStartedBeforeProfileSettled=createCalls>0;
+          profileSwitch.resolve({{
+            active:'beta',is_default:false,default_model:null,default_workspace:null,
+          }});
+          const completed=await Promise.race([
+            Promise.all([switching,queuedNewChat]).then(()=>true),
+            new Promise(resolve=>setTimeout(()=>resolve(false),100)),
+          ]);
+          process.stdout.write(JSON.stringify({{
+            completed,createStartedBeforeProfileSettled,createCalls,createBodies,
+            activeSid:S.session&&S.session.session_id,
+            activeProfile:S.activeProfile,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+    assert result["createStartedBeforeProfileSettled"] is False
+    assert result["completed"] is True, "queued New Chat and its parent intent deadlocked"
+    assert result["createCalls"] == 1
+    assert result["activeSid"] == "new-session"
+    assert result["activeProfile"] == "beta"
+    # The take-over must forward the owning intent's explicit create options
+    # (Greptile P1: the queued New Chat's empty options dropped `worktree:false`,
+    # so a worktree-default agent could mint an unintended worktree+branch).
+    bodies = result["createBodies"]
+    assert len(bodies) == 1, bodies
+    assert "worktree" in bodies[0], (
+        "profile-switch take-over dropped the explicit worktree flag: %r" % (bodies[0],)
+    )
+    assert bodies[0]["worktree"] is False, bodies[0]
+
+
+def test_voice_mode_send_preserves_buffered_transcript_across_new_session_handoff():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    script = textwrap.dedent(
+        f"""
+        const assert = require('assert');
+        {_composer_authority_helpers()}
+
+        let _newSessionInFlight = null;
+        let resolveInflight;
+        const sendCalls = [];
+        const S = {{
+          activeProfile:'default',
+          session:{{session_id:'old-session',profile:'default'}},
+          pendingFiles:[],
+          busy:false,
+        }};
+        const ta = {{value:''}};
+        function makeEl(){{
+          return {{
+            style:{{}}, disabled:false, textContent:'', className:'', innerHTML:'',
+            classList:{{add(){{}},remove(){{}},toggle(){{}},contains(){{return false;}}}},
+            setAttribute(){{}}, getAttribute(){{return null;}},
+            addEventListener(){{}}, removeEventListener(){{}},
+          }};
+        }}
+        const elements = {{
+          msg: ta, btnVoiceMode: makeEl(), voiceModeBar: makeEl(),
+          voiceModeIndicator: makeEl(), voiceModeLabel: makeEl(), btnMic: makeEl(),
+        }};
+        const $ = id => elements[id] || null;
+        const srInstances = [];
+        class FakeSpeechRecognition {{
+          constructor(){{ srInstances.push(this); }}
+          start(){{}} stop(){{}} abort(){{}}
+        }}
+        const window = {{
+          SpeechRecognition: FakeSpeechRecognition,
+          speechSynthesis: {{}},
+          autoReadLastAssistant: null,
+        }};
+        const localStorage = {{
+          store: {{'hermes-voice-mode-button':'true'}},
+          getItem(k){{ return Object.prototype.hasOwnProperty.call(this.store,k)?this.store[k]:null; }},
+          setItem(k,v){{ this.store[k]=String(v); }},
+          removeItem(k){{ delete this.store[k]; }},
+        }};
+        const _locale = {{_speech:'en-US'}};
+        const document = {{
+          addEventListener(){{}}, removeEventListener(){{}},
+          querySelectorAll(){{ return []; }}, querySelector(){{ return null; }},
+          getElementById(){{ return null; }}, createElement(){{ return makeEl(); }},
+          baseURI:'http://localhost/',
+        }};
+        function t(key){{ return key; }}
+        function showToast(){{}}
+        function stopTTS(){{}}
+        function autoResize(){{}}
+        function clearTimeout(){{}}
+        function setTimeout(){{ return 0; }}
+        function _micOriginNeedsSecureContext(){{ return false; }}
+        function _micToastKeyForRecognitionError(){{ return null; }}
+        function _clearBrowserTtsRecovery(){{}}
+        function _setButtonTooltip(){{}}
+        function send(){{ sendCalls.push({{value:ta.value, sid:S.session&&S.session.session_id}}); }}
+        {_voice_mode_block()}
+
+        (async()=>{{
+          const flush = async()=>{{ for(let i=0;i<8;i++) await Promise.resolve(); }};
+
+          // A New Session ownership handoff is pending while the visible
+          // composer is empty.
+          _newSessionInFlight = new Promise(resolve => {{ resolveInflight = resolve; }});
+          const transition = _beginComposerOwnershipTransition('old-session','default');
+
+          // Voice Mode starts listening during the pending handoff, so its
+          // lifecycle producer token resolves to the destination owner.
+          elements.btnVoiceMode.onclick();
+          const recognition = srInstances[srInstances.length-1];
+          assert.ok(recognition, 'voice mode did not start listening');
+
+          // The recogniser finalises a transcript while the handoff is still
+          // pending; programmatic producers buffer it for the destination.
+          const results = [{{0:{{transcript:'hello world'}}, isFinal:true}}];
+          results.length = 1;
+          recognition.onresult({{ resultIndex:0, results }});
+          const afterRecognize = ta.value;
+          const buffered = (typeof _composerPendingText==='function')
+            ? _composerPendingText() : null;
+
+          // Silence fires the auto-send path while the handoff is still pending.
+          window._voiceModeImmediateSend();
+          const sendCallsAfterSend = sendCalls.slice();
+          const pendingAfterSend = (typeof _composerPendingText==='function')
+            ? _composerPendingText() : null;
+
+          // The handoff settles the way newSession() settles it: the
+          // destination binds, its draft restores, buffered text drains, and
+          // only then may send() capture the spoken prompt.
+          _bindComposerOwnershipDestination(transition,'new-session','default');
+          S.session = {{session_id:'new-session',profile:'default'}};
+          ta.value = '';
+          _drainComposerOwnershipTransition(transition);
+          const drainedValue = ta.value;
+          resolveInflight();
+          await flush();
+
+          process.stdout.write(JSON.stringify({{
+            buffered,
+            pendingAfterSend,
+            drainedValue,
+            afterRecognize,
+            sendCallsAfterSend,
+            sendCalls,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+
+    assert result["sendCallsAfterSend"] == [], result
+    assert result["drainedValue"] == "hello world", result
+    assert result["sendCalls"] == [
+        {"value": "hello world", "sid": "new-session"}
+    ], result
+    assert result["pendingAfterSend"] == "hello world", (
+        "voice auto-send cleared the buffered transcript instead of preserving it"
+    )
+    assert result["buffered"] == "hello world"
+    assert result["afterRecognize"] == ""
+
 
 
 def _run_profile_switch_settlement_harness(*, reject_pending: bool) -> dict:

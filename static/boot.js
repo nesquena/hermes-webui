@@ -1790,7 +1790,10 @@ window.renderTranscript=function(container, messages, opts){
   function _voiceModeSend(){
     if(!_voiceModeActive) return;
     const text=(ta.value||'').trim();
-    if(!text){
+    // While a New Session handoff is pending, recognised speech is buffered.
+    const pendingText=!text&&typeof _composerPendingText==='function'
+      ? String(_composerPendingText()||'').trim() : '';
+    if(!text&&!pendingText){
       if(typeof _composerSetText==='function')_composerSetText(
         '','',null,_voiceComposerProducerToken
       );
@@ -1799,13 +1802,26 @@ window.renderTranscript=function(container, messages, opts){
       return;
     }
     _setState('thinking');
-    // Pin the active session id so the TTS callback won't speak a different
-    // session's reply if the user navigates away mid-stream.
-    _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
-    // send() is global from boot.js
-    if(typeof send==='function') send();
+    const commitSend=()=>{
+      const settled=(ta.value||'').trim()||(typeof _composerPendingText==='function'
+        ? String(_composerPendingText()||'').trim() : '');
+      if(!settled){ setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300); return; }
+      // Pin the receiving session so TTS won't speak another session's reply.
+      _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
+      // send() is global from boot.js
+      if(typeof send==='function') send();
+    };
+    if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+      // Let the handoff settle first: its drained transcript is what send() captures.
+      Promise.resolve(_newSessionInFlight).catch(()=>{}).then(()=>{
+        if(!_voiceModeActive)return;
+        commitSend();
+      });
+      return;
+    }
+    commitSend();
   }
 
   function _speakResponse(){
