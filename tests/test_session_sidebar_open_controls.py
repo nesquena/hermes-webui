@@ -1,0 +1,836 @@
+"""Accessibility regressions for sidebar conversation open controls."""
+
+from pathlib import Path
+import re
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+
+def _function_source(name: str) -> str:
+    marker = re.search(rf"(?:async\s+)?function\s+{re.escape(name)}\s*\(", SESSIONS_JS)
+    assert marker, f"{name} not found"
+    start = marker.start()
+    brace = SESSIONS_JS.find("{", marker.end())
+    assert brace >= 0, f"{name} body did not start"
+    depth = 1
+    index = brace + 1
+    while depth and index < len(SESSIONS_JS):
+        if SESSIONS_JS[index] == "{":
+            depth += 1
+        elif SESSIONS_JS[index] == "}":
+            depth -= 1
+        index += 1
+    assert depth == 0, f"{name} body did not close"
+    return SESSIONS_JS[start:index]
+
+
+def _skin_values() -> tuple[str, ...]:
+    start = BOOT_JS.index("const _SKINS=[")
+    end = BOOT_JS.index("];", start)
+    block = BOOT_JS[start:end]
+    values = []
+    for name, explicit_value in re.findall(
+        r"\{name:'([^']+)'(?:,\s*value:'([^']+)')?", block
+    ):
+        values.append(explicit_value or name.lower())
+    assert values
+    return tuple(values)
+
+
+def test_chat_panel_reuses_visible_label_as_a_heading():
+    assert '<h2 class="panel-head-title" data-i18n="tab_chat">Chat</h2>' in INDEX_HTML
+    assert ".panel-head-title{" in STYLE_CSS
+
+
+def test_top_level_conversation_titles_use_separate_native_open_controls():
+    render = _function_source("renderSessionListFromCache")
+
+    assert "document.createElement(_sessionSelectMode?'span':'button')" in render
+    assert "title.type='button';" in render
+    assert "title.className=_sessionSelectMode?'session-title':'session-title session-open-control';" in render
+    assert "title.dataset.sid=s.session_id;" in render
+    assert "if(isActive) title.setAttribute('aria-current','page');" in render
+    assert "_installSessionOpenControl(title,s);" in render
+
+    title_append = render.index("titleGroup.appendChild(title);")
+    tag_append = render.index("titleGroup.appendChild(chip);")
+    assert title_append < tag_append
+    assert "title.appendChild(chip);" not in render
+
+
+def test_title_and_tag_controls_share_a_constrained_layout_group():
+    render = _function_source("renderSessionListFromCache")
+
+    group_create = render.index("const titleGroup=document.createElement('div');")
+    group_class = render.index("titleGroup.className='session-title-group';")
+    title_append = render.index("titleGroup.appendChild(title);")
+    tag_block_start = render.index("// Keep tag/filter controls outside")
+    tag_block_end = render.index("// Project color dot:", tag_block_start)
+    tag_block = render[tag_block_start:tag_block_end]
+    tag_append = render.index("titleGroup.appendChild(chip);", tag_block_start, tag_block_end)
+    row_append = render.index("titleRow.appendChild(titleGroup);")
+
+    assert group_create < group_class < title_append < tag_append < row_append
+    assert "titleRow.appendChild(chip);" not in tag_block
+
+
+def test_focus_identity_wraps_the_destructive_list_rebuild():
+    render = _function_source("renderSessionListFromCache")
+    capture = render.index("const focusedSessionOpenControlId=_captureSessionOpenControlFocus(list);")
+    clear = render.index("list.innerHTML='';")
+    restore = render.index("_restoreSessionOpenControlFocus(list,focusedSessionOpenControlId);")
+    assert capture < clear < restore
+
+
+def test_select_mode_keeps_titles_out_of_the_tab_order():
+    render = _function_source("renderSessionListFromCache")
+    create = render.index("document.createElement(_sessionSelectMode?'span':'button')")
+    install = render.index("_installSessionOpenControl(title,s);")
+    assert create < install
+    assert "if(!_sessionSelectMode){" in render[create:install]
+
+
+def _browser_fixture_script() -> str:
+    return "\n".join(
+        [
+            "let _sessionSelectMode = false;",
+            "let _renamingSid = null;",
+            "let openCount = 0;",
+            "let desktopWidth = true;",
+            "let sidebarCollapsed = false;",
+            "const $ = id => document.getElementById(id);",
+            "const _isDesktopWidth = () => desktopWidth;",
+            "const _isSidebarCollapsed = () => sidebarCollapsed;",
+            "async function _openSidebarSession(){ openCount += 1; }",
+            _function_source("_installSessionOpenControl"),
+            _function_source("_isSessionSidebarVisible"),
+            _function_source("_captureSessionOpenControlFocus"),
+            _function_source("_restoreSessionOpenControlFocus"),
+            """
+            window.__setupSessionOpenControl = () => {
+              document.body.innerHTML = `
+                <aside class="sidebar mobile-open">
+                  <section id="panelChat" class="active">
+                    <input id="sessionSearch" value="">
+                    <div id="sessionList">
+                      <div class="session-item" data-sid="session-a">
+                        <button type="button" class="session-title session-open-control" data-sid="session-a">Alpha</button>
+                      </div>
+                    </div>
+                  </section>
+                </aside>`;
+              const control = document.querySelector('.session-open-control');
+              _installSessionOpenControl(control, {session_id: 'session-a'});
+              control.focus();
+              return document.activeElement === control;
+            };
+            window.__sessionOpenCount = () => openCount;
+            window.__setSessionSelectMode = value => { _sessionSelectMode = value; };
+            window.__focusRoundTrip = keepRow => {
+              const list = document.getElementById('sessionList');
+              const sid = _captureSessionOpenControlFocus(list);
+              list.innerHTML = keepRow
+                ? '<div class="session-item" data-sid="session-a"><button type="button" class="session-title session-open-control" data-sid="session-a">Alpha updated</button></div>'
+                : '<div class="session-item" data-sid="session-b"><button type="button" class="session-title session-open-control" data-sid="session-b">Beta</button></div>';
+              const restored = _restoreSessionOpenControlFocus(list, sid);
+              return {
+                sid,
+                restored,
+                activeSid: document.activeElement && document.activeElement.dataset
+                  ? document.activeElement.dataset.sid || null
+                  : null,
+              };
+            };
+            window.__hiddenMobileFocusRoundTrip = () => {
+              const list = document.getElementById('sessionList');
+              const sidebar = document.querySelector('.sidebar');
+              const sid = _captureSessionOpenControlFocus(list);
+              desktopWidth = false;
+              sidebar.classList.remove('mobile-open');
+              list.innerHTML = '<div class="session-item" data-sid="session-a"><button type="button" class="session-title session-open-control" data-sid="session-a">Alpha hidden</button></div>';
+              const restored = _restoreSessionOpenControlFocus(list, sid);
+              const result = {
+                sid,
+                restored,
+                activeSid: document.activeElement && document.activeElement.dataset
+                  ? document.activeElement.dataset.sid || null
+                  : null,
+              };
+              desktopWidth = true;
+              sidebar.classList.add('mobile-open');
+              return result;
+            };
+            """,
+        ]
+    )
+
+
+def test_keyboard_activation_and_focus_restore_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar open-control browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page()
+        page.set_content("<!doctype html><html><body></body></html>")
+        page.add_script_tag(content=_browser_fixture_script())
+        assert page.evaluate("window.__setupSessionOpenControl()") is True
+
+        control = page.locator(".session-open-control")
+        control.press("Enter")
+        control.press("Space")
+        keyboard_count = page.evaluate("window.__sessionOpenCount()")
+
+        # A pointer click remains owned by the existing row gesture path. The
+        # button's synthesized-click handler must not open the session again.
+        control.click()
+        pointer_count = page.evaluate("window.__sessionOpenCount()")
+
+        page.evaluate("window.__setSessionSelectMode(true)")
+        control.press("Enter")
+        select_mode_count = page.evaluate("window.__sessionOpenCount()")
+
+        page.evaluate("window.__setSessionSelectMode(false)")
+        page.evaluate("document.querySelector('.session-open-control').focus()")
+        kept = page.evaluate("window.__focusRoundTrip(true)")
+        page.evaluate("document.querySelector('.session-open-control').focus()")
+        hidden = page.evaluate("window.__hiddenMobileFocusRoundTrip()")
+        page.evaluate("document.querySelector('.session-open-control').focus()")
+        removed = page.evaluate("window.__focusRoundTrip(false)")
+        browser.close()
+
+    assert keyboard_count == 2
+    assert pointer_count == 2
+    assert select_mode_count == 2
+    assert kept == {"sid": "session-a", "restored": True, "activeSid": "session-a"}
+    assert hidden == {"sid": "session-a", "restored": False, "activeSid": None}
+    assert removed == {"sid": "session-a", "restored": False, "activeSid": None}
+
+
+def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar layout browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": 420, "height": 240})
+        page.set_content(
+            """
+            <!doctype html>
+            <html class="dark">
+              <body>
+                <div class="probe">
+                  <div class="session-item active" data-sid="session-a">
+                    <div class="session-text">
+                      <div class="session-title-row">
+                        <div class="session-title-group">
+                          <button type="button" class="session-title session-open-control" data-sid="session-a">
+                            Visible conversation title
+                          </button>
+                          <span class="session-tag">#alpha</span>
+                          <span class="session-tag">#hyphenated-long-tag</span>
+                          <span class="session-tag">#gamma</span>
+                          <span class="session-tag">#delta</span>
+                        </div>
+                        <span class="session-time">now</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(content="body{margin:0}.probe{margin:8px}")
+
+        page.keyboard.press("Tab")
+        control = page.locator(".session-open-control")
+        assert control.evaluate("el => el.matches(':focus-visible')") is True
+        page.wait_for_timeout(200)
+
+        metrics = []
+        for width in (180, 300):
+            page.locator(".probe").evaluate("(el, width) => { el.style.width = width + 'px'; }", width)
+            metrics.append(
+                page.locator(".session-item").evaluate(
+                    """
+                    row => {
+                      const titleRow = row.querySelector('.session-title-row');
+                      const group = row.querySelector('.session-title-group');
+                      const title = row.querySelector('.session-open-control');
+                      const tags = Array.from(row.querySelectorAll('.session-tag'));
+                      const shortTag = tags[0];
+                      const rowStyle = getComputedStyle(row);
+                      const titleStyle = getComputedStyle(title);
+                      const shortTagStyle = getComputedStyle(shortTag);
+                      const groupRect = group.getBoundingClientRect();
+                      const shortTagRect = shortTag.getBoundingClientRect();
+                      const rowRect = titleRow.getBoundingClientRect();
+                      return {
+                        probeWidth: row.closest('.probe').getBoundingClientRect().width,
+                        titleWidth: title.getBoundingClientRect().width,
+                        rowClientWidth: titleRow.clientWidth,
+                        rowScrollWidth: titleRow.scrollWidth,
+                        groupInsideRow:
+                          groupRect.left >= rowRect.left - 1 &&
+                          groupRect.right <= rowRect.right + 1,
+                        tagsSingleLine: tags.every(tag => {
+                          const style = getComputedStyle(tag);
+                          return style.whiteSpace === 'nowrap' &&
+                            style.overflowX === 'hidden' &&
+                            style.textOverflow === 'ellipsis';
+                        }),
+                        tagsFitRowHeight: tags.every(tag =>
+                          tag.getBoundingClientRect().height <= rowRect.height + 1
+                        ),
+                        shortTagFlexShrink: shortTagStyle.flexShrink,
+                        shortTagNotTruncated: shortTag.scrollWidth <= shortTag.clientWidth + 1,
+                        shortTagInsideGroup:
+                          shortTagRect.left >= groupRect.left - 1 &&
+                          shortTagRect.right <= groupRect.right + 1,
+                        rowBoxShadow: rowStyle.boxShadow,
+                        buttonOutlineStyle: titleStyle.outlineStyle,
+                      };
+                    }
+                    """
+                )
+            )
+        browser.close()
+
+    for result in metrics:
+        title_floor = 45 if result["probeWidth"] < 200 else 90
+        assert result["titleWidth"] >= title_floor
+        assert result["rowScrollWidth"] <= result["rowClientWidth"] + 1
+        assert result["groupInsideRow"] is True
+        assert result["tagsSingleLine"] is True
+        assert result["tagsFitRowHeight"] is True
+        assert result["shortTagFlexShrink"] == "0"
+        assert result["shortTagNotTruncated"] is True
+        assert result["shortTagInsideGroup"] is True
+        assert "inset" in result["rowBoxShadow"]
+        assert re.search(r"\b2px\b", result["rowBoxShadow"])
+        assert result["buttonOutlineStyle"] == "none"
+
+
+def test_pointer_focus_does_not_leave_keyboard_hover_chrome_stuck_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar pointer-focus browser test")
+
+    appearances = [
+        {"skin": skin, "dark": dark}
+        for skin in ("graphite", "codex", "terracotta", "github")
+        for dark in (False, True)
+    ]
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": 1024, "height": 260})
+        page.set_content(
+            """
+            <!doctype html>
+            <html>
+              <body tabindex="-1">
+                <div class="probe">
+                  <div class="session-item active" data-sid="session-a">
+                    <div class="session-text">
+                      <div class="session-title-row">
+                        <div class="session-title-group">
+                          <button type="button" class="session-title session-open-control">
+                            Pointer focus conversation
+                          </button>
+                        </div>
+                        <span class="session-time">now</span>
+                      </div>
+                    </div>
+                    <span class="session-attention-indicator is-attention-generic"></span>
+                    <div class="session-actions">
+                      <button type="button" class="session-actions-trigger">More</button>
+                    </div>
+                  </div>
+                </div>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(
+            content="""
+              body{margin:0}
+              .probe{margin:8px;width:300px}
+              .session-item,.session-actions,.session-attention-indicator{transition:none!important}
+            """
+        )
+
+        row = page.locator(".session-item")
+        control = page.locator(".session-open-control")
+        pointer_states = []
+        for appearance in appearances:
+            page.evaluate(
+                """
+                appearance => {
+                  document.documentElement.className = appearance.dark ? 'dark' : '';
+                  document.documentElement.dataset.skin = appearance.skin;
+                }
+                """,
+                appearance,
+            )
+            page.locator("body").focus()
+            page.mouse.move(500, 240)
+            resting_padding_right = row.evaluate("row => getComputedStyle(row).paddingRight")
+            control.click()
+            page.mouse.move(500, 240)
+            state = row.evaluate(
+                """
+                row => {
+                  const control = row.querySelector('.session-open-control');
+                  const actions = row.querySelector('.session-actions');
+                  const timestamp = row.querySelector('.session-time');
+                  const attention = row.querySelector('.session-attention-indicator');
+                  return {
+                    activeControl: document.activeElement === control,
+                    focusWithin: row.matches(':focus-within'),
+                    focusVisible: control.matches(':focus-visible'),
+                    actionsOpacity: getComputedStyle(actions).opacity,
+                    actionsPointerEvents: getComputedStyle(actions).pointerEvents,
+                    timestampDisplay: getComputedStyle(timestamp).display,
+                    timestampVisibility: getComputedStyle(timestamp).visibility,
+                    timestampHasRect: timestamp.getClientRects().length > 0 &&
+                      timestamp.getBoundingClientRect().width > 0,
+                    attentionVisible: getComputedStyle(attention).visibility !== 'hidden',
+                    paddingRight: getComputedStyle(row).paddingRight,
+                  };
+                }
+                """
+            )
+            pointer_states.append(
+                {**appearance, "restingPaddingRight": resting_padding_right, **state}
+            )
+
+        page.evaluate("document.documentElement.className='dark'; document.documentElement.dataset.skin='terracotta'")
+        page.locator("body").focus()
+        page.keyboard.press("Tab")
+        keyboard_state = row.evaluate(
+            """
+            row => {
+              const control = row.querySelector('.session-open-control');
+              const actions = row.querySelector('.session-actions');
+              const timestamp = row.querySelector('.session-time');
+              const attention = row.querySelector('.session-attention-indicator');
+              return {
+                activeControl: document.activeElement === control,
+                focusVisible: control.matches(':focus-visible'),
+                actionsOpacity: getComputedStyle(actions).opacity,
+                actionsPointerEvents: getComputedStyle(actions).pointerEvents,
+                timestampVisible: getComputedStyle(timestamp).display !== 'none' &&
+                  getComputedStyle(timestamp).visibility !== 'hidden' &&
+                  timestamp.getClientRects().length > 0,
+                attentionVisible: getComputedStyle(attention).visibility !== 'hidden',
+                paddingRight: getComputedStyle(row).paddingRight,
+                focusShadow: getComputedStyle(row).boxShadow,
+              };
+            }
+            """
+        )
+        browser.close()
+
+    for pointer_state in pointer_states:
+        appearance = f"{pointer_state['skin']}/{'dark' if pointer_state['dark'] else 'light'}"
+        assert pointer_state["activeControl"] is True, appearance
+        assert pointer_state["focusWithin"] is True, appearance
+        assert pointer_state["focusVisible"] is False, appearance
+        assert pointer_state["actionsOpacity"] == "0", appearance
+        assert pointer_state["actionsPointerEvents"] == "none", appearance
+        assert pointer_state["timestampDisplay"] != "none", appearance
+        assert pointer_state["timestampVisibility"] == "visible", appearance
+        assert pointer_state["timestampHasRect"] is True, appearance
+        assert pointer_state["attentionVisible"] is True, appearance
+        assert pointer_state["paddingRight"] == pointer_state["restingPaddingRight"], appearance
+        assert pointer_state["paddingRight"] != "40px", appearance
+
+    assert keyboard_state["activeControl"] is True
+    assert keyboard_state["focusVisible"] is True
+    assert keyboard_state["actionsOpacity"] == "1"
+    assert keyboard_state["actionsPointerEvents"] == "auto"
+    assert keyboard_state["timestampVisible"] is False
+    assert keyboard_state["attentionVisible"] is False
+    assert keyboard_state["paddingRight"] == "40px"
+    assert "inset" in keyboard_state["focusShadow"]
+    assert re.search(r"\b2px\b", keyboard_state["focusShadow"])
+
+
+def test_coarse_pointer_tap_keeps_resting_chrome_and_long_press_menu_state():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar coarse-pointer browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        context = browser.new_context(
+            viewport={"width": 390, "height": 844},
+            has_touch=True,
+            is_mobile=True,
+        )
+        page = context.new_page()
+        page.set_content(
+            """
+            <!doctype html>
+            <html data-skin="github">
+              <body>
+                <div class="session-item active" data-sid="session-a">
+                  <div class="session-text">
+                    <div class="session-title-row">
+                      <div class="session-title-group">
+                        <button type="button" class="session-title session-open-control">Touch conversation</button>
+                      </div>
+                      <span class="session-time">now</span>
+                    </div>
+                  </div>
+                  <span class="session-attention-indicator is-attention-generic"></span>
+                  <div class="session-actions"><button type="button" class="session-actions-trigger">More</button></div>
+                </div>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(
+            content="body{margin:8px}.session-item,.session-actions,.session-attention-indicator{transition:none!important}"
+        )
+
+        control = page.locator(".session-open-control")
+        row = page.locator(".session-item")
+        page.mouse.move(380, 830)
+        resting_padding_right = row.evaluate("row => getComputedStyle(row).paddingRight")
+        control.tap()
+        page.mouse.move(380, 830)
+        tap_state = row.evaluate(
+            """
+            row => ({
+              activeControl: document.activeElement === row.querySelector('.session-open-control'),
+              focusVisible: row.querySelector('.session-open-control').matches(':focus-visible'),
+              timestampVisibility: getComputedStyle(row.querySelector('.session-time')).visibility,
+              timestampHasRect: row.querySelector('.session-time').getClientRects().length > 0,
+              actionsDisplay: getComputedStyle(row.querySelector('.session-actions')).display,
+              paddingRight: getComputedStyle(row).paddingRight,
+            })
+            """
+        )
+        row.evaluate("row => row.classList.add('long-pressing','menu-open')")
+        long_press_state = row.evaluate(
+            """
+            row => ({
+              menuOpen: row.classList.contains('menu-open'),
+              longPressing: row.classList.contains('long-pressing'),
+              actionsDisplay: getComputedStyle(row.querySelector('.session-actions')).display,
+            })
+            """
+        )
+        browser.close()
+
+    assert tap_state == {
+        "activeControl": True,
+        "focusVisible": False,
+        "timestampVisibility": "visible",
+        "timestampHasRect": True,
+        "actionsDisplay": "none",
+        "paddingRight": resting_padding_right,
+    }
+    assert tap_state["paddingRight"] != "40px"
+    assert long_press_state == {
+        "menuOpen": True,
+        "longPressing": True,
+        "actionsDisplay": "none",
+    }
+
+
+def test_keyboard_focus_ring_contrast_and_attention_shadow_compose_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar focus contrast browser test")
+
+    appearances = [
+        {"skin": skin, "dark": dark}
+        for skin in _skin_values()
+        for dark in (False, True)
+    ]
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": 420, "height": 240})
+        page.set_content(
+            """
+            <!doctype html>
+            <html>
+              <body>
+                <div class="probe">
+                  <div class="session-item active" data-sid="session-a">
+                    <div class="session-text">
+                      <div class="session-title-row">
+                        <div class="session-title-group">
+                          <button type="button" class="session-title session-open-control" data-sid="session-a">
+                            Visible conversation title
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <span class="focus-color-probe"></span>
+                <span class="warning-color-probe"></span>
+                <span class="error-color-probe"></span>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(
+            content="""
+              body{margin:0;background:var(--bg)}
+              .probe{margin:8px;width:300px}
+              body,.session-item{transition:none!important}
+              .focus-color-probe{background:var(--focus-ring-strong)}
+              .warning-color-probe{background:var(--warning)}
+              .error-color-probe{background:var(--error)}
+            """
+        )
+        page.keyboard.press("Tab")
+        control = page.locator(".session-open-control")
+        assert control.evaluate("el => el.matches(':focus-visible')") is True
+        page.wait_for_timeout(200)
+
+        results = page.evaluate(
+            """
+            appearances => {
+              const html = document.documentElement;
+              const row = document.querySelector('.session-item');
+              const focusProbe = document.querySelector('.focus-color-probe');
+              const warningProbe = document.querySelector('.warning-color-probe');
+              const errorProbe = document.querySelector('.error-color-probe');
+
+              const parseColor = value => {
+                const match = value.match(/rgba?\\(([^)]+)\\)/);
+                if (!match) return null;
+                const parts = match[1].split(',').map(part => Number.parseFloat(part.trim()));
+                return [parts[0], parts[1], parts[2], parts.length > 3 ? parts[3] : 1];
+              };
+              const composite = (front, back) => {
+                const alpha = front[3] + back[3] * (1 - front[3]);
+                if (alpha === 0) return [0, 0, 0, 0];
+                return [
+                  (front[0] * front[3] + back[0] * back[3] * (1 - front[3])) / alpha,
+                  (front[1] * front[3] + back[1] * back[3] * (1 - front[3])) / alpha,
+                  (front[2] * front[3] + back[2] * back[3] * (1 - front[3])) / alpha,
+                  alpha,
+                ];
+              };
+              const effectiveBackground = element => {
+                const layers = [];
+                for (let current = element; current; current = current.parentElement) {
+                  const color = parseColor(getComputedStyle(current).backgroundColor);
+                  if (color) layers.push(color);
+                }
+                let result = [255, 255, 255, 1];
+                for (let index = layers.length - 1; index >= 0; index -= 1) {
+                  result = composite(layers[index], result);
+                }
+                return result;
+              };
+              const channel = value => {
+                const normalized = value / 255;
+                return normalized <= 0.04045
+                  ? normalized / 12.92
+                  : Math.pow((normalized + 0.055) / 1.055, 2.4);
+              };
+              const luminance = color =>
+                0.2126 * channel(color[0]) +
+                0.7152 * channel(color[1]) +
+                0.0722 * channel(color[2]);
+              const contrast = (first, second) => {
+                const a = luminance(first);
+                const b = luminance(second);
+                return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+              };
+              const closeColor = (first, second) =>
+                first && second && first.slice(0, 3).every((value, index) =>
+                  Math.abs(value - second[index]) < 1
+                );
+              const shadowColors = value =>
+                Array.from(value.matchAll(/rgba?\\([^)]+\\)/g), match => parseColor(match[0]));
+
+              return appearances.map(appearance => {
+                html.className = appearance.dark ? 'dark' : '';
+                html.dataset.skin = appearance.skin;
+                row.className = 'session-item active';
+
+                const rowBackground = effectiveBackground(row);
+                const focusColor = parseColor(getComputedStyle(focusProbe).backgroundColor);
+                const focusShadow = getComputedStyle(row).boxShadow;
+                const focusShadowColors = shadowColors(focusShadow);
+                const focusComposite = focusColor
+                  ? composite(focusColor, rowBackground)
+                  : null;
+
+                const states = [
+                  ['needs-attention', warningProbe],
+                  ['attention-clarify', warningProbe],
+                  ['attention-approval', errorProbe],
+                ].map(([state, stateProbe]) => {
+                  row.className = `session-item active ${state}`;
+                  const shadow = getComputedStyle(row).boxShadow;
+                  const colors = shadowColors(shadow);
+                  const stateColor = parseColor(getComputedStyle(stateProbe).backgroundColor);
+                  return {
+                    state,
+                    shadow,
+                    hasFocusColor: colors.some(color => closeColor(color, focusColor)),
+                    hasStateColor: colors.some(color => closeColor(color, stateColor)),
+                    shadowCount: colors.length,
+                  };
+                });
+                row.className = 'session-item active';
+
+                return {
+                  ...appearance,
+                  focusColor,
+                  focusComposite,
+                  rowBackground,
+                  focusShadow,
+                  focusShadowUsesStrongColor: focusShadowColors.some(color =>
+                    closeColor(color, focusColor)
+                  ),
+                  contrast: focusComposite ? contrast(focusComposite, rowBackground) : 0,
+                  states,
+                };
+              });
+            }
+            """,
+            appearances,
+        )
+        browser.close()
+
+    failures = []
+    for result in results:
+        appearance = f"{result['skin']}/{'dark' if result['dark'] else 'light'}"
+        if result["contrast"] < 3:
+            failures.append(
+                f"{appearance}: contrast={result['contrast']:.2f} "
+                f"focus={result['focusColor']} background={result['rowBackground']}"
+            )
+        if not result["focusShadowUsesStrongColor"]:
+            failures.append(f"{appearance}: strong focus color is absent from box-shadow")
+        for state in result["states"]:
+            if state["shadowCount"] < 2:
+                failures.append(f"{appearance}/{state['state']}: shadows did not compose")
+            if not state["hasFocusColor"]:
+                failures.append(f"{appearance}/{state['state']}: focus ring is missing")
+            if not state["hasStateColor"]:
+                failures.append(f"{appearance}/{state['state']}: attention stripe is missing")
+
+    assert not failures, "\n".join(failures)
+
+
+def test_tagged_inline_rename_preserves_input_width_in_narrow_sidebar():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar rename layout browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": 1024, "height": 240})
+        page.set_content(
+            """
+            <!doctype html>
+            <html class="dark">
+              <body>
+                <div class="probe">
+                  <div class="session-item active" data-sid="session-a">
+                    <div class="session-text">
+                      <div class="session-title-row">
+                        <div class="session-title-group">
+                          <input class="session-title-input" value="Visible conversation title">
+                          <span class="session-tag">#alpha</span>
+                          <span class="session-tag">#hyphenated-long-tag</span>
+                          <span class="session-tag">#gamma</span>
+                          <span class="session-tag">#delta</span>
+                        </div>
+                        <span class="session-time">now</span>
+                      </div>
+                    </div>
+                    <div class="session-actions"></div>
+                  </div>
+                </div>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(content="body{margin:0}.probe{margin:8px}")
+
+        rename_input = page.locator(".session-title-input")
+        rename_input.focus()
+        page.wait_for_timeout(100)
+
+        metrics = []
+        for viewport_width, sidebar_width in ((1024, 180), (420, 280)):
+            page.set_viewport_size({"width": viewport_width, "height": 240})
+            page.locator(".probe").evaluate(
+                "(el, width) => { el.style.width = width + 'px'; }", sidebar_width
+            )
+            metrics.append(
+                page.locator(".session-item").evaluate(
+                    """
+                    row => {
+                      const titleRow = row.querySelector('.session-title-row');
+                      const input = row.querySelector('.session-title-input');
+                      const tags = Array.from(row.querySelectorAll('.session-tag'));
+                      return {
+                        inputWidth: input.getBoundingClientRect().width,
+                        rowClientWidth: titleRow.clientWidth,
+                        rowScrollWidth: titleRow.scrollWidth,
+                        tagsHidden: tags.every(tag => getComputedStyle(tag).display === 'none'),
+                      };
+                    }
+                    """
+                )
+            )
+        browser.close()
+
+    for result in metrics:
+        assert result["tagsHidden"] is True
+        assert result["inputWidth"] >= 80
+        assert result["rowScrollWidth"] <= result["rowClientWidth"] + 1
