@@ -379,6 +379,23 @@ Full list of environment variables:
 | `HERMES_WEBUI_VISIBLE_SESSION_LIMIT` | `20` | Size of the sidebar's interactive recency window (how many recent non-cron/webhook sessions are listed). Also bounds how many delegated subagent children can nest at once, since a child only renders when its row wins a slot in the window — raise it for wide fan-outs. Non-integer or non-positive values fall back to the default. Values above 200 are clamped. Resolved before profile init, so a profile `.env` cannot override it |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
 | `HERMES_WEBUI_SESSIONS_MAX` | `100` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction only ever drops clean, persisted, non-active sessions; an evicted session lazily reloads from its JSON sidecar on next access |
+| `HERMES_WEBUI_RUN_JOURNAL_SWEEP` | *(unset)* | Set to `0`/`false`/`off` to disable the run-journal retention sweep entirely (#7613) |
+| `HERMES_WEBUI_RUN_JOURNAL_RETENTION_TTL_DAYS` | `14` | Runs whose journal file is older than N days are **archived** (compressed into `_run_journal_archive/`, not deleted). `0` disables the age cap. Also settable via `run_journal_retention_ttl_days` in `settings.json` (the env var wins) |
+| `HERMES_WEBUI_RUN_JOURNAL_RETENTION_MAX_RUNS_PER_SESSION` | `40` | Keep at most N newest runs live per session; older runs are archived. `0` disables the count cap (`run_journal_retention_max_runs_per_session` in `settings.json`) |
+| `HERMES_WEBUI_RUN_JOURNAL_RETENTION_MAX_BYTES_PER_SESSION` | `268435456` (256 MiB) | Per-session budget for LIVE run-journal bytes; sessions over budget archive their oldest runs. `0` disables the size cap (`run_journal_retention_max_bytes_per_session` in `settings.json`) |
+| `HERMES_WEBUI_RUN_JOURNAL_ARCHIVE_TTL_DAYS` | `0` (keep forever) | **The only destructive knob**: archives older than N days are deleted. `0` (default) never deletes archives — a stock install keeps every archived run forever (`run_journal_archive_ttl_days` in `settings.json`) |
+
+#### Run-journal retention (#7613)
+
+The run journal stores one `{run_id}.jsonl` per run under `sessions/_run_journal/<session_id>/`; nothing removed them, so a long-lived session's journal grew without bound. An hourly sweep (piggybacked on the existing maintenance tick, never on a request path) now **archives** runs past the caps above rather than deleting them:
+
+- eligible runs are compressed (gzip) into `sessions/_run_journal_archive/<session_id>/<run_id>.jsonl.gz` — measured at **5–18% of the original size** on real journals;
+- the compressed copy is verified to decompress to the exact original bytes **before** the live file is dropped;
+- runs that have not provably settled (no complete terminal row — including a journal truncated mid-write) are never touched;
+- every read path (run summaries, event reads, session replay, run lookup) transparently falls back to the archive, so a wrong classification costs one compressed copy, not the run;
+- deleting a session deletes its archives too.
+
+Where `dir_fd` primitives are unavailable (Windows), the sweep disables itself rather than fall back to path-based moves a directory swap could redirect.
 
 Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 

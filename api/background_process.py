@@ -484,6 +484,15 @@ def _reaper_loop() -> None:
                     if s not in _cfg.PENDING_BG_TASK_COMPLETIONS
                 ]:
                     _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
+            # Run-journal archival retention (#7613): archive runs past the age /
+            # count / size caps so an unbounded journal cannot grow forever. The
+            # sweep is hourly and gated inside `maybe_sweep_run_journal` (this
+            # tick fires far more often); it never runs on a request path, and
+            # its first pass is delayed past boot. Errors are swallowed there so
+            # a retention failure can never take the reaper down with it.
+            from api.run_journal import maybe_sweep_run_journal
+
+            maybe_sweep_run_journal()
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)
         # Wait but wake up promptly on stop.

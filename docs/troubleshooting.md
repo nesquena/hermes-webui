@@ -141,6 +141,45 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ---
 
+## Run journal is large / disk keeps filling (#7613)
+
+**Symptom.** `sessions/_run_journal/` grows without bound — hundreds of MB to several GB on installs with long-lived sessions or many long runs. Every run appends one `{run_id}.jsonl` and nothing removes them, so the directory only ever grows.
+
+**What runs now.** An hourly sweep (on the existing maintenance tick, never on a request path) **archives** runs past the retention caps — it does *not* delete them:
+
+```bash
+du -sh ~/.hermes/webui/sessions/_run_journal          # live run files
+du -sh ~/.hermes/webui/sessions/_run_journal_archive  # compressed archives
+```
+
+Archived runs live at `_run_journal_archive/<session_id>/<run_id>.jsonl.gz` and every read path (run status, session reload, replay after reconnect) falls back to them transparently, so recovery still works for archived runs.
+
+**Caps** (env var > `settings.json` > default; `0` disables an individual cap):
+
+| Cap | Default | Meaning |
+| --- | --- | --- |
+| `run_journal_retention_ttl_days` | `14` | Archive runs older than N days |
+| `run_journal_retention_max_runs_per_session` | `40` | Keep at most N newest runs live per session |
+| `run_journal_retention_max_bytes_per_session` | `256 MiB` | Per-session budget for live run-journal bytes |
+| `run_journal_archive_ttl_days` | `0` (never) | **Only destructive knob** — delete archives older than N days |
+
+**Notes.**
+
+- Runs without a complete terminal row (including a journal truncated mid-write) are **never** archived — a crashed run stays in place, readable, exactly as before.
+- An archived run's compressed copy is verified byte-exact before the live file is dropped; a failure at any step leaves the live file untouched (a missed archive is always safe).
+- Deleting a session deletes its archives too.
+- Set `HERMES_WEBUI_RUN_JOURNAL_SWEEP=0` to turn the sweep off entirely.
+- On Windows (no `dir_fd` support) the sweep disables itself; retention is POSIX-only until the move can be made race-safe there.
+- To manually reclaim live journal bytes immediately, run a sweep in-process (the hourly schedule otherwise applies):
+
+  ```bash
+  python3 -c "from api.run_journal import sweep_run_journal; print(sweep_run_journal())"
+  ```
+
+  (Run from the repo root with the same Python/venv the server uses.)
+
+---
+
 ## "Context compression exhausted" after a long-running turn
 
 **Symptom.** A long-running session, often with many tool calls or a small
