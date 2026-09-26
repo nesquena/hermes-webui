@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import posixpath
 import urllib.request
 from urllib.parse import urlparse, urlunparse
 
@@ -65,9 +66,10 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
     """Return a safe browser-only dashboard link URL.
 
     Unlike the server-side probe target, this value is only returned to the
-    browser for navigation.  It may point at a public reverse-proxy hostname, but
-    it still rejects credentials, paths, query strings, fragments, and non-HTTP
-    schemes so it cannot hide secrets or script URLs in config.
+    browser for navigation.  It may point at a public reverse-proxy hostname or
+    sub-path, but it still rejects credentials, query strings, fragments,
+    dot-segment traversal, and non-HTTP schemes so it cannot hide secrets or
+    script URLs in config.
     """
     raw = str(raw_url or "").strip()
     if not raw:
@@ -82,8 +84,13 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
     if parsed.params or parsed.query or parsed.fragment:
         raise ValueError("invalid dashboard URL path")
     path = parsed.path or ""
-    if path not in ("", "/"):
-        raise ValueError("invalid dashboard URL path")
+    if path:
+        if not path.startswith("/") or path.startswith("//") or "//" in path:
+            raise ValueError("invalid dashboard URL path")
+        if "%2f" in path.lower() or "%2e" in path.lower():
+            raise ValueError("invalid dashboard URL path")
+        if path not in ("", "/") and posixpath.normpath(path) != path.rstrip("/"):
+            raise ValueError("invalid dashboard URL path")
     try:
         port = parsed.port
     except ValueError as exc:
@@ -96,7 +103,8 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
         if not (1 <= port <= 65535):
             raise ValueError("invalid dashboard URL port")
         netloc = f"{netloc}:{port}"
-    return urlunparse((parsed.scheme, netloc, "", "", "", ""))
+    clean_path = path if path not in ("", "/") else ""
+    return urlunparse((parsed.scheme, netloc, clean_path, "", "", ""))
 
 
 def _looks_like_official_dashboard(payload: object) -> bool:

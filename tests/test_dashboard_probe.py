@@ -218,10 +218,58 @@ def test_dashboard_config_roundtrip_writes_profile_config_yaml(tmp_path, monkeyp
     assert saved == {"enabled": "always", "url": "https://dashboard.example.test"}
     assert get_dashboard_config() == {"enabled": "always", "url": "https://dashboard.example.test"}
 
-    for unsafe_url in ("https://example.com/path", "https://user:pass@example.com", "javascript:alert(1)"):
+    saved = save_dashboard_config({"enabled": "always", "url": "https://dashboard.example.test/sub/dashboard"})
+    assert saved == {"enabled": "always", "url": "https://dashboard.example.test/sub/dashboard"}
+    assert get_dashboard_config() == {"enabled": "always", "url": "https://dashboard.example.test/sub/dashboard"}
+
+    for unsafe_url in (
+        "https://example.com/../path",
+        "https://example.com/%2e%2e/path",
+        "https://example.com/foo%2fbar",
+        "https://example.com//evil.com",
+        "https://user:pass@example.com",
+        "javascript:alert(1)",
+        "https://example.com?query=1",
+        "https://example.com#fragment",
+    ):
         try:
             save_dashboard_config({"enabled": "auto", "url": unsafe_url})
         except ValueError:
             pass
         else:
             raise AssertionError(f"unsafe dashboard URL must be rejected: {unsafe_url}")
+
+
+def test_normalize_dashboard_browser_url_subpaths():
+    import pytest
+    from api.dashboard_probe import normalize_dashboard_browser_url
+
+    # Clean sub-paths are accepted and preserved
+    assert normalize_dashboard_browser_url("https://hermes.example.com/dashboard") == "https://hermes.example.com/dashboard"
+    assert normalize_dashboard_browser_url("https://hermes.example.com/dashboard/") == "https://hermes.example.com/dashboard/"
+    assert normalize_dashboard_browser_url("https://hermes.example.com/nested/sub/path") == "https://hermes.example.com/nested/sub/path"
+    assert normalize_dashboard_browser_url("http://127.0.0.1:9119/my-dashboard") == "http://127.0.0.1:9119/my-dashboard"
+    assert normalize_dashboard_browser_url("https://[2001:db8::1]:8443/dashboard") == "https://[2001:db8::1]:8443/dashboard"
+
+    # Root paths normalize to empty path
+    assert normalize_dashboard_browser_url("https://hermes.example.com") == "https://hermes.example.com"
+    assert normalize_dashboard_browser_url("https://hermes.example.com/") == "https://hermes.example.com"
+
+    # Dot segments, path traversal, encoded slashes/dots, and double slashes are rejected
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/../dashboard")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/dashboard/..")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/dashboard/../admin")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/dashboard/./test")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/dashboard//test")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/%2e%2e/dashboard")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/foo%2fbar")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com//evil.com")
+
