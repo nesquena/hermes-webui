@@ -3243,6 +3243,61 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
         logger.debug("Failed to reset streaming Hermes home override", exc_info=True)
 
 
+def _resolve_streaming_terminal_scope_module():
+    """Resolve tools.terminal_scope from the installed agent, if present."""
+    try:
+        import tools.terminal_scope as _ts
+        if hasattr(_ts, "install_profile_terminal_scope") and hasattr(_ts, "reset_terminal_scope"):
+            return _ts
+    except Exception:
+        pass
+    return None
+
+
+def _set_streaming_terminal_scope(profile_home: str):
+    """Install the turn's profile terminal policy as context-local state.
+
+    The runtime env export below applies each profile's TERMINAL_* settings via
+    the process-global os.environ for this turn's duration. Two concurrent
+    turns on different profiles therefore interleave their environ writes: a
+    turn whose profile pins a non-local backend (docker/ssh/...) can have its
+    terminal/file tool calls resolve the SIBLING profile's backend from the
+    shared environ mid-turn (scope-aware readers fall back to os.environ when
+    no per-turn scope is bound). Binding the profile's complete terminal
+    policy via install_profile_terminal_scope() makes terminal_env() and the
+    environment-selection path resolve THIS turn's policy from task-local
+    context, immune to the sibling environ writes — mirroring the
+    Hermes-home override above for the terminal/file side.
+    Returns ``(module, token, installed)``; never raises.
+    """
+    if not profile_home:
+        return None, None, False
+
+    _scope_mod = _resolve_streaming_terminal_scope_module()
+    if _scope_mod is None:
+        return None, None, False
+
+    try:
+        _token = _scope_mod.install_profile_terminal_scope(profile_home)
+        return _scope_mod, _token, True
+    except Exception:
+        logger.debug(
+            "Failed to set streaming terminal scope; continuing with os.environ mirror",
+            exc_info=True,
+        )
+        return None, None, False
+
+
+def _reset_streaming_terminal_scope(scope_mod, scope_token, scope_installed: bool) -> None:
+    """Reset the context-local terminal scope if it was installed."""
+    if scope_mod is None or not scope_installed:
+        return
+    try:
+        scope_mod.reset_terminal_scope(scope_token)
+    except Exception:
+        logger.debug("Failed to reset streaming terminal scope", exc_info=True)
+
+
 # ── Per-turn session identity (xsession wakeup misroute root fix — Option 1) ─
 # WebUI bound per-turn session identity ONLY to the process-global
 # os.environ['HERMES_SESSION_KEY'] (turn-start, line ~3263) and released the
@@ -10249,6 +10304,7 @@ def _run_agent_streaming(
     _streaming_cron_profile_home_token = None
     _turn_pending_source = 'webui'
     _streaming_hermes_home_override_ctx = (None, None, False)
+    _streaming_terminal_scope_ctx = (None, None, False)
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
@@ -10479,6 +10535,7 @@ def _run_agent_streaming(
             _profile_home,
         )
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
+        _streaming_terminal_scope_ctx = _set_streaming_terminal_scope(_profile_home)
         _set_thread_env(**_thread_env)
         # process_complete agent-wakeup wiring (ours-original, Option B): bind
         # this session's HERMES_SESSION_KEY to its WebUI session_id so the
@@ -14220,6 +14277,7 @@ def _run_agent_streaming(
             _SKILL_HOME_MODULE_PATCH_LOCK.release()
             _acquired_streaming_skill_home_patch_lock = False
         _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
+        _reset_streaming_terminal_scope(*_streaming_terminal_scope_ctx)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
         # every exit path so a reused thread-pool worker leaks no identity and
