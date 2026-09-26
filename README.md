@@ -224,6 +224,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
+- Large CLI and external conversations open with a bounded message page. Markdown export (including the toolbar download) fetches complete history separately without replacing the visible chat or interrupting a live stream. If complete history cannot be fetched, no partial transcript is downloaded; retry the export after the connection recovers.
 - Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls
 - Sessions persist across page reloads and SSH tunnel reconnects
 - Browser tab title reflects the active session name
@@ -235,6 +236,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Breadcrumb navigation with clickable path segments
 - Preview text, code, Markdown (rendered), and images inline
 - Chat links using `workspace://path/to/file` open files in the right-side preview pane
+- The **Artifacts** tab loads files from the complete conversation history on demand, including older and middle-of-history files, and merges newly created live files. A loading notice and an ellipsis on the count indicate an incomplete inventory. On failure, the visible files remain available with an explicit error and **Retry** button; a complete count appears only after history loads successfully.
 - Edit, create, delete, and rename files; create folders
 - Binary file download (auto-detected from server)
 - File preview auto-closes on directory navigation (with unsaved-edit guard)
