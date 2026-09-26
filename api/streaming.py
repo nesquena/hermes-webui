@@ -11483,6 +11483,7 @@ def _run_agent_streaming(
                     resolved_model,
                     provider_id=resolved_provider,
                     base_url=resolved_base_url,
+                    config_data=_cfg,
                 )
                 _reasoning_config = parse_reasoning_effort(_effort)
             except Exception:

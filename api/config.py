@@ -1292,6 +1292,14 @@ _PROVIDER_ALIASES = {
     "nemotron": "nvidia",
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
+    # Vercel AI Gateway is a registered production provider in the installed
+    # Agent (hermes_cli PROVIDER_REGISTRY canonical ``ai-gateway``); mirror
+    # its alias family so standalone WebUI installs resolve every documented
+    # spelling to the same recognized reasoning lane. (#6018 gate 2026-08-13)
+    "vercel": "ai-gateway",
+    "vercel-ai-gateway": "ai-gateway",
+    "ai_gateway": "ai-gateway",
+    "aigateway": "ai-gateway",
     # Legacy alias — earlier WebUI builds wrote ``provider: local`` for unknown
     # loopback endpoints, but ``local`` is not registered in
     # ``hermes_cli.auth.PROVIDER_REGISTRY``. Routing it through ``custom``
@@ -1351,6 +1359,10 @@ def _resolve_provider_alias(name: str) -> str:
             return _agent_aliases[raw]
     except Exception:
         pass
+    # Keep Agent-owned Azure Foundry aliases available in standalone WebUI
+    # installs where hermes_cli is intentionally absent (including CI).
+    if raw in {"azure", "azure-ai-foundry", "azure-ai"}:
+        return "azure-foundry"
     return _PROVIDER_ALIASES.get(raw, name)
 
 
@@ -4954,7 +4966,9 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # importing from the agent tree (which may not be installed).  Any drift here
 # will show up in the shared test suite since both sides accept the same set.
 # Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+VALID_REASONING_EFFORTS = (
+    "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+)
 
 
 def parse_reasoning_effort(effort):
@@ -5265,28 +5279,13 @@ def _zai_glm_thinking_toggle_supported(model_id: str, provider_id: str) -> bool 
     return cls in {"effort", "thinking"}
 
 
-_OPENAI_FAMILY_REASONING_PROVIDERS = frozenset({
-    "openai-codex", "openai", "openai-api",
-    "azure-foundry", "azure-openai", "azure",
-})
-
-_GPT_5_6_REASONING_MODELS = frozenset({
-    "gpt-5.6",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-})
-
-
-def _is_gpt_5_6_reasoning_model(bare_model: str) -> bool:
-    """Return whether an OpenAI-family model uses GPT-5.6's max ladder."""
-    return str(bare_model or "").strip().lower() in _GPT_5_6_REASONING_MODELS
-
-
 def _filter_reasoning_efforts_for_provider(
     efforts: list[str],
     model_id: str,
     provider_id: str,
+    *,
+    config_data: dict | None = None,
+    capability_confirmed: bool = False,
 ) -> list[str]:
     """Apply provider/model quirks to otherwise valid reasoning effort levels."""
     normalized = [
@@ -5296,40 +5295,123 @@ def _filter_reasoning_efforts_for_provider(
     ]
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
-    bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
-    # OpenAI-family lanes cap pre-GPT-5.6 GPT-5 models at xhigh and o-series at
-    # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max.
-    if provider in _OPENAI_FAMILY_REASONING_PROVIDERS:
-        if bare.startswith(("o1", "o3", "o4")):
-            return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(bare):
-            return [eff for eff in normalized if eff != "max"]
-    # Providers whose native ladder tops out below 'max' must NOT advertise it,
-    # otherwise a stored/CLI 'max' degrades WORSE than the
-    # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
-    # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
-    # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
+    bare = _strip_provider_hint_for_reasoning(model_id, provider).lower().rsplit("/", 1)[-1]
+    # Model-scoped hard ceilings follow the MODEL across every serving lane —
+    # direct OpenAI-family providers, aggregators (OpenRouter/Nous), Copilot,
+    # and custom gateways alike. Older GPT-5 generations reject the generic
+    # max/ultra tiers and o-series models reject anything above ``high`` no
+    # matter which route delivers them; GPT-5.6 is the only GPT-5 generation
+    # exposing max/ultra. Hermes Agent normalizes Codex's product-level
+    # ``ultra`` to the Responses API wire value ``max``. (#6018)
+    if bare.startswith(("o1", "o3", "o4")):
+        return [eff for eff in normalized if eff in {"low", "medium", "high"}]
+    if bare.startswith("gpt-5") and not _is_gpt_5_6_family(bare):
+        return [eff for eff in normalized if eff not in {"max", "ultra"}]
+    # First-party GPT-5.6 lookalikes must not regain a top tier merely because
+    # their authoritative capability result is empty. Keep genuinely unknown
+    # custom/future models on the historical preserve-verbatim path.
+    if (
+        provider in {
+            "openai-codex", "openai", "openai-api",
+            "azure-openai", "azure-foundry",
+        }
+        and "gpt-5.6" in bare
+        and not _is_gpt_5_6_family(bare)
+    ):
+        return [eff for eff in normalized if eff not in {"max", "ultra"}]
+
+    # Generic top tiers must not be advertised to providers whose native ladder
+    # tops out lower; the downgrade ladder then lands on xhigh/high safely.
     if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
-        return [eff for eff in normalized if eff != "max"]
-    # Legacy Claude is pre-adaptive whether served natively OR via Azure Foundry /
-    # Bedrock / Vertex — the ceiling follows the MODEL, not just the provider name.
-    _anthropic_lanes = {
-        "anthropic", "claude", "anthropic-claude",
-        "azure-foundry", "azure-openai", "azure", "bedrock", "aws-bedrock",
-        "vertex", "google-vertex",
-    }
-    if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
-        return [eff for eff in normalized if eff != "max"]
+        return [eff for eff in normalized if eff not in {"max", "ultra"}]
+    # Legacy Claude is pre-adaptive whether served natively, via cloud hosts
+    # (Azure Foundry / Bedrock / Vertex), OR through aggregator/routed lanes
+    # (OpenRouter, Nous, AI Gateway, custom gateways). The ceiling follows the
+    # MODEL across every serving lane — no provider gate, exactly like the
+    # older-GPT-5 and o-series ceilings above. (#6018 gate 2026-08-13)
+    if "claude" in bare and _is_pre_adaptive_anthropic(bare):
+        return [eff for eff in normalized if eff not in {"max", "ultra"}]
+    # Vercel AI Gateway forwards the reasoning config to the routed model, so
+    # adaptive Claude keeps ``max``; the Codex product-only ``ultra`` tier does
+    # not exist on that wire and must map down to ``max`` instead of leaking
+    # through. (#6018 gate 2026-08-13)
+    if provider == "ai-gateway":
+        return [eff for eff in normalized if eff != "ultra"]
     # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
     # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
     # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
     zai_supports = _zai_glm_reasoning_efforts_supported(model_id, provider_id)
     if zai_supports is True:
-        return normalized
+        # Z.AI documents ``max`` as the top GLM-5.2 reasoning_effort value; the
+        # Codex product-only ``ultra`` tier must not leak into its native ladder.
+        return [eff for eff in normalized if eff != "ultra"]
     if zai_supports is False:
         return []
+    # Installed Agent provider plugins that clamp onto a declared wire ladder
+    # (DeepInfra, Ollama Cloud, Meta AI, profile-declared ladders): levels
+    # above the ladder's top are not sendable, so strip them unless the
+    # operator explicitly allowlisted them. ``ultra`` is left to the
+    # model-scoped default-deny below (the Agent maps it to ``max``).
+    agent_ladder = _agent_provider_reasoning_ladder(provider_id, model_id)
+    if agent_ladder is not None:
+        if not agent_ladder:
+            return []
+        ranks = [
+            VALID_REASONING_EFFORTS.index(eff)
+            for eff in agent_ladder
+            if eff in VALID_REASONING_EFFORTS
+        ]
+        if ranks:
+            top = max(ranks)
+            ladder_allow = set(_configured_model_reasoning_efforts(
+                provider, model_id, config_data=config_data
+            ))
+            ladder_allow.update(_provider_configured_reasoning_efforts(
+                provider, config_data=config_data
+            ))
+            normalized = [
+                eff for eff in normalized
+                if eff == "ultra"
+                or VALID_REASONING_EFFORTS.index(eff) <= top
+                or eff in ladder_allow
+            ]
+    # ULTRA default-deny, model-scoped (gate 2026-09-09): ``ultra`` is the
+    # GPT-5.6 product tier. It survives ONLY for the GPT-5.6 family (every
+    # other model ceiling above has already fired) or when the operator
+    # explicitly allowlists it. Adaptive Claude — native, Bedrock, Azure
+    # Foundry, aggregators — plus DeepSeek, Grok, MiniMax and every other
+    # recognized family keep ``max`` as their wire ceiling and see ``ultra``
+    # stripped; coercion then degrades ultra down to ``max``. The
+    # unconditional ai-gateway strip above already mapped its ultra down, and
+    # ``max`` behavior everywhere is untouched. (#6018 gate 2026-09-09)
+    if "ultra" in normalized and not _is_gpt_5_6_family(bare):
+        operator_allow = set(_configured_model_reasoning_efforts(
+            provider, model_id, config_data=config_data
+        ))
+        operator_allow.update(_provider_configured_reasoning_efforts(
+            provider, config_data=config_data
+        ))
+        if "ultra" not in operator_allow:
+            normalized = [eff for eff in normalized if eff != "ultra"]
+    # DEFAULT-DENY for custom/unrecognized providers: their native effort
+    # ladders are unknown, so the supra-ceiling max/ultra tiers must not leak
+    # through heuristic or metadata fallbacks — unless the operator explicitly
+    # authorized them via a provider ``reasoning_efforts`` allowlist. An empty
+    # provider id skips this gate: the caller simply didn't name a provider,
+    # which is not the same as naming one we don't recognize. (#6018)
+    if provider and not capability_confirmed and not _provider_known_reasoning_capable(provider, model_id):
+        # The model-scoped allowlist is the most specific operator authority.
+        allow = set(_configured_model_reasoning_efforts(
+            provider, model_id, config_data=config_data
+        ))
+        allow.update(_provider_configured_reasoning_efforts(
+            provider, config_data=config_data
+        ))
+        normalized = [
+            eff for eff in normalized
+            if eff not in {"max", "ultra"} or eff in allow
+        ]
     return normalized
-
 
 _KNOWN_REASONING_PROVIDERS = frozenset({
     "anthropic", "claude", "anthropic-claude",
@@ -5338,20 +5420,164 @@ _KNOWN_REASONING_PROVIDERS = frozenset({
     "bedrock", "aws-bedrock", "vertex", "google-vertex",
     "gemini", "google", "google-gemini",
     "deepseek", "x-ai", "xai", "grok",
-    "copilot", "github-copilot", "openrouter",
+    # OpenRouter and the Nous Portal are recognized aggregators: model-scoped
+    # ceilings above still cap what each routed model can accept. (#6018)
+    "copilot", "github-copilot", "openrouter", "nous",
+    # Vercel AI Gateway is a registered production provider that forwards the
+    # reasoning config to the routed model (canonical slug ``ai-gateway``;
+    # aliases vercel / vercel-ai-gateway / ai_gateway / aigateway all resolve
+    # to it). Recognizing it keeps adaptive Claude ``max`` intact while the
+    # filter above maps the Codex-only ``ultra`` down to ``max``. (#6018)
+    "ai-gateway",
+    # First-class WebUI catalog providers are RECOGNIZED lanes, not custom /
+    # unknown gateways — the max/ultra default-deny must not strip them.
+    # (Canonical post-alias slugs; e.g. xai-oauth is the xAI Grok OAuth lane.)
+    "xai-oauth", "zai", "kimi-coding", "minimax", "minimax-cn",
+    "opencode-zen", "opencode-go", "mistralai", "alibaba",
+    "nvidia", "xiaomi", "actual",
 })
 
 
-def _provider_known_reasoning_capable(provider_id) -> bool:
+# Installed Hermes Agent provider plugins that clamp ``reasoning_effort`` onto a
+# declared wire ladder (``agent.reasoning_effort`` constants) although the
+# Agent's models.dev table has no mapping for them, so capability metadata
+# always misses. Each entry names the Agent constant (read live when the Agent
+# is importable) and a static mirror for standalone WebUI installs. A ladder
+# containing ``max`` makes the lane recognized for ``max``; a lower ladder is a
+# hard ceiling. ``ultra`` stays subject to the model-scoped default-deny.
+_AGENT_PROVIDER_REASONING_LADDERS: dict[str, tuple[str, tuple[str, ...]]] = {
+    # plugins/model-providers/deepinfra: clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
+    "deepinfra": (
+        "OPENAI_COMPAT_WIRE_EFFORTS",
+        ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+    ),
+    # plugins/model-providers/ollama-cloud: OLLAMA_CLOUD_EFFORTS (+ xhigh→max)
+    "ollama-cloud": (
+        "OLLAMA_CLOUD_EFFORTS",
+        ("none", "low", "medium", "high", "max"),
+    ),
+    # plugins/model-providers/meta-ai: Muse tops out at xhigh.
+    "meta-ai": (
+        "META_AI_EFFORTS",
+        ("minimal", "low", "medium", "high", "xhigh"),
+    ),
+}
+# Agent plugin aliases for the lanes above, for installs without the Agent's
+# provider registry (the registry resolves them itself when importable).
+_AGENT_PROVIDER_REASONING_ALIASES = {
+    "deep-infra": "deepinfra",
+    "deepinfra-ai": "deepinfra",
+    "ollama_cloud": "ollama-cloud",
+    "muse": "meta-ai",
+    "muse-spark": "meta-ai",
+}
+
+
+def _agent_provider_reasoning_ladder(provider_id, model_id: str = "") -> tuple[str, ...] | None:
+    """Wire ladder the installed Agent's provider plugin clamps efforts onto.
+
+    Derived from the Agent provider registry when importable: the registry
+    canonicalizes plugin aliases, and a profile's declared
+    ``supported_reasoning_efforts(model)`` hook is authoritative. The generic
+    ``custom`` profile (and every ``custom:*`` route it serves) is excluded —
+    it accepts any vocabulary, which proves nothing about the real endpoint, so
+    unknown/custom lanes keep the top-tier default-deny. Falls back to the
+    static table above only for ``None`` (unknown); ``()`` authoritatively
+    means that the model accepts no reasoning parameter.
+    """
+    raw = str(provider_id or "").strip().lower()
+    if not raw or raw == "custom" or raw.startswith("custom:"):
+        return None
+    canonical = _AGENT_PROVIDER_REASONING_ALIASES.get(raw) or _resolve_provider_alias(raw)
+    canonical = _AGENT_PROVIDER_REASONING_ALIASES.get(canonical, canonical)
+    declared = None
+    try:
+        from providers import get_provider_profile  # Hermes Agent registry
+
+        profile = get_provider_profile(raw) or get_provider_profile(canonical)
+    except Exception:
+        profile = None
+    if profile is not None:
+        name = str(getattr(profile, "name", "") or "").strip().lower()
+        if name == "custom":
+            return None
+        if name:
+            canonical = name
+        try:
+            declared = profile.supported_reasoning_efforts(model_id or None)
+        except Exception:
+            declared = None
+    if declared is not None:
+        return tuple(str(x).strip().lower() for x in declared)
+    entry = _AGENT_PROVIDER_REASONING_LADDERS.get(canonical)
+    if entry is None:
+        return None
+    const_name, fallback = entry
+    try:
+        import agent.reasoning_effort as _agent_re
+
+        live = getattr(_agent_re, const_name, None)
+        if live:
+            return tuple(str(x).strip().lower() for x in live)
+    except Exception:
+        pass
+    return fallback
+
+
+def _provider_known_reasoning_capable(provider_id, model_id: str = "") -> bool:
     """True if the provider is one we recognize as reasoning-capable.
 
-    Used to gate the 'max' default-deny: for a RECOGNIZED provider whose specific
-    model we couldn't resolve (empty capability list), preserve 'max' since those
-    providers genuinely support it; for a truly unknown/custom provider, degrade
-    'max' -> 'xhigh' so we never send a supra-ceiling level that would 400.
+    Used to gate the top-tier default-deny: for a RECOGNIZED provider whose
+    specific model we couldn't resolve (empty capability list), preserve
+    ``max``/``ultra``; for a truly unknown/custom provider, degrade either to
+    ``xhigh`` so we never send a supra-ceiling level that would 400.
+
+    Installed Agent provider plugins with a declared reasoning wire ladder
+    (e.g. DeepInfra, whose models.dev metadata always misses) are recognized
+    too; a ladder below ``max`` is enforced as a ceiling by the filter.
     """
     prov = _resolve_provider_alias(str(provider_id or "").strip().lower())
-    return prov in _KNOWN_REASONING_PROVIDERS
+    if prov in _KNOWN_REASONING_PROVIDERS:
+        return True
+    return bool(_agent_provider_reasoning_ladder(provider_id, model_id))
+
+def _provider_configured_reasoning_efforts(
+    provider_id: str,
+    *,
+    config_data: dict | None = None,
+) -> list[str]:
+    """Return the explicitly configured reasoning_efforts allowlist for *provider_id*.
+
+    Reads ``providers.<name>.reasoning_efforts`` or the matching named
+    ``custom_providers[]`` entry. Only valid levels (plus the ``none`` sentinel)
+    survive, lowercased, in configured order; [] when nothing valid is set.
+    This is the operator's explicit authorization consulted by the
+    default-deny top-tier gate in _filter_reasoning_efforts_for_provider.
+    """
+    provider = str(provider_id or "").strip().lower()
+    if not provider:
+        return []
+    source = config_data if isinstance(config_data, dict) else cfg
+    entries = None
+    try:
+        if provider.startswith("custom:"):
+            for entry in _custom_provider_entries(source):
+                if _custom_provider_slug_from_name(entry.get("name")) == provider:
+                    entries = entry.get("reasoning_efforts")
+                    break
+        else:
+            prov_entry = (source.get("providers") or {}).get(provider, {})
+            if isinstance(prov_entry, dict):
+                entries = prov_entry.get("reasoning_efforts")
+    except Exception:
+        return []
+    if not isinstance(entries, list):
+        return []
+    return [
+        str(x).strip().lower()
+        for x in entries
+        if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}
+    ]
 
 
 def _is_pre_adaptive_anthropic(bare_model: str) -> bool:
@@ -5407,7 +5633,8 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         if bare.startswith(("gpt-5", "o1", "o3", "o4")):
             if bare.startswith(("o1", "o3", "o4")):
                 return ["low", "medium", "high"]
-            return list(VALID_REASONING_EFFORTS)
+            # Mirror Hermes Agent's static no-catalog Copilot GPT-5 ceiling.
+            return ["minimal", "low", "medium", "high"]
     prefixes = (
         "deepseek/",
         "anthropic/",
@@ -5419,20 +5646,35 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         "tencent/hy3-preview",
         "xiaomi/",
     )
+    # The fallback branches here return the expanded global effort list when
+    # capability metadata is unavailable. They MUST route through
+    # _filter_reasoning_efforts_for_provider so the GPT-5.6 model check, the
+    # provider ceilings, and the unknown-provider max/ultra default-deny still
+    # apply — otherwise unsupported models get offered ultra. (#6018)
     if any(model.startswith(prefix) for prefix in prefixes):
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(VALID_REASONING_EFFORTS), model, provider
+        )
     if _nested_gateway_route_reasoning(model):
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(VALID_REASONING_EFFORTS), model, provider
+        )
     # Named custom providers often rewrite model ids with dots, underscores, or
     # extra vendor namespaces. Normalize those shapes before applying family-level
     # reasoning heuristics so "deepseek.v3.2", "deepseek_v4_flash", and
     # "vendor.deepseek.v3.2" are treated consistently.
     if any(_candidate_supports_reasoning(candidate) for candidate in _reasoning_name_candidates(bare)):
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(VALID_REASONING_EFFORTS), model, provider
+        )
     return []
 
 
-def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] | None:
+def _models_dev_reasoning_efforts(
+    model_id: str,
+    provider_id: str,
+    config_data: dict | None = None,
+) -> list[str] | None:
     """Return reasoning efforts from Hermes Agent model metadata when known.
 
     ``None`` means the metadata source is unavailable or has no answer, so the
@@ -5458,8 +5700,14 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
 
     supports_reasoning = getattr(capabilities, "supports_reasoning", None)
     if supports_reasoning is True:
+        # models.dev's boolean proves only that reasoning exists; it does not
+        # declare a wire vocabulary or authorize provider-specific top tiers.
+        # Keep unknown-provider max/ultra default-deny active.
         return _filter_reasoning_efforts_for_provider(
-            list(VALID_REASONING_EFFORTS), model, provider
+            list(VALID_REASONING_EFFORTS),
+            model,
+            provider,
+            config_data=config_data,
         )
     if supports_reasoning is False:
         return []
@@ -5646,34 +5894,97 @@ def _lmstudio_model_reasoning_options(
         )
 
 
+def _resolve_reasoning_context(
+    model_id: str | None,
+    provider_id: str | None,
+    base_url: str | None,
+    *,
+    config_data: dict | None = None,
+) -> tuple[str, str, str | None]:
+    """Canonicalize the model routing tuple used by reasoning capability gates."""
+    model = str(model_id or "").strip()
+    provider = str(provider_id or "").strip().lower()
+    resolved_base_url = str(base_url or "").strip() or None
+    source = config_data if isinstance(config_data, dict) else None
+    if model and not provider and source is not None:
+        parsed = _parse_provider_qualified_model_id(model)
+        if parsed:
+            model, provider = parsed
+        else:
+            model_cfg = source.get("model")
+            if isinstance(model_cfg, dict):
+                provider = str(model_cfg.get("provider") or "").strip().lower()
+        providers_cfg = source.get("providers")
+        provider_cfg = (
+            providers_cfg.get(provider)
+            if isinstance(providers_cfg, dict) and provider
+            else None
+        )
+        if resolved_base_url is None and isinstance(provider_cfg, dict):
+            resolved_base_url = str(provider_cfg.get("base_url") or "").strip() or None
+        if resolved_base_url is None:
+            model_cfg = source.get("model")
+            if isinstance(model_cfg, dict):
+                resolved_base_url = str(model_cfg.get("base_url") or "").strip() or None
+    if model and not provider:
+        try:
+            resolved_model, resolved_provider, inferred_base_url = resolve_model_provider(model)
+            model = str(resolved_model or model).strip()
+            provider = str(resolved_provider or "").strip().lower()
+            if resolved_base_url is None:
+                resolved_base_url = str(inferred_base_url or "").strip() or None
+        except Exception:
+            source = config_data if isinstance(config_data, dict) else cfg
+            model_cfg = source.get("model")
+            if isinstance(model_cfg, dict):
+                provider = str(model_cfg.get("provider") or "").strip().lower()
+    return model, _resolve_provider_alias(provider), resolved_base_url
+
+
+def _is_gpt_5_6_family(model_id: str | None) -> bool:
+    """Match GPT-5.6 and its variants without accepting lookalike versions."""
+    bare = str(model_id or "").strip().lower().rsplit("/", 1)[-1]
+    return re.match(r"^gpt-5\.6(?:$|[-_:])", bare) is not None
+
+
 def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
     Always passes the sourced list through _filter_reasoning_efforts_for_provider
-    so the hard provider ceilings (OpenAI-family GPT-5 before 5.6 at xhigh and
-    o-series at high; Gemini + pre-adaptive/cloud-hosted Claude at xhigh) are
-    applied uniformly. The UI dropdown and coercion therefore agree: ``max`` is
-    retained for GPT-5.6 and other models whose native ladder includes it, and
-    stripped where it would be rejected or mishandled.
+    so hard provider/model ceilings are applied uniformly. Older OpenAI-family
+    GPT-5 models cap at xhigh, GPT-5.6 exposes max/ultra, and Gemini plus
+    pre-adaptive/cloud-hosted Claude cap below the generic top tiers. The UI
+    dropdown and streaming coercion therefore agree on every offered level.
     """
-    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    model, provider, resolved_base_url = _resolve_reasoning_context(
+        model_id, provider_id, base_url, config_data=config_data
+    )
+    raw = _resolve_model_reasoning_efforts_impl(
+        model, provider, resolved_base_url, config_data=config_data
+    )
     if not raw:
         return raw
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
     # disabled, so the 'none' sentinel must NOT appear in their supported list —
     # otherwise the UI offers an "off" option that has no effect and contradicts
     # the forced-tier contract. (#6219 round-3)
-    if _zai_glm_classification(model_id, provider_id) == "forced":
+    if _zai_glm_classification(model, provider) == "forced":
         return []
     # Preserve any explicit 'none' sentinel (valid UI option = "no reasoning");
     # the ceiling filter only knows the reasoning LEVELS.
     had_none = "none" in raw
     filtered = _filter_reasoning_efforts_for_provider(
-        [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
+        [e for e in raw if e != "none"],
+        model,
+        provider,
+        config_data=config_data,
+        capability_confirmed="max" in raw,
     )
     if had_none:
         # Keep 'none' in its original leading position if it was there.
@@ -5708,10 +6019,47 @@ def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
     return configured_lists
 
 
+def _configured_model_reasoning_efforts(
+    provider_id: str,
+    model_id: str,
+    *,
+    config_data: dict | None = None,
+) -> list[str]:
+    """Return the explicit model-level effort allowlist for a provider route."""
+    provider = str(provider_id or "").strip().lower()
+    model = _strip_provider_hint_for_reasoning(model_id, provider)
+    source = config_data if isinstance(config_data, dict) else cfg
+    provider_entry = None
+    try:
+        if provider.startswith("custom:"):
+            provider_entry = next(
+                (
+                    entry for entry in _custom_provider_entries(source)
+                    if _custom_provider_slug_from_name(entry.get("name")) == provider
+                ),
+                None,
+            )
+        else:
+            candidate = (source.get("providers") or {}).get(provider)
+            provider_entry = candidate if isinstance(candidate, dict) else None
+    except Exception:
+        return []
+    configured = _configured_reasoning_effort_lists(provider_entry, model)
+    if not configured or not isinstance(configured[0], list):
+        return []
+    return [
+        str(level).strip().lower()
+        for level in configured[0]
+        if str(level).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}
+    ]
+
+
 def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none."""
     model = str(model_id or "").strip()
@@ -5724,7 +6072,10 @@ def _resolve_model_reasoning_efforts_impl(
         try:
             _, provider, resolved_base_url = resolve_model_provider(model)
         except Exception:
-            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+            source = config_data if isinstance(config_data, dict) else cfg
+            model_cfg = source.get("model")
+            if isinstance(model_cfg, dict):
+                provider = str(model_cfg.get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
 
@@ -5745,17 +6096,18 @@ def _resolve_model_reasoning_efforts_impl(
     # precedence over its provider-level reasoning_efforts list. Explicit valid
     # config is authoritative — no heuristics or models.dev lookup. Invalid or
     # empty model metadata falls through to the provider list, then heuristics.
+    source = config_data if isinstance(config_data, dict) else cfg
     _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
-            for _entry in _custom_provider_entries():
+            for _entry in _custom_provider_entries(source):
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = (source.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model
@@ -5769,6 +6121,19 @@ def _resolve_model_reasoning_efforts_impl(
                     return _filtered
     except Exception:
         pass
+    # 0. Provider config: providers.<name>.reasoning_efforts or named
+    # custom_providers[].reasoning_efforts. When the user has explicitly listed
+    # valid efforts for a provider, return that list directly — no heuristics,
+    # no models.dev lookup.
+    # Only short-circuits when the filtered list is non-empty; an all-invalid
+    # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
+    _re_list = _provider_configured_reasoning_efforts(
+        provider, config_data=config_data
+    )
+    if _re_list:
+        _filtered = list(dict.fromkeys(_re_list))
+        if _filtered:
+            return _filtered
 
     if provider in {"copilot", "github-copilot"}:
         try:
@@ -5815,7 +6180,21 @@ def _resolve_model_reasoning_efforts_impl(
     # _models_dev_reasoning_efforts already applies the provider/model filter
     # internally, so it is returned as-is here (filtering again would be
     # redundant — the filter is idempotent but the double pass obscures flow).
-    metadata_efforts = _models_dev_reasoning_efforts(hinted_model, provider)
+    # GPT-5.6 top-tier support is a first-party transport contract. A stale or
+    # negative registry answer must not erase it after explicit config has had
+    # its higher precedence above.
+    if provider in {
+        "openai-codex", "openai", "openai-api", "azure", "azure-openai",
+        "azure-foundry",
+    }:
+        if _is_gpt_5_6_family(hinted_model):
+            return _filter_reasoning_efforts_for_provider(
+                list(VALID_REASONING_EFFORTS), hinted_model, provider
+            )
+
+    metadata_efforts = _models_dev_reasoning_efforts(
+        hinted_model, provider, config_data
+    )
     if metadata_efforts is not None:
         return metadata_efforts
 
@@ -5827,46 +6206,72 @@ def coerce_reasoning_effort_for_model(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> str:
     """Return the closest supported effort for the target model/provider."""
     raw = str(effort or "").strip().lower()
     if not raw:
+        return ""
+    model, provider, resolved_base_url = _resolve_reasoning_context(
+        model_id, provider_id, base_url, config_data=config_data
+    )
+    # ProviderProfile.supported_reasoning_efforts() is tri-state. An empty
+    # tuple is a positive declaration that this model accepts no reasoning
+    # parameter, so even a persisted ``none`` must become an omitted config.
+    if _agent_provider_reasoning_ladder(provider, model) == ():
         return ""
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
     # disabled at all — a stored 'none' must coerce to '' (provider default =
     # thinking on) so streaming does not build disabled reasoning for a model
     # that forces thinking on regardless. Checked BEFORE the generic 'none'
     # early-return below so the forced-tier contract wins. (#6219 round-3)
-    if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
+    if raw == "none" and _zai_glm_classification(model, provider) == "forced":
         return ""
     if raw == "none":
         return "none"
     if raw not in VALID_REASONING_EFFORTS:
         return ""
     supported = resolve_model_reasoning_efforts(
-        model_id,
-        provider_id=provider_id,
-        base_url=base_url,
+        model,
+        provider_id=provider,
+        base_url=resolved_base_url,
+        config_data=config_data,
     )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
-    # models.dev / heuristics, and those can (a) return [] for an unrecognized
-    # model or (b) wrongly advertise 'max' for a provider
-    # whose native ladder tops out lower. _filter_reasoning_efforts_for_provider
-    # encodes the known ceilings (OpenAI-family GPT-5 before 5.6, Gemini, and
-    # pre-adaptive Anthropic all cap below 'max'); if it actively EXCLUDES the
-    # requested level, honor that ceiling and degrade down the ladder even when
-    # the sourced list is empty or (mistakenly) includes the level. This keeps a
-    # stored/CLI 'max' from reaching an adapter that would silently downgrade it
-    # worse than xhigh/high (Gemini→medium, legacy Claude manual-thinking→8k).
-    # GPT-5.6 is intentionally not capped. For providers with NO ceiling rule the
-    # filter returns the full list unchanged, so genuinely unknown models still
-    # preserve the configured effort (#3505 behavior).
+    # models.dev / heuristics, and those can return [] for an unrecognized model
+    # or advertise generic top tiers for a provider whose native ladder is lower.
+    # The filter encodes known ceilings (older OpenAI-family GPT-5, Gemini, and
+    # pre-adaptive Anthropic), while preserving max/ultra for GPT-5.6. If it
+    # excludes the requested level, degrade down the ladder even when the sourced
+    # list is empty or overly broad.
     ceiling = _filter_reasoning_efforts_for_provider(
-        list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
+        list(VALID_REASONING_EFFORTS),
+        model,
+        provider,
+        config_data=config_data,
+        capability_confirmed="max" in supported,
     )
+    # For a NAMED unknown/custom provider whose top-tier request was denied by
+    # the default-deny gate (no explicit provider/model allowlist — otherwise
+    # ``raw`` would survive in ``ceiling``) and whose capability set is empty,
+    # the only universally proven landing level is ``high``: nothing proves an
+    # unknown OpenAI-compatible endpoint accepts ``xhigh``. Recognized model
+    # families keep their proven ladders: a non-empty capability set degrades
+    # through the supported ladder below, and model-scoped family ceilings
+    # (older GPT-5 → xhigh, o-series → high) stay encoded in ``ceiling``
+    # itself. (#6018 gate 2026-08-13)
+    if (
+        raw in {"max", "ultra"}
+        and not supported
+        and provider
+        and not _provider_known_reasoning_capable(provider, model)
+        and raw not in ceiling
+    ):
+        return "high"
     if ceiling and raw not in ceiling:
-        ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
+        ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max..ultra
         try:
             raw_idx = ladder.index(raw)
         except ValueError:
@@ -5879,12 +6284,13 @@ def coerce_reasoning_effort_for_model(
     # both for models KNOWN not to support reasoning AND for models we simply
     # don't recognize (custom providers, aggregator-rewritten ids, brand-new
     # releases). Coercion exists to avoid sending a level a KNOWN-incompatible
-    # model rejects (e.g. pre-5.6 GPT-5 'max', o1/o3/o4 above 'high') -
-    # those paths return a NON-empty clamped set, so the degrade ladder below
+    # model rejects (e.g. older openai-codex GPT-5 top tiers, or o1/o3/o4
+    # above ``high``) — those paths return a NON-empty clamped set, so the
     # still applies. When the set is empty we can't tell "unsupported" from
     # "unknown", so preserve the user's configured effort verbatim where it is
     # still valid. (#3505 review)
     #
+
     # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
     # 2026-07-11): 'max' is ABOVE the universally-safe ceiling 'xhigh'. A
     # genuinely unknown/custom provider will 400 on it. So when the
@@ -5902,17 +6308,27 @@ def coerce_reasoning_effort_for_model(
     # verbatim, which Z.AI would silently ignore. This keeps the value actually
     # sent in agreement with the UI (which offers no options for these models).
     if not supported:
-        if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
+        if _zai_glm_reasoning_efforts_supported(model, provider) is False:
             return ""
-        if raw == "max" and not _provider_known_reasoning_capable(provider_id):
-            return "xhigh"
+        if raw in {"max", "ultra"} and not _provider_known_reasoning_capable(provider, model):
+            # An explicit provider/model allowlist is authoritative — the
+            # ceiling filter preserves an authorized top tier through the
+            # default-deny, so honor it verbatim.
+            if provider and raw in ceiling:
+                return raw
+            # A named unknown/custom lane without authorization lands on the
+            # universally proven ``high`` ceiling (#6018 gate 2026-08-13); an
+            # UNNAMED (empty) provider keeps the historical conservative
+            # ``xhigh`` landing — the caller simply didn't name a provider,
+            # which is not the same as naming one we don't recognize.
+            return "high" if provider else "xhigh"
         return raw
     if raw in supported:
         return raw
     # Degrade to the closest *lower* supported level instead of silently
-    # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
+    # disabling reasoning. For example, ultra/max -> xhigh -> high when the
     # target model caps below the configured effort. Never escalate.
-    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
+    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max..ultra
     try:
         raw_idx = ladder.index(raw)
     except ValueError:
@@ -5957,10 +6373,17 @@ def get_reasoning_status(
             if not resolve_base_url and model_cfg.get("base_url"):
                 resolve_base_url = str(model_cfg["base_url"]).strip()
 
+    resolve_model, resolve_provider, resolve_base_url = _resolve_reasoning_context(
+        resolve_model,
+        resolve_provider,
+        resolve_base_url,
+        config_data=config_data,
+    )
     supported_efforts = resolve_model_reasoning_efforts(
         resolve_model,
         provider_id=resolve_provider,
         base_url=resolve_base_url,
+        config_data=config_data,
     )
     # supports_thinking_toggle: can the user turn thinking on/off at all? An
     # effort-capable model obviously can. The ZAI gate separately exposes the
@@ -5983,6 +6406,7 @@ def get_reasoning_status(
             resolve_model,
             provider_id=resolve_provider,
             base_url=resolve_base_url,
+            config_data=config_data,
         ),
         "supported_efforts": supported_efforts,
         "supports_reasoning_effort": bool(supported_efforts),

@@ -340,6 +340,7 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
             effort_raw,
             model,
             provider_id=model_provider,
+            config_data=cfg_data,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
         return None if not coerced else str(coerced)
