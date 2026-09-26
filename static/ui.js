@@ -4877,19 +4877,17 @@ function renderModelDropdown(){
         const row=document.createElement('div');
         row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
         let badgeLabel = '';
-        let modelName = m.name;
         if (m.badge) {
           // 直接用badge的原始key（即config.yaml里的ID）
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
           badgeLabel = rawId;
-          modelName = rawId; // model-opt-name直接用原始ID
           if(m.badge.provider){
             const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
             badgeLabel += ` (${providerName})`;
           }
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
