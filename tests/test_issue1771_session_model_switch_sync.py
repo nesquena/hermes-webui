@@ -159,7 +159,7 @@ for (const name of [
   '_topbarLoadedMessageCount', '_topbarMessageMetaText',
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
   '_findModelInDropdown', '_refreshOpenModelDropdown', '_applyModelToDropdown',
-  '_addLiveModelsToSelect',
+  '_modelPickerOptionIdentity', '_addLiveModelsToSelect',
   '_modelStateFromAppliedDropdown', '_persistSessionModelCorrection',
   '_applySessionModelFallback', 'syncTopbar'
 ]) {

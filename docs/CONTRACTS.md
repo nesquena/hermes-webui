@@ -23,6 +23,11 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/architecture/model-picker-routing.md`](architecture/model-picker-routing.md):
+  current contract for provider-scoped model identity, exact OpenRouter route
+  matching, overflow promotion, routed fallback, and selected-row rendering.
+  Start here before changing model-picker deduplication, restoration, or live
+  catalog merging.
 - [`docs/remote-workspaces.md`](remote-workspaces.md):
   architecture contract for remote terminal workspaces (SSH/Docker), target-side
   POSIX path preservation against macOS synthetic firmlink expansion, and
