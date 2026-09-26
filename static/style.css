@@ -7299,8 +7299,33 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
   100%{background:transparent;}
 }
 .outline-jump-flash{animation:outline-flash 1.2s ease-out forwards;}
+/* Narrow viewports: the outline stays available, re-shaped as a bottom sheet.
+   A 320px floating side panel has nowhere to sit over a phone-width
+   transcript, so below the same 900px breakpoint (the one outline.js keys on
+   via _outlineIsCompact) the wrapper becomes a full-width sheet anchored to
+   the bottom edge. outline.js adds .outline-backdrop behind it and collapses
+   the sheet after a jump, so the desktop panel stays non-modal while the
+   compact form is modal. */
 @media(max-width:900px){
-  #outlineToggleBtn,#outlinePanelWrapper{display:none!important;}
+  #outlinePanelWrapper{
+    left:0;right:0;bottom:0;width:auto;
+    max-height:min(70vh,calc(100% - 96px));
+    padding-bottom:env(safe-area-inset-bottom,0px);
+    border-radius:14px 14px 0 0;
+    border-left:none;border-right:none;border-bottom:none;
+    box-shadow:0 -10px 30px rgba(0,0,0,.35);
+  }
+  .outline-header{padding:13px 16px 10px;}
+  .outline-close-btn{font-size:20px;line-height:1;padding:2px 6px;}
+  #outlinePanel{overscroll-behavior:contain;}
+  .outline-entry{padding:11px 16px;}
+  .outline-entry-num{font-size:12px;min-width:20px;}
+  .outline-entry-text{font-size:14px;}
+  .outline-backdrop{
+    position:fixed;inset:0;z-index:9997;
+    background:rgba(0,0,0,.45);
+    -webkit-tap-highlight-color:transparent;
+  }
 }
 
 /* Settings search */
