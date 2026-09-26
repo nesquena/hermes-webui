@@ -104,6 +104,7 @@ def _run_current_turn_scope_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
             _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
             _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
+            _function_body(SESSIONS_SRC, "function _hasInflightTailUserDuplicate"),
             _function_body(SESSIONS_SRC, "function _mergePendingSessionMessage"),
             _function_body(SESSIONS_SRC, "function _mergeInflightTailMessages"),
         ]

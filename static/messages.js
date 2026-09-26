@@ -1928,7 +1928,11 @@ async function send(){
   // not be swallowed — otherwise the client keeps its old timestamp and
   // the duplicate user row returns (review finding #4).
   if(startData && typeof startData.pending_started_at==='number'){
-    if(S.session) S.session.pending_started_at=startData.pending_started_at;
+    // Guard the S.session write with the same S.session.session_id===activeSid
+    // check the adjacent post-start updates use (#6649 greptile P1):
+    // a late /api/chat/start response must not stamp a session other than
+    // the one this turn belongs to, even if the user has switched in between.
+    if(S.session && S.session.session_id===activeSid) S.session.pending_started_at=startData.pending_started_at;
     if(userMsg && typeof userMsg==='object'){
       userMsg._ts=startData.pending_started_at;
     }

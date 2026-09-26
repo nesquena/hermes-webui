@@ -3934,6 +3934,30 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
   return !!(existing&&_sameTranscriptMessage(existing,candidate));
 }
 
+// _currentTailUserMessage stops at a completed (non-live) assistant because
+// the pending-user recovery path must NOT match a pending turn to a previous
+// turn's user. The INFLIGHT merge context is different: when the `done` event
+// was lost, the base may legitimately end with a completed assistant that
+// belongs to the SAME turn the inflight is re-supplying, and the reverse scan
+// must walk past it to find the current-turn user for dedup (#6649 greptile P2).
+function _hasInflightTailUserDuplicate(messages,candidate){
+  if(!candidate||String(candidate.role||'')!=='user') return false;
+  const list=Array.isArray(messages)?messages:[];
+  for(let i=list.length-1;i>=0;i--){
+    const msg=list[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user'){
+      if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+      return !!_sameTranscriptMessage(msg,candidate);
+    }
+    // Skip past live rows, tool rows, and completed (non-live) assistants
+    // so the scan reaches the current-turn user behind them.
+    if(msg._live||String(msg.role||'')==='tool'||String(msg.role||'')==='assistant') continue;
+    return false;
+  }
+  return false;
+}
+
 // Keep pending-user recovery ordering identical across load, reconnect, and
 // explicit refresh paths. The pending prompt owns the live assistant tail and
 // must be projected before it, regardless of which recovery response arrived.
@@ -4234,6 +4258,14 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
       live.content=persistedText;
     }
   }
+  // If a settled response exists in the base, only return true when the
+  // live row now reflects the SAME text. Returning true with genuinely
+  // different text would let the loadSession drop remove the authoritative
+  // settled response and leave only the stale partial stream in the
+  // restored transcript (#6649 greptile P1).
+  if(persistedText && _messageComparableText(live) !== persistedText){
+    return false;
+  }
   return !!_messageComparableText(live);
 }
 
@@ -4253,7 +4285,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
     let candidate=msg;
     if(!candidate) continue;
     const duplicate=String(candidate.role||'')==='user'
-      ? _hasCurrentTailUserDuplicate(merged,candidate)
+      ? _hasInflightTailUserDuplicate(merged,candidate)
       : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
     if(!duplicate) merged.push(candidate);
   }
