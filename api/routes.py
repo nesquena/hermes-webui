@@ -1923,6 +1923,36 @@ _LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
 
 
+def _picker_excludes_epoch() -> str:
+    """Return a stable token identifying the current picker-exclude policy.
+
+    #7507: an in-flight ``/api/models/live`` response that started BEFORE a
+    ``picker_excludes`` save carries a model list built under the OLD
+    policy. Publishing it to the cache afterwards makes the very next
+    request re-receive the just-excluded model, which is exactly what the
+    settings-save invalidation was supposed to prevent (Codex reproduced
+    this with a thread barrier).
+
+    The epoch is part of the live-cache key, so a policy change produces a
+    different key and the stale entry is simply never looked up again. It
+    must be cheap (no disk reads): the caller already invalidated the whole
+    live cache in the settings handler, so this is defense-in-depth for the
+    race where the response lands after that clear.
+    """
+    try:
+        from api.config import _picker_excludes_payload
+
+        payload = _picker_excludes_payload()
+    except Exception:
+        return ""
+    if not payload:
+        return ""
+    try:
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        return ""
+
+
 def _active_profile_for_live_models_cache() -> str:
     try:
         from api.profiles import get_active_profile_name
@@ -1937,7 +1967,11 @@ def _active_profile_for_live_models_cache() -> str:
 
 
 def _live_models_cache_key(provider: str) -> tuple[str, str]:
-    return (_active_profile_for_live_models_cache(), provider)
+    # #7507: the picker-exclude policy is part of the cache identity. A
+    # response assembled before a policy change must not satisfy a
+    # request issued after it, so the epoch rides in the key and a
+    # policy change simply moves to a fresh key.
+    return (_active_profile_for_live_models_cache(), provider, _picker_excludes_epoch())
 
 
 def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
@@ -1950,12 +1984,20 @@ def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
         if now - ts >= _LIVE_MODELS_CACHE_TTL:
             _LIVE_MODELS_CACHE.pop(key, None)
             return None
+        # #7507: reject a result that was built before a policy change even
+        # if it shares the current key (broadened key shape / legacy entry).
+        payload_epoch = payload.get("_picker_excludes_epoch")
+        if (payload_epoch or "") != key[2]:
+            _LIVE_MODELS_CACHE.pop(key, None)
+            return None
         return copy.deepcopy(payload)
 
 
 def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
+    stamped = dict(payload)
+    stamped["_picker_excludes_epoch"] = key[2]
     with _LIVE_MODELS_CACHE_LOCK:
-        _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
+        _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(stamped))
 
 
 def _clear_live_models_cache() -> None:
@@ -17528,6 +17570,32 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 pass
 
+        # #7507: the per-provider picker exclude list lives in the
+        # settings store, but the catalog caches are independent of the
+        # settings-file mtime. When ``picker_excludes`` changes, both
+        # the /api/models builder cache (memory + disk) and the
+        # /api/models/live cache must be cleared so the next request
+        # rebuilds against the new policy. Mirror the show_cli_sessions
+        # pattern above: explicit invalidation beats hoping the TTL
+        # catches up. The browser side clears its own
+        # ``_liveModelCache`` in response to the ``_invalidate_models``
+        # flag in the JSON response.
+        if "picker_excludes" in body:
+            try:
+                from api.config import invalidate_models_cache
+                invalidate_models_cache()
+            except Exception:
+                logger.debug("invalidate_models_cache failed in /api/settings")
+            try:
+                _clear_live_models_cache()
+            except Exception:
+                logger.debug("_clear_live_models_cache failed in /api/settings")
+            # Marker for the client to drop its own _liveModelCache and
+            # refetch the picker. Mirrors the response shape used by
+            # other settings (e.g. ``_invalidate_sessions`` is implicit
+            # via the re-render hook).
+            saved["_invalidate_models"] = True
+
         auth_enabled_after = is_auth_enabled()
         auth_just_enabled = bool(
             requested_password and auth_enabled_after and not auth_enabled_before
@@ -22078,10 +22146,22 @@ def _handle_live_models(handler, parsed):
         cache_key = _live_models_cache_key(provider)
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
+            cached.pop("_picker_excludes_epoch", None)
             return j(handler, cached)
 
         def _finish(payload: dict):
+            # #7507: never publish a payload built under a superseded policy.
+            # The key already moved on a policy change, so a mismatch here
+            # means the fetch straddled a save — drop it instead of letting
+            # the next request re-receive an excluded model.
+            if payload.get("_picker_excludes_epoch", cache_key[2]) != cache_key[2]:
+                logger.debug(
+                    "discarding stale /api/models/live result for %s (policy changed mid-fetch)",
+                    provider,
+                )
+                return j(handler, {"provider": provider, "models": [], "count": 0})
             _set_cached_live_models(cache_key, payload)
+            payload.pop("_picker_excludes_epoch", None)
             return j(handler, payload)
 
         # Delegate to the agent's live-fetch + fallback resolver.
@@ -22421,6 +22501,34 @@ def _handle_live_models(handler, parsed):
             ids = [m["id"] for m in _pm.get(provider, [])]
         if not ids:
             return _finish({"provider": provider, "models": [], "count": 0})
+
+        # #7507: per-provider picker exclude list. Subtract the
+        # excluded ids BEFORE the Nous featured-set and the visible
+        # overflow cap so an excluded row at the visible boundary gets
+        # backfilled from later non-excluded rows (the visible quota
+        # isn't "spend" on rows the user explicitly hid). The
+        # exclusion is evaluated on the raw id; the per-provider
+        # ``picker_excludes`` map is read with tolerant parsing so a
+        # missing/empty setting is a no-op.
+        try:
+            from api.config import (
+                get_picker_excludes,
+                _is_model_id_excluded,
+            )
+            _live_excludes = get_picker_excludes(provider)
+            if _live_excludes:
+                _before = len(ids)
+                ids = [
+                    _mid for _mid in ids
+                    if not _is_model_id_excluded(_mid, _live_excludes)
+                ]
+                if len(ids) != _before:
+                    logger.debug(
+                        "Picker excludes filtered %d model(s) for provider %s",
+                        _before - len(ids), provider,
+                    )
+        except Exception as _exclude_err:
+            logger.debug("Picker exclude filter failed for %s: %s", provider, _exclude_err)
 
         # Match the same dropdown visibility budget that /api/models uses so
         # background enrichment via _fetchLiveModels() does not re-append an

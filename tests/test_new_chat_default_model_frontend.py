@@ -87,7 +87,10 @@ def test_hard_refresh_injects_missing_active_session_model_option():
     marker = "if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function')"
     assert marker in boot_js
     branch = boot_js[boot_js.index(marker) : boot_js.index("else if(!applied&&!sessionModelState", boot_js.index(marker))]
-    assert "_ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)" in branch
+    assert (
+        "_ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null,{allowExcludedForActiveSession:true})"
+        in branch
+    )
 
 
 def test_sync_topbar_preserves_missing_session_model_as_dropdown_option():
@@ -96,9 +99,10 @@ def test_sync_topbar_preserves_missing_session_model_as_dropdown_option():
     sync_topbar = _extract_function(ui_js, "function syncTopbar")
     branch_start = sync_topbar.index("const applied=_applyModelToDropdown(currentModel,modelSel,S.session.model_provider||null);")
     session_model_branch = sync_topbar[branch_start:]
-    assert "_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)" in session_model_branch
+    ensure_call = "_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null,{allowExcludedForActiveSession:true})"
+    assert ensure_call in session_model_branch
     assert "const fallback=_applySessionModelFallback(modelSel);" in session_model_branch
-    assert session_model_branch.index("_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)") < session_model_branch.index("const fallback=_applySessionModelFallback(modelSel);"), (
+    assert session_model_branch.index(ensure_call) < session_model_branch.index("const fallback=_applySessionModelFallback(modelSel);"), (
         "active session models missing from the current catalog must be injected before fallback can select the static/default model"
     )
 

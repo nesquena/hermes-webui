@@ -3714,7 +3714,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       // If the value didn't take (model not in list), clear the bad pref only
       // for persisted browser preferences. Active sessions remain authoritative.
       if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function'){
-        _ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
+        // #7507: running session's model is the one exception to the
+        // picker exclude policy (allowExcludedForActiveSession).
+        _ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null,{allowExcludedForActiveSession:true});
       }
       else if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
         if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
