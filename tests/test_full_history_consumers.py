@@ -1,4 +1,5 @@
 """Real browser coverage for consumers of a bounded session detail window."""
+import ast
 from pathlib import Path
 import shutil
 
@@ -36,7 +37,9 @@ def page(browser):
       let _loadSessionGeneration=1;
       let _loadingSessionId='a';
       const $=id=>document.getElementById(id);
-      const t=key=>key;
+      const t=(key,vars={})=>Object.entries(vars).reduce(
+        (text,[name,value])=>text.replace('{'+name+'}',String(value)),
+        (window.testTranslations||{})[key]||key);
       const esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',
         '"':'&quot;',"'":'&#39;'}[c]));
       const setStatus=v=>window.statusText=v;
@@ -79,6 +82,61 @@ def page(browser):
       $('btnDownload').onclick=()=>{window.downloadTask=handler();}; }''')
     yield page
     page.close()
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+@pytest.mark.parametrize('state', ['loading', 'failure', 'loaded', 'empty'])
+def test_artifacts_responsive_history_states(page, tmp_path, width, state):
+    """Use production panel markup, CSS and English text at both breakpoints."""
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.set_viewport_size({'width': width, 'height': 900})
+    html = (ROOT / 'static/index.html').read_text()
+    start = html.index('<aside class="rightpanel">')
+    panel = html[start:html.index('</aside>', start) + len('</aside>')]
+    page.evaluate("""panel => {
+      document.body.innerHTML='<div class="layout"><main style="flex:1"></main>'+panel+'</div>';
+      document.documentElement.dataset.workspacePanel='open';
+      document.querySelector('.rightpanel').classList.add('mobile-open');
+    }""", panel)
+    page.add_style_tag(content=(ROOT / 'static/style.css').read_text())
+    lines = (ROOT / 'static/i18n.js').read_text().splitlines()
+    translations = {
+        key: ast.literal_eval(next(line for line in lines if line.startswith(f'    {key}:'))
+                              .split(':', 1)[1].strip().removesuffix(','))
+        for key in ('loading', 'session_history_failed', 'steer_recovery_retry')
+    }
+    page.evaluate('values=>window.testTranslations=values', translations)
+    if state == 'empty':
+        page.evaluate('full.messages=[]')
+    page.evaluate("switchWorkspacePanelTab('artifacts')")
+    if state == 'failure':
+        page.evaluate('rejectFetch()')
+        page.wait_for_selector('[data-artifacts-retry]')
+        assert 'Could not load complete' in page.locator('#workspaceArtifacts').inner_text()
+    elif state == 'loaded':
+        page.evaluate('resolveFetch()')
+        page.wait_for_selector('[data-artifact-path="old.md"]')
+    elif state == 'empty':
+        page.evaluate('resolveFetch()')
+        page.wait_for_function("document.getElementById('workspaceArtifacts').textContent.includes('No artifacts detected')")
+    else:
+        assert 'Loading' in page.locator('#workspaceArtifacts').inner_text()
+    root = page.locator('#workspaceArtifacts')
+    assert root.is_visible()
+    assert root.evaluate('(el)=>el.scrollWidth<=el.clientWidth+1')
+    box = root.bounding_box()
+    assert box is not None and box['width'] > 100
+    assert box['x'] >= -1 and box['x'] + box['width'] <= width + 1
+    count = page.locator('#workspaceArtifactsCount').inner_text()
+    assert ('…' in count) == (state in {'loading', 'failure'})
+    page.screenshot(path=str(tmp_path / f'artifacts-{width}-{state}.png'))
+    if state == 'failure':
+        page.click('[data-artifacts-retry]')
+        assert page.evaluate('requests.length') == 2
+        page.evaluate('resolveFetch()')
+        page.wait_for_selector('[data-artifact-path="old.md"]')
+    assert errors == []
 
 
 def test_export_loads_complete_snapshot_without_touching_stream(page):
