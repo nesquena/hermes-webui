@@ -1760,6 +1760,15 @@ def _provider_is_known_or_configured(
     raw = str(provider_id or "").strip().lower()
     if not raw:
         return False
+    try:
+        if _is_plugin_model_provider(raw):
+            return True
+    except Exception:
+        # Same rationale as the sibling registry check in the picker's
+        # detector: a transient plugin-registry failure must not make a real
+        # plugin-backed provider look unknown (it would be repaired away on
+        # the no-wait path). Surface at warning, fail closed to False.
+        logger.warning("plugin model-provider check failed for %s", raw, exc_info=True)
     # Configured custom provider: a named slug in custom_providers, or any
     # ``custom`` / ``custom:<slug>`` form when custom_providers are defined.
     if _named_custom_provider_slug_for_provider(raw, config_obj):
@@ -7073,6 +7082,31 @@ def _minimal_static_models_catalog() -> dict:
         }
 
 
+def _mark_non_authoritative_catalog(
+    catalog: dict, *, reason: str
+) -> dict:
+    """Tag a no-wait fallback catalog as non-authoritative.
+
+    The display path (``GET /api/session?...&resolve_model=1``) calls
+    ``get_available_models(prefer_cache=True, wait_for_inflight_rebuild=False)``
+    and gets back either the network-free minimal catalog or a stale on-disk
+    snapshot when a rebuild is in flight. Both fallbacks are KNOWN to be
+    incomplete — Copilot, custom proxies, recently-added providers, etc. may
+    all be missing. The persisted session model is the user's authoritative
+    selection; the catalog is only a default-model backstop. Marking the
+    catalog as non-authoritative lets
+    ``_resolve_compatible_session_model_state`` short-circuit and return the
+    persisted (model, model_provider) pair unchanged, so the display response
+    does not silently rewrite the next ``/api/chat/start`` payload.
+
+    ``reason`` is the no-wait branch the catalog came from (kept for
+    observability; the resolver only checks the boolean marker).
+    """
+    catalog["_non_authoritative"] = True
+    catalog["_non_authoritative_reason"] = reason
+    return catalog
+
+
 def _static_models_catalog_without_live_probes() -> dict:
     """Return a network-free /api/models catalog from local config/auth only."""
     try:
@@ -8613,15 +8647,20 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     return ordered
 
 
-def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = False) -> dict:
+def get_available_models(
+    *,
+    prefer_cache: bool = False,
+    force_refresh: bool = False,
+    wait_for_inflight_rebuild: bool = True,
+) -> dict:
     """
     Return available models grouped by provider.
 
     Discovery order:
-      1. Read config.yaml 'model' section for active provider info
-      2. Check for known API keys in env or ~/.hermes/.env
-      3. Fetch models from custom endpoint if base_url is configured
-      4. Fall back to hardcoded model list (OpenRouter-style)
+    1. Read config.yaml 'model' section for active provider info
+    2. Check for known API keys in env or ~/.hermes/.env
+    3. Fetch models from custom endpoint if base_url is configured
+    4. Fall back to hardcoded model list (OpenRouter-style)
 
     Returns: {
         'active_provider': str|None,
@@ -8629,19 +8668,44 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
     }
 
-    ``prefer_cache=True`` resolves WITHOUT ever triggering a live provider
-    probe: it serves the warm in-memory cache, then the last-known on-disk
-    cache, and only as a last resort a network-free minimal catalog
-    (config/auth derived). It NEVER does the per-provider live rebuild (the
-    Copilot token-exchange HTTPS call et al.). This is the path a
-    server-initiated wakeup turn (Option Z) takes so a cold catalog can never
-    block the wakeup chat/start on a flaky network. A normal human request
-    leaves this False and keeps the full live-discovery behaviour.
+    ``prefer_cache=True`` resolves WITHOUT triggering a live model
+    probe; it serves the warm in-memory cache, then the last-known on-disk
+    cache, and only as a last resort a network-free minimal
+    catalog (config/auth derived). It NEVER runs the per-provider live
+    rebuild (the Copilot token-exchange HTTPS call et al.). Display,
+    session-visit, and server-initiated wakeup turns (Option Z) all use
+    this flag so they never *trigger* a live rebuild. Display and
+    session-visit additionally pass ``wait_for_inflight_rebuild=False`` so
+    they never join one either; wakeup keeps the default True because its
+    result starts a real agent run. A normal human request leaves
+    ``prefer_cache`` False and keeps the full live-discovery behaviour.
 
     ``force_refresh=True`` is an internal escape hatch for bounded freshness
     checks that need a real live rebuild while preserving the default cache
     contract for every existing caller.
+
+    ``wait_for_inflight_rebuild=True`` (default) makes this caller JOIN an
+    in-flight catalog rebuild: it waits for the authoritative result instead
+    of serving a stale snapshot. Callers that make *routing decisions* —
+    the foreign-session provider repair on the chat/send path and the
+    server-initiated wakeup — must keep this True so a rebuild in flight
+    cannot send the turn to a stale backend. Display-only callers
+    (session-open model resolution, the session-visit fallback) pass False:
+    they skip both the rebuild wait AND the rebuild lock, serving the
+    warm/disk cache or the minimal catalog without ever queueing behind
+    the builder.
+
+    ``prefer_cache`` and ``force_refresh`` are mutually exclusive: the first
+    forbids live discovery ("never run or wait for the live provider probe"),
+    while the second requires it. The contradictory combination raises
+    ``ValueError`` at entry so the non-blocking contract holds for every
+    accepted input. (No in-tree caller passes both.)
     """
+    if prefer_cache and force_refresh:
+        raise ValueError(
+            "prefer_cache and force_refresh are mutually exclusive: "
+            "prefer_cache forbids live discovery while force_refresh requires it"
+        )
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     # Config mtime check — must come before any config reads.
@@ -10149,9 +10213,25 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
     # Mark that a build may be in progress BEFORE acquiring the lock.
-    # If another thread has already started the cold path, we will wait for
-    # its result rather than running the cold path concurrently.
-    should_wait = _cache_build_in_progress
+    # If another thread has already completed the rebuild, we will wait for
+    # its result rather than running the rebuild concurrently.
+    #
+    # Display-only prefer_cache callers (session-open model resolution, the
+    # session-visit fallback) must NOT wait: their contract is "serve the
+    # warm / disk cache or a network-free minimal catalog, never run OR wait
+    # for the live provider probe". The wait below is bounded only by the
+    # rebuild budget, so any in-flight rebuild — routine on networks where a
+    # provider probe blackholes (e.g. the botocore IMDS fetch) — holds a
+    # multi-second stall to EVERY concurrent session-open model resolution
+    # (observed: /api/session t3 stage 4447-4843ms, tracking the rebuild
+    # budget exactly).
+    #
+    # Routing-authoritative prefer_cache callers (the foreign-session
+    # provider repair on the chat/send path, and the server-initiated
+    # wakeup) keep wait_for_inflight_rebuild True: they must NOT get a
+    # stale snapshot while a rebuild is in flight, or a poisoned session
+    # could be routed to the wrong backend.
+    should_wait = _cache_build_in_progress and wait_for_inflight_rebuild
     force_refresh_started_at = time.monotonic() if force_refresh else None
 
     # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
@@ -10174,7 +10254,37 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     elif force_refresh:
         stale_disk_groups = _load_stale_models_cache_from_disk()
 
-    with _available_models_cache_lock:
+    # ── Non-blocking lock admission for display-only prefer_cache ─────────────
+    # (CORE re-review #7568): "skip the rebuild wait" must not mean "skip the
+    # lock". The bounded rebuild path holds _available_models_cache_lock while
+    # it blocks on build_done.wait(), so even a prefer_cache reader that skips
+    # the condvar wait still queues behind the RLock for the whole budget. A
+    # display-only reader (session-open model resolution, session-visit
+    # fallback) must never pay that: try a NON-BLOCKING acquire; if the
+    # builder owns the lock, serve the warm/disk cache or the minimal catalog
+    # immediately. Routing-authoritative callers (provider repair) keep
+    # wait_for_inflight_rebuild=True and queue normally — see above.
+    from contextlib import ExitStack as _ExitStack
+
+    _exit_stack = _ExitStack()
+    if prefer_cache and not wait_for_inflight_rebuild:
+        if not _available_models_cache_lock.acquire(blocking=False):
+            # Lock busy → an in-flight rebuild owns it. Serve the best
+            # lock-free snapshot now; never wait on the builder.
+            if disk_groups is not None:
+                return copy.deepcopy(disk_groups)
+            if stale_disk_groups is not None:
+                return _mark_non_authoritative_catalog(
+                    copy.deepcopy(stale_disk_groups),
+                    reason="no_wait_stale_disk_cache",
+                )
+            return _mark_non_authoritative_catalog(
+                copy.deepcopy(_minimal_static_models_catalog()),
+                reason="no_wait_minimal_static_catalog",
+            )
+        _exit_stack.callback(_available_models_cache_lock.release)
+
+    with _exit_stack, _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
         if should_wait:
@@ -10293,7 +10403,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # prematurely release that rebuild's serialization, waking waiters
             # to an empty cache and triggering a second live rebuild. Just
             # serve the network-free minimal catalog and leave the flag alone.
-            return copy.deepcopy(_minimal_static_models_catalog())
+            return _mark_non_authoritative_catalog(
+                copy.deepcopy(_minimal_static_models_catalog()),
+                reason="prefer_cache_cold_minimal",
+            )
 
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
@@ -10523,7 +10636,10 @@ def warm_models_catalog_provenance_if_cold() -> None:
     Deliberately does NOT call ``get_available_models(prefer_cache=True)``: even
     in prefer-cache mode that acquires ``_available_models_cache_lock`` and can
     block up to ~60s waiting on an in-flight rebuild (unbounded in synchronous
-    rebuild mode) — unacceptable on the send hot path. Instead this:
+    rebuild mode; the display-only ``wait_for_inflight_rebuild=False`` opt-out
+    exists for session-open/session-visit paths but this send-side helper
+    keeps its own strictly lock-free disk-only design so it CANNOT introduce
+    any latency on the send hot path). Instead this:
       * tries the cache lock NON-BLOCKING and returns immediately if it's busy
         (a concurrent rebuild will publish provenance itself);
       * reads ONLY the on-disk cache (no network, no live probe, no rebuild);
@@ -10661,7 +10777,13 @@ def get_available_models_for_session_visit() -> dict:
             return copy.deepcopy(stale_cached)
         _mark("prefer_cache_fallback")
         _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-        return get_available_models(prefer_cache=True)
+        # Session-visit is display-only: never queue behind a rebuild that is
+        # in flight (the bounded builder holds the models-cache lock across
+        # its build_done.wait, so the plain prefer_cache wait-skip would
+        # still park on the RLock for the whole budget).
+        return get_available_models(
+            prefer_cache=True, wait_for_inflight_rebuild=False
+        )
 
 
 def _maybe_log_slow_stages(

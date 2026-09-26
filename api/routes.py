@@ -6824,7 +6824,34 @@ def _repair_foreign_session_model_provider(
         return resolved_provider
 
     try:
-        catalog = get_available_models(prefer_cache=True)
+        # ROUTING-AUTHORITATIVE: this catalog lookup decides which backend a
+        # chat turn is sent to. It MUST NOT skip an in-flight rebuild
+        # (wait_for_inflight_rebuild stays True): during a rebuild the
+        # authoritative owner may not be published yet, and serving a stale
+        # snapshot here can silently route a poisoned session to the wrong
+        # provider. Display-only callers opt out via
+        # wait_for_inflight_rebuild=False; this one must not.
+        import inspect as _inspect
+
+        try:
+            _gam_accepts_rebuild_wait = (
+                "wait_for_inflight_rebuild"
+                in _inspect.signature(get_available_models).parameters
+            )
+        except (TypeError, ValueError):
+            # Builtins / C-callables can refuse introspection; assume the
+            # signature shape that predates wait_for_inflight_rebuild.
+            _gam_accepts_rebuild_wait = False
+        if _gam_accepts_rebuild_wait:
+            catalog = get_available_models(
+                prefer_cache=True, wait_for_inflight_rebuild=True
+            )
+        else:
+            # Stub/monkeypatched get_available_models without the new
+            # parameter (test doubles): the prefer_cache contract it does
+            # know is still cache-only, which keeps the repair semantically
+            # intact for those doubles.
+            catalog = get_available_models(prefer_cache=True)
     except Exception:
         return resolved_provider
     groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
@@ -6869,6 +6896,54 @@ def _clean_session_model_provider(value: str | None) -> str | None:
         parsed = _parse_provider_qualified_model_id(provider)
         provider = parsed[1].strip() if parsed else provider[1:]
     return provider or None
+
+
+def _non_authoritative_hint_matches_requested_provider(
+    hinted_provider: str | None,
+    requested_provider: object,
+) -> bool:
+    """True when a persisted ``@provider:`` hint can safely be preserved
+    against the caller's requested provider on the non-authoritative catalog
+    path.
+
+    The no-wait display path returns the persisted pair unchanged so the
+    browser's echo pins the next turn to it — which means a persisted hint
+    that names a DIFFERENT provider than ``requested_provider`` (a legacy
+    cold-wakeup artifact such as ``@copilot:gpt-5.5`` while the session's
+    provider is ``openai-codex``) would silently route every subsequent turn
+    through that other provider: ``model_with_provider_context()`` keeps an
+    existing ``@`` qualifier intact rather than re-qualifying it.
+
+    So preserve only when the hint resolves to the same provider as the
+    request — raw-equal, alias-equal, or normalized-equal (the same three
+    comparisons the authoritative path makes against
+    ``hint_matches_active``). Everything else falls through to the
+    compatibility-repair path, which is what rewrites a stale cross-provider
+    pair to the correct routed default.
+    """
+    hint = str(hinted_provider or "").strip().lower()
+    requested = str(requested_provider or "").strip().lower()
+    if not hint or not requested:
+        return False
+    if hint == requested:
+        return True
+    from api.config import _resolve_provider_alias as _resolve_alias
+
+    # The authoritative ``hint_matches_active`` chain compares against the
+    # canonical form of the active provider on the alias-equal and
+    # normalized-equal clauses, so it handles either side carrying an alias
+    # (e.g. ``hint="claude"`` vs ``active="anthropic"`` AND ``hint="anthropic"``
+    # vs ``active="claude"``). Mirror it: canonicalize the REQUESTED side
+    # too. The previous one-sided ``_resolve_alias(hint) == requested``
+    # silently failed when the hint was the canonical form and the request
+    # carried the alias, which let a no-wait display lookup repair a valid
+    # persisted ``@anthropic:claude-opus-4.7`` / ``claude`` pair to the
+    # catalog default (greptile P1, 2026-09-25).
+    requested_canonical = _resolve_alias(requested)
+    if _resolve_alias(hint) == requested_canonical:
+        return True
+    normalized = _normalize_provider_id(hint)
+    return bool(normalized) and normalized == requested_canonical
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
@@ -7608,6 +7683,7 @@ def _resolve_compatible_session_model_state(
     profile_config: dict | None = None,
     explicit_model_pick: bool = False,
     prefer_cached_catalog: bool = False,
+    wait_for_inflight_rebuild: bool = True,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -7631,7 +7707,7 @@ def _resolve_compatible_session_model_state(
     reverse proxies, even though the WebUI itself eventually responded.
 
     ``prefer_cached_catalog=True`` (ours-original) makes the catalog lookup
-    non-blocking: it resolves from the warm/disk cache or a network-free
+    cache-only: it resolves from the warm/disk cache or a network-free
     minimal catalog and NEVER triggers a live per-provider rebuild (the
     Copilot token-exchange HTTPS call that hangs a server-initiated wakeup
     turn, see rebase report §1/§3/model-resolve-hang). Human-initiated
@@ -7639,6 +7715,14 @@ def _resolve_compatible_session_model_state(
     already has a persisted model still resolves correctly because the
     persisted model wins over the catalog and the catalog is only consulted
     for the default-model backstop.
+
+    ``wait_for_inflight_rebuild`` (default True) controls whether the
+    cache-only lookup also JOINS an in-flight rebuild for the authoritative
+    result. Pure-display resolvers (``_resolve_effective_session_model_*_for_display``
+    on GET /api/session) pass False so they never queue behind the rebuild
+    lock. Routing-authoritative callers (the server-initiated wakeup, whose
+    resolved model/provider starts a real agent run) keep the default True:
+    they must route from the authoritative catalog, never a stale snapshot.
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
@@ -7706,20 +7790,83 @@ def _resolve_compatible_session_model_state(
         import inspect as _inspect
 
         try:
-            _gam_accepts_prefer_cache = (
-                "prefer_cache" in _inspect.signature(get_available_models).parameters
-            )
+            _gam_params = _inspect.signature(get_available_models).parameters
+            _gam_accepts_prefer_cache = "prefer_cache" in _gam_params
+            _gam_accepts_rebuild_wait = "wait_for_inflight_rebuild" in _gam_params
         except (TypeError, ValueError):
             # Builtins / C-callables can refuse introspection; assume the
             # zero-arg stub shape in that case.
             _gam_accepts_prefer_cache = False
+            _gam_accepts_rebuild_wait = False
         if _gam_accepts_prefer_cache:
-            catalog = get_available_models(prefer_cache=True)
+            # Cache-only resolution (display / wakeup paths). Whether the
+            # catalog lookup also joins an in-flight rebuild is controlled by
+            # the caller: pure-display GET /api/session resolvers pass
+            # wait_for_inflight_rebuild=False (never queue behind the
+            # builder), while routing-authoritative callers such as the
+            # server-initiated wakeup keep the default True so they route
+            # from the authoritative catalog (see get_available_models
+            # docstring).
+            if _gam_accepts_rebuild_wait:
+                catalog = get_available_models(
+                    prefer_cache=True,
+                    wait_for_inflight_rebuild=wait_for_inflight_rebuild,
+                )
+            else:
+                # Stub/monkeypatched get_available_models without the new
+                # parameter (test doubles): fall back to the prefer_cache
+                # contract it does know.
+                catalog = get_available_models(prefer_cache=True)
         else:
             catalog = get_available_models()
     else:
         catalog = get_available_models()
     default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
+
+    # Non-authoritative catalog guard (re-review #7568 round 6).
+    #
+    # The display path (``GET /api/session?...&resolve_model=1``) passes
+    # ``prefer_cached_catalog=True, wait_for_inflight_rebuild=False`` and may
+    # receive a catalog from the no-wait fallback: the network-free minimal
+    # catalog or a stale on-disk snapshot. ``get_available_models`` tags those
+    # with ``_non_authoritative=True`` exactly so this guard can fire. The
+    # catalog is KNOWN to be incomplete (Copilot, custom proxies, recently
+    # added providers may all be missing) and the persisted session pair is
+    # the user's authoritative selection; never let a non-authoritative
+    # catalog rewrite it. Returning the persisted pair unchanged also pins
+    # the next ``/api/chat/start`` payload — the browser echoes
+    # ``S.session.model`` / ``S.session.model_provider`` back as the routing
+    # state, so a normalized display answer silently reroutes the next turn
+    # to a backend the user did not pick.
+    #
+    # Only fires when BOTH model and provider are present AND the request is
+    # an ``@provider:model`` form whose provider is statically known or
+    # configured. Everything else must fall through to the
+    # compatibility-repair path below, because that path is what fixes stuck
+    # stale selections:
+    #
+    #   * a provider that no longer exists (``@removed:mistral-large`` /
+    #     ``removed``) has nothing left to preserve — the browser echoes the
+    #     stale pair back (static/sessions.js:3022, marked explicit at
+    #     static/messages.js:1822) and ``/api/chat/start`` routes to a provider
+    #     that is gone. ``_provider_is_known_or_configured()`` decides this
+    #     from the static provider registry + config state, never from the cold
+    #     catalog, and is the same predicate the slow path uses below for its
+    #     preserve-vs-repair split (catalog-absence has two causes: a
+    #     cold live-discovery provider that is still configured, vs a
+    #     genuinely removed one).
+    #   * the legacy non-``@`` forms (``openai/gpt-5.4-mini`` /
+    #     ``openai-codex`` — a stale OpenRouter-shaped id from before Codex
+    #     persisted its provider) are exactly what compatibility repair exists
+    #     for; a cold wakeup must still repair them to the active default.
+    if catalog.get("_non_authoritative") and model and requested_provider:
+        _bare_model_hint, _hinted_provider = _split_provider_qualified_model(model)
+        if _hinted_provider and _provider_is_known_or_configured(
+            _hinted_provider
+        ) and _non_authoritative_hint_matches_requested_provider(
+            _hinted_provider, requested_provider
+        ):
+            return model, requested_provider, False
 
     # Profile-aware resolution: when the caller supplies profile context
     # (not an explicit per-chat override), use the profile's provider and
@@ -8069,8 +8216,12 @@ def _resolve_effective_session_model_for_display(session) -> str:
         # the models-cache lock and starved SSE/streaming -> BrokenPipe storm
         # (#multi-tab-streaming-interlock). The persisted session model is
         # authoritative; the catalog is only a default-model backstop, which
-        # the network-free minimal catalog already provides.
+        # the network-free minimal catalog already provides. Also passes
+        # wait_for_inflight_rebuild=False: this is pure display — the result
+        # never routes a run, so it must also skip the rebuild LOCK (the
+        # builder holds it across build_done.wait) and serve immediately.
         prefer_cached_catalog=True,
+        wait_for_inflight_rebuild=False,
     )
     return effective_model or original_model
 
@@ -8089,6 +8240,7 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
         # live rebuild. prefer_cached_catalog resolves from warm/disk cache
         # or the network-free minimal catalog.
         prefer_cached_catalog=True,
+        wait_for_inflight_rebuild=False,
     )
     return provider
 
@@ -24354,6 +24506,14 @@ def start_session_turn(
     # without the profile defaults the resolver would fall back to the global
     # DEFAULT_MODEL instead of the profile's configured default (greptile flag).
     _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
+    # NOTE (Greptile #7568 re-review): this wakeup resolution is
+    # ROUTING-AUTHORITATIVE — the resolved model/provider flows into
+    # _start_chat_stream_for_session and starts a real agent run, unlike the
+    # pure-display GET /api/session resolvers. It therefore keeps the DEFAULT
+    # wait_for_inflight_rebuild=True: if a catalog rebuild is in flight it
+    # joins it and routes from the authoritative catalog, never a stale
+    # minimal snapshot. prefer_cached_catalog still guarantees it never
+    # TRIGGERS a rebuild itself.
     model, model_provider, normalized_model = _resolve_compatible_session_model_state(
         requested_model,
         requested_provider,
