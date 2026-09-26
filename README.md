@@ -219,6 +219,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Create, rename, duplicate, delete, search by title and message content
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
+- Pinned-conversation limits apply separately to each session's owning profile; root/default aliases share a limit
 - Archive sessions (hide without deleting, toggle to show)
 - Session projects -- named groups with colors for organizing sessions; delegated subagent sessions have no project of their own and follow their nearest ancestor's project in the project filter and the Unassigned chip; forks and other child sessions keep their own project, so a fork moved to "No project" stays Unassigned
 - Session tags -- add #tag to titles for colored chips and click-to-filter

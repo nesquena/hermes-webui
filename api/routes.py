@@ -474,6 +474,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     _profiles_match,
     _is_isolated_profile_mode,
     _is_root_profile,
+    _root_profile_names_snapshot,
     _SKILLS_STATS_CACHE,
     get_active_profile_name,
     get_active_profile_name as _get_active_profile_name,
@@ -17652,6 +17653,22 @@ def handle_post(handler, parsed) -> bool:
         # persisted index outside the lock, then re-check the in-memory
         # mutation set inside the lock and commit the pin atomically.
         if pin_requested and not getattr(s, "pinned", False):
+            owner_profile = str(_session_field(s, "profile", None) or "default")
+            root_profile_names = set(_root_profile_names_snapshot() or ())
+            try:
+                profiles = list_profiles_api()
+            except Exception:
+                profiles = None
+            profile_names = {str(p["name"]) for p in profiles or [] if p.get("name")}
+            listed_root_names = {str(p["name"]) for p in profiles or [] if p.get("name") and p.get("is_default") is True}
+            nonroot_names = {str(p["name"]) for p in profiles or [] if p.get("name") and p.get("is_default") is False}
+            if profiles is None and not root_profile_names:
+                return bad(handler, "Session profile information is unavailable; please retry.", 503)
+            if (root_profile_names - {"default"}) & nonroot_names or owner_profile not in profile_names | root_profile_names | listed_root_names | {"default"}:
+                return bad(handler, "Session profile information is unavailable; please retry.", 503)
+            root_profile_names.update(listed_root_names | {"default"})
+            root_owner = owner_profile in root_profile_names
+            quota_profile_names = root_profile_names if owner_profile in root_profile_names else {owner_profile}
             # Pre-snapshot from persisted index (acquires LOCK internally,
             # so must run outside our own LOCK acquire below).
             persisted_rows = [
@@ -17659,15 +17676,24 @@ def handle_post(handler, parsed) -> bool:
                 if _session_counts_toward_pin_quota(existing)
             ]
             with LOCK:
+                memory_rows = [existing.compact() for existing in SESSIONS.values()
+                               if _session_counts_toward_pin_quota(existing)]
+                candidate_rows = [
+                    existing for existing in persisted_rows
+                    if str(_session_field(existing, "profile", None) or "default") in quota_profile_names
+                ]
                 # Final authoritative count: merge persisted pinned rows with the
                 # in-memory SESSIONS snapshot. Count logical sidebar-visible pin
                 # lineages rather than raw session rows so continuation siblings
                 # in the same visible lineage do not consume extra pin quota.
-                candidate_rows = list(persisted_rows)
                 candidate_rows.extend(
-                    existing.compact() for existing in SESSIONS.values()
-                    if _session_counts_toward_pin_quota(existing)
+                    existing for existing in memory_rows
+                    if str(_session_field(existing, "profile", None) or "default") in quota_profile_names
                 )
+                unclassified_rows = [
+                    existing for existing in persisted_rows + memory_rows
+                    if root_owner and str(_session_field(existing, "profile", None) or "default") not in profile_names | root_profile_names
+                ]
                 target_row = s.compact()
                 candidate_rows.append(target_row)
                 pinned_lineage_ids = _visible_pinned_lineage_ids(candidate_rows)
@@ -17683,6 +17709,14 @@ def handle_post(handler, parsed) -> bool:
                 pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
                 if len(pinned_lineage_ids) >= pinned_sessions_limit:
                     return bad(handler, f"Up to {pinned_sessions_limit} sessions can be pinned. Unpin one before pinning another.", 400)
+                if root_owner:
+                    upper_rows = candidate_rows + unclassified_rows
+                    upper_lineage_ids = _visible_pinned_lineage_ids(upper_rows)
+                    upper_lineage_ids.discard(_session_row_lineage_root_id(
+                        target_row, {str(_session_field(row, "session_id", "") or ""): row for row in upper_rows}
+                    ))
+                    if len(upper_lineage_ids) >= pinned_sessions_limit:
+                        return bad(handler, "Session profile information is incomplete; please retry.", 503)
                 # Mark in-memory pin state under LOCK so concurrent pin
                 # requests see the increment immediately, even before
                 # save() finishes flushing to disk.
