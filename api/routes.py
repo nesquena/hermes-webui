@@ -3373,6 +3373,7 @@ from api.config import (
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
+    _load_yaml_config_file_raw,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -32747,7 +32748,9 @@ def _handle_skill_toggle(handler, body):
 
     config_path = _active_profile_config_path()
     with _cfg_lock:
-        cfg = _load_yaml_config_file(config_path)
+        # RAW load — the write transaction must not bake env-expanded secrets
+        # into the profile's config.yaml (#5619 write-target rule).
+        cfg = _load_yaml_config_file_raw(config_path)
 
         # Ensure skills section exists as a dict
         if "skills" not in cfg or not isinstance(cfg["skills"], dict):

@@ -6269,7 +6269,10 @@ def set_reasoning_display(show: bool) -> dict:
     """
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load: a write must never see env-expanded values, or saving would
+        # bake the resolved secret into config.yaml instead of the ${VAR}
+        # placeholder (#5619 write-target rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         display_cfg = config_data.get("display")
         if not isinstance(display_cfg, dict):
             display_cfg = {}
@@ -6309,7 +6312,8 @@ def set_reasoning_effort(
         )
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load — see set_reasoning_display() for the #5619 write rule.
+        config_data = _load_yaml_config_file_raw(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
@@ -6582,7 +6586,8 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # reload_config() acquires _cfg_lock internally (it's not reentrant) so
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load — the write transaction must not bake env-expanded secrets.
+        config_data = _load_yaml_config_file_raw(config_path)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
             model_cfg = {}
@@ -6794,7 +6799,8 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     model = str(model or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load — the write transaction must not bake env-expanded secrets.
+        config_data = _load_yaml_config_file_raw(config_path)
         if task != "__reset__" and task not in AUX_TASK_SLOTS:
             raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
         if task == "__reset__":
