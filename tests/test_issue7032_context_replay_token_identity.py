@@ -44,7 +44,7 @@ def _persisted_turn_one(*, with_api_content):
 
 
 def _settle_repeated_prompt_turn(previous_context, result_messages, *, authoritative):
-    from api.streaming import _settle_result_messages
+    from api.streaming import _resolve_active_turn_authority, _settle_result_messages
 
     previous_display = copy.deepcopy(previous_context)
     session = SimpleNamespace(
@@ -59,9 +59,17 @@ def _settle_repeated_prompt_turn(previous_context, result_messages, *, authorita
         "timestamp": 200.0,
         "source": "webui",
         "attachments": [],
-        "current_turn_user_idx": len(previous_context) if authoritative else None,
-        "turn_id": "turn:2" if authoritative else "",
+        "current_turn_user_idx": None,
+        "turn_id": "",
     }
+    if authoritative:
+        identity = _resolve_active_turn_authority(
+            identity,
+            result={
+                "current_turn_user_idx": len(previous_context),
+                "turn_id": "turn:2",
+            },
+        )
     _settle_result_messages(
         session,
         copy.deepcopy(previous_display),
@@ -188,3 +196,71 @@ def test_current_answer_survives_full_history_replay_without_user_echo():
         "display/context divergence: "
         f"display={display_answers} context={context_answers}"
     )
+
+
+def _sanitized_metadata_history():
+    from api.streaming import _sanitize_messages_for_agent
+
+    previous_context = _persisted_turn_one(with_api_content=False)
+    previous_context[0]["attachments"] = [
+        {"name": "report.txt", "path": "/workspace/report.txt"}
+    ]
+    previous_context[0]["source"] = "webui"
+    previous_context[1]["reasoning_content"] = "private chain of thought"
+    agent_bound_history = _sanitize_messages_for_agent(
+        previous_context,
+        cfg={"webui": {"reasoning_content_replay": "strip"}},
+        effective_model="test-model",
+        effective_provider="openai",
+    )
+    assert "attachments" not in agent_bound_history[0]
+    assert "source" not in agent_bound_history[0]
+    assert "reasoning_content" not in agent_bound_history[1]
+    return previous_context, agent_bound_history
+
+
+def _assert_exact_two_turn_projections(session):
+    expected_roles = ["user", "assistant", "user", "assistant"]
+    assert [message["role"] for message in session.messages] == expected_roles
+    assert [message["role"] for message in session.context_messages] == expected_roles
+    assert _assistant_answers(session.messages) == [
+        "the report says A",
+        "the report now says B",
+    ]
+    assert _assistant_answers(session.context_messages) == [
+        "the report says A",
+        "the report now says B",
+    ]
+
+
+def test_authoritative_agent_projection_replay_with_user_echo_is_not_duplicated():
+    """The exact Agent-bound prefix is history even after metadata sanitization."""
+    previous_context, agent_bound_history = _sanitized_metadata_history()
+    result_messages = copy.deepcopy(agent_bound_history) + [
+        {"role": "user", "content": PROMPT},
+        {"role": "assistant", "content": "the report now says B"},
+    ]
+
+    session = _settle_repeated_prompt_turn(
+        previous_context,
+        result_messages,
+        authoritative=True,
+    )
+
+    _assert_exact_two_turn_projections(session)
+
+
+def test_authoritative_agent_projection_replay_without_user_echo_is_not_duplicated():
+    """Out-of-band current users retain one durable history and one new answer."""
+    previous_context, agent_bound_history = _sanitized_metadata_history()
+    result_messages = copy.deepcopy(agent_bound_history) + [
+        {"role": "assistant", "content": "the report now says B"},
+    ]
+
+    session = _settle_repeated_prompt_turn(
+        previous_context,
+        result_messages,
+        authoritative=True,
+    )
+
+    _assert_exact_two_turn_projections(session)
