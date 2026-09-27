@@ -320,6 +320,33 @@ class TestIssue765FollowupHardening:
         data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["session_id"] == "same_sid"
 
+    def test_distinct_loaded_sessions_reject_stale_same_size_save(self):
+        s = _make_session("stale_sid")
+        s.save(skip_index=True)
+        first = Session.load("stale_sid")
+        stale = Session.load("stale_sid")
+        assert first is not None and stale is not None
+
+        first.messages[0]["content"] = "newer"
+        first.save(skip_index=True)
+        stale.messages[0]["content"] = "stale"
+        with pytest.raises(RuntimeError, match="generation changed"):
+            stale.save(skip_index=True)
+
+        persisted = json.loads(s.path.read_text(encoding="utf-8"))
+        assert persisted["messages"][0]["content"] == "newer"
+
+    def test_ordinary_save_does_not_full_parse_sidecar_for_generation_check(self, monkeypatch):
+        s = _make_session("bounded_authority")
+        s.save(skip_index=True)
+
+        def _unexpected_full_parse(_path):
+            raise AssertionError("ordinary save authority must use the bounded metadata prefix")
+
+        monkeypatch.setattr(models, "_sidecar_payload", _unexpected_full_parse)
+        s.messages.append({"role": "assistant", "content": "still bounded"})
+        s.save(skip_index=True)
+
     def test_success_path_joins_checkpoint_before_session_mutation(self):
         """Static guard: success path must stop/join checkpoint thread before mutating.
 

@@ -1459,6 +1459,25 @@ def _sidecar_payload(path: Path) -> tuple[dict, str]:
     return payload, hashlib.sha256(raw).hexdigest()
 
 
+def _sidecar_mutation_authority(path: Path) -> tuple[dict, str | None]:
+    """Read save authority without reparsing an ordinary transcript.
+
+    Current writers place both generation fields before ``messages``.  Only a
+    lineage-stamped sidecar (the squash boundary) needs an exact whole-file
+    digest; ordinary saves compare the lightweight mutation generation.  A
+    legacy layout that cannot yield a valid metadata prefix falls back to the
+    full parser rather than guessing.
+    """
+    prefix = _read_metadata_json_prefix(path)
+    if prefix is not None:
+        payload = json.loads(prefix)
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Session sidecar {path.name!r} metadata is not a JSON object")
+        if not payload.get('lineage_generation'):
+            return payload, None
+    return _sidecar_payload(path)
+
+
 def _lineage_generation_from_payload(payload: dict | None) -> str:
     """Return the durable token child creation binds to.
 
@@ -1674,7 +1693,7 @@ class Session:
         _existing_path = Path(SESSION_DIR) / f'{self.session_id}.json'
         if _existing_path.is_file():
             try:
-                _existing_payload, _existing_digest = _sidecar_payload(_existing_path)
+                _existing_payload, _existing_digest = _sidecar_mutation_authority(_existing_path)
                 self._loaded_sidecar_session_id = self.session_id
                 self._loaded_mutation_generation = _existing_payload.get('mutation_generation')
                 self._loaded_lineage_generation = _existing_payload.get('lineage_generation')
@@ -1727,7 +1746,7 @@ class Session:
                 raise RuntimeError(f"Session {self.session_id!r} generation changed: sidecar disappeared")
             return
         try:
-            payload, digest = _sidecar_payload(path)
+            payload, digest = _sidecar_mutation_authority(path)
         except (OSError, ValueError, RuntimeError) as exc:
             raise RuntimeError(f"Session {self.session_id!r} generation changed: sidecar unreadable") from exc
         expected_generation = getattr(self, '_loaded_mutation_generation', None)
@@ -1738,14 +1757,20 @@ class Session:
         # still materialize them outside Session.save().  The squash lineage
         # stamp is the durable boundary that must never be crossed: once either
         # side has one, require the exact generation and digest.  Ordinary
-        # unstamped files still share the authority lock and retain their legacy
-        # overwrite/recovery semantics.
+        # unstamped files compare the lightweight mutation token under the same
+        # authority lock while allowing foreign recovery writers that predate or
+        # preserve that token.
+        current_generation = payload.get('mutation_generation')
         if not expected_lineage and not current_lineage:
-            return
+            if current_generation is None or current_generation == expected_generation:
+                return
+            raise RuntimeError(
+                f"Session {self.session_id!r} generation changed since it was loaded; reload before saving"
+            )
         if (
             current_lineage != expected_lineage
             or
-            payload.get('mutation_generation') != expected_generation
+            current_generation != expected_generation
             or not expected_digest
             or digest != expected_digest
         ):
@@ -1806,7 +1831,10 @@ class Session:
             self._loaded_sidecar_session_id = self.session_id
             self._loaded_mutation_generation = self.mutation_generation
             self._loaded_lineage_generation = self.lineage_generation
-            _payload, self._loaded_sidecar_digest = _sidecar_payload(Path(self.path))
+            if self.lineage_generation:
+                _payload, self._loaded_sidecar_digest = _sidecar_payload(Path(self.path))
+            else:
+                self._loaded_sidecar_digest = None
 
     def _save_under_mutation_authority(self, touch_updated_at: bool = True, skip_index: bool = False) -> bool:
         if not is_safe_session_id(self.session_id):
