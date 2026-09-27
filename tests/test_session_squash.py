@@ -441,6 +441,93 @@ def test_replace_between_digest_and_swap_is_detected(env, monkeypatch):
     assert [(a, c) for _id, a, c in _state_rows(env)] == [(1, 0)] * 4
 
 
+def test_stale_ordinary_save_after_sidecar_swap_cannot_replace_squash(env, monkeypatch):
+    """An already-loaded Session.save() must join the squash authority and
+    reject its stale generation instead of replacing the committed summary."""
+    _make_session(env)
+    _make_state_db(env)
+    stale = api.models.Session.load(SID)
+    assert stale is not None
+    stale.messages.append({"role": "assistant", "content": "stale writer", "timestamp": 2000.0})
+    attempted = threading.Event()
+    finished = threading.Event()
+    errors = []
+    writer = None
+
+    def _write_stale():
+        attempted.set()
+        try:
+            stale.save()
+        except Exception as exc:  # the generation conflict is the expected outcome
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    def _hook(stage):
+        nonlocal writer
+        if stage == "before":
+            writer = threading.Thread(target=_write_stale, name="stale-session-save")
+            writer.start()
+            assert attempted.wait(2)
+            # A participating writer remains blocked until squash releases the
+            # per-session authority. The unfixed writer finishes here and wins.
+            finished.wait(0.2)
+
+    monkeypatch.setattr(session_squash, "_state_barrier_hook", _hook)
+    snap, _ = _squash()
+    assert writer is not None
+    writer.join(2)
+    assert snap["status"] == "done", snap.get("error")
+    assert errors and "generation changed" in str(errors[0])
+    persisted = json.loads((env.sessions_dir / f"{SID}.json").read_text(encoding="utf-8"))
+    assert [m.get("_squash_summary") for m in persisted["messages"]] == [True]
+    assert _index_entry(env)["message_count"] == 1
+
+
+def test_descendant_save_after_final_scan_is_generation_bound(env, monkeypatch):
+    """A child prepared from the pre-squash parent cannot land after the last
+    descendant scan and silently create a stale lineage edge."""
+    _make_session(env)
+    _make_state_db(env)
+    child = api.models.Session(
+        session_id="child_after_scan_01",
+        title="late child",
+        workspace=str(env.tmp),
+        messages=_messages(2),
+        parent_session_id=SID,
+        profile="default",
+    )
+    attempted = threading.Event()
+    finished = threading.Event()
+    errors = []
+    writer = None
+
+    def _save_child():
+        attempted.set()
+        try:
+            child.save()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    def _hook(stage):
+        nonlocal writer
+        if stage == "claimed":
+            writer = threading.Thread(target=_save_child, name="late-child-save")
+            writer.start()
+            assert attempted.wait(2)
+            finished.wait(0.2)
+
+    monkeypatch.setattr(session_squash, "_cas_hook", _hook)
+    snap, _ = _squash()
+    assert writer is not None
+    writer.join(2)
+    assert snap["status"] == "done", snap.get("error")
+    assert errors and "parent lineage generation changed" in str(errors[0])
+    assert not (env.sessions_dir / "child_after_scan_01.json").exists()
+
+
 def test_second_process_holding_squash_lock_blocks(env):
     _make_session(env)
     authority = session_squash.preview_squash(SID, request_profile="default")
@@ -543,15 +630,16 @@ def test_injected_failure_rolls_back_exactly(env, monkeypatch, stage):
     _assert_unchanged(env, before)
 
 
-def test_legacy_state_schema_without_session_rows_is_nonprojecting(env):
+def test_legacy_state_schema_without_session_rows_fails_closed(env):
     _make_session(env)
     db = env.home / "state.db"
     with sqlite3.connect(db) as conn:
         conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, active INTEGER)")
         conn.execute("INSERT INTO messages (session_id, active) VALUES (?, 1)", ("other-session",))
+    before_bytes = (env.sessions_dir / f"{SID}.json").read_bytes()
     job, _ = _squash()
-    assert job["status"] == "done", job.get("error")
-    assert job["result"]["state_barrier"] == "no-session-rows"
+    assert job["status"] == "error" and "required squash barrier" in job["error"]
+    assert (env.sessions_dir / f"{SID}.json").read_bytes() == before_bytes
     with sqlite3.connect(db) as conn:
         assert {row[1] for row in conn.execute("PRAGMA table_info(messages)")} == {"id", "session_id", "active"}
         assert conn.execute("SELECT active FROM messages WHERE session_id = ?", ("other-session",)).fetchall() == [(1,)]
@@ -704,6 +792,87 @@ def test_restore_refuses_when_session_moved_on(env):
         session_squash.restore_squash(SID, archive_name=snap["result"]["archive_name"], confirm=confirm,
                                       request_profile="default")
     assert "digest mismatch" in str(exc.value)
+
+
+def test_restore_refuses_new_active_state_row(env):
+    _make_session(env)
+    _make_state_db(env)
+    snap, authority = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    path = env.sessions_dir / f"{SID}.json"
+    with sqlite3.connect(env.home / "state.db") as conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)",
+            (SID, "assistant", "post-squash state", time.time()),
+        )
+    confirm = {"session_id": SID, "source_sha256": authority["source_sha256"],
+               "current_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    with pytest.raises(session_squash.SquashError, match="state.db.*changed"):
+        session_squash.restore_squash(SID, archive_name=snap["result"]["archive_name"],
+                                      confirm=confirm, request_profile="default")
+
+
+@pytest.mark.parametrize("movement", ["update", "delete"])
+def test_restore_refuses_mutated_or_deleted_archived_state_row(env, movement):
+    _make_session(env)
+    _make_state_db(env)
+    snap, authority = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    path = env.sessions_dir / f"{SID}.json"
+    with sqlite3.connect(env.home / "state.db") as conn:
+        if movement == "update":
+            conn.execute("UPDATE messages SET content = 'changed' WHERE session_id = ? AND id = 1", (SID,))
+        else:
+            conn.execute("DELETE FROM messages WHERE session_id = ? AND id = 1", (SID,))
+    confirm = {"session_id": SID, "source_sha256": authority["source_sha256"],
+               "current_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    with pytest.raises(session_squash.SquashError, match="state.db.*changed"):
+        session_squash.restore_squash(SID, archive_name=snap["result"]["archive_name"],
+                                      confirm=confirm, request_profile="default")
+
+
+def test_restore_refuses_first_state_row_after_zero_row_squash(env):
+    _make_session(env)
+    _make_state_db(env, rows=0)
+    snap, authority = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    path = env.sessions_dir / f"{SID}.json"
+    with sqlite3.connect(env.home / "state.db") as conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)",
+            (SID, "assistant", "first delayed row", time.time()),
+        )
+    confirm = {"session_id": SID, "source_sha256": authority["source_sha256"],
+               "current_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    with pytest.raises(session_squash.SquashError, match="state.db.*changed"):
+        session_squash.restore_squash(SID, archive_name=snap["result"]["archive_name"],
+                                      confirm=confirm, request_profile="default")
+
+
+def test_restore_rejects_live_lease_but_accepts_expired_lease(env):
+    _make_session(env)
+    _make_state_db(env)
+    snap, authority = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    path = env.sessions_dir / f"{SID}.json"
+    confirm = {"session_id": SID, "source_sha256": authority["source_sha256"],
+               "current_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    with sqlite3.connect(env.home / "state.db") as conn:
+        conn.execute("INSERT INTO session_turn_leases VALUES (?,?,?,?)",
+                     (SID, "post-squash-turn", time.time(), time.time() + 300))
+    with pytest.raises(session_squash.SquashError, match="Agent turn"):
+        session_squash.restore_squash(SID, archive_name=snap["result"]["archive_name"],
+                                      confirm=confirm, request_profile="default")
+    with sqlite3.connect(env.home / "state.db") as conn:
+        conn.execute("UPDATE session_turn_leases SET expires_at = ? WHERE conversation_id = ?",
+                     (time.time() - 1, SID))
+    restored = session_squash.restore_squash(
+        SID,
+        archive_name=snap["result"]["archive_name"],
+        confirm=confirm,
+        request_profile="default",
+    )
+    assert restored["state_rows_reactivated"] == 4
 
 
 def test_restore_refuses_rewritten_summary_even_with_fresh_confirmation(env):

@@ -33,8 +33,18 @@ def _persist(session_store, sid, n_messages, updated_at):
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
         for i in range(n_messages)
     ]
-    s = M.Session(session_id=sid, title="T", workspace=str(session_store.parent),
-                  model="glm", messages=msgs)
+    path = session_store / f"{sid}.json"
+    if path.exists():
+        # Simulate a participating external writer: load the generation it will
+        # replace, then publish through the normal save fence.  Constructing a
+        # fresh object with an existing id is intentionally no longer authority
+        # to overwrite that sidecar.
+        s = M.Session.load(sid)
+        assert s is not None
+        s.messages = msgs
+    else:
+        s = M.Session(session_id=sid, title="T", workspace=str(session_store.parent),
+                      model="glm", messages=msgs)
     s.updated_at = updated_at
     s.save(touch_updated_at=False)
     return s

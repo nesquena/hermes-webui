@@ -257,6 +257,88 @@ _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 
+# Every writer of a WebUI session sidecar joins this authority.  The in-process
+# RLock prevents two cached Session objects from racing; the file lock extends
+# the same critical section across WebUI processes.  Session.save() holds it
+# from its generation check through sidecar *and* index publication.  Squash and
+# restore use the same context manager, so there is no post-CAS window in which
+# an ordinary save can silently replace their committed generation.
+_SESSION_SIDECAR_AUTHORITY_LOCK = threading.Lock()
+_SESSION_SIDECAR_AUTHORITIES: dict[str, threading.RLock] = {}
+_SESSION_SIDECAR_AUTHORITY_LOCAL = threading.local()
+
+
+def _session_authority_thread_lock(sid: str) -> threading.RLock:
+    with _SESSION_SIDECAR_AUTHORITY_LOCK:
+        return _SESSION_SIDECAR_AUTHORITIES.setdefault(str(sid), threading.RLock())
+
+
+@contextmanager
+def _session_sidecar_authority(sid: str):
+    """Stable, re-entrant per-session mutation authority.
+
+    The lock file is deliberately separate from the sidecar inode: atomic
+    replacement is the normal persistence mechanism, so locking the JSON file
+    itself would lock an obsolete inode after the first replace.
+    """
+    sid = str(sid or "")
+    if not is_safe_session_id(sid):
+        raise ValueError(f"Unsafe session_id {sid!r}; refusing mutation authority")
+    thread_lock = _session_authority_thread_lock(sid)
+    with thread_lock:
+        held = getattr(_SESSION_SIDECAR_AUTHORITY_LOCAL, "held", None)
+        if held is None:
+            held = {}
+            _SESSION_SIDECAR_AUTHORITY_LOCAL.held = held
+        entry = held.get(sid)
+        if entry is not None:
+            entry[0] += 1
+            try:
+                yield
+            finally:
+                entry[0] -= 1
+            return
+
+        lock_dir = Path(SESSION_DIR) / ".mutation-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / f"{sid}.lock"
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        lock_file = os.fdopen(fd, "r+b", buffering=0)
+        try:
+            if _fcntl is not None:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+            elif _msvcrt is not None:  # pragma: no cover - Windows only
+                if os.fstat(lock_file.fileno()).st_size == 0:
+                    lock_file.write(b"\0")
+                lock_file.seek(0)
+                _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+            else:  # pragma: no cover - unsupported platform
+                raise RuntimeError("cross-process session mutation locking is unavailable")
+            held[sid] = [1, lock_file]
+            try:
+                yield
+            finally:
+                held.pop(sid, None)
+                if _fcntl is not None:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+                elif _msvcrt is not None:  # pragma: no cover - Windows only
+                    lock_file.seek(0)
+                    _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
+        finally:
+            lock_file.close()
+
+
+@contextmanager
+def _session_sidecar_authorities(*session_ids: str):
+    """Acquire several authorities in deterministic order."""
+    ids = sorted({str(sid) for sid in session_ids if sid})
+    # ExitStack avoids recursive helper calls while preserving reverse release.
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for sid in ids:
+            stack.enter_context(_session_sidecar_authority(sid))
+        yield
+
 # Serializes ``_record_webui_zero_message_orphan_tombstone`` /
 # ``_clear_webui_zero_message_orphan_tombstone`` so two concurrent sidebar
 # polls (or a poll racing ``Session.save`` / ``new_session`` /
@@ -1369,6 +1451,45 @@ def _validated_webui_pending_user_timestamp_identity(session, value):
     return (stream_id, pending_timestamp)
 
 
+def _sidecar_payload(path: Path) -> tuple[dict, str]:
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Session sidecar {path.name!r} is not a JSON object")
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
+def _lineage_generation_from_payload(payload: dict | None) -> str:
+    """Return the durable token child creation binds to.
+
+    Legacy sidecars have no explicit lineage generation.  Their token depends
+    only on lineage-changing fields, not title/message edits, so ordinary parent
+    saves remain compatible.  Squash stamps an explicit generation and thereby
+    invalidates every child prepared before its final descendant scan.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    generation = payload.get("lineage_generation")
+    if isinstance(generation, str) and generation:
+        return generation
+    return "legacy:%d:%s" % (
+        1 if payload.get("pre_compression_snapshot") else 0,
+        str(payload.get("intentional_shrink_generation") or ""),
+    )
+
+
+def _read_parent_lineage_generation(parent_sid: str) -> str:
+    if not is_safe_session_id(parent_sid):
+        raise RuntimeError("parent lineage generation changed (invalid parent session id)")
+    path = Path(SESSION_DIR) / f"{parent_sid}.json"
+    if not path.is_file():
+        return "missing"
+    try:
+        payload, _digest = _sidecar_payload(path)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise RuntimeError("parent lineage generation changed (unreadable parent)") from exc
+    return _lineage_generation_from_payload(payload)
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1408,6 +1529,8 @@ class Session:
                  intentional_shrink_generation=None,
                  transcript_generation: int=0,
                  transcript_generation_baseline: int=0,
+                 mutation_generation=None,
+                 lineage_generation=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1516,11 +1639,23 @@ class Session:
         self.transcript_generation_baseline = max(
             0, _parse_nonnegative_int(transcript_generation_baseline) or 0
         )
+        self.mutation_generation = mutation_generation
+        self.lineage_generation = lineage_generation
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
         self.parent_session_id = parent_session_id
+        self._expected_parent_session_id = str(parent_session_id) if parent_session_id else None
+        self._expected_parent_lineage_generation = (
+            _read_parent_lineage_generation(str(parent_session_id)) if parent_session_id else None
+        )
+        # ``Session.load`` fills these from the exact bytes it parsed.  A newly
+        # constructed object is an insert, not authority to replace an existing
+        # sidecar with the same id.
+        self._loaded_sidecar_session_id = None
+        self._loaded_mutation_generation = None
+        self._loaded_sidecar_digest = None
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
@@ -1559,7 +1694,82 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def _assert_mutation_generation(self) -> None:
+        path = Path(self.path)
+        loaded_sid = getattr(self, '_loaded_sidecar_session_id', None)
+        if loaded_sid != self.session_id:
+            if path.exists():
+                raise RuntimeError(
+                    f"Session {self.session_id!r} generation changed: refusing to replace an existing sidecar"
+                )
+            return
+        if not path.is_file():
+            raise RuntimeError(f"Session {self.session_id!r} generation changed: sidecar disappeared")
+        try:
+            payload, digest = _sidecar_payload(path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(f"Session {self.session_id!r} generation changed: sidecar unreadable") from exc
+        expected_generation = getattr(self, '_loaded_mutation_generation', None)
+        expected_digest = getattr(self, '_loaded_sidecar_digest', None)
+        if (
+            payload.get('mutation_generation') != expected_generation
+            or not expected_digest
+            or digest != expected_digest
+        ):
+            raise RuntimeError(
+                f"Session {self.session_id!r} generation changed since it was loaded; reload before saving"
+            )
+
+    def _assert_parent_lineage_generation(self) -> None:
+        parent_sid = str(self.parent_session_id or '')
+        if not parent_sid:
+            return
+        expected_sid = getattr(self, '_expected_parent_session_id', None)
+        expected = getattr(self, '_expected_parent_lineage_generation', None)
+        if expected_sid != parent_sid or expected is None:
+            # Dynamic parent assignment (notably compression continuation) binds
+            # at the assignment's first save. Constructor-created branches bind
+            # earlier, before they can wait behind a squash authority.
+            expected = _read_parent_lineage_generation(parent_sid)
+            self._expected_parent_session_id = parent_sid
+            self._expected_parent_lineage_generation = expected
+        current = _read_parent_lineage_generation(parent_sid)
+        if current != expected:
+            raise RuntimeError(
+                f"Session {self.session_id!r} parent lineage generation changed; recreate the child from the current parent"
+            )
+
+    def save(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        _skip_mutation_authority: bool = False,
+    ) -> None:
+        """Persist with generation CAS under the shared sidecar authority."""
+        if _skip_mutation_authority:
+            self._save_under_mutation_authority(touch_updated_at=touch_updated_at, skip_index=skip_index)
+            return
+        parent_sid = str(self.parent_session_id or '')
+        with _session_sidecar_authorities(self.session_id, parent_sid):
+            self._assert_parent_lineage_generation()
+            self._assert_mutation_generation()
+            prior_generation = self.mutation_generation
+            self.mutation_generation = uuid.uuid4().hex
+            written = False
+            try:
+                written = self._save_under_mutation_authority(
+                    touch_updated_at=touch_updated_at,
+                    skip_index=skip_index,
+                )
+            finally:
+                if not written:
+                    self.mutation_generation = prior_generation
+            self._loaded_sidecar_session_id = self.session_id
+            self._loaded_mutation_generation = self.mutation_generation
+            _payload, self._loaded_sidecar_digest = _sidecar_payload(Path(self.path))
+
+    def _save_under_mutation_authority(self, touch_updated_at: bool = True, skip_index: bool = False) -> bool:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1611,6 +1821,7 @@ class Session:
             'intentional_shrink_generation',
             'transcript_generation',
             'transcript_generation_baseline',
+            'mutation_generation', 'lineage_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -1724,7 +1935,7 @@ class Session:
                         incoming_msg_count,
                         self.active_stream_id,
                     )
-                    return
+                    return False
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
                     if existing_text is None:
@@ -1796,6 +2007,7 @@ class Session:
                     self.session_id,
                     exc_info=True,
                 )
+        return True
 
     @classmethod
     def load(cls, sid):
@@ -1811,9 +2023,13 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        raw = p.read_bytes()
+        data = json.loads(raw)
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        session._loaded_sidecar_session_id = str(sid)
+        session._loaded_mutation_generation = data.get('mutation_generation')
+        session._loaded_sidecar_digest = hashlib.sha256(raw).hexdigest()
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching

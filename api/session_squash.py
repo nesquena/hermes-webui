@@ -68,7 +68,8 @@ MIN_SUMMARY_CHARS = 400
 _DISTILL_BUDGET_CHARS = 100_000
 _JOB_TTL_SECONDS = 3600.0
 _ARCHIVE_DIR_NAME = "session-squash-archives"
-_MANIFEST_FORMAT = 2
+_MANIFEST_FORMAT = 3
+_STATE_GENERATION_TABLE = "webui_session_squash_state"
 
 
 class SquashError(Exception):
@@ -273,11 +274,10 @@ def _squash_process_lock(sid: str):
 
 
 def _sidecar_authority_lock(sid: str):
-    """Shared in-process sidecar authority when the runtime provides one."""
+    """Shared in/cross-process authority used by every ``Session.save``."""
     from api import models
 
-    factory = getattr(models, "_session_sidecar_authority", None)
-    return factory(sid) if callable(factory) else contextlib.nullcontext()
+    return models._session_sidecar_authority(sid)
 
 
 class _CasConflict(SquashError):
@@ -797,7 +797,7 @@ def _stage_session_file(session, staged_path: Path) -> None:
     staged_cls = type(f"_Staged{base.__name__}", (base,), {"path": property(lambda _self: staged_path)})
     staged = copy.copy(session)
     staged.__class__ = staged_cls
-    staged.save(touch_updated_at=False, skip_index=True)
+    staged.save(touch_updated_at=False, skip_index=True, _skip_mutation_authority=True)
 
 
 def _squashed_copy(session, summary: str, generation: str, now: float) -> tuple[object, str | None]:
@@ -859,6 +859,12 @@ def _squashed_copy(session, summary: str, generation: str, now: float) -> tuple[
     # Durable squash generation: startup .bak recovery treats a live
     # uuid4-hex generation the backup lacks as an intentional shrink.
     squashed.intentional_shrink_generation = generation
+    # Ordinary Session.save() compares mutation_generation; child creation
+    # compares lineage_generation.  Stamping both with this transaction's UUID
+    # makes stale writers and children prepared before the final scan fail after
+    # waiting for the shared authority.
+    squashed.mutation_generation = generation
+    squashed.lineage_generation = generation
     # A new squash starts a new state.db projection generation. Reset any
     # projection authority inherited from an earlier squash of this session
     # (fields exist when the #6600 projection contract is present).
@@ -920,14 +926,98 @@ def _state_barrier_hook(_stage: str) -> None:
     """Test seam around the state.db barrier (no-op in production)."""
 
 
-def _apply_state_barrier(sid: str, profile: str) -> dict:
-    """Soft-archive the Agent state rows of ``sid`` in one IMMEDIATE txn.
+def _state_message_columns(conn) -> set[str]:
+    return {str(row["name"]) for row in conn.execute("PRAGMA table_info(messages)")}
 
-    Refuses (zero writes) while a live Agent turn lease owns the
-    conversation, so no in-flight writer can deliver a delayed row across the
-    squash. Rows stay on disk (``active=0, compacted=1``, the Agent's own
-    compaction marking) and their ids are recorded for restore.
+
+def _state_tables(conn) -> set[str]:
+    return {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def _reject_live_state_lease(conn, sid: str, tables: set[str]) -> None:
+    if "session_turn_leases" not in tables:
+        raise SquashError("state.db lacks turn leases; squash cannot fence delayed writes", 409)
+    keys = _lease_keys(conn, sid, tables)
+    live = conn.execute(
+        f"SELECT conversation_id FROM session_turn_leases WHERE expires_at > ? "
+        f"AND conversation_id IN ({','.join('?' * len(keys))})",
+        (time.time(), *keys),
+    ).fetchone()
+    if live is not None:
+        raise SquashError("an Agent turn currently owns this conversation — retry once it is idle", 409)
+
+
+def _ensure_state_generation_schema(conn) -> None:
+    """Install the durable generation row and message-movement triggers.
+
+    The triggers do not reject later legitimate turns; they advance ``revision``
+    so restore can distinguish an untouched squash from any insert/update/delete,
+    including a first row published after a zero-row squash.
     """
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {_STATE_GENERATION_TABLE} ("
+        "session_id TEXT PRIMARY KEY, squash_generation TEXT NOT NULL, "
+        "revision INTEGER NOT NULL, rows_digest TEXT NOT NULL, created_at REAL NOT NULL)"
+    )
+    required = {"session_id", "squash_generation", "revision", "rows_digest", "created_at"}
+    actual = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({_STATE_GENERATION_TABLE})")}
+    if not required.issubset(actual):
+        raise SquashError("state.db squash generation schema is incompatible", 409)
+    conn.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS webui_squash_message_insert
+        AFTER INSERT ON messages
+        WHEN EXISTS (SELECT 1 FROM {_STATE_GENERATION_TABLE} WHERE session_id = NEW.session_id)
+        BEGIN
+          UPDATE {_STATE_GENERATION_TABLE} SET revision = revision + 1 WHERE session_id = NEW.session_id;
+        END
+    """)
+    conn.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS webui_squash_message_update
+        AFTER UPDATE ON messages
+        BEGIN
+          UPDATE {_STATE_GENERATION_TABLE} SET revision = revision + 1 WHERE session_id = OLD.session_id;
+          UPDATE {_STATE_GENERATION_TABLE} SET revision = revision + 1
+            WHERE session_id = NEW.session_id AND NEW.session_id <> OLD.session_id;
+        END
+    """)
+    conn.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS webui_squash_message_delete
+        AFTER DELETE ON messages
+        WHEN EXISTS (SELECT 1 FROM {_STATE_GENERATION_TABLE} WHERE session_id = OLD.session_id)
+        BEGIN
+          UPDATE {_STATE_GENERATION_TABLE} SET revision = revision + 1 WHERE session_id = OLD.session_id;
+        END
+    """)
+
+
+def _state_rows_digest(conn, sid: str) -> str:
+    cursor = conn.execute("SELECT * FROM messages WHERE session_id = ? ORDER BY id", (sid,))
+    columns = [str(item[0]) for item in cursor.description or ()]
+    digest = hashlib.sha256()
+    for name in columns:
+        encoded = name.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    for row in cursor:
+        for value in row:
+            if value is None:
+                marker, encoded = b"N", b""
+            elif isinstance(value, bytes):
+                marker, encoded = b"B", value
+            elif isinstance(value, float):
+                marker, encoded = b"F", repr(value).encode("ascii")
+            elif isinstance(value, int):
+                marker, encoded = b"I", str(value).encode("ascii")
+            else:
+                marker, encoded = b"S", str(value).encode("utf-8")
+            digest.update(marker)
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _apply_state_barrier(sid: str, profile: str, generation: str) -> dict:
+    """Soft-archive rows and persist a movement-sensitive generation."""
     db_path = _state_db_path_for(profile)
     if db_path is None:
         return {"state_barrier": "no-state-db", "state_archived_row_ids": []}
@@ -937,29 +1027,14 @@ def _apply_state_barrier(sid: str, profile: str) -> dict:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN IMMEDIATE")
         try:
-            cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+            cols = _state_message_columns(conn)
+            # Zero rows in an unsupported legacy schema are not durable proof:
+            # the first later Agent row would otherwise bypass the barrier.
             if not {"id", "session_id", "active", "compacted"}.issubset(cols):
-                # A legacy state.db without matching session rows has nothing
-                # to project. Hold the write lock through the check so a row
-                # cannot appear between schema inspection and this decision.
-                if "session_id" in cols and conn.execute(
-                    "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1", (sid,)
-                ).fetchone() is None:
-                    conn.execute("COMMIT")
-                    return {"state_barrier": "no-session-rows", "state_archived_row_ids": []}
                 raise SquashError("state.db lacks the required squash barrier columns", 409)
-            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "session_turn_leases" not in tables:
-                raise SquashError("state.db lacks turn leases; squash cannot fence delayed writes", 409)
-            keys = _lease_keys(conn, sid, tables)
-            now = time.time()
-            live = conn.execute(
-                f"SELECT conversation_id FROM session_turn_leases WHERE expires_at > ? "
-                f"AND conversation_id IN ({','.join('?' * len(keys))})",
-                (now, *keys),
-            ).fetchone()
-            if live is not None:
-                raise SquashError("an Agent turn currently owns this conversation — retry once it is idle", 409)
+            tables = _state_tables(conn)
+            _reject_live_state_lease(conn, sid, tables)
+            _ensure_state_generation_schema(conn)
             ids = [int(r["id"]) for r in conn.execute(
                 "SELECT id FROM messages WHERE session_id = ? AND active = 1 ORDER BY id", (sid,))]
             if ids:
@@ -968,6 +1043,14 @@ def _apply_state_barrier(sid: str, profile: str) -> dict:
                     f"AND id IN ({','.join('?' * len(ids))})",
                     (sid, *ids),
                 )
+            rows_digest = _state_rows_digest(conn, sid)
+            conn.execute(
+                f"INSERT INTO {_STATE_GENERATION_TABLE} "
+                "(session_id, squash_generation, revision, rows_digest, created_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET squash_generation=excluded.squash_generation, "
+                "revision=excluded.revision, rows_digest=excluded.rows_digest, created_at=excluded.created_at",
+                (sid, generation, 0, rows_digest, time.time()),
+            )
             _state_barrier_hook("before-commit")
             conn.execute("COMMIT")
         except BaseException:
@@ -975,7 +1058,13 @@ def _apply_state_barrier(sid: str, profile: str) -> dict:
             raise
     finally:
         conn.close()
-    return {"state_barrier": "applied", "state_archived_row_ids": ids}
+    return {
+        "state_barrier": "applied",
+        "state_archived_row_ids": ids,
+        "state_generation": generation,
+        "state_revision": 0,
+        "state_rows_digest": rows_digest,
+    }
 
 
 def _lease_keys(conn, sid: str, tables: set) -> list[str]:
@@ -998,18 +1087,40 @@ def _lease_keys(conn, sid: str, tables: set) -> list[str]:
     return keys
 
 
-def _reactivate_state_rows(sid: str, profile: str, ids: list[int]) -> int:
+def _reactivate_state_rows(sid: str, profile: str, ids: list[int], manifest: dict) -> int:
     """Undo a state barrier: re-activate exactly the recorded rows that are
     still in the barrier's archived state."""
-    if not ids:
-        return 0
     db_path = _state_db_path_for(profile)
+    if manifest.get("state_barrier") != "applied":
+        return 0
     if db_path is None:
         raise SquashError("state.db disappeared; cannot restore archived state rows", 500)
     conn = sqlite3.connect(str(db_path), timeout=5.0, isolation_level=None)
     try:
+        conn.row_factory = sqlite3.Row
         conn.execute("BEGIN IMMEDIATE")
         try:
+            tables = _state_tables(conn)
+            _reject_live_state_lease(conn, sid, tables)
+            if _STATE_GENERATION_TABLE not in tables:
+                raise SquashError("state.db squash generation disappeared; restore refused", 409)
+            generation = conn.execute(
+                f"SELECT squash_generation, revision, rows_digest FROM {_STATE_GENERATION_TABLE} WHERE session_id = ?",
+                (sid,),
+            ).fetchone()
+            if generation is None:
+                raise SquashError("state.db squash generation disappeared; restore refused", 409)
+            if (
+                generation[0] != manifest.get("state_generation")
+                or int(generation[1]) != int(manifest.get("state_revision", -1))
+                or generation[2] != manifest.get("state_rows_digest")
+                or _state_rows_digest(conn, sid) != manifest.get("state_rows_digest")
+            ):
+                raise SquashError("state.db changed since squash; restore refused", 409)
+            if conn.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT 1", (sid,)
+            ).fetchone() is not None:
+                raise SquashError("state.db has active rows after squash; restore refused", 409)
             restored = 0
             for start in range(0, len(ids), 500):
                 chunk = ids[start:start + 500]
@@ -1020,6 +1131,7 @@ def _reactivate_state_rows(sid: str, profile: str, ids: list[int]) -> int:
                 ).rowcount
             if restored != len(ids):
                 raise SquashError("state.db restore rows changed since squash", 409)
+            conn.execute(f"DELETE FROM {_STATE_GENERATION_TABLE} WHERE session_id = ?", (sid,))
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -1029,9 +1141,9 @@ def _reactivate_state_rows(sid: str, profile: str, ids: list[int]) -> int:
     return restored
 
 
-def _rearchive_restored_state_rows(sid: str, profile: str, ids: list[int]) -> None:
+def _rearchive_restored_state_rows(sid: str, profile: str, ids: list[int], manifest: dict) -> None:
     """Undo a restore's committed state reactivation on a later failure."""
-    if not ids:
+    if manifest.get("state_barrier") != "applied":
         return
     db_path = _state_db_path_for(profile)
     if db_path is None:
@@ -1044,6 +1156,12 @@ def _rearchive_restored_state_rows(sid: str, profile: str, ids: list[int]) -> No
                 f"AND id IN ({','.join('?' * len(chunk))})",
                 (sid, *chunk),
             )
+        conn.execute(
+            f"INSERT OR REPLACE INTO {_STATE_GENERATION_TABLE} "
+            "(session_id, squash_generation, revision, rows_digest, created_at) VALUES (?,?,?,?,?)",
+            (sid, manifest["state_generation"], manifest.get("state_revision", 0),
+             manifest["state_rows_digest"], manifest.get("created_at", time.time())),
+        )
 
 
 def _publish_cache(sid: str, session_obj) -> None:
@@ -1148,7 +1266,7 @@ def _commit_squash(session, authority: SquashAuthority, summary: str) -> dict:
         _verify_index(sid, 1)
 
         # 4. Durable state barrier (atomic, refuses a live Agent turn lease).
-        state = _apply_state_barrier(sid, authority.profile)
+        state = _apply_state_barrier(sid, authority.profile, generation)
 
         # 5. Finalize the manifest with what restore needs.
         manifest.update(state)
@@ -1200,9 +1318,9 @@ def _rollback_squash(*, sid, profile, live, claim, published_sig, staged_path, a
     """Best-effort exact rollback; every step is attempted and logged."""
     staged_path.unlink(missing_ok=True)
     ids = state.get("state_archived_row_ids") or []
-    if state.get("state_barrier") == "applied" and ids:
+    if state.get("state_barrier") == "applied":
         try:
-            _reactivate_state_rows(sid, profile, ids)
+            _reactivate_state_rows(sid, profile, ids, state)
         except Exception:
             logger.error("squash rollback: state rows not reactivated for %s", sid, exc_info=True)
     sidecar_restored = claim is None
@@ -1351,7 +1469,7 @@ def _commit_restore(session, manifest: dict, archive_path: Path, profile: str, c
         index_written = True
         _write_index_for(restored)
         _verify_index(sid, int(manifest.get("source_message_count") or len(restored.messages or [])))
-        reactivated = _reactivate_state_rows(sid, profile, expected_ids)
+        reactivated = _reactivate_state_rows(sid, profile, expected_ids, manifest)
         _publish_cache(sid, restored)
         committed = True
     finally:
@@ -1359,7 +1477,7 @@ def _commit_restore(session, manifest: dict, archive_path: Path, profile: str, c
             staged_path.unlink(missing_ok=True)
             if reactivated:
                 try:
-                    _rearchive_restored_state_rows(sid, profile, expected_ids)
+                    _rearchive_restored_state_rows(sid, profile, expected_ids, manifest)
                 except Exception:
                     logger.error("restore rollback: state rows not re-archived for %s", sid, exc_info=True)
             if claim is not None and published_sig is not None:
