@@ -127,6 +127,7 @@ class TestNoRenameDuringCompression:
         assert continuation.mutation_generation is None
         assert continuation.lineage_generation is None
         assert continuation._loaded_sidecar_session_id is None
+        assert continuation._loaded_sidecar_stat_signature is None
 
 
 class TestMergePreservesHistory:

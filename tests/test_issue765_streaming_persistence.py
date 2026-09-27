@@ -347,6 +347,24 @@ class TestIssue765FollowupHardening:
         s.messages.append({"role": "assistant", "content": "still bounded"})
         s.save(skip_index=True)
 
+    def test_ordinary_save_rejects_damage_after_valid_metadata_prefix(self):
+        s = _make_session("damaged_after_prefix")
+        s.save(skip_index=True)
+
+        raw = s.path.read_bytes()
+        messages_offset = raw.index(b'"messages"')
+        damaged = raw[: messages_offset + len(b'"messages": [')] + b'\n'
+        s.path.write_bytes(damaged)
+
+        prefix_payload, prefix_digest = models._sidecar_mutation_authority(s.path)
+        assert prefix_payload["mutation_generation"] == s.mutation_generation
+        assert prefix_digest is None
+
+        s.title = "must not replace damaged transcript"
+        with pytest.raises(RuntimeError, match="sidecar unreadable"):
+            s.save(skip_index=True)
+        assert s.path.read_bytes() == damaged
+
     def test_success_path_joins_checkpoint_before_session_mutation(self):
         """Static guard: success path must stop/join checkpoint thread before mutating.
 

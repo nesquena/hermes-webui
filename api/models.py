@@ -1684,6 +1684,7 @@ class Session:
         self._loaded_mutation_generation = None
         self._loaded_lineage_generation = None
         self._loaded_sidecar_digest = None
+        self._loaded_sidecar_stat_signature = None
         # Some long-standing call sites reconstruct a complete Session object
         # for an existing id rather than calling Session.load().  Bind that
         # object to the exact generation visible at construction time; it may
@@ -1693,11 +1694,13 @@ class Session:
         _existing_path = Path(SESSION_DIR) / f'{self.session_id}.json'
         if _existing_path.is_file():
             try:
+                _existing_stat_signature = _sidecar_stat_signature(_existing_path)
                 _existing_payload, _existing_digest = _sidecar_mutation_authority(_existing_path)
                 self._loaded_sidecar_session_id = self.session_id
                 self._loaded_mutation_generation = _existing_payload.get('mutation_generation')
                 self._loaded_lineage_generation = _existing_payload.get('lineage_generation')
                 self._loaded_sidecar_digest = _existing_digest
+                self._loaded_sidecar_stat_signature = _existing_stat_signature
             except (OSError, ValueError, RuntimeError):
                 pass
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
@@ -1752,6 +1755,7 @@ class Session:
         expected_generation = getattr(self, '_loaded_mutation_generation', None)
         expected_lineage = getattr(self, '_loaded_lineage_generation', None)
         expected_digest = getattr(self, '_loaded_sidecar_digest', None)
+        expected_stat_signature = getattr(self, '_loaded_sidecar_stat_signature', None)
         current_lineage = payload.get('lineage_generation')
         # Legacy sidecars predate a universal save CAS and some supported flows
         # still materialize them outside Session.save().  The squash lineage
@@ -1762,6 +1766,24 @@ class Session:
         # preserve that token.
         current_generation = payload.get('mutation_generation')
         if not expected_lineage and not current_lineage:
+            current_stat_signature = _sidecar_stat_signature(path)
+            if expected_stat_signature is not None and current_stat_signature != expected_stat_signature:
+                # A foreign/recovery writer may legitimately preserve or omit
+                # the token, but a truncated body can retain a valid metadata
+                # prefix.  Validate the whole changed file once before allowing
+                # that compatibility path; steady-state saves remain bounded.
+                try:
+                    payload, _digest = _sidecar_payload(path)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    raise RuntimeError(
+                        f"Session {self.session_id!r} generation changed: sidecar unreadable"
+                    ) from exc
+                current_lineage = payload.get('lineage_generation')
+                current_generation = payload.get('mutation_generation')
+                if current_lineage:
+                    raise RuntimeError(
+                        f"Session {self.session_id!r} generation changed since it was loaded; reload before saving"
+                    )
             if current_generation is None or current_generation == expected_generation:
                 return
             raise RuntimeError(
@@ -1835,6 +1857,7 @@ class Session:
                 _payload, self._loaded_sidecar_digest = _sidecar_payload(Path(self.path))
             else:
                 self._loaded_sidecar_digest = None
+            self._loaded_sidecar_stat_signature = _sidecar_stat_signature(Path(self.path))
 
     def _save_under_mutation_authority(self, touch_updated_at: bool = True, skip_index: bool = False) -> bool:
         if not is_safe_session_id(self.session_id):
@@ -2098,6 +2121,7 @@ class Session:
         session._loaded_mutation_generation = data.get('mutation_generation')
         session._loaded_lineage_generation = data.get('lineage_generation')
         session._loaded_sidecar_digest = hashlib.sha256(raw).hexdigest()
+        session._loaded_sidecar_stat_signature = _pre_read_sig
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -4822,6 +4846,7 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         session._loaded_mutation_generation = locked._loaded_mutation_generation
         session._loaded_lineage_generation = locked._loaded_lineage_generation
         session._loaded_sidecar_digest = locked._loaded_sidecar_digest
+        session._loaded_sidecar_stat_signature = locked._loaded_sidecar_stat_signature
         logger.info(
             "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
             sid,

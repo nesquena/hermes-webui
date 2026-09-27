@@ -80,6 +80,7 @@ from api.models import (
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
+    _sidecar_stat_signature,
     _validated_webui_pending_user_timestamp_identity,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -5626,6 +5627,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 getattr(s, '_loaded_mutation_generation', None),
                 getattr(s, '_loaded_lineage_generation', None),
                 getattr(s, '_loaded_sidecar_digest', None),
+                getattr(s, '_loaded_sidecar_stat_signature', None),
             )
             s.session_id = old_sid
             # Bind the temporary old_sid projection to the exact bytes read
@@ -5638,6 +5640,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             s._loaded_mutation_generation = existing.get('mutation_generation')
             s._loaded_lineage_generation = existing.get('lineage_generation')
             s._loaded_sidecar_digest = hashlib.sha256(existing_raw).hexdigest()
+            s._loaded_sidecar_stat_signature = _sidecar_stat_signature(old_path)
             s.pre_compression_snapshot = True
             s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
@@ -5676,6 +5679,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                     s._loaded_mutation_generation,
                     s._loaded_lineage_generation,
                     s._loaded_sidecar_digest,
+                    s._loaded_sidecar_stat_signature,
                 ) = saved_loaded_authority
                 s.active_stream_id = saved_active_stream_id
                 s.pending_user_message = saved_pending_user_message
