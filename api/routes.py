@@ -25038,17 +25038,24 @@ def _handle_chat_start(handler, body, diag=None):
             # same SID lock as deletion; otherwise it can read state after the
             # generation bump but before delete_cli_session() removes that state,
             # then recreate the retired sidecar with fresh authority.
+            fallback_response = None
             with _get_session_agent_lock(body["session_id"]):
                 try:
                     s = get_session(body["session_id"])
                     s = _ensure_full_session_before_mutation(body["session_id"], s)
                     if getattr(s, "read_only", False):
-                        return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
-                    if (
+                        fallback_response = (
+                            "Read-only imported sessions cannot be continued from WebUI",
+                            403,
+                        )
+                    elif (
                         (getattr(s, "source_tag", "") or getattr(s, "raw_source", "") or "").strip().lower() == "subagent"
                         or _is_subagent_child_session_id(body["session_id"])
                     ):
-                        return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+                        fallback_response = (
+                            "Read-only imported sessions cannot be continued from WebUI",
+                            403,
+                        )
                 except KeyError:
                     # No WebUI sidecar. If this is a foreign-origin session (CLI,
                     # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -25062,8 +25069,8 @@ def _handle_chat_start(handler, body, diag=None):
                         # no recoverable state anywhere), or 'invalid_sid' (path
                         # safety violation). All collapse to 404 — the client only
                         # knows the right thing to do for "this session is gone".
-                        return bad(handler, "Session not found", 404)
-                    if reason == "not_claimable":
+                        fallback_response = ("Session not found", 404)
+                    elif reason == "not_claimable":
                         # Foreign store says this session is read-only / owned by
                         # a non-WebUI process (messaging, claude_code,
                         # external_agent, cron, gateway/unknown, or explicit
@@ -25075,44 +25082,46 @@ def _handle_chat_start(handler, body, diag=None):
                         # clears localStorage; for a legitimately-listed read-only
                         # session the user should keep their URL and see a refusal,
                         # not have their session vanish.
-                        return bad(
-                            handler,
+                        fallback_response = (
                             "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
                             403,
                         )
-                    try:
-                        # Reaching this arm is an explicit user continuation of a
-                        # claimable foreign session. The synthesizer read the
-                        # canonical state under the SID lock, so authorization can
-                        # clear an older tombstone without granting stale work from
-                        # a concurrent delete a fresh generation.
-                        synth.save(authorize_deleted_recreation=True)
-                    except Exception as _save_err:
-                        # Persisting the sidecar failed: surface a generic 500 to
-                        # the client (paths sanitised, see _sanitize_error) and log
-                        # the full exception server-side. Returning the raw str(exc)
-                        # would leak /root/.hermes/webui/sessions/<sid>.json or any
-                        # other absolute filesystem path the OSError happened to
-                        # carry — #4911 review feedback.
-                        logger.exception(
-                            "failed to persist materialised sidecar for foreign session %s",
-                            body["session_id"],
-                        )
-                        return bad(
-                            handler,
-                            f"failed to claim session: {_sanitize_error(_save_err)}",
-                            500,
-                        )
-                    s = synth
-                    try:
-                        with LOCK:
-                            SESSIONS[s.session_id] = s
-                            SESSIONS.move_to_end(s.session_id)
-                    except Exception:
-                        # If the in-memory LRU refuses the new session, fall through
-                        # with the just-persisted sidecar; _start_run will load it
-                        # from disk if needed.
-                        pass
+                    else:
+                        try:
+                            # Reaching this arm is an explicit user continuation of a
+                            # claimable foreign session. The synthesizer read the
+                            # canonical state under the SID lock, so authorization can
+                            # clear an older tombstone without granting stale work from
+                            # a concurrent delete a fresh generation.
+                            synth.save(authorize_deleted_recreation=True)
+                        except Exception as _save_err:
+                            # Persisting the sidecar failed: surface a generic 500 to
+                            # the client (paths sanitised, see _sanitize_error) and log
+                            # the full exception server-side. Returning the raw str(exc)
+                            # would leak /root/.hermes/webui/sessions/<sid>.json or any
+                            # other absolute filesystem path the OSError happened to
+                            # carry — #4911 review feedback.
+                            logger.exception(
+                                "failed to persist materialised sidecar for foreign session %s",
+                                body["session_id"],
+                            )
+                            fallback_response = (
+                                f"failed to claim session: {_sanitize_error(_save_err)}",
+                                500,
+                            )
+                        else:
+                            s = synth
+                            try:
+                                with LOCK:
+                                    SESSIONS[s.session_id] = s
+                                    SESSIONS.move_to_end(s.session_id)
+                            except Exception:
+                                # If the in-memory LRU refuses the new session, fall through
+                                # with the just-persisted sidecar; _start_run will load it
+                                # from disk if needed.
+                                pass
+            if fallback_response is not None:
+                return bad(handler, *fallback_response)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         diag.stage("validate_profile") if diag else None
@@ -29517,13 +29526,21 @@ def _handle_session_import_cli(handler, body):
     # when a delete completes after this snapshot was taken.
     import_generation = _session_lifecycle_generation(sid)
 
-    with _get_session_agent_lock(sid):
+    def _prepare_import_result():
         if import_generation != _session_lifecycle_generation(sid):
-            return bad(handler, "Session changed while importing; try again", 409)
+            return (
+                "bad",
+                "Session changed while importing; try again",
+                409,
+            )
         # The initial existence check precedes this lock. Do not overwrite a
         # sidecar created by another request while the import was waiting.
         if Session.load(sid) is not None:
-            return bad(handler, "Session changed while importing; try again", 409)
+            return (
+                "bad",
+                "Session changed while importing; try again",
+                409,
+            )
 
         # The SID lock is the publication authority boundary. Resolve metadata
         # and read messages only after entering it so a request that starts after
@@ -29537,7 +29554,7 @@ def _handle_session_import_cli(handler, body):
         profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
         msgs = get_cli_session_messages(sid, profile=profile)
         if not msgs:
-            return bad(handler, "Session not found in CLI store", 404)
+            return ("bad", "Session not found in CLI store", 404)
 
         # Get profile, model, timestamps, and title from the in-lock snapshot.
         created_at = cli_meta.get("created_at") if cli_meta else None
@@ -29607,12 +29624,13 @@ def _handle_session_import_cli(handler, body):
                 "messages": msgs,
                 "tool_calls": [],
             }
-            return j(
-                handler,
+            return (
+                "json",
                 {
                     "session": public_session_projection(session_payload),
                     "imported": False,
                 },
+                200,
             )
 
         s = import_cli_session(
@@ -29642,6 +29660,37 @@ def _handle_session_import_cli(handler, body):
         s.platform = cli_platform
         s._cli_origin = sid
         s.save(touch_updated_at=False)
+        return (
+            "imported",
+            (
+                s,
+                msgs,
+                cli_title,
+                cli_source_tag,
+                cli_raw_source,
+                cli_session_source,
+                cli_source_label,
+                cli_read_only,
+            ),
+            200,
+        )
+
+    with _get_session_agent_lock(sid):
+        response_kind, response_payload, response_status = _prepare_import_result()
+    if response_kind == "bad":
+        return bad(handler, response_payload, response_status)
+    if response_kind == "json":
+        return j(handler, response_payload, status=response_status)
+    (
+        s,
+        msgs,
+        cli_title,
+        cli_source_tag,
+        cli_raw_source,
+        cli_session_source,
+        cli_source_label,
+        cli_read_only,
+    ) = response_payload
     publish_session_list_changed(
         "session_import_cli",
         profile=getattr(s, "profile", None),

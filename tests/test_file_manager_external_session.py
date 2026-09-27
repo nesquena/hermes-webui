@@ -396,6 +396,78 @@ class _DeleteJSONHandler:
         pass
 
 
+class _LockCheckingWriter(BytesIO):
+    """Record whether response body I/O begins outside the SID authority."""
+
+    def __init__(self, session_lock):
+        super().__init__()
+        self._session_lock = session_lock
+        self.lock_was_free = None
+
+    def write(self, value):
+        if self.lock_was_free is None:
+            self.lock_was_free = self._session_lock.acquire(blocking=False)
+            if self.lock_was_free:
+                self._session_lock.release()
+        return super().write(value)
+
+
+def test_chat_start_404_writes_response_after_releasing_sid_lock(monkeypatch):
+    """The production chat fallback must not retain SID authority for HTTP I/O."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    sid = "chat-missing-response-lock"
+    session_lock = config_module._get_session_agent_lock(sid)
+
+    def missing_session(*_args, **_kwargs):
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes_module, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes_module, "_get_or_materialize_session", missing_session)
+    monkeypatch.setattr(routes_module, "get_session", missing_session)
+    monkeypatch.setattr(
+        routes_module,
+        "_claim_or_synthesize_cli_session",
+        lambda _sid: (None, "no_foreign_state"),
+    )
+
+    handler = _DeleteJSONHandler({})
+    handler.wfile = _LockCheckingWriter(session_lock)
+    routes_module._handle_chat_start(handler, {"session_id": sid})
+
+    assert handler.status == 404
+    assert json.loads(handler.wfile.getvalue()) == {"error": "Session not found"}
+    assert handler.wfile.lock_was_free is True
+
+
+def test_explicit_import_409_writes_response_after_releasing_sid_lock(
+    monkeypatch,
+):
+    """Generation-mismatch output starts only after import releases SID authority."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    sid = "import-generation-response-lock"
+    session_lock = config_module._get_session_agent_lock(sid)
+    generations = iter((0, 1))
+
+    monkeypatch.setattr(routes_module.Session, "load", staticmethod(lambda _sid: None))
+    monkeypatch.setattr(
+        routes_module,
+        "_session_lifecycle_generation",
+        lambda _sid: next(generations),
+    )
+
+    handler = _DeleteJSONHandler({})
+    handler.wfile = _LockCheckingWriter(session_lock)
+    routes_module._handle_session_import_cli(handler, {"session_id": sid})
+
+    assert handler.status == 409
+    assert json.loads(handler.wfile.getvalue()) == {
+        "error": "Session changed while importing; try again"
+    }
+    assert handler.wfile.lock_was_free is True
+
+
 def test_delete_serializes_with_workspace_recovery_and_sidecar_stays_deleted(
     models_module, monkeypatch, tmp_path
 ):
