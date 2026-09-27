@@ -9692,7 +9692,7 @@ function setComposerStatus(t,timeoutMs){
   // hover, and a focusable row so touch and keyboard users (who never hover) can
   // reveal it too — see the `.composer-status:focus` rule in style.css.
   el.title=t;
-  el.setAttribute('tabindex','0');
+  el.tabIndex=0;
   el.style.display='';
   if(timeoutMs>0){
     const timer=setTimeout(()=>{
