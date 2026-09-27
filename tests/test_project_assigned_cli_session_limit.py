@@ -52,6 +52,8 @@ def _session(
     ended_at=None,
     end_reason=None,
     source="cli",
+    session_source=None,
+    model_config=None,
     messages=1,
     title=None,
 ):
@@ -63,6 +65,8 @@ def _session(
         "message_count": messages,
         "started_at": started_at,
         "source": source,
+        "session_source": session_source,
+        "model_config": model_config,
         "project_id": project_id,
         "parent_session_id": parent,
         "ended_at": ended_at,
@@ -78,8 +82,13 @@ def _write_state_db(db_path, rows, *, lineage_columns=True):
     ]
     lineage_ddl = ""
     if lineage_columns:
-        columns += ["parent_session_id", "ended_at", "end_reason"]
-        lineage_ddl = ", parent_session_id TEXT, ended_at REAL, end_reason TEXT"
+        columns += [
+            "parent_session_id", "ended_at", "end_reason", "session_source", "model_config",
+        ]
+        lineage_ddl = (
+            ", parent_session_id TEXT, ended_at REAL, end_reason TEXT, "
+            "session_source TEXT, model_config TEXT"
+        )
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "CREATE TABLE sessions ("
@@ -1211,6 +1220,51 @@ def test_project_ids_narrows_the_assigned_query_to_one_project(tmp_path):
     assert _ids(project_assignment="assigned", project_ids=("project-a",)) == ["a-1"]
     # Unknown ids are not an error, they simply select nothing.
     assert _ids(project_assignment="assigned", project_ids=("nope",)) == []
+
+
+@pytest.mark.parametrize("lineage_marker", ["_branched_from", "_reset_from"])
+def test_project_recovery_keeps_separate_child_conversation_visible(
+    fake_hermes_home, tmp_path, monkeypatch, lineage_marker
+):
+    """An assigned compression parent must not claim its branch/reset child.
+
+    The mixed recent window is deliberately consumed by a newer assigned row.
+    Recovery must then return the assigned parent through the project pass and
+    the separate child through the unassigned pass.  If the SQL lineage walk
+    crosses the authoritative branch/reset marker, Python still projects the
+    child separately but both recovery filters omit it from the final sidebar.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 1)
+    _register_projects(tmp_path, "project-a")
+    _write_state_db(
+        fake_hermes_home / "state.db",
+        [
+            _session(
+                "assigned-parent",
+                BASE_TS,
+                project_id="project-a",
+                ended_at=BASE_TS + 1,
+                end_reason="compression",
+            ),
+            _session(
+                "separate-child",
+                BASE_TS + 2,
+                parent="assigned-parent",
+                model_config=json.dumps({lineage_marker: "assigned-parent"}),
+            ),
+            _session(
+                "newer-assigned",
+                BASE_TS + 3,
+                project_id="project-a",
+            ),
+        ],
+    )
+
+    sessions = models.get_cli_sessions()
+    by_id = {session["session_id"]: session for session in sessions}
+
+    assert by_id["assigned-parent"]["project_id"] == "project-a"
+    assert by_id["separate-child"]["project_id"] is None
 
 
 def test_project_ids_requires_the_assigned_filter(tmp_path):
