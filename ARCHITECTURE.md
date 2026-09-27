@@ -59,6 +59,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       agent_compat.py      Resolver for Hermes Agent names moved to sibling modules (compatibility-only)
       auth.py              Optional password authentication, signed cookies, passkeys/WebAuthn
       config.py            Discovery, globals, model detection, reloadable config
+      context_brief.py     Read-only session projection, generated narrative jobs, opt-in auto worker
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
       goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
@@ -259,6 +260,33 @@ Reconciliation then appends that row instead of dropping it; rows without a
 usable timestamp and rows at or after the sidecar tail also append normally.
 The fallback therefore preserves an accepted state-only row when exact ordering
 is ambiguous, while safely placeable recovery rows remain chronological.
+
+#### Context Brief projection and regeneration
+
+`api.context_brief` builds a read-only projection for the Context panels. The
+deterministic layer derives requests, verified conclusions, Todo state, and live
+activity from the display transcript. For compression continuations it reuses the
+sidecar lineage stitch and adds profile-scoped `state.db` history, deduplicating only
+validated provenance identities. Synthetic compaction, squash, wakeup, and runtime
+handoff envelopes are excluded from narrative evidence; the current structured Todo
+and activity projection remains authoritative over transcript prose.
+
+Generated narratives are stored per session under
+`<webui state>/context-briefs/<session_id>.json`. Manual regeneration and the optional
+worker both use `start_brief_job()` and Hermes Agent's `auxiliary.compression` task;
+provider, model, and reasoning selection stay owned by Hermes Agent. Before writing,
+the job re-resolves the session and validates its lifecycle generation, transcript
+revision, active-run state, and archive state so a deleted, resumed, or changed
+session cannot receive a stale result.
+
+Automatic regeneration is disabled by default (`context_brief_auto=false`). Completed
+WebUI runs publish their session IDs through the `ACTIVE_RUNS_LOCK`-protected finished
+set. The worker claims and coalesces those IDs, applies a per-session debounce, and
+serializes in-flight work without scanning the session fleet. Browser polling is also
+opt-in: it starts and stops from the server-reported setting, uses the shared
+subpath-aware `api()` helper, rejects stale session/panel owners after the request,
+and only renders a strictly newer generation. Transient request failures leave the
+enabled poll owner intact; only a successful response with auto disabled stops it.
 
 #### Imported `state.db` sidebar projection
 

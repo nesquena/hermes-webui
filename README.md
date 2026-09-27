@@ -310,6 +310,21 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - **Todos** -- live task list from the current session
 - **Spaces** -- add, rename, remove workspaces; quick-switch from topbar
 
+### Context Brief
+- The workspace panel's **Context** tab is a read-only summary of a conversation's
+  requests, verified outcomes, current Todo state, and generated narrative. Long
+  conversations include visible compression lineage instead of treating a compacted
+  child as a new conversation.
+- **Regenerate** is the default path. It creates the narrative through Hermes Agent's
+  canonical `auxiliary.compression` routing; the WebUI does not select a separate
+  provider or model for Context Briefs.
+- **Automatic context brief** in Settings -> Preferences is opt-in and off by default.
+  When enabled, completed WebUI turns are coalesced per session and refreshed in the
+  background; archived or newly active sessions are not overwritten.
+- **Goal finish** builds a `/goal` from the brief's pending and in-progress Todos and
+  enters the normal goal command/stream lifecycle. It refreshes and revalidates the
+  visible session before starting so stale work is not relaunched in another chat.
+
 ### Mobile responsive
 - Hamburger sidebar -- slide-in overlay on mobile (<640px)
 - Sidebar top tabs stay available on mobile; no fixed bottom nav stealing chat height
