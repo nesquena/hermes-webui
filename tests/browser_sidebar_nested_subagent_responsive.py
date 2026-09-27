@@ -182,7 +182,7 @@ def main() -> int:
                         context = browser.new_context(viewport={"width": width, "height": height})
                         page = context.new_page()
                         page_errors = []
-                        page.on("pageerror", lambda error: page_errors.append(str(error)))
+                        page.on("pageerror", lambda error, errors=page_errors: errors.append(str(error)))
                         page.goto(base_url + "/", wait_until="domcontentloaded")
                         page.wait_for_selector("#sessionSearch", timeout=15000)
                         page.wait_for_function("typeof renderSessionListFromCache === 'function'")
