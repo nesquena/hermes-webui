@@ -8,11 +8,24 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _vision_source():
+    source = (ROOT / "static" / "panels.js").read_text()
+    return source[source.index("function _invalidateVisionCapabilityFirst(){"):source.index("async function _loadAuxiliaryModels(){")]
+
+
+def _switch_source():
+    source = (ROOT / "static" / "panels.js").read_text()
+    start = source.index("async function switchToProfile(name) {")
+    end = source.index("\n}\n", source.index("} finally {", start))
+    return source[start:end + 3]
+
+
 def test_vision_operations_fail_closed_and_serialize():
     if not shutil.which("node"):
         pytest.skip("node required")
-    source = (ROOT / "static/panels.js").read_text()
-    source = source[source.index("function _invalidateVisionCapabilityFirst(){"):source.index("async function _loadAuxiliaryModels(){")]
+    node = shutil.which("node")
+    assert node is not None  # for type-checkers; guarded above
+    source = _vision_source()
     script = r"""
 const assert=require('node:assert/strict');
 const S={activeProfile:'A'};
@@ -77,5 +90,103 @@ function api(url,opts){return new Promise((resolve,reject)=>requests.push({opts,
  console.log('PASS: failed GET/retry, serialized saves/reopen, rollback, malformed load, profile races');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
-    result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, timeout=20)
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_profile_switch_with_settings_open_reloads_vision_setting():
+    """A switch while Settings is open must not leave the checkbox dead.
+
+    Regression for the #7503 greptile finding: ``switchToProfile`` invalidates
+    the vision checkbox (disabled, cleared) on a successful switch, but nothing
+    reloaded the incoming profile's value while the Settings panel was open, so
+    the control stayed unusable until Settings was closed and reopened. The fix
+    reloads in place when the panel is open. This test executes the real
+    ``switchToProfile`` and vision loader together with deferred replies and
+    fails on the pre-fix head (no GET after the switch; checkbox stays
+    disabled).
+    """
+    if not shutil.which("node"):
+        pytest.skip("node required")
+    node = shutil.which("node")
+    assert node is not None  # for type-checkers; guarded above
+    vision = _vision_source()
+    switch = _switch_source()
+    script = (
+        r"""
+const assert=require('node:assert/strict');
+const S={activeProfile:'A',activeProfileIsDefault:false,messages:[],session:{session_id:'s1',workspace:null,profile:'A'}};
+const cb={checked:true,disabled:false,addEventListener(_,fn){this.change=fn;},classList:{add(){},remove(){},toggle(){}},style:{}};
+const chip={classList:{add(){},remove(){},toggle(){}},disabled:false};
+const $=id=>id==='settingsVisionCapabilityFirst'?cb:(id==='profileChip'?chip:null);
+const t=k=>k, toasts=[]; const showToast=x=>toasts.push(x);
+let _currentPanel='settings';
+const requests=[];
+function api(url,opts){return new Promise((resolve,reject)=>requests.push({url,opts,resolve,reject}));}
+let _profileSwitchGeneration=0;
+const noop=()=>{};
+// switchToProfile's optional cross-module hooks (same typeof-guards as the source)
+const _invalidateSessionListRenders=noop;
+const _setProfileSwitchListEmbargo=noop;
+const showSessionListSkeleton=noop;
+const bumpWorkspaceTreeGen=noop;
+const showWorkspaceTreeSkeleton=noop;
+const clearWorkspaceTreeSkeleton=noop;
+const closeSessionActionMenu=noop;
+const animateNextSessionListRefresh=noop;
+const _renamingSid=null;
+let _skillsData=null, _workspaceList=null;
+const applyBotName=noop;
+const _clearPersistedModelState=noop;
+const startGatewaySSE=noop;
+const _applyModelToDropdown=()=> 'm';
+const _modelStateForSelect=()=>({model:'m',model_provider:'p'});
+const refreshProfileTransitionReasoningChip=noop;
+const syncTopbar=noop;
+const renderSessionList=async()=>{};
+const newSession=async()=>{};
+const loadDir=async()=>{};
+const _openProfileSwitchSessionBrowser=noop;
+const _profileSwitchPanelLoad=async()=>{};
+const _refreshProfileSwitchBackground=noop;
+const _resetCronUnreadForProfileSwitch=noop;
+const esc=x=>x;
+"""
+        + vision
+        + "\n"
+        + switch
+        + r"""
+let finished=false;
+const watchdog=setTimeout(()=>{ if(!finished){console.error('script stalled (deferred reply never resolved)');process.exit(1);} },5000);
+(async()=>{
+ // Settings is open; profile A's value is confirmed and the checkbox is usable.
+ const loadA=_loadVisionCapabilityFirst();
+ requests.shift().resolve({vision_capability_first:true});
+ await loadA;
+ assert.equal(cb.checked,true); assert.equal(cb.disabled,false);
+ // Switch to B while Settings stays open. Resolve the switch POST, then await.
+ const sw=switchToProfile('B');
+ requests.shift().resolve({active:'B',is_default:false});
+ const switched=await sw;
+ assert.equal(switched,true);
+ assert.equal(S.activeProfile,'B');
+ assert.equal(cb._vcfProfile,'B');
+ // The reload must have issued a fresh GET for the incoming profile…
+ const reload=cb._vcfPending;
+ assert.ok(reload,'no vision GET issued after the switch — checkbox stays disabled until Settings is reopened');
+ // …and until it resolves the checkbox stays disabled (fail closed)…
+ assert.equal(cb.disabled,true);
+ // …then the incoming profile's value paints and re-enables the control.
+ requests.shift().resolve({vision_capability_first:false});
+ await reload;
+ assert.equal(cb.checked,false); assert.equal(cb.disabled,false);
+ finished=true; clearTimeout(watchdog);
+ console.log('PASS: open-Settings switch reloads the vision setting and re-enables the checkbox');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    # The PASS line must actually print — a silently-drained event loop also
+    # exits 0, so returncode alone is a false-green oracle here.
+    assert "PASS: open-Settings switch reloads" in result.stdout, result.stdout + result.stderr
