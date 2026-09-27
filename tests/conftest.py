@@ -1093,6 +1093,9 @@ def test_server():
     # hundreds of opaque failures from a single root cause.
     import tempfile as _tempfile
     _server_log = pathlib.Path(_tempfile.gettempdir()) / f"hermes-webui-test-server-{TEST_PORT}.log"
+    # Agent imports can select <TEST_STATE_DIR>/cache/scratch as tempfile's
+    # cached directory before the clean-slate step removes TEST_STATE_DIR.
+    _server_log.parent.mkdir(parents=True, exist_ok=True)
 
     # Boot the server, retrying once if it dies early or fails to bind. Boot
     # failures here are most often transient (a port not yet released by a prior
