@@ -23,6 +23,7 @@ import gzip
 import hashlib
 import json
 import os
+import sqlite3
 import time
 import urllib.error
 import urllib.request
@@ -81,7 +82,35 @@ def _seed_session(*, archived=True, sid=SID) -> Path:
     return path
 
 
+def _ensure_supported_state_db_schema() -> None:
+    """Give this destructive-flow test the state authority it requires.
+
+    The session-scoped server state may already contain a legacy ``messages``
+    table created by an earlier test in the same shard.  Upgrade only this
+    isolated fixture to the supported Agent columns; product code must continue
+    to reject the same legacy shape rather than treating zero rows as a bypass.
+    """
+    with sqlite3.connect(STATE_DIR / "state.db") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS messages ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, "
+            "timestamp REAL, active INTEGER NOT NULL DEFAULT 1, compacted INTEGER NOT NULL DEFAULT 0)"
+        )
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+        assert {"id", "session_id"}.issubset(columns), columns
+        if "active" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+        if "compacted" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_turn_leases ("
+            "conversation_id TEXT PRIMARY KEY, holder TEXT NOT NULL, "
+            "acquired_at REAL NOT NULL, expires_at REAL NOT NULL)"
+        )
+
+
 def test_squash_end_to_end(base_url):
+    _ensure_supported_state_db_schema()
     sidecar = _seed_session()
     original_sha = hashlib.sha256(sidecar.read_bytes()).hexdigest()
 

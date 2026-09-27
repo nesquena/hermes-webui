@@ -1490,6 +1490,14 @@ def _read_parent_lineage_generation(parent_sid: str) -> str:
     return _lineage_generation_from_payload(payload)
 
 
+def _bind_parent_lineage_generation(parent_sid: str) -> str | None:
+    """Bind an existing parent; defer legacy create-parent-then-child flows."""
+    path = Path(SESSION_DIR) / f"{parent_sid}.json"
+    if not path.is_file():
+        return None
+    return _read_parent_lineage_generation(parent_sid)
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1648,14 +1656,31 @@ class Session:
         self.parent_session_id = parent_session_id
         self._expected_parent_session_id = str(parent_session_id) if parent_session_id else None
         self._expected_parent_lineage_generation = (
-            _read_parent_lineage_generation(str(parent_session_id)) if parent_session_id else None
+            _bind_parent_lineage_generation(str(parent_session_id)) if parent_session_id else None
         )
         # ``Session.load`` fills these from the exact bytes it parsed.  A newly
         # constructed object is an insert, not authority to replace an existing
         # sidecar with the same id.
         self._loaded_sidecar_session_id = None
         self._loaded_mutation_generation = None
+        self._loaded_lineage_generation = None
         self._loaded_sidecar_digest = None
+        # Some long-standing call sites reconstruct a complete Session object
+        # for an existing id rather than calling Session.load().  Bind that
+        # object to the exact generation visible at construction time; it may
+        # replace that generation under the shared authority, but cannot cross
+        # a later squash/save.  Session.load() replaces this snapshot with the
+        # exact bytes it parsed below.
+        _existing_path = Path(SESSION_DIR) / f'{self.session_id}.json'
+        if _existing_path.is_file():
+            try:
+                _existing_payload, _existing_digest = _sidecar_payload(_existing_path)
+                self._loaded_sidecar_session_id = self.session_id
+                self._loaded_mutation_generation = _existing_payload.get('mutation_generation')
+                self._loaded_lineage_generation = _existing_payload.get('lineage_generation')
+                self._loaded_sidecar_digest = _existing_digest
+            except (OSError, ValueError, RuntimeError):
+                pass
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
@@ -1697,21 +1722,29 @@ class Session:
     def _assert_mutation_generation(self) -> None:
         path = Path(self.path)
         loaded_sid = getattr(self, '_loaded_sidecar_session_id', None)
-        if loaded_sid != self.session_id:
-            if path.exists():
-                raise RuntimeError(
-                    f"Session {self.session_id!r} generation changed: refusing to replace an existing sidecar"
-                )
-            return
         if not path.is_file():
-            raise RuntimeError(f"Session {self.session_id!r} generation changed: sidecar disappeared")
+            if loaded_sid == self.session_id:
+                raise RuntimeError(f"Session {self.session_id!r} generation changed: sidecar disappeared")
+            return
         try:
             payload, digest = _sidecar_payload(path)
         except (OSError, ValueError, RuntimeError) as exc:
             raise RuntimeError(f"Session {self.session_id!r} generation changed: sidecar unreadable") from exc
         expected_generation = getattr(self, '_loaded_mutation_generation', None)
+        expected_lineage = getattr(self, '_loaded_lineage_generation', None)
         expected_digest = getattr(self, '_loaded_sidecar_digest', None)
+        current_lineage = payload.get('lineage_generation')
+        # Legacy sidecars predate a universal save CAS and some supported flows
+        # still materialize them outside Session.save().  The squash lineage
+        # stamp is the durable boundary that must never be crossed: once either
+        # side has one, require the exact generation and digest.  Ordinary
+        # unstamped files still share the authority lock and retain their legacy
+        # overwrite/recovery semantics.
+        if not expected_lineage and not current_lineage:
+            return
         if (
+            current_lineage != expected_lineage
+            or
             payload.get('mutation_generation') != expected_generation
             or not expected_digest
             or digest != expected_digest
@@ -1747,6 +1780,11 @@ class Session:
         _skip_mutation_authority: bool = False,
     ) -> None:
         """Persist with generation CAS under the shared sidecar authority."""
+        if getattr(self, '_loaded_metadata_only', False):
+            raise RuntimeError(
+                f"Refusing to save metadata-only session {self.session_id!r}: "
+                "would atomically overwrite on-disk messages with []. Reload with metadata_only=False before mutating state."
+            )
         if _skip_mutation_authority:
             self._save_under_mutation_authority(touch_updated_at=touch_updated_at, skip_index=skip_index)
             return
@@ -1767,6 +1805,7 @@ class Session:
                     self.mutation_generation = prior_generation
             self._loaded_sidecar_session_id = self.session_id
             self._loaded_mutation_generation = self.mutation_generation
+            self._loaded_lineage_generation = self.lineage_generation
             _payload, self._loaded_sidecar_digest = _sidecar_payload(Path(self.path))
 
     def _save_under_mutation_authority(self, touch_updated_at: bool = True, skip_index: bool = False) -> bool:
@@ -2029,6 +2068,7 @@ class Session:
         session = cls(**data)
         session._loaded_sidecar_session_id = str(sid)
         session._loaded_mutation_generation = data.get('mutation_generation')
+        session._loaded_lineage_generation = data.get('lineage_generation')
         session._loaded_sidecar_digest = hashlib.sha256(raw).hexdigest()
         if _collapsed_partials:
             try:
@@ -4743,6 +4783,17 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        # ``locked.save()`` advanced the durable mutation generation on a
+        # separate object.  The caller is normally the shared cache entry, so
+        # carry the exact post-save authority back with the reconciled state.
+        # Otherwise its next ordinary save is correctly rejected as stale even
+        # though this reconciliation itself made it stale.
+        session.mutation_generation = locked.mutation_generation
+        session.lineage_generation = locked.lineage_generation
+        session._loaded_sidecar_session_id = locked._loaded_sidecar_session_id
+        session._loaded_mutation_generation = locked._loaded_mutation_generation
+        session._loaded_lineage_generation = locked._loaded_lineage_generation
+        session._loaded_sidecar_digest = locked._loaded_sidecar_digest
         logger.info(
             "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
             sid,
