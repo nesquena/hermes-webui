@@ -379,6 +379,7 @@ def _tool_result_reload_harness(
     truncated_hint=False,
     unrelated_clipped=False,
     reject_retry=False,
+    stall_retry=False,
 ) -> str:
     """Exercise the actual reload + UI snippet with a bounded server tool result.
 
@@ -391,6 +392,12 @@ def _tool_result_reload_harness(
     ui_clip = _slice_function("_clipCliToolSnippet", UI_JS)
     ui_diff = _slice_function("_cliLooksLikePatchDiff", UI_JS)
     ui_snippet = _slice_function("_cliToolResultSnippet", UI_JS)
+    outcome_expr = (
+        'await Promise.race([loadPromise.then(()=>"resolved"),'
+        'new Promise(resolve=>setTimeout(()=>resolve("pending"),50))])'
+        if stall_retry
+        else 'await loadPromise.then(()=>"resolved")'
+    )
     return f"""
 const _INITIAL_MSG_LIMIT=30, _MSG_LIMIT_MAX=500;
 let _msgLimitMax=500, _messagesTruncated=false, _oldestIdx=0;
@@ -421,6 +428,7 @@ async function api(url){{
   if({str(stale).lower()} && calls.length===1){{_loadSessionGeneration=2;}}
   if({str(stale_on_retry).lower()} && calls.length===2){{_loadSessionGeneration=2;}}
   if({str(reject_retry).lower()} && calls.length===2){{throw new Error('full retry failed');}}
+  if({str(stall_retry).lower()} && calls.length===2){{return new Promise(()=>{{}});}}
   const bounded=url.includes('msg_limit=');
   const clippedTool={str("newTool" if unrelated_clipped else "fullTool")};
   const messages=allMessages.map(m=>m===clippedTool&&bounded&&{str(clipped).lower()} ? {{...m,
@@ -436,8 +444,9 @@ async function api(url){{
 {ui_diff}
 {ui_snippet}
 (async()=>{{
-  await _ensureMessagesLoaded('s',{{force:true,loadGeneration:1}});
-  console.log(JSON.stringify({{calls,wasReplaced:S.messages!==oldMessages,
+  const loadPromise=_ensureMessagesLoaded('s',{{force:true,loadGeneration:1}});
+  const outcome={outcome_expr};
+  console.log(JSON.stringify({{calls,outcome,wasReplaced:S.messages!==oldMessages,
     snippet:_cliToolResultSnippet(S.messages[1].content),
     finalCount:S.messages.length,
     appendedToolTruncated:!!S.messages.find(m=>m&&m.tool_call_id==='call-2')?._content_truncated}}));
@@ -493,6 +502,16 @@ def test_failed_full_retry_keeps_bounded_transcript_and_previous_full_tool_resul
     assert "msg_limit=" not in got["calls"][1]
     assert got["wasReplaced"] is True
     assert got["finalCount"] == 4, "the successful bounded transcript must still win"
+    assert got["snippet"] == "VISIBLE RESULT", got
+
+
+def test_stalled_full_retry_does_not_delay_successful_bounded_refresh():
+    """The optional 120s request must not block painting a usable bounded load."""
+    got = json.loads(_run_node(_tool_result_reload_harness(stall_retry=True)))
+    assert len(got["calls"]) == 2, got
+    assert got["outcome"] == "resolved", got
+    assert got["wasReplaced"] is True
+    assert got["finalCount"] == 4
     assert got["snippet"] == "VISIBLE RESULT", got
 
 

@@ -3775,16 +3775,14 @@ async function _ensureMessagesLoaded(sid, opts) {
   let data;
   try {
     data = await api(`${sessionUrl}${reloadLimitParam}${expandParam}`, {timeoutMs:120000});
-    if(_ownsLoad() && data && data.session && Array.isArray(data.session.messages)
-      && data.session.messages.some(previousFullToolRow)){
-      // The bare retry is an optional fidelity upgrade. If it fails, the
-      // bounded response remains usable and its matching tool rows are restored
-      // from the complete copies already held by the browser.
-      try {
-        const fullData=await api(sessionUrl, {timeoutMs:120000});
-        if(fullData&&fullData.session&&Array.isArray(fullData.session.messages)) data=fullData;
-      } catch(_) {}
-      if(data&&data.session&&Array.isArray(data.session.messages)){
+    if(_ownsLoad() && data && data.session && Array.isArray(data.session.messages)){
+      const retryToolIds=new Set(data.session.messages
+        .filter(previousFullToolRow).map(toolRowIdentity));
+      if(retryToolIds.size){
+        // Paint the successful bounded response immediately, restoring complete
+        // copies already held by the browser. The bare request is only an
+        // optional background fidelity upgrade: a slow/stalled retry must not
+        // hold the refresh behind its 120-second network timeout.
         data={...data,session:{...data.session,messages:data.session.messages.map(m=>{
           const previous=previousFullToolRow(m);
           if(!previous) return m;
@@ -3793,6 +3791,37 @@ async function _ensureMessagesLoaded(sid, opts) {
           delete restored._content_original_chars;
           return restored;
         })}};
+        const retryGeneration=_loadGeneration;
+        void api(sessionUrl, {timeoutMs:120000}).then(fullData=>{
+          if(_loadSessionGeneration!==retryGeneration
+            || !S.session || S.session.session_id!==sid
+            || !fullData || !fullData.session || !Array.isArray(fullData.session.messages)) return;
+          const fullRowsById=new Map();
+          for(const m of fullData.session.messages){
+            const id=toolRowIdentity(m);
+            if(!m||m.role!=='tool'||m._content_truncated||!retryToolIds.has(id)) continue;
+            fullRowsById.set(id,fullRowsById.has(id)?null:m);
+          }
+          let changed=false;
+          const upgraded=(S.messages||[]).map(m=>{
+            const id=toolRowIdentity(m);
+            const previous=previousFullToolRowsById.get(id);
+            const full=fullRowsById.get(id);
+            // Do not overwrite a row changed by a newer live update. The
+            // bounded path above restored this exact content before painting.
+            if(!previous||!full||m.content!==previous.content) return m;
+            if(full.content===m.content&&!m._content_truncated) return m;
+            changed=true;
+            const restored={...m,content:full.content};
+            delete restored._content_truncated;
+            delete restored._content_original_chars;
+            return restored;
+          });
+          if(!changed) return;
+          if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
+          S.messages=upgraded;
+          if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+        }).catch(()=>{});
       }
     }
   } finally {
