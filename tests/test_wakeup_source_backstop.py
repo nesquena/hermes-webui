@@ -670,6 +670,31 @@ def test_lineage_parent_only_merge_pairs_legacy_wake_with_agent_row():
     assert parent_wake["_source"] == "process_wakeup"
 
 
+def test_lineage_does_not_pair_distinct_wakes_within_one_parent_segment():
+    legacy_wake = {
+        "role": "user",
+        "content": WAKE_TEXT,
+        "timestamp": 100.25,
+        "_source": "process_wakeup",
+    }
+    stamped_wake = _wake("delivery-b", timestamp=100.25)
+    parent = types.SimpleNamespace(messages=[legacy_wake, stamped_wake])
+    child_copy = _wake("delivery-b", timestamp=100.25)
+    child_row = {"role": "assistant", "content": "continued", "timestamp": 101.0}
+    child = types.SimpleNamespace(messages=[child_copy, child_row])
+
+    result = routes._merged_webui_lineage_messages_for_display(
+        child,
+        child.messages,
+        parent_session=parent,
+    )
+
+    wake_rows = [row for row in result if row.get("content") == WAKE_TEXT]
+    assert wake_rows == [legacy_wake, stamped_wake]
+    assert "display_kind" not in legacy_wake
+    assert models._trusted_wakeup_delivery_id(stamped_wake) == "delivery-b"
+
+
 def test_display_wake_pair_accepts_durable_row_id_without_matching_timestamp():
     sidecar_wake = {
         "role": "user",

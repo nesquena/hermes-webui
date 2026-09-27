@@ -9948,13 +9948,14 @@ def _display_merge_identity_key(msg):
     return ("ordinary", _session_message_merge_key(msg))
 
 
-def _display_merge_pair_wakeup_rows(rows):
+def _display_merge_pair_wakeup_rows(rows, origins):
     """Collapse a trusted wake with one provenance-free copy of the same turn.
 
     These display unions do not run the main sidecar/state.db reconciler.  Pair
-    only an unambiguous exact role/content row whose full-precision timestamp or
-    durable state.db row id matches.  Partial/conflicting provenance and
-    different delivery ids stay separate on the loss-proof side.
+    only across the union's input stores/lineage segments, and only for an
+    unambiguous exact role/content row whose full-precision timestamp or durable
+    state.db row id matches.  Partial/conflicting provenance and different
+    delivery ids stay separate on the loss-proof side.
     """
     trusted = []
     timestamp_candidates = defaultdict(list)
@@ -9988,6 +9989,7 @@ def _display_merge_pair_wakeup_rows(rows):
 
     matches_by_trusted = {}
     trusted_by_candidate = defaultdict(list)
+    same_origin_conflicts = set()
     for trusted_index, row in trusted:
         content = row.get("content")
         if not isinstance(content, str) or not content:
@@ -10004,6 +10006,16 @@ def _display_merge_pair_wakeup_rows(rows):
             for candidate_index in matches
             if _message_private_identity_compatible(rows[candidate_index], row)
         }
+        same_origin_conflicts.update(
+            candidate_index
+            for candidate_index in matches
+            if origins[candidate_index] == origins[trusted_index]
+        )
+        matches = {
+            candidate_index
+            for candidate_index in matches
+            if origins[candidate_index] != origins[trusted_index]
+        }
         if matches:
             matches_by_trusted[trusted_index] = matches
             for candidate_index in matches:
@@ -10014,7 +10026,10 @@ def _display_merge_pair_wakeup_rows(rows):
         if len(matches) != 1:
             continue
         candidate_index = next(iter(matches))
-        if len(trusted_by_candidate[candidate_index]) != 1:
+        if (
+            candidate_index in same_origin_conflicts
+            or len(trusted_by_candidate[candidate_index]) != 1
+        ):
             continue
         survivor = rows[candidate_index]
         authoritative = rows[trusted_index]
@@ -10032,15 +10047,21 @@ def _display_merge_sorted_rows(*collections, merge_metadata=False):
     """Preserve the historical chronological union without text-only wake dedup."""
     merged = []
     seen = {}
-    rows = sorted(
-        (msg for collection in collections for msg in collection),
-        key=lambda msg: (
-            float(msg.get("timestamp") or 0),
-            str(msg.get("role") or ""),
-            str(msg.get("content") or ""),
+    indexed_rows = sorted(
+        (
+            (msg, collection_index)
+            for collection_index, collection in enumerate(collections)
+            for msg in collection
+        ),
+        key=lambda item: (
+            float(item[0].get("timestamp") or 0),
+            str(item[0].get("role") or ""),
+            str(item[0].get("content") or ""),
         ),
     )
-    rows = _display_merge_pair_wakeup_rows(rows)
+    rows = [item[0] for item in indexed_rows]
+    origins = [item[1] for item in indexed_rows]
+    rows = _display_merge_pair_wakeup_rows(rows, origins)
     for msg in rows:
         key = _display_merge_identity_key(msg)
         existing = seen.get(key)
