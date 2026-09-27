@@ -142,9 +142,10 @@ def test_chat_start_no_longer_bare_404_on_keyerror():
         "on KeyError so a foreign session can be claimed writeable"
     )
     # Must persist the sidecar so subsequent GETs find it.
-    assert "synth.save()" in arm, (
-        "materialised session must be persisted to disk via save() so the "
-        "next request (and the next server restart) sees a WebUI sidecar"
+    assert "synth.save(authorize_deleted_recreation=True)" in arm, (
+        "an explicit chat continuation must persist the materialised session "
+        "with deleted-SID recreation authority; the helper's captured lifecycle "
+        "generation keeps a concurrent stale claim fenced"
     )
 
 
@@ -733,7 +734,7 @@ def test_post_chat_start_returns_403_for_not_claimable(
     # The new arm sits between the bare-404 collapse and the synth.save()
     # call.  Locate it via the "not_claimable" string and the 403 marker.
     m = re.search(
-        r'if reason == "not_claimable":(.*?)(?=\n\s*try:\s*\n\s*synth\.save)',
+        r'if reason == "not_claimable":(.*?)(?=\n[ \t]*try:[ \t]*\n(?:[ \t]*#[^\n]*\n)*[ \t]*synth\.save\()',
         src, re.DOTALL,
     )
     assert m, "could not find the 'not_claimable' arm in _handle_chat_start"
@@ -747,9 +748,9 @@ def test_post_chat_start_returns_403_for_not_claimable(
         "403 response body should mention read-only so the user "
         "understands why the claim was refused"
     )
-    # And critically: the 'not_claimable' arm must NOT call synth.save()
-    assert "synth.save()" not in arm, (
-        "'not_claimable' must skip synth.save() — claiming a "
+    # And critically: the 'not_claimable' arm must NOT call synth.save().
+    assert "synth.save(" not in arm, (
+        "'not_claimable' must skip synth.save(...) — claiming a "
         "read-only / foreign-owned session into a writable sidecar "
         "is the ownership-boundary violation #4911 review called out"
     )

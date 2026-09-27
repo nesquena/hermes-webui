@@ -165,9 +165,17 @@ All sidecar read/repair/save/recovery/retirement mutations share the per-session
 sidecar authority. If the agent lock is also needed, lock order is agent lock
 then sidecar authority. Ephemeral retirement first revokes checkpoint admission,
 joins the checkpoint thread to termination without holding the agent lock, then
-retires under that lock. Ordinary deletion refuses an active writeback owner and
-advances an in-process lifecycle generation with retirement, so a detached
-pre-delete `Session` object cannot republish the sidecar or clear its tombstone.
+clears pending runtime ownership and retires under that lock; the worker's final
+recovery pass therefore cannot recreate the non-persistent sidecar. Ordinary
+deletion refuses an active writeback owner, advances an in-process lifecycle
+generation, and removes state.db authority before releasing the same SID lock.
+State-backed materialization may read optimistically outside that lock, but must
+re-read beneath it and match the captured lifecycle generation before publishing.
+A tombstoned SID is never recreated by an ordinary `Session.save()`: clearing the
+deletion tombstone requires an explicit user-authorized create/import save, which
+advances the generation again before publication. Thus neither a detached
+pre-delete object nor a fresh object synthesized from stale state can republish
+the sidecar or clear its tombstone.
 
 ## State Layers
 

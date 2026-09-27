@@ -522,10 +522,10 @@ def test_ephemeral_retirement_quiesces_admitted_checkpoint(tmp_path, monkeypatch
     assert all(row.get("session_id") != sid for row in index_rows)
 
 
-def test_ephemeral_preinvoke_cancel_quiesces_checkpoint_before_retirement(
+def test_ephemeral_success_quiesces_checkpoint_before_retirement(
     tmp_path, monkeypatch
 ):
-    """The production worker joins an admitted checkpoint before cancel cleanup."""
+    """The production success branch joins an admitted checkpoint before cleanup."""
     from api import config, models, run_journal, streaming
 
     sid = "ephemeral-preinvoke-cancel"
@@ -555,6 +555,18 @@ def test_ephemeral_preinvoke_cancel_quiesces_checkpoint_before_retirement(
     checkpoint_waiting_on_lock = threading.Event()
     captured_stop_event = []
     releaser_threads = []
+    retire_results = []
+
+    original_retire = models.retire_session_sidecar
+
+    def observed_retire(*args, **kwargs):
+        try:
+            result = original_retire(*args, **kwargs)
+        except BaseException as exc:
+            retire_results.append(exc)
+            raise
+        retire_results.append(result)
+        return result
 
     def checkpoint_loop(
         checkpoint_session,
@@ -574,7 +586,7 @@ def test_ephemeral_preinvoke_cancel_quiesces_checkpoint_before_retirement(
 
     original_build_run_kwargs = streaming._build_run_conversation_kwargs
 
-    def cancel_before_invoke(*args, **kwargs):
+    def admit_checkpoint_before_invoke(*args, **kwargs):
         assert checkpoint_admitted.wait(timeout=5)
         agent_lock.acquire()
         checkpoint_may_contend.set()
@@ -590,8 +602,6 @@ def test_ephemeral_preinvoke_cancel_quiesces_checkpoint_before_retirement(
         )
         releaser.start()
         releaser_threads.append(releaser)
-        with config.STREAMS_LOCK:
-            streaming.STREAMS.pop(stream_id, None)
         return original_build_run_kwargs(*args, **kwargs)
 
     class Agent:
@@ -622,8 +632,13 @@ def test_ephemeral_preinvoke_cancel_quiesces_checkpoint_before_retirement(
             self.ephemeral_system_prompt = None
             self._last_error = None
 
-        def run_conversation(self, **_kwargs):  # pragma: no cover - invocation is denied
-            raise AssertionError("cancelled ephemeral agent must not be invoked")
+        def run_conversation(self, **_kwargs):
+            return {
+                "messages": [
+                    {"role": "user", "content": "temporary", "timestamp": 1},
+                    {"role": "assistant", "content": "ephemeral answer", "timestamp": 2},
+                ]
+            }
 
         def interrupt(self, _message):
             return None
@@ -684,9 +699,10 @@ def test_ephemeral_preinvoke_cancel_quiesces_checkpoint_before_retirement(
         )
         monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: agent_lock)
         monkeypatch.setattr(
-            streaming, "_build_run_conversation_kwargs", cancel_before_invoke
+            streaming, "_build_run_conversation_kwargs", admit_checkpoint_before_invoke
         )
         monkeypatch.setattr(streaming, "_run_periodic_checkpoint_loop", checkpoint_loop)
+        monkeypatch.setattr(models, "retire_session_sidecar", observed_retire)
         monkeypatch.setattr(config, "get_config", lambda: {})
         monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda _cfg: [])
         streaming.STREAMS[stream_id] = events
@@ -705,6 +721,11 @@ def test_ephemeral_preinvoke_cancel_quiesces_checkpoint_before_retirement(
         assert completed_before_fallback
         assert not worker.is_alive()
         assert worker_errors == []
+        emitted = []
+        while not events.empty():
+            emitted.append(events.get_nowait())
+        assert any(item[0] == "done" for item in emitted), emitted
+        assert retire_results == [True]
         assert not session.path.exists()
         assert not session.path.with_suffix(".json.bak").exists()
         index_rows = json.loads(
@@ -1042,10 +1063,7 @@ def test_owned_empty_generation_does_not_clear_tombstones_for_later_alias_append
 
     second_payload = json.loads(session.path.read_text(encoding="utf-8"))
     assert second_payload["messages"] == [appended]
-    assert cleared == [
-        ("zero", session.session_id),
-        ("deleted", session.session_id),
-    ]
+    assert cleared == [("zero", session.session_id)]
 
 
 def test_typed_incomplete_ids_round_trip_without_cross_type_collision():

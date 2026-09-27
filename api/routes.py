@@ -5506,76 +5506,78 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     except KeyError:
         pass
 
-    # Fallback: try to materialize from CLI/agent session metadata
-    cli_meta = _lookup_cli_session_metadata(sid)
+    # Capture foreign state without holding the SID mutation lock, then re-read
+    # it under that lock before publication. A delete may complete while the
+    # first state.db read is in flight; only the second snapshot is allowed to
+    # acquire write authority for this SID.
+    materialization_generation = _session_lifecycle_generation(sid)
 
-    # Delegated subagent children (#5307) are view-only: their transcript lives
-    # in state.db and ownership belongs to the delegate runner, not WebUI. They
-    # must never be materialized as a writable sidecar here — this is the shared
-    # chokepoint reached by POST /api/chat/start (_get_or_materialize_session),
-    # so gating it closes the write path that bypasses the GET/import_cli guards.
-    # Checked via state.db source (independent of cli_meta, which is often empty
-    # for a server-side subagent child).
-    _mat_source_tag = (
-        (cli_meta or {}).get("source_tag") or (cli_meta or {}).get("raw_source") or ""
-    ).strip().lower()
-    if _mat_source_tag == "subagent" or _is_subagent_child_session_id(sid):
-        raise PermissionError("read-only subagent child session")
-
-    if not cli_meta:
-        raise KeyError(sid)
-
-    # Read-only guard: messaging sessions and Claude Code imports cannot be
-    # mutated. Reject BOTH an explicit read_only flag AND any messaging-source
-    # record — agent rows normalize messaging sources without setting read_only,
-    # and state.db (not a WebUI sidecar) is the source of truth for them, so
-    # materializing a writable sidecar would fork the title/state.
-    if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
-        raise PermissionError("read-only imported session")
-
-    # Preserve source metadata fields
-    def _apply_source_meta(s):
-        s.is_cli_session = is_cli_session_row(cli_meta)
-        s.source_tag = cli_meta.get("source_tag")
-        s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
-        s.session_source = cli_meta.get("session_source")
-        s.source_label = cli_meta.get("source_label")
-        s.user_id = cli_meta.get("user_id")
-        s.chat_id = cli_meta.get("chat_id")
-        s.chat_type = cli_meta.get("chat_type")
-        s.thread_id = cli_meta.get("thread_id")
-        s.session_key = cli_meta.get("session_key")
-        s.platform = cli_meta.get("platform")
-
-    if _is_messaging_session_record(cli_meta):
-        # Messaging sessions: lightweight Session with no messages (state.db is source of truth)
-        s = Session(
-            session_id=sid,
-            title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
-            workspace=get_last_workspace(),
-            model=cli_meta.get("model") or "unknown",
-            created_at=cli_meta.get("created_at"),
-            updated_at=cli_meta.get("updated_at"),
-        )
-        _apply_source_meta(s)
-        s.save(touch_updated_at=False)
-    else:
-        # Regular CLI/agent sessions: import full message history
-        msgs = get_cli_session_messages(sid)
-        if not msgs:
+    def _capture_materialization_state():
+        cli_meta = _lookup_cli_session_metadata(sid)
+        source_tag = (
+            (cli_meta or {}).get("source_tag")
+            or (cli_meta or {}).get("raw_source")
+            or ""
+        ).strip().lower()
+        if source_tag == "subagent" or _is_subagent_child_session_id(sid):
+            raise PermissionError("read-only subagent child session")
+        if not cli_meta:
             raise KeyError(sid)
-        s = import_cli_session(
+        if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
+            raise PermissionError("read-only imported session")
+        messages = get_cli_session_messages(sid)
+        if not messages:
+            raise KeyError(sid)
+        return cli_meta, messages
+
+    _capture_materialization_state()
+    with _get_session_agent_lock(sid):
+        try:
+            current = get_session(sid)
+        except KeyError:
+            current = None
+        if current is not None:
+            current = _ensure_full_session_before_mutation(sid, current)
+            if getattr(current, "read_only", False):
+                raise PermissionError("read-only imported session")
+            return current
+
+        if materialization_generation != _session_lifecycle_generation(sid):
+            raise KeyError(sid)
+        cli_meta, messages = _capture_materialization_state()
+        if sid in _load_webui_deleted_session_tombstone():
+            state_source = (
+                cli_meta.get("source_tag")
+                or cli_meta.get("raw_source")
+                or _state_db_session_source(sid)
+                or ""
+            ).strip().lower()
+            if state_source in {"", "webui", "fork"}:
+                raise KeyError(sid)
+
+        materialized = import_cli_session(
             sid,
-            cli_meta.get("title") or title_from(msgs, "CLI Session"),
-            msgs,
+            cli_meta.get("title") or title_from(messages, "CLI Session"),
+            messages,
             cli_meta.get("model") or "unknown",
             profile=cli_meta.get("profile"),
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
+            authorize_deleted_recreation=True,
+            _lifecycle_generation=materialization_generation,
         )
-        _apply_source_meta(s)
-
-    return s
+        materialized.is_cli_session = is_cli_session_row(cli_meta)
+        materialized.source_tag = cli_meta.get("source_tag")
+        materialized.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+        materialized.session_source = cli_meta.get("session_source")
+        materialized.source_label = cli_meta.get("source_label")
+        materialized.user_id = cli_meta.get("user_id")
+        materialized.chat_id = cli_meta.get("chat_id")
+        materialized.chat_type = cli_meta.get("chat_type")
+        materialized.thread_id = cli_meta.get("thread_id")
+        materialized.session_key = cli_meta.get("session_key")
+        materialized.platform = cli_meta.get("platform")
+        return materialized
 
 
 def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = None) -> list:
@@ -8617,10 +8619,15 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             # actually write; the GET stub always reflects whatever the
             # helper returns so the read-only banner stays accurate.
             read_only=read_only_flag,
+            _lifecycle_generation=materialization_generation,
         )
 
     if not is_safe_session_id(sid):
         return None, "invalid_sid"
+    # Capture the incarnation before reading state.db. Publication paths must
+    # compare this value again while holding the SID mutation lock; a delete
+    # that completes during the read advances it and invalidates this snapshot.
+    materialization_generation = _session_lifecycle_generation(sid)
     if (
         (
             _session_index_marks_was_webui(sid)
@@ -10914,6 +10921,7 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,  # noqa: F401 - compatibility test seam
+    _session_lifecycle_generation,
     retire_session_sidecar,
     ensure_cron_project,
     _profile_has_user_projects,
@@ -16700,6 +16708,7 @@ def handle_post(handler, parsed) -> bool:
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
+        state_db_cleanup_failed = False
         try:
             # A live worker owns periodic checkpoints and final writeback until
             # its teardown clears this exact registry entry. Refuse deletion
@@ -16735,6 +16744,19 @@ def handle_post(handler, parsed) -> bool:
                     with LOCK:
                         SESSIONS.setdefault(sid, evicted_session)
                 return bad(handler, "Failed to delete session; try again", 500)
+            # Revoke the state-backed materialization source before releasing
+            # the SID lock. Any request that captured old state outside this
+            # boundary must recheck after entry and will observe the advanced
+            # generation/tombstone or the removed row, never an old incarnation
+            # with fresh publication authority.
+            if not is_messaging_session:
+                try:
+                    from api.models import delete_cli_session
+
+                    state_db_cleanup_failed = not delete_cli_session(sid)
+                except Exception:
+                    state_db_cleanup_failed = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -16784,17 +16806,6 @@ def handle_post(handler, parsed) -> bool:
             close_terminal(sid)
         except Exception:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
         return j(
             handler,
@@ -25055,7 +25066,12 @@ def _handle_chat_start(handler, body, diag=None):
                     403,
                 )
             try:
-                synth.save()
+                # Reaching this arm is an explicit user continuation of a
+                # claimable foreign session. The synthesizer captured the SID
+                # generation before reading state.db, so authorization can
+                # clear an older tombstone without granting stale work that
+                # crossed a concurrent delete a fresh generation.
+                synth.save(authorize_deleted_recreation=True)
             except Exception as _save_err:
                 # Persisting the sidecar failed: surface a generic 500 to
                 # the client (paths sanitised, see _sanitize_error) and log
@@ -29576,6 +29592,7 @@ def _handle_session_import_cli(handler, body):
         created_at=created_at,
         updated_at=updated_at,
         parent_session_id=cli_parent_session_id,
+        authorize_deleted_recreation=True,
     )
     if cron_project_id:
         s.project_id = cron_project_id

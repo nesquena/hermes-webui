@@ -1540,7 +1540,12 @@ class Session:
                  gateway_run=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
-        self._lifecycle_generation = _session_lifecycle_generation(self.session_id)
+        _captured_lifecycle_generation = kwargs.pop('_lifecycle_generation', None)
+        self._lifecycle_generation = (
+            _session_lifecycle_generation(self.session_id)
+            if _captured_lifecycle_generation is None
+            else _captured_lifecycle_generation
+        )
         self.title = title
         self.profile = profile
         self.workspace = str(_resolve_path(workspace, profile=profile))
@@ -1678,7 +1683,13 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        authorize_deleted_recreation: bool = False,
+    ) -> None:
         # Distinct Session objects can represent the same durable sidecar.  One
         # stable SID authority therefore spans snapshot creation, sidecar
         # replacement, and publication of the matching compact index row.
@@ -1693,9 +1704,32 @@ class Session:
                     f"Refusing stale save for deleted session {self.session_id!r}: "
                     "the session lifecycle generation has advanced"
                 )
-            self._save_owned_generation(touch_updated_at=touch_updated_at, skip_index=skip_index)
+            deleted = self.session_id in _load_webui_deleted_session_tombstone()
+            if deleted and not authorize_deleted_recreation:
+                raise RuntimeError(
+                    f"Refusing to recreate deleted session {self.session_id!r} without "
+                    "explicit recreation authority"
+                )
+            if deleted:
+                # A user-authorized recreate is a new incarnation. Advance the
+                # fence before publishing so every other object from the deleted
+                # generation remains stale even after the tombstone is cleared.
+                self._lifecycle_generation = _invalidate_session_lifecycle_generation(
+                    self.session_id
+                )
+            self._save_owned_generation(
+                touch_updated_at=touch_updated_at,
+                skip_index=skip_index,
+                clear_deleted_tombstone=authorize_deleted_recreation,
+            )
 
-    def _save_owned_generation(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def _save_owned_generation(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        clear_deleted_tombstone: bool = False,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1970,11 +2004,14 @@ class Session:
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
-        # row is alive (the #4985 "zero-message orphan" only ever exists
-        # when the OWNED, persisted generation has no messages). Never
-        # re-read mutable ``self.messages`` here: a worker can append through a
+        # zero-message-orphan row is alive (that tombstone only ever exists
+        # when the OWNED, persisted generation has no messages). The stronger
+        # deleted-session tombstone is cleared only by an explicitly authorized
+        # recreate transaction; ordinary saves must never resurrect a delete.
+        # Never re-read mutable ``self.messages`` here: a worker can append through a
         # live alias after generation capture, and that later append is not proof
-        # that this save published a non-empty sidecar. Clear the tombstone so the
+        # that this save published a non-empty sidecar. Clear the zero-message
+        # marker (and, only for an authorized recreate, the deletion marker) so the
         # next ``/api/sessions`` poll does not need the prune helper to
         # run before the row re-appears — useful when the message-commit
         # happens on a poll that does not yet see state.db.messages rows
@@ -1987,7 +2024,8 @@ class Session:
         if messages_to_persist:
             try:
                 _clear_webui_zero_message_orphan_tombstone(self.session_id)
-                _clear_webui_deleted_session_tombstone(self.session_id)
+                if clear_deleted_tombstone:
+                    _clear_webui_deleted_session_tombstone(self.session_id)
             except Exception:
                 logger.debug(
                     "Failed to clear webui tombstone for %s",
@@ -7843,6 +7881,8 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    authorize_deleted_recreation: bool = False,
+    _lifecycle_generation: int | None = None,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
@@ -7860,6 +7900,7 @@ def import_cli_session(
         created_at=created_at,
         updated_at=updated_at,
         parent_session_id=parent_session_id,
+        _lifecycle_generation=_lifecycle_generation,
     )
     # #4985: import_cli_session uses an explicit sid (the CLI sidecar's id).
     # If that sid was previously tombstoned as a webui zero-message orphan,
@@ -7868,14 +7909,16 @@ def import_cli_session(
     # an import.
     try:
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
     except Exception:
         logger.debug(
             "Failed to clear webui tombstone for %s",
             s.session_id,
             exc_info=True,
         )
-    s.save(touch_updated_at=False)
+    s.save(
+        touch_updated_at=False,
+        authorize_deleted_recreation=authorize_deleted_recreation,
+    )
     return s
 
 

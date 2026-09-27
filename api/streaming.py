@@ -12135,22 +12135,12 @@ def _run_agent_streaming(
                 # sidecar retirement final for this ephemeral run.
                 _stop_checkpoint_thread(_checkpoint_stop, _ckpt_thread)
                 with _agent_lock:
-                    try:
-                        from api.models import prune_session_from_index, retire_session_sidecar
-                        sidecar_path = Path(s.path)
-                        retired = retire_session_sidecar(
-                            s.session_id,
-                            sidecar_path=sidecar_path,
-                            record_deleted_tombstone=False,
-                        )
-                        if retired:
-                            prune_session_from_index(s.session_id)
-                    except Exception:
-                        logger.debug(
-                            "Failed to retire completed ephemeral session %s",
-                            session_id,
-                            exc_info=True,
-                        )
+                    # Clear pending runtime ownership before retiring. The outer
+                    # finally block runs after this return and performs a
+                    # last-resort pending sync; leaving these fields populated
+                    # would let that recovery save recreate the ephemeral
+                    # sidecar after successful retirement.
+                    _cleanup_ephemeral_cancelled_turn(s)
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()

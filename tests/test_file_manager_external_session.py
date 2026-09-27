@@ -682,9 +682,117 @@ def test_delete_invalidates_detached_session_before_stale_save(
         workspace=str(tmp_path),
         messages=[{"role": "user", "content": "intentional recreate", "timestamp": 2}],
     )
-    fresh.save()
+    with pytest.raises(RuntimeError, match="explicit recreation authority"):
+        fresh.save()
+    fresh.save(authorize_deleted_recreation=True)
     assert (session_dir / f"{sid}.json").exists()
     assert sid not in models_module._load_webui_deleted_session_tombstone()
+
+
+def test_delete_fences_state_backed_materializer_captured_before_retirement(
+    models_module, monkeypatch, tmp_path
+):
+    """A materializer paused on stale state cannot publish after delete commits."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    upload_module = pytest.importorskip("api.upload")
+    turn_journal_module = pytest.importorskip("api.turn_journal")
+    run_journal_module = pytest.importorskip("api.run_journal")
+    background_module = pytest.importorskip("api.background_process")
+    terminal_module = pytest.importorskip("api.terminal")
+
+    sid = "delete-stale-materializer"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    state = {
+        "present": True,
+        "messages": [{"role": "user", "content": "stale state", "timestamp": 1}],
+    }
+    state_captured = threading.Event()
+    resume_materializer = threading.Event()
+    materializer_result = {}
+
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models_module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+
+    def missing_session(*_args, **_kwargs):
+        raise KeyError(sid)
+
+    def lookup_metadata(_sid):
+        if not state["present"]:
+            return {}
+        return {
+            "session_id": sid,
+            "title": "stale materialization",
+            "model": "test-model",
+            "source_tag": "webui",
+        }
+
+    first_state_read = True
+
+    def get_state_messages(_sid, **_kwargs):
+        nonlocal first_state_read
+        captured = list(state["messages"]) if state["present"] else []
+        if first_state_read and threading.current_thread().name == "stale-materializer":
+            first_state_read = False
+            state_captured.set()
+            assert resume_materializer.wait(timeout=5)
+        return captured
+
+    def delete_state(_sid):
+        state["present"] = False
+        state["messages"] = []
+        return True
+
+    monkeypatch.setattr(routes_module, "get_session", missing_session)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lookup_metadata)
+    monkeypatch.setattr(routes_module, "get_cli_session_messages", get_state_messages)
+    monkeypatch.setattr(routes_module, "_state_db_session_source", lambda _sid: "webui" if state["present"] else "")
+    monkeypatch.setattr(routes_module, "_session_index_marks_was_webui", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_subagent_child_session_id", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "_publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(models_module, "delete_cli_session", delete_state)
+    monkeypatch.setattr(config_module, "_evict_session_agent", lambda _sid: None)
+    monkeypatch.setattr(upload_module, "_session_attachment_dir", lambda _sid: tmp_path / "uploads")
+    monkeypatch.setattr(turn_journal_module, "delete_turn_journal", lambda _sid: None)
+    monkeypatch.setattr(run_journal_module, "delete_run_journal", lambda _sid: None)
+    monkeypatch.setattr(background_module, "forget_bg_task_completion_dedup", lambda _sid: None)
+    monkeypatch.setattr(terminal_module, "close_terminal", lambda _sid: None)
+
+    def materialize():
+        try:
+            materializer_result["session"] = routes_module._get_or_materialize_session(sid)
+        except Exception as exc:
+            materializer_result["error"] = exc
+
+    worker = threading.Thread(target=materialize, name="stale-materializer")
+    worker.start()
+    assert state_captured.wait(timeout=5)
+
+    handler = _DeleteJSONHandler({"session_id": sid})
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+    assert handler.status == 200
+    assert not state["present"]
+
+    resume_materializer.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert isinstance(materializer_result.get("error"), KeyError)
+    assert "session" not in materializer_result
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid in models_module._load_webui_deleted_session_tombstone()
+    if (session_dir / "_index.json").exists():
+        index_rows = json.loads((session_dir / "_index.json").read_text(encoding="utf-8"))
+        assert all(row.get("session_id") != sid for row in index_rows)
 
 
 @pytest.mark.parametrize("fault", ["tombstone_not_durable", "retire_returns_false"])
