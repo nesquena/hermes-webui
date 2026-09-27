@@ -312,9 +312,10 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 ### Context Brief
 - The workspace panel's **Context** tab is a read-only summary of a conversation's
-  requests, verified outcomes, current Todo state, and generated narrative. Long
-  conversations include visible compression lineage instead of treating a compacted
-  child as a new conversation.
+  requests, verified outcomes, latest derived Todo snapshot, and generated narrative.
+  A Todo snapshot can predate a newer conclusion, so its open items are historical
+  rather than authoritative in that case. Long conversations include visible
+  compression lineage instead of treating a compacted child as a new conversation.
 - **Regenerate** is the default path. It creates the narrative through Hermes Agent's
   canonical `auxiliary.compression` routing; the WebUI does not select a separate
   provider or model for Context Briefs.
