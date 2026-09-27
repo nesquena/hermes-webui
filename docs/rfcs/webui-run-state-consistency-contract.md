@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-09-26
+- **Updated:** 2026-09-27
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -173,12 +173,15 @@ State-backed materialization may read optimistically outside that lock, but must
 re-read beneath it and match the captured lifecycle generation before publishing.
 A tombstoned SID is never recreated by an ordinary `Session.save()`: clearing the
 deletion tombstone requires an explicit user-authorized create/import save, which
-advances the generation again before publication. An explicit import captures the
-SID generation before reading its foreign transcript and rechecks it under the
-same SID lock before publishing, so user authorization does not authorize stale
-work that crossed a concurrent delete. Thus neither a detached pre-delete object
-nor a fresh object synthesized from stale state can republish the sidecar or clear
-its tombstone.
+advances the generation again before publication. Explicit import and chat-start
+fallback claims take the SID lock before resolving canonical foreign metadata or
+reading messages, and hold it through construction and publication. The lifecycle
+generation captured before lock entry must still match after entry. Therefore a
+claim that begins after retirement but before state.db cleanup waits, re-reads the
+post-cleanup store, and returns not found instead of publishing stale bytes; a
+claim already holding the lock commits first and a queued delete remains final.
+Thus neither a detached pre-delete object nor a fresh object synthesized from
+stale state can republish the sidecar or clear its tombstone.
 
 ## State Layers
 
