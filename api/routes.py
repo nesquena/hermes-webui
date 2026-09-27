@@ -9948,6 +9948,86 @@ def _display_merge_identity_key(msg):
     return ("ordinary", _session_message_merge_key(msg))
 
 
+def _display_merge_pair_wakeup_rows(rows):
+    """Collapse a trusted wake with one provenance-free copy of the same turn.
+
+    These display unions do not run the main sidecar/state.db reconciler.  Pair
+    only an unambiguous exact role/content row whose full-precision timestamp or
+    durable state.db row id matches.  Partial/conflicting provenance and
+    different delivery ids stay separate on the loss-proof side.
+    """
+    trusted = []
+    timestamp_candidates = defaultdict(list)
+    row_id_candidates = defaultdict(list)
+
+    for index, row in enumerate(rows):
+        delivery_id = _trusted_wakeup_delivery_id(row)
+        if delivery_id:
+            trusted.append((index, row))
+            continue
+        if (
+            not isinstance(row, dict)
+            or row.get("role") != "user"
+            or row.get("_source") != "process_wakeup"
+        ):
+            continue
+        if (
+            _message_display_metadata_value_present(row.get("display_kind"))
+            or _message_display_metadata_value_present(row.get("display_metadata"))
+        ):
+            continue
+        content = row.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        timestamp, timestamp_valid = _message_exact_timestamp_details(row)
+        if timestamp_valid and timestamp is not None:
+            timestamp_candidates[("user", content, timestamp)].append(index)
+        row_id, row_id_valid = _state_db_row_identity_details(row)
+        if row_id_valid and row_id is not None:
+            row_id_candidates[("user", content, row_id)].append(index)
+
+    matches_by_trusted = {}
+    trusted_by_candidate = defaultdict(list)
+    for trusted_index, row in trusted:
+        content = row.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        matches = set()
+        timestamp, timestamp_valid = _message_exact_timestamp_details(row)
+        if timestamp_valid and timestamp is not None:
+            matches.update(timestamp_candidates.get(("user", content, timestamp), ()))
+        row_id, row_id_valid = _state_db_row_identity_details(row)
+        if row_id_valid and row_id is not None:
+            matches.update(row_id_candidates.get(("user", content, row_id), ()))
+        matches = {
+            candidate_index
+            for candidate_index in matches
+            if _message_private_identity_compatible(rows[candidate_index], row)
+        }
+        if matches:
+            matches_by_trusted[trusted_index] = matches
+            for candidate_index in matches:
+                trusted_by_candidate[candidate_index].append(trusted_index)
+
+    removed = set()
+    for trusted_index, matches in matches_by_trusted.items():
+        if len(matches) != 1:
+            continue
+        candidate_index = next(iter(matches))
+        if len(trusted_by_candidate[candidate_index]) != 1:
+            continue
+        survivor = rows[candidate_index]
+        authoritative = rows[trusted_index]
+        if not _transfer_wakeup_provenance(survivor, authoritative):
+            continue
+        _merge_session_display_metadata(survivor, authoritative)
+        removed.add(trusted_index)
+
+    if not removed:
+        return rows
+    return [row for index, row in enumerate(rows) if index not in removed]
+
+
 def _display_merge_sorted_rows(*collections, merge_metadata=False):
     """Preserve the historical chronological union without text-only wake dedup."""
     merged = []
@@ -9960,6 +10040,7 @@ def _display_merge_sorted_rows(*collections, merge_metadata=False):
             str(msg.get("content") or ""),
         ),
     )
+    rows = _display_merge_pair_wakeup_rows(rows)
     for msg in rows:
         key = _display_merge_identity_key(msg)
         existing = seen.get(key)
@@ -10817,12 +10898,17 @@ from api.models import (
     _active_stream_ids,
     _evict_sessions_over_cap,
     _merge_session_display_metadata,
+    _message_display_metadata_value_present,
+    _transfer_wakeup_provenance,
     _trusted_wakeup_delivery_id,
     _normalize_wakeup_rows_for_display,
     _session_message_merge_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
+    _message_exact_timestamp_details,
+    _state_db_row_identity_details,
+    _message_private_identity_compatible,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,

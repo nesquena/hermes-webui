@@ -586,7 +586,38 @@ def test_messaging_longer_cli_keeps_distinct_delivery_and_prior_answer(monkeypat
                                     truncation_boundary=None)
     merged = routes._merged_session_messages_for_display(session, cli)
     assert _delivery_ids(merged) == ["delivery-a", "delivery-b"]
+    assert len([row for row in merged if row.get("content") == WAKE_TEXT]) == 2
     assert any(row.get("content") == "prior answer" for row in merged)
+
+
+def test_messaging_restore_pairs_legacy_sidecar_wake_with_agent_row(monkeypatch):
+    sidecar_wake = {
+        "role": "user",
+        "content": WAKE_TEXT,
+        "timestamp": 100.25,
+        "_source": "process_wakeup",
+    }
+    cli_wake = _wake("delivery-a", timestamp=100.25)
+    cli = [cli_wake, {"role": "assistant", "content": "answer", "timestamp": 100.3}]
+    monkeypatch.setattr(
+        routes,
+        "_webui_sidecar_lineage_messages_for_display",
+        lambda _: [sidecar_wake],
+    )
+
+    result = routes._merged_session_messages_for_display(
+        types.SimpleNamespace(
+            messages=[sidecar_wake],
+            truncation_watermark=None,
+            truncation_boundary=None,
+        ),
+        cli,
+    )
+
+    wake_rows = [row for row in result if row.get("content") == WAKE_TEXT]
+    assert wake_rows == [sidecar_wake]
+    assert _delivery_ids(wake_rows) == ["delivery-a"]
+    assert sidecar_wake["_source"] == "process_wakeup"
 
 
 def test_messaging_state_only_projects_durable_wake(monkeypatch):
@@ -615,6 +646,81 @@ def test_lineage_parent_only_merge_distinguishes_wake_deliveries():
         child, child.messages, parent_session=parent,
     )
     assert _delivery_ids(result) == ["delivery-a", "delivery-b"]
+    assert len(result) == 2
+
+
+def test_lineage_parent_only_merge_pairs_legacy_wake_with_agent_row():
+    parent_wake = {
+        "role": "user",
+        "content": WAKE_TEXT,
+        "timestamp": 100.25,
+        "_source": "process_wakeup",
+    }
+    parent = types.SimpleNamespace(messages=[parent_wake])
+    child = types.SimpleNamespace(messages=[_wake("delivery-a", timestamp=100.25)])
+
+    result = routes._merged_webui_lineage_messages_for_display(
+        child,
+        child.messages,
+        parent_session=parent,
+    )
+
+    assert result == [parent_wake]
+    assert _delivery_ids(result) == ["delivery-a"]
+    assert parent_wake["_source"] == "process_wakeup"
+
+
+def test_display_wake_pair_accepts_durable_row_id_without_matching_timestamp():
+    sidecar_wake = {
+        "role": "user",
+        "content": WAKE_TEXT,
+        "timestamp": 100.5,
+        "_source": "process_wakeup",
+        "_state_db_row_id": 7,
+    }
+    agent_wake = _wake(
+        "delivery-a",
+        timestamp=100.25,
+        _state_db_row_id="7",
+    )
+
+    result = routes._display_merge_sorted_rows([sidecar_wake], [agent_wake])
+
+    assert result == [sidecar_wake]
+    assert _delivery_ids(result) == ["delivery-a"]
+
+
+def test_display_wake_pair_rejects_partial_provenance_and_timestamp_mismatch():
+    partial = {
+        "role": "user",
+        "content": WAKE_TEXT,
+        "timestamp": 100.25,
+        "_source": "process_wakeup",
+        "display_kind": "process_wakeup",
+    }
+    mismatched = {
+        "role": "user",
+        "content": WAKE_TEXT,
+        "timestamp": 100.5,
+        "_source": "process_wakeup",
+    }
+    authoritative = _wake("delivery-a", timestamp=100.25)
+    partial_before = dict(partial)
+    mismatched_before = dict(mismatched)
+
+    result = routes._display_merge_sorted_rows(
+        [partial, mismatched],
+        [authoritative],
+    )
+
+    assert len(result) == 3
+    assert partial == partial_before
+    assert mismatched == mismatched_before
+    assert [
+        models._trusted_wakeup_delivery_id(row)
+        for row in result
+        if models._trusted_wakeup_delivery_id(row)
+    ] == ["delivery-a"]
 
 
 def test_display_merges_same_delivery_once_and_preserves_legacy_bytes():
