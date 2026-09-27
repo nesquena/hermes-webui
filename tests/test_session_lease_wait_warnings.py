@@ -87,7 +87,10 @@ def _build_status_callback():
     ns = {
         "put": lambda event, data: events.append((event, data)),
         "session_id": "sid-1",
+        "agent": object(),
         "_captured_terminal_error": [None],
+        "_bridge_fallback_lifecycle_status": streaming._bridge_fallback_lifecycle_status,
+        "_emit_effective_run_meta": lambda: None,
         "_is_agent_compression_start_status": streaming._is_agent_compression_start_status,
         "_is_fallback_lifecycle_message": streaming._is_fallback_lifecycle_message,
         "_is_session_lease_wait_message": streaming._is_session_lease_wait_message,

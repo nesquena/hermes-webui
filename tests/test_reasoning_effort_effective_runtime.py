@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import threading
 from collections import OrderedDict
 from types import SimpleNamespace
 
@@ -51,26 +52,34 @@ def _terminal_runtime():
     }
 
 
-def _runtime_terminal_lines(*, runs_api: bool):
-    runtime = _terminal_runtime()
+_DEFAULT_RUNTIME = object()
+
+
+def _runtime_terminal_lines(*, runs_api: bool, runtime=_DEFAULT_RUNTIME):
+    if runtime is _DEFAULT_RUNTIME:
+        runtime = _terminal_runtime()
     if runs_api:
+        terminal = {
+            "event": "run.completed",
+            "output": "answered",
+            "usage": {"input_tokens": 7, "output_tokens": 2},
+        }
+        if runtime is not None:
+            terminal["runtime"] = runtime
         payloads = [
             {"event": "message.delta", "delta": "answered"},
-            {
-                "event": "run.completed",
-                "output": "answered",
-                "runtime": runtime,
-                "usage": {"input_tokens": 7, "output_tokens": 2},
-            },
+            terminal,
         ]
     else:
+        terminal = {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 2},
+        }
+        if runtime is not None:
+            terminal["runtime"] = runtime
         payloads = [
             {"choices": [{"delta": {"content": "answered"}}]},
-            {
-                "choices": [{"delta": {}, "finish_reason": "stop"}],
-                "runtime": runtime,
-                "usage": {"prompt_tokens": 7, "completion_tokens": 2},
-            },
+            terminal,
         ]
     lines = []
     for payload in payloads:
@@ -191,7 +200,7 @@ def _capture_gateway_request_body(
         profile=None,
         context_messages=[],
         _approval_notice_emitted=False,
-        save=lambda: None,
+        save=lambda **_kwargs: None,
     )
     channel = create_stream_channel()
     subscriber = channel.subscribe()
@@ -266,7 +275,6 @@ def test_gateway_request_options_compose_with_installed_parser_for_both_transpor
     ]
     bodies = []
     expected = []
-    expected_run_meta_efforts = []
 
     for runs_api in (True, False):
         transport = "runs" if runs_api else "legacy"
@@ -290,21 +298,33 @@ def test_gateway_request_options_compose_with_installed_parser_for_both_transpor
                     "service_tier": accepted_tier,
                 }
             )
-            initial_meta = [payload for event, payload in events if event == "run_meta"]
-            assert len(initial_meta) == 1
-            expected_run_meta_efforts.append(
-                "off" if reasoning == {"enabled": False} else (reasoning or {}).get("effort")
-            )
-            assert initial_meta[0]["reasoning_effort"] == expected_run_meta_efforts[-1]
+            # Accepted request options are still intent. Without terminal
+            # runtime evidence they must not be surfaced as observed run_meta.
+            assert [payload for event, payload in events if event == "run_meta"] == []
 
     assert _installed_gateway_parser(bodies) == expected
 
 
 @pytest.mark.parametrize("runs_api", [True, False], ids=["runs-api", "legacy-stream"])
+@pytest.mark.parametrize(
+    ("terminal_runtime", "expected_runtime"),
+    [
+        (
+            {"model": "answered-model-b", "provider": "provider-c", "reasoning": {"enabled": False}},
+            {"model": "answered-model-b", "provider": "provider-c", "reasoning_effort": "off"},
+        ),
+        (
+            {"model": "answered-model-b", "provider": "provider-c"},
+            {"model": "answered-model-b", "provider": "provider-c"},
+        ),
+        (None, {}),
+    ],
+    ids=["observed-runtime-with-effort", "observed-runtime-without-effort", "runtime-unknown"],
+)
 def test_gateway_terminal_runtime_reconciles_live_persisted_done_and_reload(
-    tmp_path, monkeypatch, runs_api
+    tmp_path, monkeypatch, runs_api, terminal_runtime, expected_runtime
 ):
-    """Answer attribution follows B/C/off while the selected route remains A/provider-A."""
+    """Only terminal observations are attributed; the selected route remains A/provider-A."""
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
@@ -353,7 +373,9 @@ def test_gateway_terminal_runtime_reconciles_live_persisted_done_and_reload(
             gateway_requests.append(json.loads(req.data.decode("utf-8")))
         if runs_api and req.full_url.endswith("/v1/runs"):
             return _JsonResponse({"run_id": "run-effective-runtime"})
-        return _SseResponse(_runtime_terminal_lines(runs_api=runs_api))
+        return _SseResponse(
+            _runtime_terminal_lines(runs_api=runs_api, runtime=terminal_runtime)
+        )
 
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
 
@@ -394,35 +416,45 @@ def test_gateway_terminal_runtime_reconciles_live_persisted_done_and_reload(
         }
     ]
     run_meta = [payload for event, payload in events if event == "run_meta"]
-    assert run_meta == [
-        {
+    expected_run_meta = []
+    if expected_runtime:
+        expected_run_meta.append({
             "session_id": session.session_id,
-            "model": "requested-model-a",
-            "provider": "provider-a",
-            "reasoning_effort": "high",
-        },
-        {
-            "session_id": session.session_id,
-            "model": "answered-model-b",
-            "provider": "provider-c",
-            "reasoning_effort": "off",
-        },
-    ]
+            "model": expected_runtime.get("model"),
+            "provider": expected_runtime.get("provider"),
+            "reasoning_effort": expected_runtime.get("reasoning_effort"),
+        })
+    assert run_meta == expected_run_meta
 
     saved = models.get_session(session.session_id)
     assistant = saved.messages[-1]
-    assert assistant["_usedModel"] == "answered-model-b"
-    assert assistant["_reasoningEffort"] == "off"
-    assert assistant["_gatewayRouting"]["used_model"] == "answered-model-b"
-    assert assistant["_gatewayRouting"]["used_provider"] == "provider-c"
+    if expected_runtime:
+        assert assistant["_usedModel"] == expected_runtime["model"]
+        assert assistant["_gatewayRouting"]["used_model"] == expected_runtime["model"]
+        assert assistant["_gatewayRouting"]["used_provider"] == expected_runtime["provider"]
+    else:
+        assert "_usedModel" not in assistant
+        assert "_gatewayRouting" not in assistant
+    if "reasoning_effort" in expected_runtime:
+        assert assistant["_reasoningEffort"] == expected_runtime["reasoning_effort"]
+    else:
+        assert "_reasoningEffort" not in assistant
     assert saved.model == "requested-model-a"
     assert saved.model_provider == "provider-a"
 
     done = [payload for event, payload in events if event == "done"]
     assert len(done) == 1
-    assert done[0]["usage"]["used_model"] == "answered-model-b"
-    assert done[0]["usage"]["used_provider"] == "provider-c"
-    assert done[0]["usage"]["reasoning_effort"] == "off"
+    usage = done[0]["usage"]
+    if expected_runtime:
+        assert usage["used_model"] == expected_runtime["model"]
+        assert usage["used_provider"] == expected_runtime["provider"]
+    else:
+        assert "used_model" not in usage
+        assert "used_provider" not in usage
+    if "reasoning_effort" in expected_runtime:
+        assert usage["reasoning_effort"] == expected_runtime["reasoning_effort"]
+    else:
+        assert "reasoning_effort" not in usage
     assert "_effective_runtime" not in done[0]["usage"]
 
     models.SESSIONS.clear()
@@ -430,9 +462,16 @@ def test_gateway_terminal_runtime_reconciles_live_persisted_done_and_reload(
     assert reloaded.model == "requested-model-a"
     assert reloaded.model_provider == "provider-a"
     reloaded_assistant = reloaded.messages[-1]
-    assert reloaded_assistant["_usedModel"] == "answered-model-b"
-    assert reloaded_assistant["_reasoningEffort"] == "off"
-    assert reloaded_assistant["_gatewayRouting"]["used_provider"] == "provider-c"
+    if expected_runtime:
+        assert reloaded_assistant["_usedModel"] == expected_runtime["model"]
+        assert reloaded_assistant["_gatewayRouting"]["used_provider"] == expected_runtime["provider"]
+    else:
+        assert "_usedModel" not in reloaded_assistant
+        assert "_gatewayRouting" not in reloaded_assistant
+    if "reasoning_effort" in expected_runtime:
+        assert reloaded_assistant["_reasoningEffort"] == expected_runtime["reasoning_effort"]
+    else:
+        assert "_reasoningEffort" not in reloaded_assistant
 
     # The next turn is built from the reloaded request-owned selection, not from
     # the prior turn's effective runtime attribution.
@@ -467,3 +506,41 @@ def test_gateway_does_not_treat_plain_terminal_model_as_effective_runtime():
             "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }
     ) == {}
+
+
+def test_completed_run_reattach_merges_terminal_runtime_before_return(monkeypatch):
+    """A completed Runs status owns observed attribution after WebUI restart."""
+    monkeypatch.setattr(
+        gateway_chat,
+        "_get_gateway_run_status",
+        lambda *_args, **_kwargs: {
+            "status": "completed",
+            "output": "reattached answer",
+            "runtime": {"model": "answered-model-b", "provider": "provider-c"},
+            "usage": {"input_tokens": 9, "output_tokens": 3},
+        },
+    )
+    monkeypatch.setattr(gateway_chat, "_publish_gateway_run_id", lambda *_args: None)
+    monkeypatch.setattr(gateway_chat, "update_active_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "api.route_approvals.settle_gateway_pending_run",
+        lambda *_args, **_kwargs: None,
+    )
+
+    output, usage = gateway_chat._await_gateway_run_result(
+        "reattach-session",
+        "reattach-stream",
+        "reattach-run",
+        "http://gateway.test",
+        "",
+        put_gateway_event=lambda *_args: None,
+        cancel_event=threading.Event(),
+    )
+
+    assert output == "reattached answer"
+    assert usage["input_tokens"] == 9
+    assert usage["output_tokens"] == 3
+    assert usage["_effective_runtime"] == {
+        "model": "answered-model-b",
+        "provider": "provider-c",
+    }

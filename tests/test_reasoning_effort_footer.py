@@ -76,7 +76,7 @@ class TestBackendEmission:
         assert _gateway_reasoning_effort_label(None) is None
 
     def test_run_meta_emitted_upfront_after_agent_registration(self):
-        registration = STREAMING_PY.index("AGENT_INSTANCES[stream_id] = agent")
+        registration = STREAMING_PY.index("_register_agent_if_current(agent")
         initial_emission = STREAMING_PY.index(
             "_emit_effective_run_meta()", registration
         )
@@ -169,6 +169,31 @@ class TestBackendEmission:
         assert [event for event, _ in events] == ["warning", "run_meta"]
         assert events[1][1]["model"] == "fallback"
         assert events[1][1]["provider"] == "p2"
+
+    def test_current_model_fallback_success_line_refreshes_run_meta(self):
+        agent = _FakeAgent(
+            {"enabled": True, "effort": "low"},
+            model="fallback",
+            provider="p2",
+        )
+        events = []
+
+        handled = _bridge_fallback_lifecycle_status(
+            "lifecycle",
+            "Model fallback: primary (p1) failed; using fallback (p2)",
+            agent=agent,
+            session_id="fallback-current-producer",
+            put=lambda event, data: events.append((event, data)),
+        )
+
+        assert handled is True
+        assert [event for event, _ in events] == ["warning", "run_meta"]
+        assert events[1][1] == {
+            "session_id": "fallback-current-producer",
+            "model": "fallback",
+            "provider": "p2",
+            "reasoning_effort": "low",
+        }
 
     def test_done_payload_carries_reasoning_effort(self):
         assert "usage['reasoning_effort'] = _effort_label_done" in STREAMING_PY
