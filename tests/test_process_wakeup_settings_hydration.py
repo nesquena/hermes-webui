@@ -71,6 +71,7 @@ def test_authoritative_wakeup_hydration_invalidates_all_transcript_caches():
     const checkbox = {{ checked: true }};
     function $(id) {{ return id === 'settingsShowBackgroundWakeups' ? checkbox : null; }}
     function _messageVirtualDefaultHeightForRole() {{ return 72; }}
+    function _resetMessageVirtualMeasurementBurst() {{}}
     function _clearUserRowIntrinsicHeightCache() {{}}
 
     const _renderCache = new Map([['stale-markdown', '<p>stale</p>']]);
