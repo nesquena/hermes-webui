@@ -1024,6 +1024,7 @@ def test_explicit_import_rereads_state_after_inflight_delete_cleanup(
         "payload": {"error": "Session not found in CLI store"},
     }
     assert not state["present"]
+    assert sid not in routes_module.SESSIONS
     assert not (session_dir / f"{sid}.json").exists()
     assert not (session_dir / f"{sid}.json.bak").exists()
     assert sid in models_module._load_webui_deleted_session_tombstone()
@@ -1159,6 +1160,7 @@ def test_chat_start_claim_rereads_state_after_inflight_delete_cleanup(
         "payload": {"error": "Session not found"},
     }
     assert not state["present"]
+    assert sid not in routes_module.SESSIONS
     assert not (session_dir / f"{sid}.json").exists()
     assert not (session_dir / f"{sid}.json.bak").exists()
     assert sid in models_module._load_webui_deleted_session_tombstone()
