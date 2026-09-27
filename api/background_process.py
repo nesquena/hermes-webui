@@ -1363,6 +1363,12 @@ def _canonical_wakeup_session_id(session_id: str) -> str:
         )
         return ""
 
+    if sealed is None:
+        logger.warning(
+            "process wakeup cannot verify compression lineage for session %s",
+            target,
+        )
+        return ""
     if sealed:
         tip = str(tip or "")
         if not tip or tip == target:

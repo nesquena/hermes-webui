@@ -298,6 +298,50 @@ def test_wakeup_target_rejects_uncertain_lineage(monkeypatch):
     assert background_process._canonical_wakeup_session_id("sealed-parent") == ""
 
 
+@pytest.mark.parametrize("failure", ["missing", "open", "api", "read"])
+def test_wakeup_target_rejects_real_resolver_authority_failure(
+    monkeypatch, tmp_path, failure
+):
+    """Unavailable durable authority cannot authorize a writable origin."""
+    import api.background_process as background_process
+    import api.profiles as profiles
+
+    opened = []
+
+    class FailingSessionDB:
+        def __init__(self, path, read_only=False):
+            assert failure != "missing", "an absent state.db must not be opened"
+            assert read_only is True
+            if failure == "open":
+                raise OSError("state.db open failed")
+            opened.append(self)
+            self.closed = False
+            if failure == "api":
+                self.__dict__["get_session"] = None
+
+        def get_session(self, session_id):
+            raise OSError("state.db read failed")
+
+        def get_compression_tip(self, session_id):
+            pytest.fail("tip lookup must not run before the parent read succeeds")
+
+        def close(self):
+            self.closed = True
+
+    fake = types.ModuleType("hermes_state")
+    fake.__dict__["SessionDB"] = FailingSessionDB
+    monkeypatch.setitem(sys.modules, "hermes_state", fake)
+    if failure != "missing":
+        (tmp_path / "state.db").write_bytes(b"")
+    monkeypatch.setattr(
+        profiles, "_resolve_profile_home_for_name", lambda name: str(tmp_path)
+    )
+    _snapshot(monkeypatch, snapshot=False)
+
+    assert background_process._canonical_wakeup_session_id("sealed-parent") == ""
+    assert all(db.closed for db in opened)
+
+
 def test_wakeup_target_fallback_loader_still_checks_lineage(monkeypatch):
     """Read-only materialization fallback must not bypass durable authority."""
     import api.background_process as background_process
