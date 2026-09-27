@@ -7764,6 +7764,13 @@ function _customModelFromQualifiedId(rawId){
     if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
     return rest||rawId;
   }
+  // A provider slug is a config key or a host:port authority — it never
+  // contains a '/'. A slash-bearing first segment is therefore the model
+  // itself in the plain custom lane (`@custom:ollamacloud/qwen3.5:397b`
+  // must render the whole remainder, not just `397b`), mirroring the
+  // `/`-means-routable rule api/config.py applies when building ids (#7240).
+  const sep0=rest.indexOf(':');
+  if(rest.slice(0,sep0).includes('/')) return rest||rawId;
   const inner='custom:'+rest;
   // 1. Authoritative: longest provider_id prefix the server actually told us
   // about via /api/models group metadata. Config beats shape, so a purely
