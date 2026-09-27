@@ -113,6 +113,8 @@ def _run_drag_probe(steps: list[dict]) -> dict:
         _function_source(name)
         for name in (
             "_markScrollbarDragIntent",
+            "_beginScrollbarDragIntent",
+            "_promoteOverlayScrollbarDrag",
             "_clearScrollbarDragIntent",
             "_consumeScrollbarDragIntent",
             "_releaseScrollbarDragIntent",
@@ -162,8 +164,10 @@ let _scrollbarDragActive=false;
 let _scrollbarDragIntentQueued=false;
 let _scrollbarDragIntentUntil=-Infinity;
 let _scrollbarDragObservedTop=null;
+let _scrollbarOverlayDragCandidate=null;
 const SCROLLBAR_DRAG_INTENT_WINDOW_MS=250;
 const SCROLLBAR_DRAG_EDGE_BAND_PX=20;
+const SCROLLBAR_OVERLAY_DRAG_MIN_MOVE_PX=2;
 let _messageScrollInputGeneration=0;
 let _messageJumpScrollOwner=null;
 let _lastScrollTop=6500;
@@ -207,6 +211,7 @@ eval(payload.listener);
 const snapshots={};
 const snapshot=(key)=>{snapshots[key]={
   dragActive:_scrollbarDragActive,
+  overlayCandidate:!!_scrollbarOverlayDragCandidate,
   intentQueued:_scrollbarDragIntentQueued,
   intentUntil:_scrollbarDragIntentUntil,
   rafPending:rafs.size>0,
@@ -218,8 +223,20 @@ for(const step of payload.steps){
     const target=step.child?{clientWidth:el.clientWidth}:el;
     const event={target};
     if(typeof step.offsetX==='number') event.offsetX=step.offsetX;
+    if(typeof step.offsetY==='number') event.offsetY=step.offsetY;
     if(typeof step.clientX==='number') event.clientX=step.clientX;
+    if(typeof step.clientY==='number') event.clientY=step.clientY;
+    if(typeof step.pointerId==='number') event.pointerId=step.pointerId;
+    if(typeof step.pointerType==='string') event.pointerType=step.pointerType;
+    if(typeof step.button==='number') event.button=step.button;
     elHandlers.pointerdown(event);
+  }else if(step.op==='pointermove'){
+    const event={};
+    if(typeof step.clientX==='number') event.clientX=step.clientX;
+    if(typeof step.clientY==='number') event.clientY=step.clientY;
+    if(typeof step.pointerId==='number') event.pointerId=step.pointerId;
+    if(typeof step.pointerType==='string') event.pointerType=step.pointerType;
+    windowHandlers.pointermove(event);
   }else if(step.op==='scrollTop'){ el.scrollTop=step.value; }
   else if(step.op==='seed'){
     _lastScrollTop=el.scrollTop;
@@ -235,8 +252,16 @@ for(const step of payload.steps){
     document.visibilityState='hidden';
     documentHandlers.visibilitychange();
   }
-  else if(step.op==='pointerup'){ windowHandlers.pointerup(); }
-  else if(step.op==='pointercancel'){ windowHandlers.pointercancel(); }
+  else if(step.op==='pointerup'){
+    const event={};
+    if(typeof step.pointerId==='number') event.pointerId=step.pointerId;
+    windowHandlers.pointerup(event);
+  }
+  else if(step.op==='pointercancel'){
+    const event={};
+    if(typeof step.pointerId==='number') event.pointerId=step.pointerId;
+    windowHandlers.pointercancel(event);
+  }
   else if(step.op==='scroll'){ elHandlers.scroll(); }
   else if(step.op==='flush'){ flushAnimationFrames(); }
   else if(step.op==='advance'){ clockNow+=step.ms; }
@@ -322,11 +347,18 @@ def test_scrollbar_drag_intent_survives_pointerup_before_scroll_frame():
 
 def test_overlay_scrollbar_press_inside_client_box_still_unpins():
     """Overlay scrollbars (Firefox macOS thin — bug 1568939) sit INSIDE the
-    client box, so their drags report offsetX < clientWidth. A right-edge press
-    (offsetX === clientWidth - 1) must still claim drag ownership and unpin."""
+    client box, so their drags report offsetX < clientWidth. A right-edge thumb
+    drag must still claim ownership once pointer movement changes scrollTop."""
     result = _run_drag_probe(
         [
-            {"op": "pointerdown", "offsetX": 799},  # overlay thumb, in-box
+            {
+                "op": "pointerdown",
+                "offsetX": 799,
+                "clientX": 799,
+                "clientY": 480,
+                "pointerId": 7,
+            },  # overlay thumb, in-box
+            {"op": "pointermove", "clientX": 799, "clientY": 472, "pointerId": 7},
             {"op": "scrollTop", "value": 6492},
             {"op": "scroll"},
             {"op": "flush"},
@@ -334,6 +366,86 @@ def test_overlay_scrollbar_press_inside_client_box_still_unpins():
     )
     assert result["state"]["_messageUserUnpinned"] is True
     assert result["state"]["_scrollPinned"] is False
+
+
+def test_overlay_scrollbar_drag_survives_pointerup_before_async_scroll():
+    """Promoting an overlay candidate at release retains its pre-drag position,
+    so the existing bounded release latch still owns a late scroll event."""
+    result = _run_drag_probe(
+        [
+            {
+                "op": "pointerdown",
+                "offsetX": 799,
+                "clientX": 799,
+                "clientY": 480,
+                "pointerId": 17,
+            },
+            {"op": "pointermove", "clientX": 799, "clientY": 472, "pointerId": 17},
+            {"op": "scrollTop", "value": 6492},
+            {"op": "advance", "ms": 251},
+            {"op": "pointerup", "pointerId": 17},
+            {"op": "snapshot", "key": "releasedBeforeScroll"},
+            {"op": "scroll"},
+            {"op": "flush"},
+        ]
+    )
+    assert result["snapshots"]["releasedBeforeScroll"]["dragActive"] is False
+    assert result["snapshots"]["releasedBeforeScroll"]["intentUntil"] == 1251 + 250
+    assert result["state"]["_messageUserUnpinned"] is True
+    assert result["state"]["_scrollPinned"] is False
+
+
+def test_empty_right_margin_press_does_not_claim_scrollbar_intent():
+    """A wide transcript leaves empty space between .messages-inner and the
+    scroller's right edge. Pressing that margin must not turn a later browser
+    tail nudge into reader-owned scrollbar motion."""
+    result = _run_drag_probe(
+        [
+            {
+                "op": "pointerdown",
+                "offsetX": 799,
+                "clientX": 799,
+                "clientY": 250,
+                "pointerId": 8,
+            },
+            {"op": "snapshot", "key": "afterMarginPress"},
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "flush"},
+        ]
+    )
+    assert result["snapshots"]["afterMarginPress"]["dragActive"] is False
+    assert result["snapshots"]["afterMarginPress"]["overlayCandidate"] is True
+    assert result["snapshots"]["afterMarginPress"]["intentUntil"] is None
+    assert result["state"]["_messageUserUnpinned"] is False
+    assert result["state"]["_scrollPinned"] is True
+
+
+def test_touch_at_overlay_edge_keeps_touch_scroll_ownership():
+    """Mobile touch gestures use the existing touch intent path; the desktop
+    overlay-scrollbar candidate must not steal a right-edge touch."""
+    result = _run_drag_probe(
+        [
+            {
+                "op": "pointerdown",
+                "offsetX": 799,
+                "clientX": 799,
+                "clientY": 480,
+                "pointerId": 9,
+                "pointerType": "touch",
+            },
+            {
+                "op": "pointermove",
+                "clientX": 799,
+                "clientY": 460,
+                "pointerId": 9,
+                "pointerType": "touch",
+            },
+            {"op": "snapshot", "key": "afterTouchMove"},
+        ]
+    )
+    assert result["snapshots"]["afterTouchMove"]["dragActive"] is False
+    assert result["snapshots"]["afterTouchMove"]["overlayCandidate"] is False
 
 
 def test_scrollbar_press_outside_edge_band_does_not_bypass_jitter_guard():

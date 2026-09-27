@@ -633,10 +633,13 @@ let _scrollbarDragIntentUntil=-Infinity;
 let _scrollbarDragObservedTop=null;
 // An OVERLAY scrollbar (macOS; Firefox keeps one even with scrollbar-width:thin,
 // Mozilla bug 1568939) is drawn INSIDE the client box, so a press on its thumb
-// reports offsetX<clientWidth and the gutter-only test never fires. Treat a
-// press whose target is the scroller itself within this band of its right edge
-// as a scrollbar hit too (content presses target .messages-inner, not #messages).
+// reports offsetX<clientWidth and the gutter-only test never fires. The same
+// right-edge band can also be empty margin beside the narrower transcript, so an
+// in-box press is only a CANDIDATE until vertical pointer movement and a changed
+// scrollTop prove an overlay-thumb drag. A real gutter hit remains unambiguous.
 const SCROLLBAR_DRAG_EDGE_BAND_PX=20;
+const SCROLLBAR_OVERLAY_DRAG_MIN_MOVE_PX=2;
+let _scrollbarOverlayDragCandidate=null;
 function _markMessageVirtualScrollActive(){
   _messageVirtualScrollActive=true;
   clearTimeout(_messageVirtualScrollSettleTimer);
@@ -6290,15 +6293,31 @@ function _isMessageTailJitter(top,bottomDistance,scrollbarDragIntent=false){
 function _markScrollbarDragIntent(){
   _scrollbarDragIntentUntil=performance.now()+SCROLLBAR_DRAG_INTENT_WINDOW_MS;
 }
+function _beginScrollbarDragIntent(el,observedTop=el.scrollTop){
+  _scrollbarOverlayDragCandidate=null;
+  if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
+  _scrollbarDragActive=true;
+  if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+  _scrollbarDragObservedTop=observedTop;
+  _markScrollbarDragIntent();
+}
+function _promoteOverlayScrollbarDrag(el){
+  const candidate=_scrollbarOverlayDragCandidate;
+  if(!candidate||!candidate.moved||el.scrollTop===candidate.scrollTop) return false;
+  _beginScrollbarDragIntent(el,candidate.scrollTop);
+  return true;
+}
 function _clearScrollbarDragIntent(){
   _scrollbarDragActive=false;
   _scrollbarDragIntentQueued=false;
   _scrollbarDragIntentUntil=-Infinity;
   _scrollbarDragObservedTop=null;
+  _scrollbarOverlayDragCandidate=null;
 }
 // `top` is the scrollTop this scroll event delivers: while the drag is active it
 // is recorded as observed, so release can tell pending movement apart.
-function _consumeScrollbarDragIntent(top){
+function _consumeScrollbarDragIntent(top,el){
+  if(el) _promoteOverlayScrollbarDrag(el);
   if(_scrollbarDragActive&&typeof top==='number') _scrollbarDragObservedTop=top;
   const fresh=performance.now()<=_scrollbarDragIntentUntil;
   _scrollbarDragIntentUntil=-Infinity;
@@ -6540,6 +6559,7 @@ function _resetScrollDirectionTracker(){
   _scrollbarDragIntentQueued=false;
   _scrollbarDragIntentUntil=-Infinity;
   _scrollbarDragObservedTop=null;
+  _scrollbarOverlayDragCandidate=null;
   _lastScrollTop=null;
   _lastMessageClientHeight=null;
   _messageUserUnpinned=false;
@@ -6570,6 +6590,7 @@ function _resetStreamScrollFollow(){
   _scrollbarDragIntentQueued=false;
   _scrollbarDragIntentUntil=-Infinity;
   _scrollbarDragObservedTop=null;
+  _scrollbarOverlayDragCandidate=null;
   _messageUserUnpinned=false;
   _scrollPinned=true;
   _nearBottomCount=0;
@@ -6660,27 +6681,47 @@ if(typeof window!=='undefined'){
   if(!el) return;
   el.addEventListener('pointerdown',(e)=>{
     if(e.target!==el) return;
+    if(e.pointerType==='touch'||(typeof e.button==='number'&&e.button!==0)) return;
+    if(el.scrollHeight<=el.clientHeight) return;
     // Transcript content lives in .messages-inner, so a press whose target is
-    // the scroller itself is never a message — only its margins or its
-    // scrollbar. A GUTTER scrollbar sits outside the client box (offsetX >=
-    // clientWidth); an OVERLAY scrollbar (macOS, Firefox thin — see
-    // SCROLLBAR_DRAG_EDGE_BAND_PX) sits INSIDE it, hugging the right edge, so
-    // also accept a press within that band of the edge, measured either
-    // scroller-relative (offsetX) or against the live bounding rect (clientX).
-    const band=typeof SCROLLBAR_DRAG_EDGE_BAND_PX==='number'?SCROLLBAR_DRAG_EDGE_BAND_PX:0;
-    let onScrollbar=e.offsetX>=el.clientWidth-band;
-    if(!onScrollbar&&band>0&&typeof e.clientX==='number'&&typeof el.getBoundingClientRect==='function'){
-      const right=el.getBoundingClientRect().right;
-      onScrollbar=e.clientX>=right-band&&e.clientX<=right;
+    // the scroller itself is either its margin or its scrollbar. A GUTTER hit
+    // is outside the client box and can claim intent immediately. An OVERLAY
+    // hit is inside the box and geometrically indistinguishable from the empty
+    // right margin at pointerdown, so keep it as a candidate until real vertical
+    // pointer movement changes scrollTop.
+    const offsetX=typeof e.offsetX==='number'?e.offsetX:-Infinity;
+    if(typeof e.offsetX==='number'&&e.offsetX>=el.clientWidth){
+      _beginScrollbarDragIntent(el);
+      return;
     }
-    if(!onScrollbar) return;
-    if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
-    _scrollbarDragActive=true;
-    if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
-    if(typeof _scrollbarDragObservedTop!=='undefined') _scrollbarDragObservedTop=el.scrollTop;
-    if(typeof _markScrollbarDragIntent==='function') _markScrollbarDragIntent();
+    const band=typeof SCROLLBAR_DRAG_EDGE_BAND_PX==='number'?SCROLLBAR_DRAG_EDGE_BAND_PX:0;
+    let onOverlayEdge=offsetX>=el.clientWidth-band;
+    const rect=typeof el.getBoundingClientRect==='function'?el.getBoundingClientRect():null;
+    if(!onOverlayEdge&&band>0&&rect&&typeof e.clientX==='number'){
+      onOverlayEdge=e.clientX>=rect.right-band&&e.clientX<=rect.right;
+    }
+    if(!onOverlayEdge) return;
+    const clientX=typeof e.clientX==='number'?e.clientX:(rect&&Number.isFinite(offsetX)?rect.left+offsetX:null);
+    const clientY=typeof e.clientY==='number'?e.clientY:(rect&&typeof e.offsetY==='number'?rect.top+e.offsetY:null);
+    if(typeof clientX!=='number'||typeof clientY!=='number') return;
+    _scrollbarOverlayDragCandidate={pointerId:e.pointerId,clientX,clientY,scrollTop:el.scrollTop,moved:false};
+  },{passive:true});
+  window.addEventListener('pointermove',(e)=>{
+    const candidate=_scrollbarOverlayDragCandidate;
+    if(!candidate) return;
+    if(candidate.pointerId!==undefined&&e.pointerId!==candidate.pointerId) return;
+    if(typeof e.clientX!=='number'||typeof e.clientY!=='number') return;
+    const dx=e.clientX-candidate.clientX;
+    const dy=e.clientY-candidate.clientY;
+    const threshold=typeof SCROLLBAR_OVERLAY_DRAG_MIN_MOVE_PX==='number'?SCROLLBAR_OVERLAY_DRAG_MIN_MOVE_PX:2;
+    if(Math.abs(dy)>=threshold&&Math.abs(dy)>=Math.abs(dx)) candidate.moved=true;
+    _promoteOverlayScrollbarDrag(el);
   },{passive:true});
   window.addEventListener('pointerup',()=>{
+    if(_scrollbarOverlayDragCandidate){
+      _promoteOverlayScrollbarDrag(el);
+      _scrollbarOverlayDragCandidate=null;
+    }
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
     // `scroll` is async: the drag's own scroll event may only be dispatched
@@ -6690,6 +6731,10 @@ if(typeof window!=='undefined'){
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('pointercancel',()=>{
+    if(_scrollbarOverlayDragCandidate){
+      _promoteOverlayScrollbarDrag(el);
+      _scrollbarOverlayDragCandidate=null;
+    }
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
     if(typeof _releaseScrollbarDragIntent==='function') _releaseScrollbarDragIntent(el.scrollTop,el.scrollHeight-el.clientHeight);
@@ -6744,8 +6789,8 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    // Consume the drag stamp on the first scroll after it (never leaks); record delivered top.
-    const dragStamp=typeof _consumeScrollbarDragIntent==='function'&&_consumeScrollbarDragIntent(el.scrollTop);
+    // Consume the drag stamp on first scroll after it (never leaks); record delivered top.
+    const dragStamp=typeof _consumeScrollbarDragIntent==='function'&&_consumeScrollbarDragIntent(el.scrollTop,el);
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
