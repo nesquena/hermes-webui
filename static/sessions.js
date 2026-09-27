@@ -2055,6 +2055,9 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    // A reconnect can register while /api/session/new is pending and S.session
+    // still names the old pane. Re-arbitrate once the new pane becomes authoritative.
+    if(typeof closeOtherLiveStreams==='function') closeOtherLiveStreams(S.session.session_id);
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);

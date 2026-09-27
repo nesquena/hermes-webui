@@ -350,6 +350,105 @@ def test_late_registration_during_load_window_uses_navigation_target(browser, ba
         page.close()
 
 
+def test_late_registration_during_new_chat_window_closes_old_stream(browser, base_url):
+    """New Chat re-arbitrates a reconnect that lands while creation is pending."""
+    page = browser.new_page(
+        viewport={"width": 1024, "height": 720},
+        bypass_csp=True,
+    )
+    try:
+        page.goto(base_url + "/", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true && "
+            "typeof attachLiveStream === 'function' && typeof newSession === 'function'",
+            timeout=15_000,
+        )
+        result = page.evaluate(
+            """
+            async () => {
+              class FakeEventSource {
+                static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
+                static instances = [];
+                constructor(url) {
+                  this.url = String(url);
+                  this.readyState = FakeEventSource.OPEN;
+                  FakeEventSource.instances.push(this);
+                }
+                addEventListener() {}
+                close() { this.readyState = FakeEventSource.CLOSED; }
+              }
+              window.EventSource = FakeEventSource;
+              for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
+
+              let releaseProbe;
+              let releaseNewSession;
+              let newSessionRequested;
+              const probe = new Promise(resolve => { releaseProbe = resolve; });
+              const newSessionResponse = new Promise(resolve => { releaseNewSession = resolve; });
+              const requested = new Promise(resolve => { newSessionRequested = resolve; });
+              const originalApi = window.api;
+              window.api = async (path, opts) => {
+                const p = String(path);
+                if (p.includes('/api/chat/stream/status')) {
+                  await probe;
+                  return {active:true};
+                }
+                if (p.includes('/api/session/new')) {
+                  newSessionRequested();
+                  await newSessionResponse;
+                  return {session:{session_id:'session-c', title:'Untitled', messages:[],
+                                   workspace:'', model:'', active_stream_id:null}};
+                }
+                return originalApi(path, opts);
+              };
+              try {
+                S.session = {session_id:'session-a', pending_started_at:1};
+                S.messages = [];
+                S.activeStreamId = 'stream-a';
+                INFLIGHT['session-a'] = {
+                  streamId:'stream-a', messages:[], uploaded:[], toolCalls:[]
+                };
+                attachLiveStream('session-a', 'stream-a', [], {reconnecting:true});
+                await Promise.resolve();
+
+                const newSessionPromise = newSession(false, {worktree:false});
+                await requested;
+                releaseProbe();
+                await new Promise(resolve => setTimeout(resolve, 0));
+                await new Promise(resolve => setTimeout(resolve, 0));
+                const sourceA = FakeEventSource.instances.find(s => s.url.includes('stream-a'));
+                const sourceAOpenDuringNewChat = !!sourceA
+                  && sourceA.readyState === FakeEventSource.OPEN;
+
+                releaseNewSession();
+                await newSessionPromise;
+                return {
+                  sourceAOpened:!!sourceA,
+                  sourceAOpenDuringNewChat,
+                  sourceAOpen:!!sourceA && sourceA.readyState === FakeEventSource.OPEN,
+                  selectedSid:S.session && S.session.session_id,
+                  activeStreamId:S.activeStreamId,
+                  liveKeys:Object.keys(LIVE_STREAMS).sort(),
+                  inflightAReattach:INFLIGHT['session-a']?.reattach === true,
+                };
+              } finally {
+                window.api = originalApi;
+                for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
+              }
+            }
+            """
+        )
+        assert result["sourceAOpened"] is True, result
+        assert result["sourceAOpenDuringNewChat"] is True, result
+        assert result["sourceAOpen"] is False, result
+        assert result["selectedSid"] == "session-c", result
+        assert result["activeStreamId"] is None, result
+        assert result["liveKeys"] == [], result
+        assert result["inflightAReattach"] is True, result
+    finally:
+        page.close()
+
+
 def test_stale_session_load_cannot_close_new_chat_stream(browser, base_url):
     """A pending load must not replace a New Chat or close its live stream.
 
