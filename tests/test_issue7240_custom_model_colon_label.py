@@ -41,6 +41,13 @@ const fnSrc = ui.slice(start, after);
 // Optional pre-hydrated catalog: {routingId: label}. Absent -> empty, which
 // exercises the string-only legacy fallback.
 const _dynamicModelLabels = process.argv[3] ? JSON.parse(process.argv[3]) : {};
+// getModelLabel() may delegate to the shared qualified-ID grammar
+// (_customModelFromQualifiedId), which reads the hydrated
+// _dynamicProviderIds prefix set populated by /api/models at page load.
+// Those tests exercise the no-catalog lane, where the authoritative prefix
+// lookup must not match, so an empty map is exactly the hydrated-never
+// environment the legacy fallback models (#6657).
+const _dynamicProviderIds = {};
 function _fmtOllamaLabel(s){ return s; }
 // getModelLabel() calls the dotted Bedrock/Vertex prefix normalizer, which lives
 // just above it with two Sets it closes over. Pull all three in, or the eval'd
@@ -99,14 +106,20 @@ def test_custom_model_label_plain_lane_and_host_port_slugs():
         # Endpoint-style slug: ':port' belongs to the provider segment.
         "@custom:10.8.71.41:8080:Qwen3-235B",
         "@custom:localhost:11434:llama3",
-        # A digit-leading model after a NAMED slug is not a port — must not be
-        # peeled as if the slug were host:port.
+        # Under the unified grammar (#6657), `omni:11434` is a valid
+        # endpoint authority (single-label LAN/Docker host + port — the same
+        # shapes _custom_slug_rest_is_endpoint_authority accepts on the
+        # backend), so the model is "Qwen3" and the label matches the route
+        # master's narrower localhost/dotted/IPv4-only host check could not
+        # see. When provider `custom:omni` exists, the hydrated catalog
+        # remains authoritative and renders the operator label verbatim
+        # (test_catalog_label_wins_over_legacy_peel).
         "@custom:omni:11434:Qwen3",
     ])
     assert out["@custom:qwen397b-64k"] == "qwen397b-64k"
     assert out["@custom:10.8.71.41:8080:Qwen3-235B"] == "Qwen3-235B"
     assert out["@custom:localhost:11434:llama3"] == "llama3"
-    assert out["@custom:omni:11434:Qwen3"] == "11434:Qwen3"
+    assert out["@custom:omni:11434:Qwen3"] == "Qwen3"
 
 
 def test_plain_custom_lane_colon_bearing_model_slash_segment():
