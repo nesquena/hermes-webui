@@ -178,6 +178,38 @@ def test_prewarmed_row_takes_configured_label(live_endpoint, _sync_rebuild):
     )
 
 
+def test_prewarmed_row_missing_from_live_falls_back_with_config_label(
+    live_endpoint, _sync_rebuild
+):
+    """A configured model the live endpoint no longer returns must surface
+    through the fallback row WITH its operator label — that loop used to
+    derive the label from the raw id (title-casing it), so a rebuild could
+    show a different label than the cold catalog for the same config."""
+    _ModelsEndpoint.payload = {"data": []}  # endpoint returns nothing
+    result = _models_with_cfg(
+        model_cfg=_active_cfg(live_endpoint),
+        custom_providers=[
+            {
+                **_gateway_cfg(live_endpoint),
+                "models": [
+                    {"id": "us.anthropic.claude-opus-4-8", "label": "Claude Opus 4.8"},
+                    "model-a",
+                ],
+            }
+        ],
+    )
+    row = _row_by_model_id(
+        result.get("groups", []), "custom:mygateway", "us.anthropic.claude-opus-4-8"
+    )
+    assert row is not None, "configured model missing from live must fall back into the group"
+    assert row["label"] == "Claude Opus 4.8", (
+        f"fallback row must carry the operator label, got {row['label']!r}"
+    )
+    bare_row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
+    assert bare_row is not None
+    assert bare_row["label"] != "model-a", "bare id must still derive, not render raw"
+
+
 def test_prewarmed_row_keeps_endpoint_label_without_config_label(live_endpoint, _sync_rebuild):
     """Without an operator label, the endpoint label survives unchanged."""
     _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}

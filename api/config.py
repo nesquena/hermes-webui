@@ -10043,7 +10043,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
                     if _cp_model and _dedup_key not in _seen_custom_ids:
-                        _cp_label = _get_label_for_model(_cp_model, [])
+                        # Same label authority as the live loop above: an
+                        # operator label must survive a live rebuild that
+                        # never returned the model — without this lookup the
+                        # fallback row title-cases the raw id and the cold
+                        # catalog and the rebuilt catalog disagree (#6657).
+                        _cp_label = _cp_label_map.get(_cp_model) or _get_label_for_model(
+                            _cp_model, []
+                        )
                         _seen_custom_ids.add(_dedup_key)
                         if _slug:
                             detected_providers.add(_slug)
