@@ -75,7 +75,10 @@ reads, so disconnect is not blocked by a slow projection.
 
 When a local `fallback_providers` entry serves a turn (the configured provider
 failed and no LLM **gateway** was involved), the server stamps both model
-identities so clients can surface the switch:
+identities so clients can surface the switch. This includes a provider selected
+while the Agent is being constructed: at that boundary the server preserves the
+requested identity only when a configured fallback chain, the Agent's init
+fallback signal, and a different normalized effective runtime all agree:
 
 - **Live**: the `done` event's `usage` object carries `used_model` (the model
   that actually served the turn, read after `agent.run`) and, when the served

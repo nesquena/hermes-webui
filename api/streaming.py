@@ -3271,17 +3271,59 @@ def _agent_fallback_provenance(agent) -> bool:
     the client/model/provider in place; ``restore_primary_runtime`` clears it
     at the start of the next turn once the primary is back (it stays set while
     the turn is genuinely served by the fallback, including cooldown turns).
-    ``_fallback_activated`` is deliberately NOT accepted: it is restore
-    bookkeeping shared with the init-time fallback chain (whose
-    ``_primary_runtime`` snapshot is taken after the swap, so no
-    primary-vs-served difference can be proven) and with user-initiated
-    model switches, neither of which is a runtime fallback. The WebUI never
-    infers a fallback from model spellings: without this flag a turn is a
-    normal turn, whatever the served id looks like.
+    Constructor-time fallback is represented separately by the WebUI-owned
+    ``_webui_init_fallback_requested_identity`` marker. That marker is written
+    only immediately after construction, when a configured fallback chain,
+    the Agent's init fallback flag, and a different effective runtime jointly
+    prove the switch. ``_fallback_activated`` is deliberately NOT accepted on
+    its own: later it is also used for restore bookkeeping and user-initiated
+    model switches. The WebUI never infers a fallback from model spellings.
     """
     if agent is None:
         return False
-    return getattr(agent, "_provider_fallback_active", None) is True
+    if getattr(agent, "_provider_fallback_active", None) is True:
+        return True
+    init_identity = getattr(agent, "_webui_init_fallback_requested_identity", None)
+    return (
+        isinstance(init_identity, tuple)
+        and len(init_identity) == 2
+        and bool(init_identity[1])
+    )
+
+
+def _capture_init_fallback_provenance(agent, requested_model, requested_provider, fallback_chain) -> bool:
+    """Record a constructor-time local fallback only when it is fully proven.
+
+    Hermes Agent may consume ``fallback_model`` while its constructor probes
+    providers. In that path ``_provider_fallback_active`` is not set and the
+    Agent's ``_primary_runtime`` snapshot already describes the fallback, so
+    post-run state alone cannot recover the requested identity. This helper is
+    called only at the constructor boundary, where all three facts are known:
+    a fallback chain was supplied, the constructor reports fallback activation,
+    and its effective normalized runtime differs from the requested one.
+
+    The generic ``_fallback_activated`` bit is never trusted elsewhere. Unknown
+    identities and notation-only differences fail closed.
+    """
+    if agent is None or not fallback_chain:
+        return False
+    if getattr(agent, "_fallback_activated", None) is not True:
+        return False
+    requested_identity = _normalized_runtime_identity(requested_model, requested_provider)
+    used_model = str(getattr(agent, "model", "") or "").strip()
+    used_provider = str(getattr(agent, "provider", "") or "").strip()
+    if not requested_identity[1] or not _local_model_switch(
+        requested_model,
+        used_model,
+        requested_provider,
+        used_provider,
+    ):
+        return False
+    try:
+        agent._webui_init_fallback_requested_identity = requested_identity
+    except Exception:
+        return False
+    return True
 
 
 def _bare_model_id_candidates(model_id, provider_id=None) -> list[str]:
@@ -3392,12 +3434,20 @@ def _local_model_switch(requested_model, used_model, requested_provider=None, us
 def _primary_runtime_identity(agent, requested_model, requested_provider) -> tuple[str, str]:
     """Constructor-normalized primary identity the turn was asked to run on.
 
-    Prefer the Agent's own ``_primary_runtime`` snapshot: it is taken after
+    Prefer the WebUI's constructor-boundary snapshot for an init-time fallback,
+    then the Agent's own ``_primary_runtime`` snapshot: the latter is taken after
     ``AIAgent.__init__`` normalized model and provider and is refreshed by
     ``switch_model``, so it is the exact identity ``restore_primary_runtime``
     returns to after a fallback. Fall back to the WebUI-resolved pair when
     the snapshot is unavailable (fake or legacy agents).
     """
+    init_identity = getattr(agent, '_webui_init_fallback_requested_identity', None)
+    if (
+        isinstance(init_identity, tuple)
+        and len(init_identity) == 2
+        and init_identity[1]
+    ):
+        return init_identity
     rt = getattr(agent, '_primary_runtime', None)
     if isinstance(rt, dict) and str(rt.get('model') or '').strip():
         return _normalized_runtime_identity(rt.get('model'), rt.get('provider') or requested_provider)
@@ -11837,6 +11887,12 @@ def _run_agent_streaming(
             _cache_new_agent = False
             if ephemeral:
                 agent = _AIAgent(**_agent_kwargs)
+                _capture_init_fallback_provenance(
+                    agent,
+                    resolved_model,
+                    resolved_provider,
+                    _fallback_resolved,
+                )
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
                 from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
@@ -11946,6 +12002,12 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     agent = _AIAgent(**_agent_kwargs)
+                    _capture_init_fallback_provenance(
+                        agent,
+                        resolved_model,
+                        resolved_provider,
+                        _fallback_resolved,
+                    )
                     _cache_new_agent = True
 
             if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):

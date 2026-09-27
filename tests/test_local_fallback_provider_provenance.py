@@ -37,9 +37,9 @@ _MISSING = object()
 
 
 def _make_agent(*, requested_model, requested_provider, served_model, served_provider,
-                fallback_active, primary_runtime="requested"):
-    """FakeAgent: constructed on the requested identity; run_conversation swaps
-    to the served identity and sets the Agent's real fallback-active flag."""
+                fallback_active, primary_runtime="requested", init_fallback=False):
+    """FakeAgent: constructed on the requested identity normally; an optional
+    init-time fallback swaps before return. run_conversation models turn fallback."""
 
     class FakeAgent:
         def __init__(
@@ -69,13 +69,21 @@ def _make_agent(*, requested_model, requested_provider, served_model, served_pro
             self.reasoning_config = None
             self.ephemeral_system_prompt = None
             self._last_error = None
-            # Constructor state == the requested identity, like AIAgent.
-            self.model = requested_model
-            self.provider = requested_provider
+            # Normally constructor state == the requested identity. When the
+            # primary provider cannot initialize, AIAgent can consume the
+            # supplied fallback chain before returning instead.
+            self.model = served_model if init_fallback else requested_model
+            self.provider = served_provider if init_fallback else requested_provider
             self._provider_fallback_active = False
+            self._fallback_activated = init_fallback
             # AIAgent snapshots the primary runtime AFTER the constructor
             # normalized model/provider; restore_primary_runtime returns to it.
-            if primary_runtime == "requested":
+            if init_fallback:
+                self._primary_runtime = {
+                    "model": served_model,
+                    "provider": served_provider,
+                }
+            elif primary_runtime == "requested":
                 self._primary_runtime = {
                     "model": requested_model,
                     "provider": requested_provider,
@@ -85,10 +93,12 @@ def _make_agent(*, requested_model, requested_provider, served_model, served_pro
 
         def run_conversation(self, **kwargs):
             # try_activate_fallback swaps client/model/provider in place and
-            # sets the fallback-active provenance flag.
-            self.model = served_model
-            self.provider = served_provider
-            self._provider_fallback_active = fallback_active
+            # sets the fallback-active provenance flag. An init fallback has
+            # already performed that swap before this method is entered.
+            if not init_fallback:
+                self.model = served_model
+                self.provider = served_provider
+                self._provider_fallback_active = fallback_active
             history = kwargs.get("conversation_history", [])
             return {
                 "messages": history + [
@@ -103,7 +113,7 @@ def _make_agent(*, requested_model, requested_provider, served_model, served_pro
     return FakeAgent
 
 
-def _run_turn(agent_cls, *, resolved_model, resolved_provider, extra_modules=None):
+def _run_turn(agent_cls, *, resolved_model, resolved_provider, extra_modules=None, config=None):
     """Drive the production streaming worker with a FakeAgent and return
     (session, sse_events). Mirrors test_issue1857_usage_overwrite.py."""
     import api.streaming as streaming
@@ -186,7 +196,7 @@ def _run_turn(agent_cls, *, resolved_model, resolved_provider, extra_modules=Non
              mock.patch.object(
                  streaming, "resolve_model_provider",
                  return_value=(resolved_model, resolved_provider, None)), \
-             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config.get_config", return_value=config or {}), \
              mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
             streaming.STREAMS[fake_stream_id] = fake_queue
             streaming._run_agent_streaming(
@@ -239,6 +249,37 @@ def test_proven_cross_provider_fallback_stamps_full_requested_and_used_identity(
     usage = _done_usage(events)
     assert usage["used_model"] == "deepseek-v4-flash-0731"
     assert usage["used_provider"] == fold("ollama")
+    assert usage["requested_model"] == "qwen3.8-max"
+    assert usage["requested_provider"] == "alibaba"
+
+
+def test_constructor_time_fallback_stamps_requested_and_used_identity():
+    """An init-time fallback is proven at the constructor boundary even though
+    AIAgent has not yet set its per-run ``_provider_fallback_active`` flag and
+    its primary-runtime snapshot already describes the fallback."""
+    agent_cls = _make_agent(
+        requested_model="qwen3.8-max",
+        requested_provider="alibaba",
+        served_model="deepseek-v4-flash-0731",
+        served_provider="ollama",
+        fallback_active=False,
+        init_fallback=True,
+    )
+    session, events = _run_turn(
+        agent_cls,
+        resolved_model="qwen3.8-max",
+        resolved_provider="alibaba",
+        config={
+            "fallback_providers": [
+                {"provider": "ollama", "model": "deepseek-v4-flash-0731"}
+            ]
+        },
+    )
+    last = session.messages[-1]
+    assert last["_usedModel"] == "deepseek-v4-flash-0731"
+    assert last["_requestedModel"] == "qwen3.8-max"
+    assert last["_requestedProvider"] == "alibaba"
+    usage = _done_usage(events)
     assert usage["requested_model"] == "qwen3.8-max"
     assert usage["requested_provider"] == "alibaba"
 
@@ -385,7 +426,11 @@ def test_provider_alias_fold_matches_the_agent_tables():
 def test_fallback_switch_requires_agent_provenance_and_identity_change():
     """Helper-level contract of the notice gate: provenance AND a different
     normalized (provider, model) identity — never a spelling variant alone."""
-    from api.streaming import _agent_fallback_provenance, _local_fallback_switch
+    from api.streaming import (
+        _agent_fallback_provenance,
+        _capture_init_fallback_provenance,
+        _local_fallback_switch,
+    )
 
     # Stand in for the Agent's constructor-time model normalizer (dots →
     # hyphens for Anthropic) when the real hermes_cli tree is not importable
@@ -440,9 +485,37 @@ def test_fallback_switch_requires_agent_provenance_and_identity_change():
         # _fallback_activated alone (init-time fallback / user model switch
         # bookkeeping) is NOT runtime fallback provenance.
         other = Agent()
+        other.model = "deepseek-flash"
+        other.provider = "deepseek"
         other._provider_fallback_active = False
         other._fallback_activated = True
         assert _agent_fallback_provenance(other) is False
+        # At the constructor boundary, no configured chain still fails closed.
+        assert _capture_init_fallback_provenance(
+            other, "claude-sonnet-4-6", "anthropic", None
+        ) is False
+        assert _agent_fallback_provenance(other) is False
+        # A supplied chain plus init signal plus different effective identity
+        # creates the separate WebUI-owned provenance marker.
+        assert _capture_init_fallback_provenance(
+            other,
+            "claude-sonnet-4-6",
+            "anthropic",
+            [{"provider": "deepseek", "model": "deepseek-flash"}],
+        ) is True
+        assert _agent_fallback_provenance(other) is True
+
+        same = Agent()
+        same.model = "claude-sonnet-4-6"
+        same.provider = "anthropic"
+        same._fallback_activated = True
+        assert _capture_init_fallback_provenance(
+            same,
+            "claude-sonnet-4.6",
+            "anthropic",
+            [{"provider": "anthropic", "model": "claude-sonnet-4-6"}],
+        ) is False
+        assert _agent_fallback_provenance(same) is False
     finally:
         for k, prev in saved.items():
             if prev is _MISSING:
