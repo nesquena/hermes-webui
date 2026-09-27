@@ -600,9 +600,14 @@ to the active conversation rather than a global app setting.
 
 Session management:
     newSession()          POST /api/session/new, update S.session, save to localStorage
-    loadSession(sid)      GET /api/session?session_id=X (initial load uses the
-                          bounded tail `msg_limit=30`; jump-to-start and outline
-                          jump pass `msg_limit=all`), check INFLIGHT first, update S
+    loadSession(sid)      For ordinary navigation, start fresh metadata-only and
+                          bounded 30-message tail requests together. Await and assign
+                          metadata first; then apply the tail only while that load
+                          generation still owns the session. If the prefetched tail's
+                          message count predates accepted metadata, refetch it once
+                          before mutating transcript or count. Same-session forced
+                          reloads retain their existing width-aware request path;
+                          jump-to-start and outline jump pass `msg_limit=all`.
     deleteSession(sid)    POST /api/session/delete, handle active/inactive cases correctly
     renderSessionList()   GET /api/sessions, rebuild #sessionList DOM
 
