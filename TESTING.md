@@ -122,6 +122,18 @@ pip install playwright && python -m playwright install chromium
 python tests/browser_smoke.py
 ```
 
+`tests/browser_sidebar_nested_subagent_responsive.py` is the rendered sidebar-search
+companion gate. It injects same-source and cross-surface nested-subagent fixtures
+through the real browser search/render path and checks row reachability, clipping,
+horizontal overflow, and mobile touch-target size at 1440x900, 768x900, and
+390x844 (with the mobile drawer open). Set `RESPONSIVE_SCREENSHOT_DIR` to save
+sidebar screenshots:
+
+```bash
+python tests/browser_sidebar_nested_subagent_responsive.py
+RESPONSIVE_SCREENSHOT_DIR=/path/to/evidence python tests/browser_sidebar_nested_subagent_responsive.py
+```
+
 It is intentionally **credential-free**: it strips every `*_API_KEY` from the
 environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class

@@ -124,3 +124,7 @@ jobs:
       - name: Run new-chat focus gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_new_chat_focus.py
+
+      - name: Run nested-subagent responsive gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_sidebar_nested_subagent_responsive.py
