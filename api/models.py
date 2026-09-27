@@ -11858,6 +11858,19 @@ def _session_message_dedup_key(msg: dict):
     return key
 
 
+def _invalid_state_db_row_payload_key(msg: dict):
+    """Key malformed-provenance rows by exact payload, never by bad aliases."""
+    _, row_id_valid = _state_db_row_identity_details(msg)
+    if row_id_valid:
+        return None
+    without_row_identity = {
+        key: value
+        for key, value in msg.items()
+        if key not in {"_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"}
+    }
+    return _session_message_dedup_key(without_row_identity)
+
+
 def _normalized_session_message_content(msg: dict):
     """Visible identity for a message's content.
 
@@ -12873,6 +12886,28 @@ def _merge_session_messages_append_only_impl(
         content_key = _cached_message_key(msg, "content_state")
         if preserve_native_image_row:
             row_id, row_id_valid = _state_db_row_identity_details(msg)
+            if not row_id_valid:
+                # The native-image bridge already proved this scalar is a
+                # payload-exact mirror candidate. Invalid provenance cannot
+                # prove another durable row, but the ordinary fail-closed key
+                # uses object identity and would append the same malformed row
+                # again on every reconciliation pass. Collapse only against an
+                # earlier malformed mirror with the exact payload key; valid
+                # row identities and conflicting provider bytes remain distinct.
+                invalid_payload_key = _invalid_state_db_row_payload_key(msg)
+                invalid_payload_duplicate = next(
+                    (
+                        candidate
+                        for candidate in merged_messages
+                        if isinstance(candidate, dict)
+                        and _invalid_state_db_row_payload_key(candidate)
+                        == invalid_payload_key
+                    ),
+                    None,
+                )
+                if invalid_payload_duplicate is not None:
+                    _merge_session_display_metadata(invalid_payload_duplicate, msg)
+                    continue
             existing = (
                 merged_by_row_id.get(row_id)
                 if row_id_valid and row_id is not None

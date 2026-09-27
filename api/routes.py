@@ -25418,6 +25418,7 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
+                _record_agent_history_replay_authority,
                 _resolve_active_turn_authority,
                 _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
@@ -25463,17 +25464,22 @@ def _handle_chat_sync(handler, body):
                 "current_turn_user_idx": None,
                 "turn_id": "",
             }
+            _sync_agent_bound_history = _sanitize_messages_for_agent(
+                _previous_context_messages,
+                cfg=get_config(),
+                effective_model=_model,
+                effective_provider=_provider,
+                effective_base_url=_base_url,
+            )
+            _record_agent_history_replay_authority(
+                _sync_active_turn_identity,
+                _sync_agent_bound_history,
+            )
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_agent(
-                    _previous_context_messages,
-                    cfg=get_config(),
-                    effective_model=_model,
-                    effective_provider=_provider,
-                    effective_base_url=_base_url,
-                ),
+                conversation_history=_sync_agent_bound_history,
                 task_id=s.session_id,
                 persist_user_message=msg,
             )

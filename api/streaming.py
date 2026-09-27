@@ -2079,6 +2079,67 @@ def _active_turn_boundary_is_valid(identity):
     )
 
 
+_AGENT_HISTORY_REPLAY_DIGESTS_FIELD = 'agent_history_replay_digests'
+
+
+def _record_agent_history_replay_authority(identity, agent_bound_history):
+    """Bind settlement to the exact history projection supplied to the Agent."""
+    if not isinstance(identity, dict):
+        return
+    identity.pop(_AGENT_HISTORY_REPLAY_DIGESTS_FIELD, None)
+    if not agent_bound_history:
+        return
+    digests = []
+    for message in agent_bound_history:
+        digest = _canonical_replay_digest(message)
+        if digest is None:
+            return
+        digests.append(digest)
+    identity[_AGENT_HISTORY_REPLAY_DIGESTS_FIELD] = tuple(digests)
+
+
+def _restore_agent_history_replay_prefix(
+    result_messages,
+    previous_context,
+    identity,
+):
+    """Restore durable history when result replays the exact Agent input.
+
+    The WebUI sanitizer deliberately removes persistence-only metadata before
+    provider replay. Comparing that projection to durable rows at settlement
+    therefore cannot be payload-equal. The request-local digest tuple records
+    the exact projection actually supplied to the Agent; only a complete,
+    position-for-position match may replace the replayed prefix with its durable
+    counterpart. Incomparable or differently sized projections fail closed.
+    """
+    result_messages = list(result_messages or [])
+    previous_context = list(previous_context or [])
+    digests = (
+        identity.get(_AGENT_HISTORY_REPLAY_DIGESTS_FIELD)
+        if isinstance(identity, dict)
+        else None
+    )
+    if (
+        type(digests) is not tuple
+        or len(digests) != len(previous_context)
+        or len(result_messages) < len(digests)
+        or (
+            _active_turn_boundary_is_valid(identity)
+            and identity['current_turn_user_idx'] != len(previous_context)
+        )
+    ):
+        return result_messages, False
+    for message, expected_digest in zip(result_messages, digests, strict=False):
+        if _canonical_replay_digest(message) != expected_digest:
+            return result_messages, False
+    history_size = len(digests)
+    return (
+        copy.deepcopy(previous_context)
+        + copy.deepcopy(result_messages[history_size:]),
+        True,
+    )
+
+
 def _exact_out_of_band_history_size(result_messages, previous_context):
     """Return ``len(previous_context)`` when the result is exact history + delta.
 
@@ -2924,6 +2985,13 @@ def _settle_result_messages(
     source,
     active_turn_identity,
 ):
+    result_messages, agent_history_replay_prefix = (
+        _restore_agent_history_replay_prefix(
+            result_messages,
+            previous_context_messages,
+            active_turn_identity,
+        )
+    )
     result_messages, repeated_exact_history_prefix = (
         _collapse_repeated_exact_history_prefixes(
             previous_context_messages,
@@ -2932,6 +3000,8 @@ def _settle_result_messages(
         )
     )
     result_has_authoritative_full_history_prefix = (
+        agent_history_replay_prefix
+        or
         repeated_exact_history_prefix
         or _result_has_authoritative_full_history_prefix(
             result_messages,
@@ -3050,7 +3120,7 @@ def _settle_result_messages(
     ):
         history_size = len(previous_context_messages)
         session.context_messages = (
-            copy.deepcopy(previous_context_messages)
+            list(copy.deepcopy(previous_context_messages))
             + _deduplicate_context_messages(next_context_messages[history_size:])
         )
     else:
@@ -12896,18 +12966,23 @@ def _run_agent_streaming(
                 _register_pending_user_timestamp_identity(
                     agent.run_conversation, s, _persist_user_timestamp
                 )
+            _agent_bound_history = _sanitize_messages_for_agent(
+                _previous_context_messages,
+                cfg=_cfg,
+                effective_model=resolved_model,
+                effective_provider=resolved_provider,
+                effective_base_url=resolved_base_url,
+                requested_provider=(_session_requested_provider or ""),
+            )
+            _record_agent_history_replay_authority(
+                _active_turn_identity,
+                _agent_bound_history,
+            )
             _run_conversation_kwargs = _build_run_conversation_kwargs(
                 agent.run_conversation,
                 user_message=user_message,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_agent(
-                    _previous_context_messages,
-                    cfg=_cfg,
-                    effective_model=resolved_model,
-                    effective_provider=resolved_provider,
-                    effective_base_url=resolved_base_url,
-                    requested_provider=(_session_requested_provider or ""),
-                ),
+                conversation_history=_agent_bound_history,
                 conversation_history_revision=_conversation_history_revision,
                 task_id=session_id,
                 persist_user_message=msg_text,
@@ -13489,18 +13564,23 @@ def _run_agent_streaming(
                                     s,
                                     _heal_persist_user_timestamp,
                                 )
+                                _heal_agent_bound_history = _sanitize_messages_for_agent(
+                                    _heal_context_messages,
+                                    cfg=_cfg,
+                                    effective_model=resolved_model,
+                                    effective_provider=resolved_provider,
+                                    effective_base_url=resolved_base_url,
+                                    requested_provider=(_session_requested_provider or ""),
+                                )
+                                _record_agent_history_replay_authority(
+                                    _active_turn_identity,
+                                    _heal_agent_bound_history,
+                                )
                                 _heal_kwargs = _build_run_conversation_kwargs(
                                     agent.run_conversation,
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
-                                    conversation_history=_sanitize_messages_for_agent(
-                                        _heal_context_messages,
-                                        cfg=_cfg,
-                                        effective_model=resolved_model,
-                                        effective_provider=resolved_provider,
-                                        effective_base_url=resolved_base_url,
-                                        requested_provider=(_session_requested_provider or ""),
-                                    ),
+                                    conversation_history=_heal_agent_bound_history,
                                     conversation_history_revision=(
                                         _heal_conversation_history_revision
                                     ),
@@ -14856,18 +14936,23 @@ def _run_agent_streaming(
                                 s,
                                 _heal_persist_user_timestamp,
                             )
+                        _heal_agent_bound_history = _sanitize_messages_for_agent(
+                            _heal_context_messages,
+                            cfg=_cfg,
+                            effective_model=resolved_model,
+                            effective_provider=resolved_provider,
+                            effective_base_url=resolved_base_url,
+                            requested_provider=(_session_requested_provider or ""),
+                        )
+                        _record_agent_history_replay_authority(
+                            _active_turn_identity,
+                            _heal_agent_bound_history,
+                        )
                         _heal_kwargs2 = _build_run_conversation_kwargs(
                             _heal_agent.run_conversation,
                             user_message=user_message,
                             system_message=workspace_system_msg,
-                            conversation_history=_sanitize_messages_for_agent(
-                                _heal_context_messages,
-                                cfg=_cfg,
-                                effective_model=resolved_model,
-                                effective_provider=resolved_provider,
-                                effective_base_url=resolved_base_url,
-                                requested_provider=(_session_requested_provider or ""),
-                            ),
+                            conversation_history=_heal_agent_bound_history,
                             conversation_history_revision=(
                                 _heal_conversation_history_revision
                             ),

@@ -43,8 +43,18 @@ def _persisted_turn_one(*, with_api_content):
     return [user, assistant]
 
 
-def _settle_repeated_prompt_turn(previous_context, result_messages, *, authoritative):
-    from api.streaming import _resolve_active_turn_authority, _settle_result_messages
+def _settle_repeated_prompt_turn(
+    previous_context,
+    result_messages,
+    *,
+    authoritative,
+    agent_bound_history=None,
+):
+    from api.streaming import (
+        _canonical_replay_digest,
+        _resolve_active_turn_authority,
+        _settle_result_messages,
+    )
 
     previous_display = copy.deepcopy(previous_context)
     session = SimpleNamespace(
@@ -62,6 +72,11 @@ def _settle_repeated_prompt_turn(previous_context, result_messages, *, authorita
         "current_turn_user_idx": None,
         "turn_id": "",
     }
+    if agent_bound_history is not None:
+        identity["agent_history_replay_digests"] = tuple(
+            _canonical_replay_digest(message)
+            for message in agent_bound_history
+        )
     if authoritative:
         identity = _resolve_active_turn_authority(
             identity,
@@ -245,6 +260,7 @@ def test_authoritative_agent_projection_replay_with_user_echo_is_not_duplicated(
         previous_context,
         result_messages,
         authoritative=True,
+        agent_bound_history=agent_bound_history,
     )
 
     _assert_exact_two_turn_projections(session)
@@ -261,6 +277,7 @@ def test_authoritative_agent_projection_replay_without_user_echo_is_not_duplicat
         previous_context,
         result_messages,
         authoritative=True,
+        agent_bound_history=agent_bound_history,
     )
 
     _assert_exact_two_turn_projections(session)
