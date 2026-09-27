@@ -4381,7 +4381,7 @@ function _contextBriefAutoGeneration(brief){
 }
 async function _pollContextBriefAutoRefresh(epoch){
   if (_contextBriefAutoTimer === null || _contextBriefAutoEpoch !== epoch) return;
-  // setInterval may tick again while fetch/json parsing is pending. Only one
+  // setInterval may tick again while the API request is pending. Only one
   // callback may own a given epoch; a re-enabled successor gets a new epoch.
   if (_contextBriefAutoInFlightEpoch === epoch) return;
   const panels = Array.from(document.querySelectorAll('[data-brief-sid]'))
@@ -4398,12 +4398,13 @@ async function _pollContextBriefAutoRefresh(epoch){
   if (!_contextBriefAutoOwnerCurrent(owner)) return;
   _contextBriefAutoInFlightEpoch = epoch;
   try {
-    const res = await fetch('/api/session/context-brief', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+    // Reuse the shared helper so deployments mounted below `/` resolve against
+    // document.baseURI and HTTP errors reject instead of masquerading as an
+    // authoritative `auto.enabled === false` response.
+    const data = await api('/api/session/context-brief', {
+      method: 'POST',
       body: JSON.stringify({session_id: sid}),
     });
-    if (!_contextBriefAutoOwnerCurrent(owner)) return;
-    const data = await res.json();
     if (!_contextBriefAutoOwnerCurrent(owner)) return;
 
     // The response owns the effective setting. Consume it before looking at

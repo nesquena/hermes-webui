@@ -29,10 +29,11 @@ const timers = [];
 const activeTimers = new Set();
 const renders = [];
 let clearCount = 0;
-let fetchCount = 0;
+let requestCount = 0;
 let currentSid = 'sid-a';
 let currentPanels = [];
-let fetchImpl = null;
+let apiImpl = null;
+const requestPaths = [];
 
 function deferred() {
   let resolve;
@@ -49,16 +50,17 @@ function makePanel(generation) {
     _briefData: generation === null ? {} : {llm_brief: {generated_at: generation}},
   };
 }
-function response(payload, jsonPromise) {
-  return {json: () => jsonPromise || Promise.resolve(payload)};
-}
-
 const ctx = {
   console,
   _loadSessionGeneration: 1,
   document: {querySelectorAll: () => currentPanels},
   _contextBriefSid: () => currentSid,
-  fetch: (...args) => { fetchCount += 1; return fetchImpl(...args); },
+  api: (path, options) => {
+    requestCount += 1;
+    requestPaths.push(path);
+    return apiImpl(path, options);
+  },
+  fetch: () => { throw new Error('auto refresh must use the subpath-aware api helper'); },
   renderContextBrief: (brief, panel) => {
     renders.push({sid: panel.dataset.briefSid, generation: brief.llm_brief.generated_at});
     panel._briefData = brief;
@@ -102,7 +104,7 @@ const payload = (auto, generation) => ({
   ctx.syncAuto(enabled);
   let beforeRender = renders.length;
   let beforeClear = clearCount;
-  fetchImpl = async () => response(payload(disabled, 10));
+  apiImpl = async () => payload(disabled, 10);
   await latestTick();
   out.unchangedDisable = {
     activeTimers: activeTimers.size,
@@ -112,7 +114,7 @@ const payload = (auto, generation) => ({
   ctx.syncAuto(enabled);
   beforeRender = renders.length;
   beforeClear = clearCount;
-  fetchImpl = async () => response(payload(undefined, 11));
+  apiImpl = async () => payload(undefined, 11);
   await latestTick();
   out.missingDisable = {
     activeTimers: activeTimers.size,
@@ -120,15 +122,26 @@ const payload = (auto, generation) => ({
     renders: renders.length - beforeRender,
   };
 
-  // Stop while fetch is pending: the old owner cannot continue afterward.
+  // A transient API failure must not be confused with an authoritative disable.
+  ctx.syncAuto(enabled);
+  beforeRender = renders.length;
+  apiImpl = async () => { throw new Error('transient'); };
+  await latestTick();
+  out.transientError = {
+    activeTimers: activeTimers.size,
+    renders: renders.length - beforeRender,
+  };
+  out.requestPaths = requestPaths.slice();
+
+  // Stop while the API request is pending: the old owner cannot continue afterward.
   ctx.syncAuto(enabled);
   const pendingStop = deferred();
-  fetchImpl = () => pendingStop.promise;
+  apiImpl = () => pendingStop.promise;
   beforeRender = renders.length;
   const stoppedPoll = latestTick();
   await Promise.resolve();
   ctx.syncAuto(disabled);
-  pendingStop.resolve(response(payload(enabled, 20)));
+  pendingStop.resolve(payload(enabled, 20));
   await stoppedPoll;
   out.disableDuringFetch = {
     activeTimers: activeTimers.size,
@@ -140,12 +153,12 @@ const payload = (auto, generation) => ({
   currentPanels = [makePanel(10)];
   ctx.syncAuto(enabled);
   const pendingSession = deferred();
-  fetchImpl = () => pendingSession.promise;
+  apiImpl = () => pendingSession.promise;
   beforeRender = renders.length;
   const sessionPoll = latestTick();
   await Promise.resolve();
   currentSid = 'sid-b';
-  pendingSession.resolve(response(payload(enabled, 20)));
+  pendingSession.resolve(payload(enabled, 20));
   await sessionPoll;
   out.sessionChange = renders.length - beforeRender;
   ctx.syncAuto(disabled);
@@ -154,12 +167,12 @@ const payload = (auto, generation) => ({
   currentPanels = [makePanel(10)];
   ctx.syncAuto(enabled);
   const pendingGeneration = deferred();
-  fetchImpl = () => pendingGeneration.promise;
+  apiImpl = () => pendingGeneration.promise;
   beforeRender = renders.length;
   const generationPoll = latestTick();
   await Promise.resolve();
   ctx._loadSessionGeneration += 1;
-  pendingGeneration.resolve(response(payload(enabled, 20)));
+  pendingGeneration.resolve(payload(enabled, 20));
   await generationPoll;
   out.loadGenerationChange = renders.length - beforeRender;
   ctx.syncAuto(disabled);
@@ -167,12 +180,12 @@ const payload = (auto, generation) => ({
   currentPanels = [makePanel(10)];
   ctx.syncAuto(enabled);
   const pendingPanelSeq = deferred();
-  fetchImpl = () => pendingPanelSeq.promise;
+  apiImpl = () => pendingPanelSeq.promise;
   beforeRender = renders.length;
   const panelSeqPoll = latestTick();
   await Promise.resolve();
   currentPanels[0]._briefReqSeq += 1;
-  pendingPanelSeq.resolve(response(payload(enabled, 20)));
+  pendingPanelSeq.resolve(payload(enabled, 20));
   await panelSeqPoll;
   out.panelRequestSequenceChange = renders.length - beforeRender;
   ctx.syncAuto(disabled);
@@ -180,26 +193,25 @@ const payload = (auto, generation) => ({
   currentPanels = [makePanel(10)];
   ctx.syncAuto(enabled);
   const pendingPanelSid = deferred();
-  fetchImpl = () => pendingPanelSid.promise;
+  apiImpl = () => pendingPanelSid.promise;
   beforeRender = renders.length;
   const panelSidPoll = latestTick();
   await Promise.resolve();
   currentPanels[0].dataset.briefSid = 'sid-b';
-  pendingPanelSid.resolve(response(payload(enabled, 20)));
+  pendingPanelSid.resolve(payload(enabled, 20));
   await panelSidPoll;
   out.panelSidChange = renders.length - beforeRender;
   ctx.syncAuto(disabled);
 
   currentPanels = [makePanel(10)];
   ctx.syncAuto(enabled);
-  const pendingVisibilityJson = deferred();
-  fetchImpl = async () => response(null, pendingVisibilityJson.promise);
+  const pendingVisibility = deferred();
+  apiImpl = () => pendingVisibility.promise;
   beforeRender = renders.length;
   const visibilityPoll = latestTick();
   await Promise.resolve();
-  await Promise.resolve();
   currentPanels[0].offsetParent = null;
-  pendingVisibilityJson.resolve(payload(enabled, 20));
+  pendingVisibility.resolve(payload(enabled, 20));
   await visibilityPoll;
   out.panelVisibilityChange = renders.length - beforeRender;
   ctx.syncAuto(disabled);
@@ -207,14 +219,13 @@ const payload = (auto, generation) => ({
   // A manual response can install generation 30 while auto generation 20 parses.
   currentPanels = [makePanel(10)];
   ctx.syncAuto(enabled);
-  const pendingJson = deferred();
-  fetchImpl = async () => response(null, pendingJson.promise);
+  const pendingAuto = deferred();
+  apiImpl = () => pendingAuto.promise;
   beforeRender = renders.length;
   const olderAutoPoll = latestTick();
   await Promise.resolve();
-  await Promise.resolve();
   currentPanels[0]._briefData = {llm_brief: {generated_at: 30}};
-  pendingJson.resolve(payload(enabled, 20));
+  pendingAuto.resolve(payload(enabled, 20));
   await olderAutoPoll;
   out.manualNewerAutoOlder = renders.length - beforeRender;
   ctx.syncAuto(disabled);
@@ -223,17 +234,17 @@ const payload = (auto, generation) => ({
   currentPanels = [makePanel(30)];
   ctx.syncAuto(enabled);
   const overlapping = deferred();
-  fetchImpl = () => overlapping.promise;
-  const fetchBefore = fetchCount;
+  apiImpl = () => overlapping.promise;
+  const requestBefore = requestCount;
   beforeRender = renders.length;
   const firstTick = latestTick();
   await Promise.resolve();
   const secondTick = latestTick();
   await Promise.resolve();
-  overlapping.resolve(response(payload(enabled, 40)));
+  overlapping.resolve(payload(enabled, 40));
   await Promise.all([firstTick, secondTick]);
   out.overlappingTicks = {
-    fetches: fetchCount - fetchBefore,
+    fetches: requestCount - requestBefore,
     renders: renders.length - beforeRender,
   };
   ctx.syncAuto(disabled);
@@ -245,14 +256,14 @@ const payload = (auto, generation) => ({
   ctx.syncAuto(disabled);
   ctx.syncAuto(enabled);
   const freshCallback = timers[timers.length - 1].callback;
-  fetchImpl = async () => response(payload(enabled, 50));
-  const restartFetchBefore = fetchCount;
+  apiImpl = async () => payload(enabled, 50);
+  const restartRequestBefore = requestCount;
   beforeRender = renders.length;
   await staleCallback();
   await freshCallback();
   out.stopReenable = {
     activeTimers: activeTimers.size,
-    fetches: fetchCount - restartFetchBefore,
+    fetches: requestCount - restartRequestBefore,
     renders: renders.length - beforeRender,
   };
   ctx.syncAuto(disabled);
@@ -866,6 +877,12 @@ class TestFrontendStatic:
         result = _auto_refresh_harness()
         assert result["unchangedDisable"] == {"activeTimers": 0, "clears": 1, "renders": 0}
         assert result["missingDisable"] == {"activeTimers": 0, "clears": 1, "renders": 0}
+
+    def test_auto_refresh_uses_subpath_aware_api_and_survives_transient_errors(self):
+        result = _auto_refresh_harness()
+        assert result["transientError"] == {"activeTimers": 1, "renders": 0}
+        assert result["requestPaths"]
+        assert set(result["requestPaths"]) == {"/api/session/context-brief"}
 
     def test_auto_refresh_disable_during_fetch_invalidates_owner(self):
         assert _auto_refresh_harness()["disableDuringFetch"] == {
