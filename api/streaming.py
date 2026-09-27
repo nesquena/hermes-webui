@@ -65,7 +65,7 @@ from api.config import (
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
-from api.goal_continuation_store import snapshot_pending_goal_continuations
+from api.goal_continuation_store import arm_pending_goal_continuation
 
 from api.helpers import (
     redact_session_data,
@@ -14494,7 +14494,11 @@ def _run_agent_streaming(
                         # #1932: mark this session as pending a goal continuation
                         # so the next /chat/start creates a goal-related stream.
                         PENDING_GOAL_CONTINUATION.add(session_id)
-                        snapshot_pending_goal_continuations()
+                        arm_pending_goal_continuation(
+                            session_id,
+                            continuation_prompt,
+                            reason="goal_continue",
+                        )
                         put('goal_continue', {
                             'session_id': session_id,
                             'continuation_prompt': continuation_prompt,

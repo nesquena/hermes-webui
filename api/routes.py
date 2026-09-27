@@ -2973,7 +2973,7 @@ from api.config import (
     _parse_provider_qualified_model_id,
 )
 from api import config as api_config
-from api.goal_continuation_store import snapshot_pending_goal_continuations
+from api.goal_continuation_store import retire_pending_goal_continuation
 
 from api.helpers import (
     require,
@@ -16926,6 +16926,12 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            # #6885 slice 2a: a deleted session must not leave stale durable
+            # intent that a later boot/repair would re-arm as a continuation.
+            try:
+                retire_pending_goal_continuation(sid, reason="deleted")
+            except Exception:
+                logger.debug("Failed to retire pending goal continuation for deleted session %s", sid)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -24680,6 +24686,7 @@ def _start_chat_stream_for_session(
         if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
             goal_related = True
             PENDING_GOAL_CONTINUATION.discard(s.session_id)
+            retire_pending_goal_continuation(s.session_id)
             consumed_goal_continuation = True
         if s.session_id in PENDING_BG_TASK_COMPLETIONS:
             PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)

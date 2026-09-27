@@ -35,7 +35,7 @@ from api.config import (
     unregister_stream_owner,
     update_active_run,
 )
-from api.goal_continuation_store import snapshot_pending_goal_continuations
+from api.goal_continuation_store import arm_pending_goal_continuation
 
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
@@ -1750,7 +1750,11 @@ def _run_gateway_chat_streaming(
                     continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
                     if continuation_prompt:
                         PENDING_GOAL_CONTINUATION.add(session_id)
-                        snapshot_pending_goal_continuations()
+                        arm_pending_goal_continuation(
+                            session_id,
+                            continuation_prompt,
+                            reason="goal_continue",
+                        )
                         put_gateway_event("goal_continue", {
                             "session_id": session_id,
                             "continuation_prompt": continuation_prompt,
