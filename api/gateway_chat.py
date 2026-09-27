@@ -1516,8 +1516,19 @@ def _run_gateway_chat_streaming(
                 body["provider"] = model_provider
             if reasoning_effort is not None:
                 body["reasoning_effort"] = reasoning_effort
+            # Current Agent chat and runs handlers both construct request
+            # overrides from body.model_options. Keep the top-level scalars for
+            # older OpenAI-compatible receivers, but send the authoritative
+            # session effort through the same negotiated mapping as /v1/runs.
+            _legacy_model_options = _gateway_run_model_options(
+                reasoning_effort, base_url=base_url, api_key=api_key
+            )
             if _gw_overrides.get("service_tier"):
                 body["service_tier"] = _gw_overrides["service_tier"]
+                _legacy_model_options = dict(_legacy_model_options or {})
+                _legacy_model_options["service_tier"] = _gw_overrides["service_tier"]
+            if _legacy_model_options:
+                body["model_options"] = _legacy_model_options
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),

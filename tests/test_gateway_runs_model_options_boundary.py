@@ -64,7 +64,7 @@ from gateway.platforms.api_server import _request_agent_overrides, _request_reas
 vectors = json.loads(sys.stdin.read())
 out = []
 for vector in vectors:
-    if vector.get("kind") == "run_body":
+    if vector.get("kind") in {"run_body", "legacy_chat_body"}:
         # The exact composition _handle_runs performs before _create_agent.
         overrides = _request_agent_overrides(vector["body"], virtual_model="hermes-agent")
         out.append(_request_reasoning_config(overrides.get("model_options")))
@@ -174,7 +174,7 @@ def _contract_reasoning_config(model_options):
 def _compose_with_contract(vectors):
     out = []
     for vector in vectors:
-        if vector.get("kind") == "run_body":
+        if vector.get("kind") in {"run_body", "legacy_chat_body"}:
             out.append(_contract_reasoning_config(vector["body"].get("model_options")))
         else:
             out.append(_contract_reasoning_config(vector.get("model_options")))
@@ -339,8 +339,14 @@ class _SseResponse:
         return None
 
 
-def _capture_runs_wire_body(session_effort, *, global_effort="high"):
-    """Run the REAL gateway-runs worker for a session override; return the wire body."""
+def _capture_gateway_wire_body(
+    session_effort,
+    *,
+    global_effort="high",
+    use_runs_api=True,
+    service_tier=None,
+):
+    """Run the real gateway worker and return its Agent-facing request body."""
     import api.config as config
     from api.config import STREAMS, STREAMS_LOCK
     from api.gateway_chat import _run_gateway_chat_streaming
@@ -356,6 +362,13 @@ def _capture_runs_wire_body(session_effort, *, global_effort="high"):
         requests.append(req)
         if req.full_url.endswith("/v1/runs"):
             return _JsonResponse({"run_id": "run-model-options"})
+        if req.full_url.endswith("/v1/chat/completions"):
+            return _SseResponse([
+                b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n',
+                b"\n",
+                b"data: [DONE]\n",
+                b"\n",
+            ])
         return _SseResponse([
             b'data: {"event":"message.delta","delta":"Hello"}\n',
             b"\n",
@@ -383,13 +396,19 @@ def _capture_runs_wire_body(session_effort, *, global_effort="high"):
             "os.environ",
             {
                 "HERMES_WEBUI_CHAT_BACKEND": "gateway",
-                "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+                "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1" if use_runs_api else "0",
                 "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw:8642",
                 "HERMES_WEBUI_GATEWAY_API_KEY": "secret",
             },
         ):
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_a, **_k: True), \
+                 patch("api.gateway_chat.gateway_approval_unavailable_reason", lambda *_a, **_k: None), \
                  patch("api.config.get_config", lambda: cfg), \
+                 patch("api.config.get_gateway_caps", lambda *_a, **_k: {"reasoning_efforts": None}), \
+                 patch(
+                     "api.config._main_model_request_overrides",
+                     lambda *_a, **_k: ({"service_tier": service_tier} if service_tier else {}),
+                 ), \
                  patch.object(config, "resolve_model_reasoning_efforts", lambda *a, **k: list(config.VALID_REASONING_EFFORTS)), \
                  patch("urllib.request.urlopen", side_effect=fake_urlopen), \
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
@@ -406,9 +425,32 @@ def _capture_runs_wire_body(session_effort, *, global_effort="high"):
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
 
-    run_requests = [req for req in requests if req.full_url.endswith("/v1/runs")]
-    assert run_requests, "worker never POSTed /v1/runs"
-    return json.loads(run_requests[0].data.decode("utf-8"))
+    target = "/v1/runs" if use_runs_api else "/v1/chat/completions"
+    agent_requests = [req for req in requests if req.full_url.endswith(target)]
+    assert agent_requests, f"worker never POSTed {target}"
+    return json.loads(agent_requests[0].data.decode("utf-8"))
+
+
+def _capture_runs_wire_body(session_effort, *, global_effort="high"):
+    return _capture_gateway_wire_body(
+        session_effort,
+        global_effort=global_effort,
+        use_runs_api=True,
+    )
+
+
+def _capture_legacy_chat_wire_body(
+    session_effort,
+    *,
+    global_effort="high",
+    service_tier=None,
+):
+    return _capture_gateway_wire_body(
+        session_effort,
+        global_effort=global_effort,
+        use_runs_api=False,
+        service_tier=service_tier,
+    )
 
 
 def test_runs_wire_body_nests_session_effort_under_model_options():
@@ -426,6 +468,43 @@ def test_runs_wire_body_carries_disabled_session_reasoning():
 
     assert run_body["model_options"]["reasoning"] == {"enabled": False}
     assert run_body["model_options"]["reasoning_effort"] == "none"
+
+
+def test_legacy_chat_body_composes_with_installed_agent_overrides():
+    """Legacy chat must use the same nested receiver contract as Gateway Runs."""
+    disabled_body = _capture_legacy_chat_wire_body("none", global_effort="high")
+    low_body = _capture_legacy_chat_wire_body(
+        "low",
+        global_effort="high",
+        service_tier="priority",
+    )
+    degraded_body = _capture_legacy_chat_wire_body("ultra", global_effort="high")
+
+    assert disabled_body["reasoning_effort"] == "none"
+    assert disabled_body["model_options"] == {
+        "reasoning": {"enabled": False},
+        "reasoning_effort": "none",
+    }
+    assert low_body["reasoning_effort"] == "low"
+    assert low_body["service_tier"] == "priority"
+    assert low_body["model_options"] == {
+        "reasoning": {"enabled": True, "effort": "low"},
+        "reasoning_effort": "low",
+        "service_tier": "priority",
+    }
+    assert degraded_body["reasoning_effort"] == "ultra"
+    assert degraded_body["model_options"]["reasoning_effort"] == "xhigh"
+
+    results = _compose_with_installed_handler([
+        {"kind": "legacy_chat_body", "body": disabled_body},
+        {"kind": "legacy_chat_body", "body": low_body},
+        {"kind": "legacy_chat_body", "body": degraded_body},
+    ])
+    assert results == [
+        {"enabled": False},
+        {"enabled": True, "effort": "low"},
+        {"enabled": True, "effort": "xhigh"},
+    ]
 
 
 # ── Composition with the INSTALLED handler (the actual receiver) ────────────

@@ -258,6 +258,14 @@ runner-local requests all receive that resolved value. Agent model switches,
 fallback activation, and primary-runtime restoration reapply the session
 precedence without rewriting the persisted session model.
 
+All Agent-facing HTTP lanes (`/v1/chat/completions` and `/v1/runs`, including
+`runner-local`) place reasoning overrides in nested `model_options`, which is
+the current Agent receiver contract. Gateway lanes nest `service_tier` there as
+well. Gateway chat and runner-local also retain the top-level
+`reasoning_effort` scalar for older receivers. Supra-legacy efforts are
+preserved only when the receiver advertises them; otherwise they degrade to the
+highest known-safe level.
+
 `GET /api/reasoning?session_id=<id>&model=<model>&provider=<provider>` returns the
 effective, capability-adjusted status used by the composer. Session payloads
 instead expose the persisted nullable override so clients can distinguish

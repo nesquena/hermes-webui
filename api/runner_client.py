@@ -54,7 +54,12 @@ class HttpRunnerClient:
         return cls(base_url=base_url, api_key=str(source.get(_RUNNER_API_KEY_ENV) or ""))
 
     def start_run(self, request) -> dict[str, Any]:
-        return self._post("/v1/runs", {
+        # ``/v1/runs`` is an Agent-facing boundary. Current Hermes Agent reads
+        # reasoning only from model_options; retain the top-level scalar for
+        # compatibility with older supervised runners.
+        from api.gateway_chat import _gateway_run_model_options
+
+        payload = {
             "session_id": request.session_id,
             "message": request.message,
             "attachments": list(request.attachments or []),
@@ -66,7 +71,15 @@ class HttpRunnerClient:
             "toolsets": list(request.toolsets or []),
             "source": request.source,
             "metadata": dict(request.metadata or {}),
-        })
+        }
+        model_options = _gateway_run_model_options(
+            request.reasoning_effort,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
+        if model_options:
+            payload["model_options"] = model_options
+        return self._post("/v1/runs", payload)
 
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> dict[str, Any]:
         query = ""

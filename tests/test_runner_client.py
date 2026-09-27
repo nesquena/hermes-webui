@@ -85,6 +85,10 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
         "provider": "openai-codex",
         "model": "gpt-5.5",
         "reasoning_effort": "high",
+        "model_options": {
+            "reasoning": {"enabled": True, "effort": "high"},
+            "reasoning_effort": "high",
+        },
         "toolsets": ["terminal"],
         "source": "webui",
         "metadata": {"route": "/api/chat/start"},
