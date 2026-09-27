@@ -196,18 +196,20 @@ def test_legacy_sidecar_without_message_count_still_backs_up_on_shrink(session_s
 
 
 def test_file_changed_on_disk_since_last_save_falls_back_and_still_backs_up(session_store):
-    """An externally grown file. This process saved 3 messages; something else
-    then rewrote the file with 6 (an external appender, another process, a
-    restore). The next save with 4 is a real shrink relative to DISK, and the
-    count that governs it is the one the file now carries (6), not the 3 this
-    process remembers: the `.bak` must hold the 6-message array."""
-    s = _make(session_store, "x1", 3)
+    """A fresh writer adopting an externally grown file must compare with disk.
+
+    An object that had already saved an older generation now fails closed under
+    the sidecar revision contract, so use the real adoption shape: a fresh
+    object's first save of 4 over a durable 6-message sidecar. The `.bak` must
+    hold the 6-message array.
+    """
+    s = M.Session(session_id="x1", title="T", workspace=str(session_store.parent),
+                  model="glm", messages=_msgs(4))
     external = {"session_id": "x1", "title": "T", "workspace": str(session_store.parent),
                 "model": "glm", "created_at": 1.0, "updated_at": 2.0,
                 "message_count": 6, "messages": _msgs(6)}
     s.path.write_text(json.dumps(external, indent=2), encoding="utf-8")
 
-    s.messages = _msgs(4)
     s.save()
 
     bak = s.path.with_suffix(".json.bak")
@@ -216,16 +218,16 @@ def test_file_changed_on_disk_since_last_save_falls_back_and_still_backs_up(sess
 
 
 def test_file_changed_on_disk_without_a_count_still_backs_up_on_shrink(session_store):
-    """The same external rewrite, but the replacement carries no
+    """The same fresh-writer adoption, but the durable file carries no
     `message_count` (an older writer, a hand-edited file). No prefix count ->
     the full parse runs and the 6-message array is still backed up."""
-    s = _make(session_store, "x2", 3)
+    s = M.Session(session_id="x2", title="T", workspace=str(session_store.parent),
+                  model="glm", messages=_msgs(4))
     external = {"session_id": "x2", "title": "T", "workspace": str(session_store.parent),
                 "model": "glm", "created_at": 1.0, "updated_at": 2.0,
                 "messages": _msgs(6)}
     s.path.write_text(json.dumps(external, indent=2), encoding="utf-8")
 
-    s.messages = _msgs(4)
     s.save()
 
     bak = s.path.with_suffix(".json.bak")
@@ -246,13 +248,13 @@ def test_unmarked_stale_count_from_a_foreign_writer_still_backs_up_on_shrink(ses
     land in the `.bak`. Remove the gate in `_prefix_message_count` and this
     test fails with no backup written.
     """
-    s = _make(session_store, "x3", 3)
+    s = M.Session(session_id="x3", title="T", workspace=str(session_store.parent),
+                  model="glm", messages=_msgs(4))
     foreign = {"session_id": "x3", "title": "T", "workspace": str(session_store.parent),
                "model": "glm", "created_at": 1.0, "updated_at": 2.0,
                "message_count": 2, "messages": _msgs(6)}  # stale count, NO _mc_v
     s.path.write_text(json.dumps(foreign, indent=2), encoding="utf-8")
 
-    s.messages = _msgs(4)
     s.save()
 
     bak = s.path.with_suffix(".json.bak")
@@ -263,14 +265,14 @@ def test_unmarked_stale_count_from_a_foreign_writer_still_backs_up_on_shrink(ses
 
 def test_wrong_marker_version_still_backs_up_on_shrink(session_store):
     """A count marked by a DIFFERENT writer contract is equally untrusted."""
-    s = _make(session_store, "x4", 3)
+    s = M.Session(session_id="x4", title="T", workspace=str(session_store.parent),
+                  model="glm", messages=_msgs(4))
     foreign = {"session_id": "x4", "title": "T", "workspace": str(session_store.parent),
                "model": "glm", "created_at": 1.0, "updated_at": 2.0,
                "_mc_v": M._MESSAGE_COUNT_MARKER + 1,
                "message_count": 2, "messages": _msgs(6)}
     s.path.write_text(json.dumps(foreign, indent=2), encoding="utf-8")
 
-    s.messages = _msgs(4)
     s.save()
 
     bak = s.path.with_suffix(".json.bak")
@@ -280,14 +282,19 @@ def test_wrong_marker_version_still_backs_up_on_shrink(session_store):
 
 def test_first_save_remarks_the_file_and_the_fast_path_resumes(session_store, monkeypatch):
     """The gate costs one full parse, once. After a save by the current writer
-    the file carries `_mc_v`, and the cheap prefix path is back in service."""
-    s = _make(session_store, "x5", 3)
+    the file carries `_mc_v`, and the cheap prefix path is back in service.
+
+    Use a fresh object for the legacy adoption: an object that already saved a
+    different generation must reject the replacement as stale rather than
+    silently overwrite it.
+    """
+    s = M.Session(session_id="x5", title="T", workspace=str(session_store.parent),
+                  model="glm", messages=_msgs(6))
     foreign = {"session_id": "x5", "title": "T", "workspace": str(session_store.parent),
                "model": "glm", "created_at": 1.0, "updated_at": 2.0,
                "message_count": 2, "messages": _msgs(6)}  # unmarked foreign file
     s.path.write_text(json.dumps(foreign, indent=2), encoding="utf-8")
 
-    s.messages = _msgs(6)
     s.save()  # equal-count save; unmarked prefix count ignored, full parse, no shrink
 
     assert json.loads(s.path.read_text(encoding="utf-8"))["_mc_v"] == M._MESSAGE_COUNT_MARKER
@@ -336,21 +343,21 @@ def test_collapse_self_heal_on_load_still_backs_up_the_pre_collapse_array(sessio
 
 # ── the collision a stat identity cannot see (review, 2026-09-21) ───────────
 
-def test_same_length_in_place_rewrite_inside_one_mtime_tick_still_backs_up(session_store):
-    """A same-length, same-mtime, same-inode rewrite must not hide a shrink.
+def test_same_length_in_place_rewrite_inside_one_mtime_tick_is_rejected(session_store):
+    """A same-length, same-mtime, same-inode rewrite must not be overwritten.
 
     The removed revision of this PR trusted an in-memory (inode, size,
     mtime_ns) identity: "this object wrote the file, stat says nothing changed,
     so the on-disk length is the one I remember". A stat tuple is not a content
     identity. Another writer replaces the sidecar IN PLACE with a longer
     transcript that occupies the same number of bytes, inside one mtime tick,
-    so all three fields still match -- and the next shrinking save then reads
-    its stale count as "growing", overwrites the longer transcript and writes
-    no `.bak`. That is the #1558 data-loss shape the safeguard exists to
-    prevent, reachable on the branch, which is why the identity cache is gone.
+    so all three fields still match -- and a stale count alone would read the
+    next shrinking save as "growing".
 
-    The count now comes from the file's own metadata prefix, which any rewrite
-    of the bytes has to carry, so the shrink is seen for what it is.
+    The current revision contract hashes the sidecar bytes, so it detects the
+    collision before the count safeguard is reached and makes the stale writer
+    reload. This is stronger than backing up after accepting the stale save:
+    the externally grown generation remains authoritative and untouched.
     """
     p = session_store / "i1.json"
     base = {"session_id": "i1", "title": "T", "workspace": str(session_store.parent),
@@ -378,9 +385,8 @@ def test_same_length_in_place_rewrite_inside_one_mtime_tick_still_backs_up(sessi
     assert len(loaded.messages) == 2, "premise: this object remembers 2 messages"
 
     loaded.messages = _msgs(3)
-    loaded.save()
+    with pytest.raises(RuntimeError, match="stale sidecar revision"):
+        loaded.save()
 
-    bak = p.with_suffix(".json.bak")
-    assert bak.exists(), "the 5-message transcript must be recoverable"
-    assert len(json.loads(bak.read_text(encoding="utf-8"))["messages"]) == 5
-    assert len(M.Session.load("i1").messages) == 3
+    assert not p.with_suffix(".json.bak").exists()
+    assert len(M.Session.load("i1").messages) == 5
