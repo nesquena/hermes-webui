@@ -9300,6 +9300,20 @@ def _register_pending_user_timestamp_identity(
         save(touch_updated_at=False, skip_index=True)
 
 
+def _load_history_after_admission(expected_session_id, canonical_id, refresh, project):
+    """Rebuild model (not display) context inside the Agent's durable turn lease.
+
+    A rotated parent is not permission to move a WebUI workspace or replay its
+    accepted input on a different session. Preserve the normal reload/resend path.
+    """
+    if canonical_id != expected_session_id:
+        raise RuntimeError("session_rotated: reload the continuation before resending")
+    messages, revision = refresh()
+    if not isinstance(revision, dict) or revision.get("session_id") != expected_session_id:
+        raise RuntimeError("durable model context unavailable during turn admission")
+    return project(messages)
+
+
 def _build_run_conversation_kwargs(
     callable_obj,
     *,
@@ -9310,6 +9324,7 @@ def _build_run_conversation_kwargs(
     task_id,
     persist_user_message,
     persist_user_timestamp,
+    conversation_history_loader=None,
 ):
     """Build one rolling-compatible Agent invocation contract without mutation.
 
@@ -9336,6 +9351,10 @@ def _build_run_conversation_kwargs(
         "conversation_history_revision",
         conversation_history_revision,
     )
+    if conversation_history_loader is not None:
+        _add_supported_run_conversation_kwarg(
+            callable_obj, kwargs, "conversation_history_loader", conversation_history_loader,
+        )
     return kwargs
 
 
@@ -11794,12 +11813,13 @@ def _run_agent_streaming(
                 with_revision=True,
             )
 
-            def _context_and_revision_from_state_snapshot(state_snapshot):
+            def _context_and_revision_from_state_snapshot(state_snapshot, *, require_reconciled=False):
                 reconciled_snapshot = reconciled_state_db_messages_for_session(
                     s,
                     prefer_context=True,
                     state_messages=state_snapshot,
                     with_revision=True,
+                    **({"require_reconciled": True} if require_reconciled else {}),
                 )
                 if not isinstance(reconciled_snapshot, StateDBSessionMessagesSnapshot):
                     raise TypeError(
@@ -11814,13 +11834,25 @@ def _run_agent_streaming(
                     reconciled_snapshot.revision,
                 )
 
-            def _refresh_context_and_revision_from_state_db():
+            def _refresh_context_and_revision_from_state_db(*, require_reconciled=False):
                 fresh_state_snapshot = get_state_db_session_messages(
                     session_id,
                     profile=getattr(s, 'profile', None),
                     with_revision=True,
                 )
-                return _context_and_revision_from_state_snapshot(fresh_state_snapshot)
+                return _context_and_revision_from_state_snapshot(
+                    fresh_state_snapshot, require_reconciled=require_reconciled)
+
+            def _admitted_model_history(canonical_id):
+                return _load_history_after_admission(
+                    session_id, canonical_id,
+                    lambda: _refresh_context_and_revision_from_state_db(require_reconciled=True),
+                    lambda messages: _sanitize_messages_for_agent(
+                        messages, cfg=_cfg, effective_model=resolved_model,
+                        effective_provider=resolved_provider, effective_base_url=resolved_base_url,
+                        requested_provider=(_session_requested_provider or ""),
+                    ),
+                )
 
             _previous_messages = list(
                 reconciled_state_db_messages_for_session(
@@ -11946,6 +11978,7 @@ def _run_agent_streaming(
                 task_id=session_id,
                 persist_user_message=msg_text,
                 persist_user_timestamp=_persist_user_timestamp,
+                conversation_history_loader=_admitted_model_history,
             )
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
@@ -12541,6 +12574,7 @@ def _run_agent_streaming(
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                     persist_user_timestamp=_heal_persist_user_timestamp,
+                                    conversation_history_loader=_admitted_model_history,
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -13908,6 +13942,7 @@ def _run_agent_streaming(
                             task_id=session_id,
                             persist_user_message=msg_text,
                             persist_user_timestamp=_heal_persist_user_timestamp,
+                            conversation_history_loader=_admitted_model_history,
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config

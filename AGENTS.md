@@ -100,6 +100,11 @@ Follow that checklist's safety rules:
   stale chat POSTs before workspace/model/pending-state mutation; the browser
   loads the continuation and preserves the draft without automatic replay.
   Explicit closures and unknown terminal reasons do not authorize a redirect.
+- Cross-surface history preparation uses the optional native under-lease callback
+  for both initial and self-heal turns. Keep provider sanitization and model/display
+  separation; missing durable state, an unverified compression anchor, or a different
+  continuation refuses inference.
+  See `docs/rfcs/webui-run-state-consistency-contract.md` for the rolling-compatibility limit.
 - For Docker build changes in `docker_init.bash`, mirror directory exclusions
   in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
   with restricted permissions (e.g. `.playwright/`).
