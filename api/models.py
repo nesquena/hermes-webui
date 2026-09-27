@@ -7954,6 +7954,13 @@ def _reload_cli_sessions_after_inflight(
     db_path: str,
     max_reclaims=None,
 ) -> list:
+    """Wait for an in-flight CLI session cache rebuild and return the fresh or stale result.
+
+    If multiple callers wait and detect an invalidation/clear storm before a cached entry
+    is published, the waiter re-attempts the claim loop up to ``max_reclaims`` times
+    (defaulting to ``_CLI_SESSIONS_CACHE_MAX_RECLAIMS`` = 5) before falling back to
+    rebuilding the sessions directly to prevent unbounded contention (#4966).
+    """
     if max_reclaims is None:
         max_reclaims = _CLI_SESSIONS_CACHE_MAX_RECLAIMS
     reclaims = 0

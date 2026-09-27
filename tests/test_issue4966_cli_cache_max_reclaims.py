@@ -11,10 +11,9 @@ def test_cli_sessions_cache_reclaim_loop_caps_at_max_reclaims(monkeypatch):
 
     # Custom claim rebuild that simulates being a waiter that finishes waiting,
     # but finds no cache entry each time until max_reclaims.
-    real_claim = models._cli_sessions_cache_claim_rebuild
-
     def _simulated_claim(key):
-        event, is_owner = real_claim(key)
+        reclaims_observed["count"] += 1
+        event = threading.Event()
         # Immediately set event so waiter doesn't sleep, but do NOT populate cache
         event.set()
         return event, False
@@ -39,6 +38,7 @@ def test_cli_sessions_cache_reclaim_loop_caps_at_max_reclaims(monkeypatch):
     )
 
     assert result == [{"session_id": "fallback_session"}]
+    assert reclaims_observed["count"] == 3
     assert rebuild_called["count"] == 1
 
 
