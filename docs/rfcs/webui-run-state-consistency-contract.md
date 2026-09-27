@@ -173,9 +173,12 @@ State-backed materialization may read optimistically outside that lock, but must
 re-read beneath it and match the captured lifecycle generation before publishing.
 A tombstoned SID is never recreated by an ordinary `Session.save()`: clearing the
 deletion tombstone requires an explicit user-authorized create/import save, which
-advances the generation again before publication. Thus neither a detached
-pre-delete object nor a fresh object synthesized from stale state can republish
-the sidecar or clear its tombstone.
+advances the generation again before publication. An explicit import captures the
+SID generation before reading its foreign transcript and rechecks it under the
+same SID lock before publishing, so user authorization does not authorize stale
+work that crossed a concurrent delete. Thus neither a detached pre-delete object
+nor a fresh object synthesized from stale state can republish the sidecar or clear
+its tombstone.
 
 ## State Layers
 

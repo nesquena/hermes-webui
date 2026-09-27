@@ -29496,6 +29496,12 @@ def _handle_session_import_cli(handler, body):
             },
         )
 
+    # Capture the SID incarnation before reading the foreign store. An explicit
+    # import may intentionally recreate a SID that was already deleted when the
+    # request began, but it must not acquire fresh publication authority when a
+    # delete completes after this snapshot was taken.
+    import_generation = _session_lifecycle_generation(sid)
+
     # Fetch messages from CLI store
     cli_meta = _resolve_cli_import_metadata(
         sid,
@@ -29583,32 +29589,41 @@ def _handle_session_import_cli(handler, body):
             },
         )
 
-    s = import_cli_session(
-        sid,
-        title,
-        msgs,
-        model,
-        profile=profile,
-        created_at=created_at,
-        updated_at=updated_at,
-        parent_session_id=cli_parent_session_id,
-        authorize_deleted_recreation=True,
-    )
-    if cron_project_id:
-        s.project_id = cron_project_id
-    s.is_cli_session = True
-    s.source_tag = cli_source_tag
-    s.raw_source = cli_raw_source or cli_source_tag
-    s.session_source = cli_session_source
-    s.source_label = cli_source_label
-    s.user_id = cli_user_id
-    s.chat_id = cli_chat_id
-    s.chat_type = cli_chat_type
-    s.thread_id = cli_thread_id
-    s.session_key = cli_session_key
-    s.platform = cli_platform
-    s._cli_origin = sid
-    s.save(touch_updated_at=False)
+    with _get_session_agent_lock(sid):
+        if import_generation != _session_lifecycle_generation(sid):
+            return bad(handler, "Session changed while importing; try again", 409)
+        # The initial existence check precedes the foreign-store read. Do not
+        # overwrite a sidecar created by another request while that read was in
+        # flight; let the caller retry through the normal refresh path.
+        if Session.load(sid) is not None:
+            return bad(handler, "Session changed while importing; try again", 409)
+        s = import_cli_session(
+            sid,
+            title,
+            msgs,
+            model,
+            profile=profile,
+            created_at=created_at,
+            updated_at=updated_at,
+            parent_session_id=cli_parent_session_id,
+            authorize_deleted_recreation=True,
+            _lifecycle_generation=import_generation,
+        )
+        if cron_project_id:
+            s.project_id = cron_project_id
+        s.is_cli_session = True
+        s.source_tag = cli_source_tag
+        s.raw_source = cli_raw_source or cli_source_tag
+        s.session_source = cli_session_source
+        s.source_label = cli_source_label
+        s.user_id = cli_user_id
+        s.chat_id = cli_chat_id
+        s.chat_type = cli_chat_type
+        s.thread_id = cli_thread_id
+        s.session_key = cli_session_key
+        s.platform = cli_platform
+        s._cli_origin = sid
+        s.save(touch_updated_at=False)
     publish_session_list_changed(
         "session_import_cli",
         profile=getattr(s, "profile", None),
