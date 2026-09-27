@@ -11868,7 +11868,12 @@ def _invalid_state_db_row_payload_key(msg: dict):
         for key, value in msg.items()
         if key not in {"_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"}
     }
-    return _session_message_dedup_key(without_row_identity)
+    payload_digest = _canonical_message_digest(without_row_identity)
+    if payload_digest is None:
+        # Non-JSON values cannot prove payload equality. Keep the row distinct
+        # rather than falling back to a partial identity or sharing a None key.
+        return ("uncomparable_invalid_state_db_row_payload", id(msg))
+    return ("invalid_state_db_row_payload", payload_digest)
 
 
 def _normalized_session_message_content(msg: dict):
