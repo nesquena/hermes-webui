@@ -207,6 +207,8 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
       title         string, auto-set from first user message
       workspace     absolute path string, resolved at creation
       model         model ID string (e.g. "anthropic/claude-sonnet-4.6")
+      model_provider normalized provider lane for the selected session model
+      reasoning_effort nullable per-session override ("none" through "ultra")
       messages      list of OpenAI-format message dicts
       created_at    float Unix timestamp
       updated_at    float Unix timestamp, updated on every save()
@@ -236,6 +238,32 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
+
+#### Per-session model and reasoning selection
+
+The session sidecar owns the user's requested `model`, `model_provider`, and
+nullable `reasoning_effort` override. `POST /api/session/update` validates and
+persists those requested values under the session lock. An empty
+`reasoning_effort` clears the session override; `none` is an explicit disabled
+override. A real model/provider or reasoning change evicts the reusable session
+Agent, while a no-op update does not. Neither update mutates an already-running
+response; the next run consumes the persisted selection.
+
+The stored override is not itself the effective runtime effort. For each run,
+`resolve_effective_reasoning_effort()` resolves, in order, the session override,
+the active model's `agent.reasoning_overrides` entry, and the profile-wide
+`agent.reasoning_effort`, then clamps the result to the selected model/provider
+capability. Local streaming, legacy Gateway, Gateway Runs `model_options`, and
+runner-local requests all receive that resolved value. Agent model switches,
+fallback activation, and primary-runtime restoration reapply the session
+precedence without rewriting the persisted session model.
+
+`GET /api/reasoning?session_id=<id>&model=<model>&provider=<provider>` returns the
+effective, capability-adjusted status used by the composer. Session payloads
+instead expose the persisted nullable override so clients can distinguish
+"Auto" from an explicit effort. Session duplication, branching, regeneration,
+and focused compression continuation copy the requested model and reasoning
+selection to the new session.
 
 #### Session transcript reconciliation with `state.db`
 
