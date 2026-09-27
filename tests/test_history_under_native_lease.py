@@ -85,8 +85,8 @@ def test_real_reconciler_refuses_unverifiable_compressed_context(tmp_path, monke
     import threading
     from types import SimpleNamespace
     from api import models
-    from hermes_state import SessionDB
     admit = pytest.importorskip("agent.turn_facade_lease").admit_durable_turn_lease
+    from hermes_state import SessionDB
     if "conversation_history_loader" not in inspect.signature(admit).parameters:
         pytest.skip("requires Agent's optional under-lease history loader")
     db = SessionDB(tmp_path / "state.db")
@@ -134,6 +134,40 @@ def test_real_reconciler_refuses_unverifiable_compressed_context(tmp_path, monke
         peer.release_session_turn_lease("s", "after-test")
         peer.close()
         db.close()
+
+
+@pytest.mark.parametrize("anchor_state", ["removed", "missing", "valid"])
+def test_strict_reconciliation_without_agent_checkout(anchor_state):
+    """Exercise WebUI's real refusal path without the optional Agent fixture."""
+    from types import SimpleNamespace
+    from api import models
+
+    summary = {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] local summary"}
+    anchor = {"role": "assistant", "content": "old anchor", "timestamp": 2.0}
+    latest = {"role": "assistant", "content": "fresh external reply", "timestamp": 4.0}
+    anchor_key = {"role": "assistant", "text": "old anchor", "ts": 2.0}
+    session = SimpleNamespace(
+        session_id="s", messages=[], context_messages=[summary],
+        compression_anchor_message_key=None if anchor_state == "missing" else anchor_key,
+    )
+    messages = [latest] if anchor_state == "removed" else [anchor, latest]
+    revision = {"session_id": "s"}
+    durable = models.StateDBSessionMessagesSnapshot(messages=messages, revision=revision)
+
+    def reconcile():
+        return models.reconciled_state_db_messages_for_session(
+            session, prefer_context=True, state_messages=durable,
+            require_reconciled=True, with_revision=True,
+        )
+
+    if anchor_state == "valid":
+        result = reconcile()
+        assert [message["content"] for message in result.messages] == [summary["content"], latest["content"]]
+        assert result.revision == revision
+    else:
+        expected = "compression_anchor_missing" if anchor_state == "missing" else "compression_anchor_unverifiable"
+        with pytest.raises(RuntimeError, match=expected):
+            reconcile()
 
 
 def test_old_agent_does_not_receive_loader():
