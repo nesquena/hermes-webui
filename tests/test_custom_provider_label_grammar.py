@@ -361,6 +361,10 @@ eval(extractConst('_PY_WS_CLASS'));
 eval(extractConst('_CUSTOM_SLUG_TRIM_RE'));
 eval(extractConst('_CUSTOM_SLUG_HOST_REJECT_RE'));
 eval(extractFunc('_customSlugIsEndpointAuthority'));
+// The model-half entry point delegates to the shared two-half parser
+// (deep-review 2026-09-27): both must be in scope for every driver below.
+eval(extractFunc('_parseQualifiedCustomId'));
+eval(extractFunc('_customModelFromQualifiedId'));
 """
 
 _DRIVER = _EXTRACT_PREAMBLE + r"""
@@ -610,3 +614,41 @@ def test_dynamic_catalog_label_wins_when_present(tmp_path):
     labels = {"@custom:my-key:some-model:free": "Meu Modelo Free"}
     cases = ["@custom:my-key:some-model:free", "@custom:localhost:1234:qwen3"]
     assert _labels(tmp_path, labels, cases) == ["Meu Modelo Free", "qwen3"]
+
+
+@requires_node
+def test_generic_slash_lane_label_and_named_slash_still_route(tmp_path):
+    """Deep-review 2026-09-27, defect 3 (frontend half): an unmatched
+    vendor/slash id keeps its whole remainder as the label, while a
+    slash-bearing model under a NAMED provider keeps the named route."""
+    cases = [
+        "@custom:ollamacloud/qwen3.5:397b",
+        "@custom:omni:kg/stepfun/step-3.7-flash:free",
+    ]
+    assert _labels(tmp_path, {}, cases) == [
+        "ollamacloud/qwen3.5:397b",
+        "kg/stepfun/step-3.7-flash:free",
+    ]
+    # And the backend route agrees on both: the unmatched slash id resolves
+    # under bare `custom`; the named one under its named slug.
+    assert _resolve_with_cfg(
+        "@custom:ollamacloud/qwen3.5:397b", provider="openai"
+    )[1] == "custom"
+    assert _resolve_with_cfg(
+        "@custom:omni:kg/stepfun/step-3.7-flash:free",
+        provider="openai",
+        custom_providers=[{"name": "omni", "base_url": "http://omni.example/v1"}],
+    )[1] == "custom:omni"
+
+
+@requires_node
+def test_backend_route_matches_label_on_reviewer_identity_ids():
+    """Backend half of defect 2's identity contract: the ROUTE for the
+    single-label and bracketed-IPv6 ids must agree with what the picker
+    shows (the shared grammar), not the legacy localhost/dotted-only peel."""
+    for model_id, want_model, want_provider in (
+        ("@custom:llm:8080:qwen3", "qwen3", "custom:llm:8080"),
+        ("@custom:[::1]:11434:qwen3", "qwen3", "custom:[::1]:11434"),
+    ):
+        model, provider, _ = _resolve_with_cfg(model_id, provider="openai")
+        assert (model, provider) == (want_model, want_provider), model_id
