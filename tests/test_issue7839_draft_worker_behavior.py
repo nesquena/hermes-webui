@@ -232,7 +232,6 @@ def test_missing_session_settles_missing(isolated_session_env, monkeypatch, draf
         raise KeyError(_sid)
 
     monkeypatch.setattr(routes, "get_session", get_session_stub)
-
     handler = _post_draft(sid, "never lands")
     assert handler.status == 404, (
         f"a post-preflight missing session must 404, got {handler.status} {handler.response}"
@@ -291,7 +290,7 @@ def test_failed_settle_self_heals_once_lock_frees(isolated_session_env, monkeypa
     monkeypatch.setattr(routes, "_DRAFT_SAVE_LOCK_WAIT", 0.05)
     monkeypatch.setattr(routes, "_DRAFT_SAVE_RETRY_DELAY", 0.2)
 
-    handler = _post_draft(sid, "self healed")
+    _post_draft(sid, "self healed")
     # The handler may 503 (its own wait expired) or 200; either way the queued
     # intent must become durable via the bounded self-heal timer.
     assert _wait_for_draft(sid, "self healed", timeout=10.0) is not None, (
@@ -340,7 +339,6 @@ def test_self_heal_retries_are_bounded(isolated_session_env, monkeypatch, draft_
 def test_load_exception_settles_and_next_request_recovers(isolated_session_env, monkeypatch, draft_responses):
     """A non-KeyError load failure must 503 and must not strand the worker."""
     from api import routes
-    from api.models import Session
 
     sid = "dwkr0007"
     _make_persisted_session(sid)
@@ -419,12 +417,16 @@ def test_earlier_success_not_flipped_by_later_failure(isolated_session_env, monk
     monkeypatch.setattr(routes, "_DRAFT_SAVE_RETRY_DELAY", 3600.0)  # no self-heal
 
     real_save = Session.save
+    first_save_started = threading.Event()
 
     def slow_first_save(self, *a, **kw):
         # Keep the worker busy so B queues while gen 1 is still saving —
         # both requests are then in flight when the outcomes are written.
+        # The event removes the timing guesswork: B publishes only after the
+        # worker has actually claimed A and entered its save (Greptile P2).
         slow_first_save.calls += 1
         if slow_first_save.calls == 1:
+            first_save_started.set()
             time.sleep(0.4)
         return real_save(self, *a, **kw)
 
@@ -439,7 +441,8 @@ def test_earlier_success_not_flipped_by_later_failure(isolated_session_env, monk
         t1 = threading.Thread(target=run, args=("a", "first-ok"))
         t2 = threading.Thread(target=run, args=("b", "second-fails"))
         t1.start()
-        time.sleep(0.1)  # A is inside its slow save when B publishes
+        assert first_save_started.wait(10.0), "worker never reached A's save"
+        assert not results.keys(), "B must not publish before A is in its save"
         t2.start()
         t1.join(30)
         t2.join(30)
