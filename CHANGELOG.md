@@ -447,6 +447,14 @@
 
 ### Documentation
 
+- **The README's remote-access paragraph now leads with Tailscale Serve.** It sent users straight to a
+  `HERMES_WEBUI_HOST=0.0.0.0` bind, which contradicted the guide it links to. It now recommends Serve, which
+  keeps WebUI on loopback behind tailnet-only HTTPS, and keeps the authenticated direct-IP bind as the
+  fallback when Serve is unavailable. (#7420 by @taljeon)
+- **A Chinese remote-access guide.** `docs/remote-access-zh.md` covers Tailscale Serve, the direct tailnet-IP
+  fallback, SSH tunnels, a native-Windows setup with `start.ps1` (dependencies installed into the agent venv
+  that `start.ps1` actually uses, plus a Tailscale-only firewall rule), WSL-only login autostart, and the
+  security boundaries of each exposure level. The README links it. (#7814 by @happy5318)
 - **`AGENTS.md` now routes contributors to the references that match their change.** The old "read first" list asked for four files up front regardless of what was being changed, and carried a compressed copy of the ten change guidelines that `docs/GUIDELINES.md` owns. It now maps each reference to the kind of work it applies to and states explicit completion/verification criteria instead. No information is lost — the ten rules remain in `docs/GUIDELINES.md`, which the new version still points to. Thanks @steveafrost. (#7593)
 - **The `/api/models` cache invalidation contract is documented.** `#7556` shipped a change to the catalog cache's source fingerprint, and its review flagged the surrounding contract as undocumented runtime behavior. `docs/architecture/models-cache-invalidation.md` now records what is cached (in-memory snapshot, per-profile `models_cache.json`, cold vs hot path), the three source axes (`config_yaml` stat identity, `auth_json` content hash with a volatile-key deny-list, baked-in plus Codex catalog hashes) and why each is fingerprinted the way it is, and the invariant that both volatile-key sets are deny-lists that may only remove fields which provably do not gate the provider/model set. Changes no runtime behavior. Thanks @webtecnica. (#7560, #7556)
 
