@@ -25307,42 +25307,62 @@ def _message_text_simple(value) -> str:
     return str(value or "").strip()
 
 
+def _is_terminal_assistant_message(msg: dict) -> bool:
+    """Return True if msg is a completed, terminal assistant prose response.
+
+    Excludes tool-call declarations, interrupted/error turns, and compression markers.
+    """
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("role") != "assistant":
+        return False
+    if msg.get("_error") or msg.get("type") in ("interrupted", "error"):
+        return False
+    if msg.get("tool_calls"):
+        return False
+    from api.compression_anchor import is_context_compression_marker
+
+    if is_context_compression_marker(msg):
+        return False
+    raw_content = msg.get("content")
+    text = _message_text_simple(raw_content) if isinstance(raw_content, list) else str(raw_content or "").strip()
+    return bool(text)
+
+
 def _extract_latest_completed_exchange(messages: list) -> tuple:
     """Return (last_user_msg, last_assistant_msg) from the latest completed exchange.
 
-    A completed exchange is a user message followed by at least one assistant
-    response message that has content or tool calls (not an error/interruption).
-    Returns (None, None) when no completed exchange is found.
+    A completed exchange is a user message followed by a terminal assistant
+    answer (nonempty projected text, no tool_calls, no error/interruption,
+    and no compression marker). Intermediate tool-call declarations and
+    tool results are skipped. If the latest turn is incomplete (e.g. only tool
+    calls with or without tool results), scan backward for the prior completed
+    exchange or return (None, None).
     """
-    last_user = None
-    last_assistant = None
-    
+    candidate_assistant = None
     for msg in reversed(messages):
         if not isinstance(msg, dict):
             continue
         role = msg.get("role", "")
         if role == "assistant":
-            # Skip error/interruption markers
-            if msg.get("_error") or msg.get("type") in ("interrupted",):
-                continue
-            content = msg.get("content")
-            tool_calls = msg.get("tool_calls")
-            if content or tool_calls:
-                if last_assistant is None:
-                    last_assistant = msg
-        elif role == "user" and last_assistant is not None:
-            # Found the user that precedes the last completed assistant response
-            last_user = msg
-            break
-    
-    return last_user, last_assistant
+            if candidate_assistant is None and _is_terminal_assistant_message(msg):
+                candidate_assistant = msg
+        elif role == "user":
+            if candidate_assistant is not None:
+                return msg, candidate_assistant
+            # Hit a user without finding a terminal assistant response first;
+            # this turn is incomplete (e.g. tool call without final answer).
+            # Discard and search backward for a prior completed exchange.
+            candidate_assistant = None
+
+    return None, None
 
 
 def _message_content_equivalent(a: dict | None, b: dict | None) -> bool:
-    """Return True when two messages have matching role and text content.
+    """Return True when two messages have matching role and content.
 
-    Intentional value-level equivalence, not object identity. Strips timing
-    and metadata fields that may differ across storage layers.
+    Intentional value-level equivalence, not object identity. Handles both
+    plain strings and structured list-of-dicts content while comparing tool_calls.
     """
     if a is None and b is None:
         return True
@@ -25352,14 +25372,27 @@ def _message_content_equivalent(a: dict | None, b: dict | None) -> bool:
         return False
     if a.get("role") != b.get("role"):
         return False
-    # Compare text content
-    a_text = a.get("content", "")
-    b_text = b.get("content", "")
-    if not isinstance(a_text, str):
-        a_text = ""
-    if not isinstance(b_text, str):
-        b_text = ""
-    return a_text == b_text
+
+    # Check tool calls equivalence
+    a_tools = a.get("tool_calls") or []
+    b_tools = b.get("tool_calls") or []
+    if a_tools != b_tools:
+        return False
+
+    a_content = a.get("content")
+    b_content = b.get("content")
+
+    # Fast path: exact content equality
+    if a_content == b_content:
+        return True
+
+    # If both have structured or string content, compare normalized text
+    a_text = _message_text_simple(a_content)
+    b_text = _message_text_simple(b_content)
+    if a_text and b_text:
+        return a_text == b_text
+
+    return False
 
 
 def _build_handoff_context_messages(source_context, last_user, last_assistant) -> list:

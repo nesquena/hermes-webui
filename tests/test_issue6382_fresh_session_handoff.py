@@ -22,6 +22,7 @@ from api.routes import (
     _session_handoff_eligibility_error,
     _extract_latest_completed_exchange,
     _build_handoff_context_messages,
+    _message_content_equivalent,
     _handle_session_handoff,
 )
 
@@ -217,7 +218,7 @@ class TestExtractLatestExchange:
         assert user is None
         assert assistant is None
 
-    def test_assistant_with_tool_calls_is_valid(self):
+    def test_assistant_with_tool_calls_then_final_answer_selects_final_prose(self):
         msgs = [
             {"role": "user", "content": "search google", "timestamp": 1.0},
             {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "web_search"}}], "timestamp": 2.0},
@@ -228,15 +229,36 @@ class TestExtractLatestExchange:
         assert user["content"] == "search google"
         assert assistant["content"] == "Here are the results."
 
-    def test_assistant_with_only_tool_calls_no_content(self):
+    def test_tool_call_only_turn_without_tool_result_does_not_count_as_completed(self):
         msgs = [
             {"role": "user", "content": "run tool", "timestamp": 1.0},
             {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "my_tool"}}], "timestamp": 2.0},
         ]
         user, assistant = _extract_latest_completed_exchange(msgs)
-        assert user["content"] == "run tool"
-        assert assistant is not None
-        assert assistant.get("tool_calls") is not None
+        assert user is None
+        assert assistant is None
+
+    def test_tool_call_only_turn_with_tool_result_does_not_count_as_completed(self):
+        msgs = [
+            {"role": "user", "content": "run tool", "timestamp": 1.0},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "my_tool"}}], "timestamp": 2.0},
+            {"role": "tool", "tool_call_id": "call1", "content": "output", "timestamp": 3.0},
+        ]
+        user, assistant = _extract_latest_completed_exchange(msgs)
+        assert user is None
+        assert assistant is None
+
+    def test_tool_call_only_newest_turn_falls_back_to_prior_completed_exchange(self):
+        msgs = [
+            {"role": "user", "content": "first prompt", "timestamp": 1.0},
+            {"role": "assistant", "content": "first response", "timestamp": 2.0},
+            {"role": "user", "content": "run tool", "timestamp": 3.0},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "my_tool"}}], "timestamp": 4.0},
+            {"role": "tool", "tool_call_id": "call1", "content": "output", "timestamp": 5.0},
+        ]
+        user, assistant = _extract_latest_completed_exchange(msgs)
+        assert user["content"] == "first prompt"
+        assert assistant["content"] == "first response"
 
 
 # ── _build_handoff_context_messages ────────────────────────────────────────
@@ -333,6 +355,73 @@ class TestBuildHandoffContext:
         assert len(result) == 1 + len(source_context)
         assert result[-1]["role"] == "assistant"
         assert result[-1]["content"] == "a1"
+
+    def test_distinct_list_form_content_not_falsely_deduplicated(self):
+        """Distinct structured content messages must be appended rather than falsely deduplicated."""
+        source_context = [
+            {"role": "user", "content": [{"type": "text", "text": "previous query"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "previous answer"}]},
+        ]
+        last_user = {"role": "user", "content": [{"type": "text", "text": "new query"}]}
+        last_assistant = {"role": "assistant", "content": [{"type": "text", "text": "new answer"}]}
+
+        result = _build_handoff_context_messages(source_context, last_user, last_assistant)
+        assert len(result) == 1 + len(source_context) + 2
+        assert result[-2]["content"] == [{"type": "text", "text": "new query"}]
+        assert result[-1]["content"] == [{"type": "text", "text": "new answer"}]
+
+    def test_identical_list_form_content_deduplicates(self):
+        """Identical structured content messages must deduplicate cleanly against tail."""
+        source_context = [
+            {"role": "user", "content": [{"type": "text", "text": "same query"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "same answer"}]},
+        ]
+        last_user = {"role": "user", "content": [{"type": "text", "text": "same query"}]}
+        last_assistant = {"role": "assistant", "content": [{"type": "text", "text": "same answer"}]}
+
+        result = _build_handoff_context_messages(source_context, last_user, last_assistant)
+        assert len(result) == 1 + len(source_context)
+
+
+class TestMessageContentEquivalent:
+    def test_none_equivalence(self):
+        assert _message_content_equivalent(None, None) is True
+        assert _message_content_equivalent({"role": "user"}, None) is False
+        assert _message_content_equivalent(None, {"role": "user"}) is False
+
+    def test_role_mismatch(self):
+        a = {"role": "user", "content": "hello"}
+        b = {"role": "assistant", "content": "hello"}
+        assert _message_content_equivalent(a, b) is False
+
+    def test_plain_strings(self):
+        a = {"role": "user", "content": "hello"}
+        b = {"role": "user", "content": "hello"}
+        c = {"role": "user", "content": "world"}
+        assert _message_content_equivalent(a, b) is True
+        assert _message_content_equivalent(a, c) is False
+
+    def test_list_form_distinct(self):
+        a = {"role": "user", "content": [{"type": "text", "text": "alpha"}]}
+        b = {"role": "user", "content": [{"type": "text", "text": "beta"}]}
+        assert _message_content_equivalent(a, b) is False
+
+    def test_list_form_identical(self):
+        a = {"role": "user", "content": [{"type": "text", "text": "alpha"}]}
+        b = {"role": "user", "content": [{"type": "text", "text": "alpha"}]}
+        assert _message_content_equivalent(a, b) is True
+
+    def test_list_and_string_equivalence(self):
+        a = {"role": "user", "content": [{"type": "text", "text": "alpha"}]}
+        b = {"role": "user", "content": "alpha"}
+        assert _message_content_equivalent(a, b) is True
+
+    def test_tool_calls_difference(self):
+        a = {"role": "assistant", "content": "hi", "tool_calls": [{"name": "tool_a"}]}
+        b = {"role": "assistant", "content": "hi", "tool_calls": [{"name": "tool_b"}]}
+        c = {"role": "assistant", "content": "hi"}
+        assert _message_content_equivalent(a, b) is False
+        assert _message_content_equivalent(a, c) is False
 
 
 # ── _handle_session_handoff ────────────────────────────────────────────────
@@ -477,7 +566,6 @@ class TestHandleSessionHandoff:
 
     def test_handoff_preserves_workspace_model_provider(self, session_dir, captured_response):
         """Request-level overrides for workspace/model should work."""
-        import copy
         marker = _compression_marker()
         ctx = [marker, {"role": "user", "content": "q1"}]
         source, _ = _make_compressed_session(
