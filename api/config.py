@@ -10714,13 +10714,7 @@ def get_index_html_path() -> Path:
 _INDEX_HTML_PATH = get_index_html_path()
 
 # ── Thread synchronisation ───────────────────────────────────────────────────
-# RLock, not Lock: several call sites acquire LOCK and then call into
-# helpers (get_session -> _resolve_session_once) that acquire it again on the
-# same thread. With a non-reentrant Lock that second acquire blocks forever and
-# the request thread deadlocks silently (no exception, no log) — observed as the
-# webui chat worker stopping right after `worker_started`, leaving the stream to
-# report "The live worker stopped before this run finished."
-LOCK = threading.RLock()
+LOCK = threading.Lock()
 # Max compact Session objects held in the in-memory LRU (issue #3506, #4765, #6351).
 # Lighter than the agent cache (no live agent runtime), but still bounded so a
 # long-running self-hosted install cannot accumulate every session it ever
