@@ -204,14 +204,25 @@ Object.defineProperty(global, '_currentCronDetail', {
   set(v) { _currentCronDetail = v; },
 });
 
-// api() returns a never-resolving promise for the pending-fetch scenario
-// so the toggle can fire while the fetch is still in flight.
+// api() returns a promise the harness settles on demand for the pending-fetch
+// scenario, so the toggle can fire while the fetch is still in flight and the
+// code under test then runs its OWN resolve path (cache write + render).
+// Returning a permanently-never-settling promise here (as this stub used to)
+// made the pending-fetch assertion unreachable: the driver had to hand-render
+// the body, so _loadRunContent's resolve branch was never exercised.
+let _settleFetch = null;
+const _fetchSettled = (payload) => new Promise((resolve) => {
+  _settleFetch = () => resolve(payload);
+});
 global.api = (url) => {
   fetchCount += 1;
   if (scenario.pendingFetch) {
-    return new Promise(() => { });  // never settles
+    return _fetchSettled(scenario.payload);
   }
-  return Promise.resolve(scenario.apiResponse);
+  return Promise.resolve(scenario.payload);
+};
+global._releaseFetch = (payload) => {
+  if (_settleFetch) _settleFetch(payload);
 };
 
 // ---- serialise the rendered body for assertions ----------------------
@@ -299,10 +310,19 @@ async function main() {
     result.openAfterToggle = rowItem._classes.contains('open');
     result.fetchAfterToggle = fetchCount;
     result.storedExpanded = global._cronExpansionGet(global._cronRunExpandKey(scenario.jobId, scenario.filename));
-    // 3. the fetch resolves and must render the toggled (expanded) state.
+    // 3. Let the in-flight fetch actually resolve, then assert on whatever
+    //    _loadRunContent itself rendered. The previous version of this step
+    //    seeded the cache and called _renderCronRunBody by hand, which meant
+    //    the test passed even if _loadRunContent rendered nothing (or a stale
+    //    collapsed state) on resolve — the reviewing point was that the
+    //    pending promise never completed, so the real async load was never
+    //    exercised.
     if (scenario.resolveFetch) {
-      global._cronRunBodyCache[global._cronRunExpandKey(scenario.jobId, scenario.filename)] = payload;
-      _renderCronRunBody(rowBody, payload, scenario.jobId, scenario.filename);
+      // _releaseFetch is installed by the harness: the api() stub returns a
+      // promise this harness settles, so the code under test runs its own
+      // resolve path (cache write + render) rather than the test's.
+      global._releaseFetch(scenario.payload);
+      await loadPromise;
     }
     result.rendered = serialize(rowBody);
   }

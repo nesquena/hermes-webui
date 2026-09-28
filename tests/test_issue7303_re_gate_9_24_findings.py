@@ -39,7 +39,12 @@ DRIVER_JS = Path(__file__).parent / "_cron_run_body_driver.js"
 NODE = shutil.which("node")
 import pytest
 
-pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+# Only the renderer tests shell out to the Node driver. The three parser-only
+# regressions (findings 4, 5, 6) call ``parse_cron_output`` /
+# ``response_snippet`` directly and are pure Python, so a module-wide skip
+# would silently drop that coverage on any host without Node. Mark the driver
+# tests individually instead (review finding: "Parser tests skip without Node").
+_requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +125,7 @@ def _render(scenario_payload, *, job, expanded):
 # ---------------------------------------------------------------------------
 
 
+@_requires_node
 def test_finding_1_core_view_raw_output_renders_verbatim():
     """CORE 1: the projection drops the ``## Response`` heading and trims
     both sides, so the response block + context disclosure cannot rebuild
@@ -166,6 +172,7 @@ def test_finding_1_core_view_raw_output_renders_verbatim():
 # ---------------------------------------------------------------------------
 
 
+@_requires_node
 def test_finding_2_core_pending_fetch_keeps_row_open():
     """CORE 2: on a cache miss the toggle used to fall back to
     ``_loadRunContent()``, which saw the row already ``.open`` and
@@ -214,6 +221,7 @@ def test_finding_2_core_pending_fetch_keeps_row_open():
 # ---------------------------------------------------------------------------
 
 
+@_requires_node
 def test_finding_3_silent_script_job_and_empty_response_stay_raw():
     """SILENT 3: two distinct conditions were missing from the gate that
     enables response-first. A script (``no_agent``) job whose stdout
