@@ -2758,13 +2758,15 @@ def _is_model_id_excluded(model_id: object, exclude_set: set[str]) -> bool:
         bare = _strip_provider_prefix_from_model_id(raw)
         if bare and bare in exclude_set:
             return True
-    # ``provider/model`` slash form (config ``model.default`` shape):
-    # compare the bare model half against the exclude set too.
+    # ``provider/model`` slash form (config ``model.default`` shape): the
+    # slash is a provider separator ONLY when its prefix names a provider
+    # WebUI can render. Comparing the tail unconditionally hid the distinct
+    # valid model ``vendor/bar`` from a bare-``bar`` exclusion — the same
+    # over-filter the browser matcher had (#7777 P1). When the prefix is
+    # not a known provider, exact-ID matching stands.
     if "/" in raw:
         head, _, tail = raw.partition("/")
         if head and tail:
-            if tail in exclude_set:
-                return True
             try:
                 if _is_known_model_provider(head.strip()) and tail.strip() in exclude_set:
                     return True

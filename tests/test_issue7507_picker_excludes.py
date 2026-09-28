@@ -573,3 +573,36 @@ def test_save_settings_wires_invalidate_hook():
     """
     assert "_invalidate_models" in PANELS_JS
     assert "_invalidateLiveModelCache" in PANELS_JS
+
+
+# ── #7777 re-gate: slash form must not over-filter ────────────────────────
+
+
+def _excluded(model_id, entries):
+    from api.config import _is_model_id_excluded
+
+    return _is_model_id_excluded(model_id, set(entries))
+
+
+def test_slash_form_not_over_filtered_when_prefix_is_not_a_provider():
+    """#7777 P1: excluding the bare id ``bar`` must not remove the distinct
+    valid model ``vendor/bar``. The slash is a provider separator only
+    when its prefix names a provider WebUI can render."""
+    assert _excluded("vendor/bar", ["bar"]) is False
+    # The exact ids still match.
+    assert _excluded("bar", ["bar"]) is True
+    assert _excluded("vendor/bar", ["vendor/bar"]) is True
+
+
+def test_slash_form_still_filters_a_known_provider():
+    """Control: when the prefix IS a renderable provider the slash form
+    keeps filtering the bare tail, matching the historical shape that
+    Hermes config's ``model.default`` uses."""
+    assert _excluded("openrouter/anthropic/claude", ["anthropic/claude", "openrouter"]) is True
+
+
+def test_slash_form_prefix_case_insensitive_for_known_providers():
+    """A known provider prefix matches case-insensitively (the registry
+    lookup lowercases), while the model tail stays case-preserving."""
+    assert _excluded("OpenRouter/anthropic/claude", ["anthropic/claude"]) is True
+    assert _excluded("OpenRouter/Anthropic/Claude", ["anthropic/claude"]) is False

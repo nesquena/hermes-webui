@@ -181,6 +181,8 @@ global.fetch = async (url) => {
 // ── evaluate the functions under test in this scope ──────────────────────
 eval(extractFunc('_bumpLiveModelFetchEpoch'));
 eval(extractFunc('_pickerExcludesForProvider'));
+eval(extractFunc('_collectKnownPickerProviders'));
+eval(extractFunc('_isKnownPickerProvider'));
 eval(extractFunc('_bareModelIdForExcludeMatch'));
 eval(extractFunc('_modelIsPickerExcluded'));
 eval(extractFunc('_ensureModelOptionInDropdown'));
@@ -312,6 +314,70 @@ function buildSelect(options) {
     const added = _addLiveModelsToSelect('openai', _liveModelCache['openai'], sel);
     out.added = added;
     out.optionValues = sel.options.map(o => o.value);
+  }
+
+  // ── #7777 re-gate scenarios ────────────────────────────────────────────
+  else if (scenario === 'r7777_colon_model_id_preserved') {
+    // P4: `@opencode-zen:vendor/model:1` — the model half legitimately
+    // contains a colon, so the prefix strip must not truncate it to `1`.
+    window._pickerExcludes = { 'opencode-zen': ['vendor/model:1', 'gpt-keep'] };
+    out.bare = _bareModelIdForExcludeMatch(
+      '@opencode-zen:vendor/model:1', _collectKnownPickerProviders());
+    out.excludedPrefixed = _modelIsPickerExcluded('@opencode-zen:vendor/model:1', 'opencode-zen');
+    out.excludedBareAlias = _modelIsPickerExcluded('vendor/model:1', 'opencode-zen');
+    out.keepStillVisible = _modelIsPickerExcluded('@opencode-zen:gpt-keep', 'opencode-zen') === false;
+  }
+
+  else if (scenario === 'r7777_case_folding_does_not_hide') {
+    // P5: the policy is case-preserving. A lowercase exclusion must not
+    // suppress the distinct catalog id MODEL-A.
+    window._pickerExcludes = { openai: ['model-a'] };
+    out.hidesLower = _modelIsPickerExcluded('model-a', 'openai');
+    out.hidesUpper = _modelIsPickerExcluded('MODEL-A', 'openai');
+    out.prefixedLower = _modelIsPickerExcluded('@openai:model-a', 'openai');
+    out.prefixedUpper = _modelIsPickerExcluded('@openai:MODEL-A', 'openai');
+  }
+
+  else if (scenario === 'r7777_slash_id_not_over_filtered') {
+    // P6: excluding the bare id `bar` must not remove the distinct valid
+    // model `vendor/bar` unless `vendor` is a provider the picker renders.
+    window._pickerExcludes = { openai: ['bar'] };
+    out.vendorBarHidden = _modelIsPickerExcluded('vendor/bar', 'openai');
+    out.bareBarHidden = _modelIsPickerExcluded('bar', 'openai');
+  }
+
+  else if (scenario === 'r7777_alias_exclusions_union') {
+    // P3: a settings.json can carry both `zai` and `z.ai`, each with its
+    // own slice of hides; the browser must union them.
+    window._pickerExcludes = { 'zai': ['shared-a'], 'z.ai': ['shared-b'] };
+    const canonical = _pickerExcludesForProvider('zai');
+    const aliasForm = _pickerExcludesForProvider('z.ai');
+    out.canonical = Array.from(canonical).sort();
+    out.aliasForm = Array.from(aliasForm).sort();
+  }
+
+  else if (scenario === 'r7777_all_excluded_stays_untouched') {
+    // P7: when EVERY option is excluded the fallback must not select the
+    // first (forbidden) option; the selection is left untouched.
+    window._pickerExcludes = { openai: ['gpt-a', 'gpt-b'] };
+    window._defaultModel = '';
+    window._activeProvider = 'openai';
+    const sel = buildSelect([{ group: { label: 'OpenAI', provider: 'openai', models: [{ id: 'gpt-a' }, { id: 'gpt-b' }] } }]);
+    const state = _applySessionModelFallback(sel);
+    out.state = state;
+    out.selValue = sel.value;
+  }
+
+  else if (scenario === 'r7777_excluded_fallback_skips_when_eligible_exists') {
+    // P7 control: with one eligible row present the fallback still lands on
+    // it rather than the excluded first option.
+    window._pickerExcludes = { openai: ['gpt-a'] };
+    window._defaultModel = '';
+    window._activeProvider = 'openai';
+    const sel = buildSelect([{ group: { label: 'OpenAI', provider: 'openai', models: [{ id: 'gpt-a' }, { id: 'gpt-keep' }] } }]);
+    const state = _applySessionModelFallback(sel);
+    out.state = state;
+    out.selValue = sel.value;
   }
 
   else if (scenario === 'fallback_skips_excluded_default') {
@@ -465,3 +531,75 @@ def test_add_live_models_drops_excluded_even_from_cache(driver_path):
     out = _run_scenario(driver_path, "add_live_models_drops_excluded")
     assert out["optionValues"] == ["gpt-keep", "gpt-new"]
     assert out["added"] == 1
+
+
+# ── #7777 re-gate: seven P1 findings ──────────────────────────────────────
+
+
+def test_r7777_colon_in_model_id_is_preserved(driver_path):
+    """P4 (Colon Model IDs Reappear): stripping at the FINAL colon turned
+    ``@opencode-zen:vendor/model:1`` into ``1``, so the browser never
+    recognised the configured exclusion and re-injected the model through
+    default / fallback / settings / live paths even though the server
+    filtered it. The prefix strip is provider-id aware, mirroring
+    ``api.config._strip_provider_prefix_from_model_id``."""
+    out = _run_scenario(driver_path, "r7777_colon_model_id_preserved")
+    assert out["bare"] == "vendor/model:1", out
+    assert out["excludedPrefixed"] is True, (
+        "the @provider:-prefixed rendering of an excluded id must stay hidden"
+    )
+    assert out["excludedBareAlias"] is True, (
+        "the bare form of the same id must stay hidden"
+    )
+
+
+def test_r7777_case_preserving_matching(driver_path):
+    """P5 (Case Folding Hides Models): the browser check lowercased the
+    candidate before comparing it with the unchanged exclusion set, so a
+    lowercase exclusion ``model-a`` suppressed the distinct catalog id
+    ``MODEL-A`` only in the browser — a valid server-provided option
+    disappeared from fallback and live-model paths."""
+    out = _run_scenario(driver_path, "r7777_case_folding_does_not_hide")
+    assert out["hidesLower"] is True
+    assert out["hidesUpper"] is False, out
+    assert out["prefixedLower"] is True
+    assert out["prefixedUpper"] is False, out
+
+
+def test_r7777_slash_id_is_not_over_filtered(driver_path):
+    """P6 (Slash IDs Are Over-Filtered): the browser compared everything
+    after the first slash with the exclusion set before checking whether
+    the prefix was a known provider, so excluding the bare id ``bar`` also
+    removed the distinct valid model ``vendor/bar`` from every producer."""
+    out = _run_scenario(driver_path, "r7777_slash_id_not_over_filtered")
+    assert out["bareBarHidden"] is True
+    assert out["vendorBarHidden"] is False, out
+
+
+def test_r7777_alias_exclusions_are_unioned(driver_path):
+    """P3 (Alias exclusions are dropped): settings persistence allows
+    ``zai`` and ``z.ai`` to coexist, each carrying a different slice of
+    hides. Looking up only the first matching list ignored the other and
+    let those models reappear in every catalog producer."""
+    out = _run_scenario(driver_path, "r7777_alias_exclusions_union")
+    assert out["canonical"] == ["shared-a", "shared-b"], out
+    assert out["aliasForm"] == ["shared-a", "shared-b"], out
+
+
+def test_r7777_all_excluded_fallback_leaves_selection_untouched(driver_path):
+    """P7 (Excluded fallback becomes active): the ``||``-fallback selected
+    the FIRST option when the eligibility scan found nothing, which is
+    exactly the forbidden model when every option is excluded. It then
+    became the active model state instead of leaving the picker without
+    an eligible model."""
+    out = _run_scenario(driver_path, "r7777_all_excluded_stays_untouched")
+    assert out["state"] is None, out
+    assert out["selValue"] != "gpt-a", out
+
+
+def test_r7777_fallback_still_selects_an_eligible_row(driver_path):
+    """Control for P7: with an eligible row present the fallback still
+    lands on it rather than the excluded first option — the fix removes
+    only the forbidden-activation path, not the fallback itself."""
+    out = _run_scenario(driver_path, "r7777_excluded_fallback_skips_when_eligible_exists")
+    assert out.get("selValue") == "gpt-keep", out

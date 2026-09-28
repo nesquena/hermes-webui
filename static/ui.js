@@ -5346,22 +5346,40 @@ function _pickerExcludesForProvider(providerId){
     const raw=window._pickerExcludes;
     if(!raw||typeof raw!=='object') return new Set();
     const pid=String(providerId||'').trim();
-    let value=null;
-    if(pid) value = (pid in raw) ? raw[pid] : (pid.toLowerCase() in raw ? raw[pid.toLowerCase()] : null);
-    if(!value && !pid){
-      // No provider context — union every provider's list (mirrors the
-      // server-side get_picker_excludes(None) aggregate).
-      const out=new Set();
-      for(const k of Object.keys(raw)){
-        const list=raw[k];
-        if(Array.isArray(list)) for(const m of list){ const s=String(m||'').trim(); if(s) out.add(s); }
+    // Union across every stored key that resolves to the requested
+    // provider's canonical id, mirroring the server's
+    // api.config.get_picker_excludes. A settings.json can carry BOTH
+    // ``zai`` and ``z.ai``, each with its own slice of hides; taking
+    // only the first match resurrected the models named under the other
+    // key (#7777 P1: "Alias exclusions are dropped").
+    const keys=[pid,pid.toLowerCase(),pid.replace(/\./g,''),pid.toLowerCase().replace(/\./g,'')];
+    const out=new Set();
+    const consume=(v)=>{
+      if(!Array.isArray(v)) return;
+      for(const m of v){ const s=String(m||'').trim(); if(s) out.add(s); }
+    };
+    for(const k of new Set(keys.filter(Boolean))){ if(k in raw) consume(raw[k]); }
+    if(pid){
+      // Also absorb every stored key that is a punctuation-variant of the
+      // requested id (z.ai / zai / ZAI), which is the whole alias family
+      // WebUI's provider slugs can be spelled with.
+      const norm=(k)=>String(k||'').trim().toLowerCase().replace(/[^a-z0-9]/g,'');
+      const target=norm(pid);
+      if(target){
+        for(const k of Object.keys(raw)){
+          if(k in raw&&norm(k)===target) consume(raw[k]);
+        }
       }
       return out;
     }
-    if(!Array.isArray(value)) return new Set();
-    const out=new Set();
-    for(const m of value){ const s=String(m||'').trim(); if(s) out.add(s); }
-    return out;
+    // No provider context — union every provider's list (mirrors the
+    // server-side get_picker_excludes(None) aggregate).
+    const all=new Set();
+    for(const k of Object.keys(raw)){
+      const list=raw[k];
+      if(Array.isArray(list)) for(const m of list){ const s=String(m||'').trim(); if(s) all.add(s); }
+    }
+    return all;
   }catch(_e){ return new Set(); }
 }
 /**
@@ -5370,13 +5388,58 @@ function _pickerExcludesForProvider(providerId){
  * colons — ``@custom:alpha:chat-a`` → ``chat-a``), mirroring
  * ``api.config._strip_provider_prefix_from_model_id``.
  */
-function _bareModelIdForExcludeMatch(modelId){
+function _bareModelIdForExcludeMatch(modelId, knownProviders){
   const value=String(modelId||'').trim();
   if(!value.startsWith('@')||!value.includes(':')) return value;
   const body=value.slice(1);
-  const idx=body.lastIndexOf(':');
-  if(idx<=0) return value;
-  return body.slice(idx+1);
+  const boundaries=[];
+  for(let i=0;i<body.length;i++){ if(body[i]===':') boundaries.push(i); }
+  // Longest (most specific) prefix first, mirroring the server's
+  // _strip_provider_prefix_from_model_id. Provider ids themselves can
+  // contain colons (a named custom provider is `custom:<slug>`), so the
+  // prefix boundary is NOT the last colon in the value.
+  for(const idx of boundaries.reverse()){
+    const candidate=body.slice(0,idx).trim();
+    if(!candidate) continue;
+    if(_isKnownPickerProvider(candidate,knownProviders)) return body.slice(idx+1).trim();
+  }
+  // Unknown provider id: strip the FIRST colon-delimited segment only,
+  // preserving the historical plain `@provider:model` behaviour.
+  const first=body.indexOf(':');
+  if(first<=0) return value;
+  return body.slice(first+1).trim();
+}
+/**
+ * #7507/#7777: the set of provider ids the picker can render, collected
+ * once per catalog load so the exclude matcher can tell a real provider
+ * prefix from a colon that belongs to the MODEL id itself
+ * (`@opencode-zen:vendor/model:1` — the model is `vendor/model:1`, not `1`).
+ */
+function _collectKnownPickerProviders(){
+  const out=new Set();
+  try{
+    const groups=(window._modelCatalogGroups&&Array.isArray(window._modelCatalogGroups))
+      ? window._modelCatalogGroups : [];
+    for(const g of groups){
+      const pid=g&&g.provider_id?String(g.provider_id).trim():'';
+      if(pid) out.add(pid);
+    }
+    const badges=window._configuredModelBadges||{};
+    for(const k of Object.keys(badges)){
+      const p=badges[k]&&badges[k].provider?String(badges[k].provider).trim():'';
+      if(p) out.add(p);
+    }
+    const active=window._activeProvider?String(window._activeProvider).trim():'';
+    if(active) out.add(active);
+  }catch(_e){}
+  return out;
+}
+function _isKnownPickerProvider(candidate,known){
+  const c=String(candidate||'').trim().toLowerCase();
+  if(!c) return false;
+  if(c.startsWith('custom:')) return true;
+  if(known&&typeof known.has==='function'&&known.has(c)) return true;
+  return false;
 }
 /**
  * #7507: true when *modelId* is on the per-provider picker exclude list
@@ -5388,10 +5451,34 @@ function _modelIsPickerExcluded(modelId, providerId){
   if(!excludes.size) return false;
   const value=String(modelId||'').trim();
   if(!value) return false;
+  // Exact, case-preserving match — the server policy is case-preserving and
+  // the browser must not hide a server-provided option by folding case
+  // (a lowercase exclusion `model-a` must not suppress `MODEL-A`; #7777 P1).
   if(excludes.has(value)) return true;
-  if(excludes.has(value.toLowerCase())) return true;
-  const bare=_bareModelIdForExcludeMatch(value);
-  return !!bare && (excludes.has(bare)||excludes.has(bare.toLowerCase()));
+  // `@provider:`-prefixed rendering: strip the COMPLETE provider prefix
+  // (provider ids can contain colons) before comparing, so an exclusion
+  // for the bare id still matches the prefixed rendering. The strip is
+  // provider-aware: only a boundary naming a real provider is stripped,
+  // which keeps a colon inside the MODEL id intact
+  // (`@opencode-zen:vendor/model:1` → `vendor/model:1`, #7777 P1).
+  if(value.startsWith('@')&&value.includes(':')){
+    const bare=_bareModelIdForExcludeMatch(value,_collectKnownPickerProviders());
+    if(bare&&excludes.has(bare)) return true;
+  }
+  // `provider/model` slash form (the shape config `model.default` uses).
+  // #7777 P1: the unconditional tail comparison kept hiding the distinct
+  // valid model `vendor/bar` from a bare-`bar` exclusion. Only a prefix
+  // that names a provider the picker actually renders may be treated as a
+  // provider separator; otherwise exact-ID matching stands.
+  if(value.includes('/')){
+    const slash=value.indexOf('/');
+    const head=value.slice(0,slash);
+    const tail=value.slice(slash+1);
+    if(head&&tail&&_isKnownPickerProvider(head,_collectKnownPickerProviders())){
+      if(excludes.has(tail)) return true;
+    }
+  }
+  return false;
 }
 function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId, opts){
   if(!modelId||!sel) return null;
@@ -5536,8 +5623,14 @@ function _applySessionModelFallback(sel){
   const first=sel.querySelector('optgroup > option, option');
   if(first){
     const allOptions=Array.from(sel.options||[]);
-    const eligibleLast=allOptions.find(o=>o&&!_excluded(String(o.value||''),_getOptionProviderId(o)))
-      || allOptions.find(o=>o&&String(o.value||'')===String(first.value||''));
+    // #7777 P1: the old `||`-fallback selected the FIRST option whenever
+    // the eligibility scan found nothing — and when every option is
+    // excluded that first option is exactly the forbidden model the user
+    // asked to hide, which then became the active selection. Use a single
+    // `find`: only an option that IS eligible may be applied. When the
+    // whole picker is filtered out, return null and let the caller leave
+    // the selection untouched rather than fighting the user's policy.
+    const eligibleLast=allOptions.find(o=>o&&!_excluded(String(o.value||''),_getOptionProviderId(o)));
     if(eligibleLast){
       sel.value=eligibleLast.value;
       if(sel.id==='modelSelect'){
@@ -5676,6 +5769,10 @@ async function populateModelDropdown(opts={}){
     const groups=usedConfiguredFallback
       ? _synthGroupsFromConfigured()
       : data.groups;
+    // #7777: expose the rendered provider set so the exclude matcher can
+    // tell a real provider prefix from a colon that belongs to the model id
+    // itself (see _collectKnownPickerProviders).
+    window._modelCatalogGroups=Array.isArray(groups)?groups:[];
     const willRetry=usedConfiguredFallback && requestedFreshness!=='session_visit' && !_modelCatalogFallbackRetried;
 
     if(!groups.length){
