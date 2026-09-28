@@ -1834,6 +1834,11 @@ def test_merge_inflight_dedup_skips_completed_assistant_to_find_last_user():
     previously returned false when it hit a non-live assistant, treating
     the inflight user as a new turn. It should continue past the completed
     assistant to find and dedup the real last user message.
+
+    The completed assistant is now KEPT in the base through the dedup/merge
+    check (greptile P2): the previous revision dropped it before the merge,
+    so the completed-assistant shape — exactly what loadSession hits after a
+    lost `done` event — was never exercised.
     """
     assert NODE, "node not on PATH"
     start = SESSIONS_JS.find("function _messageComparableText")
@@ -1844,11 +1849,11 @@ def test_merge_inflight_dedup_skips_completed_assistant_to_find_last_user():
 const assert = require('assert');
 {helper_src}
 
-// Case 1: INFLIGHT recovery path — base ends with completed assistant
-// loadSession calls _dropCurrentTurnAssistantMessages before _mergeInflightTailMessages
-// base = [user:q, assistant:ans] → after drop → [user:q]
-// inflight = [user:q, live assistant]
-// expected: 1 user row (deduped)
+// Case 1: INFLIGHT recovery path — base ends with a completed assistant and
+// the completed assistant REMAINS in the base through the merge (no drop).
+// base = [user:q, assistant:ans]   inflight = [user:q, live assistant(same text)]
+// expected: 1 user row (the reverse scan dedups past the assistant); the
+// completed assistant survives as the single assistant row.
 let base = [
   {{role:'user', content:'hello'}},
   {{role:'assistant', content:'answer'}},
@@ -1857,17 +1862,23 @@ let inflight = [
   {{role:'user', content:'hello'}},
   {{role:'assistant', _live:true, content:'answer'}},
 ];
-// Simulate loadSession: drop completed assistant, then merge
-base = _dropCurrentTurnAssistantMessages(base);
 let merged = _mergeInflightTailMessages(base, inflight);
 let users = merged.filter(m => m.role === 'user');
 assert.strictEqual(users.length, 1,
-  'After dropping completed assistant, dedup should work: expected 1 user, got ' + users.length);
+  'Completed assistant in base: dedup must still find the last user: expected 1 user, got ' + users.length);
+let assistants = merged.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants.length, 1,
+  'Completed assistant must remain the single assistant row: ' + JSON.stringify(assistants.map(a => a.content)));
+assert.strictEqual(assistants[0].content, 'answer');
+assert.strictEqual(assistants[0]._live, undefined);
 
-// Case 2: multi-turn base, INFLIGHT recovery path
-// base = [u1, a1, u2, a2] → after drop → [u1, a1, u2]
-// inflight = [u2, live assistant]
-// expected: 2 users (u2 deduped against base's last user)
+// Case 2: multi-turn base through the BARE merge helper.
+// The ownership gate lives in _prepareRunningLiveTail; this isolated helper
+// does not infer that a settled answer supersedes a divergent live row.
+// base = [u1, a1, u2, a2]   inflight = [u2, live assistant]
+// expected: u2 deduped against base's last user; both completed assistants
+// survive; the unmarked divergent live row is appended. The full recovery
+// path's prepare -> drop -> merge behavior is covered below.
 base = [
   {{role:'user', content:'first'}},
   {{role:'assistant', content:'first answer'}},
@@ -1878,7 +1889,6 @@ inflight = [
   {{role:'user', content:'second'}},
   {{role:'assistant', _live:true, content:'second answer live'}},
 ];
-base = _dropCurrentTurnAssistantMessages(base);
 merged = _mergeInflightTailMessages(base, inflight);
 users = merged.filter(m => m.role === 'user');
 assert.strictEqual(users.length, 2,
@@ -1886,6 +1896,11 @@ assert.strictEqual(users.length, 2,
 let lastUser = users[users.length - 1];
 assert.strictEqual(lastUser.content, 'second',
   'Last user should be "second", not "first"');
+assistants = merged.filter(m => m.role === 'assistant');
+assert.ok(assistants.some(a => a.content === 'second answer' && !a._live),
+  'Completed assistant for the second turn must remain in the base through the merge');
+assert.ok(assistants.some(a => a._live && a.content === 'second answer live'),
+  'Divergent live text stays as an appended row when no settled text supersedes it');
 
 // Case 3: genuinely new different prompt is preserved
 base = [
@@ -2427,6 +2442,164 @@ assert.strictEqual(users3.length, 2,
   'Genuinely new different prompt must be preserved: expected 2 users, got ' + users3.length);
 assert.strictEqual(users3[1].content, 'new turn different text',
   'The new prompt must survive the reverse-scan dedup');
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_deferred_save_preserves_current_live_turn_when_base_lacks_current_user():
+    """Greptile P1 (2026-09-27, sessions.js:4277): in deferred session-save
+    mode the persisted transcript can end with the PREVIOUS turn's settled
+    user+assistant while the CURRENT turn (current user + live partial) exists
+    only in the INFLIGHT snapshot. loadSession must NOT overwrite the live
+    row with that previous settled answer and then have the merge dedupe the
+    live row away — the current response would disappear.
+
+    Flow under test (the real loadSession recovery path): prepare -> (drop
+    only when prepared) -> merge.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// Deferred save: base persisted the PREVIOUS turn only. The current user +
+// live partial live in the INFLIGHT snapshot.
+// base = [u1 'previous question' (id u1), a1 'previous settled answer' (id a1)]
+// inflight = [u2 'current question' (id u2), live 'current live partial' (id la2)]
+let base = [
+  {{role:'user', content:'previous question', id:'u1', timestamp:1}},
+  {{role:'assistant', content:'previous settled answer', id:'a1'}},
+];
+let inflight = [
+  {{role:'user', content:'current question', id:'u2', timestamp:2}},
+  {{role:'assistant', _live:true, content:'current live partial', id:'la2'}},
+];
+let prepared = _prepareRunningLiveTail(base, inflight);
+assert.strictEqual(prepared, false,
+  'Deferred save: must not treat the previous answer as the live turn, drop stays inert');
+assert.strictEqual(inflight[1].content, 'current live partial',
+  'The live row must NOT be overwritten with the previous turn settled answer');
+if (prepared) {{ base = _dropCurrentTurnAssistantMessages(base); }}
+let merged = _mergeInflightTailMessages(base, inflight);
+let users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 2,
+  'Deferred save: previous turn user AND current turn user must both survive');
+assert.strictEqual(users[0].content, 'previous question');
+assert.strictEqual(users[1].content, 'current question');
+let assistants = merged.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants.length, 2,
+  'Deferred save: previous settled answer stays AND the current live row survives: ' +
+  JSON.stringify(assistants.map(a => a.content)));
+assert.strictEqual(assistants[0].content, 'previous settled answer');
+assert.ok(assistants[1]._live, 'The current turn row must still be the live assistant');
+assert.strictEqual(assistants[1].content, 'current live partial',
+  'The current response must keep its own live text, not the previous answer');
+
+// Var2: the live row carries NO id. At HEAD the overwritten live row was then
+// text-deduped against the previous settled answer and the current turn lost
+// its assistant entirely; it must survive with its own content instead.
+let base2 = [
+  {{role:'user', content:'previous question', id:'u1', timestamp:1}},
+  {{role:'assistant', content:'previous settled answer', id:'a1'}},
+];
+let inflight2 = [
+  {{role:'user', content:'current question', id:'u2', timestamp:2}},
+  {{role:'assistant', _live:true, content:'current live partial'}},
+];
+let prepared2 = _prepareRunningLiveTail(base2, inflight2);
+assert.strictEqual(prepared2, false);
+assert.strictEqual(inflight2[1].content, 'current live partial');
+if (prepared2) {{ base2 = _dropCurrentTurnAssistantMessages(base2); }}
+let merged2 = _mergeInflightTailMessages(base2, inflight2);
+let users2 = merged2.filter(m => m.role === 'user');
+assert.strictEqual(users2.length, 2, 'Var: both user rows survive');
+let assistants2 = merged2.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants2.length, 2,
+  'Var: previous settled answer AND the current live partial must both remain: ' +
+  JSON.stringify(assistants2.map(a => a.content)));
+assert.strictEqual(assistants2[1].content, 'current live partial',
+  'Var: the current response must not be vanished by text-deduping it to the previous answer');
+assert.strictEqual(assistants2[1]._live, true);
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_lost_done_divergent_live_with_distinct_id_not_left_visible():
+    """Greptile P1 (2026-09-27, sessions.js:4279): when a completed response
+    and a divergent stale live partial coexist after a lost `done` event, the
+    settled answer is authoritative and the stale live row must NOT remain
+    visible as a second assistant row — even when the live row carries its own
+    distinct id that `_sameTranscriptMessage`'s id-first comparison cannot
+    text-dedupe.
+
+    Flow under test: prepare -> (drop only when prepared) -> merge.
+    """
+
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// Lost done: base holds the settled answer for the CURRENT turn (same user),
+// inflight carries a divergent live partial with a DIFFERENT id. The settled
+// row is authoritative; the stale live row must not render as a second
+// assistant row.
+let base = [
+  {{role:'user', content:'hello', id:'u1', timestamp:1}},
+  {{role:'assistant', content:'authoritative settled answer', id:'a1'}},
+];
+let inflight = [
+  {{role:'user', content:'hello', id:'u1', timestamp:1}},
+  {{role:'assistant', _live:true, content:'stale divergent partial', id:'la1'}},
+];
+let prepared = _prepareRunningLiveTail(base, inflight);
+assert.strictEqual(prepared, false,
+  'Divergent live: must return false so the drop does not remove the settled answer');
+if (prepared) {{ base = _dropCurrentTurnAssistantMessages(base); }}
+let merged = _mergeInflightTailMessages(base, inflight);
+let assistants = merged.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants.length, 1,
+  'The stale divergent live row must not remain visible as a second assistant row: ' +
+  JSON.stringify(assistants.map(a => a.content)));
+assert.strictEqual(assistants[0].content, 'authoritative settled answer',
+  'The surviving assistant must be the authoritative settled answer');
+assert.strictEqual(assistants[0].id, 'a1');
+assert.strictEqual(assistants[0]._live, undefined);
+let users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 1, 'The inflight user must dedup against the base user');
+
+// Multi-turn variant: only the CURRENT turn loses its live row; the previous
+// settled pair stays intact.
+let base2 = [
+  {{role:'user', content:'first turn', id:'u1', timestamp:1}},
+  {{role:'assistant', content:'first answer', id:'a1'}},
+  {{role:'user', content:'second turn', id:'u2', timestamp:2}},
+  {{role:'assistant', content:'second turn settled answer', id:'a2'}},
+];
+let inflight2 = [
+  {{role:'user', content:'second turn', id:'u2', timestamp:2}},
+  {{role:'assistant', _live:true, content:'second turn stale partial', id:'la2'}},
+];
+let prepared2 = _prepareRunningLiveTail(base2, inflight2);
+assert.strictEqual(prepared2, false);
+if (prepared2) {{ base2 = _dropCurrentTurnAssistantMessages(base2); }}
+let merged2 = _mergeInflightTailMessages(base2, inflight2);
+let assistants2 = merged2.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants2.length, 2,
+  'Multi-turn: both settled answers survive; no stale live row appended');
+assert.strictEqual(assistants2[0].content, 'first answer');
+assert.strictEqual(assistants2[1].content, 'second turn settled answer');
+assert.ok(!assistants2.some(a => a._live), 'No live row may remain after the merge');
 """
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr

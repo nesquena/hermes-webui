@@ -4244,7 +4244,24 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
   if(!live) return false;
   const liveText=_messageComparableText(live);
   const persistedText=_currentTurnAssistantText(baseMessages);
-  if(persistedText){
+  // The persisted tail is only authoritative for the CURRENT turn when the
+  // base transcript also carries the current turn's user. In deferred
+  // session-save mode the base can end with the PREVIOUS turn's settled
+  // user+assistant while the current user + live partial exist only in the
+  // INFLIGHT snapshot. Reconciling the live row to that previous answer and
+  // letting the merge text-dedupe it away would make the current response
+  // disappear (#6649 greptile P1, "Current response can disappear").
+  const firstLiveIdx=inflight.findIndex(m=>m&&m._live);
+  let turnUser=null;
+  for(let i=firstLiveIdx-1;i>=0;i--){
+    const msg=inflight[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user'){turnUser=msg;break;}
+    if(String(msg.role||'')==='tool') continue;
+    break;
+  }
+  const settledBelongsToCurrentTurn=!!(turnUser&&_hasInflightTailUserDuplicate(baseMessages,turnUser));
+  if(persistedText&&settledBelongsToCurrentTurn){
     const compactPersisted=_compactTranscriptText(persistedText);
     const compactLive=_compactTranscriptText(liveText);
     if(!liveText || persistedText.startsWith(liveText)){
@@ -4272,11 +4289,24 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
   // response and the divergent live partial coexist on screen (#6649
   // greptile P1 follow-up: "Stale response remains visible" — the settled
   // row survives the drop but the merge then appends the stale partial
-  // beside it).
-  if(persistedText && _messageComparableText(live) !== persistedText){
+  // beside it). The _supersededBySettled marker covers the case where the
+  // live row carries its own distinct id: _sameTranscriptMessage's id-first
+  // comparison would fail the text-equality dedupe and re-append the row, so
+  // the merge drops flagged rows outright.
+  //
+  // When the base does NOT contain the current turn's user (deferred save),
+  // persistedText describes a PREVIOUS turn: never touch the live content,
+  // never drop base rows, and let the merge append the live turn as-is.
+  if(persistedText && settledBelongsToCurrentTurn && _messageComparableText(live) !== persistedText){
     live.content = persistedText;
+    live._supersededBySettled = true;
     return false;
   }
+  // Deferred save: the base ends with a PREVIOUS turn's settled tail, not a
+  // superseded copy of the current live turn. Returning true would make the
+  // loadSession drop remove that previous answer — never drop base rows when
+  // the persisted tail doesn't belong to the current turn.
+  if(persistedText && !settledBelongsToCurrentTurn) return false;
   return !!_messageComparableText(live);
 }
 
@@ -4290,7 +4320,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
   if(firstLiveIdx<0) return base;
   let start=firstLiveIdx;
   if(firstLiveIdx>0&&inflight[firstLiveIdx-1]&&inflight[firstLiveIdx-1].role==='user') start=firstLiveIdx-1;
-  const tail=inflight.slice(start).filter(m=>m&&m.role);
+  const tail=inflight.slice(start).filter(m=>m&&m.role&&!m._supersededBySettled);
   const merged=[...base];
   for(const msg of tail){
     let candidate=msg;
