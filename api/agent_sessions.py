@@ -390,9 +390,19 @@ def is_cli_session_row_visible(row: dict) -> bool:
     # number), so such a row can never clear this untitled threshold. Hiding it
     # would silently drop a real session from the sidebar because an old
     # schema lacks a column — an unseen data loss. Surface it instead.
-    if row.get("actual_user_message_count") is None and row.get(
-        "user_message_count"
-    ) is None and not row.get("messages"):
+    #
+    # But the escape must only apply while the total message count is itself
+    # ambiguous enough to hold the two user turns the threshold requires. A row
+    # that provably carries a single message cannot contain two user turns, so
+    # surfacing it would wrongly let a legacy one-turn stub pass the interactivity
+    # gate. The guard derives the count strictly from role-bearing rows in that
+    # case (which yields zero), keeping ambiguous legacy rows from inflating it.
+    if (
+        row.get("actual_user_message_count") is None
+        and row.get("user_message_count") is None
+        and not row.get("messages")
+        and message_count >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
+    ):
         return True
 
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT

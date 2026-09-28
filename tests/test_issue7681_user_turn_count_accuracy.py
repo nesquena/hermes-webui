@@ -798,3 +798,39 @@ def test_known_zero_turn_count_still_hides_untitled_cli_row():
 
     assert ags._count_user_turns(row) == 0
     assert ags.is_cli_session_row_visible(row) is False
+
+
+def test_legacy_single_message_untitled_cli_row_does_not_pass():
+    """#7681 finding: a single message must not clear the two-user-turn gate.
+
+    The unknown-schema escape surfaces untitled CLI rows whose turn count is
+    genuinely unknown (no ``role`` column), so a real session isn't hidden just
+    because an old schema lacks a column. But the escape must not let a row
+    that *provably* cannot contain two user turns through the threshold: a
+    legacy (roles-unavailable) untitled CLI session with exactly one message is
+    not an interactive two-turn conversation, so it must stay hidden just like
+    the known-zero path.
+
+    Revert-sensitive: broadening the escape to ignore ``message_count`` (or
+    dropping the count guard) makes this fail.
+    """
+    import api.agent_sessions as ags
+
+    row = {
+        "id": "cli_legacy_one_msg",
+        "actual_message_count": 1,       # joinable, but only one message
+        "message_count": 1,
+        "actual_user_message_count": None,  # no `role` column → unknown
+        "user_message_count": None,
+        "messages": [],                  # no sidecar fallback available
+        "ended_at": None,
+        "end_reason": None,
+        "source": "cli",
+        "source_tag": "cli",
+        "title": None,                   # untitled → hits the threshold branch
+    }
+
+    assert ags._count_user_turns(row) == 0
+    # One message cannot contain the two user turns required by the untitled
+    # CLI threshold, so an unknown count must still resolve to *hidden* here.
+    assert ags.is_cli_session_row_visible(row) is False
