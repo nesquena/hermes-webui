@@ -316,3 +316,164 @@ class TestSettingsSearchReviewFixes:
         assert "++_settingsSearchSeq" in body, (
             "the outside-click dismiss handler must bump _settingsSearchSeq"
         )
+
+    def test_result_click_handler_invalidates_deferred_dynamic_loader(self):
+        """Clicking a search result must bump _settingsSearchSeq so in-flight
+        deferred dynamic loaders cannot resurrect/repopulate the dismissed dropdown."""
+        idx = PANELS_JS.find("function _renderSettingsResults")
+        assert idx >= 0, "_renderSettingsResults not found"
+        body = PANELS_JS[idx:idx + 2500]
+        click_idx = body.find("item.addEventListener('click'")
+        assert click_idx >= 0, "item click listener not found"
+        click_handler = body[click_idx:click_idx + 300]
+        assert "++_settingsSearchSeq" in click_handler, (
+            "item click handler must bump _settingsSearchSeq to invalidate pending dynamic loaders"
+        )
+
+    def test_behavioral_deferred_loader_selection_race(self):
+        """Behavioral deferred-loader test:
+        1. starts filterSettings('Theme') without awaiting it;
+        2. proves the Theme row is visible while dynamic loader promise is pending;
+        3. clicks that provisional row through fake event listener;
+        4. releases the loaders and awaits completion;
+        5. verifies input stays empty and results remain hidden and childless.
+        """
+        import shutil
+        import subprocess
+        import json
+
+        node = shutil.which("node")
+        if not node:
+            return
+
+        test_script = """
+        let _settingsSearchSeq = 0;
+        let _settingsDynamicPromise = null;
+        let _settingsIndex = [
+          {
+            sectionKey: 'appearance',
+            label: 'Theme',
+            i18nKey: 'settings_theme',
+            titleText: 'theme',
+            valueText: 'dark',
+            descriptionText: 'theme color',
+            searchBlob: 'theme dark theme color',
+            _settingsSearchIndex: 0
+          }
+        ];
+
+        let _innerHTML = '';
+        let resultsEl = {
+          style: { display: 'none' },
+          get innerHTML() { return _innerHTML; },
+          set innerHTML(val) {
+            _innerHTML = val;
+            if (val === '') this.children = [];
+          },
+          children: [],
+          appendChild(child) { this.children.push(child); }
+        };
+
+        let inputEl = { value: 'Theme' };
+
+        function $(id) {
+          if (id === 'settingsSearchResults') return resultsEl;
+          if (id === 'settingsSearch') return inputEl;
+          return null;
+        }
+
+        function t(k) { return k; }
+        function esc(s) { return s; }
+        function _navigateToSettingsField(m) {}
+
+        function _scoreSettingsSearchMatch(entry, q) {
+          if (entry.label.toLowerCase().includes(q.toLowerCase())) {
+            return { bucketIndex: 0, matchIndex: 0 };
+          }
+          return null;
+        }
+
+        async function _buildSettingsIndex() {}
+
+        const document = {
+          createElement(tag) {
+            return {
+              type: tag,
+              className: '',
+              innerHTML: '',
+              listeners: {},
+              addEventListener(ev, fn) { this.listeners[ev] = fn; },
+              click() { if (this.listeners['click']) this.listeners['click'](); }
+            };
+          }
+        };
+
+        // Extract filterSettings and _renderSettingsResults directly from panels.js
+        """
+        # Let's extract the actual functions from PANELS_JS
+        f_start = PANELS_JS.find("async function filterSettings(query)")
+        f_end = PANELS_JS.find("function _scoreSettingsSearchMatch", f_start)
+        assert f_start >= 0 and f_end >= 0
+        actual_js = PANELS_JS[f_start:f_end]
+
+        driver = test_script + "\n" + actual_js + """
+        (async () => {
+          let releaseLoader = null;
+          _settingsDynamicPromise = new Promise(resolve => { releaseLoader = resolve; });
+
+          // 1. start filterSettings('Theme') without awaiting
+          const filterPromise = filterSettings('Theme');
+
+          // Wait microtask so Phase 1 synchronous render executes
+          await Promise.resolve();
+
+          // 2. prove Theme row is visible while loader is unresolved
+          const visibleBefore = (resultsEl.style.display !== 'none');
+          const childCountBefore = resultsEl.children.length;
+          const firstChild = resultsEl.children[0];
+
+          // 3. click provisional row
+          firstChild.click();
+
+          const hiddenAfterClick = (resultsEl.style.display === 'none');
+          const emptyAfterClick = (inputEl.value === '');
+          const childCountAfterClick = resultsEl.children.length;
+
+          // Add a new dynamic item to index to see if it repopulates
+          _settingsIndex.push({
+            sectionKey: 'providers',
+            label: 'Provider Theme Extra',
+            _settingsSearchIndex: 1
+          });
+
+          // 4. release loaders and await completion
+          releaseLoader();
+          await filterPromise;
+
+          // 5. verify input stays empty and results remain hidden and childless
+          const hiddenAtEnd = (resultsEl.style.display === 'none');
+          const emptyAtEnd = (inputEl.value === '');
+          const childCountAtEnd = resultsEl.children.length;
+
+          process.stdout.write(JSON.stringify({
+            visibleBefore,
+            childCountBefore,
+            hiddenAfterClick,
+            emptyAfterClick,
+            hiddenAtEnd,
+            emptyAtEnd,
+            childCountAtEnd
+          }));
+        })();
+        """
+
+        res = subprocess.run([node, "-e", driver], capture_output=True, text=True, check=True)
+        data = json.loads(res.stdout)
+        assert data["visibleBefore"] is True
+        assert data["childCountBefore"] == 1
+        assert data["hiddenAfterClick"] is True
+        assert data["emptyAfterClick"] is True
+        assert data["hiddenAtEnd"] is True
+        assert data["emptyAtEnd"] is True
+        assert data["childCountAtEnd"] == 0
+
