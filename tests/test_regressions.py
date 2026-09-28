@@ -2258,6 +2258,48 @@ def test_reconcile_agent_command_transcript_refuses_profile_or_session_mismatch(
     assert len(out["toasts"]) == 2
 
 
+def test_reconcile_agent_command_transcript_passes_owner_profile_to_load_guard():
+    """A profile switch while loading must be fenced by loadSession itself."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    result_id = _js_block(source, "function _agentCommandResultId(result){", "\nasync function _reconcileAgentCommandTranscript")
+    reconcile = _js_block(source, "async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){", "\nasync function resolveBundleCommand")
+    script = textwrap.dedent(
+        """
+        const S={session:{session_id:'sid-A'},activeProfile:'default',messages:[]};
+        let receivedOptions=null;
+        const showToast=()=>{};
+        const _profileMatchesActiveProfile=(owner,active)=>owner===active;
+        const loadSession=async(_sid,opts)=>{
+          receivedOptions=opts;
+          S.activeProfile='other-profile';
+          if(!opts.ownerProfile||!_profileMatchesActiveProfile(opts.ownerProfile,S.activeProfile))return;
+          S.messages=[{role:'assistant',_webui_command_id:'command-1'}];
+        };
+        %(result_id)s
+        %(reconcile)s
+        (async()=>{
+          const reconciled=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          console.log(JSON.stringify({reconciled,receivedOptions,messages:S.messages}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"result_id": result_id, "reconcile": reconcile}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["reconciled"] is False
+    assert out["receivedOptions"]["ownerProfile"] == "default"
+    assert out["messages"] == []
+
+
 def _run_webui_plugin_command_scenario(*, reject=False):
     """Run the real awaited plugin-command branch while ownership changes."""
     import json

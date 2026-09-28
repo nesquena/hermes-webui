@@ -607,7 +607,12 @@ async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){
   try{
     // The server transcript owns both rows. Reload it rather than appending a
     // second browser-owned assistant result beside a pending/final server row.
-    await loadSession(ownerSid,{force:true,preserveActiveInput:true,commandReconcileId:commandId});
+    await loadSession(ownerSid,{
+      force:true,
+      preserveActiveInput:true,
+      commandReconcileId:commandId,
+      ownerProfile:ownerProfile,
+    });
     return !!(S&&Array.isArray(S.messages)&&S.messages.some((message)=>
       message&&message.role==='assistant'
       &&String(message._webui_command_id||'')===commandId
