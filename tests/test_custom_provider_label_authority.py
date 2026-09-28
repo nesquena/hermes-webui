@@ -242,6 +242,82 @@ def test_prewarmed_row_honors_explicit_label_equal_to_id(live_endpoint, _sync_re
     )
 
 
+def test_unnamed_active_endpoint_live_row_takes_configured_label(
+    live_endpoint, _sync_rebuild
+):
+    """Deep-review 2026-09-27, defect 1: an UNNAMED custom_providers[] entry
+    whose endpoint IS the active ``model.base_url``. Its live rows land in
+    ``auto_detected_models_by_provider["custom"]`` and reach the generic
+    Custom group through the provider-specific list — a configured allowlist
+    that only fed the global fallback list never beat them. The configured
+    label must be applied to that provider-specific list itself."""
+    _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}
+    result = _models_with_cfg(
+        model_cfg={"provider": "custom", "base_url": live_endpoint},
+        custom_providers=[
+            {
+                "base_url": live_endpoint,  # no name — the unnamed topology
+                "models": [{"id": "model-a", "label": "Operator Label"}],
+            }
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom", "model-a")
+    assert row is not None, "live row must appear in the generic Custom group"
+    assert row["label"] == "Operator Label", (
+        "configured label must win on the unnamed active-endpoint live path, "
+        f"got {row['label']!r}"
+    )
+
+
+def test_unnamed_live_row_without_config_label_keeps_endpoint_label(
+    live_endpoint, _sync_rebuild
+):
+    """No operator label supplied: the endpoint label survives untouched —
+    the merge must not invent authority the config never granted."""
+    _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}
+    result = _models_with_cfg(
+        model_cfg={"provider": "custom", "base_url": live_endpoint},
+        custom_providers=[
+            {"base_url": live_endpoint, "models": ["model-a"]}  # bare id
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom", "model-a")
+    assert row is not None
+    assert row["label"] == "Endpoint Label"
+
+
+def test_mixed_named_and_unnamed_entries_label_their_own_groups(
+    live_endpoint, _sync_rebuild
+):
+    """A named entry's labels are consumed on its own named path and must
+    never re-voice the generic Custom group — and vice versa."""
+    _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}
+    result = _models_with_cfg(
+        model_cfg={"provider": "custom", "base_url": live_endpoint},
+        custom_providers=[
+            {
+                "base_url": live_endpoint,  # unnamed, IS the active endpoint
+                "models": [{"id": "model-a", "label": "Operator Label"}],
+            },
+            {
+                "name": "MyGateway",  # named, different endpoint
+                "base_url": "http://gateway.invalid:9999/v1",
+                "models": [{"id": "other-model", "label": "Gateway Label"}],
+            },
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom", "model-a")
+    assert row is not None
+    assert row["label"] == "Operator Label", (
+        f"unnamed entry's label must win in the Custom group, got {row['label']!r}"
+    )
+    named = _row_by_model_id(result.get("groups", []), "custom:mygateway", "other-model")
+    assert named is not None
+    assert named["label"] == "Gateway Label", (
+        f"named entry's own group must keep its label, got {named['label']!r}"
+    )
+
+
 def test_prewarmed_row_ignores_label_from_ignored_later_duplicate(live_endpoint, _sync_rebuild):
     """Deep-review 2026-08-20, hot path: a later labeled dict duplicating a
     bare-string first occurrence is IGNORED by the ids walker, so its label

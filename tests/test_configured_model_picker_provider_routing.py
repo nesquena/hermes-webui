@@ -35,7 +35,21 @@ function extractFunction(source, name) {
   throw new Error('unterminated: ' + name);
 }
 
+function extractConstDotted(name) {
+  // Single-line top-level const, re-spelled var so sloppy-mode eval'd
+  // functions can reach it (lexical consts stay inside eval's own scope).
+  const re = new RegExp('^const ' + name + '=.*$', 'm');
+  const m = uiSrc.match(re);
+  if (!m) throw new Error('not found: ' + name);
+  return m[0].replace(/^const /, 'var ');
+}
+
+eval(extractConstDotted('_PY_WS_CLASS'));
+eval(extractConstDotted('_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConstDotted('_CUSTOM_SLUG_HOST_REJECT_RE'));
 eval([
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
   '_getOptionProviderId',
   '_providerFromModelValue',
   '_modelPickerOptionIdentity',
@@ -48,6 +62,7 @@ eval([
 
 globalThis._refreshOpenModelDropdown = () => {};
 globalThis.syncModelChip = () => {};
+globalThis._dynamicProviderIds = {};
 
 globalThis.document = {
   createElement(tag) {
@@ -64,6 +79,9 @@ globalThis.getModelLabel = value => String(value || '');
 globalThis.window = { _configuredModelBadges: {
   '@custom:backup:model-a': {provider: 'custom:backup', role: 'fallback', label: 'Fallback 1'},
 } };
+// The identity heuristics delegate to the shared parser (#6657), which reads
+// the server-reported provider-id set; empty here = pure shape grammar.
+globalThis._dynamicProviderIds = {};
 
 const primary = {
   value: 'model-a',
@@ -185,10 +203,25 @@ function extractFunction(source, name) {
   throw new Error('unterminated: ' + name);
 }
 
+function extractConstDotted(name) {
+  // Single-line top-level const, re-spelled var so sloppy-mode eval'd
+  // functions can reach it (lexical consts stay inside eval's own scope).
+  const re = new RegExp('^const ' + name + '=.*$', 'm');
+  const m = uiSrc.match(re);
+  if (!m) throw new Error('not found: ' + name);
+  return m[0].replace(/^const /, 'var ');
+}
+
+eval(extractConstDotted('_PY_WS_CLASS'));
+eval(extractConstDotted('_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConstDotted('_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval(extractFunction(uiSrc, '_customSlugIsEndpointAuthority'));
+eval(extractFunction(uiSrc, '_parseQualifiedCustomId'));
 eval([
   '_getOptionProviderId',
   '_providerFromModelValue',
   '_modelStateForSelect',
+  '_modelProviderForSend',
 ].map(name => extractFunction(uiSrc, name)).join('\n'));
 
 globalThis.document = {
@@ -204,6 +237,10 @@ globalThis.document = {
 };
 globalThis.getModelLabel = value => String(value || '');
 globalThis.window = { _configuredModelBadges: {} };
+globalThis.S = { session: null };  // _modelProviderForSend reads S.session
+// The identity heuristics delegate to the shared parser (#6657), which reads
+// the server-reported provider-id set; empty here = pure shape grammar.
+globalThis._dynamicProviderIds = {};
 
 const group = {tagName: 'OPTGROUP', dataset: {provider: 'custom:hetmer.net'}};
 const luna = {
@@ -245,12 +282,59 @@ const select = {
   set value(value) {},
 };
 
+// Reviewer identity cases (deep-review 2026-09-27): a single-label LAN host
+// and a bracketed-IPv6 endpoint must parse to the SAME provider/model split
+// pre-hydration (no option metadata at all) and when hydrated, for both the
+// persisted state and the send path.
+const hostPortGroup = {tagName: 'OPTGROUP', dataset: {provider: 'custom:llm:8080'}};
+const qwen3opt = {
+  value: '@custom:llm:8080:qwen3',
+  textContent: 'qwen3',
+  dataset: {},  // normal catalog render path — no data-model
+  parentElement: hostPortGroup,
+};
+const hostPortSelect = {
+  id: 'modelSelect',
+  options: [qwen3opt],
+  querySelectorAll() { return []; },
+  get selectedOptions() { return [qwen3opt]; },
+  get value() { return qwen3opt.value; },
+  set value(value) {},
+};
+const ipv6Group = {tagName: 'OPTGROUP', dataset: {provider: 'custom:[::1]:11434'}};
+const qwen3v6opt = {
+  value: '@custom:[::1]:11434:qwen3',
+  textContent: 'qwen3',
+  dataset: {},
+  parentElement: ipv6Group,
+};
+const ipv6Select = {
+  id: 'modelSelect',
+  options: [qwen3v6opt],
+  querySelectorAll() { return []; },
+  get selectedOptions() { return [qwen3v6opt]; },
+  get value() { return qwen3v6opt.value; },
+  set value(value) {},
+};
+
 process.stdout.write(JSON.stringify({
   nonDefault: _modelStateForSelect(select, '@custom:hetmer.net:sol'),
   defaultUnprefixed: _modelStateForSelect(select, 'luna'),
   colonBearingModel: _modelStateForSelect(select, '@custom:hetmer.net:model-a:free'),
   localhostEndpoint: _modelStateForSelect(select, '@custom:localhost:11434:llama3.2'),
   missingOptionCustomInput: _modelStateForSelect(select, '@custom:localhost:11434:mistral-custom'),
+  preHydrationHostPort: {
+    provider: _providerFromModelValue('@custom:llm:8080:qwen3'),
+    model: _parseQualifiedCustomId('@custom:llm:8080:qwen3').model,
+  },
+  hydratedHostPort: _modelStateForSelect(hostPortSelect, '@custom:llm:8080:qwen3'),
+  sentHostPort: _modelProviderForSend('@custom:llm:8080:qwen3'),
+  preHydrationIpv6: {
+    provider: _providerFromModelValue('@custom:[::1]:11434:qwen3'),
+    model: _parseQualifiedCustomId('@custom:[::1]:11434:qwen3').model,
+  },
+  hydratedIpv6: _modelStateForSelect(ipv6Select, '@custom:[::1]:11434:qwen3'),
+  sentIpv6: _modelProviderForSend('@custom:[::1]:11434:qwen3'),
 }));
 """
 
@@ -295,6 +379,29 @@ def test_non_default_named_custom_provider_model_strips_qualified_prefix():
         "model": "mistral-custom",
         "model_provider": "custom:localhost:11434",
     }
+    # Deep-review 2026-09-27, #6657 defect 2: the single-label host and the
+    # bracketed-IPv6 endpoint must split the SAME way pre-hydration (no
+    # option metadata) and when hydrated — state and send included. The
+    # legacy localhost/dotted-only heuristics parsed `@custom:llm:8080:qwen3`
+    # as provider `custom:llm` and collapsed the IPv6 provider even earlier.
+    assert payload["preHydrationHostPort"] == {
+        "provider": "custom:llm:8080",
+        "model": "qwen3",
+    }
+    assert payload["hydratedHostPort"] == {
+        "model": "qwen3",
+        "model_provider": "custom:llm:8080",
+    }
+    assert payload["sentHostPort"] == "custom:llm:8080"
+    assert payload["preHydrationIpv6"] == {
+        "provider": "custom:[::1]:11434",
+        "model": "qwen3",
+    }
+    assert payload["hydratedIpv6"] == {
+        "model": "qwen3",
+        "model_provider": "custom:[::1]:11434",
+    }
+    assert payload["sentIpv6"] == "custom:[::1]:11434"
 
 
 # Round-trip: send -> persist -> restore for a colon-bearing named

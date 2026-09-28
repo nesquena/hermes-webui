@@ -24,6 +24,14 @@ function extract(name){
   }
   throw new Error('unterminated '+name);
 }
+function extractConst(name){
+  // Single-line top-level const, re-spelled var so sloppy-mode eval'd
+  // functions can reach it (same trick as test_custom_provider_label_grammar).
+  const re=new RegExp('^const '+name+'=.*$','m');
+  const m=src.match(re);
+  if(!m) throw new Error('missing '+name);
+  return m[0].replace(/^const /,'var ');
+}
 class Node {
   constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.parentElement=null;this._value='';this.textContent='';this.id='';}
   appendChild(child){child.parentElement=this;this.children.push(child);return child;}
@@ -44,10 +52,19 @@ const document={createElement:tag=>new Node(tag)};
 const window={_configuredModelBadges:{},_activeProvider:'custom:cpa'};
 const S={session:null};
 const _dynamicModelLabels={};
+const _dynamicProviderIds={};
 const _liveModelFetchPending=new Set();
 const $=()=>null;
 const getModelLabel=value=>value;
 const syncModelChip=()=>{};
+// The identity heuristics delegate to the shared two-half parser
+// (deep-review 2026-09-27), which needs the endpoint-authority predicate
+// and its module-level regexes in scope first.
+eval(extractConst('_PY_WS_CLASS'));
+eval(extractConst('_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConst('_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval(extract('_customSlugIsEndpointAuthority'));
+eval(extract('_parseQualifiedCustomId'));
 for(const name of ['_getOptionProviderId','_providerFromModelValue','_modelPickerOptionIdentity','_deduplicateModelPickerOptions','_modelStateForSelect','_findModelInDropdown','_refreshOpenModelDropdown','_applyModelToDropdown','_ensureModelOptionInDropdown','_addLiveModelsToSelect']) eval(extract(name));
 function makeSelect(selected){
   const sel=new Node('select');sel.id='modelSelect';

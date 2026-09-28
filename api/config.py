@@ -2868,7 +2868,12 @@ def _parse_provider_qualified_model_id(
        (``_known_custom_provider_slugs``), only when no named slug matched —
        endpoint-only providers (no ``name``) keep routing through
        ``custom:<host>:<port>``.
-    3. Otherwise the shape grammar above: rsplit at the last colon, then peel one
+    3. Generic slash lane, on the fallback path no tier claimed: when the
+       pre-tag segment after ``custom:`` contains ``/``, the whole remainder
+       is the model under the bare ``custom`` provider — a slug can never
+       contain ``/``, so ``@custom:ollamacloud/qwen3.5:397b`` keeps
+       ``ollamacloud/qwen3.5:397b`` whole (deep-review 2026-09-27).
+    4. Otherwise the shape grammar above: rsplit at the last colon, then peel one
        segment back unless what remains after ``custom:`` is an endpoint
        authority.
 
@@ -2917,6 +2922,28 @@ def _parse_provider_qualified_model_id(
                 bare = ":".join(segments[cut:])
                 if bare and prefix.lower() in known_slugs:
                     return bare, prefix
+    # Generic slash lane — the fallback path (deep-review 2026-09-27, #6657
+    # defect 3), reached by every ``custom:`` hint no configured slug tier
+    # claimed: 2-colon ids like ``@custom:ollamacloud/qwen3.5:397b`` (the
+    # tier block above never runs for them) and multi-colon ids no tier
+    # matched. The trigger is a ``/`` in the FIRST segment (before the first
+    # colon): a slug can never contain ``/`` (the name-derived slug regex
+    # and the endpoint host reject class both exclude it), and the #7240
+    # producer emits ``/``-bearing model ids on the plain lane WITHOUT the
+    # ``@`` prefix — so such an id was never ``<slug>:<model>`` and the
+    # whole remainder after ``custom:`` is the model under the bare
+    # ``custom`` provider, never an rsplit into provider
+    # ``custom:ollamacloud/qwen3.5`` with model ``397b``. A slash in a LATER
+    # segment keeps the #1776 peel: ``@custom:omni:kg/stepfun/...:free``
+    # resolves under ``custom:omni`` (named tier first when configured),
+    # and endpoint authorities keep vendor-slash models via the endpoint
+    # tier or the peel — ``@custom:gw:8080:vendor/qwen:free`` stays under
+    # ``custom:gw:8080``.
+    if inner.startswith("custom:"):
+        _rest = inner[len("custom:"):]
+        _first_colon = _rest.find(":")
+        if _first_colon > 0 and "/" in _rest[:_first_colon]:
+            return _rest, "custom"
     provider_hint, bare_model = inner.rsplit(":", 1)
     if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
         _slug_rest = provider_hint[len("custom:"):]
@@ -9921,11 +9948,46 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 api_key=api_key,
                 trusted_base_urls=tuple(_trusted_custom_bases),
             )
+            provider_key = provider.lower()
             for auto_model in _active_endpoint_models:
                 auto_detected_models.append(auto_model)
-                provider_key = provider.lower()
                 auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
                 detected_providers.add(provider_key)
+
+            # Label authority for the ACTIVE endpoint's live rows (deep-review
+            # 2026-09-27, #6657 defect 1). ``auto_detected_models_by_provider``
+            # is keyed by provider id: an unnamed active endpoint stores its
+            # rows under the bare ``custom`` key, and those rows reach the
+            # Custom picker group via the provider-specific list — a
+            # configured allowlist that only feeds the GLOBAL
+            # ``auto_detected_models`` fallback list never beats them. (Rows
+            # under a NAMED slug key pass through the named-entry loop
+            # below, which already applies ``_cp_label_map``.) The merge is
+            # scoped to that bare-``custom`` topology and reads ONLY unnamed
+            # ``custom_providers[]`` entries — a named entry's labels are
+            # consumed on its own named path, so they can never double-voice
+            # the generic Custom group. ``provider`` is read after the
+            # loopback/private sniff above, so the key matches the key the
+            # rows were stored under in the loop above. First-entry
+            # authority stays with the existing first-occurrence walkers
+            # (``_seen_custom_ids`` / ``_configured_model_ids``); this merge
+            # never reorders or re-decides which entry owns a label.
+            _active_cfg_label_map: dict[str, str] = {}
+            if provider_key == "custom":
+                for _map_entry in _custom_provider_entries(cfg):
+                    if str(_map_entry.get("name") or "").strip():
+                        continue
+                    if not str(_map_entry.get("base_url") or "").strip():
+                        continue
+                    for _mid, _lbl in _configured_model_label_overrides(
+                        _map_entry.get("models")
+                    ).items():
+                        _active_cfg_label_map.setdefault(_mid, _lbl)
+            if _active_cfg_label_map:
+                for _row in auto_detected_models_by_provider.get(provider_key, []):
+                    _row_id = str(_row.get("id") or "").strip()
+                    if _row_id in _active_cfg_label_map:
+                        _row["label"] = _active_cfg_label_map[_row_id]
 
         _custom_providers_cfg = cfg.get("custom_providers", [])
         _named_custom_groups: dict = {}

@@ -3177,23 +3177,14 @@ function _getOptionProviderId(opt){
   }
   const value=String(opt.value||'');
   if(value.startsWith('@') && value.includes(':')){
-    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
-    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
-    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    // Shared qualified-ID grammar (mirror of api/config.py:
+    // _parse_provider_qualified_model_id via _parseQualifiedCustomId) — the
+    // provider half comes from the SAME parse the backend route and the
+    // label use, so a pre-hydration identity cannot disagree with the
+    // catalog (#6657). Covers endpoint authorities (custom:llm:8080),
+    // bracketed IPv6, named slugs and the generic slash lane.
     if(value.startsWith('@custom:')){
-      const afterCustom=value.substring('@custom:'.length);
-      const parts=afterCustom.split(':');
-      if(parts.length>=3 && /^\d+$/.test(parts[1])){
-        const port=parseInt(parts[1], 10);
-        const host=parts[0];
-        const hl=host.toLowerCase();
-        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
-          return 'custom:'+host+':'+parts[1];
-        }
-      }
-      const firstColon=afterCustom.indexOf(':');
-      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
-      return 'custom:'+afterCustom;
+      return _parseQualifiedCustomId(value).provider;
     }
     // Other @provider:model — provider is up to first colon
     return value.slice(1,value.indexOf(':'));
@@ -3203,23 +3194,10 @@ function _getOptionProviderId(opt){
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
   if(value.startsWith('@')&&value.includes(':')){
-    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
-    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
-    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    // Same shared grammar as _getOptionProviderId — one parse for state,
+    // send and identity (#6657).
     if(value.startsWith('@custom:')){
-      const afterCustom=value.substring('@custom:'.length);
-      const parts=afterCustom.split(':');
-      if(parts.length>=3 && /^\d+$/.test(parts[1])){
-        const port=parseInt(parts[1], 10);
-        const host=parts[0];
-        const hl=host.toLowerCase();
-        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
-          return 'custom:'+host+':'+parts[1];
-        }
-      }
-      const firstColon=afterCustom.indexOf(':');
-      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
-      return 'custom:'+afterCustom;
+      return _parseQualifiedCustomId(value).provider;
     }
     // Other @provider:model — provider is up to first colon
     return value.slice(1,value.indexOf(':'));
@@ -3234,19 +3212,9 @@ function _modelPickerOptionIdentity(modelId, providerId){
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
       value=value.substring(exactPrefix.length);
     }else if(value.startsWith('@custom:')){
-      const afterCustom=value.substring('@custom:'.length);
-      const parts=afterCustom.split(':');
-      let splitAt=-1;
-      if(parts.length>=3 && /^\d+$/.test(parts[1])){
-        const port=parseInt(parts[1], 10);
-        const host=parts[0];
-        const hl=host.toLowerCase();
-        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
-          splitAt=parts[0].length + 1 + parts[1].length;
-        }
-      }
-      if(splitAt<0) splitAt=afterCustom.indexOf(':');
-      value=splitAt>=0 ? afterCustom.substring(splitAt+1) : afterCustom;
+      // Same shared grammar — the identity keeps the model half of the ONE
+      // parse shared with label, state and send (#6657).
+      value=_parseQualifiedCustomId(value).model;
     }else{
       value=value.substring(value.indexOf(':')+1);
     }
@@ -7752,55 +7720,61 @@ function _customSlugIsEndpointAuthority(rest){
   return !(host.startsWith('-') || host.endsWith('-') || host.startsWith('.'));
 }
 
-function _customModelFromQualifiedId(rawId){
-  // Shared qualified-ID grammar — mirror of api/config.py:
-  // _parse_provider_qualified_model_id (see its docstring for the grammar).
-  // The provider segment may itself contain colons (host:port endpoints) and
-  // the model segment may too (":free" tags), so a blind first/last-colon split
-  // misparses both.
+function _parseQualifiedCustomId(rawId){
+  // ONE split for a @custom:<provider>:<model> id into both halves — mirror of
+  // api/config.py: _parse_provider_qualified_model_id (order documented there).
+  // Consumers needing only the model keep _customModelFromQualifiedId; the
+  // state/send identity paths (_getOptionProviderId, _providerFromModelValue,
+  // _modelPickerOptionIdentity) consume BOTH halves from here so a pre-
+  // hydration parse can never disagree with the backend route (#6657):
+  //   1. authoritative provider id the server reported (_dynamicProviderIds)
+  //   2. generic slash lane — a slug never contains '/', so a '/' in the
+  //      pre-tag segment puts the WHOLE remainder under provider `custom`
+  //      (@custom:ollamacloud/qwen3.5:397b -> custom / ollamacloud/qwen3.5:397b)
+  //   3. shape grammar: last-colon rsplit, peeling one segment back unless the
+  //      slug rest is an endpoint authority (_customSlugIsEndpointAuthority)
   const rest=rawId.slice('@custom:'.length);
-  if(!rest.includes(':')){
-    // Legacy "<slug>/<model>" form (no provider colon).
-    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
-    return rest||rawId;
+  const firstColon=rest.indexOf(':');
+  if(firstColon<0){
+    // Legacy "<slug>/<model>" form (no provider colon): the leading segment
+    // is vendor hierarchy, not a provider — strip it for the model half,
+    // exactly as this function always has (#3360).
+    if(rest.includes('/')) return {provider:'custom', model:rest.slice(rest.indexOf('/')+1)||rawId};
+    return {provider:'custom', model:rest};
   }
-  // A provider slug is a config key or a host:port authority — it never
-  // contains a '/'. A slash-bearing first segment is therefore the model
-  // itself in the plain custom lane (`@custom:ollamacloud/qwen3.5:397b`
-  // must render the whole remainder, not just `397b`), mirroring the
-  // `/`-means-routable rule api/config.py applies when building ids (#7240).
-  const sep0=rest.indexOf(':');
-  if(rest.slice(0,sep0).includes('/')) return rest||rawId;
+  // Generic slash lane: a slug never contains '/', so a slash-bearing FIRST
+  // segment was never <slug>:<model> — the whole remainder is the model
+  // under bare `custom` (mirror of the backend fallback lane).
+  if(rest.slice(0,firstColon).includes('/')) return {provider:'custom', model:rest};
   const inner='custom:'+rest;
-  // 1. Authoritative: longest provider_id prefix the server actually told us
-  // about via /api/models group metadata. Config beats shape, so a purely
-  // numeric model id under a named provider (@custom:gw:8080:free) still
-  // resolves to "8080:free" when the server reports provider_id "custom:gw".
-  // cut>=2 skips the bare `custom` root: it prefixes EVERY id here, so matching
-  // it would hand the whole slug back as the label. Only a slug that names
-  // something (custom:gw, custom:llm:8080) disambiguates.
   const segs=inner.split(':');
   for(let cut=segs.length-1;cut>=2;cut--){
     const prefix=segs.slice(0,cut).join(':');
     const tail=segs.slice(cut).join(':');
-    if(tail && _dynamicProviderIds[prefix.toLowerCase()]) return tail;
+    if(tail && _dynamicProviderIds[prefix.toLowerCase()]) return {provider:prefix, model:tail};
   }
-  // 2. Otherwise the shape grammar.
-  const lastColon=inner.lastIndexOf(':');
-  let providerHint=inner.slice(0,lastColon);
-  let bare=inner.slice(lastColon+1);
+  let providerHint=inner.slice(0,inner.lastIndexOf(':'));
+  let bare=inner.slice(inner.lastIndexOf(':')+1);
   if(providerHint.startsWith('custom:') && providerHint.split(':').length-1>=2){
     const slugRest=providerHint.slice('custom:'.length);
     if(!_customSlugIsEndpointAuthority(slugRest)){
-      // Not an endpoint authority: the extra segment belongs to the model
-      // (e.g. @custom:my-key:some-model:free -> model "some-model:free").
       const extraColon=providerHint.lastIndexOf(':');
       const extra=providerHint.slice(extraColon+1);
       providerHint=providerHint.slice(0,extraColon);
       bare=extra+':'+bare;
     }
   }
-  return bare||rawId;
+  return {provider:providerHint, model:bare};
+}
+
+function _customModelFromQualifiedId(rawId){
+  // Shared qualified-ID grammar — mirror of api/config.py:
+  // _parse_provider_qualified_model_id (see its docstring for the grammar).
+  // The provider segment may itself contain colons (host:port endpoints) and
+  // the model segment may too (":free" tags), so a blind first/last-colon split
+  // misparses both. The split itself lives in _parseQualifiedCustomId so the
+  // label half and the state/send identity half consume the SAME parse.
+  return _parseQualifiedCustomId(rawId).model||rawId;
 }
 
 function getModelLabel(modelId){
