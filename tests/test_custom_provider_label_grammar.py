@@ -378,6 +378,55 @@ process.stdout.write(JSON.stringify(result));
 """
 
 
+_ROUTING_DRIVER = _EXTRACT_PREAMBLE + r"""
+let _dynamicProviderIds = JSON.parse(process.argv[3]);
+let S = {session: null};
+let persisted = null;
+let select = null;
+function _readPersistedModelState(){ return persisted; }
+function $(name){ return name === 'modelSelect' ? select : null; }
+eval(extractFunc('_optionDeclaredProviderId'));
+eval(extractFunc('_clientProviderAuthorityForModel'));
+eval(extractFunc('_dynamicProviderAuthorityForQualifiedCustomId'));
+eval(extractFunc('_qualifiedCustomIdNeedsBackendAuthority'));
+eval(extractFunc('_getOptionProviderId'));
+eval(extractFunc('_providerFromModelValue'));
+eval(extractFunc('_modelStateForSelect'));
+eval(extractFunc('_modelProviderForSend'));
+const raw = '@custom:gw:8080:free';
+function option(provider){
+  return {value: raw, dataset: provider ? {provider} : {}, parentElement: null};
+}
+function state(kind){
+  S = {session: null}; persisted = null; select = null;
+  if(kind === 'dropdown'){
+    const opt = option('custom:gw');
+    select = {value: raw, options: [opt], selectedOptions: [opt]};
+  } else if(kind === 'session') {
+    S = {session: {model: raw, model_provider: 'custom:gw'}};
+  } else if(kind === 'persisted') {
+    persisted = {model: raw, model_provider: 'custom:gw'};
+  }
+  return {state: _modelStateForSelect(select, raw), send: _modelProviderForSend(raw)};
+}
+process.stdout.write(JSON.stringify(['none','dropdown','session','persisted'].map(state)));
+"""
+
+
+def _routing_states(tmp_path, provider_ids=None):
+    driver = tmp_path / "routing.js"
+    driver.write_text(_ROUTING_DRIVER, encoding="utf-8")
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, str(driver), str(UI_JS_PATH), json.dumps(provider_ids or {})],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 def _labels(tmp_path, dynamic_labels, cases, provider_ids=None):
     driver = tmp_path / "driver.js"
     driver.write_text(_DRIVER, encoding="utf-8")
@@ -583,6 +632,32 @@ def test_ipv6_ids_label_without_dynamic_labels(tmp_path):
     ]
     assert _labels(tmp_path, {}, cases) == ["qwen3", "qwen3:free", "11434:qwen3"]
 
+
+
+
+@requires_node
+def test_named_provider_authority_beats_endpoint_shape_before_and_after_hydration(tmp_path):
+    """Re-review 2026-09-28: the ambiguous `gw:8080` spelling must never make
+    browser state/send disagree with the backend's configured named `custom:gw`.
+
+    Before catalog hydration, no client authority preserves the full id and
+    defers route selection; dropdown, session and persisted metadata each supply
+    the named authority. After hydration, server-reported provider metadata does
+    the same even with no selected option.
+    """
+    raw = "@custom:gw:8080:free"
+    cold = _routing_states(tmp_path)
+    assert cold[0] == {"state": {"model": raw, "model_provider": None}, "send": None}
+    for result in cold[1:]:
+        assert result == {
+            "state": {"model": "8080:free", "model_provider": "custom:gw"},
+            "send": "custom:gw",
+        }
+    hydrated = _routing_states(tmp_path, {"custom:gw": True})
+    assert hydrated[0] == {
+        "state": {"model": "8080:free", "model_provider": "custom:gw"},
+        "send": "custom:gw",
+    }
 
 @requires_node
 def test_authoritative_provider_id_resolves_shape_ambiguity(tmp_path):

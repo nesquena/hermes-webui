@@ -269,6 +269,48 @@ def test_unnamed_active_endpoint_live_row_takes_configured_label(
     )
 
 
+@pytest.mark.parametrize("active_first", [True, False])
+def test_unnamed_live_row_uses_only_active_endpoint_label(
+    live_endpoint, _sync_rebuild, active_first
+):
+    """Re-review 2026-09-28 defect 1: inactive unnamed entries must not
+    overwrite an active live row merely because they appear first in config."""
+    _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}
+    inactive_entry = {
+        "base_url": "http://127.0.0.1:9/v1",
+        "models": [{"id": "model-a", "label": "Inactive Label"}],
+    }
+    active_entry = {
+        "base_url": live_endpoint,
+        "models": [{"id": "model-a", "label": "Active Label"}],
+    }
+    entries = [active_entry, inactive_entry] if active_first else [inactive_entry, active_entry]
+    result = _models_with_cfg(
+        model_cfg={"provider": "custom", "base_url": live_endpoint},
+        custom_providers=entries,
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom", "model-a")
+    assert row is not None
+    assert row["label"] == "Active Label"
+
+
+def test_unnamed_live_row_ignores_unmatched_endpoint_label(live_endpoint, _sync_rebuild):
+    """An unnamed entry with no matching active endpoint contributes no label."""
+    _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}
+    result = _models_with_cfg(
+        model_cfg={"provider": "custom", "base_url": live_endpoint},
+        custom_providers=[
+            {
+                "base_url": "http://127.0.0.1:9/v1",
+                "models": [{"id": "model-a", "label": "Inactive Label"}],
+            }
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom", "model-a")
+    assert row is not None
+    assert row["label"] == "Endpoint Label"
+
+
 def test_unnamed_live_row_without_config_label_keeps_endpoint_label(
     live_endpoint, _sync_rebuild
 ):

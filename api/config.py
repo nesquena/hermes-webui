@@ -9974,10 +9974,22 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # never reorders or re-decides which entry owns a label.
             _active_cfg_label_map: dict[str, str] = {}
             if provider_key == "custom":
+                _active_base_norm = _normalize_base_url_for_match(base_url)
                 for _map_entry in _custom_provider_entries(cfg):
                     if str(_map_entry.get("name") or "").strip():
                         continue
-                    if not str(_map_entry.get("base_url") or "").strip():
+                    _entry_base_norm = _normalize_base_url_for_match(
+                        _map_entry.get("base_url")
+                    )
+                    if not _entry_base_norm or not _active_base_norm:
+                        continue
+                    if _entry_base_norm != _active_base_norm:
+                        # An unnamed entry for a DIFFERENT endpoint must never
+                        # voice labels here: both entries advertise the same
+                        # model with different labels, and setdefault() below
+                        # would keep whichever entry config lists first —
+                        # overriding the ACTIVE endpoint's live row with an
+                        # INACTIVE entry's label (#6657 re-review defect 1).
                         continue
                     for _mid, _lbl in _configured_model_label_overrides(
                         _map_entry.get("models")
