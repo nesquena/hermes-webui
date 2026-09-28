@@ -5373,6 +5373,28 @@ def _is_generic_fallback_title(title: str) -> bool:
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
+def _read_state_db_title_if_available(session_id: str, profile: Optional[str] = None) -> str:
+    """Return the title stored in Hermes state.db if available and non-empty."""
+    try:
+        from api.models import _agent_state_db_path, open_state_db_readonly
+        from contextlib import closing
+        import sqlite3
+
+        db_path = _agent_state_db_path(profile=profile)
+        if not db_path or not db_path.exists():
+            return ""
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT title FROM sessions WHERE id = ?", (session_id,))
+            row = cur.fetchone()
+            if row and row["title"]:
+                return str(row["title"] or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
     """Generate and publish a better title after `done`, then end the stream."""
     try:
@@ -5405,15 +5427,21 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             if not _aux_title_generation_enabled():
                 _put_title_status(put_event, session_id, 'skipped', 'title_generation_disabled', current)
                 return
-            aux_title_configured = _aux_title_configured()
-            if agent and not aux_title_configured:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
+            state_title = _read_state_db_title_if_available(session_id, profile=getattr(s, 'profile', None))
+            if state_title and state_title not in ('Untitled', 'New Chat') and not _looks_invalid_generated_title(state_title):
+                next_title = state_title
+                llm_status = 'state_db'
+                raw_preview = ''
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
-                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                aux_title_configured = _aux_title_configured()
+                if agent and not aux_title_configured:
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
+                else:
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
+                    if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                        next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
             source = llm_status
             if not next_title:
                 fallback_title = _fallback_title_from_exchange(user_text, assistant_text)

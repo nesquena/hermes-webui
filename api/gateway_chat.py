@@ -1739,10 +1739,33 @@ def _run_gateway_chat_streaming(
                 session_id,
                 goal_exc,
             )
+        _bg_title_inputs = None
+        try:
+            from api.streaming import _background_title_generation_inputs
+            _bg_title_inputs = _background_title_generation_inputs(s)
+        except Exception:
+            logger.debug("Failed to determine background title inputs for gateway session %s", session_id, exc_info=True)
+
         from api.streaming import _session_payload_with_full_messages
         gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
-        put_gateway_event("stream_end", {"session_id": session_id})
+
+        if _bg_title_inputs:
+            from api.streaming import _run_background_title_update
+            title_thread = threading.Thread(
+                target=_run_background_title_update,
+                args=(s.session_id, *_bg_title_inputs, str(s.title or "").strip(), put_gateway_event, None),
+                daemon=True,
+            )
+            title_thread.start()
+            title_thread.join(timeout=1.0)
+        else:
+            put_gateway_event("stream_end", {"session_id": session_id})
+            try:
+                from api.streaming import _maybe_schedule_title_refresh
+                _maybe_schedule_title_refresh(s, put_gateway_event, None)
+            except Exception:
+                pass
     except urllib.error.HTTPError as exc:
         try:
             err_body = exc.read(2048).decode("utf-8", errors="replace")
