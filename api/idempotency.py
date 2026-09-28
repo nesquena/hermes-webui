@@ -599,7 +599,9 @@ class IdempotencyStore:
 
     # -- public api ----------------------------------------------------------
 
-    def claim(self, key: str, fingerprint: str) -> IdempotencyRecord:
+    def claim(
+        self, key: str, fingerprint: str, *, profile: str | None = None
+    ) -> IdempotencyRecord:
         """Atomically claim ``key`` for ``fingerprint``.
 
         The supplied ``key`` is a validated raw key (printable ASCII,
@@ -607,8 +609,14 @@ class IdempotencyStore:
         the server-resolved active profile before any lookup or
         write. The fingerprint MUST already include the same profile
         (see ``compute_request_fingerprint``) so two profiles
-        sending the same raw key produce different fingerprints and
+        sending the same key produce different fingerprints and
         are isolated.
+
+        ``profile`` pins the namespace once for a request lifecycle so
+        the same profile is used here, by ``complete()`` and by
+        ``release()`` even if the server's active profile changes mid
+        request; when omitted it is resolved fresh via
+        ``resolve_active_profile()``.
 
         Returns:
             * a new ``STATUS_PENDING`` record if this is the first claim;
@@ -627,7 +635,7 @@ class IdempotencyStore:
               the caller can retry without risking a duplicate turn.
         """
         self._ensure_loaded()
-        stored_key = build_storage_key(key)
+        stored_key = build_storage_key(key, profile=profile)
         profile = stored_key.split(_NAMESPACE_SEP, 1)[0]
         with self._lock:
             existing = self._records.get(stored_key)
@@ -679,6 +687,15 @@ class IdempotencyStore:
             # evicted under a cap.
             self._records.move_to_end(stored_key)
             if existing.status == STATUS_PENDING:
+                if existing.stream_id:
+                    # A turn was admitted and its identity reconciled onto
+                    # this pending claim (see ``reconcile``) — the
+                    # completion write either failed or has not landed, but
+                    # the same logical turn is already known to be running /
+                    # started. Treat this as a replay of that identity, not
+                    # an in-flight duplicate: the route returns the original
+                    # identity and no second turn is admitted.
+                    return existing
                 raise IdempotencyInFlight(
                     f"idempotency key {key!r} is currently in flight"
                 )
@@ -689,6 +706,7 @@ class IdempotencyStore:
         self,
         key: str,
         *,
+        profile: str | None = None,
         session_id: str,
         stream_id: str,
         turn_id: str,
@@ -704,6 +722,13 @@ class IdempotencyStore:
         in-memory state was lost). The namespacing is idempotent: a
         repeated call with the same raw key produces the same storage
         key.
+
+        ``profile`` pins the namespace once per request; it MUST be
+        the same value the route resolved at entry and passed to
+        ``claim``/``release``/``reconcile``, so a profile switch mid
+        request cannot scatter the lifecycle across namespaces. When
+        omitted it is resolved fresh (callers outside the route may
+        omit it).
 
         Idempotent on the (session_id, stream_id, turn_id) triple: if
         the stored record already matches, this is a no-op (apart from
@@ -728,7 +753,7 @@ class IdempotencyStore:
         completion to a retrying client.
         """
         self._ensure_loaded()
-        stored_key = build_storage_key(key)
+        stored_key = build_storage_key(key, profile=profile)
         with self._lock:
             existing = self._records.get(stored_key)
             now = time.time()
@@ -777,7 +802,68 @@ class IdempotencyStore:
                 raise
             return rec
 
-    def release(self, key: str) -> None:
+    def reconcile(
+        self,
+        key: str,
+        *,
+        profile: str | None = None,
+        session_id: str,
+        stream_id: str,
+        turn_id: str,
+    ) -> IdempotencyRecord:
+        """Durably bind the admitted stream/run identity onto a pending claim.
+
+        This is called by the route when a turn has ALREADY been admitted
+        (``_start_run`` returned a 2xx with a stream_id) but the completion
+        write that would flip the claim to ``STATUS_COMPLETE`` failed. The
+        agent turn cannot be undone, so the durable guard must carry the
+        admitted identity; otherwise the only record of the turn is an
+        identity-less ``STATUS_PENDING`` claim and the next retry with the
+        same key would be refused as in-flight (or, worse, re-admitted as a
+        fresh turn) instead of replaying the original acceptance.
+
+        Effect: the stored record for ``key`` (same profile namespace as
+        ``claim``) retains ``STATUS_PENDING`` but now also carries the
+        reconciled ``session_id``/``stream_id``/``turn_id``. ``claim()``
+        treats a pending record that has a stream_id as a replay, so a
+        retry returns the original identity without starting a second turn.
+
+        Fail-closed: when the reconcile itself cannot be made durable, the
+        in-memory identity fields are rolled back (the claim falls back to
+        a plain pending record) and ``IdempotencyStoreUnavailable``
+        propagates so the route can surface 503. The guard is preserved —
+        never dropped — so the caller retries against an explicit refusal
+        rather than silently re-admitting a duplicate turn.
+        """
+        self._ensure_loaded()
+        stored_key = build_storage_key(key, profile=profile)
+        with self._lock:
+            existing = self._records.get(stored_key)
+            if existing is None:
+                raise IdempotencyStoreUnavailable(
+                    f"cannot reconcile idempotency key {key!r}: no durable "
+                    "claim exists to bind the admitted identity to"
+                )
+            # Snapshot the prior identity so a persist failure can undo it.
+            prior_session, prior_stream, prior_turn = (
+                existing.session_id, existing.stream_id, existing.turn_id,
+            )
+            existing.session_id = session_id
+            existing.stream_id = stream_id
+            existing.turn_id = turn_id
+            self._records.move_to_end(stored_key)
+            try:
+                self._persist_locked()
+            except IdempotencyStoreUnavailable:
+                # The identity could not be made durable. Roll it back so
+                # memory and disk still agree; the pending guard remains.
+                existing.session_id, existing.stream_id, existing.turn_id = (
+                    prior_session, prior_stream, prior_turn,
+                )
+                raise
+            return existing
+
+    def release(self, key: str, *, profile: str | None = None) -> None:
         """Drop a pending claim. Used when validation fails before acceptance.
 
         A completed record is NEVER released — that's the whole point of
@@ -786,7 +872,9 @@ class IdempotencyStore:
 
         ``key`` is the validated raw key; the storage key is computed
         via ``build_storage_key`` so the same profile namespace is
-        used as the one the original claim wrote under.
+        used as the one the original claim wrote under. Pass the same
+        ``profile`` the claim used when the request has already
+        resolved it (see ``claim``).
 
         Fail-closed: when the drop cannot be made durable, the pending
         claim is restored in memory and ``IdempotencyStoreUnavailable``
@@ -798,7 +886,7 @@ class IdempotencyStore:
         exactly the state that admits a duplicate turn.
         """
         self._ensure_loaded()
-        stored_key = build_storage_key(key)
+        stored_key = build_storage_key(key, profile=profile)
         with self._lock:
             existing = self._records.get(stored_key)
             if existing is None:
@@ -814,7 +902,7 @@ class IdempotencyStore:
                     self._records[stored_key] = existing
                     raise
 
-    def lookup(self, key: str) -> IdempotencyRecord | None:
+    def lookup(self, key: str, *, profile: str | None = None) -> IdempotencyRecord | None:
         """Return the stored record for ``key`` or ``None`` if absent / expired.
 
         ``key`` is the validated raw key; the same profile namespace
@@ -822,7 +910,7 @@ class IdempotencyStore:
         diagnostics and tests.
         """
         self._ensure_loaded()
-        stored_key = build_storage_key(key)
+        stored_key = build_storage_key(key, profile=profile)
         with self._lock:
             self._evict_expired_locked()
             rec = self._records.get(stored_key)

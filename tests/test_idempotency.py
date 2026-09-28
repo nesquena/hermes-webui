@@ -1334,3 +1334,201 @@ def test_idempotency_module_wired_into_routes(idem_env):
     # The release must happen in the finally so validation failures
     # don't strand a pending claim.
     assert "store.release" in src or ".release(" in src
+
+
+def test_store_acquisition_failure_returns_503_with_zero_calls(idem_env, monkeypatch):
+    """Finding 1 (route-level): when the idempotency store cannot be
+    ACQUIRED, a keyed request must fail closed with 503 — it must NOT slide
+    into the keyless legacy path and admit a turn with no claim. The review
+    called the old `except Exception: store = None` downgrade a direct
+    fail-open path: a keyed request continued to `_start_run` with no claim.
+    Zero recorder calls means no turn was admitted."""
+
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "acquire-fail-key"
+
+    # Store acquisition raises.
+    def boom_acquire():
+        raise RuntimeError("simulated: store registry unavailable")
+    monkeypatch.setattr(idem_env.routes, "get_idempotency_store", boom_acquire)
+    s, p = idem_env.run_handler(body, key_header=key)
+    assert s == 503, f"expected 503 on store acquisition failure, got {s}: {p}"
+    assert p.get("code") == "idempotency_store_unavailable"
+    assert p.get("idempotency_key") == key
+    assert len(idem_env.recorder.calls) == 0, (
+        f"store acquisition failure still admitted a turn: "
+        f"{len(idem_env.recorder.calls)} calls"
+    )
+    # No claim was written either.
+    assert list(idem_env.store.keys()) == []
+
+    # A None store (defensive) takes the same fail-closed path.
+    monkeypatch.setattr(
+        idem_env.routes, "get_idempotency_store", lambda: None
+    )
+    key2 = "acquire-none-key"
+    s2, p2 = idem_env.run_handler(body, key_header=key2)
+    assert s2 == 503, f"expected 503 for a None store, got {s2}: {p2}"
+    assert p2.get("code") == "idempotency_store_unavailable"
+    assert len(idem_env.recorder.calls) == 0, (
+        f"None store still admitted a turn: {len(idem_env.recorder.calls)} calls"
+    )
+
+
+def test_completion_write_failure_retains_and_replays_same_turn(idem_env, monkeypatch):
+    """Finding 2: when ONLY the completion's durable write fails (and the
+    NEXT persistence call — the reconciliation — succeeds), the admitted
+    turn's identity must be reconciled onto the pending claim and NEVER
+    released (the agent turn cannot be undone). A retry with the same key
+    must REPLAY the original identity — recorder stays at one — instead of
+    starting a second turn.
+
+    This distinguishes the bug from a stub that fails every write from
+    call two onward (the old test's stub only preserved the record because
+    release() also failed); here the release would succeed if the route
+    attempted it, so a released claim would be visible in the store."""
+    from api import idempotency as idem_mod
+
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "complete-write-fail-key"
+
+    # Fail ONLY the second persist (the completion's durable write); let
+    # the claim persist (call 1) and the reconciliation persist (call 3,
+    # the "next persistence call") succeed.
+    state = {"call_count": 0}
+    original_persist = idem_env.store._persist_locked
+
+    def one_completion_failure():
+        state["call_count"] += 1
+        if state["call_count"] == 2:
+            raise idem_mod.IdempotencyStoreUnavailable(
+                "simulated: single completion write failure"
+            )
+        return original_persist()
+    monkeypatch.setattr(idem_env.store, "_persist_locked", one_completion_failure)
+
+    # First attempt: turn admitted, completion write fails once, reconcile
+    # succeeds, route signals 503 (durability gap) but keeps the guard.
+    s1, p1 = idem_env.run_handler(body, key_header=key)
+    assert s1 == 503, f"expected 503 after completion write failure, got {s1}: {p1}"
+    assert p1.get("code") == "idempotency_store_unavailable"
+    # The turn WAS admitted before the persist failed.
+    assert len(idem_env.recorder.calls) == 1
+
+    # Post-handler: the guard is NOT released — a pending claim bound to the
+    # admitted identity.
+    rec = idem_env.store.lookup(key)
+    assert rec is not None, "pending claim was released after completion failure"
+    assert rec.status == "pending", f"expected pending, got {rec.status!r}"
+    assert rec.stream_id == "stream-1", (
+        f"admitted identity must be reconciled onto the claim; got "
+        f"stream_id={rec.stream_id!r}"
+    )
+
+    # Retry with the same key: replays the same turn, not a second one.
+    s2, p2 = idem_env.run_handler(body, key_header=key)
+    assert s2 == 200, f"expected replay after retry, got {s2}: {p2}"
+    assert p2["stream_id"] == "stream-1"
+    assert p2["turn_id"] == "turn-1"
+    assert p2.get("replayed_from_idempotency_key") is True
+    assert len(idem_env.recorder.calls) == 1, (
+        f"retry admitted a SECOND turn: {len(idem_env.recorder.calls)} calls"
+    )
+
+
+def test_unexpected_complete_exception_returns_503_and_retains_claim(idem_env, monkeypatch):
+    """Finding 4: an UNEXPECTED exception from complete() (not the typed
+    persist failure) must NOT be swallowed into a 200 response with the
+    claim released. Treat it as unavailable (503) and retain the pending
+    guard — the generic branch that logged and returned the success
+    response while the finally deleted the claim is the bug."""
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "unexpected-complete-key"
+
+    def boom_complete(self, *a, **k):
+        raise RuntimeError("unexpected crash inside complete()")
+    monkeypatch.setattr(idem_env.store, "complete", boom_complete)
+
+    s, p = idem_env.run_handler(body, key_header=key)
+    assert s != 200, (
+        f"unexpected complete() exception must not yield 200; got {s}: {p}"
+    )
+    assert s == 503
+    assert p.get("code") == "idempotency_store_unavailable"
+
+    # The claim was NOT released (finally must have skipped the release
+    # because the turn was admitted).
+    rec = idem_env.store.lookup(key)
+    assert rec is not None, "complete() failure released the pending claim"
+    assert rec.status == "pending", f"expected pending, got {rec.status!r}"
+
+
+def test_profile_drift_within_request_stays_bound_to_original_namespace(idem_env, monkeypatch):
+    """Finding 3: the profile namespace must be resolved ONCE per request
+    and threaded through claim/complete/reconcile/release. When the server's
+    active profile CHANGES across successive resolver calls mid-request
+    (simulated by `_get_active_profile_name` returning a distinct profile
+    every call), the lifecycle must stay bound to the namespace resolved at
+    entry — every step receives the SAME profile. The old code re-resolved
+    on each `build_storage_key`, so a claim, complete, or release could land
+    in different namespaces.
+
+    We spy on each lifecycle step to record the ``profile`` it received and
+    assert them all equal; we also assert the completed record lives under
+    the entry-resolved namespace, not a later resolver call's value."""
+    from api import idempotency as idem_mod
+
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "profile-drift-key"
+
+    # Successive calls return DIFFERENT profiles (active profile switches).
+    seq = iter(["alpha", "beta", "gamma", "delta"])
+    def flip():
+        return next(seq, "default")
+    monkeypatch.setattr(idem_env.routes, "_get_active_profile_name", flip)
+
+    # Capture the profile each idempotency lifecycle step receives.
+    usage: list[tuple[str, object]] = []
+    store = idem_env.store
+    for method in ("claim", "complete", "reconcile", "release"):
+        original = getattr(store, method)
+        if method == "claim":
+            def spy(key_arg, fp, *, profile=None, _o=original):
+                usage.append(("claim", profile))
+                return _o(key_arg, fp, profile=profile)
+        else:
+            def spy(*a, profile=None, _m=method, _o=original, **k):
+                usage.append((_m, profile))
+                return _o(*a, profile=profile, **k)
+        monkeypatch.setattr(store, method, spy)
+
+    s, p = idem_env.run_handler(body, key_header=key)
+    # A cross-namespace drift would make complete() miss the claim and
+    # surface 503; a successful 200 already proves no drift here.
+    assert s == 200, f"request drifted across namespaces: got {s}: {p}"
+
+    claim_profiles = [prof for m, prof in usage if m == "claim"]
+    complete_profiles = [prof for m, prof in usage if m == "complete"]
+    assert complete_profiles, "complete() was never called"
+    assert len(set(claim_profiles)) == 1, (
+        f"claim() drifted across namespaces: {claim_profiles}"
+    )
+    assert len(set(complete_profiles)) == 1, (
+        f"complete() drifted across namespaces: {complete_profiles}"
+    )
+    assert complete_profiles[0] == claim_profiles[0], (
+        f"claim/complete NOT bound to the same namespace: "
+        f"claim={claim_profiles[0]!r} complete={complete_profiles[0]!r}"
+    )
+
+    ns = complete_profiles[0]
+    stored = store.lookup_stored(
+        idem_mod.build_storage_key(key, profile=str(ns))
+    )
+    assert stored is not None and stored.status == "complete", (
+        f"record should be complete under entry namespace {ns!r}, got {stored!r}"
+    )
+    # And NOT filed under a later resolver value ("beta").
+    assert store.lookup_stored(
+        idem_mod.build_storage_key(key, profile="beta")
+    ) is None
