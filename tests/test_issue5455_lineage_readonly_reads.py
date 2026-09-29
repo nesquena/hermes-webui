@@ -9,7 +9,6 @@ lineage-metadata reads, and the gateway-watcher fingerprint projection (a 5s
 poll), were still opening a read-WRITE connection. This shared them onto the
 same ``open_state_db_readonly`` helper.
 """
-import logging
 import sqlite3
 from contextlib import closing
 
@@ -98,25 +97,25 @@ def test_helper_encodes_special_path_chars(tmp_path, monkeypatch):
     assert calls[0]["target"].endswith("?mode=ro")
 
 
-def test_helper_falls_back_to_writable_and_logs(tmp_path, monkeypatch, caplog):
+def test_helper_never_falls_back_to_writable(tmp_path, monkeypatch):
+    """A read-only open failure propagates; the helper never retries with a
+    write-capable handle on the live WAL database."""
     db = tmp_path / "state.db"
     _make_lineage_db(db)
-    real_connect = sqlite3.connect
+    calls = []
 
     def fail_read_only(target, *args, **kwargs):
-        if kwargs.get("uri"):
-            raise sqlite3.OperationalError("synthetic read-only URI failure")
-        return real_connect(target, *args, **kwargs)
+        calls.append({"target": str(target), "uri": bool(kwargs.get("uri"))})
+        raise sqlite3.OperationalError("synthetic read-only URI failure")
 
     monkeypatch.setattr(agent_sessions.sqlite3, "connect", fail_read_only)
-    with caplog.at_level(logging.WARNING, logger="api.agent_sessions"):
-        conn = open_state_db_readonly(db)
-    try:
-        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 2
-    finally:
-        conn.close()
-    assert "read-only open failed" in caplog.text
-    assert "synthetic read-only URI failure" in caplog.text
+    with pytest.raises(sqlite3.OperationalError, match="synthetic read-only URI failure"):
+        open_state_db_readonly(db)
+
+    # Exactly one attempt, and it was the read-only URI form.
+    assert len(calls) == 1
+    assert calls[0]["uri"] is True
+    assert calls[0]["target"].endswith("?mode=ro")
 
 
 def test_helper_raises_on_missing_db_instead_of_creating_a_ghost(tmp_path):

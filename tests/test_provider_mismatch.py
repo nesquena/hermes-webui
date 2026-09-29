@@ -553,15 +553,39 @@ def test_bare_codex_gpt_runtime_bridge_routes_to_codex(monkeypatch):
 
 
 def test_non_openrouter_slash_model_provider_context_stays_unqualified():
-    """Portal/custom slash IDs must not be blindly wrapped as @provider:model."""
+    """Portal/custom slash IDs must keep the provider hint when the session
+    provider differs from the profile default (#7333).
+
+    Previously any non-OpenRouter slash ID fell through to a bare passthrough,
+    dropping the session provider — so a Nous portal row
+    (``anthropic/claude-sonnet-4.6`` on the Nous namespace) picked under a
+    foreign default (e.g. xai-oauth) inherited the default provider's base_url
+    and 404'd. The fix emits ``@provider:model`` for known routable providers
+    (portal/static/named-custom) that differ from the configured default.
+    """
     import api.config as config
 
-    runtime_model = config.model_with_provider_context(
-        "anthropic/claude-sonnet-4.6",
-        "nous",
-    )
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "xai-oauth",
+        "default": "grok-4.6",
+        "base_url": "https://api.x.ai/v1",
+    }
+    config.cfg["providers"] = {}
+    try:
+        runtime_model = config.model_with_provider_context(
+            "anthropic/claude-sonnet-4.6",
+            "nous",
+        )
+        model, provider, base_url = config.resolve_model_provider(runtime_model)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
 
-    assert runtime_model == "anthropic/claude-sonnet-4.6"
+    assert runtime_model == "@nous:anthropic/claude-sonnet-4.6"
+    assert model == "anthropic/claude-sonnet-4.6"
+    assert provider == "nous"
+    assert base_url != "https://api.x.ai/v1"
 
 
 def test_configured_provider_slash_model_keeps_provider_context():
@@ -1035,9 +1059,9 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
         "_resolve_chat_workspace_with_recovery",
         lambda current, _requested: current.workspace,
     )
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: value)
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
 

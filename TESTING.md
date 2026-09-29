@@ -36,6 +36,24 @@ npm run lint:runtime
 npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
 ```
 
+## Native raster redaction boundary
+
+Run `./scripts/test.sh tests/test_mpf_jpeg_redaction.py tests/test_raster_data_uri_redaction.py tests/test_security_redaction.py`.
+Native `messages[*].content[*].image_url.url` raster data may bypass text
+credential scanning only after complete container validation. MPF JPEGs require
+an APP2 MP Index with bounded TIFF entries, contiguous declared JPEG extents,
+and a complete SOF/scan/EOI sequence in each image. Gaps, overlaps, malformed
+frames, and trailing bytes fall back to text redaction. Image-shaped tool
+metadata does not acquire this exemption. This is structural validation, not
+pixel decoding or secret detection inside image metadata/pixels.
+
+`tests/fixtures/multipicture.jpg` contains two Pillow-generated 8x8 solid-color
+frames (red and blue), not private photographs; generation instructions live in
+`tests/test_mpf_jpeg_redaction.py`. The tests cover both TIFF byte orders and
+credential text appended after the final EOI. Helper timing improvements do
+not by themselves prove browser or shared-server responsiveness; verify those
+separately with a real conversation and concurrent requests.
+
 ## Python lint gate (ruff) — forward-looking, new-code-only
 
 The Python twin of the ESLint runtime guard. A curated `ruff` ruleset
@@ -136,12 +154,35 @@ HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
   python tests/browser_historical_transcript_hydration.py
 ```
 
-The dedicated `Conversation lifecycle (informational)` workflow runs the current
-proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`) and
-stays non-blocking while the public
-matrix expands to additional behavior rows. The maintainer's private QA harness
-remains broader; later public slices will add session switching, reconnect/replay,
-cancellation, compression, and recovery.
+The dedicated `Conversation lifecycle (informational)` workflow keeps the existing
+proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`)
+non-blocking while the public matrix expands. The Chromium
+`reconnect-scene-redraw` row does **not** allow failures: it exercises the real
+`loadSession` reconnect path and fails the workflow on a regression. Required
+merge checks remain a maintainer-controlled repository setting.
+The maintainer's private QA harness remains broader; later public slices will
+add cancellation, compression, and recovery coverage.
+
+### Active-session reconnect redraw gate
+
+`tests/browser_reconnect_scene_redraw.py` is an opt-in deterministic browser
+gate for reconnecting to a running session with a large Anchor activity scene.
+It uses an isolated temporary server/home and fixture SSE events—no agent,
+provider credentials, or production state. By default it checks Chromium and
+WebKit, desktop and 390px viewports, and all three activity display modes:
+
+```bash
+pip install playwright
+python -m playwright install chromium webkit
+python tests/browser_reconnect_scene_redraw.py
+```
+
+`TOOL_COUNT`, `BROWSERS`, and `MODES` narrow the matrix. `MEASURE_BASELINE=1`
+records an unoptimized baseline without enforcing the redraw ceiling;
+`METRICS_FILE` saves JSON metrics and `SCREENSHOT_DIR` saves generated-fixture
+screenshots. This gate tests page reconstruction, journal-cursor resume, and
+subsequent fixture SSE updates. It does not test a real provider/network or PWA
+service-worker cache behavior.
 
 ### Streaming reader intent
 

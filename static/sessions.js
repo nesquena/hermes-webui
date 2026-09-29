@@ -189,6 +189,15 @@ function _clearRememberedNewChatDraftSession(sid) {
   } catch (_) {}
 }
 
+function _adoptRegenerationRevision(sessionPayload){
+  if(!S||!S.session||!sessionPayload||typeof sessionPayload!=='object') return;
+  if(Object.prototype.hasOwnProperty.call(sessionPayload,'regeneration_revision')){
+    S.session.regeneration_revision=sessionPayload.regeneration_revision;
+  }else{
+    delete S.session.regeneration_revision;
+  }
+}
+
 async function _restoreRememberedNewChatDraftSession() {
   let sid = '';
   try { sid = localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) || ''; } catch (_) { sid = ''; }
@@ -337,7 +346,20 @@ function _clearComposerDraft(sid, text, files) {
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+// A deleted session's acknowledgement must not return from a stale client's
+// cache. Membership in the rendered list cannot decide this: the sidebar filters
+// by profile, project, and source, so an absent row is not evidence of deletion.
+// Each deletion therefore records its own key, and merges drop any entry whose
+// session has one. Records are pruned by age so the store stays bounded.
+const SESSION_VIEWED_COUNTS_DELETED_PREFIX = 'hermes-session-viewed-counts:deleted:v1:';
+const SESSION_VIEWED_COUNTS_DELETED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
+// Clear ordering is stored per session so two clients clearing different
+// sessions never replace one another's tombstones with whole-map writes. The
+// unsuffixed key is the legacy map read during migration.
+const SESSION_COMPLETION_UNREAD_CLEARED_KEY = 'hermes-session-completion-unread-cleared';
+const SESSION_COMPLETION_UNREAD_CLEARED_PREFIX = `${SESSION_COMPLETION_UNREAD_CLEARED_KEY}:v1:`;
+const SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
 // Per-profile session-count cache (issue #4717 / #4662 Phase 1.5). Records how
 // many sessions each profile rendered last time, keyed by profile name, so a
@@ -350,6 +372,7 @@ const SESSION_PROFILE_COUNTS_KEY = 'hermes-session-profile-counts';
 let _sessionProfileCounts = null;
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
+let _sessionCompletionUnreadClearedMemory = {};
 let _sessionObservedStreaming = null;
 const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
@@ -467,23 +490,216 @@ function _knownSessionProfileCount(profile) {
   return (typeof v === 'number' && Number.isFinite(v)) ? v : null;
 }
 
+// Read a persisted sid -> value map. Missing or unreadable values read as an
+// empty map, matching the getters above.
+function _readStoredJsonMap(key) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    return {};
+  }
+}
+
+// Does this session still exist as far as this client can tell? The sidebar list
+// is the authority (deletion drops the row) and the visit snapshot covers the
+// window before the first list render.
+function _sessionExistsForUnreadState(sid) {
+  if (!sid) return false;
+  if (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions)
+    && _allSessions.some((s) => s && s.session_id === sid)) {
+    return true;
+  }
+  return typeof _sessionListSnapshotById !== 'undefined' && _sessionListSnapshotById
+    && typeof _sessionListSnapshotById.has === 'function'
+    && _sessionListSnapshotById.has(sid);
+}
+
+// Is there a session list to judge existence against at all? Without one,
+// "unknown" must not be read as "deleted": a client that has not rendered a list
+// yet would otherwise refuse to persist a fresh acknowledgement, and would prune
+// every tombstone it holds.
+function _sessionListLoaded() {
+  if (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions)
+    && _allSessions.length > 0) {
+    return true;
+  }
+  return typeof _sessionListSnapshotById !== 'undefined' && _sessionListSnapshotById
+    && typeof _sessionListSnapshotById.size === 'number'
+    && _sessionListSnapshotById.size > 0;
+}
+
+// Viewed acknowledgements are generation-scoped. Transcript mutation routes
+// increment `transcript_generation` whenever the visible message list shrinks;
+// counts are monotonic only within one generation. Legacy numeric entries belong
+// to generation zero and are migrated on their next save.
+function _sessionViewedCountRecord(value, transcriptGeneration = 0) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return {
+      message_count: Number(value.message_count) || 0,
+      transcript_generation: Math.max(0, Number(value.transcript_generation) || 0),
+    };
+  }
+  return {
+    message_count: Number(value) || 0,
+    transcript_generation: Math.max(0, Number(transcriptGeneration) || 0),
+  };
+}
+
+function _sessionViewedCountValue(value) {
+  return _sessionViewedCountRecord(value).message_count;
+}
+
+function _sessionViewedRecordWins(candidate, current) {
+  const ours = _sessionViewedCountRecord(candidate);
+  const theirs = _sessionViewedCountRecord(current);
+  if (ours.transcript_generation !== theirs.transcript_generation) {
+    return ours.transcript_generation > theirs.transcript_generation;
+  }
+  return ours.message_count > theirs.message_count;
+}
+
+function _sessionTranscriptGenerationForUnread(sid, explicit = null) {
+  if (explicit !== null && explicit !== undefined && Number.isFinite(Number(explicit))) {
+    return Math.max(0, Number(explicit) || 0);
+  }
+  let active = null;
+  try {
+    active = (S && S.session && S.session.session_id === sid) ? S.session : null;
+  } catch (_) {}
+  const snapshot = (typeof _sessionListSnapshotById !== 'undefined' && _sessionListSnapshotById)
+    ? _sessionListSnapshotById.get(sid) : null;
+  const listed = (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions))
+    ? _allSessions.find((s) => s && s.session_id === sid) : null;
+  const session = active || snapshot || listed;
+  return Math.max(0, Number(session && session.transcript_generation) || 0);
+}
+
+function _mergeSessionViewedCounts(disk, cache) {
+  const deleted = _readSessionViewedCountDeletions();
+  const gone = (sid) => Object.prototype.hasOwnProperty.call(deleted, sid);
+  const counts = {};
+  let changed = false;
+  for (const sid of Object.keys(disk || {})) {
+    if (gone(sid)) {
+      changed = true;
+      continue;
+    }
+    const record = _sessionViewedCountRecord(disk[sid]);
+    counts[sid] = record;
+    if (!disk[sid] || typeof disk[sid] !== 'object' || Array.isArray(disk[sid])) changed = true;
+  }
+  for (const sid of Object.keys(cache || {})) {
+    if (gone(sid)) continue;
+    const ours = _sessionViewedCountRecord(cache[sid]);
+    if (Object.prototype.hasOwnProperty.call(counts, sid)) {
+      if (_sessionViewedRecordWins(ours, counts[sid])) {
+        counts[sid] = ours;
+        changed = true;
+      }
+      continue;
+    }
+    if (_sessionListLoaded() && !_sessionExistsForUnreadState(sid)) continue;
+    counts[sid] = ours;
+    changed = true;
+  }
+  const live = {};
+  for (const sid of Object.keys(counts)) live[sid] = counts[sid];
+  for (const sid of Object.keys(cache || {})) {
+    if (gone(sid)) continue;
+    const ours = _sessionViewedCountRecord(cache[sid]);
+    if (!Object.prototype.hasOwnProperty.call(live, sid) || _sessionViewedRecordWins(ours, live[sid])) {
+      live[sid] = ours;
+    }
+  }
+  return {counts, live, changed};
+}
+
+function _sessionViewedCountDeletedKey(sid) {
+  return `${SESSION_VIEWED_COUNTS_DELETED_PREFIX}${encodeURIComponent(String(sid))}`;
+}
+
+// Read the deletion records, dropping any that have aged out.
+function _readSessionViewedCountDeletions() {
+  const deleted = {};
+  let keys = [];
+  try {
+    keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+  } catch (_) {
+    return deleted;
+  }
+  const now = Date.now();
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key.startsWith(SESSION_VIEWED_COUNTS_DELETED_PREFIX)) continue;
+    const encoded = key.slice(SESSION_VIEWED_COUNTS_DELETED_PREFIX.length);
+    let sid = '';
+    try {
+      sid = decodeURIComponent(encoded);
+    } catch (_) {
+      continue;
+    }
+    if (!sid) continue;
+    let stamp = 0;
+    try {
+      stamp = Number(localStorage.getItem(key)) || 0;
+    } catch (_) {}
+    if (stamp && now - stamp > SESSION_VIEWED_COUNTS_DELETED_TTL_MS) {
+      try { localStorage.removeItem(key); } catch (_) {}
+      continue;
+    }
+    deleted[sid] = stamp;
+  }
+  return deleted;
+}
+
+function _recordSessionViewedCountDeleted(sid) {
+  if (!sid) return;
+  try {
+    localStorage.setItem(_sessionViewedCountDeletedKey(sid), String(Date.now()));
+  } catch (_) {
+    // Without the record the deletion still removed the entry; the next delete
+    // or merge attempt records it again.
+  }
+}
+
 function _saveSessionViewedCounts() {
   try {
-    localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(_getSessionViewedCounts()));
+    const merged = _mergeSessionViewedCounts(
+      _readStoredJsonMap(SESSION_VIEWED_COUNTS_KEY),
+      _getSessionViewedCounts()
+    );
+    // Write only when we hold something the store does not (a strictly greater
+    // count, or an entry it is missing). Rewriting an unchanged map would let two
+    // clients ping-pong storage events forever.
+    if (merged.changed) {
+      localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(merged.counts));
+    }
+    _sessionViewedCounts = merged.live;
   } catch (_){
     // Ignore localStorage write failures.
   }
 }
 
-function _setSessionViewedCount(sid, messageCount = 0) {
+function _setSessionViewedCount(sid, messageCount = 0, transcriptGeneration = null) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  counts[sid] = next;
+  const generation = _sessionTranscriptGenerationForUnread(sid, transcriptGeneration);
+  const incoming = _sessionViewedCountRecord(next, generation);
+  const hadCount = Object.prototype.hasOwnProperty.call(counts, sid);
+  const previous = hadCount ? _sessionViewedCountRecord(counts[sid]) : null;
+  if (!previous || _sessionViewedRecordWins(incoming, previous)) {
+    counts[sid] = incoming;
+  } else {
+    counts[sid] = previous;
+  }
   _saveSessionViewedCounts();
-  // If the viewed count is now current, any prior completion-unread marker is
-  // stale — clear it so _hasUnreadForSession doesn't short-circuit (#3020).
-  _clearSessionCompletionUnread(sid);
+  // A generation change or count advance acknowledges completion state even if
+  // another client prepared an older marker before this save.
+  const advanced = !previous
+    || generation > previous.transcript_generation
+    || (generation === previous.transcript_generation && next > previous.message_count);
+  _clearSessionCompletionUnread(sid, advanced);
 }
 
 function _getSessionCompletionUnread() {
@@ -497,9 +713,140 @@ function _getSessionCompletionUnread() {
   return _sessionCompletionUnread;
 }
 
+// Completion-unread markers are add/remove, so unlike viewed counts they cannot
+// be max-merged: the later event has to win. Every clear records a tombstone
+// (sid -> clearedAt) in SESSION_COMPLETION_UNREAD_CLEARED_KEY, and a marker only
+// survives when it does not predate its sid's clear.
+function _markerLosesToUnreadClear(marker, clearedAt) {
+  const cleared = Number(clearedAt) || 0;
+  if (!cleared) return false;
+  return _sessionCompletionUnreadOrder(marker) <= cleared;
+}
+
+function _sessionCompletionUnreadOrder(marker) {
+  return Number(marker && (marker.unread_order || marker.completed_at)) || 0;
+}
+
+function _sessionCompletionUnreadClearedKey(sid, clearedAt = null) {
+  const base = `${SESSION_COMPLETION_UNREAD_CLEARED_PREFIX}${encodeURIComponent(String(sid))}`;
+  return clearedAt == null ? base : `${base}:${Number(clearedAt) || 0}`;
+}
+
+function _parseSessionCompletionUnreadClearedKey(key) {
+  if (!key || !key.startsWith(SESSION_COMPLETION_UNREAD_CLEARED_PREFIX)) return null;
+  const suffix = key.slice(SESSION_COMPLETION_UNREAD_CLEARED_PREFIX.length);
+  const separator = suffix.lastIndexOf(':');
+  const encodedSid = separator > 0 ? suffix.slice(0, separator) : suffix;
+  const version = separator > 0 ? Number(suffix.slice(separator + 1)) || 0 : 0;
+  let sid = '';
+  try { sid = decodeURIComponent(encodedSid); } catch (_) { return null; }
+  if (!sid) return null;
+  return { sid, version };
+}
+
+// Read persisted clear ordering independently from the in-memory fallback. The
+// distinction matters during pruning: a higher clear that failed quota and lives
+// only in memory must not delete the older durable record it supersedes.
+function _readPersistedSessionCompletionUnreadCleared() {
+  // Snapshot keys before values. A clear that starts after this operation began
+  // is deliberately excluded, so a marker prepared first gets the same logical
+  // order and loses the clear-wins tie. A marker started after a completed clear
+  // observes that clear and advances beyond it.
+  let keys = [];
+  try {
+    keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+  } catch (_) {}
+  const cleared = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+  try {
+    for (const key of keys) {
+      const parsed = _parseSessionCompletionUnreadClearedKey(key);
+      if (!parsed) continue;
+      const storedValue = Number(localStorage.getItem(key)) || 0;
+      const value = parsed.version || storedValue;
+      if (value > (Number(cleared[parsed.sid]) || 0)) cleared[parsed.sid] = value;
+    }
+  } catch (_) {
+    // A storage implementation that cannot enumerate still retains legacy data.
+  }
+  return cleared;
+}
+
+// Combine durable clear ordering with this client's in-memory fallback. The
+// fallback keeps the current window correct when quota rejects a new key.
+function _readSessionCompletionUnreadCleared() {
+  const cleared = _readPersistedSessionCompletionUnreadCleared();
+  const now = Date.now();
+  for (const [sid, memoryRecord] of Object.entries(_sessionCompletionUnreadClearedMemory || {})) {
+    const value = Number(memoryRecord && memoryRecord.order) || 0;
+    const recordedAt = Number(memoryRecord && memoryRecord.recorded_at) || 0;
+    if (recordedAt && now - recordedAt > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS) {
+      delete _sessionCompletionUnreadClearedMemory[sid];
+      continue;
+    }
+    if (value > (Number(cleared[sid]) || 0)) cleared[sid] = value;
+  }
+  return cleared;
+}
+
+function _nextSessionCompletionUnreadOrder(sid, cleared = null) {
+  const clears = cleared || _readSessionCompletionUnreadCleared();
+  const cached = _getSessionCompletionUnread()[sid];
+  const stored = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY)[sid];
+  return Math.max(
+    Date.now(),
+    Number(clears[sid]) || 0,
+    _sessionCompletionUnreadOrder(cached),
+    _sessionCompletionUnreadOrder(stored)
+  ) + 1;
+}
+
+// Merge the persisted marker map with our cache under the tombstones. Markers
+// the store holds that a clear already outranks are dropped from the result, so
+// the caller can write the repaired map back and no reader sees them again.
+function _mergeSessionCompletionUnread(disk, cache, cleared) {
+  const markers = {};
+  let changed = false;
+  for (const sid of Object.keys(disk || {})) {
+    const stored = disk[sid];
+    if (_markerLosesToUnreadClear(stored, (cleared || {})[sid])) {
+      changed = true;
+      continue;
+    }
+    markers[sid] = stored;
+  }
+  for (const sid of Object.keys(cache || {})) {
+    const ours = cache[sid];
+    if (_markerLosesToUnreadClear(ours, (cleared || {})[sid])) continue;
+    if (Object.prototype.hasOwnProperty.call(markers, sid)) {
+      // Both sides hold a marker: the later logical operation wins, which is the
+      // same order the clear comparison uses. Comparing completed_at here would
+      // keep the earlier of two markers written in one millisecond and leave that
+      // one's message count or cron profile metadata for later cleanup.
+      if (_sessionCompletionUnreadOrder(ours) > _sessionCompletionUnreadOrder(markers[sid])) {
+        markers[sid] = ours;
+        changed = true;
+      }
+      continue;
+    }
+    markers[sid] = ours;
+    changed = true;
+  }
+  return {markers, changed};
+}
+
 function _saveSessionCompletionUnread() {
   try {
-    localStorage.setItem(SESSION_COMPLETION_UNREAD_KEY, JSON.stringify(_getSessionCompletionUnread()));
+    const merged = _mergeSessionCompletionUnread(
+      _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY),
+      _getSessionCompletionUnread(),
+      _readSessionCompletionUnreadCleared()
+    );
+    // Same convergence rule as the viewed counts: write only when the store does
+    // not already hold the merged result.
+    if (merged.changed) {
+      localStorage.setItem(SESSION_COMPLETION_UNREAD_KEY, JSON.stringify(merged.markers));
+    }
+    _sessionCompletionUnread = merged.markers;
   } catch (_){
     // Ignore localStorage write failures.
   }
@@ -509,7 +856,12 @@ function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
   const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  const entry = {message_count: count, completed_at: Date.now()};
+  const clearsAtIntent = _readSessionCompletionUnreadCleared();
+  const entry = {
+    message_count: count,
+    completed_at: Date.now(),
+    unread_order: _nextSessionCompletionUnreadOrder(sid, clearsAtIntent),
+  };
   // Cron markers carry source+profile so profile switches can clear only that
   // cross-profile leak without wiping ordinary chat completion unread (#5960).
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
@@ -541,11 +893,88 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
   return true;
 }
 
-function _clearSessionCompletionUnread(sid) {
+// Record that the completion-unread marker(s) for `sidOrSids` were cleared at
+// `clearedAt`. Each session owns a separate key: clears for different sessions
+// are independent atomic writes and cannot discard one another. Markers carry a
+// completed_at timestamp, so a marker that does not postdate the clear loses,
+// while a completion that happened afterwards still wins. Old or deleted-session
+// tombstones are pruned opportunistically to bound quota use.
+function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
+  const justCleared = new Set(
+    (Array.isArray(sidOrSids) ? sidOrSids : [sidOrSids]).map((sid) => String(sid))
+  );
+  const at = Number(clearedAt) || 0;
+  for (const sid of justCleared) {
+    const previous = _sessionCompletionUnreadClearedMemory[sid];
+    if (at > (Number(previous && previous.order) || 0)) {
+      _sessionCompletionUnreadClearedMemory[sid] = {order: at, recorded_at: Date.now()};
+    }
+  }
+
+  // One-way migration. The previous representation kept every clear fact in one
+  // shared blob, so concurrent clears could replace one another and the blob
+  // only ever grew. Import those facts as independently addressable records and
+  // drop the blob. A client still running the previous revision will not observe
+  // clears recorded after this point; that is a reload boundary, not something a
+  // dual write could have fixed, because the shared blob cannot be written
+  // concurrently without losing an update.
+  const legacy = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+  let migrated = true;
+  for (const [sid, value] of Object.entries(legacy)) {
+    const stamp = Number(value) || 0;
+    if (!stamp) continue;
+    try {
+      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, stamp), String(Date.now()));
+    } catch (_) {
+      migrated = false;
+    }
+  }
+  for (const sid of justCleared) {
+    try {
+      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, at), String(Date.now()));
+    } catch (_) {}
+  }
+  if (Object.keys(legacy).length && migrated) {
+    try { localStorage.removeItem(SESSION_COMPLETION_UNREAD_CLEARED_KEY); } catch (_) {}
+  }
+
+  const persistedCleared = _readPersistedSessionCompletionUnreadCleared();
+  let keys = [];
+  try {
+    keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+  } catch (_) {}
+  for (const key of keys) {
+    const parsed = _parseSessionCompletionUnreadClearedKey(key);
+    if (!parsed) continue;
+    try {
+      const recordedAt = Number(localStorage.getItem(key)) || 0;
+      const version = parsed.version || recordedAt;
+      const expired = recordedAt > 0 && Date.now() - recordedAt > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS;
+      const superseded = version < (Number(persistedCleared[parsed.sid]) || 0);
+      // Prune by age, or when a newer ordering fact is itself durable. A
+      // memory-only clear may keep this window correct under quota pressure, but
+      // it cannot safely replace the older record across reload.
+      if (expired || superseded) localStorage.removeItem(key);
+    } catch (_) {}
+  }
+}
+
+function _clearSessionCompletionUnread(sid, recordIfMissing = true) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
-  if (!Object.prototype.hasOwnProperty.call(unread, sid)) return;
+  let stored = false;
+  if (!Object.prototype.hasOwnProperty.call(unread, sid)) {
+    // Another client may have recorded this marker since our cache was loaded,
+    // so the store decides whether there is anything to clear.
+    stored = Object.prototype.hasOwnProperty.call(
+      _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY), sid);
+    if (!stored && !recordIfMissing) return;
+  }
+  const order = _nextSessionCompletionUnreadOrder(sid);
   delete unread[sid];
+  // Write the ordering fact before the marker map. This is required even when
+  // the marker has been prepared by another client but has not reached storage.
+  _writeSessionCompletionUnreadCleared(sid, order);
   _saveSessionCompletionUnread();
 }
 
@@ -657,6 +1086,7 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
     : 'default';
   const unread = _getSessionCompletionUnread();
   let changed = false;
+  const clearedSids = [];
   for (const sid of Object.keys(unread)) {
     const marker = unread[sid];
     if (!marker || typeof marker !== 'object' || Array.isArray(marker)) continue;
@@ -667,9 +1097,16 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
     if (!resolved.profile) continue;
     if (_cronMarkerProfileMatchesActive(resolved.profile, active)) continue;
     delete unread[sid];
+    clearedSids.push(sid);
     changed = true;
   }
   if (!changed) return false;
+  // Each cleared marker needs its durable ordering fact, or the merge in
+  // _saveSessionCompletionUnread() (and a stale client's later save) would
+  // restore it from the store.
+  for (const sid of clearedSids) {
+    _writeSessionCompletionUnreadCleared(sid, _nextSessionCompletionUnreadOrder(sid));
+  }
   _saveSessionCompletionUnread();
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   return true;
@@ -678,9 +1115,34 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
 function _clearSessionViewedCount(sid) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
-  if (!Object.prototype.hasOwnProperty.call(counts, sid)) return;
+  const hadCachedEntry = Object.prototype.hasOwnProperty.call(counts, sid);
   delete counts[sid];
-  _saveSessionViewedCounts();
+  // Record the deletion before any merge, so this client cannot re-adopt the
+  // entry it is deleting and another client holding the same acknowledgement
+  // prunes it instead of writing it back.
+  _recordSessionViewedCountDeleted(sid);
+  // A removal must actually leave disk, unlike the additive max-merge used on
+  // the set path (which never deletes). Delete just this key from the persisted
+  // map so entries a concurrent client added are preserved. The store is
+  // consulted even when our cache never held the key: an entry another client
+  // added since our cache was loaded is exactly the one this path has to prune.
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_VIEWED_COUNTS_KEY) || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (Object.prototype.hasOwnProperty.call(parsed, sid)) {
+        delete parsed[sid];
+        localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(parsed));
+      }
+      // Adopt the store's entries but keep any higher count we already hold: we
+      // are the only client left that can repair a count another client
+      // lowered, so dropping ours here would lose the acknowledgement.
+      _sessionViewedCounts = _mergeSessionViewedCounts(parsed, counts).live;
+      return;
+    }
+  } catch (_){
+    // Fall through to the cache-only write on read/parse failure.
+  }
+  if (hadCachedEntry) _saveSessionViewedCounts();
 }
 
 function _hasSessionCompletionUnread(sid) {
@@ -730,12 +1192,22 @@ function _hasUnreadForSession(s) {
   if (!s || !s.session_id) return false;
   if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
+  const generation = _sessionTranscriptGenerationForUnread(s.session_id, s.transcript_generation);
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
-    _setSessionViewedCount(s.session_id, Number(s.message_count || 0));
+    _setSessionViewedCount(s.session_id, Number(s.message_count || 0), generation);
     return false;
   }
-  if (!Number.isFinite(s.message_count)) return false;
-  return s.message_count > Number(counts[s.session_id] || 0);
+  const viewed = _sessionViewedCountRecord(counts[s.session_id]);
+  if (generation > viewed.transcript_generation) {
+    const baseline = Math.max(0, Math.min(
+      Number(s.message_count || 0),
+      Number(s.transcript_generation_baseline) || 0
+    ));
+    _setSessionViewedCount(s.session_id, baseline, generation);
+    return Number.isFinite(s.message_count) && s.message_count > baseline;
+  }
+  if (generation < viewed.transcript_generation || !Number.isFinite(s.message_count)) return false;
+  return s.message_count > viewed.message_count;
 }
 
 // Keep the sidebar polling snapshot current for a just-visited session so a
@@ -843,6 +1315,14 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
+  // Sidebar idle metadata can beat the terminal frame on the independent chat
+  // SSE. Let its exact OPEN transport finish the Anchor handoff; orphaned or
+  // disconnected streams still use the existing idle recovery below.
+  if (_hasOwnedOpenLiveStream(sid)) {
+    const live=LIVE_STREAMS[sid];
+    if(typeof live.recoverFromSidebarIdle==='function') live.recoverFromSidebarIdle();
+    return false;
+  }
   let changed=false;
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
@@ -931,6 +1411,8 @@ function _purgeStaleInflightEntries() {
     if (typeof _sendInProgress !== 'undefined' && _sendInProgress && sid === _sendInProgressSid) {
       continue;
     }
+    // The sidebar render must not purge what the idle reconciler preserved.
+    if (_hasOwnedOpenLiveStream(sid)) continue;
     if (!sessionsById.has(sid)) {
       const knownSource = sourceById ? sourceById.get(sid) : null;
       if (currentSidebarSource && (!knownSource || knownSource !== currentSidebarSource)) {
@@ -950,6 +1432,14 @@ function _purgeStaleInflightEntries() {
     }
     // Sessions that exist and are still streaming are preserved.
   }
+}
+
+function _hasOwnedOpenLiveStream(sid) {
+  if (typeof S === 'undefined' || !S || !S.session || S.session.session_id !== sid || !S.activeStreamId) return false;
+  const live = typeof LIVE_STREAMS === 'object' && LIVE_STREAMS ? LIVE_STREAMS[sid] : null;
+  // readyState 1 is EventSource.OPEN. A cached stream ID or busy flag alone
+  // is not ownership and must never disable recovery for a stuck indicator.
+  return Boolean(live && live.streamId === S.activeStreamId && live.source && live.source.readyState === 1);
 }
 
 function _rememberSessionListSource(s, sid = null, allowScopeFallback = true) {
@@ -1006,6 +1496,74 @@ function _inflightHasVisibleLiveState(inflight) {
     });
   }
   return false;
+}
+
+// #7640: a run-journal replay cursor is only safe when the recovery object can
+// still repaint the live assistant turn. `_inflightHasVisibleLiveState()` above
+// deliberately counts a plain user row (the optimistic row has to survive a
+// mid-turn reload), but such an object carries no assistant projection at all:
+// seeding `after_seq` from it tells the server to skip every journal event that
+// would rebuild the body, so the settled footer lands over a blank message until
+// a manual reload replays the journal from the zero floor. Only recoverable live
+// output may raise the replay floor.
+function _inflightCanSeedJournalReplay(inflight){
+  if(!inflight||typeof inflight!=='object') return false;
+  if(String(inflight.lastAssistantText||'').trim()) return true;
+  if(String(inflight.lastReasoningText||'').trim()) return true;
+  if(String(inflight.liveTurnHtml||'').trim()) return true;
+  if(Array.isArray(inflight.toolCalls)&&inflight.toolCalls.length) return true;
+  if(Array.isArray(inflight.activityBurstAnchors)&&inflight.activityBurstAnchors.length) return true;
+  const anchorScene=inflight.anchorActivityScene;
+  if(anchorScene&&Array.isArray(anchorScene.activity_rows)&&anchorScene.activity_rows.length) return true;
+  if(Array.isArray(inflight.messages)){
+    // The transcript copy carries every earlier turn (#7651): in an established
+    // conversation the last assistant row is the PREVIOUS turn's reply, not the
+    // one the cursor belongs to, so it must never authorize a nonzero floor.
+    // Message evidence counts only from a current `_live` assistant standing
+    // after the latest user boundary; anything historical fails closed to zero.
+    const list=inflight.messages;
+    let latestUserIdx=-1;
+    for(let i=list.length-1;i>=0;i--){
+      const row=list[i];
+      if(row&&row.role==='user'){latestUserIdx=i;break;}
+    }
+    return list.some((msg,idx)=>{
+      if(!msg||msg.role!=='assistant') return false;
+      if(!msg._live) return false;
+      if(idx<=latestUserIdx) return false;
+      const content=msg.content;
+      if(typeof content==='string') return Boolean(content.trim());
+      if(Array.isArray(content)) return content.length>0;
+      return Boolean(content);
+    });
+  }
+  return false;
+}
+
+function _runJournalReplayFloorForInflight(inflight){
+  if(!_inflightCanSeedJournalReplay(inflight)) return 0;
+  return Math.max(0,Number((inflight&&inflight.lastRunJournalSeq)||0)||0);
+}
+
+function _runJournalReplayEventIdForInflight(inflight){
+  if(!_runJournalReplayFloorForInflight(inflight)) return '';
+  return String((inflight&&inflight.lastRunJournalEventId)||'');
+}
+
+// #7640: re-validate the selected recovery object immediately before reattach
+// instead of trusting its existence. A cursor that outlived its assistant
+// projection is dropped here so it cannot reach the wire as a replay floor; the
+// replay then restarts from zero, which is the path a manual reload already
+// proves out. Normalising the object (not just the floor) also keeps a later
+// persist from resurrecting the stale cursor on the next reattach.
+function _normalizeInflightReplayCursorForReattach(inflight){
+  if(!inflight||typeof inflight!=='object') return inflight;
+  const seq=Math.max(0,Number(inflight.lastRunJournalSeq||0)||0);
+  if(seq>0&&!_inflightCanSeedJournalReplay(inflight)){
+    inflight.lastRunJournalSeq=0;
+    inflight.lastRunJournalEventId='';
+  }
+  return inflight;
 }
 
 function _serverLiveSnapshotToolId(tc){
@@ -1400,15 +1958,20 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // One-shot profile-switch workspace wins first; otherwise prefer the profile default.
+    // Explicit profile switch wins, then the current conversation, then the profile default.
+    // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const inheritWs=switchWs||(S._profileDefaultWorkspace||null)||(S.session?S.session.workspace:null);
+    const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
+    const inheritWs=switchWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
     };
-    if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
+    if(S.session&&S.session.session_id){
+      reqBody.prev_session_id=S.session.session_id;
+      if(sessionWs) reqBody.workspace_inherited_from_prev_session=true;
+    }
     // Three-value worktree contract (#6022): explicit true/false is forwarded
     // verbatim; an ABSENT key lets the server apply the agent's config-level
     // `worktree:` default. Auto-bind paths pass worktree:false explicitly so a
@@ -1444,7 +2007,7 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
-      // Cold-start / picker-without-provider fallback: when the dropdown option's
+      // Cold-start / picker-without-provider fallback (#2518): when the dropdown option's
       // data-provider is empty/'default' or the persisted state predates provider
       // tracking, newModelState.model_provider is null. POST /api/session/new's
       // fast path in _resolve_compatible_session_model_state requires both model
@@ -1491,7 +2054,7 @@ async function newSession(flash, options={}){
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
-    S.session=data.session;S.messages=data.session.messages||[];
+    S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1646,6 +2209,10 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
+    // #7509: mirror the canonical switch in panels.js — the slash-skill caches still
+    // hold the previous profile's /api/skills payload, so drop them (and any reply
+    // still in flight) once the switch has succeeded.
+    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     if(data.default_model) window._defaultModel=data.default_model;
@@ -1703,6 +2270,12 @@ async function loadSession(sid){
   // #2971: idempotent re-arm before the no-op guard revives a stream a prior
   // failed loadSession killed; no-ops on real switches.
   _rearmActiveSessionStream();
+  // #6999: same-session force-reload coordination lives in the refresh paths
+  // (refreshActiveSessionIfExternallyUpdated guard + session-updated SSE
+  // handler in messages.js), NOT here: a second loadSession(sid,{force:true})
+  // for the same sid is a legitimate supersede (generation bump below) that
+  // cross-session ordering tests rely on. Coalescing at the entry point would
+  // drop the superseding fetch and leave a stale first load in charge.
   if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){
     // Re-selecting the already-open session is a no-op for transcript/scroll, but
     // it is still a *visit*: clear a stale sidebar unread dot (e.g. one a
@@ -1968,6 +2541,7 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
@@ -2144,6 +2718,12 @@ async function loadSession(sid){
     S.activeStreamId=activeStreamId;
     const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
     const replayPersistedLiveToolCards=(opts)=>{
+      // The journal-backed Anchor scene is authoritative through its resume
+      // cursor; newer rows arrive through the reattached SSE stream. Replaying
+      // the older INFLIGHT tool cache after a successful scene restore would
+      // redraw all N rows N times. Keep the #3707 replay only for legacy HTML
+      // restoration or a failed/unavailable scene render.
+      if(restoredAnchorScene) return;
       const liveToolCalls=Array.isArray(S.toolCalls)
         ? S.toolCalls
         : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
@@ -2159,6 +2739,11 @@ async function loadSession(sid){
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (!_isCurrentLoad()) return;
+      // #7640: validate the selected recovery object at the moment of reattach
+      // rather than trusting its existence. A cache that kept `lastRunJournalSeq`
+      // but lost the live assistant projection would otherwise seed the replay
+      // floor and skip the journal range that rebuilds the message body.
+      _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
       didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
@@ -2288,6 +2873,8 @@ async function loadSession(sid){
     if(activeStreamId){
       S.busy=true;
       S.activeStreamId=activeStreamId;
+      // #7640: same reattach validation as the `reattach` branch above.
+      if(INFLIGHT[sid]) _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
       updateSendBtn();
@@ -2381,7 +2968,7 @@ async function loadSession(sid){
     );
   }
 
-  if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+  if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(sid);
 
   // ── Cross-channel handoff hint ──
   // After session fully loaded, check if this is a messaging session with
@@ -2403,7 +2990,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix', 'signal']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -2413,6 +3000,7 @@ const _MESSAGING_SOURCE_LABELS = {
   wecom: 'WeCom',
   wecom_callback: 'WeCom Callback',
   matrix: 'Matrix',
+  signal: 'Signal',
 };
 
 function _isMessagingSession(session) {
@@ -2534,7 +3122,7 @@ function _isCliSession(session) {
 
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
-  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
+  return filter === 'cli' ? t('sessions_source_cli', n) : t('sessions_source_webui', n);
 }
 
 function _clearSessionSourceTabCounts() {
@@ -2785,7 +3373,7 @@ function _showHandoffHint(sid, rounds) {
     </div>
     <div class="handoff-hint-actions">
       <button class="handoff-hint-action" type="button">View summary</button>
-      <button class="handoff-hint-dismiss" type="button" onclick="event.stopPropagation(); _dismissHandoffHint('${esc(sid)}')" title="Dismiss">
+      <button class="handoff-hint-dismiss" type="button" onclick="event.stopPropagation(); _dismissHandoffHint(${jsArg(sid)})" title="Dismiss">
         Close
       </button>
     </div>
@@ -2902,12 +3490,20 @@ async function _generateHandoffSummary(sid, rounds) {
   } catch (e) {
     console.warn('Handoff summary failed:', e);
     if (S.session && S.session.session_id === sid && typeof setHandoffUi === 'function') {
+      // A 400 carries an actionable, user-fixable message (e.g. an ambiguous
+      // custom-provider slug collision: rename one provider so its slug is
+      // unique). Surface it verbatim rather than degrading to the generic
+      // "try again" card — previously the server answered 200 with a warning
+      // that this handler ignored, hiding the fix from the user.
+      const errorText = (e && e.status === 400 && e.message)
+        ? e.message
+        : ('Summary generation failed: ' + (e && e.message ? e.message : 'unknown error'));
       setHandoffUi({
         sessionId: sid,
         phase: 'error',
         channel,
         rounds,
-        errorText: 'Summary generation failed: ' + e.message,
+        errorText,
       });
     }
   }
@@ -3187,9 +3783,23 @@ async function _ensureMessagesLoaded(sid, opts) {
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
-    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(), _messageRenderableMessageCount());
+    // #6999: bound the auto-expansion. This number gates
+    // _messageHiddenBeforeCount() (load-older / jump-to-start affordances)
+    // and the non-virtualized fallback render width; the virtualized DOM tail
+    // is independently capped at MESSAGE_RENDER_WINDOW_DEFAULT via
+    // _messageVirtualKeepTailCount(). Growing the window to the FULL loaded
+    // transcript on every force reload (tab focus, SSE catch-up) zeroes the
+    // hidden-before count for long sessions and widens the effective render
+    // window for non-virtualized paths. Keep the #3686 intent (don't collapse
+    // back to the 50-row default after a load) but cap the growth to a small
+    // multiple of the default window.
+    _messageRenderWindowSize=Math.max(
+      _currentMessageRenderWindowSize(),
+      Math.min(_messageRenderableMessageCount(), (typeof MESSAGE_RENDER_WINDOW_DEFAULT==='number'?MESSAGE_RENDER_WINDOW_DEFAULT:50)*4)
+    );
   }
   if(S.session&&S.session.session_id===sid){
+    if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.session.message_count=Number(data.session.message_count || msgs.length);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
@@ -3860,7 +4470,7 @@ async function _ensureAllMessagesLoaded() {
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=all`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
     // Session may have been switched while we awaited. Bail rather than
@@ -3886,6 +4496,11 @@ async function _ensureAllMessagesLoaded() {
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
+      if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
+        S.session.regeneration_revision = data.session.regeneration_revision;
+      } else {
+        delete S.session.regeneration_revision;
+      }
     }
   } finally {
     _loadingOlder = false;
@@ -5219,7 +5834,8 @@ function _shouldKeepLocalOnlyOptimisticSessionRow(local){
 function _dropStaleOptimisticSessionRow(sid){
   if(!sid) return;
   if(typeof _rememberSessionListSource==='function') _rememberSessionListSource(null, sid, false);
-  if(INFLIGHT&&INFLIGHT[sid]){
+  // Retiring sidebar optimism must not retire the independent chat owner.
+  if(INFLIGHT&&INFLIGHT[sid]&&!_hasOwnedOpenLiveStream(sid)){
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
@@ -5730,6 +6346,12 @@ let _sessionTimeRefreshVisibilityHandler = null;
 let _activeSessionExternalRefreshTimer = null;
 let _activeSessionExternalRefreshInFlight = false;
 let _deferredActiveSessionExternalRefreshReason = '';
+// #6999 re-gate: per-SID latch of the maximum message_count announced by a
+// `session-updated` frame while the external-refresh guard was held. The
+// refresh owner runs ONE guarded follow-up in its finally instead of letting
+// the event die — production does not guarantee a second event, so discarding
+// would leave the transcript stale until the next focus/poll.
+let _pendingSessionUpdatedCounts = null;
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
 let _sessionEventsRefreshPendingRequest = null;
@@ -5822,6 +6444,51 @@ function _flushDeferredActiveSessionExternalRefresh(){
   void refreshActiveSessionIfExternallyUpdated(reason);
 }
 
+// #6999 re-gate: coalesce, never discard. Called by the messages.js
+// `session-updated` handler when it finds the external-refresh guard held:
+// instead of dropping the update (production does not guarantee a second
+// event), latch the MAXIMUM announced count per SID. The refresh owner's
+// finally drains it with ONE guarded follow-up.
+function _latchSessionUpdatedPendingCount(sid, count){
+  const n = Number(count);
+  if(!sid || !Number.isFinite(n)) return;
+  if(!_pendingSessionUpdatedCounts) _pendingSessionUpdatedCounts = {};
+  const prev = _pendingSessionUpdatedCounts[sid];
+  if(prev === undefined || n > prev) _pendingSessionUpdatedCounts[sid] = n;
+}
+
+// Single-line entry used by the messages.js `session-updated` handler:
+// returns true when the external-refresh probe owns the guard (the frame was
+// latched for the owner's finally to drain); returns false when the handler
+// should take its normal direct-load path.
+function _coalesceSessionUpdatedWhileRefreshHeld(sid, count){
+  if(typeof _activeSessionExternalRefreshInFlight === 'undefined' || !_activeSessionExternalRefreshInFlight) return false;
+  _latchSessionUpdatedPendingCount(sid, count);
+  return true;
+}
+
+// Drain the per-SID latch after the external-refresh owner releases its
+// guard. Runs ONE guarded follow-up only when local state is still behind
+// the latched count — a same-SID load during the refresh window already
+// caught us up, a switch-away moved the active session elsewhere, and
+// duplicate events coalesce into this single follow-up.
+function _drainSessionUpdatedPendingCount(){
+  const pending = _pendingSessionUpdatedCounts;
+  _pendingSessionUpdatedCounts = null;
+  if(!pending || !S.session || !S.session.session_id) return;
+  const sid = S.session.session_id;
+  const latched = pending[sid];
+  if(latched === undefined) return;
+  const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
+  if(Number.isFinite(localCount) && localCount >= latched) return;
+  // The follow-up re-enters refreshActiveSessionIfExternallyUpdated, which
+  // re-probes server metadata and only force-reloads when the count actually
+  // changed — so the OOM guards (busy/stream/loading/document.hidden) all
+  // apply, and a metadata-read-only probe that already ran during the refresh
+  // window gets a second chance to observe the latched growth.
+  void refreshActiveSessionIfExternallyUpdated('session-updated');
+}
+
 // Reconcile the active session against server-side metadata. Returns a status
 // string so callers (notably the post-stream idle reconcile) can decide how to
 // react:
@@ -5846,6 +6513,10 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(_activeSessionExternalRefreshInFlight) return 'skipped';
   if(!S.session || !S.session.session_id) return 'skipped';
   if(S.busy || S.activeStreamId) return 'skipped';
+  // #6999: if a load for this exact session is already in flight, it owns the
+  // refresh — probing now would duplicate the fetch and the O(N) render work
+  // that exhausts the tab's JS heap when the tab comes back into focus.
+  if(_loadingSessionId === S.session.session_id) return 'skipped';
   if(typeof _isMessageReaderUnpinned==='function'&&_isMessageReaderUnpinned()){
     _deferActiveSessionExternalRefresh(reason||'poll');
     return 'skipped';
@@ -5930,6 +6601,10 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     return 'failed';
   }finally{
     _activeSessionExternalRefreshInFlight = false;
+    // #6999 re-gate: any `session-updated` frames that arrived while we owned
+    // the guard were latched (coalesced), not dropped — run ONE guarded
+    // follow-up when local state is still behind the latched count.
+    _drainSessionUpdatedPendingCount();
   }
 }
 
@@ -7015,6 +7690,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   };
   const orphans=[];
   const renderableChildIds=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
+  const childAttachOrderById=new Map();
+  let childAttachCursor=0;
   const attachQueueById=new Map();
   for(const candidate of [...(rawSessions||[]),...(referenceSessions||[])]){
     if(candidate&&candidate.session_id&&!attachQueueById.has(candidate.session_id)) attachQueueById.set(candidate.session_id,candidate);
@@ -7024,6 +7701,12 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
     if(child&&child.session_id&&visibleBySid.has(child.session_id)) continue;
     const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
+    const childRawRole=[
+      child&&child.raw_source,
+      child&&child.source_tag,
+      child&&child.source,
+    ].map(source=>String(source||'').trim().toLowerCase()).find(Boolean)||'';
+    const childIsDelegatedSubagent=_isChildSession(child)&&childRawRole==='subagent';
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
@@ -7048,11 +7731,10 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       hiddenArchivedChildTree.add(child.session_id);
       continue;
     }
-    // Cross-surface rows (for example a WebUI continuation from a Telegram
-    // conversation) should remain top-level when there is no WebUI-owned parent
-    // row to stack under.  But if the parent is visible in this same sidebar
-    // render, attach normally — delegated subagent rows are also cross-source
-    // relative to their WebUI parent and should not be forced into orphans.
+    // Independent cross-surface rows (for example a WebUI continuation from a
+    // Telegram conversation) remain top-level instead of nesting under an
+    // external parent. Delegated subagents are also cross-source, but they are
+    // parent-owned work and should still attach to the visible parent row.
     const parentSourceMarker=String(parentRow&&(
       parentRow.session_source||parentRow.raw_source||parentRow.source_tag||parentRow.source
     )||'').toLowerCase();
@@ -7063,12 +7745,15 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       parentRow.session_source==='messaging'||
       (parentSourceMarker&&parentSourceMarker!=='webui'&&parentSourceMarker!=='subagent'&&parentSourceMarker!=='other'&&parentSourceMarker!=='fork')
     );
-    if(parentRow&&child._cross_surface_child_session&&parentIsExternal){
+    if(parentRow&&child._cross_surface_child_session&&parentIsExternal&&!childIsDelegatedSubagent){
       if(childRenderable) orphans.push({...child,_orphan_child_session:true});
       continue;
     }
     if(parentRow){
       const childCopy={...child};
+      if(!childAttachOrderById.has(childCopy.session_id)){
+        childAttachOrderById.set(childCopy.session_id, childAttachCursor++);
+      }
       if(parentSegment){
         childCopy._parent_segment_id=parentSegment.session_id;
         childCopy._parent_segment_title=_sessionDisplayTitle(parentSegment)||child.parent_title||'Untitled';
@@ -7095,6 +7780,23 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // branch above and still orphans as before.
       if(child&&child._cross_surface_child_session&&_isChildSession(child)) continue;
       orphans.push({...child,_orphan_child_session:true});
+    }
+  }
+  const resolveReadOnlySession = typeof _isReadOnlySession === 'function'
+    ? _isReadOnlySession
+    : ((session) => !!(session && session.read_only));
+  for(const row of rows){
+    if(Array.isArray(row._child_sessions)&&row._child_sessions.length>1){
+      row._child_sessions.sort((a,b)=>{
+        const readOnlyCmp = Number(resolveReadOnlySession(a))-Number(resolveReadOnlySession(b));
+        if(readOnlyCmp!==0) return readOnlyCmp;
+        const aOrder = childAttachOrderById.get(a&&a.session_id) ?? Number.MAX_SAFE_INTEGER;
+        const bOrder = childAttachOrderById.get(b&&b.session_id) ?? Number.MAX_SAFE_INTEGER;
+        return aOrder-bOrder;
+      });
+    }
+    if(Array.isArray(row._child_sessions)){
+      row._child_session_count=row._child_sessions.length;
     }
   }
   return [...rows,...orphans];
@@ -7432,7 +8134,50 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
+function _isDelegatedSubagentRow(s){
+  if(!_isChildSession(s)) return false;
+  const role=[s.raw_source,s.source_tag,s.source].map(v=>String(v||'').trim().toLowerCase()).find(Boolean)||'';
+  return role==='subagent';
+}
+
+// Delegated subagents without a project_id take their nearest ancestor's project;
+// every other row keeps its own. Memoized per render, so each lineage resolves once.
+function _sidebarProjectResolver(rowsById){
+  const memo=new Map();
+  return function projectIdFor(s){
+    if(!s) return null;
+    const path=[];
+    const onPath=new Set();
+    let cur=s, result=null;
+    while(cur){
+      const sid=cur.session_id;
+      if(memo.has(sid)){ result=memo.get(sid); break; }
+      if(cur.project_id||!_isDelegatedSubagentRow(cur)){ result=cur.project_id||null; if(sid) path.push(sid); break; }
+      if(onPath.has(sid)) break;
+      onPath.add(sid); path.push(sid);
+      cur=rowsById?rowsById.get(cur.parent_session_id):null;
+    }
+    for(const sid of path) memo.set(sid,result);
+    return result;
+  };
+}
+
+function _sidebarRowsById(rows){
+  const byId=new Map();
+  for(const list of rows){
+    if(!Array.isArray(list)) continue;
+    for(const s of list) if(s&&s.session_id&&!byId.has(s.session_id)) byId.set(s.session_id,s);
+  }
+  return byId;
+}
+
+// True when any row resolves to no project, using the filter's own ancestor map.
+function _sidebarHasUnprojectedRows(rows, projectIdFor){
+  return rows.some(s=>!projectIdFor(s));
+}
+
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
+  const projectIdFor=_sidebarProjectResolver(_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]));
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
@@ -7451,10 +8196,11 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     const referenceRaw=isCli ? cliReferenceRaw : webuiReferenceRaw;
     const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
     profileFiltered.push(s);
+    const projectId=projectIdFor(s);
     if(_activeProject===NO_PROJECT_FILTER){
-      if(s.project_id) continue;
+      if(projectId) continue;
     } else if(_activeProject){
-      if(s.project_id!==_activeProject) continue;
+      if(projectId!==_activeProject) continue;
     }
     referenceRaw.push(s);
     if(s.archived){
@@ -7478,6 +8224,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     cliReferenceRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
+    projectIdFor,
   };
 }
 
@@ -7489,15 +8236,18 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 // suppression context — silently hiding a visible child/fork whose archived
 // ancestor lives outside the current view. Scope the references to the same
 // project + source bucket as the render they feed before using them.
-function _scopedSidebarReferenceRows(isCli){
+// projectIdFor: the render's shared resolver; standalone callers get one over references + _allSessions.
+function _scopedSidebarReferenceRows(isCli, projectIdFor){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
+  const resolve=projectIdFor||_sidebarProjectResolver(_sidebarRowsById([_sidebarReferenceSessions, typeof _allSessions!=='undefined'?_allSessions:null]));
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
     // Source scope: only references in the same webui/cli bucket as this render.
     if(_isCliSession(s)!==!!isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
-    if(_activeProject===NO_PROJECT_FILTER){ if(s.project_id) return false; }
-    else if(_activeProject){ if(s.project_id!==_activeProject) return false; }
+    const projectId=resolve(s);
+    if(_activeProject===NO_PROJECT_FILTER){ if(projectId) return false; }
+    else if(_activeProject){ if(projectId!==_activeProject) return false; }
     return true;
   });
 }
@@ -7603,19 +8353,20 @@ function renderSessionListFromCache(){
     cliReferenceRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
+    projectIdFor,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
   const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, projectIdFor)]);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
   // null is a deliberate "not computed" sentinel consumed only by
   // _sessionSourceTabCount's fallback path below.
   const renderedWebuiSessionCount=_serverWebuiSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length
+    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)]).length
     : null;
   const renderedCliSessionCount=_serverCliSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length
+    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)]).length
     : null;
   const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);
   const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);
@@ -7677,7 +8428,7 @@ function renderSessionListFromCache(){
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
-  const hasUnprojected=profileFiltered.some(s=>!s.project_id);
+  const hasUnprojected=_sidebarHasUnprojectedRows(profileFiltered, projectIdFor);
   if(_allProjects.length>0||hasUnprojected){
     const bar=document.createElement('div');
     bar.className='project-bar';
@@ -8214,7 +8965,7 @@ function renderSessionListFromCache(){
       const childList=document.createElement('div');
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
-      const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
+      const sortedChildren=[...s._child_sessions];
       const openChildSession=async(childSession)=>{
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
@@ -8926,10 +9677,31 @@ async function _handleShowAllProfilesStorageEvent(e){
   if(typeof renderSessionList==='function') await renderSessionList({deferWhileInteracting:false});
 }
 
+function _handleUnreadStorageEvent(e){
+  if(!e || !e.key) return;
+  // A concurrent WebUI client on the same origin/profile changed one of the
+  // unread stores. Both saves re-read the store, merge our cache into it (max for
+  // viewed counts, tombstone-ordered for completion markers), keep the merged map
+  // as the live cache, and write back only what the store is missing. So this
+  // client re-asserts the acknowledgement it still holds instead of dropping it
+  // and re-reading a value the other client's write already lost.
+  if(e.key === SESSION_VIEWED_COUNTS_KEY
+    || (typeof e.key === 'string' && e.key.startsWith(SESSION_VIEWED_COUNTS_DELETED_PREFIX))){
+    _saveSessionViewedCounts();
+  }
+  else if(e.key === SESSION_COMPLETION_UNREAD_KEY
+    || e.key === SESSION_COMPLETION_UNREAD_CLEARED_KEY
+    || (typeof e.key === 'string'
+      && e.key.startsWith(SESSION_COMPLETION_UNREAD_CLEARED_PREFIX))){
+    _saveSessionCompletionUnread();
+  }
+}
+
 if(typeof window!=='undefined'){
   window.addEventListener('storage', (e) => {
     void _handleActiveSessionStorageEvent(e);
     void _handleShowAllProfilesStorageEvent(e);
+    void _handleUnreadStorageEvent(e);
   });
   window.addEventListener('popstate', () => {
     const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;

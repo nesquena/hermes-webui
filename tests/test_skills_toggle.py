@@ -197,3 +197,43 @@ def test_platform_disabled_no_write_through_when_key_absent(tmp_path, monkeypatc
     assert "skill-b" in cfg_after["skills"]["disabled"]
     # platform_disabled was never created
     assert "platform_disabled" not in cfg_after.get("skills", {})
+
+
+def test_toggle_preserves_json_array_string_entries(tmp_path, monkeypatch):
+    """Issue #7120: when skills.disabled is stored as a JSON-array string,
+    a toggle must decode it before add/remove so the other entries survive
+    the write (previously the whole string was treated as one name and the
+    list was destroyed on the next save)."""
+    from unittest.mock import MagicMock
+    from api.routes import _handle_skill_toggle
+    from api.config import _load_yaml_config_file
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+
+    import yaml
+
+    config = {"skills": {"disabled": '["skill-a", "skill-b"]'}}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump(config), encoding="utf-8")
+
+    fake_dir = tmp_path / "skills" / "skill-c"
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    fake_md = fake_dir / "SKILL.md"
+    fake_md.write_text("---\nname: skill-c\n---\nC skill", encoding="utf-8")
+    monkeypatch.setattr(
+        "api.routes._find_skill_in_dirs",
+        lambda name, dirs: (fake_dir, fake_md),
+    )
+
+    handler = MagicMock()
+
+    # Toggle skill-c OFF — must append without dropping skill-a/skill-b
+    _handle_skill_toggle(handler, {"name": "skill-c", "enabled": False})
+    cfg_after = _load_yaml_config_file(config_path)
+    assert cfg_after["skills"]["disabled"] == ["skill-a", "skill-b", "skill-c"]
+
+    # Toggle skill-a ON — must remove only skill-a, preserving skill-b
+    _handle_skill_toggle(handler, {"name": "skill-a", "enabled": True})
+    cfg_after2 = _load_yaml_config_file(config_path)
+    assert cfg_after2["skills"]["disabled"] == ["skill-b", "skill-c"]

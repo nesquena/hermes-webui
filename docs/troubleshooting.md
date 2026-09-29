@@ -6,6 +6,26 @@ If your symptom isn't listed and the diagnostics don't narrow it down, file a bu
 
 ---
 
+## Requests succeed but access records disappear during agent work
+
+The server emits `[webui]` JSON access records to its original process stdout,
+using a private duplicate captured before agent imports. This keeps request and
+HTTP error logs visible when an in-process tool redirects or closes `sys.stdout`.
+Logging failures still must not interrupt HTTP responses.
+
+Check the service's captured stdout (for example, `docker logs <container>` or
+the journal for your WebUI unit). Verify successful `POST /api/chat/start` and
+`GET /api/chat/stream` records, not only health probes or rejected requests.
+Records include `method`, `path`, `status`, and `ms`: elapsed time until response
+headers, **not** the lifetime of an SSE stream or the agent turn. A missing record
+before response headers does not distinguish a pending request from a logging
+failure. Keep the launcher's output destination open for the process lifetime.
+
+Scheduled cron execution belongs to the Hermes Agent gateway scheduler, not the
+WebUI HTTP server. Investigate cron outcomes in the gateway's logs and the
+active Hermes home's `cron/executions.db`; WebUI access records show HTTP cron
+management requests, not every scheduled execution.
+
 ## "AIAgent not available -- check that hermes-agent is on sys.path"
 
 **Symptom.** WebUI starts, shows the chat interface, but every chat request fails immediately with this error in the response or the server log. As of v0.51.6 the error includes a diagnostic block with the running Python interpreter, the relevant `sys.path` entries, and the most-common fix; on older versions the message is bare.
@@ -179,13 +199,23 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 ## "Hermes Agent was updated while Hermes WebUI was running"
 
-**Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.
+**Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI manually. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.
 
-**Why.** WebUI currently imports `run_agent.AIAgent` into its long-lived Python process. Python keeps imported modules in memory. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision, producing misleading `ImportError`s or inconsistent runtime state. For local Agent-backed chat, WebUI therefore returns a retryable `409 agent_runtime_stale` before claiming or mutating session state instead of attempting a partial in-process reload. Gateway-backed chat runs in the gateway process and is not blocked by this WebUI-local check. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare.
+**Why.** WebUI imports `run_agent.AIAgent` into its long-lived Python process. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision. Local Agent-backed actions return a retryable `409 agent_runtime_stale` with `restart_scheduled: false` before accepting a new turn. Gateway- and runner-owned chat keep their existing runtime ownership. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare; losing a previously known revision remains fail-closed.
 
-**Diagnostic.** Compare the running WebUI process start time with the Agent checkout revision and recent update history. If the Agent was updated after WebUI started, restart WebUI before investigating individual missing-symbol errors.
+**Diagnostic.** The stale-runtime response includes `agent_update_state`, also preserved in asynchronous compression error status:
 
-**Fix.** Restart using the same launch method that started WebUI:
+| Value | Observation |
+| --- | --- |
+| `active` | A recent Agent update marker names a live PID. |
+| `incomplete` | An Agent recovery marker exists in the loaded checkout or configured venv installation. |
+| `stale` | The update marker names a dead PID or is older than the diagnostic age limit. |
+| `unknown` | Marker contents, PID liveness, or recovery-marker presence cannot be read or classified. |
+| `unverified` | No active or recovery marker was found. Update completion and environment health remain unverified. |
+
+These are observations, not success receipts. Hermes Agent removes `.hermes-update-in-progress` on failed and interrupted exits too. A missing or stale marker, or a readable Git revision, does not prove a completed update or a healthy environment. WebUI only reads these markers; it does not remove or repair them.
+
+**Fix.** Check the Agent updater's outcome and resolve any failed or incomplete Agent update first. Once the Agent checkout and environment are healthy and no updater is running, restart WebUI using the same launch method that started it:
 
 ```bash
 ./ctl.sh restart
@@ -193,9 +223,110 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 systemctl --user restart hermes-webui.service
 ```
 
-If you launched `python3 bootstrap.py` in the foreground, stop it with Ctrl-C and start it again. Restarting the whole computer or WSL is not required when restarting the WebUI backend succeeds.
+For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again. Restarting the whole computer or WSL is not required when restarting the WebUI backend succeeds. Retry the action after restarting the backend; refreshing the browser alone does not replace its imported Agent modules.
 
-**When to file a bug.** File a WebUI bug if the restart-required message appears even though the Agent revision did not change, or if a clean WebUI restart still produces the same import error. Include the WebUI launch method, WebUI revision, Agent revision, and the sanitized error text.
+**Automatic restart prerequisite.** Revision mismatch does not schedule a WebUI restart. Safe automation requires an Agent-owned terminal success receipt bound to the exact update transaction, final revision, and healthy environment, plus an Agent-owned atomic handoff or lease that excludes new mutations across process replacement (or an Agent updater that performs the restart itself). No such public contract is verified for this integration. Repeated readiness checks followed by `os.execv()` leave a race; WebUI's own update lock does not exclude an external Agent updater. Explicit updates initiated through WebUI retain their existing behavior and are outside this revision-mismatch guard.
+
+**When to file a bug.** File a WebUI bug if the restart-required message appears even though the Agent revision did not change or become unreadable, or if a clean WebUI restart still produces the same import error. Include the launch method, WebUI and Agent revisions, the marker diagnostic, and sanitized error text.
+
+---
+
+## Agent sessions list slowly (or the `state.db` read index is missing)
+
+**Symptom.** The sidebar's imported/CLI session list takes seconds per refresh on a large Hermes profile, or a log line says a `state.db` read failed. Sessions still appear; nothing is lost.
+
+**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary (the listing returns empty for that profile) instead of silently reopening the file writable.
+
+**Diagnostic.**
+
+```bash
+sqlite3 "file:$HOME/.hermes/state.db?mode=ro" "PRAGMA index_list(messages)"
+```
+
+`idx_messages_session` should be listed. If it is not, the agent has not created it and WebUI will not create it for you.
+
+**Fix.** Create the covering read indexes in an explicit drained maintenance window: stop the agent (and any gateway/cron runner) writing to that `state.db`, then run:
+
+```bash
+python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confirm-drained
+```
+
+- `--confirm-drained` is mandatory: it is your assertion that no agent turn is running against the database. The tool does not verify it.
+- `--lock-file PATH` (optional) additionally holds an exclusive non-blocking lock on `PATH` (`flock` on POSIX, `msvcrt.locking` on Windows) for deployments that serialise agent turns on a lock file; a held lock makes the tool exit without touching the database. Without `--lock-file` no lock primitive is required, so the script runs on native Windows as well. On Windows the lock covers byte 0 of `PATH`; a new or empty lock file is initialised with one byte first (an existing lock file is never rewritten).
+- The tool opens the database `mode=rw` (never `rwc`): a mistyped path raises instead of creating an empty database. Indexes are created inside one `BEGIN IMMEDIATE` transaction and rolled back on any error.
+- It is idempotent and prints a JSON status per index (`created` / `existing` / `skipped`). `skipped` means this database's schema lacks a column that index keys on (an older agent); the indexes the schema does support are still created. An existing index with a different table, key shape or collation is reported as `Incompatible index` and never replaced; an index that is not covering (`EXPLAIN QUERY PLAN`) is reported as `Index is not covering`.
+- Windows UNC profiles (`HERMES_HOME=\\server\share\...`) are supported: readers and this tool build the empty-authority URI `file:////server/share/state.db` that the bundled SQLite accepts.
+
+**When to file a bug.** File a WebUI bug if the listing stays slow after the tool reports `existing` for `idx_messages_session`, if the tool reports `Incompatible index` on an untouched agent-created database, or if a read-only open fails on a local path. Include the tool's JSON output, the `PRAGMA index_list(messages)` result, and the sanitized error text.
+
+---
+
+## 404 after login when password auth is enabled
+
+**Symptom.** After enabling password authentication (`HERMES_WEBUI_PASSWORD`), logging in redirects to `/sessions` and the browser shows a `404 not found` error instead of the chat interface.
+
+**Why.** The server-side redirect after login targets `/sessions` (plural), but that path was missing from the explicit SPA-shell allowlist in `handle_get()`. Without auth the bug is invisible because the SPA handles `/sessions` client-side and the server route is never hit — only the server-side post-login redirect exposes it.
+
+**Fix.** `/sessions` is now included alongside `/` and `/index.html` in the set of paths that serve the SPA shell. No configuration change is needed.
+
+---
+
+## "OpenCode Go model picker shows a model that errors when you send" (or is missing newly released models)
+
+**Symptom.** One of two directions:
+
+1. A model selected from the OpenCode Go group fails on the first message (`model not found`, `Model is unavailable`, or a region error), even though the picker offered it.
+2. A newly released OpenCode Go model does not appear in the picker at all, and must be typed into the Custom Model ID box.
+
+**Why.** The Go picker follows the **live** Go-tier catalog (`https://opencode.ai/zen/go/v1/models`) whenever the installed Hermes Agent is v0.20.5 or newer. That endpoint advertises a superset of what a given tier, key, or region can actually serve — an id can be listed and still fail on send. Conversely, an id the endpoint serves but the WebUI's static fallback list predates is missing when the live path is unavailable (Agent older than v0.20.5, probe failure, or offline); the static list mirrors Hermes core's curated Go catalog and can lag new releases by design.
+
+**Diagnostic.** Check which path is feeding your picker:
+
+```bash
+hermes --version          # live path requires >= 0.20.5
+curl -sS https://opencode.ai/zen/go/v1/models \
+  -H "Authorization: Bearer $OPENCODE_GO_API_KEY" | head -50
+```
+
+Interpret the two together:
+
+- **Failing model absent from the `curl` output** → it was delisted upstream (for example `ox-alpha-free`, removed from the relay on 2026-09-09). A picker can still offer it from a **stale catalog merge**: Hermes core merges its own curated Go list into the live result, and every Agent release *through v0.21.1 (tag `v2026.9.7`)* still carries the delisted id in that list — verified at runtime against v0.21.0, where the live path serves 37 ids including `ox-alpha-free`. The removal is committed on core `main` (2026-09-09 sync) but **no released Agent version includes it yet** — and `main` reports the same `0.21.1` version string as the stale tag, so a version number alone cannot tell you whether the fix is in. Until a release notes the 2026-09-09 catalog sync, the **verified workaround is the config allowlist** (below); selecting the dead entry is harmless to other models (it errors on send, nothing else).
+- **Failing model present in the `curl` output** → the relay lists it but your tier/region cannot serve it; the picker is behaving correctly. Pin the models you actually use with an explicit allowlist in `config.yaml`, which takes precedence over both the live catalog and the fallback:
+
+  ```yaml
+  providers:
+    opencode-go:
+      models:
+        - kimi-k3
+        - glm-5.3
+  ```
+
+  A lighter per-provider exclude capability is tracked in #7507.
+- **Missing new model, Agent ≥ v0.20.5** → the live catalog is the source; refresh or check the endpoint with the `curl` above (cold rebuilds are also bounded by a 4-second foreground budget — the first picker open after a restart can serve the last-known list while the live rebuild finishes in the background, so re-open the picker once before concluding it's stale).
+- **Missing new model, Agent older than v0.20.5** → the static fallback is serving by design; upgrade the Agent to ≥ v0.20.5 so the picker reads the live catalog.
+
+**When to file a bug.** File a WebUI bug if a model fails on send *and* appears in the `curl` output for your key (a routing problem), or if a model is missing with Agent ≥ v0.20.5 and the live catalog reachable (fallback used when it should not be).
+
+---
+
+## MCP panel shows another profile's servers, or "Live status for this profile is unavailable"
+
+**Symptom.** With several profiles, the MCP settings panel of profile A shows a server as *Active* with a tool count while the tool inventory is empty (or lists profile B's tools); `/reload-mcp` on one profile stops the other profile's servers; or the MCP panel and the external Notes drawer show the notice *"Live status for this profile is unavailable right now"* and `/reload-mcp` answers *"MCP runtime scope could not be confirmed"*.
+
+**Why.** Hermes Agent keeps one in-process MCP ledger per WebUI process and keys a connection by profile only when it can tell the request serves a profile other than the process's own. The WebUI binds every MCP status read and `/reload-mcp` to the request profile (`ARCHITECTURE.md` §4.10). While a chat turn is streaming, the WebUI mirrors that turn's profile into `HERMES_HOME`; Agents that predate `hermes_constants.pin_process_hermes_home` cannot distinguish that mirror from the process profile, so the WebUI withholds runtime data and refuses the reload instead of showing or resetting another profile's connection.
+
+**Diagnostic commands.**
+
+```bash
+# runtime_scope: "profile" (bound), "legacy_process" (Agent without profile-scoped MCP),
+# "unavailable" (scope could not be confirmed right now)
+curl -s -b "hermes_profile=<profile>" http://127.0.0.1:8787/api/mcp/servers | python3 -m json.tool | grep -E '"(name|status|tool_count|runtime_scope)"'
+python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_process_hermes_home'))"
+```
+
+**Fix.** `unavailable` while a turn is running is expected: refresh once the turn finishes. If it persists with no turn running, the Agent predates the process-home pin; upgrade Hermes Agent. `legacy_process` means the Agent has no profile-scoped MCP ledger at all; its `/reload-mcp` stays process-wide by design. After changing a profile's `mcp_servers`, run `/reload-mcp` **from that profile**: it only resets that profile's own connections and retries its failed servers.
+
+**When to file a bug.** File a WebUI bug if `runtime_scope` is `"profile"` and a server is still reported *Active* with tools you cannot see in the inventory, or if `/reload-mcp` from one profile changes another profile's `tool_count`.
 
 ---
 

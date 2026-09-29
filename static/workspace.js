@@ -609,6 +609,13 @@ function renderSessionArtifacts(){
   }).join('');
 }
 
+function projectSessionArtifactsForOwner(sessionId){
+  if(!sessionId||!S.session||S.session.session_id!==sessionId) return false;
+  if(typeof _isSessionCurrentPane!=='function'||!_isSessionCurrentPane(sessionId)) return false;
+  renderSessionArtifacts();
+  return true;
+}
+
 async function _workspacePathExists(path){
   if(!S.session||!path) return false;
   const parts=String(path).replace(/\\/g,'/').split('/').filter(Boolean);
@@ -1418,16 +1425,22 @@ async function _collectFilesFromEntry(entry, relPrefix) {
 async function _collectOsDropUploads(dataTransfer) {
   const out = [];
   const items = dataTransfer.items ? [...dataTransfer.items] : [];
-  if (items.length && typeof items[0].webkitGetAsEntry === 'function') {
+  const files = dataTransfer.files ? [...dataTransfer.files] : [];
+  if (items.length) {
+    const entries = [];
     for (const item of items) {
       if (item.kind !== 'file') continue;
-      const entry = item.webkitGetAsEntry();
+      const getAsEntry = item.getAsEntry || item.webkitGetAsEntry;
+      const entry = typeof getAsEntry === 'function' ? getAsEntry.call(item) : null;
       if (!entry) continue;
+      entries.push(entry);
+    }
+    for (const entry of entries) {
       out.push(...await _collectFilesFromEntry(entry, ''));
     }
     if (out.length) return out;
   }
-  for (const file of dataTransfer.files) {
+  for (const file of files) {
     out.push({ file, relDir: '' });
   }
   return out;

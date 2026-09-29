@@ -314,9 +314,13 @@ def _read_claude_code_credentials() -> dict[str, Any] | None:
     and macOS Keychain. Returns the credential dict or None.
     """
     try:
-        from agent.anthropic_adapter import (
-            is_claude_code_token_valid,
-            read_claude_code_credentials,
+        from api.agent_compat import agent_attr
+
+        is_claude_code_token_valid = agent_attr(
+            "agent.anthropic_adapter", "is_claude_code_token_valid", "agent.anthropic_credentials"
+        )
+        read_claude_code_credentials = agent_attr(
+            "agent.anthropic_adapter", "read_claude_code_credentials", "agent.anthropic_credentials"
         )
 
         creds = read_claude_code_credentials()

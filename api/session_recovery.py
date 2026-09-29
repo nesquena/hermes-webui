@@ -601,7 +601,14 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
         'session_id': row.get('id'),
         'title': row.get('title') or 'Recovered WebUI Session',
         'workspace': workspace_value if isinstance(workspace_value, str) else '',
-        'message_count': row.get('message_count') if isinstance(row.get('message_count'), int) else len(messages),
+        # state.db is canonical for the recovered message rows.  Its denormalized
+        # sessions.message_count is absent from older schemas (read above as 0)
+        # and can be stale after recovery, so never copy it into a sidecar whose
+        # `messages` array we just materialized.  Session.save() uses this field
+        # to decide whether an overwrite shrinks the transcript; it must match
+        # the payload exactly or the #1558 backup / empty-snapshot guards can be
+        # bypassed.
+        'message_count': len(messages if isinstance(messages, list) else []),
         'worktree_path': row.get('worktree_path') or None,
         'worktree_branch': row.get('worktree_branch') or None,
         'worktree_repo_root': row.get('worktree_repo_root') or None,

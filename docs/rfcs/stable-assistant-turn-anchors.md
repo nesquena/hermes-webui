@@ -574,6 +574,38 @@ early renderers can avoid chasing `S.messages` during every paint. If settlement
 later rewrites the transcript message, the anchor must be refreshed from that
 message instead of allowing the two copies to drift silently.
 
+### Settled ownership of a restored live turn
+
+A preserved or snapshotted live-turn node is not evidence of a running turn. The
+settled assistant message is persisted a few milliseconds before the stream's
+terminal event clears the active stream id, so a live node whose stream has
+already ended can survive a transcript rebuild or a session switch and be
+appended under the settled answer, putting the same answer on screen twice
+(#6948 follow-up; upstream symptom report #2051).
+
+A live-turn node is therefore discarded only where the settled transcript is
+proved to own it: the transcript ends with a settled assistant message, no
+message still carries a live-projection marker, that settled message's
+persisted stream identity equals the id of the stream that built the live node
+— or, only where no scene identity was persisted, the markdown the stream
+produced equals the persisted message source — and the node carries nothing the
+settled rebuild could not have produced, meaning no unpersisted tool card,
+reasoning row or transparent-stream row and no second live segment.
+
+Ownership is a state proof, never a comparison of two rendered DOM trees: the
+live body comes from the streaming parser and the settled body from the
+markdown renderer, and an answer that reads the same as the previous one must
+not delete a genuinely live turn. An unrecognised node shape keeps the turn.
+Only the two branches that ADD a turn are gated; a branch that replaces a node
+cannot duplicate one.
+
+A settled activity scene projects one answer as well. A `process_prose` row
+whose text duplicates the scene's final answer — the same text, or a prefix of
+it within ten percent of its length — is dropped where both settled renderers
+take their rows, so the answer is not rebuilt as a second assistant segment
+above itself. Live rendering is unchanged: while the turn streams, the inline
+live segment is hidden and the prose row is the visible answer.
+
 ## Replay, Reload, And Reconstruction
 
 Replay/reload should reconstruct the same Assistant Turn Anchor from durable

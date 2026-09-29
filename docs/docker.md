@@ -468,6 +468,44 @@ services:
 
 Then configure the URL as `http://host.docker.internal:<port>`. Also ensure the host service binds to an address reachable from containers (not only a loopback interface the Docker bridge cannot reach) and that your host firewall allows the connection.
 
+### 9. "Failed to verify state directory" / restart loop on a bind-mounted state dir (#7027)
+
+**Symptom**: Single-container deploy with the state directory bind-mounted from a
+host directory, no `WANTED_UID` set. The container exits 1 and restart-loops:
+
+```
+-- Auto-detected workspace UID: 1024 (from /workspace)
+touch: cannot touch '/app/data/.testfile': Permission denied
+!! ERROR: Failed to verify state directory at /app/data
+```
+
+**Cause**: UID auto-detection used to read `/workspace` before the configured
+state directory. In a stock image `/workspace` exists and is owned by the
+image's own build-time `1024:1024`, so detection returned a value that carries
+no information about the host — and because `1024` is also the fallback default,
+the log read as if detection had found nothing.
+
+**Fix**: Fixed in the init script — the configured `HERMES_WEBUI_STATE_DIR` is
+now probed first. The full order is:
+
+1. `$HERMES_WEBUI_STATE_DIR` (default `/app/data`) — a bind mount by definition
+   in a single-container deploy, so its owner is the host identity to match
+2. `/home/hermeswebui/.hermes`, `$HERMES_HOME`, `/opt/data` — the hermes-home
+   shared volume in two-container setups (#668)
+3. `/workspace` — used only when nothing above resolves
+4. `1024` — fallback default
+
+Root-owned candidates (UID 0, e.g. a freshly created named volume) are skipped
+at every step. An explicitly supplied `WANTED_UID`/`WANTED_GID` always wins and
+is never overwritten by detection — including the value `1024`, which earlier
+versions treated as "unset".
+
+If you are on an older image, the workaround is to set the IDs explicitly:
+
+```bash
+docker run -e WANTED_UID=$(id -u) -e WANTED_GID=$(id -g) ...
+```
+
 ## Multi-container architecture
 
 The two- and three-container setups use **named Docker volumes** (not bind mounts) by default for a reason: named volumes solve the UID/GID problem by construction. Docker creates the volume's root directory with the correct ownership, all containers reading/writing to it see the same files, no host-side permission setup required.
@@ -588,6 +626,7 @@ volumes:
 - #681 — tools running in WebUI container, not agent container (architectural)
 - #668 — auto-detect UID/GID from mounted volume
 - #569 — UID/GID detection priority order
+- #7027 — state dir probed before `/workspace` in UID/GID detection (see [#9 above](#9-failed-to-verify-state-directory--restart-loop-on-a-bind-mounted-state-dir-7027))
 
 If you hit a new failure mode not covered here, please [open an issue](https://github.com/nesquena/hermes-webui/issues/new) with:
 

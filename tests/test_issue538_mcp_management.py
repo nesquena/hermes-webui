@@ -161,7 +161,7 @@ class TestMcpList:
         monkeypatch.setenv('HERMES_CONFIG_PATH', str(override_path))
         monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: active_home)
         monkeypatch.setattr(routes, 'get_active_hermes_home', lambda: active_home)
-        monkeypatch.setattr(routes, '_mcp_runtime_status_by_name', lambda: {})
+        monkeypatch.setattr(routes, '_mcp_runtime_status_by_name', lambda *_args, **_kwargs: {})
         config.reload_config()
 
         h = _make_handler()

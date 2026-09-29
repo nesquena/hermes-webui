@@ -220,7 +220,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
-- Session projects -- named groups with colors for organizing sessions
+- Session projects -- named groups with colors for organizing sessions; delegated subagent sessions have no project of their own and follow their nearest ancestor's project in the project filter and the Unassigned chip; forks and other child sessions keep their own project, so a fork moved to "No project" stays Unassigned
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
@@ -285,12 +285,14 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 ### Settings and configuration
 - **Hermes Control Center** (sidebar launcher button) -- Conversation tab (export/import/clear), Preferences tab (model, send key, theme, language, all toggles), System tab (version, password)
 - Send key: Enter (default) or Ctrl/Cmd+Enter
+- Send-key on touch devices: plain Enter inserts a newline on phones (iPhone/iPod, Android phones) and on tablets / iPadOS / touch-capable Macs that only expose a coarse pointer (no attached hardware keyboard), matching the software keyboard's return key. Devices that report a fine pointer (for example, a tablet with a hardware keyboard) keep the configured physical-keyboard send-key behavior. The configured shortcut and the Send button remain available for sending.
 - Show/hide CLI sessions toggle (enabled by default)
 - Token usage display toggle (off by default, also via `/usage` command)
 - Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
 - Background agent error alerts -- banner when a non-active session encounters an error
+- Approval and clarification browser alerts notify once per pending owner when its session is not actively viewed. Local approval dismissal hides attention without resolving the prompt; resolution, replacement, and cancellation retire that owner's alert state. Denied or failed notification delivery can retry while the prompt remains pending.
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
@@ -361,6 +363,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
 | `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where sessions and state are stored. **Note (upgrade):** the default now follows `HERMES_HOME` — if you previously relocated `HERMES_HOME` to a non-default base **without** setting `HERMES_WEBUI_STATE_DIR`, your WebUI state now resolves to `$HERMES_HOME/webui` instead of the old platform-default `~/.hermes/webui`. To keep using the old location, set `HERMES_WEBUI_STATE_DIR` to it (or move the directory). Installs with `HERMES_HOME` unset or at the default base are unaffected. |
+| `HERMES_WEBUI_SETTINGS_FILE` | `<state dir>/settings.json` | Optional path for this instance's WebUI settings file (sessions, workspaces and projects stay in the state directory). Read once at startup, so restart after changing it |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
@@ -373,6 +376,7 @@ Full list of environment variables:
 | `HERMES_HOME` | Windows: `%LOCALAPPDATA%\hermes`; POSIX: `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
 | `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
+| `HERMES_WEBUI_VISIBLE_SESSION_LIMIT` | `20` | Size of the sidebar's interactive recency window (how many recent non-cron/webhook sessions are listed). Also bounds how many delegated subagent children can nest at once, since a child only renders when its row wins a slot in the window — raise it for wide fan-outs. Non-integer or non-positive values fall back to the default. Values above 200 are clamped. Resolved before profile init, so a profile `.env` cannot override it |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
 | `HERMES_WEBUI_SESSIONS_MAX` | `100` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction only ever drops clean, persisted, non-active sessions; an evicted session lazily reloads from its JSON sidecar on next access |
 
@@ -444,7 +448,14 @@ Set `environmentFiles` for secrets like API keys. Protected WebUI runtime keys f
 
 ### Remote access (SSH tunnel, Tailscale, phone)
 
-The server binds to `127.0.0.1` by default. To reach it from another machine use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh` prints for you over SSH), or join your server and phone to a [Tailscale](https://tailscale.com) network and browse to `http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` + `HERMES_WEBUI_PASSWORD` set. Full walkthrough (incl. a community ARM64-Android field report): [`docs/remote-access.md`](docs/remote-access.md).
+The server binds to `127.0.0.1` by default. To reach it from another machine,
+use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh`
+prints for you over SSH) or, on a single-operator or access-restricted tailnet,
+use the preferred [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve)
+flow, which keeps WebUI on loopback behind tailnet-only HTTPS. Direct access to
+`http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` and
+`HERMES_WEBUI_PASSWORD` is a fallback when Serve is unavailable. Full setup and
+the community ARM64-Android field report: [`docs/remote-access.md`](docs/remote-access.md).
 
 ### Manual launch (without start.sh)
 
@@ -680,6 +691,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 
 **Deploying & operating**
 - [`docs/remote-access.md`](docs/remote-access.md) — SSH tunnel, Tailscale, and phone access (incl. a community ARM64-Android field report)
+- [`docs/remote-access-zh.md`](docs/remote-access-zh.md) — 中文远程访问指南：Tailscale、SSH 隧道、Windows 原生部署（自启仅适用 WSL 用户）
 - [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md) — optional dynamic recall-prefill and Gateway-backed browser chat for self-hosted deployments
 - [`docs/docker.md`](docs/docker.md) — Docker compose setup, common failures, and bind-mount migration
 - [`docs/supervisor.md`](docs/supervisor.md) — launchd, systemd, supervisord, runit, and s6 process-supervisor setup
@@ -692,6 +704,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`TESTING.md`](TESTING.md) — manual browser test plan and automated coverage reference
 - [`DESIGN.md`](DESIGN.md) — design tokens and the calm-console direction
 - [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) — UI/UX principles sourced from the design docs and visual inventories
+- [`docs/sse-streams.md`](docs/sse-streams.md) — cross-client SSE endpoint reference: session streaming, gateway SSE probe scope, heartbeats, and proxy behavior
 - [`docs/CONTRACTS.md`](docs/CONTRACTS.md) — project contract/RFC/design index for contributors and agents
 - [`docs/rfcs/README.md`](docs/rfcs/README.md) — RFC index for larger architecture and durability proposals
 

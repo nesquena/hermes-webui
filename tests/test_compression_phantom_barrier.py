@@ -12,7 +12,6 @@ import re
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
@@ -200,7 +199,8 @@ async ({kind, doneSid}) => {
 
 @pytest.fixture(scope="module")
 def browser():
-    with sync_playwright() as playwright:
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    with playwright_api.sync_playwright() as playwright:
         instance = playwright.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],

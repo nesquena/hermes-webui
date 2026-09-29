@@ -70,6 +70,7 @@ def test_first_jump_to_answer_cancels_pending_load_time_bottom_settle():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
 let _scrollPinned = true;
+let _loadingSessionId = null;
 let _messageUserUnpinned = false;
 let _nearBottomCount = 2;
 let _messageJumpScrollGeneration = 0;
@@ -156,6 +157,9 @@ def test_jump_geometry_controls_active_session_refresh_deferral(
     sessions_js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(ui_js + "\n" + sessions_js) + rf"""
 let _scrollPinned = true;
+let _loadingSessionId = null;
+let _pendingSessionUpdatedCounts = null;
+function _drainSessionUpdatedPendingCount(){{}}
 let _messageUserUnpinned = false;
 let _nearBottomCount = 2;
 let _messageJumpScrollGeneration = 0;
@@ -260,6 +264,9 @@ def test_response_jump_owns_native_smooth_scroll_until_final_reconciliation(
         + _extract_message_scroll_listener_script(ui_js)
         + rf"""
 let _scrollPinned = true;
+let _loadingSessionId = null;
+let _pendingSessionUpdatedCounts = null;
+function _drainSessionUpdatedPendingCount(){{}}
 let _messageUserUnpinned = false;
 let _nearBottomCount = 2;
 let _messageJumpScrollGeneration = 0;
@@ -430,6 +437,7 @@ def test_jump_owner_replacement_and_session_change_cancel_stale_generation():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
 let _scrollPinned = true;
+let _loadingSessionId = null;
 let _messageUserUnpinned = false;
 let _nearBottomCount = 2;
 let _lastScrollTop = 400;
@@ -532,6 +540,7 @@ def test_manual_wheel_input_cancels_active_jump_owner():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
 let _scrollPinned = true;
+let _loadingSessionId = null;
 let _messageUserUnpinned = false;
 let _nearBottomCount = 2;
 let _programmaticScroll = false;
@@ -602,6 +611,7 @@ def test_streaming_frame_during_jump_owner_does_not_snap_to_bottom():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
 let _scrollPinned = true;
+let _loadingSessionId = null;
 let _messageUserUnpinned = false;
 let _nearBottomCount = 0;
 let _programmaticScroll = false;
@@ -658,6 +668,7 @@ def test_wheel_up_during_jump_owner_takes_reader_ownership_not_pinned_midtranscr
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
 let _scrollPinned = true;
+let _loadingSessionId = null;
 let _messageUserUnpinned = false;
 let _nearBottomCount = 2;
 let _programmaticScroll = false;
@@ -724,6 +735,7 @@ def test_wheel_down_during_jump_owner_also_takes_reader_ownership():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
 let _scrollPinned = true;
+let _loadingSessionId = null;
 let _messageUserUnpinned = false;
 let _nearBottomCount = 2;
 let _programmaticScroll = false;
