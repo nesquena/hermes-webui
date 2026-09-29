@@ -1027,13 +1027,14 @@ def _run_busy_intercept_js(script_body: str) -> dict:
             busy: true,
             activeStreamId: 'stream-1',
             session: {{ session_id: 'sess-1' }},
+            messages: [],
             pendingFiles: []
           }},
           cancelStream: async (reason) => {{ calls.push('cancelStream:' + reason); return true; }},
           showToast: () => {{}},
           $: () => ({{ value: '' }}),
           autoResize: () => {{}},
-          api: async () => ({{}}),
+          api: async (url, opts) => {{ calls.push('api:' + url + ' ' + ((opts && opts.body) || '')); return {{ output: 'ok' }}; }},
           _trySteer: async () => {{ calls.push('steer'); }},
           queueSessionMessage: () => {{ calls.push('queue'); }}
         }};
@@ -1077,13 +1078,22 @@ def test_busy_stop_executes_real_cancel_branch():
         """
         const r1 = await busyIntercept('/stop', false);
         const r2 = await busyIntercept('/agents', false);
-        return { stop: r1, agents: r2 };
+        const r3 = await busyIntercept('/review', false);
+        return { stop: r1, agents: r2, review: r3 };
         """
     )
     # /stop is intercepted by the busy branch (cmdStop -> cancelStream ran,
     # mode routing never reached), /agents is NOT a busy-control command so it
-    # falls through to mode routing (documented: it is no longer announced).
+    # falls through to mode routing (documented: it is no longer announced),
+    # and /review reaches the exec endpoint from a busy chat (the backend
+    # answers with its "wait for the turn" refusal instead of the text being
+    # steered or queued).
     assert out["result"]["stop"] == {"intercepted": True}
     assert out["result"]["agents"] == {"intercepted": False}
+    assert out["result"]["review"] == {"intercepted": True}
     assert any(c.startswith("cancelStream:slash-stop") for c in out["calls"]), out["calls"]
+    assert any(
+        c == 'api:/api/commands/exec {"command":"/review","session_id":"sess-1"}'
+        for c in out["calls"]
+    ), out["calls"]
     assert not any(c.startswith("steer") for c in out["calls"]), out["calls"]
