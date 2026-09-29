@@ -2041,6 +2041,43 @@ def test_get_session_reloads_when_cached_session_lags_disk(monkeypatch, tmp_path
     assert models.SESSIONS[sid] is loaded
 
 
+def test_state_db_self_heal_refreshes_cached_save_authority(monkeypatch, tmp_path):
+    import api.models as models
+
+    sid = "webui_reconcile_save_authority"
+    sidecar_messages = [
+        {"role": "user", "content": "old user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+    ]
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    payload["lineage_generation"] = "squash-lineage"
+    payload["mutation_generation"] = "before-self-heal"
+    session.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    cached = models.Session.load(sid)
+    assert cached is not None
+    cached.active_stream_id = "finished-stream"
+    cached.pending_user_message = "new prompt"
+    cached.save(touch_updated_at=False)
+    models.SESSIONS[sid] = cached
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        sidecar_messages + [
+            {"role": "user", "content": "new prompt", "timestamp": 1002.0},
+            {"role": "assistant", "content": "new answer", "timestamp": 1003.0},
+        ],
+    )
+
+    assert models._sync_sidecar_from_state_db_if_newer(cached) is True
+    cached.title = "save after self-heal"
+    cached.save(touch_updated_at=False)
+    persisted = json.loads(cached.path.read_text(encoding="utf-8"))
+    assert persisted["title"] == "save after self-heal"
+    assert persisted["lineage_generation"] == "squash-lineage"
+
+
 def test_metadata_fast_path_uses_summary_without_full_merge_for_restamped_replays(monkeypatch, tmp_path):
     """Metadata-only /api/session must not full-read and merge transcripts.
 

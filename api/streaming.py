@@ -5,6 +5,7 @@ Includes Sprint 10 cancel support via CANCEL_FLAGS.
 import base64
 import contextlib
 import contextvars
+import hashlib
 import json
 import logging
 import math
@@ -79,6 +80,7 @@ from api.models import (
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
+    _sidecar_stat_signature,
     _validated_webui_pending_user_timestamp_identity,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -5598,15 +5600,17 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
     if not old_path.exists():
         return
     try:
-        existing_text = old_path.read_text(encoding='utf-8')
+        existing_raw = old_path.read_bytes()
+        existing_text = existing_raw.decode('utf-8')
         try:
             existing = json.loads(existing_text)
             existing_msgs = len(existing.get('messages') or [])
             existing_snapshot = bool(existing.get('pre_compression_snapshot'))
         except (json.JSONDecodeError, ValueError):
-            # Treat corrupt/malformed old JSON as missing history and rewrite it
-            # from the in-memory pre-compression messages below. That is safer
-            # than leaving an unreadable recovery snapshot behind.
+            # Treat corrupt/malformed old JSON as missing history and attempt to
+            # rewrite it from the in-memory pre-compression messages below. The
+            # save authority still fails closed if it cannot parse the target.
+            existing = {}
             existing_msgs = -1
             existing_snapshot = False
         if len(s.messages) > existing_msgs:
@@ -5616,7 +5620,27 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             saved_sid = s.session_id
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
             saved_pinned = bool(getattr(s, 'pinned', False))
+            saved_mutation_generation = getattr(s, 'mutation_generation', None)
+            saved_lineage_generation = getattr(s, 'lineage_generation', None)
+            saved_loaded_authority = (
+                getattr(s, '_loaded_sidecar_session_id', None),
+                getattr(s, '_loaded_mutation_generation', None),
+                getattr(s, '_loaded_lineage_generation', None),
+                getattr(s, '_loaded_sidecar_digest', None),
+                getattr(s, '_loaded_sidecar_stat_signature', None),
+            )
             s.session_id = old_sid
+            # Bind the temporary old_sid projection to the exact bytes read
+            # above.  Session.save() rechecks this authority under the shared
+            # lock, so a concurrent writer or squash wins rather than being
+            # overwritten by this preservation path.
+            s.mutation_generation = existing.get('mutation_generation')
+            s.lineage_generation = existing.get('lineage_generation')
+            s._loaded_sidecar_session_id = old_sid
+            s._loaded_mutation_generation = existing.get('mutation_generation')
+            s._loaded_lineage_generation = existing.get('lineage_generation')
+            s._loaded_sidecar_digest = hashlib.sha256(existing_raw).hexdigest()
+            s._loaded_sidecar_stat_signature = _sidecar_stat_signature(old_path)
             s.pre_compression_snapshot = True
             s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
@@ -5648,6 +5672,15 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.session_id = saved_sid
                 s.pre_compression_snapshot = saved_snapshot
                 s.pinned = saved_pinned
+                s.mutation_generation = saved_mutation_generation
+                s.lineage_generation = saved_lineage_generation
+                (
+                    s._loaded_sidecar_session_id,
+                    s._loaded_mutation_generation,
+                    s._loaded_lineage_generation,
+                    s._loaded_sidecar_digest,
+                    s._loaded_sidecar_stat_signature,
+                ) = saved_loaded_authority
                 s.active_stream_id = saved_active_stream_id
                 s.pending_user_message = saved_pending_user_message
                 s.pending_attachments = saved_pending_attachments

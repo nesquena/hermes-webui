@@ -124,6 +124,10 @@ class TestNoRenameDuringCompression:
         assert continuation.session_id == "new_sid"
         assert continuation.parent_session_id == "fork_parent"
         assert not continuation.pre_compression_snapshot
+        assert continuation.mutation_generation is None
+        assert continuation.lineage_generation is None
+        assert continuation._loaded_sidecar_session_id is None
+        assert continuation._loaded_sidecar_stat_signature is None
 
 
 class TestMergePreservesHistory:

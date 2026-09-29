@@ -280,25 +280,23 @@ class TestIssue765FollowupHardening:
     def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
         """Two concurrent saves of the same session must not collide on one tmp path.
 
-        The key regression guard here is that each save call should reach os.replace()
-        with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
-        threads would target the same path and the second replace would deterministically
-        fail once the first consume/remove happened.
+        Each save joins the per-session mutation authority, but each call must
+        still reach os.replace() with a distinct source tmp path. With the old
+        shared `<sid>.tmp` scheme, serialized or concurrent callers could consume
+        one another's temporary file.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
         replace_sources = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
+        def _record_replace(src, dst):
             replace_sources.append(str(src))
-            barrier.wait(timeout=5)
             return original_replace(src, dst)
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _record_replace)
 
         def _save_worker():
             try:
@@ -321,6 +319,51 @@ class TestIssue765FollowupHardening:
         )
         data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["session_id"] == "same_sid"
+
+    def test_distinct_loaded_sessions_reject_stale_same_size_save(self):
+        s = _make_session("stale_sid")
+        s.save(skip_index=True)
+        first = Session.load("stale_sid")
+        stale = Session.load("stale_sid")
+        assert first is not None and stale is not None
+
+        first.messages[0]["content"] = "newer"
+        first.save(skip_index=True)
+        stale.messages[0]["content"] = "stale"
+        with pytest.raises(RuntimeError, match="generation changed"):
+            stale.save(skip_index=True)
+
+        persisted = json.loads(s.path.read_text(encoding="utf-8"))
+        assert persisted["messages"][0]["content"] == "newer"
+
+    def test_ordinary_save_does_not_full_parse_sidecar_for_generation_check(self, monkeypatch):
+        s = _make_session("bounded_authority")
+        s.save(skip_index=True)
+
+        def _unexpected_full_parse(_path):
+            raise AssertionError("ordinary save authority must use the bounded metadata prefix")
+
+        monkeypatch.setattr(models, "_sidecar_payload", _unexpected_full_parse)
+        s.messages.append({"role": "assistant", "content": "still bounded"})
+        s.save(skip_index=True)
+
+    def test_ordinary_save_rejects_damage_after_valid_metadata_prefix(self):
+        s = _make_session("damaged_after_prefix")
+        s.save(skip_index=True)
+
+        raw = s.path.read_bytes()
+        messages_offset = raw.index(b'"messages"')
+        damaged = raw[: messages_offset + len(b'"messages": [')] + b'\n'
+        s.path.write_bytes(damaged)
+
+        prefix_payload, prefix_digest = models._sidecar_mutation_authority(s.path)
+        assert prefix_payload["mutation_generation"] == s.mutation_generation
+        assert prefix_digest is None
+
+        s.title = "must not replace damaged transcript"
+        with pytest.raises(RuntimeError, match="sidecar unreadable"):
+            s.save(skip_index=True)
+        assert s.path.read_bytes() == damaged
 
     def test_success_path_joins_checkpoint_before_session_mutation(self):
         """Static guard: success path must stop/join checkpoint thread before mutating.

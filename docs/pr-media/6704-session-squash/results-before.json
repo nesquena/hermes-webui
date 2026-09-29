@@ -1,0 +1,69 @@
+{
+  "browser": "Chromium 136.0.7103.25",
+  "expect": "before",
+  "passed": true,
+  "server_root_name": "webui-pr6704-before",
+  "source_sha": "c296673ebfaf98750fe38438bc71f0cbb1f75777",
+  "viewports": [
+    {
+      "compact_menu_opened": false,
+      "console_errors": [],
+      "desktop_control_count": 0,
+      "dialog_opened": false,
+      "layout": {
+        "document_width": 1454,
+        "horizontal_overflow": true,
+        "target": null,
+        "viewport_width": 1440
+      },
+      "mobile_control_count": 0,
+      "name": "desktop",
+      "screenshot": "before-desktop.png",
+      "session_id_present": true,
+      "viewport": [
+        1440,
+        900
+      ]
+    },
+    {
+      "compact_menu_opened": true,
+      "console_errors": [],
+      "desktop_control_count": 0,
+      "dialog_opened": false,
+      "layout": {
+        "document_width": 768,
+        "horizontal_overflow": false,
+        "target": null,
+        "viewport_width": 768
+      },
+      "mobile_control_count": 0,
+      "name": "narrow",
+      "screenshot": "before-narrow.png",
+      "session_id_present": true,
+      "viewport": [
+        768,
+        900
+      ]
+    },
+    {
+      "compact_menu_opened": true,
+      "console_errors": [],
+      "desktop_control_count": 0,
+      "dialog_opened": false,
+      "layout": {
+        "document_width": 390,
+        "horizontal_overflow": false,
+        "target": null,
+        "viewport_width": 390
+      },
+      "mobile_control_count": 0,
+      "name": "mobile",
+      "screenshot": "before-mobile.png",
+      "session_id_present": true,
+      "viewport": [
+        390,
+        844
+      ]
+    }
+  ]
+}

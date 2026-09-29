@@ -1,0 +1,96 @@
+{
+  "browser": "Chromium 136.0.7103.25",
+  "expect": "after",
+  "passed": true,
+  "server_root_name": "webui-pr6704-visual-evidence",
+  "source_sha": "aef874a971dca350e27b0f33c7742da131ec4fbb",
+  "viewports": [
+    {
+      "compact_menu_opened": false,
+      "console_errors": [],
+      "desktop_control_count": 1,
+      "dialog_opened": true,
+      "layout": {
+        "document_width": 1454,
+        "horizontal_overflow": true,
+        "target": {
+          "bottom": 876,
+          "display": "flex",
+          "height": 34,
+          "left": 1053,
+          "right": 1087,
+          "top": 842,
+          "visibility": "visible",
+          "width": 34
+        },
+        "viewport_width": 1440
+      },
+      "mobile_control_count": 1,
+      "name": "desktop",
+      "screenshot": "after-desktop.png",
+      "session_id_present": true,
+      "viewport": [
+        1440,
+        900
+      ]
+    },
+    {
+      "compact_menu_opened": true,
+      "console_errors": [],
+      "desktop_control_count": 1,
+      "dialog_opened": true,
+      "layout": {
+        "document_width": 768,
+        "horizontal_overflow": false,
+        "target": {
+          "bottom": 814,
+          "display": "flex",
+          "height": 49,
+          "left": 386,
+          "right": 730,
+          "top": 765,
+          "visibility": "visible",
+          "width": 344
+        },
+        "viewport_width": 768
+      },
+      "mobile_control_count": 1,
+      "name": "narrow",
+      "screenshot": "after-narrow.png",
+      "session_id_present": true,
+      "viewport": [
+        768,
+        900
+      ]
+    },
+    {
+      "compact_menu_opened": true,
+      "console_errors": [],
+      "desktop_control_count": 1,
+      "dialog_opened": true,
+      "layout": {
+        "document_width": 390,
+        "horizontal_overflow": false,
+        "target": {
+          "bottom": 758,
+          "display": "flex",
+          "height": 49,
+          "left": 28,
+          "right": 362,
+          "top": 709,
+          "visibility": "visible",
+          "width": 334
+        },
+        "viewport_width": 390
+      },
+      "mobile_control_count": 1,
+      "name": "mobile",
+      "screenshot": "after-mobile.png",
+      "session_id_present": true,
+      "viewport": [
+        390,
+        844
+      ]
+    }
+  ]
+}

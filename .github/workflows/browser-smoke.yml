@@ -117,6 +117,8 @@ jobs:
           # Install only the Chromium browser + its system deps.
           python -m playwright install --with-deps chromium
 
-      - name: Run browser smoke
+      - name: Run browser smoke and squash viewport check
         if: needs.changes.outputs.docs_only != 'true'
-        run: python tests/browser_smoke.py
+        run: |
+          python tests/browser_smoke.py
+          python tests/browser_session_squash_visual.py

@@ -21,6 +21,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SESSIONS_SRC = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_SRC = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -92,6 +93,12 @@ ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoa
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
+BEGIN_SESSION_NAVIGATION_REQUEST_SRC = _extract_function(SESSIONS_SRC, "_beginSessionNavigationRequest")
+SESSION_NAVIGATION_REQUEST_IS_CURRENT_SRC = _extract_function(SESSIONS_SRC, "_sessionNavigationRequestIsCurrent")
+SQUASH_RUNNING_HELPERS_SRC = PANELS_SRC[
+    PANELS_SRC.index("const _squashRunningSessions = new Set()") :
+    PANELS_SRC.index("async function squashConversation")
+]
 
 
 def _normalise_ws(s: str) -> str:
@@ -100,14 +107,10 @@ def _normalise_ws(s: str) -> str:
 
 def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded():
     body = LOAD_SESSION_SRC
-    assert "_loadSessionGeneration" in body, (
-        "loadSession() must use a global generation counter so superseded loads "
-        "can be rejected by continuation ownership checks"
+    assert "const _loadGeneration = _beginSessionNavigationRequest(sid)" in body, (
+        "loadSession() must capture requested-navigation authority at the shared chokepoint"
     )
-    assert "const _loadGeneration = ++_loadSessionGeneration" in body, (
-        "loadSession() must increment and capture per-call generation"
-    )
-    assert "const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration" in body
+    assert "const _isCurrentLoad = () => _sessionNavigationRequestIsCurrent(sid,_loadGeneration)" in body
     assert "loadGeneration:_loadGeneration" in body, (
         "loadSession() must thread generation into _ensureMessagesLoaded()"
     )
@@ -143,6 +146,16 @@ def test_ensure_messages_loaded_ownership_guard_pre_and_post_await():
 
 
 _NODE_SCRIPT_TEMPLATE = r'''
+function makeButton() {
+  const classes = new Set();
+  return {
+    classList: {
+      toggle(name, force) { if (force) classes.add(name); else classes.delete(name); },
+      contains(name) { return classes.has(name); },
+    },
+  };
+}
+
 function makeHarness() {
   const apiCalls = [];
   const queue = [];
@@ -190,6 +203,8 @@ function snapshotState() {
     visibleCacheClears,
     liveCardClears,
     toolSyncCalls,
+    squashButtons: [desktopSquashButton, mobileSquashButton]
+      .map((button) => button.classList.contains('squash-running')),
   };
 }
 
@@ -206,6 +221,7 @@ function createEnvironment() {
   globalThis._loadingSessionId = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
+  _squashRunningSessions.clear();
   globalThis._pendingCarryForwardSnapshot = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
@@ -311,9 +327,13 @@ function createEnvironment() {
 
   globalThis._msgInner = { innerHTML: 'INIT_LOADING' };
   const _msgInput = { value: '' };
+  globalThis.desktopSquashButton = makeButton();
+  globalThis.mobileSquashButton = makeButton();
   globalThis.$ = (id) => {
     if (id === 'msgInner') return _msgInner;
     if (id === 'msg') return _msgInput;
+    if (id === 'btnSquash') return desktopSquashButton;
+    if (id === 'composerMobileSquashBtn') return mobileSquashButton;
     return null;
   };
 
@@ -350,6 +370,9 @@ let toastCalls = [];
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
+__BEGIN_SESSION_NAVIGATION_REQUEST_SRC__
+__SESSION_NAVIGATION_REQUEST_IS_CURRENT_SRC__
+__SQUASH_RUNNING_HELPERS_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
@@ -409,6 +432,26 @@ const API_ATLAS_MSGS = {
     messages: [{ role: 'assistant', content: 'new-active-transcript' }],
     message_count: 21,
     tool_calls: [{ name: 'tool-atlas' }],
+  },
+};
+
+const API_CINDER_META = {
+  session: {
+    session_id: 'sid-cinder',
+    message_count: 8,
+    active_stream_id: null,
+    resolve_model: 'qwen/qwq-32b-instruct',
+  },
+};
+
+const API_CINDER_MSGS = {
+  session: {
+    session_id: 'sid-cinder',
+    _messages_truncated: false,
+    _messages_offset: 0,
+    messages: [{ role: 'assistant', content: 'cinder-transcript' }],
+    message_count: 8,
+    tool_calls: [],
   },
 };
 
@@ -561,11 +604,159 @@ async function runStaleRejectedIdleCatch() {
   };
 }
 
+async function runPendingSwitchBack() {
+  createEnvironment();
+  S.session = JSON.parse(JSON.stringify(API_BEACON_META.session));
+  S.messages = [{ role: 'assistant', content: 'visible-beacon-transcript' }];
+
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  const calls = {
+    atlasMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
+    beaconMeta: apiHost.enqueue(buildMessageUrl('sid-beacon', 0)),
+    beaconMsgs: apiHost.enqueue(buildMessageUrl('sid-beacon', 1)),
+  };
+
+  const pendingSwitch = loadSession('sid-atlas');
+  await waitForQueued(apiHost, calls.atlasMeta.url);
+  const pendingAuthority = {
+    destination: _loadingSessionId,
+    generation: _loadSessionGeneration,
+  };
+
+  // S.session still identifies Beacon while Atlas metadata is pending. Clicking
+  // Beacon again must supersede the Atlas request instead of hitting the
+  // same-session no-op.
+  const switchBack = loadSession('sid-beacon');
+  await waitForQueued(apiHost, calls.beaconMeta.url);
+  const switchBackAuthority = {
+    destination: _loadingSessionId,
+    generation: _loadSessionGeneration,
+  };
+
+  // Let the superseded Atlas response return first. Its stale continuation must
+  // preserve Beacon's newer destination + generation authority.
+  calls.atlasMeta._resolve(API_ATLAS_META);
+  await pendingSwitch;
+  calls.beaconMeta._resolve(API_BEACON_META);
+  await waitForQueued(apiHost, calls.beaconMsgs.url);
+  calls.beaconMsgs._resolve(API_BEACON_MSGS);
+  await switchBack;
+
+  return {
+    scenario: 'pending-switch-back',
+    pendingAuthority,
+    switchBackAuthority,
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+    toolCalls: snapshotState().toolCalls,
+    apiCalls: snapshotState().apiCalls,
+    loadingSid: snapshotState().loadingSid,
+    loadingGeneration: snapshotState().loadingGeneration,
+  };
+}
+
+function seedRunningSquashOwner() {
+  S.session = JSON.parse(JSON.stringify(API_BEACON_META.session));
+  S.messages = [{ role: 'assistant', content: 'visible-beacon-transcript' }];
+  _squashSetRunning('sid-beacon', true);
+}
+
+async function runSquashIndicatorMetadataFailure() {
+  createEnvironment();
+  seedRunningSquashOwner();
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+  const atlasMeta = apiHost.enqueue(buildMessageUrl('sid-atlas', 0));
+
+  const navigation = loadSession('sid-atlas');
+  await waitForQueued(apiHost, atlasMeta.url);
+  const whilePending = snapshotState().squashButtons;
+  const error = new Error('Atlas metadata failed');
+  error.status = 500;
+  atlasMeta._reject(error);
+  await navigation;
+
+  return {
+    finalSid: S.session && S.session.session_id,
+    whilePending,
+    afterFailure: snapshotState().squashButtons,
+    loadingSid: _loadingSessionId,
+  };
+}
+
+async function runSquashIndicatorMetadataSuccess() {
+  createEnvironment();
+  seedRunningSquashOwner();
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+  const atlasMeta = apiHost.enqueue(buildMessageUrl('sid-atlas', 0));
+  const atlasMsgs = apiHost.enqueue(buildMessageUrl('sid-atlas', 1));
+
+  const navigation = loadSession('sid-atlas');
+  await waitForQueued(apiHost, atlasMeta.url);
+  const whilePending = snapshotState().squashButtons;
+  atlasMeta._resolve(API_ATLAS_META);
+  await waitForQueued(apiHost, atlasMsgs.url);
+  const afterMetadataAccepted = snapshotState().squashButtons;
+  atlasMsgs._resolve(API_ATLAS_MSGS);
+  await navigation;
+
+  return {
+    finalSid: S.session && S.session.session_id,
+    whilePending,
+    afterMetadataAccepted,
+    afterSuccess: snapshotState().squashButtons,
+  };
+}
+
+async function runSquashIndicatorStaleMetadata() {
+  createEnvironment();
+  seedRunningSquashOwner();
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+  const atlasMeta = apiHost.enqueue(buildMessageUrl('sid-atlas', 0));
+  const cinderMeta = apiHost.enqueue(buildMessageUrl('sid-cinder', 0));
+  const cinderMsgs = apiHost.enqueue(buildMessageUrl('sid-cinder', 1));
+
+  const staleNavigation = loadSession('sid-atlas');
+  await waitForQueued(apiHost, atlasMeta.url);
+  const currentNavigation = loadSession('sid-cinder');
+  await waitForQueued(apiHost, cinderMeta.url);
+  const whileBothPending = snapshotState().squashButtons;
+
+  atlasMeta._resolve(API_ATLAS_META);
+  await staleNavigation;
+  const afterStaleMetadata = snapshotState().squashButtons;
+  cinderMeta._resolve(API_CINDER_META);
+  await waitForQueued(apiHost, cinderMsgs.url);
+  const afterCurrentMetadata = snapshotState().squashButtons;
+  cinderMsgs._resolve(API_CINDER_MSGS);
+  await currentNavigation;
+
+  return {
+    finalSid: S.session && S.session.session_id,
+    whileBothPending,
+    afterStaleMetadata,
+    afterCurrentMetadata,
+    afterSuccess: snapshotState().squashButtons,
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
+    pendingSwitchBack: await runPendingSwitchBack(),
+    squashIndicatorMetadataFailure: await runSquashIndicatorMetadataFailure(),
+    squashIndicatorMetadataSuccess: await runSquashIndicatorMetadataSuccess(),
+    squashIndicatorStaleMetadata: await runSquashIndicatorStaleMetadata(),
   };
 }
 
@@ -608,6 +799,9 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
+        .replace("__BEGIN_SESSION_NAVIGATION_REQUEST_SRC__", BEGIN_SESSION_NAVIGATION_REQUEST_SRC)
+        .replace("__SESSION_NAVIGATION_REQUEST_IS_CURRENT_SRC__", SESSION_NAVIGATION_REQUEST_IS_CURRENT_SRC)
+        .replace("__SQUASH_RUNNING_HELPERS_SRC__", SQUASH_RUNNING_HELPERS_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
     )
@@ -616,6 +810,10 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     cross = body["crossSessionOrdering"]
     stale = body["staleIdleCatch"]
     observed = body["observedIdleCrossSessionOrdering"]
+    switch_back = body["pendingSwitchBack"]
+    squash_failure = body["squashIndicatorMetadataFailure"]
+    squash_success = body["squashIndicatorMetadataSuccess"]
+    squash_stale = body["squashIndicatorStaleMetadata"]
 
     def _assert_atlas_wins(session_result, *, label):
         assert session_result["finalSid"] == "sid-atlas", f"{label}: stale overlap should end on Atlas session"
@@ -681,6 +879,48 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert stale["apiCalls"].count(
         "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
     ) == 2, "both old and active loads should have attempted message fetch"
+
+    # 4) Pending switch-back: while Atlas metadata is unresolved, S.session still
+    #    identifies Beacon. Re-selecting Beacon must supersede Atlas rather than
+    #    taking the ordinary same-session no-op, and both destination + generation
+    #    must remain authoritative after Atlas's stale continuation returns.
+    assert switch_back["pendingAuthority"] == {"destination": "sid-atlas", "generation": 1}
+    assert switch_back["switchBackAuthority"] == {"destination": "sid-beacon", "generation": 2}
+    assert switch_back["finalSid"] == "sid-beacon"
+    assert switch_back["messages"] == ["stale-beacon-transcript"]
+    assert switch_back["toolCalls"] == [{"name": "tool-beacon-stale", "done": True}]
+    assert switch_back["apiCalls"] == [
+        "/api/session?session_id=sid-atlas&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-beacon&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1",
+    ]
+    assert switch_back["loadingSid"] is None
+    assert switch_back["loadingGeneration"] == 2
+
+    # 5) Exact production loadSession runtime: A owns an active squash while B's
+    #    metadata is pending. Shared desktop/mobile controls continue to project
+    #    the actually visible A until metadata for a current destination succeeds.
+    #    Failure keeps A visible and running; stale metadata cannot project its
+    #    superseded destination; accepted B/C metadata switches both controls.
+    assert squash_failure == {
+        "finalSid": "sid-beacon",
+        "whilePending": [True, True],
+        "afterFailure": [True, True],
+        "loadingSid": None,
+    }
+    assert squash_success == {
+        "finalSid": "sid-atlas",
+        "whilePending": [True, True],
+        "afterMetadataAccepted": [False, False],
+        "afterSuccess": [False, False],
+    }
+    assert squash_stale == {
+        "finalSid": "sid-cinder",
+        "whileBothPending": [True, True],
+        "afterStaleMetadata": [True, True],
+        "afterCurrentMetadata": [False, False],
+        "afterSuccess": [False, False],
+    }
 
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
     assert stale["loadingSid"] is None, "load marker should be cleared after stale reject + re-owner completion"
