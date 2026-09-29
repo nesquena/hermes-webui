@@ -15610,6 +15610,52 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   return true;
 }
 
+function _parseProcessWakeupBody(text){
+  const s=String(text||'');
+  let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand: ([^\n]*)\nOutput:\n([\s\S]*)\]$/);
+  if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
+  m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
+  if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
+  return null;
+}
+function _processWakeupInfo(m, text){
+  const parsed=_parseProcessWakeupBody(text);
+  const meta=(m&&m._wakeup_meta&&typeof m._wakeup_meta==='object')?m._wakeup_meta:null;
+  if(!parsed&&!meta) return null;
+  const pick=(metaKey,parsedKey)=>{
+    if(meta&&meta[metaKey]!=null) return meta[metaKey];
+    return parsed?parsed[parsedKey]:null;
+  };
+  return {
+    type:String(pick('type','type')||''),
+    taskId:String(pick('task_id','taskId')||''),
+    command:String(pick('command','command')||''),
+    exitCode:pick('exit_code','exitCode'),
+    pattern:pick('pattern','pattern'),
+    output:parsed?parsed.output:null,
+  };
+}
+function _processWakeupCardHtml(info, rawText, extras){
+  const isWatch=info.type==='watch_match';
+  const exitStr=info.exitCode==null?'':String(info.exitCode);
+  const exitKnown=/^-?\d+$/.test(exitStr);
+  const exitOk=exitStr==='0';
+  let chip;
+  if(isWatch){
+    chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
+  }else{
+    const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
+    const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');
+    chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
+  }
+  const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
+  const outRaw=info.output!=null?String(info.output):String(rawText||'');
+  const outHtml=outRaw.trim()?`<pre class="process-wakeup-text">${esc(outRaw)}</pre>`:'';
+  const cmdRow=info.command?`<div class="process-wakeup-cmd-row"><code>${esc(info.command)}</code></div>`:'';
+  const patternRow=(isWatch&&info.pattern)?`<div class="process-wakeup-pattern-row"><span class="process-wakeup-detail-key">${esc(t('process_wakeup_matched'))}</span><code>${esc(String(info.pattern))}</code></div>`:'';
+  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
+}
+
 function _hydrateHistoricalToolTranscriptAnchorScenes(){
   // #6220: hydrate ID-linked historical tool transcripts into Anchors.
   // Scan S.messages for eligible assistant turns where every tool_calls[]
@@ -15647,6 +15693,13 @@ function _hydrateHistoricalToolTranscriptAnchorScenes(){
     for(let j=i+1;j<messages.length;j++){
       if(messages[j]&&messages[j].role==='user'){turnEnd=j;break;}
     }
+
+    // If scene is already attached to any assistant message in this turn, skip.
+    let alreadyHydrated=false;
+    for(let j=i;j<turnEnd;j++){
+      if(messages[j]&&messages[j]._anchor_activity_scene){alreadyHydrated=true;break;}
+    }
+    if(alreadyHydrated) continue;
 
     // Validate every tool_call has an id and matching result within the turn.
     let allLinked=true;
