@@ -1137,6 +1137,7 @@ WebUI progress guidance:
 - Do not reveal hidden reasoning, chain-of-thought, private scratchpads, secrets, raw logs, or long tool output.
 - Password, API-key, token, and secret fields are automatically redacted by the system. Treat masked values as intentional redaction, not placeholder text or user input errors, and do not tell the user a stored credential is wrong based on a masked value alone.
 - Final visible assistant replies must be clear, user-facing, and in the user's language, not private planning notes.
+- Keep the final reply self-contained: the answer to the user's question belongs there, not only in an interim update (interim updates may be collapsed or missed).
 - Do not include terse planning fragments or scratchpad shorthand in visible assistant text. Avoid fragments like "Need script", "Need check logs", "Need inspect email", or "maybe invite"; either omit them or rewrite them as clear user-facing progress.
 - For direct answers or very short tasks, skip progress updates and answer normally.
 """.strip()
