@@ -170,6 +170,12 @@ _SESSION_TOOLSETS_CACHE_LOCK = threading.Lock()
 _SESSION_TOOLSETS_CACHE_TTL = 5.0  # seconds; a session JSON change is reflected within 5s
 
 
+def clear_config_derivations_cache() -> None:
+    """Clear cached profile derivations (used in tests and config reload)."""
+    with _CONFIG_DERIVATIONS_CACHE_LOCK:
+        _CONFIG_DERIVATIONS_CACHE.clear()
+
+
 def _stream_writeback_diag_threshold_seconds(environ=None):
     if environ is None:
         environ = os.environ
@@ -8149,22 +8155,10 @@ def _run_agent_streaming(
             if _cached_derivations is not None:
                 # Use cached derivations — config hasn't changed since last turn
                 _prefill_context = _cached_derivations['_prefill_context']
-                _prefill_messages = _cached_derivations['_prefill_messages']
                 _toolsets = list(_cached_derivations['_toolsets'])
             else:
-                # Fresh derivation — compute prefill and toolsets from config
+                # Fresh derivation — compute prefill context and toolsets from config
                 _prefill_context = _load_webui_prefill_context(_cfg)
-                _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
-                _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
-                _main_request_overrides = _main_model_request_overrides(
-                    _cfg,
-                    effective_model=resolved_model,
-                    effective_provider=resolved_provider,
-                )
-                put('context_status', {
-                    'session_id': session_id,
-                    'prefill': _public_prefill_context_status(_prefill_context),
-                })
 
                 # Per-profile toolsets — use _resolve_cli_toolsets() so MCP
                 # server toolsets are included, matching native CLI behaviour.
@@ -8172,30 +8166,31 @@ def _run_agent_streaming(
                 _toolsets = _resolve_cli_toolsets(_cfg)
 
                 # Cache derivations for the next turn on the same profile.
-                # _main_request_overrides is NOT cached because it depends on
-                # the per-turn resolved_model + resolved_provider.
+                # _prefill_messages and _main_request_overrides are NOT cached
+                # because message boundary normalization and model overrides are
+                # per-session/turn-dependent.
                 if _cfg_fingerprint and _profile_home:
                     with _CONFIG_DERIVATIONS_CACHE_LOCK:
                         _CONFIG_DERIVATIONS_CACHE[_cache_key] = {
                             '_fingerprint': _cfg_fingerprint,
                             '_prefill_context': _prefill_context,
-                            '_prefill_messages': _prefill_messages,
                             '_toolsets': list(_toolsets),
                         }
 
-            # _main_request_overrides is per-turn (depends on resolved model+provider)
-            # and was already computed in the fresh branch above. For the cached
-            # branch, compute it now.
-            if _cached_derivations is not None:
-                _main_request_overrides = _main_model_request_overrides(
-                    _cfg,
-                    effective_model=resolved_model,
-                    effective_provider=resolved_provider,
-                )
-                put('context_status', {
-                    'session_id': session_id,
-                    'prefill': _public_prefill_context_status(_prefill_context),
-                })
+            # Per-turn: convert prefill context to messages and normalize trailing boundaries
+            _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
+            _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
+
+            # Per-turn: main request overrides depend on resolved model and provider
+            _main_request_overrides = _main_model_request_overrides(
+                _cfg,
+                effective_model=resolved_model,
+                effective_provider=resolved_provider,
+            )
+            put('context_status', {
+                'session_id': session_id,
+                'prefill': _public_prefill_context_status(_prefill_context),
+            })
 
             # Per-session toolset override (#493): if the session has
             # enabled_toolsets set, use that instead of the global config.
