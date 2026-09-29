@@ -1387,6 +1387,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsNewChatOnSessionDelete" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_new_chat_on_session_delete">Start a new chat when deleting the open conversation</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_new_chat_on_session_delete">When on, deleting the conversation you are viewing starts a fresh conversation instead of loading the most recent remaining one. When off (default), deleting it loads the most recent remaining conversation, or shows a blank page when none are left.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowCliSessions" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_external_sessions">Show non-WebUI sessions</span>
               </label>

@@ -4929,11 +4929,16 @@ function _renderBatchActionBar(){
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
+        const _deletedWorkspace=(S.session&&S.session.workspace)||null;
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
-        const remaining=await api('/api/sessions'+_sessionListQueryString());
-        if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-        else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+        if(window._newChatOnSessionDelete===true){
+          await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace);
+        }else{
+          const remaining=await api('/api/sessions'+_sessionListQueryString());
+          if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
+          else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+        }
       }
       if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
@@ -9792,6 +9797,18 @@ async function removeWorktree(session){
   }
 }
 
+// Opt-in helper (new_chat_on_session_delete, default off): both delete paths
+// call this when the just-deleted conversation was the one being viewed. Reuse
+// the remembered empty New Chat draft when one exists (same as the "+" button),
+// otherwise ask newSession() for a fresh chat, keeping the deleted
+// conversation's workspace so the user stays where they were working.
+async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace){
+  if(typeof _restoreRememberedNewChatDraftSession==='function'
+     && await _restoreRememberedNewChatDraftSession()) return;
+  if(deletedWorkspace) S._profileSwitchWorkspace=deletedWorkspace;
+  await newSession(false);
+}
+
 async function deleteSession(sid, beforeDelete=null){
   const session=_sessionSnapshotById(sid);
   const ok=await showConfirmDialog({
@@ -9835,21 +9852,30 @@ async function deleteSession(sid, beforeDelete=null){
     _optimisticallyRemoveSessionFromList(sid);
   }
   if(S.session&&S.session.session_id===sid){
+    // Keep the deleted conversation's workspace so the opt-in new chat below
+    // stays where the user was working.
+    const _deletedWorkspace=(S.session&&S.session.workspace)||(session&&session.workspace)||null;
     S.session=null;S.messages=[];S.entries=[];
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
-    // load the most recent remaining session, or show blank if none left
-    const remaining=await api('/api/sessions'+_sessionListQueryString());
-    if(remaining.sessions&&remaining.sessions.length){
-      await loadSession(remaining.sessions[0].session_id);
+    if(window._newChatOnSessionDelete===true){
+      // Opt-in (default off): start a new chat instead of loading the most
+      // recent remaining session.
+      await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace);
     }else{
-      const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
-      const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
-      $('msgInner').innerHTML='';
-      $('emptyState').style.display='';
-      $('fileTree').innerHTML='';
-      if(typeof S!=='undefined') S.session=null;
-      if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+      // load the most recent remaining session, or show blank if none left
+      const remaining=await api('/api/sessions'+_sessionListQueryString());
+      if(remaining.sessions&&remaining.sessions.length){
+        await loadSession(remaining.sessions[0].session_id);
+      }else{
+        const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
+        const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
+        $('msgInner').innerHTML='';
+        $('emptyState').style.display='';
+        $('fileTree').innerHTML='';
+        if(typeof S!=='undefined') S.session=null;
+        if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+      }
     }
   }
   if(cleanupFailed) showToast(t('delete_failed'),0,'error');
