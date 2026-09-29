@@ -3306,14 +3306,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             if isinstance(payload, dict) and payload:
                 entry: dict = {
                     "source_event_type": "artifact_reference",
-                    "payload": dict(payload),
                 }
                 for key in ("kind", "path"):
                     value = payload.get(key)
                     if value is not None:
                         entry[key] = str(value)
                 event_id = event.get("event_id")
-                if event_id:
+                if event_id is not None:
                     entry["event_id"] = str(event_id)
                 artifacts.append(entry)
             continue
@@ -3321,14 +3320,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             if isinstance(payload, dict) and payload:
                 entry: dict = {
                     "source_event_type": "state_saved",
-                    "payload": dict(payload),
                 }
                 for key in ("kind", "name", "action"):
                     value = payload.get(key)
                     if value is not None:
                         entry[key] = str(value)
                 event_id = event.get("event_id")
-                if event_id:
+                if event_id is not None:
                     entry["event_id"] = str(event_id)
                 side_effects.append(entry)
             continue
