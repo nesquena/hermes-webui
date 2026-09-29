@@ -97,12 +97,10 @@ def test_refreshSession_uses_shared_helper():
 # ─── loadSession reattach path (was already correct before #6419) ─────────────────
 
 def test_loadSession_inflight_reattach_merges_pending_user_before_render():
-    """Regression for the #2341 contract: loadSession INFLIGHT branch must call
-    the shared helper and render afterwards."""
-    start = SESSIONS_JS.find("if(INFLIGHT[sid]){")
-    assert start != -1, "loadSession INFLIGHT branch not found"
-    end = SESSIONS_JS.find("}else{", start)
-    assert end != -1, "loadSession INFLIGHT branch end not found"
+    """The active recovery branch must merge before rendering the live turn."""
+    start = SESSIONS_JS.find("if(INFLIGHT[sid]){\n    _ensureInflightLiveAssistantMessage")
+    end = SESSIONS_JS.find("// Phase 2b: Idle session", start)
+    assert start != -1 and end > start, "loadSession live-recovery branch not found"
     block = SESSIONS_JS[start:end]
 
     merge_pos = block.find("_mergePendingSessionMessage")

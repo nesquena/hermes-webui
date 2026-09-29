@@ -1,4 +1,21 @@
+let _profileSwitchApiQueue=Promise.resolve();
+let _profileSwitchApiIntent=0;
+let _profileSwitchApiPending=0;
 async function api(path,opts={}){
+  const apiPath=path.replace(/^\//,'').split('?')[0];
+  if(S._profileCookieOwnershipUncertain&&!['api/profile/switch','api/profile/active','api/profiles'].includes(apiPath)) throw new Error('Profile must be confirmed before using this request.');
+  if(path.replace(/^\//,'')==='api/profile/switch'
+    &&String(opts.method||'GET').toUpperCase()==='POST'&&!opts._profileSwitchQueued){
+    const intent=++_profileSwitchApiIntent;
+    _profileSwitchApiPending++;
+    const request=_profileSwitchApiQueue.catch(()=>{}).then(()=>api(path,{...opts,_profileSwitchQueued:true}));
+    _profileSwitchApiQueue=request.then(()=>{},()=>{});
+    try{
+      const data=await request;
+      if(data&&typeof data==='object') Object.defineProperty(data,'_profileSwitchRequestId',{value:intent});
+      return data;
+    }finally{_profileSwitchApiPending--;}
+  }
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);

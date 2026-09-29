@@ -41,6 +41,14 @@ def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
 
 
+def _new_session_source() -> str:
+    src = _read("static/sessions.js")
+    start = src.find("async function newSession(flash, options={}){")
+    end = src.find("\nasync function loadSession(", start)
+    assert start != -1 and end > start, "newSession() body must be present"
+    return src[start:end]
+
+
 # ---------------------------------------------------------------------------
 # Client-side: source-shape check that the fallback is wired in newSession().
 # ---------------------------------------------------------------------------
@@ -50,10 +58,7 @@ class TestClientFallbackSourceShape:
     """Static checks that the fallback chain lives inside newSession()."""
 
     def test_active_provider_fallback_present(self):
-        src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        assert idx != -1
-        body = src[idx:idx + 6000]
+        body = _new_session_source()
         assert "window._activeProvider" in body, (
             "newSession() must consult window._activeProvider when the dropdown "
             "did not yield a truthy model_provider (cold boot, empty "
@@ -61,9 +66,7 @@ class TestClientFallbackSourceShape:
         )
 
     def test_previous_session_fallback_present(self):
-        src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        body = src[idx:idx + 6000]
+        body = _new_session_source()
         assert "S.session&&S.session.model_provider" in body, (
             "newSession() must fall back to the previous session's "
             "model_provider when neither the dropdown nor window._activeProvider "
@@ -72,13 +75,17 @@ class TestClientFallbackSourceShape:
 
     def test_fallback_chain_order(self):
         """Fallback order: explicit > _activeProvider > prev-session > null."""
-        src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        body = src[idx:idx + 6000]
-        explicit = body.find("newModelState.model_provider")
-        active = body.find("window._activeProvider")
-        prev = body.find("S.session&&S.session.model_provider")
-        assert -1 < explicit < active < prev, (
+        expr = _provider_assignment_in_new_session()
+        assign_at = expr.find("reqBody.model_provider=")
+        assign = expr[assign_at:]
+        assign_fallback = assign.find("(_bareModel")
+        fallback_at = expr.find("const _fallbackProvider=")
+        fallback_end = expr.find(";", fallback_at)
+        fallback = expr[fallback_at:fallback_end]
+        explicit = assign.find("newModelState.model_provider")
+        active = fallback.find("window._activeProvider")
+        prev = fallback.find("S.session&&S.session.model_provider")
+        assert -1 < explicit < assign_fallback and -1 < active < prev, (
             f"Fallback chain order broken: explicit={explicit}, "
             f"_activeProvider={active}, prev-session={prev}. "
             "Explicit selection must beat _activeProvider which must beat "
@@ -87,12 +94,7 @@ class TestClientFallbackSourceShape:
 
     def test_issue_referenced_in_source(self):
         """Future readers should be able to trace this back to the issue."""
-        src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        # Window covers the model-fallback region of newSession(); the function
-        # has grown over time (e.g. pre-session toolset staging #4490), so keep
-        # the window comfortably larger than the fallback block it guards.
-        body = src[idx:idx + 5000]
+        body = _new_session_source()
         assert "#2518" in body, (
             "newSession()'s fallback comment should reference #2518 so the "
             "follow-up provenance survives future refactors."
@@ -211,10 +213,7 @@ def _provider_assignment_in_new_session() -> str:
     in a comment) and on the guard declaration so future comments
     referencing ``reqBody.model_provider`` cannot confuse it.
     """
-    src = _read("static/sessions.js")
-    idx = src.find("async function newSession(flash, options={}){")
-    assert idx != -1, "newSession() must be defined in static/sessions.js"
-    body = src[idx : idx + 7000]
+    body = _new_session_source()
     guard_start = body.find("const _bareModel")
     assert guard_start != -1, (
         "newSession() must declare a 'const _bareModel' guard for the "
@@ -328,9 +327,13 @@ class TestIssue2518FollowupSlashSlugGuard:
             f"explicit picker (newModelState.model_provider) must be the first "
             f"operand, before the _fallbackProvider fallback, in the assignment: {assign!r}"
         )
-        # _activeProvider precedes prev-session inside _fallbackProvider.
-        pos_active = expr.find("window._activeProvider")
-        pos_prev = expr.find("S.session&&S.session.model_provider")
+        # _activeProvider precedes prev-session inside the actual fallback
+        # declaration (comments earlier in newSession are not precedence).
+        fallback_at = expr.find("const _fallbackProvider=")
+        fallback_end = expr.find(";", fallback_at)
+        fallback = expr[fallback_at:fallback_end]
+        pos_active = fallback.find("window._activeProvider")
+        pos_prev = fallback.find("S.session&&S.session.model_provider")
         assert -1 < pos_active < pos_prev, (
             f"_fallbackProvider must source _activeProvider before prev-session: {expr!r}"
         )

@@ -758,9 +758,9 @@ def test_frontend_stamp_source_invariants():
     src = open(ROOT / "static" / "ui.js", encoding="utf-8").read()
     # Main transcript path and transparent ordered segments must stamp.
     assert "_stampMediaSnapshots(bodyHtml, m._media_snapshots)" in src
-    # Transparent segments: original _getCachedRender line is preserved (source
-    # window contract), stamping applied on the next line via *_Stamped.
-    assert "_getCachedRender(partDisplayText,false);" in src
+    # Transparent segments use the same cached renderer and opt into settled
+    # session links only for non-live content before stamping the snapshot map.
+    assert "_getCachedRender(partDisplayText,false,{linkSessionReferences:!m._live});" in src
     assert "_stampMediaSnapshots(partBodyHtml,m._media_snapshots)" in src
     # Worklog scene prose path is intentionally NOT stamped (folded view; the
     # scene render chain is exercised by harness-extracted tests that would

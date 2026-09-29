@@ -1604,6 +1604,89 @@ function _scheduleMessageVirtualizedRender(force, request){
   });
 }
 
+function _htmlTagEnd(text,start){
+  let quote='',afterEquals=false;
+  for(let i=start;i<text.length;i++){
+    const ch=text[i];
+    if(quote){if(ch===quote) quote='';continue;}
+    if(ch==='>') return i; if(ch==='='){afterEquals=true;continue;}
+    if((ch==='"'||ch==="'")&&afterEquals){quote=ch;afterEquals=false;continue;}
+    if(!/\s/.test(ch)) afterEquals=false;
+  }
+  return -1;
+}
+function _linkBareSessionReferences(html){
+  const source=String(html||'');
+  const reference=/@session:(?:(?:[a-z0-9][a-z0-9_-]*)\/)?[A-Za-z0-9_-]+/g;
+  const protectedTags=new Set(['a','code','pre','script','style','textarea']);
+  const entityDecoder=document.createElement('textarea');
+  const tagInfo=tag=>String(tag||'').match(/^<\s*(\/)?\s*([a-z][a-z0-9]*)\b/i);
+  const renderText=text=>{
+    let out='',last=0,m;
+    reference.lastIndex=0;
+    while((m=reference.exec(text))){
+      const raw=m[0];
+      const before=text.slice(last,m.index);
+      const previous=m.index?text[m.index-1]:'';
+      const next=text[m.index+raw.length]||'';
+      const continuation=text.slice(m.index+raw.length);
+      const entity=continuation.match(/^&(?:#(?:[0-9]{1,32}|[xX][0-9a-fA-F]{1,8})|[A-Za-z][A-Za-z0-9]{0,31});?/);
+      const entitySuffix=entity?continuation.slice(entity[0].length):'';
+      const entityOverlong=/^&#[0-9]{32}[0-9]|^&#[xX][0-9a-fA-F]{8}[0-9a-fA-F]/i.test(continuation);
+      entityDecoder.innerHTML=entity&&!entityOverlong?entity[0]:'';
+      const entityChar=entityOverlong?'_':entity?entityDecoder.value:'';
+      if(previous==='\\'||/[A-Za-z0-9@/?#%=:.-]/.test(previous)
+        ||/[A-Za-z0-9_/-]/.test(next)
+        ||(next==='.'&&/[A-Za-z0-9_-]/.test(continuation[1]||''))
+        ||/[A-Za-z0-9_/-]/.test(entityChar)
+        ||(entityChar==='.'&&/[A-Za-z0-9_-]/.test(entitySuffix[0]||''))) continue;
+      const profileMatch=raw.match(/^@session:([a-z0-9][a-z0-9_-]*)\//);
+      const profile=profileMatch?profileMatch[1]:null;
+      let sid=profileMatch?raw.slice(profileMatch[0].length):raw.slice('@session:'.length);
+      let wrapperCount=0;
+      for(let i=m.index-1;i>=0&&text[i]==='_';i--) wrapperCount++;
+      wrapperCount=Math.min(wrapperCount,2);
+      if(wrapperCount&&sid.endsWith('_'.repeat(wrapperCount))) sid=sid.slice(0,-wrapperCount);
+      const validSid=typeof _sessionReferenceIdIsValid==='function'
+        ? _sessionReferenceIdIsValid(sid)
+        : sid.length>0&&sid.length<=256&&/^[A-Za-z0-9_-]+$/.test(sid);
+      const validProfile=!profile||(typeof _sessionReferenceProfileIsValid==='function'
+        ? _sessionReferenceProfileIsValid(profile)
+        : profile.length>0&&profile.length<=64&&/^[a-z0-9][a-z0-9_-]*$/.test(profile));
+      if(!validSid||!validProfile) continue;
+      let href='session/'+encodeURIComponent(sid);
+      if(typeof _sessionUrlForSid==='function') href=_sessionUrlForSid(sid,profile);
+      const label='@session:'+(profile?profile+'/':'')+sid;
+      out+=before+'<a class="session-link" href="'+esc(href)+'" data-session-ref="1" data-session-id="'+esc(sid)+'"'+(profile?' data-session-profile="'+esc(profile)+'"':'')+'>'+esc(label)+'</a>';
+      if(wrapperCount) out+='_'.repeat(wrapperCount);
+      last=m.index+raw.length;
+    }
+    return out+text.slice(last);
+  };
+  let out='',i=0;
+  while(i<source.length){
+    if(source[i]!=='<'){
+      const next=source.indexOf('<',i);
+      const end=next<0?source.length:next;
+      out+=renderText(source.slice(i,end));i=end;continue;
+    }
+    const end=_htmlTagEnd(source,i);
+    if(end<0){out+=source.slice(i);break;}
+    const tag=source.slice(i,end+1);
+    out+=tag;
+    const info=tagInfo(tag);
+    if(info&&!info[1]&&!/\/\s*>$/.test(tag)&&protectedTags.has(info[2].toLowerCase())){
+      const closeRe=new RegExp('</\\s*'+info[2]+'\\s*>','ig');
+      closeRe.lastIndex=end+1;
+      const close=closeRe.exec(source);
+      if(!close){out+=source.slice(end+1);break;}
+      out+=source.slice(end+1,close.index+close[0].length);i=close.index+close[0].length;continue;
+    }
+    i=end+1;
+  }
+  return out;
+}
+
 // ── renderMd / _renderUserFencedBlocks cache ──────────────────────────────
 // Long sessions re-render the same messages on every renderMessages() call.
 // Cache the rendered HTML so unchanged messages skip the expensive regex
@@ -1611,26 +1694,32 @@ function _scheduleMessageVirtualizedRender(force, request){
 const _renderCache = new Map();
 const _renderCacheMax = 300;
 function _clearRenderCache(){ _renderCache.clear(); }
-function _renderCacheKey(text, isUser){
+function _renderCacheKey(text, isUser, linkSessionReferences=true){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
-  const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
-  // Short content: use the full string as key (cheap Map lookup).
-  // Long content: length + prefix + suffix is good enough — collisions on
-  // 20-char prefix+suffix are vanishingly rare for chat messages.
-  if(text.length <= 500) return p + ':' + text;
-  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+  const p = (linkSessionReferences?'l':'r')+':' + (isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a');
+  return p + ':' + text;
 }
-function _getCachedRender(text, isUser){
-  const key = _renderCacheKey(text, isUser);
+function _getCachedRender(text, isUser, options){
+  const linkSessionReferences=!(options&&options.linkSessionReferences===false);
+  const key = _renderCacheKey(text, isUser, linkSessionReferences);
   const hit = _renderCache.get(key);
   if(hit !== undefined) return hit;
+  const sourceText=String(text),markers=new Set(sourceText.match(/SESSIONREFESCAPED\d+TOKEN/g)||[]),escapedReferences=new Map();
+  let markerIndex=0;
+  const renderText=sourceText.replace(/\\(@session:[A-Za-z0-9_/-]+)/g,escapedReference=>{
+    let marker;
+    do{marker=`SESSIONREFESCAPED${markerIndex++}TOKEN`;}while(markers.has(marker));
+    markers.add(marker);escapedReferences.set(marker,escapedReference);return marker;
+  });
   const rendered = isUser
-    ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
-    : renderMd(_stripXmlToolCallsDisplay(String(text)));
+    ? (window._renderUserMarkdown ? renderMd(renderText) : _renderUserFencedBlocks(renderText))
+    : renderMd(_stripXmlToolCallsDisplay(renderText));
+  let settled = linkSessionReferences ? _linkBareSessionReferences(rendered) : rendered;
+  if(escapedReferences.size) settled=settled.replace(/SESSIONREFESCAPED\d+TOKEN/g,marker=>esc(escapedReferences.get(marker)??marker));
   if(_renderCache.size > _renderCacheMax) _renderCache.clear();
-  _renderCache.set(key, rendered);
-  return rendered;
+  _renderCache.set(key, settled);
+  return settled;
 }
 // ── Message-level media snapshot stamping ─────────────────────────────────
 // /api/media serves a file's CURRENT bytes. Since ETag revalidation (#6922),
@@ -2683,6 +2772,12 @@ document.addEventListener('click', e => {
   if(!e.target || !e.target.closest) return;
   const sessionLink=e.target.closest('a.session-link[href]');
   if(sessionLink){
+    if(sessionLink.getAttribute('data-session-ref')==='1'&&typeof _openSessionReference==='function'){
+      const sid=sessionLink.getAttribute('data-session-id')||'';
+      const profile=sessionLink.getAttribute('data-session-profile');
+      if(sid){e.preventDefault();void _openSessionReference(sid,profile||null);}
+      return;
+    }
     const href=sessionLink.getAttribute('href')||'';
     const m=href.match(/(?:^|\/)session\/([^?#]+)/i);
     if(m&&typeof loadSession==='function'){
@@ -8327,7 +8422,7 @@ function renderMd(raw){
       const sid=href.replace(/^session:\/\//i,'').split(/[?#]/)[0];
       try{
         const decoded=decodeURIComponent(sid);
-        if(typeof _sessionUrlForSid==='function') return _sessionUrlForSid(decoded);
+        if(typeof _sessionUrlForSid==='function') return _sessionUrlForSid(decoded,null);
         return 'session/'+encodeURIComponent(decoded);
       }catch(_){
         return 'session/'+encodeURIComponent(sid);
@@ -8457,7 +8552,19 @@ function renderMd(raw){
     }
     return '';
   }
-  s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>_tag(tag));
+  const _replaceTagsQuoteAware=(input,replacer)=>{
+    let out='',i=0;
+    while(i<input.length){
+      if(input[i]!=='<'||!/[a-z/]/i.test(input[i+1]||'')){out+=input[i++];continue;}
+      const end=_htmlTagEnd(input,i);
+      if(end<0){out+=esc(input.slice(i));break;}
+      const tag=input.slice(i,end+1);
+      out+=/^<\/?[a-z]/i.test(tag)?replacer(tag):esc(tag);
+      i=end+1;
+    }
+    return out;
+  };
+  s=_replaceTagsQuoteAware(s,tag=>_tag(tag));
   // Incomplete raw tags must not survive until paragraph wrapping, where the
   // renderer's generated </p> could provide a closing ">" and turn them into
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).
@@ -17839,7 +17946,7 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    let bodyHtml = _getCachedRender(displayContent, isUser);
+    let bodyHtml = _getCachedRender(displayContent, isUser, {linkSessionReferences:!m._live});
     // Message-level media snapshots: settled assistant messages carry a
     // path→digest map (written at settle time) freezing the file bytes the
     // turn emitted. Stamp it AFTER the text-keyed render cache so identical
@@ -18066,7 +18173,7 @@ function renderMessages(options){
         if(_ERR_MSG_RE.test(String(partDisplayText||'').trim())) orderedSeg.dataset.error='1';
         if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))) orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
         const isLastTextPart=partIdx===lastTextPartIdx;
-        const partBodyHtml=_getCachedRender(partDisplayText,false);
+        const partBodyHtml=_getCachedRender(partDisplayText,false,{linkSessionReferences:!m._live});
         // Message-level media snapshots: transparent ordered segments carry the
         // same per-message path→digest map as the main transcript; stamp it so
         // historical previews freeze (&snap=) instead of following overwrites.

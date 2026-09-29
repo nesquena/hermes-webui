@@ -125,7 +125,7 @@ global.switchToProfile = async (name) => {
           profileSwitchCompleted = await switchToProfile(intent.name) === true;
           if (profileSwitchCompleted) {
             profileSwitchChangedProfile = (S.activeProfile || 'default') !== profileSwitchProfileBefore || !!S.activeProfileIsDefault !== profileSwitchIsDefaultBefore;
-            if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
+            if (profileSwitchChangedProfile && typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
           }
         }
       } else {
@@ -146,9 +146,9 @@ global.switchToProfile = async (name) => {
   const afterPrefill = window.location.pathname + window.location.search + window.location.hash;
   const profilePos = bootSrc.indexOf("const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;");
   const renderPos = bootSrc.indexOf("await renderSessionList();", profilePos);
-  const savedPos = bootSrc.indexOf("const saved=urlSession||savedLocal;", profilePos);
+  const savedPos = bootSrc.indexOf("const saved=(S._ambiguousSessionUrlIntent||profileIntentInvalid)?null:(urlSession||savedLocal);", profilePos);
   const loadPos = bootSrc.indexOf("await loadSession(saved, {preserveActiveInput:true});", profilePos);
-  const consumePos = bootSrc.indexOf("if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();", profilePos);
+  const consumePos = bootSrc.indexOf("if(_profileSwitchChangedProfile&&typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();", profilePos);
   const completedPos = bootSrc.indexOf("_profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;", profilePos);
   const changedPos = bootSrc.indexOf("_profileSwitchChangedProfile=", completedPos);
   const cleanupGuardPos = bootSrc.indexOf("if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){", profilePos);
@@ -183,7 +183,7 @@ global.switchToProfile = async (name) => {
     assert payload["keepsExplicitSession"] is False
 
 
-def test_noop_profile_query_switch_keeps_saved_local_state():
+def test_root_alias_profile_query_boot_switch_keeps_saved_local_state():
     source = _node_prelude() + """
 function applyUrl(rel) {
   const next = new URL(rel, 'https://example.test');
@@ -206,7 +206,7 @@ global.window = {
 };
 global.document = { baseURI: 'https://example.test/app/' };
 applyUrl('/app/?profile=default&q=hello&keep=1#frag');
-global.S = { activeProfile: 'default', activeProfileIsDefault: true };
+global.S = { activeProfile: 'root', activeProfileIsDefault: true };
 global.localStorage = {
   store: { 'hermes-webui-session': 'saved-local' },
   getItem(key) {
@@ -236,7 +236,7 @@ global.switchToProfile = async () => true;
           profileSwitchCompleted = await switchToProfile(intent.name) === true;
           if (profileSwitchCompleted) {
             profileSwitchChangedProfile = (S.activeProfile || 'default') !== profileSwitchProfileBefore || !!S.activeProfileIsDefault !== profileSwitchIsDefaultBefore;
-            if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
+            if (profileSwitchChangedProfile && typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
           }
         }
       } else {
@@ -256,6 +256,7 @@ global.switchToProfile = async () => true;
     profileSwitchChangedProfile,
     savedLocalBefore,
     savedLocalAfter: localStorage.getItem('hermes-webui-session'),
+    url: window.location.pathname + window.location.search + window.location.hash,
     cleanupGuardPos,
   }));
 })().catch(err => {
@@ -270,6 +271,7 @@ global.switchToProfile = async () => true;
     assert payload["profileSwitchChangedProfile"] is False
     assert payload["savedLocalBefore"] == "saved-local"
     assert payload["savedLocalAfter"] == "saved-local"
+    assert payload["url"] == "/app/?profile=default&q=hello&keep=1#frag"
     assert payload["cleanupGuardPos"] >= 0
 
 
@@ -326,7 +328,6 @@ global.switchToProfile = async () => { throw new Error('boom'); };
         }
       } else {
         console.warn('[boot] ignored invalid profile query', intent.name);
-        if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
       }
     } catch (e) {
       console.warn('[boot] profile query switch failed', e);
@@ -413,7 +414,6 @@ global.switchToProfile = async () => false;
         }
       } else {
         console.warn('[boot] ignored invalid profile query', intent.name);
-        if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
       }
     } catch (e) {
       console.warn('[boot] profile query switch failed', e);
@@ -443,7 +443,7 @@ global.switchToProfile = async () => false;
     assert payload["warns"] == []
 
 
-def test_invalid_profile_query_warns_and_skips_switch():
+def test_invalid_profile_query_warns_skips_switch_and_keeps_retry_url():
     source = _node_prelude() + """
 function applyUrl(rel) {
   const next = new URL(rel, 'https://example.test');
@@ -480,7 +480,6 @@ global.switchToProfile = async (name) => { switched.push(name); };
         if (typeof switchToProfile === 'function') await switchToProfile(intent.name);
       } else {
         console.warn('[boot] ignored invalid profile query', intent.name);
-        if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
       }
     } catch (e) {
       console.warn('[boot] profile query switch failed', e);
@@ -502,8 +501,8 @@ global.switchToProfile = async (name) => { switched.push(name); };
     assert payload["intent"] == {"hasParam": True, "valid": False, "name": "../bad"}
     assert payload["switched"] == []
     assert payload["warns"] == [["[boot] ignored invalid profile query", "../bad"]]
-    assert payload["url"] == "/app/?q=hello&keep=1#frag"
-    assert payload["historyCalls"] == [{"state": None, "title": "", "url": "/app/?q=hello&keep=1#frag"}]
+    assert payload["url"] == "/app/?profile=../bad&q=hello&keep=1#frag"
+    assert payload["historyCalls"] == []
 
 
 def test_prefill_cleanup_still_strips_q_prompt_and_send():
@@ -568,7 +567,7 @@ const explicitAfter = localStorage.getItem('hermes-webui-session');
 console.log(JSON.stringify({
   blocksImplicit,
   allowsExplicit,
-  ignoresInvalid: _profileQueryBlocksSavedLocalRestore(invalidProfile, null),
+  blocksInvalid: _profileQueryBlocksSavedLocalRestore(invalidProfile, null),
   implicitAfter,
   explicitAfter,
 }));
@@ -577,7 +576,7 @@ console.log(JSON.stringify({
     assert payload == {
         "blocksImplicit": True,
         "allowsExplicit": False,
-        "ignoresInvalid": False,
+        "blocksInvalid": True,
         "implicitAfter": None,
         "explicitAfter": "saved-local",
     }
@@ -669,7 +668,6 @@ def test_profile_transitions_fetch_destination_reasoning_after_hiding_stale_chip
     source = f"""
 const uiSrc = {UI_JS!r};
 const panelsSrc = {PANELS_JS!r};
-const sessionsSrc = {SESSIONS_JS!r};
 function extractFunc(src, name) {{
   const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
   const start = src.search(re);
@@ -716,7 +714,6 @@ eval(extractFunc(uiSrc, 'fetchReasoningChip'));
 eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
 eval(extractFunc(uiSrc, 'syncTopbar'));
 eval(extractFunc(panelsSrc, 'switchToProfile'));
-eval(extractFunc(sessionsSrc, '_switchProfileForSessionLoad'));
 const pending = [];
 const reasoningUrls = [];
 global.api = (url) => {{
@@ -739,7 +736,7 @@ fetchReasoningChip();
   S.session = {{ model: 'old-model', model_provider: 'old-provider', profile: 'default' }};
   _currentReasoningEffort = 'low'; _currentReasoningEffortsSupported = ['low', 'high']; _profileTransitionReasoningContext = null; _lastReasoningFetchKey = null;
   fetchReasoningChip();
-  await _switchProfileForSessionLoad('vops');
+  await switchToProfile('vops', {{openExistingSession:true}});
   const directLoad = {{ hidden: els.composerReasoningWrap.style.display, urls: reasoningUrls.slice(2) }};
   pending[2]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
   const directLoadAfterOld = _currentReasoningEffort;

@@ -356,7 +356,7 @@ console.log(JSON.stringify({
     )
     new_pos = BOOT_JS.find("await newSession(true);", active_profile_pos)
     load_pos = BOOT_JS.find("await loadSession(saved, {preserveActiveInput:true});", active_profile_pos)
-    saved_pos = BOOT_JS.find("const saved=urlSession||savedLocal;")
+    saved_pos = BOOT_JS.find("const saved=(S._ambiguousSessionUrlIntent||profileIntentInvalid)?null:(urlSession||savedLocal);")
     check_pos = BOOT_JS.find("await checkInflightOnBoot(saved);", load_pos)
     apply_pos = BOOT_JS.find("await _finalizeComposerPrefillOnBoot(prefillIntent);", check_pos)
     assert saved_pos >= 0

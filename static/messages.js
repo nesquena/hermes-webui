@@ -960,6 +960,7 @@ function _clearPendingSelections(){
   return true;
 }
 if(typeof window!=='undefined') window._clearPendingSelections=_clearPendingSelections;
+if(typeof window!=='undefined') window._capturePendingSelections=()=>{const selections=_pendingSelections.map(s=>({...s})),counter=_selectionIdCounter;return()=>{_pendingSelections=selections;_selectionIdCounter=counter;_renderSelectionChips();};};
 
 function _selectedContextPreview(text){
   const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
@@ -1382,6 +1383,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 }
 
 async function send(){
+  if(S._profileCookieOwnershipUncertain){showToast('Profile could not be confirmed. Switch profiles before sending.',5000,'error');return;}
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -4584,7 +4586,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const sid=href.replace(/^session:\/\//i,'').split(/[?#]/)[0];
       try{
         const decoded=decodeURIComponent(sid);
-        if(typeof _sessionUrlForSid==='function') return _sessionUrlForSid(decoded);
+        if(typeof _sessionUrlForSid==='function') return _sessionUrlForSid(decoded,null);
         return 'session/'+encodeURIComponent(decoded);
       }catch(_){
         return 'session/'+encodeURIComponent(sid);

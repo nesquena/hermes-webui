@@ -812,7 +812,7 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
     ), "Session-load empty-state guard must run before render-window/state resets."
 
 
-def test_browser_session_url_accepts_api_session_id_param(cleanup_test_sessions):
+def test_browser_session_url_accepts_api_session_id_param():
     """External links using ?session_id=... should open that session in the browser.
 
     The API endpoint uses `session_id`, while the browser URL historically used
@@ -826,8 +826,10 @@ def test_browser_session_url_accepts_api_session_id_param(cleanup_test_sessions)
     end = src.find("function _sessionUrlForSid", start)
     assert end > start, "session URL parser block end not found"
     block = src[start:end]
-    assert "qs.get('session')" in block or 'qs.get("session")' in block
-    assert "qs.get('session_id')" in block or 'qs.get("session_id")' in block
+    assert "qs.getAll('session')" in block
+    assert "qs.getAll('session_id')" in block
+    assert "querySession=qs.has('session')?sessions[0]:(qs.has('session_id')?sessionIds[0]:null);" in block
+    assert "sessions.length>1||sessionIds.length>1||(sessions.length&&sessionIds.length)" in block
 
 
 def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
