@@ -248,17 +248,47 @@ class TestExtractLatestExchange:
         assert user is None
         assert assistant is None
 
-    def test_tool_call_only_newest_turn_falls_back_to_prior_completed_exchange(self):
+    def test_previous_completed_and_newest_incomplete_turn_yields_no_exchange(self):
         msgs = [
             {"role": "user", "content": "first prompt", "timestamp": 1.0},
             {"role": "assistant", "content": "first response", "timestamp": 2.0},
             {"role": "user", "content": "run tool", "timestamp": 3.0},
-            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "my_tool"}}], "timestamp": 4.0},
-            {"role": "tool", "tool_call_id": "call1", "content": "output", "timestamp": 5.0},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": "my_tool"}}], "timestamp": 4.0},
+            {"role": "tool", "tool_call_id": "c1", "content": "output", "timestamp": 5.0},
         ]
         user, assistant = _extract_latest_completed_exchange(msgs)
-        assert user["content"] == "first prompt"
-        assert assistant["content"] == "first response"
+        assert user is None
+        assert assistant is None
+
+    def test_user_partial_prose_error_or_interrupted_rejected(self):
+        msgs = [
+            {"role": "user", "content": "hello", "timestamp": 1.0},
+            {"role": "assistant", "content": "partial text", "_partial": True, "timestamp": 2.0},
+            {"type": "interrupted", "timestamp": 3.0},
+        ]
+        user, assistant = _extract_latest_completed_exchange(msgs)
+        assert user is None
+        assert assistant is None
+
+    def test_unresolved_embedded_tool_declaration_rejected(self):
+        msgs = [
+            {"role": "user", "content": "do work", "timestamp": 1.0},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "work"}], "timestamp": 2.0},
+        ]
+        user, assistant = _extract_latest_completed_exchange(msgs)
+        assert user is None
+        assert assistant is None
+
+    def test_embedded_tool_declaration_with_result_and_final_prose_succeeds(self):
+        msgs = [
+            {"role": "user", "content": "do work", "timestamp": 1.0},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "work"}], "timestamp": 2.0},
+            {"role": "tool", "tool_call_id": "t1", "content": "done", "timestamp": 3.0},
+            {"role": "assistant", "content": "Work completed successfully.", "timestamp": 4.0},
+        ]
+        user, assistant = _extract_latest_completed_exchange(msgs)
+        assert user["content"] == "do work"
+        assert assistant["content"] == "Work completed successfully."
 
 
 # ── _build_handoff_context_messages ────────────────────────────────────────
@@ -422,6 +452,35 @@ class TestMessageContentEquivalent:
         c = {"role": "assistant", "content": "hi"}
         assert _message_content_equivalent(a, b) is False
         assert _message_content_equivalent(a, c) is False
+
+    def test_same_text_different_image_url(self):
+        a = {"role": "user", "content": [{"type": "text", "text": "same"}, {"type": "image_url", "image_url": {"url": "http://example.com/1.png"}}]}
+        b = {"role": "user", "content": [{"type": "text", "text": "same"}, {"type": "image_url", "image_url": {"url": "http://example.com/2.png"}}]}
+        c = {"role": "user", "content": [{"type": "text", "text": "same"}, {"type": "image_url", "image_url": {"url": "http://example.com/1.png"}}]}
+        assert _message_content_equivalent(a, b) is False
+        assert _message_content_equivalent(a, c) is True
+
+    def test_same_text_different_document(self):
+        a = {"role": "user", "content": [{"type": "text", "text": "same"}, {"type": "document", "source": {"data": "docA"}}]}
+        b = {"role": "user", "content": [{"type": "text", "text": "same"}, {"type": "document", "source": {"data": "docB"}}]}
+        c = {"role": "user", "content": [{"type": "text", "text": "same"}, {"type": "document", "source": {"data": "docA"}}]}
+        assert _message_content_equivalent(a, b) is False
+        assert _message_content_equivalent(a, c) is True
+
+    def test_same_text_different_embedded_tool_id(self):
+        a = {"role": "assistant", "content": [{"type": "text", "text": "same"}, {"type": "tool_use", "id": "t1", "name": "f", "input": {"a": 1}}]}
+        b = {"role": "assistant", "content": [{"type": "text", "text": "same"}, {"type": "tool_use", "id": "t2", "name": "f", "input": {"a": 1}}]}
+        assert _message_content_equivalent(a, b) is False
+
+    def test_same_text_different_embedded_tool_input(self):
+        a = {"role": "assistant", "content": [{"type": "text", "text": "same"}, {"type": "tool_use", "id": "t1", "name": "f", "input": {"a": 1}}]}
+        b = {"role": "assistant", "content": [{"type": "text", "text": "same"}, {"type": "tool_use", "id": "t1", "name": "f", "input": {"a": 2}}]}
+        assert _message_content_equivalent(a, b) is False
+
+    def test_same_text_identical_embedded_tool(self):
+        a = {"role": "assistant", "content": [{"type": "text", "text": "same"}, {"type": "tool_use", "id": "t1", "name": "f", "input": {"a": 1}}]}
+        b = {"role": "assistant", "content": [{"type": "text", "text": "same"}, {"type": "tool_use", "id": "t1", "name": "f", "input": {"a": 1}}]}
+        assert _message_content_equivalent(a, b) is True
 
 
 # ── _handle_session_handoff ────────────────────────────────────────────────

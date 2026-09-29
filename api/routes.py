@@ -25310,13 +25310,16 @@ def _message_text_simple(value) -> str:
 def _is_terminal_assistant_message(msg: dict) -> bool:
     """Return True if msg is a completed, terminal assistant prose response.
 
-    Excludes tool-call declarations, interrupted/error turns, and compression markers.
+    Excludes tool-call declarations, interrupted/error turns, partial outputs,
+    and compression markers.
     """
     if not isinstance(msg, dict):
         return False
     if msg.get("role") != "assistant":
         return False
     if msg.get("_error") or msg.get("type") in ("interrupted", "error"):
+        return False
+    if msg.get("_partial") or msg.get("_partial_tool_calls"):
         return False
     if msg.get("tool_calls"):
         return False
@@ -25325,44 +25328,198 @@ def _is_terminal_assistant_message(msg: dict) -> bool:
     if is_context_compression_marker(msg):
         return False
     raw_content = msg.get("content")
-    text = _message_text_simple(raw_content) if isinstance(raw_content, list) else str(raw_content or "").strip()
+    if isinstance(raw_content, str):
+        text = raw_content.strip()
+    elif isinstance(raw_content, list):
+        if any(isinstance(part, dict) and part.get("type") == "tool_use" for part in raw_content):
+            return False
+        text_parts = [
+            str(part.get("text") or part.get("content") or "")
+            for part in raw_content
+            if isinstance(part, dict) and part.get("type") in ("", "text", "input_text", "output_text", None)
+        ]
+        text = "".join(text_parts).strip()
+    else:
+        text = ""
     return bool(text)
 
 
 def _extract_latest_completed_exchange(messages: list) -> tuple:
     """Return (last_user_msg, last_assistant_msg) from the latest completed exchange.
 
-    A completed exchange is a user message followed by a terminal assistant
-    answer (nonempty projected text, no tool_calls, no error/interruption,
-    and no compression marker). Intermediate tool-call declarations and
-    tool results are skipped. If the latest turn is incomplete (e.g. only tool
-    calls with or without tool results), scan backward for the prior completed
-    exchange or return (None, None).
+    Scoped strictly to the newest user turn. If the newest turn is incomplete
+    (e.g. pending/unresolved tool calls, missing final answer, interrupted or
+    partial response), returns (None, None) rather than falling back to an earlier
+    completed exchange.
     """
-    candidate_assistant = None
-    for msg in reversed(messages):
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get("role", "")
-        if role == "assistant":
-            if candidate_assistant is None and _is_terminal_assistant_message(msg):
-                candidate_assistant = msg
-        elif role == "user":
-            if candidate_assistant is not None:
-                return msg, candidate_assistant
-            # Hit a user without finding a terminal assistant response first;
-            # this turn is incomplete (e.g. tool call without final answer).
-            # Discard and search backward for a prior completed exchange.
-            candidate_assistant = None
+    if not isinstance(messages, list) or not messages:
+        return None, None
 
-    return None, None
+    last_user_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            last_user_idx = i
+            break
+
+    if last_user_idx is None:
+        return None, None
+
+    last_user = messages[last_user_idx]
+    turn_messages = messages[last_user_idx + 1:]
+    if not turn_messages:
+        return None, None
+
+    for msg in turn_messages:
+        if not isinstance(msg, dict):
+            return None, None
+        if msg.get("_error") or msg.get("type") in ("interrupted", "error"):
+            return None, None
+        if msg.get("_partial") or msg.get("_partial_tool_calls"):
+            return None, None
+
+    last_assistant = turn_messages[-1]
+    if not _is_terminal_assistant_message(last_assistant):
+        return None, None
+
+    declared_tool_ids = set()
+    for msg in turn_messages[:-1]:
+        if msg.get("role") == "assistant":
+            for tc in (msg.get("tool_calls") or []):
+                if isinstance(tc, dict) and tc.get("id"):
+                    declared_tool_ids.add(str(tc["id"]).strip())
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "tool_use" and part.get("id"):
+                        declared_tool_ids.add(str(part["id"]).strip())
+
+    resolved_tool_ids = set()
+    for msg in turn_messages[:-1]:
+        if msg.get("role") == "tool" and msg.get("tool_call_id"):
+            resolved_tool_ids.add(str(msg["tool_call_id"]).strip())
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "tool_result":
+                    res_id = part.get("tool_use_id") or part.get("tool_call_id")
+                    if res_id:
+                        resolved_tool_ids.add(str(res_id).strip())
+
+    if not declared_tool_ids.issubset(resolved_tool_ids):
+        return None, None
+
+    return last_user, last_assistant
+
+
+def _canonical_tool_calls(tool_calls: list | None) -> list:
+    """Canonicalize top-level tool calls for value-level equivalence."""
+    if not isinstance(tool_calls, list):
+        return []
+    canonical = []
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        tc_id = tc.get("id") or tc.get("tool_call_id") or ""
+        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+        fn_name = fn.get("name") or tc.get("name") or ""
+        fn_args = fn.get("arguments") or tc.get("arguments") or tc.get("input") or ""
+        if isinstance(fn_args, dict):
+            fn_args_str = json.dumps(fn_args, sort_keys=True)
+        else:
+            fn_args_str = str(fn_args or "").strip()
+        canonical.append((str(tc_id).strip(), str(fn_name).strip(), fn_args_str))
+    return canonical
+
+
+def _canonical_message_content(content) -> list:
+    """Canonicalize message content into a list of normalized parts.
+
+    Pure-text lists are normalized to [('text', combined_text)] so that
+    equivalent string and pure-text list representations compare equal.
+    Any non-text parts (image, document, tool_use, etc.) preserve their
+    semantic identity so distinct payloads never falsely deduplicate.
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        text = content.strip()
+        return [("text", text)] if text else []
+
+    if not isinstance(content, list):
+        text = str(content or "").strip()
+        return [("text", text)] if text else []
+
+    has_non_text = False
+    for part in content:
+        if isinstance(part, str):
+            continue
+        if isinstance(part, dict):
+            ptype = str(part.get("type") or "text").lower()
+            if ptype not in ("", "text", "input_text", "output_text"):
+                has_non_text = True
+                break
+        else:
+            has_non_text = True
+            break
+
+    if not has_non_text:
+        text_parts = []
+        for part in content:
+            if isinstance(part, str):
+                text_parts.append(part)
+            elif isinstance(part, dict):
+                text_parts.append(str(part.get("text") or part.get("content") or part.get("input_text") or part.get("output_text") or ""))
+        combined = "".join(text_parts).strip()
+        return [("text", combined)] if combined else []
+
+    canonical_parts = []
+    for part in content:
+        if isinstance(part, str):
+            canonical_parts.append(("text", part.strip()))
+        elif isinstance(part, dict):
+            ptype = str(part.get("type") or "text").lower()
+            if ptype in ("", "text", "input_text", "output_text"):
+                txt = str(part.get("text") or part.get("content") or part.get("input_text") or part.get("output_text") or "").strip()
+                canonical_parts.append(("text", txt))
+            elif ptype == "tool_use":
+                t_id = str(part.get("id") or "").strip()
+                t_name = str(part.get("name") or "").strip()
+                t_input = part.get("input") or part.get("arguments") or ""
+                if isinstance(t_input, dict):
+                    t_input_str = json.dumps(t_input, sort_keys=True)
+                else:
+                    t_input_str = str(t_input or "").strip()
+                canonical_parts.append(("tool_use", t_id, t_name, t_input_str))
+            elif ptype in ("image_url", "image"):
+                img = part.get("image_url") or part.get("image") or part.get("source") or ""
+                if isinstance(img, dict):
+                    img_str = json.dumps({k: v for k, v in img.items() if not k.startswith("_")}, sort_keys=True)
+                else:
+                    img_str = str(img or "").strip()
+                canonical_parts.append(("image", img_str))
+            elif ptype in ("document", "file"):
+                doc = part.get("document") or part.get("source") or part.get("file") or part
+                if isinstance(doc, dict):
+                    doc_str = json.dumps({k: v for k, v in doc.items() if not k.startswith("_")}, sort_keys=True)
+                else:
+                    doc_str = str(doc or "").strip()
+                canonical_parts.append(("document", doc_str))
+            else:
+                clean_dict = {k: v for k, v in part.items() if not k.startswith("_")}
+                canonical_parts.append((ptype, json.dumps(clean_dict, sort_keys=True)))
+        else:
+            canonical_parts.append(("unknown", str(part)))
+
+    return canonical_parts
 
 
 def _message_content_equivalent(a: dict | None, b: dict | None) -> bool:
-    """Return True when two messages have matching role and content.
+    """Return True when two messages have matching role, content, and tool calls.
 
     Intentional value-level equivalence, not object identity. Handles both
-    plain strings and structured list-of-dicts content while comparing tool_calls.
+    plain strings and structured list-of-dicts content without lossy flattening of
+    non-text payloads (images, documents, tool declarations).
     """
     if a is None and b is None:
         return True
@@ -25373,26 +25530,10 @@ def _message_content_equivalent(a: dict | None, b: dict | None) -> bool:
     if a.get("role") != b.get("role"):
         return False
 
-    # Check tool calls equivalence
-    a_tools = a.get("tool_calls") or []
-    b_tools = b.get("tool_calls") or []
-    if a_tools != b_tools:
+    if _canonical_tool_calls(a.get("tool_calls")) != _canonical_tool_calls(b.get("tool_calls")):
         return False
 
-    a_content = a.get("content")
-    b_content = b.get("content")
-
-    # Fast path: exact content equality
-    if a_content == b_content:
-        return True
-
-    # If both have structured or string content, compare normalized text
-    a_text = _message_text_simple(a_content)
-    b_text = _message_text_simple(b_content)
-    if a_text and b_text:
-        return a_text == b_text
-
-    return False
+    return _canonical_message_content(a.get("content")) == _canonical_message_content(b.get("content"))
 
 
 def _build_handoff_context_messages(source_context, last_user, last_assistant) -> list:
