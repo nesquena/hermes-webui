@@ -277,5 +277,7 @@ def test_new_session_inflight_cleanup_still_runs_after_api_rejects():
     finally_idx = src.find("}finally{", start)
     assert finally_idx > start, "newSession() must keep a finally cleanup block"
     block = src[finally_idx : src.find("\n}", finally_idx) + 2]
+    # #6712 (gate round 8): the reset is now guarded so an older run cannot clear a
+    # newer owner's live slot; the assignment still exists.
     assert "_newSessionInFlight=null" in block
     assert "_setNewSessionPending(false)" in block

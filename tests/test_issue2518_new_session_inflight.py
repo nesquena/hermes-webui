@@ -16,7 +16,16 @@ def test_new_session_reuses_inflight_request_before_posting_again():
         "newSession() must return the existing create promise so rapid clicks do "
         "not enqueue multiple /api/session/new requests"
     )
-    assert "_newSessionInFlight=(async()=>" in src
+    # #6712 (gate round 8): the run is captured in a local binding so the shared
+    # slot can be identified as THIS run when it is cleared.
+    assert "_run=(async()=>" in src
+    assert "_newSessionInFlight=_run;" in src, (
+        "the started run must be published to the shared slot"
+    )
+    assert "_newSessionInFlight===_run" in src, (
+        "the slot may only be cleared while it still identifies this run/owner; an "
+        "older finally must not clear a newer owner's live slot"
+    )
     assert "_newSessionInFlight=null;" in src
 
 

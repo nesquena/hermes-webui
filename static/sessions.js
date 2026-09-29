@@ -153,6 +153,27 @@ function _profileMatchesActiveProfile(profile, activeProfile){
   return eventName === 'default' && !!S.activeProfileIsDefault;
 }
 
+// Symmetric root-alias equivalence for the ACTIVE surface. `_profileMatchesActiveProfile`
+// covers literal equality plus the FORWARD direction (a name tagged 'default' while the
+// active surface is a renamed root). The REVERSE direction — a pane tagged with the
+// renamed-root name (e.g. `kinni`) while a later boot reports the same root as 'default' —
+// is the same root and must match too, exactly as `_cronMarkerProfileMatchesActive` already
+// does for cron markers. With only the forward direction, the profile guards on the pane
+// and on the stream re-arm would reject the CURRENT pane's own frames and refuse to reopen
+// its stream, so a restored conversation would stop receiving live updates (Greptile P1,
+// round 11). Kept as ONE named rule so the pane check, the re-arm check and any future
+// caller cannot drift apart the way two divergent matchers did in round 8.
+function _paneProfileMatchesActiveProfile(paneProfile, activeProfile){
+  if(_profileMatchesActiveProfile(paneProfile, activeProfile)) return true;
+  const paneName = (typeof paneProfile === 'string' && paneProfile.trim()) ? paneProfile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(paneName === activeName) return true;
+  return activeName === 'default'
+    && !!(typeof S !== 'undefined' && S && S.activeProfileIsDefault)
+    && typeof _canonicalProfileRootAlias === 'function'
+    && _canonicalProfileRootAlias(paneName);
+}
+
 function _sessionEventProfilesMatch(eventProfile, activeProfile){
   if(!(typeof eventProfile === 'string' && eventProfile.trim())) return true;
   return _profileMatchesActiveProfile(eventProfile, activeProfile);
@@ -1039,11 +1060,81 @@ function _resolveCronCompletionMarkerOrigin(sid, marker) {
   return {isCron, profile: profile || ''};
 }
 
-// A profile name provably resolving to the root profile: the literal
-// 'default' alias, or a roster entry flagged is_default (renamed root).
-// Unknown names fail closed — exact-name matching still applies to them.
+// Root-alias resolution for profile-scope AUTHORITY. The ONLY admissible input is the
+// canonical set the server delivers atomically with the active-profile state
+// (`S.activeProfileRootNames`, from /api/profile/active and /api/profile/switch). The
+// UI roster (_profilesCache) and the server's memoized root-name cache are both
+// unacceptable here: the roster starts empty / can be five minutes stale from
+// localStorage, and the memoized cache is only invalidated by mutations this process
+// performed — an out-of-band rename would leave stale aliases deciding authority
+// (Greptile gate rounds 12-14, AGENTS.md "scope caches by the complete identity",
+// "for authority checks fail closed when safety cannot be confirmed").
+function _activeProfileRootNamesSet(){
+  if(typeof S !== 'undefined' && S && Array.isArray(S.activeProfileRootNames)
+     && S.activeProfileRootNames.length){
+    return new Set(S.activeProfileRootNames);
+  }
+  return null;
+}
+
+// THE one place that ingests a server active-profile payload's root scope (boot,
+// profile switch, and the revalidation refresh all come through here). One writer
+// means the ingestion rule cannot drift between its three callers — duplicated
+// predicates are what let rounds 13-14 disagree about authority.
+//
+// A payload that carries NO scope (a boot fallback, a failed listing) leaves the
+// scope CLEARED and NOT authoritative. Marking a missing scope authoritative is the
+// round-15 regression: authority then rejects a renamed-root pane it cannot verify
+// while `_revalidateActiveProfileRootScope()` refuses to refresh, so the restored
+// conversation stops receiving live updates until the next navigation or reload.
+//
+// Accepts either key shape: the server JSON (`root_names` / `root_names_authoritative`)
+// or the boot-state object (`rootNames` / `rootNamesAuthoritative`).
+function _applyActiveProfileRootScope(payload){
+  if(typeof S === 'undefined' || !S) return;
+  const p = (payload && typeof payload === 'object') ? payload : {};
+  const names = Array.isArray(p.root_names) ? p.root_names
+    : (Array.isArray(p.rootNames) ? p.rootNames : null);
+  S.activeProfileRootNames = names ? names.slice() : null;
+  // Authoritative only when a real set arrived AND the server did not flag it
+  // partial. No set => the fail-closed default, which must keep revalidating.
+  const flag = (p.root_names_authoritative !== undefined)
+    ? p.root_names_authoritative
+    : p.rootNamesAuthoritative;
+  S.activeProfileRootNamesAuthoritative = !!names && flag !== false;
+}
+
+// True only when we hold a resolved, non-empty server scope. Anything else — a
+// cleared scope, a partial one, or an unset flag — must keep revalidating so a
+// renamed root is never silently rejected for the life of the page.
+function _activeProfileRootNamesResolved(){
+  if(typeof S === 'undefined' || !S) return false;
+  return S.activeProfileRootNamesAuthoritative === true
+    && Array.isArray(S.activeProfileRootNames)
+    && S.activeProfileRootNames.length > 0;
+}
+
+// Canonical-scope root admission for AUTHORITY (pane/frame/stream). Deliberately
+// stricter than `_cronProfileNameIsRootAlias` below: that helper serves cron-marker
+// scope, where an eventually-consistent roster is an acceptable input, but it must
+// never decide stream authority. With no canonical scope in hand we fail CLOSED — an
+// unknown name is not admitted as the renamed root.
+function _canonicalProfileRootAlias(name){
+  if (name === 'default') return true;
+  const serverRoots = (typeof _activeProfileRootNamesSet === 'function')
+    ? _activeProfileRootNamesSet()
+    : null;
+  return !!(serverRoots && serverRoots.has(name));
+}
+
 function _cronProfileNameIsRootAlias(name) {
   if (name === 'default') return true;
+  // Tolerant by design: harnesses and partial loads may not define the server-set
+  // reader, in which case the roster fallback below still answers.
+  const serverRoots = (typeof _activeProfileRootNamesSet === 'function')
+    ? _activeProfileRootNamesSet()
+    : null;
+  if (serverRoots) return serverRoots.has(name);
   if (typeof _profilesCache !== 'undefined' && _profilesCache
     && Array.isArray(_profilesCache.profiles)) {
     const entry = _profilesCache.profiles.find((p) => p && p.name === name);
@@ -1841,7 +1932,17 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 }
 
 let _newSessionInFlight=null;
+// Profile-switch generation that owns the current _newSessionInFlight promise
+// (null = no switch context). Used to stop a caller under a different generation
+// from adopting a session created for an older profile.
+let _newSessionInFlightGen=null;
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
+// Sids whose message body failed to load during the most recent loadSession().
+// Cleared when a load for that sid starts, set when its message fetch fails, and
+// read by loadSession()'s return value so a partially-loaded conversation is not
+// reported as a successful load.
+const _loadMessagesFailedSids=new Set();
+function _loadMessagesFailedForSid(sid){ return _loadMessagesFailedSids.has(sid); }
 const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalThis;
 
 function _rememberEmptyComposerModelOverride(model, modelProvider){
@@ -1941,13 +2042,68 @@ function _setNewSessionPending(pending){
   }
 }
 
+// A load that belongs to a profile switch must ALSO stop owning its outcome when
+// a newer switch takes the generation. `_loadSessionGeneration` cannot see that:
+// switch B can advance `_profileSwitchGeneration` and take its no-load /
+// list-failure fallback, leaving switch A's load as the current load — free to
+// install S.session, localStorage, the URL, the stream and the transcript under
+// the cookie switch B now owns. Every guard site consults this one rule instead
+// of re-deriving ownership from a caller-supplied mode.
+//
+// `switchGen === null` marks a load that is not switch-owned (plain sidebar
+// navigation, boot restore, New Chat): those are unaffected.
+function _profileSwitchOwnsLoad(switchGen){
+  if(switchGen === null || typeof switchGen === 'undefined') return true;
+  if(typeof _profileSwitchGeneration !== 'number') return true;
+  return switchGen === _profileSwitchGeneration;
+}
+
 async function newSession(flash, options={}){
-  if(_newSessionInFlight){
-    if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
-    return _newSessionInFlight;
+  // A shared in-flight promise must not be handed to a caller working under a
+  // different profile generation. During a profile switch the cookie and the
+  // active profile have already changed while an earlier newSession() may still
+  // be running for the PREVIOUS profile; returning that promise would let the
+  // caller treat a session created for the old profile as its own result (the
+  // "rapid switches retain a session created for an older profile" case).
+  // Callers may pass the generation they belong to; the cached promise is reused
+  // only when it belongs to the same one.
+  const callerGen = (options && typeof options.profileSwitchGen === 'number')
+    ? options.profileSwitchGen
+    : null;
+  // #6712 (gate round 8): with several waiters, a single await is not enough.
+  // The slot may already have been replaced by a run owned by yet another
+  // generation, and this caller may have become superseded while it waited, so
+  // re-examine the slot after every await. Each pass either adopts the slot
+  // (same owner), aborts (superseded switch), or waits again; only then does
+  // this caller start its own run and take the slot.
+  // A caller whose switch has been superseded must produce no session at all:
+  // reaching the start of its own run would create one under the newer profile's
+  // cookie and adopt it over that switch's state. Checked on entry and again
+  // after every wait, so a caller that lost ownership while queued stops here.
+  const _supersededByNewerSwitch = () => callerGen !== null
+    && typeof _profileSwitchGeneration === 'number'
+    && callerGen !== _profileSwitchGeneration;
+  for(;;){
+    if(_supersededByNewerSwitch()) return null;
+    if(!_newSessionInFlight) break;
+    const _inFlightGen = (typeof _newSessionInFlightGen === 'number') ? _newSessionInFlightGen : null;
+    const _sameOwner = (callerGen === null && _inFlightGen === null) || callerGen === _inFlightGen;
+    if(_sameOwner){
+      if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
+      return _newSessionInFlight;
+    }
+    // Different owner still current: await the incumbent, then loop to
+    // re-check — the slot may be empty (we then start our own run) or may have
+    // been taken over by yet another owner, and this caller may itself have
+    // been superseded while it waited. The incumbent is captured locally so
+    // this run can be told apart from a successor's when the shared slot is
+    // finally cleared.
+    const _incumbent = _newSessionInFlight;
+    try{ await _incumbent; }catch(_){}
   }
   _setNewSessionPending(true);
-  _newSessionInFlight=(async()=>{
+  _newSessionInFlightGen = callerGen;
+  const _run=(async()=>{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -2051,6 +2207,24 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    // #6712 (Greptile): a superseded switch must not install its session.
+    //
+    // The caller's generation checks sit AROUND newSession(), so they cannot
+    // stop the install that happens INSIDE it: once the POST resolves, this
+    // function unconditionally adopted data.session, the localStorage key, the
+    // URL and the session stream. During rapid profile switches the cookie and
+    // active profile have already moved on, so the completed request installed
+    // a session that belongs to the PREVIOUS profile — the newer switch then
+    // follows its empty-session fallback, leaves no replacement, and the
+    // browser is left holding profile-gated state it cannot load or stream.
+    //
+    // The session was still created server-side; this only declines to adopt
+    // it into the browser's active state, which is now owned by a newer switch.
+    if(callerGen!==null
+       && typeof _profileSwitchGeneration==='number'
+       && callerGen!==_profileSwitchGeneration){
+      return null;
+    }
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -2130,11 +2304,20 @@ async function newSession(flash, options={}){
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
   })();
+  _newSessionInFlight=_run;
   try{
-    return await _newSessionInFlight;
+    return await _run;
   }finally{
-    _newSessionInFlight=null;
-    _setNewSessionPending(false);
+    // #6712 (gate round 8): clear the shared slot only while it still
+    // identifies THIS run and owner. A newer owner may have replaced the slot
+    // while we awaited; clearing unconditionally would delete the live run, so
+    // the next caller would start a second concurrent creation and adopt
+    // neither — and the pending indicator would be cleared under it.
+    if(_newSessionInFlight===_run && _newSessionInFlightGen===callerGen){
+      _newSessionInFlight=null;
+      _newSessionInFlightGen=null;
+      _setNewSessionPending(false);
+    }
   }
 }
 
@@ -2181,7 +2364,143 @@ function _clearStuckSessionOnBoot(sid, currentSid){
 function _rearmActiveSessionStream(){
   if(typeof startSessionStream!=='function') return;
   const activeSid = S.session ? S.session.session_id : null;
-  if(activeSid) startSessionStream(activeSid);
+  if(!activeSid) return;
+  // #6712 P1 (Greptile round 10): a profile switch moves the cookie, so the
+  // session still on screen belongs to the profile we are LEAVING. Re-arming a
+  // stream for it would subscribe under the NEW profile for the old profile's
+  // session — and /api/session/stream is keyed by session id alone, with frames
+  // carrying no profile, so that profile's turns could attach to this pane. The
+  // switch owns arming its own session, so leave arming to it.
+  const paneProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
+    ? S.session.profile.trim()
+    : 'default';
+  if(!_paneProfileMatchesActiveProfile(paneProfile, S.activeProfile)){
+    // Rejected — evidence the scope we hold may be stale (a root renamed out-of-band
+    // while this page is open). Ask for a confirmed scope and re-arm rather than
+    // letting the pane go silent; bounded by the floor, and it stops once the server
+    // confirms a genuine mismatch (Greptile P1, round 17).
+    if(typeof _revalidateActiveProfileRootScope === 'function') _revalidateActiveProfileRootScope({forced: true});
+    return;
+  }
+  startSessionStream(activeSid);
+}
+
+// Revalidate the canonical root scope from the server when the last snapshot was not
+// a resolved view, then reconcile this pane's stream. Single-flight: concurrent pane
+// events during a failure window must not stampede the endpoint. On success we adopt
+// the fresh scope and re-arm, which is exactly what "reconnect the stream when server
+// root metadata changes" requires — a renamed root that was absent from the stale
+// scope no longer silently stops receiving live updates (Greptile P1, round 14).
+let _profileRootScopeRefresh = null;
+// A refresh that cannot resolve the scope must not be retried on every rejected frame,
+// or a persistently failing listing would turn each frame into a request.
+let _profileRootScopeNextRefreshAt = 0;
+const _PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS = 15000;
+// ...but the floor must never be the END of the story (Greptile P1, round 16). A pane
+// whose stream was never armed receives no further frames, so after the floor expires
+// nothing would call us again and the conversation would stay disconnected until
+// unrelated navigation or a reload. Every attempt that leaves the scope unresolved
+// therefore SCHEDULES its own retry, so reconciliation is guaranteed.
+let _profileRootScopeRetryTimer = null;
+
+function _clearProfileRootScopeRetry(){
+  if(_profileRootScopeRetryTimer === null) return;
+  try{ if(typeof clearTimeout === 'function') clearTimeout(_profileRootScopeRetryTimer); }catch(_){ }
+  _profileRootScopeRetryTimer = null;
+}
+
+// The retry must preserve WHY it was scheduled. A floor-blocked evidence-driven
+// attempt that retried as a plain one would be short-circuited by the resolved check
+// and the refresh would never actually happen (Greptile P1, round 17).
+let _profileRootScopeRetryForced = false;
+function _scheduleProfileRootScopeRetryIn(ms, forced){
+  if(typeof setTimeout !== 'function') return;
+  if(_profileRootScopeRetryTimer !== null) return;   // one pending retry is enough
+  const wait = (typeof ms === 'number' && ms > 0) ? ms : 1;
+  const retryForced = !!forced;
+  _profileRootScopeRetryForced = retryForced;
+  _profileRootScopeRetryTimer = setTimeout(function(){
+    _profileRootScopeRetryTimer = null;
+    _profileRootScopeRetryForced = false;
+    if(typeof _revalidateActiveProfileRootScope === 'function'){
+      _revalidateActiveProfileRootScope(retryForced ? {forced: true} : undefined);
+    }
+  }, wait);
+}
+
+// Ownership token for a scope refresh (Greptile P1, round 16). A refresh may only
+// install the state of the transition it was issued under: if a newer profile switch
+// (or the 409-recovery switch) took over while the request was in flight, its state
+// owns the surface and this response describes a profile we have already left —
+// applying it would replace the newer, authoritative scope with the older one.
+function _profileScopeRefreshOwnerToken(){
+  return {
+    gen: (typeof _profileSwitchGeneration === 'number') ? _profileSwitchGeneration : null,
+    profile: (typeof S !== 'undefined' && S) ? (S.activeProfile || 'default') : null,
+  };
+}
+function _profileScopeRefreshOwnerStillOwns(token){
+  if(!token) return false;
+  const gen = (typeof _profileSwitchGeneration === 'number') ? _profileSwitchGeneration : null;
+  if(token.gen !== null && gen !== null && token.gen !== gen) return false;
+  const profile = (typeof S !== 'undefined' && S) ? (S.activeProfile || 'default') : null;
+  if(token.profile !== null && profile !== null && token.profile !== profile) return false;
+  return true;
+}
+
+function _revalidateActiveProfileRootScope(opts){
+  // `forced` marks an attempt driven by EVIDENCE: a pane was rejected against the
+  // scope we hold. A resolved scope is then not proof that the scope is current — the
+  // identity can change server-side (a root renamed out-of-band) while this page is
+  // open, and a settled snapshot would otherwise mean "reject silently forever"
+  // (Greptile P1, round 17). The attempt stays bounded: single-flight, the floor, and
+  // the rule below that a CONFIRMED mismatch stops retrying.
+  const forced = !!(opts && opts.forced);
+  if(!forced
+     && typeof _activeProfileRootNamesResolved === 'function'
+     && _activeProfileRootNamesResolved()){
+    _clearProfileRootScopeRetry();
+    return;
+  }
+  if(_profileRootScopeRefresh) return;   // the in-flight attempt schedules the next one
+  const now = (typeof Date !== 'undefined' ? Date.now() : 0);
+  if(now < _profileRootScopeNextRefreshAt){
+    // Blocked by the floor. Without rescheduling, a rejected pane would wait forever
+    // for a frame it will never receive (its stream was never armed).
+    _scheduleProfileRootScopeRetryIn(_profileRootScopeNextRefreshAt - now, forced);
+    return;
+  }
+  if(typeof api !== 'function'){
+    _scheduleProfileRootScopeRetryIn(_PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS, forced);
+    return;
+  }
+  const owner = _profileScopeRefreshOwnerToken();
+  _profileRootScopeNextRefreshAt = now + _PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS;
+  _profileRootScopeRefresh = api('/api/profile/active', {redirect401: false})
+    .then((d) => {
+      if(!_profileScopeRefreshOwnerStillOwns(owner)) return;   // a newer transition owns state
+      if(!d || typeof d !== 'object') return;
+      const hasScope = Array.isArray(d.root_names) && d.root_names.length > 0;
+      const authoritative = hasScope && d.root_names_authoritative !== false;
+      // Never downgrade a resolved scope with a non-authoritative snapshot.
+      if(!authoritative && typeof _activeProfileRootNamesResolved === 'function'
+         && _activeProfileRootNamesResolved()) return;
+      // Same writer as boot/switch: a payload WITHOUT a scope clears it and stays
+      // non-authoritative, so this cannot mistake a missing scope for a resolved one.
+      if(typeof _applyActiveProfileRootScope === 'function') _applyActiveProfileRootScope(d);
+      _rearmActiveSessionStream();
+    })
+    .catch(() => { /* stale scope: authority stays fail-closed */ })
+    .finally(() => {
+      _profileRootScopeRefresh = null;
+      const settled = typeof _activeProfileRootNamesResolved === 'function'
+        && _activeProfileRootNamesResolved();
+      // `settled` means the server CONFIRMED the identity we hold. A pane that is
+      // still rejected after a confirmed answer is a genuine mismatch, not staleness,
+      // so retrying would only poll — stop. Unconfirmed answers keep reconciling.
+      if(settled) _clearProfileRootScopeRetry();
+      else _scheduleProfileRootScopeRetryIn(_PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS, forced);
+    });
 }
 
 function _sessionProfileMismatchFromError(e){
@@ -2254,7 +2573,7 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
-      return;
+      return false;
     }
   }
   const forceReload = !!opts.force;
@@ -2292,7 +2611,45 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  // This load owns the outcome for `sid`: drop any failure recorded by a
+  // previous attempt so a now-successful load is not reported as failed.
+  if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.delete(sid);
+  // #6712 (gate round 8): ownership is the load generation AND — when this load
+  // belongs to a profile switch — the switch generation it started under. The
+  // two used to be combined only on the 409 profile-mismatch path, so a
+  // superseded switch's normal metadata/message path could still reach the
+  // installs below (S.session, localStorage, the URL, the stream, the
+  // transcript) before the caller's post-await check ran.
+  const _loadSwitchGen = (opts.profileSwitchOwned && typeof opts.switchGen === 'number')
+    ? opts.switchGen
+    : null;
+  // Ownership of the in-flight MARKER is deliberately separate from ownership of
+  // the INSTALLS below. A load the user is waiting on owns the marker until a
+  // newer loadSession() supersedes it — but a profile switch taking over is not a
+  // supersede, so folding the switch into the marker predicate would strand the
+  // marker when this load takes a stale exit: every stale exit clears the marker
+  // through the same predicate, and readers such as
+  // `if (_loadingSessionId !== null && _loadingSessionId !== sid) return;` would
+  // then keep rejecting the current pane's reconciliation and stream events until
+  // another navigation overwrote it (Greptile P1 on #6712, round 9).
+  const _ownsLoadMarker = () => _loadingSessionId === sid
+    && _loadSessionGeneration === _loadGeneration;
+  // Gate round 12 (G2): ONE owner-checked marker retirement for every stale
+  // abandonment. Two exits still returned without it — the bail after the awaited
+  // composer-draft save, and the 409 pre/post-recovery exits — so a superseded
+  // switch that took a no-load fallback could leave the old id installed, and
+  // `_isSessionCurrentPane()` would then reject the CURRENT pane's frames. The
+  // guard means an older load can never retire a newer load's marker.
+  const _retireLoadMarkerIfOwned = () => { if (_ownsLoadMarker()) _loadingSessionId = null; };
+  const _isCurrentLoad = () => _ownsLoadMarker() && _profileSwitchOwnsLoad(_loadSwitchGen);
+  // The same ownership token, forwarded to _ensureMessagesLoaded() so a stale
+  // message response cannot write the transcript either. Keeps the load's opts
+  // in one place instead of re-spelling them at each call site.
+  const _loadOwnerOpts = (force) => ({
+    force: !!force,
+    loadGeneration:_loadGeneration,
+    switchGen:_loadSwitchGen,
+  });
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -2330,7 +2687,9 @@ async function loadSession(sid){
     // continuation can't wipe S.messages / write the loading placeholder /
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
-    if (!_isCurrentLoad()) return;
+    // Gate round 12 (G2): the awaited draft save above is an abandonment point —
+    // retire the marker we still own before bailing.
+    if (!_isCurrentLoad()) { _retireLoadMarkerIfOwned(); return; }
     // Snapshot the live turn before msgInner is replaced. Preserves the activity
     // timer, partial response, and tool cards so switching back does not rebuild
     // the stream UI from scratch.
@@ -2409,9 +2768,29 @@ async function loadSession(sid){
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
+      // #6712 F3: when this load belongs to a profile switch, the mismatch
+      // recovery must not drag the browser back to another profile. The
+      // recovery below calls _switchProfileForSessionLoad(), which issues its
+      // own profile switch — if a newer switch has already taken ownership, or
+      // the recovery would move AWAY from the profile this switch selected, the
+      // correct action is to abandon the load and let the owner decide. Without
+      // this, switch A's stale response could pull the browser back to A after
+      // switch B had already advanced the cookie.
+      if(opts.profileSwitchOwned){
+        // #6712 F3: ownership is now part of _isCurrentLoad() — it folds in
+        // opts.switchGen against the live _profileSwitchGeneration — so this
+        // recovery cannot drag the browser back to a profile a newer switch has
+        // already left.
+        if(!_isCurrentLoad()){
+          _retireLoadMarkerIfOwned();
+          _rearmActiveSessionStream();
+          return false;
+        }
+      }
       if (!_isCurrentLoad()) {
+        _retireLoadMarkerIfOwned();
         _rearmActiveSessionStream();
-        return;
+        return false;
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
@@ -2422,10 +2801,20 @@ async function loadSession(sid){
         // before clearing _loadingSessionId or retrying so the stale
         // continuation can't hijack the UI back to the old target.
         if (!_isCurrentLoad()) {
+          _retireLoadMarkerIfOwned();
           _rearmActiveSessionStream();
-          return;
+          return false;
         }
-        if (_isCurrentLoad()) _loadingSessionId = null;
+        // #6712 F3: the recovery switched the active profile. If a newer
+        // profile switch has since taken ownership, retrying here would fight
+        // it; abandon instead.
+        if(opts.profileSwitchOwned
+           && typeof opts.switchGen === 'number'
+           && typeof _profileSwitchGeneration !== 'undefined'
+           && opts.switchGen !== _profileSwitchGeneration){
+          return false;
+        }
+        _retireLoadMarkerIfOwned();
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
@@ -2440,6 +2829,11 @@ async function loadSession(sid){
     // load, re-arm the active session's stream and bail before any DOM mutation
     // or self-heal.
     if (!_isCurrentLoad()) {
+      // Marker ownership is narrower than install ownership (Greptile P1, round 9):
+      // a superseded switch is not a superseded LOAD, so this exit is the last
+      // writer the marker has. Release it, or the abandoned session stays marked
+      // as loading and readers reject the current pane.
+      _retireLoadMarkerIfOwned();
       _rearmActiveSessionStream();
       return;
     }
@@ -2460,7 +2854,7 @@ async function loadSession(sid){
         if(!currentSid || currentSid===sid){
           try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
           try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-          if (_isCurrentLoad()) _loadingSessionId = null;
+          _retireLoadMarkerIfOwned();
           if(!currentSid){
             throw e;
           }
@@ -2484,7 +2878,7 @@ async function loadSession(sid){
     // NOT restart — doing so would spin the SSE reconnect loop against a dead
     // session_id.
     const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
-    if (_isCurrentLoad()) _loadingSessionId = null;
+    _retireLoadMarkerIfOwned();
     // The session stream was stopped unconditionally at the top of this load
     // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
     // lines below, but this failure exit never reaches that point — leaving
@@ -2513,7 +2907,7 @@ async function loadSession(sid){
   // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
-    if (_isCurrentLoad()) _loadingSessionId = null;
+    _retireLoadMarkerIfOwned();
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
     _rearmActiveSessionStream();
@@ -2527,6 +2921,7 @@ async function loadSession(sid){
     // Re-arm the genuinely-displayed S.session (idempotent — no-ops once the
     // newer load arms its own sid).
     _rearmActiveSessionStream();
+    _retireLoadMarkerIfOwned();
     return;
   }
   // #2980: if this (current) load resolved a hidden pre-compression snapshot,
@@ -2687,19 +3082,28 @@ async function loadSession(sid){
     // Switching between active sessions should rebuild the live worklog from
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
+    let _messagesLoaded=false;
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      _messagesLoaded = await _ensureMessagesLoaded(sid, _loadOwnerOpts(_keepStaleUntilLoaded));
     } catch(e) {
       if (!_isCurrentLoad()) {
+        _retireLoadMarkerIfOwned();
         _rearmActiveSessionStream();
         return;
       }
       S.messages=inflightMessages;
+      if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
     }
     if (!_isCurrentLoad()) {
+      _retireLoadMarkerIfOwned();
       _rearmActiveSessionStream();
       return;
     }
+    // #6712 (gate round 8): when the body was never accepted (lost ownership,
+    // or a response without `session`) the inflight projection is all there is
+    // — record the failure so the resume path does not report a half-loaded
+    // conversation as a success.
+    if(!_messagesLoaded && typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
     const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
     if(liveTailPrepared){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
@@ -2804,10 +3208,12 @@ async function loadSession(sid){
     // arrive (visibility/focus recovery), force the fetch so the
     // "messages already populated" early-return inside _ensureMessagesLoaded
     // does NOT skip the swap to the new transcript.
+    let _messagesLoaded=false;
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      _messagesLoaded = await _ensureMessagesLoaded(sid, _loadOwnerOpts(_keepStaleUntilLoaded));
     } catch (e) {
       if (!_isCurrentLoad()) {
+        _retireLoadMarkerIfOwned();
         _rearmActiveSessionStream();
         return;
       }
@@ -2820,11 +3226,20 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
-      if (_isCurrentLoad()) _loadingSessionId = null;
+      if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
+      _retireLoadMarkerIfOwned();
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) {
+      _retireLoadMarkerIfOwned();
+      return;
+    }
+    // #6712 (gate round 8): the body was not accepted (lost ownership, or a
+    // response without `session`). Record it so loadSession() reports failure
+    // and the profile-switch resume runs its fresh-session fallback instead of
+    // treating an empty transcript as a successful resume.
+    if(!_messagesLoaded && typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
 
     // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
@@ -2945,7 +3360,7 @@ async function loadSession(sid){
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
-  if (_isCurrentLoad()) _loadingSessionId = null;
+  _retireLoadMarkerIfOwned();
 
   // Re-acknowledge the visit after the async message-load gap. A deferred
   // sidebar /api/sessions poll can land while _ensureMessagesLoaded is in
@@ -2982,6 +3397,15 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
   }
+  // Callers that need to distinguish a real load from a swallowed failure (e.g.
+  // the profile-switch resume path) rely on this result. S.session pointing at
+  // the requested session is necessary but NOT sufficient: the message body can
+  // still have failed to load (network error, server failure, SSE drop), and
+  // both message paths above keep a usable fallback (inflight projection, or the
+  // "Failed to load messages" notice) so the load continues to the tail. Report
+  // that as a failure so the caller can run its fresh-session rollback instead
+  // of treating a half-loaded conversation as a successful resume.
+  return !!(S.session && S.session.session_id === sid) && !_loadMessagesFailedForSid(sid);
 }
 
 // ── Handoff hint logic ──────────────────────────────────────────────────────
@@ -3715,12 +4139,25 @@ async function _ensureMessagesLoaded(sid, opts) {
   // S.messages in a single frame.
   opts = opts || {};
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
-  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
-  if (!_ownsLoad()) return;
+  // #6712 (gate round 8): ownership here is the same rule as loadSession's — the
+  // load generation AND, when the caller belongs to a profile switch, the switch
+  // generation. Without the switch half, a body requested by a superseded switch
+  // could still be accepted and written into the transcript of the profile a
+  // newer switch now owns.
+  const _switchGen = (typeof opts.switchGen === 'number') ? opts.switchGen : null;
+  const _ownsLoad = () => _loadingSessionId === sid
+    && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration)
+    && _profileSwitchOwnsLoad(_switchGen);
+  // Returns an explicit success boolean. `true` means a valid body was accepted
+  // (or usable messages were already in place); every other exit — lost
+  // ownership, a response without `session`, an auth redirect — is `false`.
+  // loadSession() turns a non-true result into a recorded failure, so a
+  // half-loaded conversation is no longer reported as a successful resume.
+  if (!_ownsLoad()) return false;
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     _clearSameSessionForceReloadHint(sid);
-    return;
+    return true;
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
@@ -3746,9 +4183,20 @@ async function _ensureMessagesLoaded(sid, opts) {
   } finally {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }
-  if (!_ownsLoad()) return;
-  // Guard: api() may have redirected (401) and returned undefined.
-  if (!data || !data.session) return;
+  if (!_ownsLoad()) return false;
+  // Gate round 12 (G1): reject a malformed envelope BEFORE any mutation. Rejecting
+  // only a MISSING `session` was not enough — truthy junk (`{session:{}}`,
+  // `{session:"x"}`, a wrong `session_id`, non-array `messages`) passed through
+  // `(data.session.messages || [])`, installed an empty transcript and still
+  // reported a successful resume. `session` must be a plain object naming THIS
+  // session, and `messages`, when present, must be an array.
+  if (!data || !data.session) return false;
+  if (typeof data.session !== 'object' || Array.isArray(data.session)) return false;
+  if (String(data.session.session_id || '') !== String(sid)) return false;
+  // Gate round 13: require an ARRAY. Admit nothing else — a missing or null
+  // `messages` used to reach `(data.session.messages || [])`, install an empty
+  // transcript and still report success.
+  if (!Array.isArray(data.session.messages)) return false;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
@@ -3837,6 +4285,7 @@ async function _ensureMessagesLoaded(sid, opts) {
     }
     if(typeof syncTopbar==='function') syncTopbar();
   }
+  return true;
 }
 
 function _messageComparableText(m){

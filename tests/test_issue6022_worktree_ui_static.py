@@ -8,6 +8,8 @@ load, with nothing to reap it (#6023).
 
 from pathlib import Path
 
+import re
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,9 +46,14 @@ def test_onboarding_session_sends_explicit_worktree_false():
 
 def test_profile_switch_session_sends_explicit_worktree_false():
     src = read("static/panels.js")
-    assert (
-        "await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});"
-        in src
+    # The call gained a `profileSwitchGen` option (Greptile review: an in-flight
+    # newSession() from an older profile must not be adopted by this switch), so
+    # match the contract — an explicit `worktree: false` on the profile-switch
+    # newSession call — instead of one exact argument list.
+    m = re.search(r"await newSession\(false, \{[^}]*worktree: false[^}]*\}\)", src)
+    assert m, (
+        "the profile-switch newSession call must opt out of the config worktree "
+        "default explicitly with `worktree: false`"
     )
 
 

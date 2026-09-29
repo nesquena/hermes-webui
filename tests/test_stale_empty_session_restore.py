@@ -101,8 +101,9 @@ def test_load_session_clears_saved_stale_404_and_rethrows_to_boot():
         "loadSession must strip stale /session/{id} from the URL so a refresh "
         "doesn't re-trigger the 404 loop"
     )
-    assert "_loadingSessionId = null" in block, (
-        "loadSession must clear the in-flight load marker on 404"
+    # Gate round 12 (G2): the retirement goes through the owner-checked helper.
+    assert "_retireLoadMarkerIfOwned();" in block, (
+        "loadSession must retire the in-flight load marker on 404"
     )
     # Boot-time (!currentSid) rethrow so boot falls through to the empty state.
     assert "!currentSid" in block, (

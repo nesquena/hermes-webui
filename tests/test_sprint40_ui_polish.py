@@ -22,6 +22,30 @@ STYLE_CSS  = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 PANELS_JS   = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
+
+def _balanced_block(js: str, start: int) -> str:
+    """Return the brace-balanced block beginning at/after `start`.
+
+    Fixed character windows silently stop reaching their target once comments
+    are added above it — the block is still there, but the assertion is measured
+    against a byte budget instead of the code. Extract by brace matching so the
+    check follows the branch, not the prose.
+    """
+    brace = js.find("{", start)
+    assert brace != -1, "opening brace not found"
+    depth = 0
+    i = brace
+    while i < len(js):
+        ch = js[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return js[start : i + 1]
+        i += 1
+    raise AssertionError("unbalanced braces while extracting block")
+
 try:
     from api import config as _api_config
     _config_available = True
@@ -240,12 +264,13 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         """After await newSession(false) in the sessionInProgress branch,
         the code must call syncTopbar() so the profile/workspace chips reflect
         the new profile's default workspace."""
-        # Find the sessionInProgress block
-        idx = PANELS_JS.find('if (sessionInProgress)')
+        # Find the sessionInProgress block by brace matching. A fixed 1000-char
+        # window stopped reaching syncTopbar() once the branch gained the resume
+        # helper and the generation comments, so the assertion was measuring
+        # distance-from-the-top rather than the ordering it claims to check.
+        idx = PANELS_JS.find('} else if (sessionInProgress) {')
         self.assertGreater(idx, -1, "sessionInProgress branch must exist in panels.js")
-
-        # Slice from that point to cover the relevant block
-        block = PANELS_JS[idx:idx + 1000]
+        block = _balanced_block(PANELS_JS, idx)
 
         # newSession(false, ...) must be called first
         self.assertIn('await newSession(false', block,
@@ -263,7 +288,10 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         """newSession(false) should apply the pending profile workspace itself."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        # Brace-match the branch rather than slicing a fixed 1000-char window:
+        # the guard comment above `newSession()` pushed the call past the old
+        # cutoff, so the window measured prose length instead of the call site.
+        block = _balanced_block(PANELS_JS, idx)
 
         self.assertIn('await newSession(false', block)
         self.assertNotIn('/api/session/update', block,
@@ -274,7 +302,8 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         """The profile switch path should avoid duplicate workspace persistence."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        # Same reason as above: follow the branch by brace matching, not a byte budget.
+        block = _balanced_block(PANELS_JS, idx)
 
         self.assertNotIn('/api/session/update', block,
                          "newSession(false) receives S._profileSwitchWorkspace, so "
@@ -283,9 +312,13 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
     def test_sync_topbar_before_render_session_list(self):
         """syncTopbar() should be called before renderSessionList()
         so the chips are correct when the UI re-renders."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
-        self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        # Extract the whole `else if (sessionInProgress)` branch by brace
+        # matching instead of a fixed 1000-char window: added comments above the
+        # render call pushed it past the old cutoff, so the window was measuring
+        # prose length rather than the ordering it claims to assert.
+        idx = PANELS_JS.find('} else if (sessionInProgress) {')
+        self.assertGreater(idx, -1, "sessionInProgress branch not found")
+        block = _balanced_block(PANELS_JS, idx)
 
         pos_sync = block.find('syncTopbar()')
         pos_render = block.find('await renderSessionList()')

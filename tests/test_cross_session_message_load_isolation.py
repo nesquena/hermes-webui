@@ -92,6 +92,10 @@ ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoa
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
+# #6712 (gate round 8): loadSession()/_ensureMessagesLoaded() fold profile-switch
+# ownership into their guard through this shared rule. The harness injects only the
+# extracted functions, so ship the helper too — otherwise the guard throws.
+PROFILE_SWITCH_OWNERSHIP_SRC = _extract_function(SESSIONS_SRC, "_profileSwitchOwnsLoad")
 
 
 def _normalise_ws(s: str) -> str:
@@ -107,7 +111,19 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
     assert "const _loadGeneration = ++_loadSessionGeneration" in body, (
         "loadSession() must increment and capture per-call generation"
     )
-    assert "const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration" in body
+    # #6712 (gate round 8): ownership is the load generation AND the switch
+    # generation the load started under — combined in ONE predicate so every
+    # guard site (metadata path included) shares it.
+    # #6712 (round 9): the predicate is composed of two named helpers — marker
+    # ownership (load generation only) and the install predicate that adds the
+    # switch generation on top.
+    assert "_ownsLoadMarker = () => _loadingSessionId === sid" in body
+    assert "_loadSessionGeneration === _loadGeneration" in body
+    assert "_isCurrentLoad = () => _ownsLoadMarker() && _profileSwitchOwnsLoad(_loadSwitchGen)" in body
+    assert "_profileSwitchOwnsLoad(_loadSwitchGen)" in body, (
+        "loadSession() must fold profile-switch ownership into its guard, not "
+        "only into the 409 recovery path"
+    )
     assert "loadGeneration:_loadGeneration" in body, (
         "loadSession() must thread generation into _ensureMessagesLoaded()"
     )
@@ -118,7 +134,7 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
         "loadSession() should check ownership in multiple await/catch paths, "
         "including stale _ensureMessagesLoaded catch branches"
     )
-    ensure_call = _normalise_ws("await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});")
+    ensure_call = _normalise_ws("await _ensureMessagesLoaded(sid, _loadOwnerOpts(_keepStaleUntilLoaded));")
     assert ensure_call in norm, (
         "loadSession() must pass generation into _ensureMessagesLoaded() for stale-owner checks"
     )
@@ -136,8 +152,14 @@ def test_ensure_messages_loaded_ownership_guard_pre_and_post_await():
     assert (
         "_loadGeneration===null||_loadSessionGeneration===_loadGeneration" in norm
     ), "_ensureMessagesLoaded must compare generation token"
-    assert norm.count("if(!_ownsLoad())return;") >= 2, (
-        "_ensureMessagesLoaded needs pre/post await ownership guards"
+    assert norm.count("if(!_ownsLoad())returnfalse;") >= 2, (
+        "_ensureMessagesLoaded needs pre/post await ownership guards, and each must "
+        "report an explicit failure (gate round 8: a body that was never accepted was "
+        "read as success)"
+    )
+    assert "_profileSwitchOwnsLoad(_switchGen)" in norm, (
+        "_ensureMessagesLoaded must apply the same switch-ownership rule, or a body "
+        "requested by a superseded switch can still write the transcript"
     )
     assert "_loadGeneration" in body, "_ensureMessagesLoaded should read generation from opts"
 
@@ -228,6 +250,15 @@ function createEnvironment() {
   globalThis._messageRenderableMessageCount = () => 2;
 
   globalThis._rearmActiveSessionStream = () => { rearmCalls += 1; };
+  // #6712: loadSession() consults the message-load failure record (a module-level
+  // Set in sessions.js) so a partially-loaded conversation is not reported as a
+  // successful load. The harness injects only the extracted functions, not
+  // module-level state, so provide it here — otherwise loadSession throws
+  // ReferenceError at its success return.
+  globalThis._loadMessagesFailedSids = new Set();
+  globalThis._loadMessagesFailedForSid = (sid) => globalThis._loadMessagesFailedSids.has(sid);
+  // #6712: the same rule loadSession()/_ensureMessagesLoaded() consult for switch ownership.
+  globalThis._profileSwitchGeneration = 0;
   globalThis.stopApprovalPolling = () => {};
   globalThis.hideApprovalCard = () => {};
   globalThis.stopSessionStream = () => {};
@@ -350,6 +381,7 @@ let toastCalls = [];
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
+__PROFILE_SWITCH_OWNERSHIP_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
@@ -608,6 +640,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
+        .replace("__PROFILE_SWITCH_OWNERSHIP_SRC__", PROFILE_SWITCH_OWNERSHIP_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
     )
