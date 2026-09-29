@@ -95,10 +95,21 @@ const sessionStorage = {
 };
 const MODEL_STATE_KEY = 'hermes-webui-model-state';
 
+const _dynamicProviderIds = {};
+const _CUSTOM_SLUG_TRIM_RE = /^[\u0009-\u000D\u0020]+|[\u0009-\u000D\u0020]+$/g;
+const _CUSTOM_SLUG_HOST_REJECT_RE = /[\s\/@?#\[\]\\]/;
 for (const name of [
+  '_optionDeclaredProviderId',
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_getOptionProviderId',
   '_providerFromModelValue',
   '_modelStateForSelect',
+  '_storedModelProvider',
   '_readPersistedModelState',
   '_pickerExplicitPickKey',
   '_readExplicitPickerPick',
@@ -113,12 +124,6 @@ const args = JSON.parse(process.argv[3]);
 modelSelect = makeSelect(args.options || [], args.initialValue || '');
 if (args.persisted) localStorage.setItem(MODEL_STATE_KEY, JSON.stringify(args.persisted));
 var S = {session: {session_id: args.sessionId || 's1', model_provider: args.sessionProvider || null}};
-// #7865 round-2: seed the picker's session-scoped explicit-pick evidence when
-// the scenario declares one (the gate in _modelProviderForSend requires it).
-if (args.explicitPick) {
-  _rememberExplicitPickerPick(args.sessionId || 's1',
-    args.explicitPick.value, args.explicitPick.model_provider);
-}
 
 if (args.mode === 'modelState') {
   process.stdout.write(JSON.stringify(_modelStateForSelect(modelSelect, args.model)));
@@ -185,6 +190,7 @@ def test_model_provider_for_send_prefers_dropdown_over_stale_session_provider(dr
     """
     provider = _run_helper(driver_path, {
         "model": "grok-4.3",
+        "sessionModel": "grok-4.3",
         "sessionProvider": "session-provider",
         "initialValue": "grok-4.3",
         "options": [{"provider": "xai-oauth", "value": "grok-4.3"}],

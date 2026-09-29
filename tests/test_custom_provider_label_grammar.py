@@ -387,6 +387,7 @@ function _readPersistedModelState(){ return persisted; }
 function $(name){ return name === 'modelSelect' ? select : null; }
 eval(extractFunc('_optionDeclaredProviderId'));
 eval(extractFunc('_clientProviderAuthorityForModel'));
+eval(extractFunc('_persistedProviderAuthorityForModel'));
 eval(extractFunc('_dynamicProviderAuthorityForQualifiedCustomId'));
 eval(extractFunc('_qualifiedCustomIdNeedsBackendAuthority'));
 eval(extractFunc('_getOptionProviderId'));

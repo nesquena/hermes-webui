@@ -42,25 +42,6 @@ def _read(path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Source-level guards (fast, no node) — lock the shape of the fix in place.
-# ---------------------------------------------------------------------------
-
-def test_model_state_no_longer_blindly_reads_selected_option():
-    """The bug was `const opt=sel&&sel.selectedOptions&&sel.selectedOptions[0];`
-    used unconditionally as the provider source. That exact unconditional read
-    must be gone; the resolver must match the option by value."""
-    src = _read(UI_JS)
-    start = src.index("function _modelStateForSelect(sel, modelId)")
-    body = src[start : src.index("function _captureModelDropdownSelection", start)]
-    # It must resolve by matching option value.
-    assert "Array.from(sel.options).find(o=>String(o.value||'')===value)" in body
-    # It may still prefer the selected option, but ONLY when it matches the value.
-    assert "selected&&String(selected.value||'')===value" in body
-    # The unconditional "trust selectedOptions[0]" read must not survive.
-    assert "const opt=sel&&sel.selectedOptions&&sel.selectedOptions[0];" not in body
-
-
-# ---------------------------------------------------------------------------
 # Behavioral test in Node — the real repro the maintainer asked for.
 # ---------------------------------------------------------------------------
 
@@ -82,6 +63,13 @@ function extractFunction(source, name) {
 }
 
 // Dependencies pulled in verbatim from ui.js so we test the real code.
+eval(extractFunction(uiSrc, '_optionDeclaredProviderId'));
+// This driver covers plain model values; the custom-id authority grammar is
+// exercised by test_custom_provider_model_identity.py.
+function _clientProviderAuthorityForModel(){ return ''; }
+function _dynamicProviderAuthorityForQualifiedCustomId(){ return ''; }
+function _persistedProviderAuthorityForModel(){ return ''; }
+function _qualifiedCustomIdNeedsBackendAuthority(){ return false; }
 eval(extractFunction(uiSrc, '_getOptionProviderId'));
 eval(extractFunction(uiSrc, '_providerFromModelValue'));
 eval(extractFunction(uiSrc, '_modelStateForSelect'));
