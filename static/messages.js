@@ -1419,6 +1419,21 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+function _newSessionActionWasSuperseded(result){
+  if(typeof _newSessionResultWasSuperseded==='function'){
+    return _newSessionResultWasSuperseded(result);
+  }
+  return !!(result&&result.status==='superseded');
+}
+
+async function _ensureSessionForComposerAction(){
+  if(S.session)return true;
+  const result=await newSession();
+  if(_newSessionActionWasSuperseded(result)||!S.session)return false;
+  await renderSessionList();
+  return true;
+}
+
 async function send(){
   // Voice Mode and other programmatic producers can call send() even while the
   // composer controls are disabled. Wait until the New Session owner resolves;
@@ -1427,7 +1442,9 @@ async function send(){
     // If another send already owns this transition, a Voice Mode callback is a
     // duplicate producer for the same still-visible composer. Do not queue it.
     if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
-    try{await _newSessionInFlight;}catch(_){ }
+    let newSessionResult=null;
+    try{newSessionResult=await _newSessionInFlight;}catch(_){ }
+    if(_newSessionActionWasSuperseded(newSessionResult))return;
   }
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1492,7 +1509,7 @@ async function send(){
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();await renderSessionList();}
+      if(!S.session&&!(await _ensureSessionForComposerAction())) return;
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, /yolo, or /stop while the agent is running and have
@@ -1570,7 +1587,7 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1588,7 +1605,7 @@ async function send(){
     }
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1617,7 +1634,7 @@ async function send(){
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
@@ -1625,7 +1642,7 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
@@ -1640,7 +1657,7 @@ async function send(){
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
@@ -1656,7 +1673,7 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
@@ -1688,7 +1705,7 @@ async function send(){
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session){await newSession();await renderSessionList();}
+          if(!S.session&&!(await _ensureSessionForComposerAction())) return;
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
@@ -1697,7 +1714,7 @@ async function send(){
       }
     }
   }
-  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session&&!(await _ensureSessionForComposerAction())) return;
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;

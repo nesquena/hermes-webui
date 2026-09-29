@@ -92,6 +92,10 @@ ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoa
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
+CLAIM_PANE_NAVIGATION_SRC = _extract_function(SESSIONS_SRC, "_claimPaneNavigation")
+PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC = _extract_function(
+    SESSIONS_SRC, "_paneNavigationClaimIsCurrent"
+)
 
 
 def _normalise_ws(s: str) -> str:
@@ -206,6 +210,7 @@ function createEnvironment() {
   globalThis._loadingSessionId = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
+  globalThis._paneNavigationGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
@@ -350,6 +355,8 @@ let toastCalls = [];
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
+__CLAIM_PANE_NAVIGATION_SRC__
+__PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
@@ -607,6 +614,11 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         )
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
+        )
+        .replace("__CLAIM_PANE_NAVIGATION_SRC__", CLAIM_PANE_NAVIGATION_SRC)
+        .replace(
+            "__PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC__",
+            PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC,
         )
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)

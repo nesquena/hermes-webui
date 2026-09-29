@@ -1968,6 +1968,29 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 let _contextTransitionGeneration=0;
 let _contextTransitionTail=Promise.resolve();
 const _CONTEXT_TRANSITION_INTENT=Symbol('context-transition-intent');
+// Context work remains serialized, but an explicit pane choice must take
+// ownership immediately so an older New Chat response cannot reclaim the pane.
+let _paneNavigationGeneration=0;
+
+function _claimPaneNavigation(){
+  const generation=++_paneNavigationGeneration;
+  // Retire any older load immediately. Its stream was stopped when that load
+  // began, so re-arm the still-visible owner while the newer navigation settles.
+  if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId!==null){
+    if(typeof _loadSessionGeneration==='number')++_loadSessionGeneration;
+    _loadingSessionId=null;
+    if(typeof _rearmActiveSessionStream==='function')_rearmActiveSessionStream();
+  }
+  return generation;
+}
+
+function _paneNavigationClaimIsCurrent(generation){
+  return Number(generation)===_paneNavigationGeneration;
+}
+
+function _newSessionResultWasSuperseded(result){
+  return !!(result&&result.status==='superseded');
+}
 
 function _claimContextTransition(kind){
   const previous=_contextTransitionTail.catch(()=>{});
@@ -2202,6 +2225,7 @@ async function newSession(flash, options={}){
   const request={
     started:false,
     start:null,
+    paneNavigationGeneration:_claimPaneNavigation(),
     promise:new Promise((resolve,reject)=>{
       resolveRequest=resolve;
       rejectRequest=reject;
@@ -2383,6 +2407,52 @@ async function newSession(flash, options={}){
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
+    // The server still created a durable destination, but a newer explicit
+    // navigation owns the pane. Settle its composer off-screen and return a
+    // discriminated result so waiting Send/command callers stop cleanly.
+    if(!_paneNavigationClaimIsCurrent(request.paneNavigationGeneration)){
+      const createdSession=data.session;
+      const createdProfile=String(createdSession.profile||reqBody.profile||'default').trim()||'default';
+      if(composerTransition&&typeof _bindComposerOwnershipDestination==='function'){
+        _bindComposerOwnershipDestination(
+          composerTransition,createdSession.session_id,createdProfile
+        );
+      }
+      if(composerTransition&&typeof _drainComposerOwnershipTransition==='function'){
+        _drainComposerOwnershipTransition(composerTransition,false,{
+          hiddenDestination:true,
+          destinationState:createdSession.composer_draft||{},
+        });
+      }
+      const destinationState=typeof _composerRememberedOwnerSnapshot==='function'
+        ? _composerRememberedOwnerSnapshot(createdSession.session_id,createdProfile)
+        : null;
+      if(destinationState){
+        createdSession.composer_draft={
+          text:String(destinationState.text||''),
+          files:typeof _composerDraftFilesForPersist==='function'
+            ? _composerDraftFilesForPersist(destinationState.files)
+            : [],
+        };
+      }
+      if(destinationState
+        &&(destinationState.text||(destinationState.files&&destinationState.files.length))
+        &&typeof _saveComposerDraftNow==='function'){
+        await _saveComposerDraftNow(
+          createdSession.session_id,
+          destinationState.text,
+          destinationState.files,
+          createdProfile
+        );
+      }
+      S._pendingSessionToolsets=null;
+      if(!(options&&options.worktree)) _rememberNewChatDraftSession(createdSession);
+      if(typeof refreshSessionList==='function'){
+        Promise.resolve(refreshSessionList('new-session-superseded')).catch(()=>{});
+      }
+      request.resolve({status:'superseded',session:createdSession});
+      return;
+    }
     S.session=data.session;
     if(typeof _adoptRegenerationRevision==="function") _adoptRegenerationRevision(data.session);
     S.messages=data.session.messages||[];
@@ -2501,7 +2571,7 @@ async function newSession(flash, options={}){
         if(input&&input.disabled!==true&&typeof input.focus==='function')input.focus();
       }
     }
-    request.resolve();
+    request.resolve({status:'committed',session:S.session});
     return;
     }catch(error){
       request.reject(error);
@@ -2632,9 +2702,28 @@ async function loadSession(sid){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
   }
+  const forceReload = !!opts.force;
+  const entrySid = S.session ? S.session.session_id : null;
+  const paneNavigationBaseline=_paneNavigationGeneration;
+  const providedPaneNavigationGeneration=Number.isInteger(opts._paneNavigationGeneration)
+    ? opts._paneNavigationGeneration
+    : null;
+  const paneNavigationGeneration=providedPaneNavigationGeneration!==null
+    ? providedPaneNavigationGeneration
+    : (entrySid!==sid?_claimPaneNavigation():null);
+  // A same-session force refresh is automatic maintenance, not a newer pane
+  // choice. Revalidate it after the serialized wait instead of superseding New Chat.
+  const automaticSameSessionRefresh=forceReload
+    &&entrySid===sid
+    &&providedPaneNavigationGeneration===null;
   if(typeof _waitForNewSessionNavigationSettlement==='function'){
     await _waitForNewSessionNavigationSettlement();
   }
+  if(paneNavigationGeneration!==null
+    &&!_paneNavigationClaimIsCurrent(paneNavigationGeneration)) return;
+  if(automaticSameSessionRefresh
+    &&(_paneNavigationGeneration!==paneNavigationBaseline
+      ||!S.session||S.session.session_id!==sid)) return;
   // Extension pre-open hook — fires once per sidebar click, not on every call.
   // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
   // when loadSession runs the actual navigation inside it.
@@ -2644,7 +2733,6 @@ async function loadSession(sid){
       return;
     }
   }
-  const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
@@ -2679,7 +2767,11 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  const _paneOwnershipIsCurrent = () => paneNavigationGeneration!==null
+    ? _paneNavigationClaimIsCurrent(paneNavigationGeneration)
+    : (!automaticSameSessionRefresh||_paneNavigationGeneration===paneNavigationBaseline);
+  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration
+    && _paneOwnershipIsCurrent();
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -3453,15 +3545,17 @@ async function _ensureSidebarSessionProfile(session){
 
 async function _openSidebarSession(session, loadOpts={}){
   if(!session||!session.session_id) return;
-  if(typeof _waitForNewSessionNavigationSettlement==='function'){
-    await _waitForNewSessionNavigationSettlement();
-  }
   // Extension pre-open hook — before any side-effects (external import, profile switching).
   // Handler returns {cancel:true} to prevent the open.
   if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
     if(_preResult&&_preResult.cancel===true) return;
   }
+  const paneNavigationGeneration=_claimPaneNavigation();
+  if(typeof _waitForNewSessionNavigationSettlement==='function'){
+    await _waitForNewSessionNavigationSettlement();
+  }
+  if(!_paneNavigationClaimIsCurrent(paneNavigationGeneration)) return;
   // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
   if(typeof closeMobileSidebar==='function')closeMobileSidebar();
   if(_isExternalSession(session)){
@@ -3470,7 +3564,10 @@ async function _openSidebarSession(session, loadOpts={}){
   }
   await _ensureSidebarSessionProfile(session);
   // Tell loadSession to skip its pre-hook — we already ran it above.
-  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
+  await loadSession(session.session_id, Object.assign({}, loadOpts, {
+    _preloadNotified:true,
+    _paneNavigationGeneration:paneNavigationGeneration,
+  }));
   renderSessionListFromCache();
 }
 

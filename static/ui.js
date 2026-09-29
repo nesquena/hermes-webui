@@ -455,7 +455,7 @@ function _persistComposerTransitionAbort(token){
     }catch(_){}
   }
 }
-function _drainComposerOwnershipTransition(token,aborted=false){
+function _drainComposerOwnershipTransition(token,aborted=false,options={}){
   if(!token||_composerOwnershipTransition!==token)return false;
   _rememberComposerSettledOwners(token.generation,{
     sourceSid:token.sourceSid,sourceProfile:token.sourceProfile,
@@ -477,6 +477,30 @@ function _drainComposerOwnershipTransition(token,aborted=false){
       if(typeof autoResize==='function')autoResize();
       if(typeof updateSendBtn==='function')updateSendBtn();
     }
+  }else if(options&&options.hiddenDestination){
+    // A newer pane navigation won, so materialize the created session's draft
+    // without projecting it through the visible textarea/file tray.
+    const baseline=options.destinationState||{};
+    const state={
+      text:typeof baseline.text==='string'?baseline.text:'',
+      files:Array.isArray(baseline.files)?[...baseline.files]:[],
+      revision:0,
+    };
+    let destinationMutated=token.destinationSlots.size>0;
+    if(token.destinationSlots.size){
+      state.text=token.destinationText;
+    }
+    for(const mutation of token.mutations){
+      if(mutation.ownerRole==='source')continue;
+      if(mutation.kind==='files-add'
+        ||mutation.kind==='files-replace'
+        ||mutation.kind==='file-remove'){
+        destinationMutated=true;
+        _composerApplyRecordToState(state,mutation);
+      }
+    }
+    if(destinationMutated)state.revision=token.revision;
+    _rememberComposerOwnerState(token.destinationSid,token.destinationProfile,state,token.generation);
   }else{
     if(token.destinationSlots.size)_composerSetText(token.destinationText);
     for(const mutation of token.mutations){
