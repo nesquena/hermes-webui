@@ -5944,6 +5944,31 @@ main.main > #mainPlugin{display:none;}
      #liveAssistantTurn below. */
   .msg-row[data-role="user"] { content-visibility: auto; contain-intrinsic-size: auto 96px; contain: layout style; }
   .msg-row { contain: layout style; }
+
+/* Desktop opt-in lazy render (mirrors the touch rule above), gated behind
+   html[data-lazy-render="enabled"]. Enabled only via the runtime toggle
+   (document.documentElement.dataset.lazyRender='enabled'), so it is trivially
+   reversible and defaults OFF — same safety posture as the experimental
+   JS virtualization, but with NO height-estimating JS, so no #4343
+   oscillation: the browser skips layout/paint of off-screen rows while
+   keeping the full DOM (Ctrl+F unaffected for rendered rows).
+
+   Scope to USER rows only — the SAME reason as the touch rule's #5637 note:
+   assistant rows can hold multi-thousand-px tool-result blocks, and a flat
+   contain-intrinsic-size cannot reserve their real off-screen height, which
+   collapses scrollHeight and force-clamps scrollTop (jump-to-top). User rows
+   are short and size-predictable, so they are the safe subset. Assistant and
+   live-streaming rows stay fully rendered. */
+:root[data-lazy-render="enabled"] .msg-row[data-role="user"] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+  contain: layout style;
+}
+:root[data-lazy-render="enabled"] #liveAssistantTurn,
+:root[data-lazy-render="enabled"] .msg-row[data-live-assistant-turn],
+:root[data-lazy-render="enabled"] .msg-row[data-live-assistant] {
+  content-visibility: visible;
+}
   /* Keep the LIVE streaming turn fully rendered while a response streams. The
      live turn is always id="liveAssistantTurn" (assigned on every render path:
      Compact Worklog, Transparent Stream, restored-live, etc.), but ONLY the
