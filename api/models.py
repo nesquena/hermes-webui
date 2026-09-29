@@ -12080,24 +12080,40 @@ def _collapse_streaming_row_id_snapshots(sidecar_messages: list, state_messages:
     more than one occurrence, and the append-only merge grows one mid-stream
     row without bound. Collapsing to the most advanced snapshot before the
     merge runs restores the invariant the fast path assumes: at most one entry
-    per durable row id among streaming skeletons. Settled replies and mixed
-    buckets are returned untouched.
+    per durable row id among streaming skeletons.
+
+    A collapsed row keeps exactly one copy *per source list*, at the position
+    of that list's first snapshot, carrying the winning payload (a shallow copy
+    for the list that did not supply the winner, so neither list shares the
+    other's dict).  Deleting the losing list's copy instead would make the
+    append-only merge treat the row as sidecar-only-then-later-rows and drop
+    it from the result entirely when the winner lives in ``state.db``.
+
+    Buckets are tracked over *all* valid durable rows: a ``_row_id`` that also
+    has a non-skeleton member anywhere (a settled reply sharing the id) is a
+    mixed bucket and is returned untouched.
     """
     buckets: dict[str, list] = {}
+    members: dict[str, list] = {}
     for source in (sidecar_messages, state_messages):
         for msg in source:
-            if not isinstance(msg, dict) or not _is_streaming_row_snapshot(msg):
+            if not isinstance(msg, dict):
                 continue
             row_id, valid = _state_db_row_identity_details(msg)
             if not valid or row_id is None:
                 continue
-            buckets.setdefault(row_id, []).append(msg)
+            members.setdefault(row_id, []).append(msg)
+            if _is_streaming_row_snapshot(msg):
+                buckets.setdefault(row_id, []).append(msg)
 
+    # A durable id counts as pure-streaming only when *every* member row with
+    # that id is a skeleton.  Mixed buckets are the provider's "two distinct
+    # payloads" territory and stay untouched.
     collapsed_ids = {
         row_id
         for row_id, group in buckets.items()
         if len(group) > 1
-        and all(_is_streaming_row_snapshot(m) for m in group)
+        and all(_is_streaming_row_snapshot(m) for m in members[row_id])
     }
     if not collapsed_ids:
         return sidecar_messages, state_messages
@@ -12110,21 +12126,31 @@ def _collapse_streaming_row_id_snapshots(sidecar_messages: list, state_messages:
 
     def _filter(source: list) -> list:
         out = []
+        emitted: set[str] = set()
         for msg in source:
-            if not isinstance(msg, dict) or not _is_streaming_row_snapshot(msg):
+            if not isinstance(msg, dict):
                 out.append(msg)
                 continue
             row_id, valid = _state_db_row_identity_details(msg)
-            if not valid or row_id is None or row_id not in collapsed_ids:
+            if (
+                not valid
+                or row_id is None
+                or row_id not in collapsed_ids
+                or not _is_streaming_row_snapshot(msg)
+            ):
                 out.append(msg)
                 continue
-            # Keep exactly the winner object (identity) for this durable row;
-            # drop every other snapshot of the same row from both sides. The
-            # winner object exists once in exactly one source list, so the
-            # surviving count per row id is one.
-            if winners[row_id] is msg:
+            winner = winners[row_id]
+            if row_id in emitted:
+                continue  # later snapshot of an already-collapsed row
+            emitted.add(row_id)
+            if winner is msg:
                 out.append(msg)
-            continue
+            else:
+                # This list keeps the row at its first position with the
+                # winning payload; shallow copy so the lists never share a
+                # dict the reconciler might mutate.
+                out.append(dict(winner))
         return out
 
     return _filter(sidecar_messages), _filter(state_messages)
