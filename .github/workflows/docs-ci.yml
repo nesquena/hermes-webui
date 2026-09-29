@@ -24,6 +24,8 @@ on:
       - '**/*.md'
       - '**/*.markdown'
       - '**/*.rst'
+      - '**/*.mkd'
+      - '**/*.mkdn'
       - 'docs/**'
       - 'CHANGELOG*'
       - '**/README*'
@@ -33,6 +35,8 @@ on:
       - '**/*.md'
       - '**/*.markdown'
       - '**/*.rst'
+      - '**/*.mkd'
+      - '**/*.mkdn'
       - 'docs/**'
       - 'CHANGELOG*'
       - '**/README*'
@@ -73,10 +77,10 @@ jobs:
           fi
           : > doc_files.txt
           if CHANGED="$(git diff --name-only --no-renames --diff-filter=ACMR "$RANGE" 2>/dev/null)"; then
-            printf '%s\n' "$CHANGED" | grep -Ei '\.(md|markdown|rst)$' > doc_files.txt || true
+            printf '%s\n' "$CHANGED" | grep -Ei '\.(md|markdown|rst|mkd|mkdn)$' > doc_files.txt || true
           fi
           if [ ! -s doc_files.txt ]; then
-            git ls-files '*.md' '*.markdown' '*.rst' > doc_files.txt 2>/dev/null || true
+            git ls-files '*.md' '*.markdown' '*.rst' '*.mkd' '*.mkdn' > doc_files.txt 2>/dev/null || true
           fi
           # Keep only files that still exist (skip deletions), preserving exact names.
           : > doc_files_existing.txt
@@ -112,5 +116,7 @@ jobs:
             "**/*.md"
             "**/*.markdown"
             "**/*.rst"
+            "**/*.mkd"
+            "**/*.mkdn"
           fail: true
         continue-on-error: true

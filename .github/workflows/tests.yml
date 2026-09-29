@@ -51,7 +51,7 @@ jobs:
           is_docs() {
             f="$1"; low="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')"; base="${f##*/}"
             case "$low" in
-              *.md|*.markdown|*.rst) return 0 ;;
+              *.md|*.markdown|*.rst|*.mkd|*.mkdn) return 0 ;;
             esac
             case "$base" in
               LICENSE|README|CHANGELOG|NOTICE|AUTHORS|CONTRIBUTING) return 0 ;;
