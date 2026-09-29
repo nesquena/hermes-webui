@@ -267,3 +267,64 @@ _setActiveSessionUrl('session-123');
         "method": "push",
         "url": "/app/session/session-123?keep=1",
     }
+
+
+def test_popstate_kept_session_replaces_route_before_composed_reload():
+    source = f"""
+const sessionsSrc = {SESSIONS_JS!r};
+function extractFunc(src, name) {{
+  const start = src.indexOf('function ' + name);
+  let i = src.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0) {{ if (src[i] === '{{') depth++; else if (src[i] === '}}') depth--; i++; }}
+  return src.slice(start, i);
+}}
+function extractPopstate(src) {{
+  const marker = "window.addEventListener('popstate', () => ";
+  const start = src.indexOf(marker);
+  let i = src.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0) {{ if (src[i] === '{{') depth++; else if (src[i] === '}}') depth--; i++; }}
+  return '() => ' + src.slice(src.indexOf('{{', start), i);
+}}
+function applyUrl(rel) {{
+  const next = new URL(rel, 'https://example.test');
+  Object.assign(window.location, {{href:next.href,pathname:next.pathname,search:next.search,hash:next.hash}});
+}}
+const calls=[];
+global.window={{location:{{}},history:{{state:null,replaceState(state,_title,url){{
+  this.state=state; calls.push(url); applyUrl(url);
+}}}},addEventListener(){{}}}};
+global.document={{baseURI:'https://example.test/app/'}};
+global.S={{session:{{session_id:'session-A'}},busy:false}};
+global.showToast=()=>{{}};
+global.loadSession=()=>{{ throw new Error('kept session must not load another route'); }};
+global._sessionIdFromLocation=()=>{{
+  const match=window.location.pathname.match(new RegExp('/session/([^/]+)'));
+  return match?decodeURIComponent(match[1]):null;
+}};
+globalThis._sessionUrlForSid=(0,eval)('('+extractFunc(sessionsSrc,'_sessionUrlForSid')+')');
+const popstate=(0,eval)('('+extractPopstate(sessionsSrc)+')');
+
+applyUrl('/app/');
+popstate();
+const rootResult={{url:window.location.pathname,reloadedSid:_sessionIdFromLocation()}};
+
+applyUrl('/app/session/session-B');
+S.busy=true;
+popstate();
+const busyResult={{url:window.location.pathname,sid:S.session.session_id}};
+console.log(JSON.stringify({{calls,rootResult,busyResult}}));
+"""
+    assert _run_node(source) == {
+        "calls": [
+            "/app/session/session-A",
+            "/app/session/session-A",
+        ],
+        "rootResult": {
+            "url": "/app/session/session-A",
+            "reloadedSid": "session-A",
+        },
+        "busyResult": {
+            "url": "/app/session/session-A",
+            "sid": "session-A",
+        },
+    }

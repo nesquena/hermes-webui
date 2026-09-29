@@ -132,7 +132,7 @@ def test_load_session_persists_only_after_metadata_loads():
     # so use a stable boundary inside loadSession instead.
     load = _block(src, "async function loadSession(sid)", "// Phase 2a:")
     api_pos = load.index("data = await api(`/api/session")
-    persist_pos = load.index("localStorage.setItem('hermes-webui-session',S.session.session_id)")
+    persist_pos = load.index("_rememberActiveSession(S.session.session_id)")
 
     assert "_persistActiveSession" not in src
     assert persist_pos > api_pos

@@ -148,6 +148,7 @@ let _loadingOlder = false;
 let _messagesTruncated = true;
 let _oldestIdx = 1;
 let _messagesGeneration = 0;
+let _messagesOwnerSid = null;
 let _loadingSessionId = null;
 let _messageRenderWindowSize = 50;
 let _scrollPinned = true;
