@@ -87,6 +87,9 @@ def _extract_function(source: str, name: str) -> str:
     raise AssertionError(f"Could not extract function {name}")
 
 
+START_FRESH_SESSION_NAVIGATION_REQUESTS_SRC = _extract_function(
+    SESSIONS_SRC, "_startFreshSessionNavigationRequests"
+)
 LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession")
 ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoaded")
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
@@ -118,7 +121,10 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
         "loadSession() should check ownership in multiple await/catch paths, "
         "including stale _ensureMessagesLoaded catch branches"
     )
-    ensure_call = _normalise_ws("await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});")
+    ensure_call = _normalise_ws(
+        "await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, "
+        "loadGeneration:_loadGeneration, messageRequest:_freshMessagesRequest});"
+    )
     assert ensure_call in norm, (
         "loadSession() must pass generation into _ensureMessagesLoaded() for stale-owner checks"
     )
@@ -176,6 +182,7 @@ function makeHarness() {
 function snapshotState() {
   return {
     sid: S.session && S.session.session_id,
+    messageCount: S.session && S.session.message_count,
     messages: Array.isArray(S.messages) ? S.messages.map((m) => (m && m.role ? String(m.content || '') : null)).filter(Boolean) : [],
     toolCalls: Array.isArray(S.toolCalls) ? S.toolCalls.slice() : [],
     truncated: _messagesTruncated,
@@ -347,9 +354,11 @@ let toolSyncCalls = 0;
 let toastCalls = [];
 
 // Source under test
+const _INITIAL_TAIL_MSG_LIMIT = 30;
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
+__START_FRESH_SESSION_NAVIGATION_REQUESTS_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
@@ -432,10 +441,44 @@ const API_ATLAS_RELOAD_MSGS = {
   },
 };
 
-function buildMessageUrl(sid, mode, suffix='') {
+const API_FRESHNESS_META = {
+  session: {
+    session_id: 'sid-freshness',
+    message_count: 2,
+    active_stream_id: null,
+    resolve_model: 'qwen/qwq-32b-instruct',
+  },
+};
+
+const API_FRESHNESS_STALE_MSGS = {
+  session: {
+    session_id: 'sid-freshness',
+    _messages_truncated: false,
+    _messages_offset: 0,
+    messages: [{ role: 'user', content: 'older-message' }],
+    message_count: 1,
+    tool_calls: [],
+  },
+};
+
+const API_FRESHNESS_CURRENT_MSGS = {
+  session: {
+    session_id: 'sid-freshness',
+    _messages_truncated: false,
+    _messages_offset: 0,
+    messages: [
+      { role: 'user', content: 'older-message' },
+      { role: 'assistant', content: 'just-completed-message' },
+    ],
+    message_count: 2,
+    tool_calls: [],
+  },
+};
+
+function buildMessageUrl(sid, mode, suffix='', limit=_INITIAL_TAIL_MSG_LIMIT) {
   const base = `/api/session?session_id=${encodeURIComponent(sid)}&messages=${mode}&resolve_model=0`;
   if (mode === 0) return base;
-  return `${base}&msg_limit=${_messageReloadLimitForSession()}&expand_renderable=1${suffix}`;
+  return `${base}&msg_limit=${limit}&expand_renderable=1${suffix}`;
 }
 
 function makeCrossSessionCalls(apiHost) {
@@ -462,11 +505,14 @@ function runCrossSessionOrderingBase({seedBeaconInflight, resolveBeaconMsgsBefor
   const first = loadSession('sid-beacon', { force: true });
   return (async () => {
     await waitForQueued(apiHost, calls.beaconMeta.url);
+    // A real click must issue both fresh requests before metadata is released.
+    await waitForQueued(apiHost, calls.beaconMsgs.url);
+    const firstRequestsParallel = true;
     calls.beaconMeta._resolve(API_BEACON_META);
 
-    await waitForQueued(apiHost, calls.beaconMsgs.url);
     const second = loadSession('sid-atlas', { force: true });
     await waitForQueued(apiHost, calls.atlasMeta.url);
+    await waitForQueued(apiHost, calls.atlasMsgs.url);
 
     if (resolveBeaconMsgsBeforeAtlasMeta) {
       calls.beaconMsgs._resolve(API_BEACON_MSGS);
@@ -496,6 +542,7 @@ function runCrossSessionOrderingBase({seedBeaconInflight, resolveBeaconMsgsBefor
       loadingSid: snapshotState().loadingSid,
       loadingGeneration: snapshotState().loadingGeneration,
       rearmCalls: snapshotState().rearmCalls,
+      firstRequestsParallel,
     };
   })();
 }
@@ -524,9 +571,9 @@ async function runStaleRejectedIdleCatch() {
 
   const calls = {
     firstMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
-    firstMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+    firstMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1, '', 2)),
     secondMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
-    secondMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+    secondMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1, '', 2)),
   };
 
   const first = loadSession('sid-atlas', { force: true });
@@ -561,11 +608,41 @@ async function runStaleRejectedIdleCatch() {
   };
 }
 
+async function runPrefetchedTailOlderThanMetadata() {
+  createEnvironment();
+  globalThis._messageReloadLimitForSession = () => _INITIAL_TAIL_MSG_LIMIT;
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  const calls = {
+    metadata: apiHost.enqueue(buildMessageUrl('sid-freshness', 0)),
+    staleTail: apiHost.enqueue(buildMessageUrl('sid-freshness', 1)),
+    currentTail: apiHost.enqueue(buildMessageUrl('sid-freshness', 1)),
+  };
+
+  const load = loadSession('sid-freshness', { force: true });
+  await waitForQueued(apiHost, calls.staleTail.url);
+  // The parallel tail reads the transcript before the metadata request observes
+  // the just-completed assistant row. Resolve it first to pin that schedule.
+  calls.staleTail._resolve(API_FRESHNESS_STALE_MSGS);
+  await Promise.resolve();
+  calls.currentTail._resolve(API_FRESHNESS_CURRENT_MSGS);
+  calls.metadata._resolve(API_FRESHNESS_META);
+  await load;
+
+  return {
+    scenario: 'prefetched-tail-older-than-metadata',
+    ...snapshotState(),
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
+    prefetchedTailOlderThanMetadata: await runPrefetchedTailOlderThanMetadata(),
   };
 }
 
@@ -608,6 +685,10 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
+        .replace(
+            "__START_FRESH_SESSION_NAVIGATION_REQUESTS_SRC__",
+            START_FRESH_SESSION_NAVIGATION_REQUESTS_SRC,
+        )
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
     )
@@ -616,6 +697,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     cross = body["crossSessionOrdering"]
     stale = body["staleIdleCatch"]
     observed = body["observedIdleCrossSessionOrdering"]
+    freshness = body["prefetchedTailOlderThanMetadata"]
 
     def _assert_atlas_wins(session_result, *, label):
         assert session_result["finalSid"] == "sid-atlas", f"{label}: stale overlap should end on Atlas session"
@@ -633,18 +715,19 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert cross["apiCalls"][0] == "/api/session?session_id=sid-beacon&messages=0&resolve_model=0", (
         "first API call should target old session's metadata"
     )
-    assert cross["apiCalls"][1] == "/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1", (
+    assert cross["apiCalls"][1] == "/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1", (
         "beacon transcript request should queue before atlas metadata resolves"
     )
     assert cross["apiCalls"][2] == "/api/session?session_id=sid-atlas&messages=0&resolve_model=0", (
         "second API call should target atlas metadata while stale beacon messages are in flight"
     )
-    assert cross["apiCalls"][3] == "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1", (
+    assert cross["apiCalls"][3] == "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1", (
         "atlas should still fetch a transcript while beacon was stale"
     )
-    assert cross["apiCalls"].count("/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1") == 1, (
+    assert cross["apiCalls"].count("/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1") == 1, (
         "stale overlap should still issue the Beacon transcript call, but it must not win"
     )
+    assert cross["firstRequestsParallel"] is True
     _assert_atlas_wins(cross, label="cross-session-ordering")
 
     # 2) Observed idle-path race with no INFLIGHT: stale Beacon transcript returns
@@ -652,19 +735,19 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert observed["apiCalls"][0] == "/api/session?session_id=sid-beacon&messages=0&resolve_model=0", (
         "idle-path race should start from old Beacon metadata"
     )
-    assert observed["apiCalls"][1] == "/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1", (
+    assert observed["apiCalls"][1] == "/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1", (
         "Beacon transcript call should remain queued before Atlas metadata under observed race"
     )
     assert observed["apiCalls"][2] == "/api/session?session_id=sid-atlas&messages=0&resolve_model=0", (
         "Atlas metadata must start while Beacon continuation returns stale"
     )
-    assert observed["apiCalls"][3] == "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1", (
+    assert observed["apiCalls"][3] == "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1", (
         "Atlas transcript request must still issue despite stale Beacon return"
     )
-    assert observed["apiCalls"].count("/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1") == 1, (
+    assert observed["apiCalls"].count("/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1") == 1, (
         "stale Beacon transcript should occur once in observed race"
     )
-    assert observed["apiCalls"].count("/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1") == 1, (
+    assert observed["apiCalls"].count("/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1") == 1, (
         "Atlas transcript must be issued once once stale Beacon is processed first"
     )
     _assert_atlas_wins(observed, label="observed-idle-cross-session-ordering")
@@ -681,6 +764,21 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert stale["apiCalls"].count(
         "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
     ) == 2, "both old and active loads should have attempted message fetch"
+
+    # 4) A parallel tail can complete before newer metadata. The accepted
+    # metadata count is the freshness floor: refetch one bounded tail before
+    # replacing the transcript or lowering its message_count.
+    freshness_tail_url = (
+        "/api/session?session_id=sid-freshness&messages=1&resolve_model=0"
+        "&msg_limit=30&expand_renderable=1"
+    )
+    assert freshness["apiCalls"].count(freshness_tail_url) == 2, (
+        "an older prefetched tail must trigger exactly one bounded refresh"
+    )
+    assert freshness["messages"] == ["older-message", "just-completed-message"]
+    assert freshness["messageCount"] == 2, (
+        "an older tail must not lower the accepted metadata/SSE cursor count"
+    )
 
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
     assert stale["loadingSid"] is None, "load marker should be cleared after stale reject + re-owner completion"
