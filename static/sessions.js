@@ -198,7 +198,7 @@ function _adoptRegenerationRevision(sessionPayload){
   }
 }
 
-async function _restoreRememberedNewChatDraftSession() {
+async function _restoreRememberedNewChatDraftSession(requiredWorkspace=null) {
   let sid = '';
   try { sid = localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) || ''; } catch (_) { sid = ''; }
   if (!sid || (S.session && S.session.session_id === sid)) return false;
@@ -209,6 +209,12 @@ async function _restoreRememberedNewChatDraftSession() {
       _clearRememberedNewChatDraftSession(sid);
       return false;
     }
+    // Callers that need a specific workspace (the delete flow passes the
+    // deleted conversation's workspace) only reuse the draft when it belongs
+    // there. On mismatch, keep the remembered key: the draft stays valid for
+    // the ordinary New Chat flow, and the caller continues on its own (e.g.
+    // starts a fresh chat in the deleted workspace).
+    if (requiredWorkspace && session.workspace !== requiredWorkspace) return false;
     await loadSession(sid, {skipLineageResolve:true});
     return !!(S.session && S.session.session_id === sid);
   } catch (_) {
@@ -9800,11 +9806,12 @@ async function removeWorktree(session){
 // Opt-in helper (new_chat_on_session_delete, default off): both delete paths
 // call this when the just-deleted conversation was the one being viewed. Reuse
 // the remembered empty New Chat draft when one exists (same as the "+" button),
-// otherwise ask newSession() for a fresh chat, keeping the deleted
-// conversation's workspace so the user stays where they were working.
+// but only when that draft belongs to the deleted conversation's workspace;
+// otherwise ask newSession() for a fresh chat in that workspace so the user
+// stays where they were working.
 async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace){
   if(typeof _restoreRememberedNewChatDraftSession==='function'
-     && await _restoreRememberedNewChatDraftSession()) return;
+     && await _restoreRememberedNewChatDraftSession(deletedWorkspace)) return;
   if(deletedWorkspace) S._profileSwitchWorkspace=deletedWorkspace;
   await newSession(false);
 }

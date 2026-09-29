@@ -157,6 +157,7 @@ _DRIVER_SRC = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const scenario = process.argv[3] || '';
+const isBatch = scenario.indexOf('batch_') === 0;
 
 // ---- mocked browser environment ----
 const _store = new Map();
@@ -172,6 +173,14 @@ global.sessionStorage = {
 };
 global.window = {};
 
+// minimal DOM + batch-action-bar doubles for the batch-delete route
+const _barChildren = [];
+const _bar = { style: {}, innerHTML: '', appendChild: c => { _barChildren.push(c); } };
+function _el() {
+  return { className: '', textContent: '', style: {}, dataset: {}, appendChild() {}, closest() { return null; }, remove() {}, setAttribute() {}, addEventListener() {}, onclick: null };
+}
+global.document = { querySelectorAll: () => [], createElement: () => _el(), addEventListener() {}, removeEventListener() {} };
+
 // ---- observable effects the scenarios assert ----
 const out = {
   restoreCalls: 0,
@@ -182,6 +191,7 @@ const out = {
   workspaceFlagAtNewSession: null,
   toasts: [],
   renderListCalls: 0,
+  rememberedKeyAfter: null,
 };
 
 // ---- stubs the extracted deleteSession references ----
@@ -193,7 +203,7 @@ const showToast = m => { out.toasts.push(String(m)); };
 const setStatus = () => {};
 const assistantDisplayName = () => 'Hermes';
 const syncAppTitlebar = () => {};
-const $ = () => null;
+const $ = id => (id === 'batchActionBar' ? _bar : null);
 const renderSessionListFromCache = () => {};
 const renderSessionList = async () => { out.renderListCalls += 1; };
 const _sessionListQueryString = () => '';
@@ -205,20 +215,39 @@ const _hydrateTodosFromSession = () => {};
 const _optimisticallyRemoveSessionFromList = () => {};
 const _sessionResponseRetainsWorktree = () => false;
 const showConfirmDialog = async () => true;
+const _selectedSessions = new Set();
+const _worktreeSessionCount = () => 0;
+const _worktreeResponseCount = () => 0;
+const exitSessionSelectMode = () => {};
 
 async function api(url) {
   if (url === '/api/session/delete') { out.deleteCalls += 1; return {}; }
+  if (url.indexOf('/api/session?') === 0) { return { session: global.__draftSession }; }
   if (url.indexOf('/api/sessions') === 0) {
     out.sessionsFetchCalls += 1;
     return { sessions: [{ session_id: 'remaining-1' }] };
   }
   return {};
 }
-async function loadSession(sid) { out.loadSessionArgs.push(sid); }
-const _draftRestorable = { value: scenario === 'flag_on_draft_restored' };
-async function _restoreRememberedNewChatDraftSession() {
-  out.restoreCalls += 1;
-  return _draftRestorable.value;
+async function loadSession(sid) { out.loadSessionArgs.push(sid); S.session = { session_id: sid }; }
+const NEW_CHAT_DRAFT_SESSION_KEY = (src.match(/NEW_CHAT_DRAFT_SESSION_KEY = '([^']+)'/) || [])[1];
+if (!NEW_CHAT_DRAFT_SESSION_KEY) throw new Error('NEW_CHAT_DRAFT_SESSION_KEY not found in sessions.js');
+const DRAFT_SCEN = {
+  flag_on_draft_other_ws: '/ws/B',
+  flag_on_draft_same_ws: '/ws/A',
+  batch_flag_on_draft_other_ws: '/ws/B',
+  batch_flag_on_draft_same_ws: '/ws/A',
+};
+var _draftRestorable = { value: scenario === 'flag_on_draft_restored' };
+var _restoreRememberedNewChatDraftSession;
+if (DRAFT_SCEN[scenario]) {
+  _store.set(NEW_CHAT_DRAFT_SESSION_KEY, 'remembered-1');
+  global.__draftSession = { session_id: 'remembered-1', message_count: 0, title: 'New Chat', profile: 'default', composer_draft: { text: 'remembered draft', files: [] }, workspace: DRAFT_SCEN[scenario] };
+} else {
+  _restoreRememberedNewChatDraftSession = async function () {
+    out.restoreCalls += 1;
+    return _draftRestorable.value;
+  };
 }
 async function newSession(flash) {
   out.newSessionCalls += 1;
@@ -238,6 +267,10 @@ const FLAGS = {
   flag_on_draft_restored: true,
   flag_on_other_deleted: true,
   flag_off_current_deleted: false,
+  flag_on_draft_other_ws: true,
+  flag_on_draft_same_ws: true,
+  batch_flag_on_draft_other_ws: true,
+  batch_flag_on_draft_same_ws: true,
 };
 window._newChatOnSessionDelete = FLAGS[scenario];
 const deleteTarget = scenario === 'flag_on_other_deleted' ? 'B' : 'A';
@@ -261,9 +294,25 @@ function extractFunc(name) {
 // the pre-feature source must fail on the scenario ASSERTIONS, not extraction.
 try { eval(extractFunc('_startNewChatAfterDeletingCurrentSession')); } catch (e) {}
 eval(extractFunc('deleteSession'));
+if (DRAFT_SCEN[scenario]) {
+  eval(extractFunc('_profileMatchesActiveProfile'));
+  eval(extractFunc('_isRestorableNewChatDraftSession'));
+  eval(extractFunc('_clearRememberedNewChatDraftSession'));
+  eval(extractFunc('_restoreRememberedNewChatDraftSession'));
+}
+if (isBatch) eval(extractFunc('_renderBatchActionBar'));
 
 (async () => {
-  await deleteSession(deleteTarget);
+  if (isBatch) {
+    _selectedSessions.add('A');
+    _renderBatchActionBar();
+    const deleteBtn = _barChildren.filter(c => c.className && c.className.indexOf('batch-action-btn-danger') !== -1)[0];
+    if (!deleteBtn) throw new Error('batch delete button not found');
+    await deleteBtn.onclick();
+  } else {
+    await deleteSession(deleteTarget);
+  }
+  out.rememberedKeyAfter = _store.has(NEW_CHAT_DRAFT_SESSION_KEY) ? _store.get(NEW_CHAT_DRAFT_SESSION_KEY) : null;
   process.stdout.write(JSON.stringify(out));
 })().catch(e => {
   process.stderr.write(String((e && e.stack) || e));
@@ -347,3 +396,49 @@ class TestDeleteFlowBehaviour:
         )
         assert out["loadSessionArgs"] == []
         assert out["sessionsFetchCalls"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+class TestDraftWorkspaceAwareness:
+    """Review finding (2026-09-29): the remembered empty-draft reuse in the
+    delete flow must be workspace-aware. A draft remembered for a different
+    workspace must not be loaded (and must stay remembered for the ordinary
+    New Chat flow); a draft for the deleted workspace must still be reused.
+    Both the single-delete and the batch-delete routes carry the invariant.
+    """
+
+    def test_delete_open_session_skips_draft_from_other_workspace(self, driver_path):
+        out = _run_scenario(driver_path, "flag_on_draft_other_ws")
+        assert out["loadSessionArgs"] == [], (
+            "the delete flow must not load a draft remembered for another workspace"
+        )
+        assert out["newSessionCalls"] == 1, (
+            "the delete flow must fall through to a fresh chat in the deleted workspace"
+        )
+        assert out["workspaceFlagAtNewSession"] == "/ws/A", (
+            "the fresh chat must stay in the deleted conversation's workspace"
+        )
+        assert out["rememberedKeyAfter"] == "remembered-1", (
+            "the workspace-mismatched draft must stay remembered for the ordinary New Chat flow"
+        )
+
+    def test_delete_open_session_restores_draft_from_same_workspace(self, driver_path):
+        out = _run_scenario(driver_path, "flag_on_draft_same_ws")
+        assert out["loadSessionArgs"] == ["remembered-1"], (
+            "a draft belonging to the deleted conversation's workspace must still be reused"
+        )
+        assert out["newSessionCalls"] == 0
+        assert out["rememberedKeyAfter"] == "remembered-1"
+
+    def test_batch_delete_skips_draft_from_other_workspace(self, driver_path):
+        out = _run_scenario(driver_path, "batch_flag_on_draft_other_ws")
+        assert out["deleteCalls"] == 1
+        assert out["loadSessionArgs"] == []
+        assert out["newSessionCalls"] == 1
+        assert out["workspaceFlagAtNewSession"] == "/ws/A"
+        assert out["rememberedKeyAfter"] == "remembered-1"
+
+    def test_batch_delete_restores_draft_from_same_workspace(self, driver_path):
+        out = _run_scenario(driver_path, "batch_flag_on_draft_same_ws")
+        assert out["loadSessionArgs"] == ["remembered-1"]
+        assert out["newSessionCalls"] == 0

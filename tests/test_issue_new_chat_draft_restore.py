@@ -79,7 +79,7 @@ def test_new_chat_empty_reuse_guard_checks_loaded_visible_messages():
 
 def test_restore_helper_validates_candidate_with_session_metadata():
     assert "const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';" in SESSIONS_JS
-    assert "async function _restoreRememberedNewChatDraftSession()" in SESSIONS_JS
+    assert "async function _restoreRememberedNewChatDraftSession(requiredWorkspace=null) {" in SESSIONS_JS
     assert "messages=0&resolve_model=0" in SESSIONS_JS, (
         "helper should validate the hidden zero-message candidate through /api/session metadata"
     )
