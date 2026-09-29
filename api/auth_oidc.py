@@ -178,6 +178,15 @@ def _resolve_oidc_config() -> dict[str, Any]:
         allow_private = raw_allow_private.lower() in ("true", "1", "yes")
     else:
         allow_private = bool(raw_allow_private)
+    raw_trusted_hosts = pick(
+        "trusted_issuer_hosts", "HERMES_WEBUI_OIDC_TRUSTED_ISSUER_HOSTS"
+    )
+    trusted_issuer_hosts: set[str] = set()
+    if isinstance(raw_trusted_hosts, (list, tuple, set)):
+        trusted_issuer_hosts = {str(h).strip().lower() for h in raw_trusted_hosts if str(h).strip()}
+    elif isinstance(raw_trusted_hosts, str):
+        trusted_issuer_hosts = {h.strip().lower() for h in raw_trusted_hosts.split(",") if h.strip()}
+
     return {
         "issuer": str(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER") or "").strip(),
         "client_id": str(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID") or "").strip(),
@@ -187,6 +196,7 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
         "allow_private_endpoints": allow_private,
+        "trusted_issuer_hosts": trusted_issuer_hosts,
     }
 
 
@@ -401,7 +411,24 @@ def _oidc_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(_NoRedirect)
 
 
-def _validate_outbound_oidc_url(url: str) -> None:
+_ALLOWED_PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),  # CGNAT / Tailscale
+    ipaddress.ip_network("fc00::/7"),       # IPv6 Unique Local Address (ULA)
+)
+
+
+def _is_rfc1918_or_cgnat_or_ula(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    candidate = getattr(address, "ipv4_mapped", None) or address
+    for net in _ALLOWED_PRIVATE_NETWORKS:
+        if candidate in net:
+            return True
+    return False
+
+
+def _validate_outbound_oidc_url(url: str, *, oidc_config: dict[str, Any] | None = None) -> None:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
         raise OIDCAuthError("OIDC endpoint URLs must use https", status_code=502)
@@ -410,9 +437,11 @@ def _validate_outbound_oidc_url(url: str) -> None:
     hostname = str(parsed.hostname or "").strip()
     if not hostname:
         raise OIDCAuthError("OIDC endpoint URL was missing a hostname", status_code=502)
-    cfg = _resolve_oidc_config()
+    cfg = oidc_config if oidc_config is not None else _resolve_oidc_config()
     allow_private = bool(cfg.get("allow_private_endpoints", False))
-    if _is_disallowed_oidc_host(hostname, allow_private=allow_private):
+    trusted_hosts = cfg.get("trusted_issuer_hosts") or set()
+    host_is_trusted = hostname.lower() in trusted_hosts
+    if _is_disallowed_oidc_host(hostname, allow_private=(allow_private or host_is_trusted)):
         raise OIDCAuthError(
             "OIDC endpoint URLs must not target private or local addresses",
             status_code=502,
@@ -444,16 +473,19 @@ def _parse_ip_address(value: str):
 
 def _is_disallowed_oidc_ip(address, *, allow_private: bool = False) -> bool:
     candidate = getattr(address, "ipv4_mapped", None) or address
-    if candidate.is_loopback:
-        return True
-    if not allow_private and candidate.is_private:
-        return True
-    return (
-        candidate.is_link_local
+    if (
+        candidate.is_loopback
+        or candidate.is_link_local
         or candidate.is_multicast
         or candidate.is_unspecified
         or candidate.is_reserved
-    )
+    ):
+        return True
+    if candidate.is_private:
+        if allow_private and _is_rfc1918_or_cgnat_or_ula(candidate):
+            return False
+        return True
+    return False
 
 
 def _reject_non_finite_json_constant(value: str):

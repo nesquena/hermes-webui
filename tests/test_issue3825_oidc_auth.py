@@ -576,14 +576,108 @@ def test_validates_private_dns_host_when_allow_private_endpoints_is_true(monkeyp
     )
 
 
-def test_still_rejects_loopback_when_allow_private_endpoints_is_true():
+def test_still_rejects_loopback_when_allow_private_endpoints_is_true(monkeypatch):
     import api.auth_oidc as auth_oidc
     from api.auth_oidc import OIDCAuthError
 
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "https://auth.internal",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": True,
+        },
+    )
+
+    for blocked_url in [
+        "https://127.0.0.1/.well-known/openid-configuration",
+        "https://[::1]/.well-known/openid-configuration",
+        "https://169.254.169.254/.well-known/openid-configuration",
+        "https://0.0.0.0/.well-known/openid-configuration",
+        "https://224.0.0.1/.well-known/openid-configuration",
+    ]:
+        with pytest.raises(OIDCAuthError, match="private or local addresses"):
+            auth_oidc._validate_outbound_oidc_url(blocked_url)
+
+
+@pytest.mark.parametrize(
+    "special_ip",
+    [
+        "0.0.0.1",
+        "192.0.2.1",
+        "198.18.0.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "2002::1",
+    ],
+)
+def test_still_rejects_non_rfc1918_special_ranges_when_allow_private_endpoints_is_true(
+    monkeypatch, special_ip
+):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    host_part = f"[{special_ip}]" if ":" in special_ip else special_ip
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": f"https://{host_part}",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": True,
+        },
+    )
+
     with pytest.raises(OIDCAuthError, match="private or local addresses"):
         auth_oidc._validate_outbound_oidc_url(
-            "https://127.0.0.1/.well-known/openid-configuration"
+            f"https://{host_part}/.well-known/openid-configuration"
         )
+
+
+def test_trusted_issuer_hosts_allows_specific_private_host(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "https://auth.internal.corp",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": False,
+            "trusted_issuer_hosts": {"auth.internal.corp"},
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.20.30.40", 443))
+        ],
+    )
+
+    # Allowed because host is in trusted_issuer_hosts
+    auth_oidc._validate_outbound_oidc_url("https://auth.internal.corp/.well-known/openid-configuration")
+
+    # Other host with private IP is still rejected
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url("https://other.internal.corp/.well-known/openid-configuration")
 
 
 def test_allow_private_endpoints_defaults_to_false_in_config(monkeypatch):
@@ -604,6 +698,7 @@ def test_allow_private_endpoints_defaults_to_false_in_config(monkeypatch):
 
     cfg = auth_oidc._resolve_oidc_config()
     assert cfg["allow_private_endpoints"] is False
+    assert cfg["trusted_issuer_hosts"] == set()
 
 
 def test_select_public_key_rejects_wrong_ec_curve_for_alg():
