@@ -936,9 +936,12 @@ def _configured_allowed_workspace_roots() -> list[Path]:
 
 
 def _is_under_allowed_registration_root(candidate: Path) -> bool:
-    home = _home_path()
-    if home != Path("/") and _is_within(candidate, home):
-        return True
+    """Return whether strict-mode roots permit a non-home candidate.
+
+    Home-directory candidates are accepted by ``validate_workspace_to_add``
+    before the strict-mode gate, so this helper intentionally only evaluates
+    the default workspace and explicitly configured roots.
+    """
     for root in _configured_allowed_workspace_roots():
         if _is_within(candidate, root):
             return True
