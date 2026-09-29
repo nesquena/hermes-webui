@@ -12,7 +12,6 @@ _scrollAfterMessageRender and first paint, while keeping the deferred pass in pl
 for async / heavy post-processing (diff, csv, pdf, mermaid, katex) under anchor suppression.
 """
 from pathlib import Path
-import re
 import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
@@ -69,6 +68,26 @@ def test_cached_session_restore_runs_highlight_synchronously(ui_js_content):
     highlight_pos = cache_slice.find(highlight_call)
     scroll_pos = cache_slice.find(scroll_call)
     assert highlight_pos < scroll_pos, "Fast-path highlightCode must run before _scrollAfterMessageRender"
+
+
+def test_restore_live_turn_html_runs_highlight_synchronously(ui_js_content):
+    """restoreLiveTurnHtmlForSession must execute highlightCode and initTreeViews synchronously on restored node."""
+    fn_idx = ui_js_content.find("function restoreLiveTurnHtmlForSession(sid){")
+    assert fn_idx != -1, "restoreLiveTurnHtmlForSession not found in ui.js"
+    fn_slice = ui_js_content[fn_idx : fn_idx + 2500]
+
+    highlight_call = "if(typeof highlightCode==='function') highlightCode(restored);"
+    tree_init_call = "if(typeof initTreeViews==='function') initTreeViews(restored);"
+    copy_btn_call = "if(typeof addCopyButtons==='function') addCopyButtons(restored);"
+    raf_call = "requestAnimationFrame(()=>_postProcessWithAnchorSuppression(restored));"
+
+    assert highlight_call in fn_slice, "restoreLiveTurnHtmlForSession must call highlightCode(restored) synchronously"
+    assert tree_init_call in fn_slice, "restoreLiveTurnHtmlForSession must call initTreeViews(restored) synchronously"
+    assert copy_btn_call in fn_slice, "restoreLiveTurnHtmlForSession must call addCopyButtons(restored) synchronously"
+
+    highlight_pos = fn_slice.find(highlight_call)
+    raf_pos = fn_slice.find(raf_call)
+    assert highlight_pos < raf_pos, "Synchronous highlight must occur before deferred _postProcessWithAnchorSuppression in restoreLiveTurn"
 
 
 def test_overflow_anchor_suppression_dispatches_preserved(ui_js_content):
