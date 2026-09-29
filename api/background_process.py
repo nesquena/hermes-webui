@@ -411,6 +411,13 @@ def _reaper_loop() -> None:
                     if s not in _cfg.PENDING_BG_TASK_COMPLETIONS
                 ]:
                     _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
+
+            try:
+                from api.gateway_restart import reap_stray_restart_processes
+
+                reap_stray_restart_processes()
+            except Exception:
+                pass
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)
         # Wait but wake up promptly on stop.
