@@ -7956,10 +7956,10 @@ function renderSessionListFromCache(){
   }
   const orderedSessions=[...filteredSessions].sort(_sessionSidebarSortCompare);
   // Empty state when unread-only filter hides everything
-  if(_showUnreadOnly && orderedSessions.length === 0 && !(_activeProject && sessions.length === 0)){
+  if(_showUnreadOnly && sessions.length > 0 && orderedSessions.length === 0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
-    empty.textContent='No unread conversations.';
+    empty.textContent=typeof t === 'function' ? t('no_unread_conversations') : 'No unread conversations.';
     list.appendChild(empty);
   }
   // Separate pinned from unpinned
