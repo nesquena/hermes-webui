@@ -12030,6 +12030,106 @@ def _project_native_image_payload_conflicts_for_display(
     return visible_messages
 
 
+def _streaming_row_snapshot_rank(msg: dict) -> tuple:
+    """Order snapshots of one mid-stream assistant row from stalest to newest.
+
+    A reconnect can persist the same durable ``_row_id`` several times while an
+    assistant turn is still streaming: identical role/content/timestamp, a still
+    ``incomplete`` finish state and only the provider sidecar (``api_content``)
+    advanced between snapshots.  The most advanced snapshot is the one whose
+    sidecar carries the most bytes; ties fall back to the display-only
+    first-token marker, then arrival order.  This never ranks a row that has
+    real visible content or tool calls — those are separate turns, not
+    snapshots, and stay untouched.
+    """
+    sidecar = _session_message_api_content_key(msg)
+    sidecar_len = len(sidecar) if isinstance(sidecar, str) else 0
+    first_token = msg.get("_firstTokenMs")
+    first_token_val = first_token if isinstance(first_token, (int, float)) else -1
+    return (sidecar_len, first_token_val)
+
+
+def _is_streaming_row_snapshot(msg: dict) -> bool:
+    """True for a mid-stream assistant skeleton that only carries sidecar bytes.
+
+    Bounded deliberately: assistant role, no visible content, no tool calls,
+    non-empty provider sidecar and a still-unfinished provider state. Anything
+    past the terminal marker is a settled reply, not a snapshot, and is excluded
+    so the pre-existing two-distinct-payload rule for completed rows is kept.
+    """
+    if not isinstance(msg, dict):
+        return False
+    if str(msg.get("role") or "").lower() != "assistant":
+        return False
+    content = _normalized_session_message_content(msg)
+    if content not in ("", None, []):
+        return False
+    if msg.get("tool_calls"):
+        return False
+    if not _session_message_api_content_key(msg):
+        return False
+    finish = str(msg.get("finish_reason") or "").strip().lower()
+    return finish in ("", "incomplete", "length", "streaming", "null", "none")
+
+
+def _collapse_streaming_row_id_snapshots(sidecar_messages: list, state_messages: list):
+    """Dedup repeated streaming snapshots that share one durable ``_row_id``.
+
+    Without this guard, divergent ``api_content`` keeps every snapshot on its
+    own dedup key, the row-id fast path disables itself once a row id counts
+    more than one occurrence, and the append-only merge grows one mid-stream
+    row without bound. Collapsing to the most advanced snapshot before the
+    merge runs restores the invariant the fast path assumes: at most one entry
+    per durable row id among streaming skeletons. Settled replies and mixed
+    buckets are returned untouched.
+    """
+    buckets: dict[str, list] = {}
+    for source in (sidecar_messages, state_messages):
+        for msg in source:
+            if not isinstance(msg, dict) or not _is_streaming_row_snapshot(msg):
+                continue
+            row_id, valid = _state_db_row_identity_details(msg)
+            if not valid or row_id is None:
+                continue
+            buckets.setdefault(row_id, []).append(msg)
+
+    collapsed_ids = {
+        row_id
+        for row_id, group in buckets.items()
+        if len(group) > 1
+        and all(_is_streaming_row_snapshot(m) for m in group)
+    }
+    if not collapsed_ids:
+        return sidecar_messages, state_messages
+
+    winners: dict[str, dict] = {
+        row_id: max(group, key=_streaming_row_snapshot_rank)
+        for row_id, group in buckets.items()
+        if row_id in collapsed_ids
+    }
+
+    def _filter(source: list) -> list:
+        out = []
+        for msg in source:
+            if not isinstance(msg, dict) or not _is_streaming_row_snapshot(msg):
+                out.append(msg)
+                continue
+            row_id, valid = _state_db_row_identity_details(msg)
+            if not valid or row_id is None or row_id not in collapsed_ids:
+                out.append(msg)
+                continue
+            # Keep exactly the winner object (identity) for this durable row;
+            # drop every other snapshot of the same row from both sides. The
+            # winner object exists once in exactly one source list, so the
+            # surviving count per row id is one.
+            if winners[row_id] is msg:
+                out.append(msg)
+            continue
+        return out
+
+    return _filter(sidecar_messages), _filter(state_messages)
+
+
 def _merge_session_messages_append_only_impl(
     sidecar_messages: list,
     state_messages: list,
@@ -12048,6 +12148,9 @@ def _merge_session_messages_append_only_impl(
     """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
+    sidecar_messages, state_messages = _collapse_streaming_row_id_snapshots(
+        sidecar_messages, state_messages
+    )
     _reconcile_api_content_sidecars(sidecar_messages, state_messages)
     # The reconciler's quarantine sets are invocation-local. Mirror the
     # identity-bucket guards here because this append-only merge has its own
