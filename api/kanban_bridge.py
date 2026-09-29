@@ -23,7 +23,7 @@ from api.agent_compat import agent_attr
 from api.helpers import bad, j
 from api.workspace import resolve_trusted_workspace
 
-BOARD_COLUMNS = ["triage", "todo", "ready", "running", "blocked", "done"]
+BOARD_COLUMNS = ["triage", "todo", "scheduled", "ready", "running", "blocked", "done"]
 _TASK_PREFIX = "/api/kanban/tasks/"
 
 
@@ -449,7 +449,7 @@ def _patch_task(conn, task_id: str, body: dict):
         else:
             if not _set_status_direct(conn, task_id, "ready"):
                 raise LookupError("task not found")
-    elif status in ("triage", "todo"):
+    elif status in ("triage", "todo", "scheduled"):
         # Direct status write for drag-drop moves between non-running,
         # non-terminal columns. Uses the claim-aware helper that nulls out
         # claim_lock / claim_expires / worker_pid when leaving 'running'
