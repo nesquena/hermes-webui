@@ -20,10 +20,9 @@ import threading
 import time
 import traceback
 import copy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-import zoneinfo
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +143,7 @@ _ENV_LOCK = threading.Lock()
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
 
-_TIMESTAMP_PREFIX_RE = re.compile(r'^\[Time:\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\]\n')
+_TIMESTAMP_PREFIX_RE = re.compile(r'^\s*\[Time:\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:?\d{2}|Z)\]\s*')
 
 _STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS = 250.0
 
@@ -2151,18 +2150,17 @@ def _resolve_image_input_mode(cfg: dict) -> str:
 def _time_context_prefix(turn_started_at: float) -> str:
     """Format a ``[Time: …]\\n`` prefix for the given Unix timestamp.
 
-    Uses the system timezone (``time.tzname[0]``) via ``zoneinfo`` so the
+    Uses the system timezone via ``datetime.fromtimestamp(ts).astimezone()`` so the
     prefix reflects the local offset of the machine running WebUI. Falls back
     to UTC silently on any error — never raises.
     """
     try:
-        tz = zoneinfo.ZoneInfo(time.tzname[0])
-        dt = datetime.fromtimestamp(turn_started_at, tz=tz)
-        return f"[Time: {dt.strftime('%Y-%m-%dT%H:%M:%S%z')}]\n"
+        dt = datetime.fromtimestamp(turn_started_at).astimezone()
+        return f"[Time: {dt.isoformat(timespec='seconds')}]\n"
     except Exception:
         try:
-            dt = datetime.fromtimestamp(turn_started_at, tz=zoneinfo.ZoneInfo("UTC"))
-            return f"[Time: {dt.strftime('%Y-%m-%dT%H:%M:%S%z')}]\n"
+            dt = datetime.fromtimestamp(turn_started_at, tz=timezone.utc)
+            return f"[Time: {dt.isoformat(timespec='seconds')}]\n"
         except Exception:
             return ""
 
@@ -2180,10 +2178,9 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     the agent's text-mode pipeline (``vision_analyze``) handles images.
     """
     # Prepend message-timestamp prefix when configured
-    _timestamp_enabled = bool(
-        isinstance(cfg, dict)
-        and cfg.get('gateway', {}).get('message_timestamps', {}).get('enabled')
-    )
+    _gw = cfg.get('gateway') if isinstance(cfg, dict) else None
+    _ts_cfg = _gw.get('message_timestamps') if isinstance(_gw, dict) else None
+    _timestamp_enabled = bool(isinstance(_ts_cfg, dict) and _ts_cfg.get('enabled'))
     if _timestamp_enabled and turn_started_at is not None:
         _ts_prefix = _time_context_prefix(turn_started_at)
         if _ts_prefix:
@@ -2681,6 +2678,7 @@ def _workspace_context_prefix(path: str) -> str:
 def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     """Remove WebUI-injected workspace tags without eating user-typed text."""
     value = str(text or '')
+    value = _TIMESTAMP_PREFIX_RE.sub('', value)
     stripped = _WORKSPACE_PREFIX_RE.sub('', value, count=1)
     if include_legacy and stripped == value:
         stripped = _LEGACY_WORKSPACE_PREFIX_RE.sub('', value, count=1)
