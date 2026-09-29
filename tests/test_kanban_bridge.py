@@ -1332,3 +1332,24 @@ def test_board_payload_includes_unassigned_ready_tasks_without_assignee_filter(m
         "Unassigned task must have a falsy assignee in the payload so the "
         "frontend _kanbanLaneKey() maps it to KANBAN_UNASSIGNED_LANE."
     )
+
+
+def test_issue7900_scheduled_column_and_status(monkeypatch):
+    """Regression test for #7900: scheduled status must be in BOARD_COLUMNS and accepted by validation."""
+    bridge = _load_bridge(monkeypatch)
+    assert "scheduled" in bridge.BOARD_COLUMNS
+    assert bridge.BOARD_COLUMNS == [
+        "triage", "todo", "scheduled", "ready", "running", "blocked", "done"
+    ]
+    assert bridge._validate_status("scheduled") == "scheduled"
+
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    scheduled_task = FakeTask("t_sched", "Time-delay card", "scheduled", "alice")
+    fake_kanban.tasks.append(scheduled_task)
+
+    data = bridge._board_payload(_parsed())
+    sched_col = next((c for c in data["columns"] if c["name"] == "scheduled"), None)
+    assert sched_col is not None, "scheduled column missing from board payload"
+    sched_ids = {task["id"] for task in sched_col["tasks"]}
+    assert "t_sched" in sched_ids
+
