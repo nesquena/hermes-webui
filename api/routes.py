@@ -11744,7 +11744,7 @@ def _serve_manifest(handler) -> bool:
     return j(handler, {"error": "not found"}, status=404)
 
 
-_DEFAULT_ICON_TINT = "#08EBF1"
+_DEFAULT_ICON_TINT = getattr(api_config, "DEFAULT_ICON_TINT", "#08EBF1")
 _DEFAULT_ICON_GRADIENT_END = "#3889FD"
 _ICON_TINT_RE = re.compile(r"^#?[0-9A-Fa-f]{6}$")
 
@@ -11765,8 +11765,10 @@ def _icon_gradient_end(tint: str) -> str:
 
 def _serve_app_icon(handler, parsed) -> bool:
     tint_values = parse_qs(parsed.query or "").get("tint", [])
-    saved_tint = load_settings().get("icon_tint")
-    tint = _normalize_icon_tint(tint_values[0] if tint_values else saved_tint)
+    if tint_values:
+        tint = _normalize_icon_tint(tint_values[0])
+    else:
+        tint = _normalize_icon_tint(load_settings().get("icon_tint"))
     icon_path = (api_config.get_static_root() / "favicon.svg").resolve()
     svg = icon_path.read_text(encoding="utf-8")
     replacements = {

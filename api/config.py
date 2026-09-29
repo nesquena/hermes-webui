@@ -9357,6 +9357,7 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 _SETTINGS_TTS_ENGINE_RE = __import__("re").compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _SETTINGS_HEX_COLOR_RE = __import__("re").compile(r"^#[0-9A-Fa-f]{6}$")
 _SETTINGS_HEX_COLOR_KEYS = {"icon_tint"}
+DEFAULT_ICON_TINT = _SETTINGS_DEFAULTS["icon_tint"]
 
 _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").Lock()

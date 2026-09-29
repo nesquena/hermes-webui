@@ -61,9 +61,20 @@ def test_icon_tint_is_a_validated_appearance_setting(tmp_path, monkeypatch):
     assert saved["icon_tint"] == "#E5484D"
 
 
-def test_tinted_favicon_route_uses_requested_color():
+def test_tinted_favicon_route_uses_requested_color(monkeypatch):
+    from api import routes
+
+    called = False
+
+    def _fail():
+        nonlocal called
+        called = True
+        raise AssertionError("load_settings should not be called when tint is present")
+
+    monkeypatch.setattr(routes, "load_settings", _fail)
     handler = _get("/static/favicon.svg?tint=E5484D")
 
+    assert not called
     assert handler.status == 200
     assert handler.header("Content-Type").startswith("image/svg+xml")
     assert handler.header("Cache-Control") == "no-store"
@@ -102,15 +113,17 @@ def test_manifest_points_install_icons_at_current_tint(monkeypatch):
 
 
 def test_icon_tint_control_updates_favicon_and_autosaves():
+    boot_content = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
     assert 'id="settingsIconTint"' in INDEX
     assert (
         'rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png"'
         in INDEX
     )
-    assert "function _pickIconTint(" in BOOT
-    assert "_applyIconTint" in BOOT
+    assert "function _pickIconTint(" in boot_content
+    assert "_applyIconTint" in boot_content
+    assert ':not([rel*="apple-touch-icon"])' in boot_content
     assert (
-        "_scheduleAppearanceAutosave()" in BOOT[BOOT.index("function _pickIconTint(") :]
+        "_scheduleAppearanceAutosave()" in boot_content[boot_content.index("function _pickIconTint(") :]
     )
     assert "icon_tint:" in PANELS[PANELS.index("function _appearancePayloadFromUi(") :]
     assert "body.icon_tint=iconTint;" in PANELS.replace(" ", "")
