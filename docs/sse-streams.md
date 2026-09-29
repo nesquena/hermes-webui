@@ -23,6 +23,24 @@ The authoritative `event:` names on `/api/chat/stream` are listed in the
 **Authoritative emitted events** table of
 [`docs/rfcs/session-sse-contract-v1.md`](rfcs/session-sse-contract-v1.md).
 
+## Browser chat-stream ownership
+
+The browser keeps a chat-turn `/api/chat/stream` EventSource only for the
+selected conversation pane. On a switch from A to B, `closeLiveStream(A)`
+snapshots A's visible live turn, closes its source, and marks A's inflight run
+for reattachment and run-journal replay on return; A's run continues on the
+server. This foreground-only rule also applies when an asynchronous status or
+replay probe registers a source *after* the pane switch: registration closes
+sources that do not belong to the currently selected session. Background
+session/list updates use their separate SSE channels; this rule does not stop
+background runs or disable those channels.
+
+Do not retain background chat EventSources without first making every
+`attachLiveStream()` listener owner-safe: those listeners currently project
+shared composer, activity, and status UI for the foreground pane. One chat
+source per page also avoids multiplying occupied backend request workers across
+background sessions and tabs.
+
 ## Gateway probe scope (important for non-browser clients)
 
 `GET /api/sessions/gateway/stream?probe=1` returns a JSON capability payload

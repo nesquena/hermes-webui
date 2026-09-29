@@ -119,8 +119,11 @@ def test_load_existing_session_clears_staged_toolsets():
     body = _function_body(SESSIONS_JS, "async function loadSession")
     compact = body.replace(" ", "")
     assign = compact.index("S.session=data.session")
-    # The clear must accompany the real-session assignment, not only the create path.
-    assert "S._pendingSessionToolsets=null" in compact[assign : assign + 400]
+    clear = compact.index("S._pendingSessionToolsets=null", assign)
+    deferred_refresh = compact.index("if(typeofpopulateModelDropdown", assign)
+    # The clear must accompany the synchronous real-session setup, before any
+    # deferred refresh work, not only exist on the create path.
+    assert assign < clear < deferred_refresh
 
 
 def test_workspace_and_profile_switches_clear_pending_toolsets():
