@@ -50,6 +50,12 @@ eval(extractConstDotted('_CUSTOM_SLUG_HOST_REJECT_RE'));
 eval([
   '_customSlugIsEndpointAuthority',
   '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_dynamicProviderIds',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_getOptionProviderId',
   '_providerFromModelValue',
   '_modelPickerOptionIdentity',
@@ -58,11 +64,21 @@ eval([
   '_findModelInDropdown',
   '_applyModelToDropdown',
   '_ensureModelOptionInDropdown',
-].map(name => extractFunction(uiSrc, name)).join('\n'));
+].map(name => {
+  if (name === '_dynamicProviderIds') {
+    const re = new RegExp('^let ' + name + '=.*$', 'm');
+    const m = uiSrc.match(re);
+    if (!m) throw new Error('not found: ' + name);
+    return m[0].replace(/^let /, 'var ');
+  }
+  return extractFunction(uiSrc, name);
+}).join('\n'));
 
 globalThis._refreshOpenModelDropdown = () => {};
 globalThis.syncModelChip = () => {};
 globalThis._dynamicProviderIds = {};
+// Production global the authority chain reads (ui.js always has it).
+globalThis.S = {session: null};
 
 globalThis.document = {
   createElement(tag) {
@@ -215,14 +231,28 @@ function extractConstDotted(name) {
 eval(extractConstDotted('_PY_WS_CLASS'));
 eval(extractConstDotted('_CUSTOM_SLUG_TRIM_RE'));
 eval(extractConstDotted('_CUSTOM_SLUG_HOST_REJECT_RE'));
-eval(extractFunction(uiSrc, '_customSlugIsEndpointAuthority'));
-eval(extractFunction(uiSrc, '_parseQualifiedCustomId'));
 eval([
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_dynamicProviderIds',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_getOptionProviderId',
   '_providerFromModelValue',
   '_modelStateForSelect',
   '_modelProviderForSend',
-].map(name => extractFunction(uiSrc, name)).join('\n'));
+].map(name => {
+  if (name === '_dynamicProviderIds') {
+    const re = new RegExp('^let ' + name + '=.*$', 'm');
+    const m = uiSrc.match(re);
+    if (!m) throw new Error('not found: ' + name);
+    return m[0].replace(/^let /, 'var ');
+  }
+  return extractFunction(uiSrc, name);
+}).join('\n'));
 
 globalThis.document = {
   createElement(tag) {
@@ -375,9 +405,13 @@ def test_non_default_named_custom_provider_model_strips_qualified_prefix():
         "model": "llama3.2",
         "model_provider": "custom:localhost:11434",
     }
+    # Missing-option + no client authority: the endpoint-shaped qualified id is
+    # genuinely ambiguous pre-hydration (named slug vs endpoint), so the picker
+    # defers to the backend verbatim (#6657 authority contract, same result as
+    # the composed authority-chain oracle in test_custom_provider_model_identity).
     assert payload["missingOptionCustomInput"] == {
-        "model": "mistral-custom",
-        "model_provider": "custom:localhost:11434",
+        "model": "@custom:localhost:11434:mistral-custom",
+        "model_provider": None,
     }
     # Deep-review 2026-09-27, #6657 defect 2: the single-label host and the
     # bracketed-IPv6 endpoint must split the SAME way pre-hydration (no
@@ -392,7 +426,13 @@ def test_non_default_named_custom_provider_model_strips_qualified_prefix():
         "model": "qwen3",
         "model_provider": "custom:llm:8080",
     }
-    assert payload["sentHostPort"] == "custom:llm:8080"
+    # Send path, pre-hydration with NO client authority: the endpoint-shaped
+    # id is ambiguous (named slug `custom:llm` vs endpoint `custom:llm:8080`),
+    # so the real authority chain defers to the backend's config-aware parser
+    # (same contract as the composed authority-chain oracle in
+    # test_custom_provider_model_identity). The old isolated run returned the
+    # shape guess only because the helpers were absent from the sandbox.
+    assert payload["sentHostPort"] is None
     assert payload["preHydrationIpv6"] == {
         "provider": "custom:[::1]:11434",
         "model": "qwen3",
@@ -401,7 +441,7 @@ def test_non_default_named_custom_provider_model_strips_qualified_prefix():
         "model": "qwen3",
         "model_provider": "custom:[::1]:11434",
     }
-    assert payload["sentIpv6"] == "custom:[::1]:11434"
+    assert payload["sentIpv6"] is None
 
 
 # Round-trip: send -> persist -> restore for a colon-bearing named
@@ -593,12 +633,26 @@ async function selectModelFromDropdown(value, provider) {
   window.__picked=_modelStateForSelect(modelSelect,modelSelect.value);
 }
 
+// Production globals the authority chain reads (ui.js always has these).
+var S = { session: null };
+eval(new RegExp('^const _PY_WS_CLASS=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_TRIM_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_HOST_REJECT_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^let _dynamicProviderIds=.*$', 'm').exec(ui)[0].replace(/^let /, 'var '));
 for (const name of [
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_modelPickerOptionIdentity',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
+  '_providerFromModelValue',
   '_modelStateForSelect',
   '_findModelInDropdown',
   '_applyModelToDropdown',
@@ -891,11 +945,25 @@ async function selectModelFromDropdown(value, provider) {
   window.__picked=_modelStateForSelect(modelSelect,modelSelect.value);
 }
 
+// Production globals the authority chain reads (ui.js always has these).
+var S = { session: null };
+eval(new RegExp('^const _PY_WS_CLASS=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_TRIM_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_HOST_REJECT_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^let _dynamicProviderIds=.*$', 'm').exec(ui)[0].replace(/^let /, 'var '));
 for (const name of [
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
+  '_providerFromModelValue',
   '_modelStateForSelect',
   '_findModelInDropdown',
   '_applyModelToDropdown',

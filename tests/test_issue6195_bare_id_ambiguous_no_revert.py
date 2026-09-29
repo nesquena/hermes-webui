@@ -49,10 +49,32 @@ function extractFunction(source, name){
 }
 
 eval([
+  '_PY_WS_CLASS',
+  '_CUSTOM_SLUG_TRIM_RE',
+  '_CUSTOM_SLUG_HOST_REJECT_RE',
+].map(name => {
+  const re = new RegExp('^const ' + name + '=.*$', 'm');
+  const m = uiSrc.match(re);
+  if (!m) throw new Error('not found: ' + name);
+  return m[0].replace(/^const /, 'var ');
+}).join('\n'));
+eval([
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_dynamicProviderIds',
   '_getOptionProviderId',
   '_providerFromModelValue',
   '_findModelInDropdown',
-].map(name => extractFunction(uiSrc, name)).join('\n'));
+].map(name => {
+  if (name === '_dynamicProviderIds') {
+    const re = new RegExp('^let ' + name + '=.*$', 'm');
+    const m = uiSrc.match(re);
+    if (!m) throw new Error('not found: ' + name);
+    return m[0].replace(/^let /, 'var ');
+  }
+  return extractFunction(uiSrc, name);
+}).join('\n'));
 
 function makeOpt(value, provider){
   return { value, textContent:value, dataset:{}, parentElement:{tagName:'OPTGROUP', dataset:{provider}} };

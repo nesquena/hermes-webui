@@ -157,14 +157,28 @@ function fetch(url, opts) { calls.fetches.push({url: String(url), body: opts && 
 for (const name of [
   'assistantDisplayName',
   '_topbarLoadedMessageCount', '_topbarMessageMetaText',
-  '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
+  '_PY_WS_CLASS', '_CUSTOM_SLUG_TRIM_RE', '_CUSTOM_SLUG_HOST_REJECT_RE',
+  '_customSlugIsEndpointAuthority', '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId', '_dynamicProviderIds',
+  '_clientProviderAuthorityForModel', '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId', '_qualifiedCustomIdNeedsBackendAuthority',
+  '_getOptionProviderId', '_providerFromModelValue',
+  '_modelPickerOptionIdentity', '_deduplicateModelPickerOptions',
+  '_modelStateForSelect', '_storedModelProvider',
   '_findModelInDropdown', '_refreshOpenModelDropdown', '_applyModelToDropdown',
   '_addLiveModelsToSelect',
   '_modelStateFromAppliedDropdown', '_persistSessionModelCorrection',
   '_applySessionModelFallback', 'syncTopbar'
 ]) {
   const src = extractFunc(name, {optional: name !== 'syncTopbar'});
-  if (src) eval(src);
+  if (!src) continue;
+  if (name === '_PY_WS_CLASS' || name === '_CUSTOM_SLUG_TRIM_RE' || name === '_CUSTOM_SLUG_HOST_REJECT_RE') {
+    eval(src.replace(/^const /, 'var '));
+  } else if (name === '_dynamicProviderIds') {
+    eval(src.replace(/^let /, 'var '));
+  } else {
+    eval(src);
+  }
 }
 
 const args = JSON.parse(process.argv[3]);

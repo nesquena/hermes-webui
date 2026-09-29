@@ -30,7 +30,35 @@ def _run_harness():
     identity = _function(UI_JS, "_modelPickerOptionIdentity")
     helper = _function(UI_JS, "_deduplicateModelPickerOptions")
     live_add = _function(UI_JS, "_addLiveModelsToSelect")
+    # Real dependency chain of the extracted resolvers (#6657 review): the
+    # production functions are extracted verbatim, so every helper they call
+    # must be present — no production test accommodations.
+    chain = [
+        ("const", "_PY_WS_CLASS"),
+        ("const", "_CUSTOM_SLUG_TRIM_RE"),
+        ("const", "_CUSTOM_SLUG_HOST_REJECT_RE"),
+        ("func", "_customSlugIsEndpointAuthority"),
+        ("func", "_parseQualifiedCustomId"),
+        ("func", "_optionDeclaredProviderId"),
+        ("let", "_dynamicProviderIds"),
+        ("func", "_clientProviderAuthorityForModel"),
+        ("func", "_persistedProviderAuthorityForModel"),
+        ("func", "_dynamicProviderAuthorityForQualifiedCustomId"),
+        ("func", "_qualifiedCustomIdNeedsBackendAuthority"),
+        ("func", "_providerFromModelValue"),
+        ("func", "_modelStateForSelect"),
+    ]
+    preamble = []
+    for kind, name in chain:
+        if kind == "func":
+            preamble.append(_function(UI_JS, name))
+            continue
+        decl = "const" if kind == "const" else "let"
+        match = re.search(rf"^{decl} {name}=.*$", UI_JS, re.MULTILINE)
+        assert match, f"{name} not found in ui.js"
+        preamble.append(match.group(0).replace(f"{decl} ", "var ", 1))
     script = f"""
+{chr(10).join(preamble)}
 {provider_helper}
 {identity}
 {helper}
@@ -52,9 +80,12 @@ class Node {{
 globalThis.window={{_activeProvider:'custom:llm-proxy'}};
 globalThis.document={{createElement:tag=>new Node(tag)}};
 globalThis._dynamicModelLabels={{}};
-globalThis._modelStateForSelect=()=>({{model:'',model_provider:null}});
-globalThis._applyModelToDropdown=()=>null;
 globalThis.S={{session:null}};
+function _modelStateForSelect(sel, modelId) {{
+  const opt=(sel&&sel.options||[]).find(o=>String(o.value||'')===modelId)||null;
+  return {{model:opt?String(opt.value||''):String(modelId||''),model_provider:null}};
+}}
+function _applyModelToDropdown() {{ return null; }}
 function addCatalog(select, value) {{
   const group=select.querySelectorAll('optgroup')[0] || (()=>{{
     const item=new Node('optgroup'); item.dataset.provider='custom:llm-proxy'; select.appendChild(item); return item;

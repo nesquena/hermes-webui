@@ -3185,7 +3185,7 @@ function _optionDeclaredProviderId(opt){
 function _clientProviderAuthorityForModel(value,sel,matchAnyOption=true,preferSession=false){
   const model=String(value||'').trim();
   if(!model) return '';
-  const session=typeof S!=='undefined'&&S&&S.session?S.session:null;
+  const session=S&&S.session?S.session:null;
   const sessionProvider=session&&String(session.model||'').trim()===model&&session.model_provider
     ?String(session.model_provider).trim():'';
   if(preferSession&&sessionProvider) return sessionProvider;
@@ -3206,7 +3206,7 @@ function _clientProviderAuthorityForModel(value,sel,matchAnyOption=true,preferSe
 }
 function _persistedProviderAuthorityForModel(value){
   const model=String(value||'').trim();
-  if(!model||typeof _readPersistedModelState!=='function') return '';
+  if(!model) return '';
   try{
     const persisted=_readPersistedModelState();
     if(persisted&&String(persisted.model||'').trim()===model&&persisted.model_provider){
@@ -3238,12 +3238,7 @@ function _qualifiedCustomIdNeedsBackendAuthority(value){
 }
 function _getOptionProviderId(opt){
   if(!opt) return '';
-  // Lightweight extraction harnesses can load this resolver without its DOM
-  // helper; retain the same data-provider contract in that narrow case.
-  const declared=typeof _optionDeclaredProviderId==='function'
-    ?_optionDeclaredProviderId(opt)
-    :((opt.dataset&&opt.dataset.provider)
-      ||((opt.parentElement&&opt.parentElement.dataset&&opt.parentElement.dataset.provider)||''));
+  const declared=_optionDeclaredProviderId(opt);
   if(declared) return String(declared).trim();
   const value=String(opt.value||'');
   if(value.startsWith('@') && value.includes(':')){
@@ -3253,10 +3248,9 @@ function _getOptionProviderId(opt){
     // label use, so a pre-hydration identity cannot disagree with the
     // catalog (#6657). Covers endpoint authorities (custom:llm:8080),
     // bracketed IPv6, named slugs and the generic slash lane.
-    if(value.startsWith('@custom:')&&typeof _parseQualifiedCustomId==='function'){
+    if(value.startsWith('@custom:')){
       return _parseQualifiedCustomId(value).provider;
     }
-    if(value.startsWith('@custom:')) return value.slice(1,value.indexOf(':',1));
     // Other @provider:model — provider is up to first colon
     return value.slice(1,value.indexOf(':'));
   }
@@ -3267,10 +3261,9 @@ function _providerFromModelValue(modelId, providerAuthority=''){
   if(value.startsWith('@')&&value.includes(':')){
     // Same shared grammar as _getOptionProviderId — one parse for state,
     // send and identity (#6657).
-    if(value.startsWith('@custom:')&&typeof _parseQualifiedCustomId==='function'){
+    if(value.startsWith('@custom:')){
       return _parseQualifiedCustomId(value,providerAuthority).provider;
     }
-    if(value.startsWith('@custom:')) return value.slice(1,value.indexOf(':',1));
     // Other @provider:model — provider is up to first colon
     return value.slice(1,value.indexOf(':'));
   }
@@ -3283,12 +3276,10 @@ function _modelPickerOptionIdentity(modelId, providerId){
     const exactPrefix=provider ? `@${provider}:` : '';
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
       value=value.substring(exactPrefix.length);
-    }else if(value.startsWith('@custom:')&&typeof _parseQualifiedCustomId==='function'){
+    }else if(value.startsWith('@custom:')){
       // Same shared grammar — the identity keeps the model half of the ONE
       // parse shared with label, state and send (#6657).
       value=_parseQualifiedCustomId(value).model;
-    }else if(value.startsWith('@custom:')){
-      value=value.substring(value.indexOf(':')+1);
     }else{
       value=value.substring(value.indexOf(':')+1);
     }
@@ -3342,17 +3333,13 @@ function _modelStateForSelect(sel, modelId){
   // Current dropdown/session and catalog authority outrank persisted browser
   // state: persistence may contain an endpoint-shaped pre-hydration guess that
   // the hydrated named catalog now disproves (#6657).
-  const clientAuthority=(typeof _clientProviderAuthorityForModel==='function'
-      ?_clientProviderAuthorityForModel(value,sel):'')
-    ||(typeof _dynamicProviderAuthorityForQualifiedCustomId==='function'
-      ?_dynamicProviderAuthorityForQualifiedCustomId(value):'')
-    ||(typeof _persistedProviderAuthorityForModel==='function'
-      ?_persistedProviderAuthorityForModel(value):'');
+  const clientAuthority=_clientProviderAuthorityForModel(value,sel)
+    ||_dynamicProviderAuthorityForQualifiedCustomId(value)
+    ||_persistedProviderAuthorityForModel(value);
   // Do not persist a frontend endpoint-shape guess when neither the dropdown,
   // session nor persisted state can authorize it. Preserve the qualified id and
   // let the backend's config-aware named-slug parser select the route.
-  if(!clientAuthority&&typeof _qualifiedCustomIdNeedsBackendAuthority==='function'
-    &&_qualifiedCustomIdNeedsBackendAuthority(value)){
+  if(!clientAuthority&&_qualifiedCustomIdNeedsBackendAuthority(value)){
     return {model:value,model_provider:null};
   }
   const explicitProvider=_providerFromModelValue(value,clientAuthority);
@@ -3419,20 +3406,12 @@ function _modelProviderForSend(modelId){
   // Browser-held identity is authoritative before any raw-id inference. This
   // preserves a configured named slug during boot, when endpoint shape alone
   // cannot distinguish `custom:gw` + `8080:free` from `custom:gw:8080` + `free`.
-  const clientAuthority=(typeof _clientProviderAuthorityForModel==='function'
-      ?_clientProviderAuthorityForModel(model,sel,false,true):'')
-    ||(typeof _dynamicProviderAuthorityForQualifiedCustomId==='function'
-      ?_dynamicProviderAuthorityForQualifiedCustomId(model):'')
-    ||(typeof _persistedProviderAuthorityForModel==='function'
-      ?_persistedProviderAuthorityForModel(model):'');
+  const clientAuthority=_clientProviderAuthorityForModel(model,sel,false,true)
+    ||_dynamicProviderAuthorityForQualifiedCustomId(model)
+    ||_persistedProviderAuthorityForModel(model);
   if(clientAuthority) return clientAuthority;
-  if(typeof _qualifiedCustomIdNeedsBackendAuthority==='function'
-    &&_qualifiedCustomIdNeedsBackendAuthority(model)) return null;
-  const explicitProvider=typeof _providerFromModelValue==='function'
-    ? _providerFromModelValue(model)
-    : '';
-  if(explicitProvider) return explicitProvider;
-  return null;
+  if(_qualifiedCustomIdNeedsBackendAuthority(model)) return null;
+  return _providerFromModelValue(model)||null;
 }
 function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   if(!sel) return null;
@@ -3485,9 +3464,7 @@ function _readPersistedModelState(){
         const hasProvider=Object.prototype.hasOwnProperty.call(parsed,'model_provider');
         return {
           model:String(parsed.model||''),
-          model_provider:typeof _storedModelProvider==='function'
-            ?_storedModelProvider(parsed.model,parsed.model_provider,hasProvider?2:1)
-            :(parsed.model_provider?String(parsed.model_provider):(_providerFromModelValue(parsed.model)||null)),
+          model_provider:_storedModelProvider(parsed.model,parsed.model_provider,hasProvider?2:1),
         };
       }
     }

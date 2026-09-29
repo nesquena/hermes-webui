@@ -65,6 +65,11 @@ eval(extractConst('_CUSTOM_SLUG_TRIM_RE'));
 eval(extractConst('_CUSTOM_SLUG_HOST_REJECT_RE'));
 eval(extract('_customSlugIsEndpointAuthority'));
 eval(extract('_parseQualifiedCustomId'));
+eval(extract('_optionDeclaredProviderId'));
+eval(extract('_clientProviderAuthorityForModel'));
+eval(extract('_persistedProviderAuthorityForModel'));
+eval(extract('_dynamicProviderAuthorityForQualifiedCustomId'));
+eval(extract('_qualifiedCustomIdNeedsBackendAuthority'));
 for(const name of ['_getOptionProviderId','_providerFromModelValue','_modelPickerOptionIdentity','_deduplicateModelPickerOptions','_modelStateForSelect','_findModelInDropdown','_refreshOpenModelDropdown','_applyModelToDropdown','_ensureModelOptionInDropdown','_addLiveModelsToSelect']) eval(extract(name));
 function makeSelect(selected){
   const sel=new Node('select');sel.id='modelSelect';
@@ -273,4 +278,3 @@ def test_qualified_custom_authority_survives_persistence_pending_and_chat_payloa
     for scenario, provider in (("hostPort", "custom:llm:8080"), ("ipv6", "custom:[::1]:11434")):
         for key in ("state", "persisted", "pending", "payload"):
             assert payload[scenario][key] == {"model": "qwen3", "model_provider": provider}
-
