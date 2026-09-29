@@ -89,10 +89,21 @@ const localStorage = {
 };
 const MODEL_STATE_KEY = 'hermes-webui-model-state';
 
+const _dynamicProviderIds = {};
+const _CUSTOM_SLUG_TRIM_RE = /^[\u0009-\u000D\u0020]+|[\u0009-\u000D\u0020]+$/g;
+const _CUSTOM_SLUG_HOST_REJECT_RE = /[\s\/@?#\[\]\\]/;
 for (const name of [
+  '_optionDeclaredProviderId',
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_getOptionProviderId',
   '_providerFromModelValue',
   '_modelStateForSelect',
+  '_storedModelProvider',
   '_readPersistedModelState',
   '_modelProviderForSend',
 ]) {
@@ -102,7 +113,7 @@ for (const name of [
 const args = JSON.parse(process.argv[3]);
 modelSelect = makeSelect(args.options || [], args.initialValue || '');
 if (args.persisted) localStorage.setItem(MODEL_STATE_KEY, JSON.stringify(args.persisted));
-var S = {session: {model_provider: args.sessionProvider || null}};
+var S = {session: {model: args.sessionModel || '', model_provider: args.sessionProvider || null}};
 
 if (args.mode === 'modelState') {
   process.stdout.write(JSON.stringify(_modelStateForSelect(modelSelect, args.model)));
@@ -150,6 +161,7 @@ def _run_model_state_helper(driver_path, payload):
 def test_model_provider_for_send_preserves_session_provider(driver_path):
     provider = _run_helper(driver_path, {
         "model": "grok-4.3",
+        "sessionModel": "grok-4.3",
         "sessionProvider": "session-provider",
         "initialValue": "grok-4.3",
         "options": [{"provider": "xai-oauth", "value": "grok-4.3"}],

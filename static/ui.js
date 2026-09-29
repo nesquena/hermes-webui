@@ -3182,26 +3182,37 @@ function _optionDeclaredProviderId(opt){
   }
   return '';
 }
-function _clientProviderAuthorityForModel(value,sel){
+function _clientProviderAuthorityForModel(value,sel,matchAnyOption=true,preferSession=false){
   const model=String(value||'').trim();
   if(!model) return '';
-  if(sel&&sel.options){
-    const opt=Array.from(sel.options).find(o=>String(o.value||'')===model);
-    const declared=_optionDeclaredProviderId(opt);
-    if(declared) return declared;
-  }
   const session=typeof S!=='undefined'&&S&&S.session?S.session:null;
-  if(session&&String(session.model||'').trim()===model&&session.model_provider){
-    return String(session.model_provider).trim();
+  const sessionProvider=session&&String(session.model||'').trim()===model&&session.model_provider
+    ?String(session.model_provider).trim():'';
+  if(preferSession&&sessionProvider) return sessionProvider;
+  if(sel&&sel.options){
+    const selected=sel.selectedOptions&&sel.selectedOptions[0];
+    if(selected&&String(selected.value||'')===model){
+      const selectedProvider=_optionDeclaredProviderId(selected);
+      if(selectedProvider) return selectedProvider;
+    }
+    if(matchAnyOption){
+      const opt=Array.from(sel.options).find(o=>String(o.value||'')===model);
+      const declared=_optionDeclaredProviderId(opt);
+      if(declared) return declared;
+    }
   }
-  if(typeof _readPersistedModelState==='function'){
-    try{
-      const persisted=_readPersistedModelState();
-      if(persisted&&String(persisted.model||'').trim()===model&&persisted.model_provider){
-        return String(persisted.model_provider).trim();
-      }
-    }catch(_){}
-  }
+  if(sessionProvider) return sessionProvider;
+  return '';
+}
+function _persistedProviderAuthorityForModel(value){
+  const model=String(value||'').trim();
+  if(!model||typeof _readPersistedModelState!=='function') return '';
+  try{
+    const persisted=_readPersistedModelState();
+    if(persisted&&String(persisted.model||'').trim()===model&&persisted.model_provider){
+      return String(persisted.model_provider).trim();
+    }
+  }catch(_){}
   return '';
 }
 function _dynamicProviderAuthorityForQualifiedCustomId(value){
@@ -3227,8 +3238,13 @@ function _qualifiedCustomIdNeedsBackendAuthority(value){
 }
 function _getOptionProviderId(opt){
   if(!opt) return '';
-  const declared=_optionDeclaredProviderId(opt);
-  if(declared) return declared;
+  // Lightweight extraction harnesses can load this resolver without its DOM
+  // helper; retain the same data-provider contract in that narrow case.
+  const declared=typeof _optionDeclaredProviderId==='function'
+    ?_optionDeclaredProviderId(opt)
+    :((opt.dataset&&opt.dataset.provider)
+      ||((opt.parentElement&&opt.parentElement.dataset&&opt.parentElement.dataset.provider)||''));
+  if(declared) return String(declared).trim();
   const value=String(opt.value||'');
   if(value.startsWith('@') && value.includes(':')){
     // Shared qualified-ID grammar (mirror of api/config.py:
@@ -3237,9 +3253,10 @@ function _getOptionProviderId(opt){
     // label use, so a pre-hydration identity cannot disagree with the
     // catalog (#6657). Covers endpoint authorities (custom:llm:8080),
     // bracketed IPv6, named slugs and the generic slash lane.
-    if(value.startsWith('@custom:')){
+    if(value.startsWith('@custom:')&&typeof _parseQualifiedCustomId==='function'){
       return _parseQualifiedCustomId(value).provider;
     }
+    if(value.startsWith('@custom:')) return value.slice(1,value.indexOf(':',1));
     // Other @provider:model — provider is up to first colon
     return value.slice(1,value.indexOf(':'));
   }
@@ -3250,9 +3267,10 @@ function _providerFromModelValue(modelId, providerAuthority=''){
   if(value.startsWith('@')&&value.includes(':')){
     // Same shared grammar as _getOptionProviderId — one parse for state,
     // send and identity (#6657).
-    if(value.startsWith('@custom:')){
+    if(value.startsWith('@custom:')&&typeof _parseQualifiedCustomId==='function'){
       return _parseQualifiedCustomId(value,providerAuthority).provider;
     }
+    if(value.startsWith('@custom:')) return value.slice(1,value.indexOf(':',1));
     // Other @provider:model — provider is up to first colon
     return value.slice(1,value.indexOf(':'));
   }
@@ -3265,10 +3283,12 @@ function _modelPickerOptionIdentity(modelId, providerId){
     const exactPrefix=provider ? `@${provider}:` : '';
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
       value=value.substring(exactPrefix.length);
-    }else if(value.startsWith('@custom:')){
+    }else if(value.startsWith('@custom:')&&typeof _parseQualifiedCustomId==='function'){
       // Same shared grammar — the identity keeps the model half of the ONE
       // parse shared with label, state and send (#6657).
       value=_parseQualifiedCustomId(value).model;
+    }else if(value.startsWith('@custom:')){
+      value=value.substring(value.indexOf(':')+1);
     }else{
       value=value.substring(value.indexOf(':')+1);
     }
@@ -3319,12 +3339,20 @@ function _modelStateForSelect(sel, modelId){
   const selected=sel&&sel.options
     ?Array.from(sel.options).find(o=>String(o.value||'')===value)
     :null;
-  const clientAuthority=_clientProviderAuthorityForModel(value,sel)
-    ||_dynamicProviderAuthorityForQualifiedCustomId(value);
+  // Current dropdown/session and catalog authority outrank persisted browser
+  // state: persistence may contain an endpoint-shaped pre-hydration guess that
+  // the hydrated named catalog now disproves (#6657).
+  const clientAuthority=(typeof _clientProviderAuthorityForModel==='function'
+      ?_clientProviderAuthorityForModel(value,sel):'')
+    ||(typeof _dynamicProviderAuthorityForQualifiedCustomId==='function'
+      ?_dynamicProviderAuthorityForQualifiedCustomId(value):'')
+    ||(typeof _persistedProviderAuthorityForModel==='function'
+      ?_persistedProviderAuthorityForModel(value):'');
   // Do not persist a frontend endpoint-shape guess when neither the dropdown,
   // session nor persisted state can authorize it. Preserve the qualified id and
   // let the backend's config-aware named-slug parser select the route.
-  if(!clientAuthority&&_qualifiedCustomIdNeedsBackendAuthority(value)){
+  if(!clientAuthority&&typeof _qualifiedCustomIdNeedsBackendAuthority==='function'
+    &&_qualifiedCustomIdNeedsBackendAuthority(value)){
     return {model:value,model_provider:null};
   }
   const explicitProvider=_providerFromModelValue(value,clientAuthority);
@@ -3391,10 +3419,15 @@ function _modelProviderForSend(modelId){
   // Browser-held identity is authoritative before any raw-id inference. This
   // preserves a configured named slug during boot, when endpoint shape alone
   // cannot distinguish `custom:gw` + `8080:free` from `custom:gw:8080` + `free`.
-  const clientAuthority=_clientProviderAuthorityForModel(model,sel)
-    ||_dynamicProviderAuthorityForQualifiedCustomId(model);
+  const clientAuthority=(typeof _clientProviderAuthorityForModel==='function'
+      ?_clientProviderAuthorityForModel(model,sel,false,true):'')
+    ||(typeof _dynamicProviderAuthorityForQualifiedCustomId==='function'
+      ?_dynamicProviderAuthorityForQualifiedCustomId(model):'')
+    ||(typeof _persistedProviderAuthorityForModel==='function'
+      ?_persistedProviderAuthorityForModel(model):'');
   if(clientAuthority) return clientAuthority;
-  if(_qualifiedCustomIdNeedsBackendAuthority(model)) return null;
+  if(typeof _qualifiedCustomIdNeedsBackendAuthority==='function'
+    &&_qualifiedCustomIdNeedsBackendAuthority(model)) return null;
   const explicitProvider=typeof _providerFromModelValue==='function'
     ? _providerFromModelValue(model)
     : '';
@@ -3437,15 +3470,24 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
 function _providerQualifiedModelValueForSelect(sel, modelId){
   return _modelStateForSelect(sel,modelId).model;
 }
+function _storedModelProvider(value, modelProvider, argumentCount){
+  // Passing a second argument is intentional authority: null means "defer this
+  // qualified custom id to the backend", not "guess again from its spelling".
+  if(argumentCount>=2) return modelProvider?String(modelProvider).trim():null;
+  return _providerFromModelValue(value)||null;
+}
 function _readPersistedModelState(){
   try{
     const raw=localStorage.getItem(MODEL_STATE_KEY);
     if(raw){
       const parsed=JSON.parse(raw);
       if(parsed&&parsed.model){
+        const hasProvider=Object.prototype.hasOwnProperty.call(parsed,'model_provider');
         return {
           model:String(parsed.model||''),
-          model_provider:parsed.model_provider?String(parsed.model_provider):(_providerFromModelValue(parsed.model)||null),
+          model_provider:typeof _storedModelProvider==='function'
+            ?_storedModelProvider(parsed.model,parsed.model_provider,hasProvider?2:1)
+            :(parsed.model_provider?String(parsed.model_provider):(_providerFromModelValue(parsed.model)||null)),
         };
       }
     }
@@ -3456,7 +3498,7 @@ function _readPersistedModelState(){
 }
 function _writePersistedModelState(model, modelProvider){
   const value=String(model||'').trim();
-  const provider=modelProvider?String(modelProvider).trim():(_providerFromModelValue(value)||null);
+  const provider=_storedModelProvider(value,modelProvider,arguments.length);
   if(!value){
     localStorage.removeItem('hermes-webui-model');
     localStorage.removeItem(MODEL_STATE_KEY);
@@ -3478,7 +3520,7 @@ function _rememberPendingSessionModel(sessionId, model, modelProvider){
   const sid=String(sessionId||'').trim();
   const value=String(model||'').trim();
   if(!sid||!value) return;
-  const provider=modelProvider?String(modelProvider).trim():(_providerFromModelValue(value)||null);
+  const provider=_storedModelProvider(value,modelProvider,arguments.length);
   try{
     sessionStorage.setItem(_pendingSessionModelKey(sid), JSON.stringify({
       model:value,
@@ -3504,9 +3546,10 @@ function _readPendingSessionModel(sessionId){
       sessionStorage.removeItem(_pendingSessionModelKey(sid));
       return null;
     }
+    const hasProvider=!!(parsed&&Object.prototype.hasOwnProperty.call(parsed,'model_provider'));
     return {
       model,
-      model_provider:parsed&&parsed.model_provider?String(parsed.model_provider):(_providerFromModelValue(model)||null),
+      model_provider:_storedModelProvider(model,parsed&&parsed.model_provider,hasProvider?2:1),
     };
   }catch(_){
     try{sessionStorage.removeItem(_pendingSessionModelKey(sid));}catch(__){}
