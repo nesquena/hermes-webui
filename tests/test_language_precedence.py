@@ -660,7 +660,7 @@ def test_load_locale_first_visit_uses_browser_hint_when_no_preference():
     out = _run_i18n_case(
         """
 {
-  ...(setLocale('fr'), {}),  // pre-seed localStorage
+  ...(localStorage.setItem('hermes-lang', 'fr'), {}),
   ...(await loadLocale(), {}),
   saved: localStorage.getItem('hermes-lang'),
 }
@@ -668,6 +668,121 @@ def test_load_locale_first_visit_uses_browser_hint_when_no_preference():
         navigator_obj={"languages": ["zh-CN"], "language": "zh-CN"},
     )
     assert out["saved"] == "fr"
+
+
+def _run_boot_error_during_browser_load(bundle_outcome: str) -> dict:
+    core_path = REPO_ROOT / "static" / "i18n-core.js"
+    french_path = REPO_ROOT / "static" / "locales" / "fr.js"
+    script = textwrap.dedent(
+        f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const core = fs.readFileSync({json.dumps(str(core_path))}, 'utf8');
+        const french = fs.readFileSync({json.dumps(str(french_path))}, 'utf8');
+        const storage = {{}};
+        const scripts = [];
+        const documentElement = {{ lang: 'en-US' }};
+        const ctx = {{
+          URL,
+          localStorage: {{
+            getItem: (key) => Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : null,
+            setItem: (key, value) => {{ storage[key] = String(value); }},
+          }},
+          document: {{
+            baseURI: 'https://example.test/',
+            currentScript: {{ src: 'https://example.test/static/i18n-core.js' }},
+            documentElement,
+            querySelectorAll: () => [],
+            createElement: () => ({{ async: false }}),
+            head: {{ appendChild: (script) => scripts.push(script) }},
+          }},
+          navigator: {{ languages: ['fr-FR'], language: 'fr-FR' }},
+        }};
+        vm.createContext(ctx);
+        vm.runInContext(core, ctx);
+        const initial = vm.runInContext('loadLocale()', ctx);
+        const earlyStorage = storage['hermes-lang'] || null;
+        const activeBefore = vm.runInContext('getActiveLocale()', ctx);
+        const langBefore = documentElement.lang;
+        const bootLanguage = vm.runInContext(
+          "resolvePreferredLocale(null, localStorage.getItem('hermes-lang'))",
+          ctx
+        );
+        const bootError = vm.runInContext(
+          "activateLocale(resolvePreferredLocale(null, localStorage.getItem('hermes-lang')))",
+          ctx
+        );
+        const script = scripts[0];
+        if ({json.dumps(bundle_outcome)} === 'success') {{
+          vm.runInContext(french, ctx);
+          script.onload();
+        }} else {{
+          script.onerror();
+        }}
+        Promise.all([initial, bootError]).then(([initialResult, bootResult]) => {{
+          const beforeLate = {{
+            active: vm.runInContext('getActiveLocale()', ctx),
+            lang: documentElement.lang,
+            stored: storage['hermes-lang'] || null,
+          }};
+          let lateRegistered = false;
+          if ({json.dumps(bundle_outcome)} === 'failure') {{
+            lateRegistered = vm.runInContext(french, ctx);
+          }}
+          process.stdout.write(JSON.stringify({{
+            earlyStorage,
+            activeBefore,
+            langBefore,
+            bootLanguage,
+            initialStatus: initialResult.status,
+            bootStatus: bootResult.status,
+            beforeLate,
+            lateRegistered,
+            afterLate: {{
+              active: vm.runInContext('getActiveLocale()', ctx),
+              lang: documentElement.lang,
+              stored: storage['hermes-lang'] || null,
+            }},
+          }}));
+        }});
+        """
+    )
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_browser_locale_is_persisted_while_its_bundle_loads():
+    assert "resolvePreferredLocale(null, localStorage.getItem('hermes-lang'))" in BOOT_JS
+    result = _run_boot_error_during_browser_load("success")
+    assert result["earlyStorage"] == "fr"
+    assert result["activeBefore"] == "en"
+    assert result["langBefore"] == "en-US"
+    assert result["bootLanguage"] == "fr"
+    assert result["bootStatus"] == "applied"
+    assert result["beforeLate"] == {
+        "active": "fr",
+        "lang": "fr-FR",
+        "stored": "fr",
+    }
+
+
+def test_failed_browser_load_settles_boot_error_to_english_before_late_registration():
+    result = _run_boot_error_during_browser_load("failure")
+    assert result["earlyStorage"] == "fr"
+    assert result["activeBefore"] == "en"
+    assert result["langBefore"] == "en-US"
+    assert result["bootLanguage"] == "fr"
+    assert result["bootStatus"] == "fallback"
+    assert result["beforeLate"] == {
+        "active": "en",
+        "lang": "en-US",
+        "stored": "en",
+    }
+    assert result["lateRegistered"] is True
+    assert result["afterLate"] == result["beforeLate"]
+
+
 def test_settings_locale_continuations_recheck_current_settlement():
     assert "const pendingLanguage=langSel.value;" in PANELS_JS
     assert "_settingsLocaleSettlementIsCurrent(localeResult)" in PANELS_JS
