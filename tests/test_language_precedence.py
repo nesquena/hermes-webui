@@ -1123,6 +1123,8 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
           vm.createContext(ctx);
           vm.runInContext({json.dumps(combined_sources)}, ctx);
 
+          elements.settingsModel = {{value: 'normal-model'}};
+          vm.runInContext("_settingsHermesDefaultModelOnOpen='old-model'", ctx);
           const normal = vm.runInContext("saveSettings(false)", ctx);
           await new Promise((resolve) => setImmediate(resolve));
           const selectorChange = vm.runInContext("_settleSettingsLocale('fr', $('settingsLanguage'))", ctx);
@@ -1131,7 +1133,9 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
           releasePost();
           await Promise.all([normal, selectorChange]);
           const normalAfter = selector.value;
+          const normalModelPostOccurred = modelPosts.length === 1;
 
+          elements.settingsModel.value = 'password-model';
           elements.settingsPassword.value = 'secret';
           const password = vm.runInContext("saveSettings(false)", ctx);
           await new Promise((resolve) => setImmediate(resolve));
@@ -1142,6 +1146,7 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
           releasePost();
           await Promise.all([password, passwordSelectorChange]);
           const passwordAfter = selector.value;
+          const passwordModelPostOccurred = modelPosts.length === 2;
 
           saveMode = false;
           await vm.runInContext("loadSettingsPanel()", ctx);
@@ -1161,11 +1166,11 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
           const releaseExplicitPost = releasePost;
           releaseExplicitPost();
           await new Promise((resolve) => setImmediate(resolve));
-          const defaultModelPostOccurred = modelPosts.length === 1;
+          const defaultModelPostOccurred = modelPosts.length === 3;
           const releaseAutosavePost = releasePost;
           if (releaseAutosavePost) releaseAutosavePost();
           await Promise.all([modelSave, sameLanguageAutosave]);
-          process.stdout.write(JSON.stringify({{requests, modelPosts, explicitPostHeld, generationBeforeAutosave, generationAfterAutosave, defaultModelPostOccurred, normalHeld, passwordHeld, normalAfter, passwordAfter, loadAfter, uiAfter}}));
+          process.stdout.write(JSON.stringify({{requests, modelPosts, explicitPostHeld, generationBeforeAutosave, generationAfterAutosave, defaultModelPostOccurred, normalHeld, passwordHeld, normalAfter, passwordAfter, normalModelPostOccurred, passwordModelPostOccurred, loadAfter, uiAfter}}));
         }})()
         """
     )
@@ -1184,5 +1189,11 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
     assert result["uiAfter"]["bodyLanguage"] == "de"
     assert result["explicitPostHeld"] is True
     assert result["generationAfterAutosave"] == result["generationBeforeAutosave"]
-    assert result["modelPosts"] == [{"model": "new-model", "provider": None}]
+    assert result["modelPosts"] == [
+        {"model": "normal-model", "provider": None},
+        {"model": "password-model", "provider": None},
+        {"model": "new-model", "provider": None},
+    ]
+    assert result["normalModelPostOccurred"] is True
+    assert result["passwordModelPostOccurred"] is True
     assert result["defaultModelPostOccurred"] is True

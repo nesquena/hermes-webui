@@ -13117,7 +13117,6 @@ async function saveSettings(andClose){
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
       const saved=await _postSettingsAtLocaleCommit(payload);
-      if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
       if(modelChanged && model){
         try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -13140,6 +13139,7 @@ async function saveSettings(andClose){
           return;
         }
       }
+      if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
       await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
@@ -13161,7 +13161,6 @@ async function saveSettings(andClose){
   }
   try{
     const saved=await _postSettingsAtLocaleCommit(body);
-    if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -13184,6 +13183,7 @@ async function saveSettings(andClose){
           return;
         }
     }
+    if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
     await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
