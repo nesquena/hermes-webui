@@ -694,3 +694,228 @@ def test_live_models_never_forwards_another_provider_key(monkeypatch):
     cfg = {"model": {"provider": "google", "api_key": "google-secret"}, "providers": {"mistral": {}}}
     assert config._canonicalise_provider_id(cfg["model"]["provider"]) != "mistral"
     assert config._canonical_provider_config(cfg, "mistral").get("api_key") is None
+
+
+def test_custom_default_save_preserves_paired_provider_identity(monkeypatch, tmp_path):
+    import yaml
+
+    cfgfile = tmp_path / "config.yaml"
+    original = {
+        "model": {
+            "provider": "custom:my_proxy",
+            "base_url": "https://underscore.example/v1",
+        },
+        "custom_providers": [
+            {"name": "my_proxy", "base_url": "https://underscore.example/v1", "api_key": "underscore-key"},
+            {"name": "my-proxy", "base_url": "https://hyphen.example/v1", "api_key": "hyphen-key"},
+        ],
+    }
+    cfgfile.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(
+        config,
+        "resolve_model_provider",
+        lambda model: (model, "custom:my_proxy", None),
+    )
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    result = config.set_hermes_default_model("vendor/model", provider="custom:my_proxy")
+    saved = yaml.safe_load(cfgfile.read_text(encoding="utf-8"))
+
+    assert result["provider"] == "custom:my_proxy"
+    assert saved["model"]["provider"] == "custom:my_proxy"
+    assert saved["model"]["base_url"] == "https://underscore.example/v1"
+
+
+def test_custom_live_handler_preserves_paired_provider_identity(monkeypatch):
+    import json
+    import urllib.request
+    from urllib.parse import urlparse
+
+    import api.profiles as profiles
+
+    cfg = {
+        "custom_providers": [
+            {
+                "name": "my_proxy",
+                "base_url": "https://underscore.example/v1",
+                "api_key": "underscore-key",
+                "models": ["underscore-model"],
+            },
+            {
+                "name": "my-proxy",
+                "base_url": "https://hyphen.example/v1",
+                "api_key": "hyphen-key",
+                "models": ["hyphen-model"],
+            },
+        ]
+    }
+    dispatched = []
+    requests = []
+
+    class Response:
+        def __init__(self, model_id):
+            self.model_id = model_id
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": self.model_id}]}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        requests.append((req.full_url, req.headers.get("Authorization"), timeout))
+        model_id = "underscore-model" if "underscore.example" in req.full_url else "hyphen-model"
+        return Response(model_id)
+
+    _install_hermes_modules(monkeypatch)
+    sys.modules["hermes_cli.models"].provider_model_ids = (
+        lambda provider: dispatched.append(provider) or []
+    )
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "proof-profile")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    routes._clear_live_models_cache()
+    try:
+        parsed = urlparse("/api/models/live?provider=custom:my_proxy")
+        first = routes._handle_live_models(object(), parsed)
+        second = routes._handle_live_models(object(), parsed)
+
+        assert dispatched == ["custom:my_proxy"]
+        assert requests == [(
+            "https://underscore.example/v1/models",
+            "Bearer underscore-key",
+            routes.CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
+        )]
+        assert first == second
+        assert first["provider"] == "custom:my_proxy"
+        assert [model["id"] for model in first["models"]] == ["underscore-model"]
+        assert ("proof-profile", "custom:my_proxy") in routes._LIVE_MODELS_CACHE
+        assert ("proof-profile", "custom:my-proxy") not in routes._LIVE_MODELS_CACHE
+    finally:
+        routes._clear_live_models_cache()
+
+
+def test_custom_provider_key_lookup_and_recovery_keep_exact_identity(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    cfg = {
+        "custom_providers": [
+            {"name": "my_proxy", "api_key": "underscore-replacement-key"},
+            {"name": "my-proxy", "api_key": "hyphen-key"},
+        ]
+    }
+    monkeypatch.setattr(providers, "get_config", lambda: cfg)
+    monkeypatch.setattr(providers, "_load_env_file", lambda _path: {})
+    monkeypatch.setattr(providers, "_thread_local_env_value", lambda _name, default="": default)
+    monkeypatch.setattr(providers, "_pool_entry_payloads", lambda provider: [
+        {
+            "last_status": "exhausted",
+            "last_status_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
+            "last_error_code": "401",
+            "secret_fingerprint": providers._credential_secret_fingerprint("underscore-old-key"),
+        }
+    ] if provider == "custom:my_proxy" else [])
+
+    assert providers._get_provider_api_key("custom:my_proxy") == "underscore-replacement-key"
+    assert providers._provider_has_key("custom:my_proxy")
+    assert not providers.provider_has_usable_pool_credential("custom:my_proxy")
+    assert providers.provider_has_process_wakeup_recovery_credential("custom:my_proxy")
+
+    cfg["custom_providers"] = [cfg["custom_providers"][0]]
+    assert providers._get_provider_api_key("custom:my_proxy") == "underscore-replacement-key"
+    assert providers._provider_has_key("custom:my_proxy")
+
+
+@pytest.mark.parametrize(
+    "provider_order,legacy_shape,canonical_shape",
+    [
+        (("mistralai", "mistral"), "list", "dict"),
+        (("mistral", "mistralai"), "list", "dict"),
+        (("mistralai", "mistral"), "dict", "list"),
+        (("mistral", "mistralai"), "dict", "list"),
+    ],
+)
+def test_mixed_mistral_model_shapes_feed_catalogs_and_cards(
+    monkeypatch, tmp_path, provider_order, legacy_shape, canonical_shape
+):
+    import yaml
+
+    def model_shape(shape, label, unique_id):
+        rows = [
+            {"id": "shared-model", "label": label},
+            {"id": unique_id, "label": f"{label} only"},
+        ]
+        if shape == "list":
+            return rows
+        return {
+            row["id"]: {"label": row["label"], "context_length": 8192}
+            for row in rows
+        }
+
+    provider_models = {
+        "mistralai": model_shape(legacy_shape, "Legacy label", "legacy-only"),
+        "mistral": model_shape(canonical_shape, "Canonical label", "canonical-only"),
+    }
+    ordered_providers = {provider: {"models": provider_models[provider]} for provider in provider_order}
+    cfg = {"model": {"provider": "mistral", "default": "shared-model"}, "providers": ordered_providers}
+    cfgfile = tmp_path / "config.yaml"
+    cfgfile.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
+    _install_hermes_modules(monkeypatch)
+    config.reload_config()
+    config.invalidate_models_cache()
+
+    merged = config._canonical_provider_config(config.get_config(), "mistral")
+    assert set(config._configured_model_ids(merged["models"])) == {
+        "shared-model", "legacy-only", "canonical-only"
+    }
+    merged_options = config._configured_model_options(merged["models"])
+    assert next(row["label"] for row in merged_options if row["id"] == "shared-model") == "Canonical label"
+    if canonical_shape == "dict":
+        canonical_only = next(row for row in merged["models"] if row["id"] == "canonical-only")
+        assert canonical_only["context_length"] == 8192
+
+    static_catalog = config._static_models_catalog_without_live_probes()
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0)
+    live_catalog = config.get_available_models(force_refresh=True)
+
+    def catalog_options(catalog):
+        group = next(group for group in catalog["groups"] if group.get("provider_id") == "mistral")
+        options = group["models"]
+        ids = [model["id"].split(":")[-1] for model in options]
+        assert all(ids.count(model_id) == 1 for model_id in ("shared-model", "legacy-only", "canonical-only"))
+        return dict(zip(ids, options))
+
+    for catalog in (static_catalog, live_catalog):
+        options = catalog_options(catalog)
+        assert {"shared-model", "legacy-only", "canonical-only"}.issubset(options)
+        assert options["shared-model"]["label"] == "Canonical label"
+
+    monkeypatch.setattr(providers, "get_config", config.get_config)
+    monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_get_cached_providers", lambda _key: None)
+    monkeypatch.setattr(providers, "_store_cached_providers", lambda _key, value: value)
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: [])
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "_provider_is_oauth", lambda _pid: False)
+    monkeypatch.setattr(providers, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(providers, "_read_visible_codex_cache_model_ids", lambda: [])
+    monkeypatch.setattr(providers, "_models_from_live_provider_ids", lambda _pid, _ids: [])
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _pid: False)
+    card = next(card for card in providers.get_providers()["providers"] if card["id"] == "mistral")
+    card_model_ids = [model["id"] for model in card["models"]]
+    assert all(isinstance(model_id, str) for model_id in card_model_ids)
+    assert all(card_model_ids.count(model_id) == 1 for model_id in ("shared-model", "legacy-only", "canonical-only"))
+    card_models = {model["id"]: model for model in card["models"]}
+    assert {"shared-model", "legacy-only", "canonical-only"}.issubset(card_models)
+    assert card_models["shared-model"]["label"] == "Canonical label"

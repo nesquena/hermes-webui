@@ -1584,7 +1584,7 @@ def _resolve_configured_provider_id(
 
 
 def _canonicalise_provider_id(name: object) -> str:
-    """Normalise a provider id slug into a stable lowercase-hyphenated form.
+    """Normalize built-in provider ids and preserve explicit custom slugs.
 
     Folds underscores to hyphens and lowercases the result, so a user with
     ``providers.opencode_go.api_key`` in ``config.yaml`` and
@@ -1608,9 +1608,12 @@ def _canonicalise_provider_id(name: object) -> str:
     """
     if not name:
         return ""
-    raw = str(name).strip().lower().replace("_", "-")
+    raw = str(name).strip().lower()
     if not raw:
         return ""
+    if raw.startswith("custom:"):
+        return raw
+    raw = raw.replace("_", "-")
     # xAI is a WebUI-owned ``x-ai`` provider. Keep dotted and display-name
     # spellings in that namespace before adapting to the Agent alias later.
     if raw in {"x.ai", "grok"}:
@@ -1656,17 +1659,48 @@ def _canonical_provider_config(config_obj: dict | None, provider: object) -> dic
     merged: dict = {}
     model_values: list = []
     model_map: dict | None = None
+    model_entries: list[tuple[str, object, bool]] = []
+    has_model_list = False
+    has_model_dict = False
     for key in keys:
         value = providers_cfg.get(key)
         if isinstance(value, dict):
             merged.update(value)
             if isinstance(value.get("models"), list):
+                has_model_list = True
                 model_values.extend(value["models"])
+                for item in value["models"]:
+                    model_id = _configured_model_ids([item])
+                    if model_id:
+                        model_entries.append((model_id[0], item, True))
             elif isinstance(value.get("models"), dict):
+                has_model_dict = True
                 if model_map is None:
                     model_map = {}
                 model_map.update(value["models"])
-    if model_values:
+                model_entries.extend(
+                    (model_id, metadata, False)
+                    for model_id, metadata in value["models"].items()
+                    if isinstance(model_id, str) and model_id.strip()
+                )
+    if has_model_list and has_model_dict:
+        merged_models: list[dict] = []
+        model_positions: dict[str, int] = {}
+        for model_id, metadata, is_list_entry in model_entries:
+            if is_list_entry and isinstance(metadata, dict):
+                row = dict(metadata)
+            elif not is_list_entry and isinstance(metadata, dict):
+                row = dict(metadata)
+                row["id"] = model_id
+            else:
+                row = {"id": model_id}
+            if model_id in model_positions:
+                merged_models[model_positions[model_id]] = row
+            else:
+                model_positions[model_id] = len(merged_models)
+                merged_models.append(row)
+        merged["models"] = merged_models
+    elif model_values:
         merged_models: list = []
         model_positions: dict[str, int] = {}
         for item in model_values:
@@ -7356,8 +7390,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                 continue
 
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
-            raw_key = canonical_to_raw_provider_key.get(pid, pid)
-            provider_cfg = _get_provider_cfg(raw_key)
+            provider_cfg = _canonical_provider_config(cfg, pid)
             raw_models = []
             if (
                 isinstance(provider_cfg, dict)
