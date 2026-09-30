@@ -217,8 +217,19 @@ function resolveLocale(lang) {
   return Object.keys(LOCALE_REGISTRY).find((k) => k.toLowerCase() === base) || null;
 }
 
-function resolvePreferredLocale(primary, fallback) {
-  return resolveLocale(primary) || resolveLocale(fallback) || 'en';
+function resolvePreferredLocale(primary, fallback, browserHint) {
+  return resolveLocale(primary) || resolveLocale(fallback) || resolveLocale(browserHint) || 'en';
+}
+
+function _detectBrowserLanguageHint() {
+  try {
+    const nav = (typeof navigator !== 'undefined') ? navigator : null;
+    if (!nav) return null;
+    if (Array.isArray(nav.languages) && nav.languages.length) return nav.languages[0] || null;
+    return typeof nav.language === 'string' && nav.language ? nav.language : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function ensureLocale(lang) {
@@ -279,6 +290,9 @@ async function activateLocale(lang) {
   const generation = ++_activationGeneration;
   const previous = getActiveLocale();
   const isCurrent = () => generation === _activationGeneration;
+  if (requested !== 'en') {
+    try { localStorage.setItem('hermes-lang', requested); } catch (_) {}
+  }
   try {
     await ensureLocale(requested);
   } catch (_) {
@@ -306,9 +320,12 @@ function getLocaleActivationGeneration() {
 function loadLocale() {
   let stored = null;
   try { stored = localStorage.getItem('hermes-lang'); } catch (_) {}
-  const resolved = resolvePreferredLocale(null, stored);
-  if (resolved === 'en' || LOCALES[resolved]) setLocale(resolved);
-  return resolved;
+  const resolved = resolvePreferredLocale(null, stored, _detectBrowserLanguageHint());
+  if (resolved === 'en') {
+    setLocale(resolved);
+    return Promise.resolve({ status: 'applied', requested: resolved, active: resolved, fallback: false });
+  }
+  return activateLocale(resolved);
 }
 
 function t(key, ...args) {
@@ -2061,7 +2078,7 @@ registerLocale('en', {
     yolo_disabled: 'YOLO mode OFF',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'YOLO mode active — click to disable',
-    approval_skip_all: '⚡ Skip all this session',
+    approval_skip_all: "Skip all this session",
     approval_skip_all_title: 'Skip all approval prompts for this session',
     // composer action tooltips
     composer_send: 'Send message',
@@ -2131,6 +2148,53 @@ registerLocale('en', {
     kanban_board_default_workdir: "Default workspace path",
     kanban_board_default_workdir_placeholder: "Workspace path (optional)",
     settings_desc_kanban_sessions: "Surface kanban worker runs as conversations in the sidebar. Only active when non-WebUI sessions are enabled. Defaults off; worker runs are internal and can flood the sidebar.",
-  });
+      "ext_assets_meta": "Same-origin URLs that may be injected into the app shell.",
+    "ext_assets_scripts": "Scripts",
+    "ext_assets_styles": "Stylesheets",
+    "ext_assets_title": "Final public asset URLs",
+    "ext_no_warnings": "No warnings.",
+    "ext_none": "None",
+    "ext_sidecar_health_path": "Health path",
+    "ext_sidecar_health_url": "Health URL",
+    "ext_sidecar_origin": "Origin",
+    "ext_sidecar_proxy": "Proxy",
+    "ext_sidecar_proxy_path": "Proxy path",
+    "ext_sidecars_meta": "Declared local companions; health is checked directly from this browser with WebUI credentials omitted.",
+    "ext_sidecars_none": "No loopback sidecars declared.",
+    "ext_sidecars_title": "Loopback sidecars",
+    "ext_state_unknown_ids_hint": "Some saved disabled-extension overrides no longer match the current manifest; re-added extensions with the same id may stay disabled.",
+    "ext_status_false": "false",
+    "ext_status_true": "true",
+    "ext_warnings_meta": "Codes and coarse sources only; paths and rejected values are not shown.",
+    "ext_warnings_title": "Sanitized warnings",
+    "mcp_runtime_scope_unavailable": "Live status for this profile is unavailable right now (a chat turn may be running). Refresh when it finishes.",
+    "sessions_source_cli": "CLI sessions ({0})",
+    "sessions_source_webui": "WebUI sessions ({0})",
+    "settings_extensions_copy_diagnostics": "Copy diagnostics",
+    "settings_extensions_diag_extension_dir_configured": "Extension dir configured",
+    "settings_extensions_diag_extension_dir_valid": "Extension dir valid",
+    "settings_extensions_diag_final_scripts": "Final script count",
+    "settings_extensions_diag_final_stylesheets": "Final stylesheet count",
+    "settings_extensions_diag_installed_extensions": "Installed manifest extensions",
+    "settings_extensions_diag_loopback_sidecars": "Loopback sidecar count",
+    "settings_extensions_diag_manifest_configured": "Manifest configured",
+    "settings_extensions_diag_manifest_entries": "Manifest entries inspected",
+    "settings_extensions_diag_manifest_loaded": "Manifest loaded",
+    "settings_extensions_diag_manifest_scripts": "Manifest script count",
+    "settings_extensions_diag_manifest_sidecars": "Manifest sidecar count",
+    "settings_extensions_diag_manifest_status": "Manifest status",
+    "settings_extensions_diag_manifest_stylesheets": "Manifest stylesheet count",
+    "settings_extensions_diag_user_disabled": "User-disabled extensions",
+    "settings_extensions_installed_empty": "No manifest extensions are installed in the configured bundle.",
+    "settings_extensions_installed_loading": "Loading installed extensions…",
+    "settings_extensions_installed_section_meta": "Enable or disable already-present local extensions. Reload WebUI to apply injected asset changes to this browser tab.",
+    "settings_extensions_installed_section_title": "Installed manifest extensions",
+    "settings_extensions_meta": "Browse, install, and manage WebUI extensions.",
+    "settings_extensions_no_dir": "No extension directory is configured.",
+    "settings_extensions_runtime_status_from": "Status from /api/extensions/status; toggles persist a local override for installed manifest entries.",
+    "settings_extensions_runtime_title": "Extension runtime",
+    "settings_extensions_trust_model_label": "Trust model",
+    "settings_extensions_trust_model_text": "Extensions run in the WebUI browser origin and can access the same authenticated APIs as this session. Settings and extension-owned storage are browser-local and not for secrets. Only load trusted local extension directories; disabling an extension takes effect after reload for already-injected assets.",
+});
 let _locale = LOCALES.en;
 loadLocale();
