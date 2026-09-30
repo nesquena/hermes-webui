@@ -2,6 +2,7 @@ import json
 import pathlib
 import re
 import subprocess
+import tempfile
 import textwrap
 
 
@@ -790,6 +791,109 @@ def test_settings_locale_continuations_recheck_current_settlement():
     assert "const requestedLanguage=(selector&&selector.value)" in PANELS_JS
 
 
+def test_superseded_settings_hydration_preserves_native_selector_and_next_save_language():
+    core_path = REPO_ROOT / "static" / "i18n-core.js"
+    french_path = REPO_ROOT / "static" / "locales" / "fr.js"
+    german_path = REPO_ROOT / "static" / "locales" / "de.js"
+    language_start = PANELS_JS.index("// Language preference — metadata is eager, translation data is not.")
+    language_end = PANELS_JS.index("const showUsageCb", language_start)
+    language_segment = PANELS_JS[language_start:language_end]
+    sources = [
+        _function_source(PANELS_JS, "_settleSettingsLocale"),
+        _function_source(PANELS_JS, "_reconcileSettingsLocaleSelector"),
+        _function_source(PANELS_JS, "_settingsLocaleSettlementIsCurrent"),
+        _function_source(PANELS_JS, "_settingsLocaleCommitIsCurrent"),
+        _function_source(PANELS_JS, "_commitSettingsLocale"),
+        _function_source(PANELS_JS, "_preferencesPayloadFromUi"),
+        "async function hydrateSettingsLanguage(){"
+        "const localeResult=await _settleSettingsLocale('fr',selector);"
+        + language_segment
+        + "return localeResult;}",
+    ]
+    panel_source = (
+        "let _settingsLocalePostInFlight=null;\n" + "\n".join(sources)
+    )
+    script = textwrap.dedent(
+        f"""
+        (async () => {{
+          const fs=require('fs');
+          const vm=require('vm');
+          const core=fs.readFileSync({json.dumps(str(core_path))},'utf8');
+          const french=fs.readFileSync({json.dumps(str(french_path))},'utf8');
+          const german=fs.readFileSync({json.dumps(str(german_path))},'utf8');
+          const scripts=[];
+          const options=['en','fr','de'].map(value=>({{value}}));
+          const selector={{
+            options,
+            _value:'fr',
+            get value(){{return this._value;}},
+            set value(value){{this._value=this.options.some(option=>option.value===value)?value:'';}},
+            set innerHTML(_value){{this.options=[];this._value='';}},
+            appendChild(option){{this.options.push(option);if(!this._value)this._value=option.value;}},
+            addEventListener(){{}},
+          }};
+          const storage={{}};
+          const documentElement={{lang:'en-US'}};
+          const ctx={{
+            URL,
+            selector,
+            $:(id)=>id==='settingsLanguage'?selector:null,
+            localStorage:{{getItem:key=>storage[key]||null,setItem:(key,value)=>storage[key]=String(value)}},
+            document:{{
+              baseURI:'https://example.test/',
+              currentScript:{{src:'https://example.test/static/i18n-core.js'}},
+              documentElement,
+              querySelectorAll:()=>[],
+              createElement:()=>({{}}),
+              head:{{appendChild:script=>scripts.push(script)}},
+            }},
+            _speechPreferencesPayloadFromUi:()=>({{}}),
+          }};
+          vm.createContext(ctx);
+          vm.runInContext(core,ctx);
+          vm.runInContext({json.dumps(panel_source)},ctx);
+          const hydration=vm.runInContext('hydrateSettingsLanguage()',ctx);
+          await new Promise(resolve=>setImmediate(resolve));
+          const frenchScript=scripts.find(script=>script.src.includes('/fr.js'));
+          selector.value='de';
+          const germanSettlement=vm.runInContext("_settleSettingsLocale('de',selector)",ctx);
+          await new Promise(resolve=>setImmediate(resolve));
+          const germanScript=scripts.find(script=>script.src.includes('/de.js'));
+          vm.runInContext(german,ctx);
+          germanScript.onload();
+          const germanResult=await germanSettlement;
+          vm.runInContext(french,ctx);
+          frenchScript.onload();
+          const hydrationResult=await hydration;
+          const nextSave={{}};
+          const nextSaveLocale=await vm.runInContext(
+            "_commitSettingsLocale(selector.value,selector,nextSave)",
+            Object.assign(ctx,{{nextSave}})
+          );
+          process.stdout.write(JSON.stringify({{
+            germanStatus:germanResult.status,
+            hydrationStatus:hydrationResult.status,
+            active:vm.runInContext('getActiveLocale()',ctx),
+            selector:selector.value,
+            nextSaveLanguage:nextSave.language,
+            nextSaveActive:nextSaveLocale.active,
+          }}));
+        }})()
+        """
+    )
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+    assert result == {
+        "germanStatus": "applied",
+        "hydrationStatus": "superseded",
+        "active": "de",
+        "selector": "de",
+        "nextSaveLanguage": "de",
+        "nextSaveActive": "de",
+    }
+
+
 def _function_source(src: str, name: str) -> str:
     async_token = f"async function {name}("
     start = src.find(async_token)
@@ -805,6 +909,18 @@ def _function_source(src: str, name: str) -> str:
             if depth == 0:
                 return src[start : index + 1]
     raise AssertionError(f"unclosed function {name}")
+
+
+def _run_node_script(script: str) -> subprocess.CompletedProcess:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        script_path = pathlib.Path(temp_dir) / "settings-locale-regression.js"
+        script_path.write_text(script, encoding="utf-8")
+        return subprocess.run(
+            ["node", str(script_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
 
 
 def test_settings_post_serializes_after_locale_settlement_and_ignores_stale_success():
@@ -877,7 +993,7 @@ def test_settings_post_serializes_after_locale_settlement_and_ignores_stale_succ
         }})();
         """
     )
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
     assert result == {
@@ -891,7 +1007,7 @@ def test_settings_post_serializes_after_locale_settlement_and_ignores_stale_succ
 def test_settings_save_paths_use_the_same_locale_commit_boundary():
     assert PANELS_JS.count("_postSettingsAtLocaleCommit(") >= 3
     assert PANELS_JS.count("_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)") >= 3
-    assert "const localeSettlementCurrent=_settingsLocaleSettlementIsCurrent(localeResult);" in PANELS_JS
+    assert "if(result&&result.status==='superseded') return null;" in _function_source(PANELS_JS, "_commitSettingsLocale")
 
 
 def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
@@ -905,6 +1021,7 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
         _function_source(PANELS_JS, "_postSettingsAtLocaleCommit"),
         _function_source(PANELS_JS, "saveSettings"),
         _function_source(PANELS_JS, "_applySavedSettingsUi"),
+        _function_source(PANELS_JS, "_autosavePreferencesSettings"),
     ]
     locale_start = PANELS_JS.index("const resolvedLanguage=")
     language_start = PANELS_JS.index("// Language preference", locale_start)
@@ -928,6 +1045,7 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
           let active = 'de';
           let generation = 1;
           const requests = [];
+          const modelPosts = [];
           let applyCount = 0;
           let releasePost;
           let saveMode = true;
@@ -940,10 +1058,15 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
             getActiveLocale: () => active,
             getLocaleActivationGeneration: () => generation,
             activateLocale: async (requested) => {{
-              if (requested !== active) {{ generation++; active = requested; }}
+              generation++;
+              active = requested;
               return {{status: 'applied', requested, active, generation}};
             }},
             api: (path, options) => {{
+              if (path === '/api/default-model') {{
+                modelPosts.push(JSON.parse(options.body));
+                return Promise.resolve({{}});
+              }}
               if (options && options.method === 'POST') {{
                 const body = JSON.parse(options.body);
                 requests.push(body);
@@ -1024,14 +1147,32 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
           await vm.runInContext("loadSettingsPanel()", ctx);
           const loadAfter = selector.value;
           const uiAfter = await vm.runInContext("(async () => {{ const body={{language:'fr'}}; await _applySavedSettingsUi({{}}, body, {{language:'fr'}}); return {{selector: $('settingsLanguage').value, bodyLanguage: body.language}}; }})()", ctx);
-          process.stdout.write(JSON.stringify({{requests, normalHeld, passwordHeld, normalAfter, passwordAfter, loadAfter, uiAfter}}));
+          saveMode = true;
+          selector.value = 'de';
+          elements.settingsModel = {{value: 'new-model'}};
+          vm.runInContext("_settingsHermesDefaultModelOnOpen='old-model'", ctx);
+          const modelSave = vm.runInContext("saveSettings(false)", ctx);
+          await new Promise((resolve) => setImmediate(resolve));
+          const explicitPostHeld = requests.length === 3;
+          const generationBeforeAutosave = generation;
+          const sameLanguageAutosave = vm.runInContext("_autosavePreferencesSettings({{language: 'de'}})", ctx);
+          await new Promise((resolve) => setImmediate(resolve));
+          const generationAfterAutosave = generation;
+          const releaseExplicitPost = releasePost;
+          releaseExplicitPost();
+          await new Promise((resolve) => setImmediate(resolve));
+          const defaultModelPostOccurred = modelPosts.length === 1;
+          const releaseAutosavePost = releasePost;
+          if (releaseAutosavePost) releaseAutosavePost();
+          await Promise.all([modelSave, sameLanguageAutosave]);
+          process.stdout.write(JSON.stringify({{requests, modelPosts, explicitPostHeld, generationBeforeAutosave, generationAfterAutosave, defaultModelPostOccurred, normalHeld, passwordHeld, normalAfter, passwordAfter, loadAfter, uiAfter}}));
         }})()
         """
     )
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    proc = _run_node_script(script)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
-    assert [request["language"] for request in result["requests"]] == ["de", "fr"]
+    assert [request["language"] for request in result["requests"]] == ["de", "fr", "de", "de"]
     assert result["requests"][0]["language"] == "de"
     assert result["requests"][1]["language"] == "fr"
     assert result["normalHeld"] is True
@@ -1041,3 +1182,7 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
     assert result["loadAfter"] == "de"
     assert result["uiAfter"]["selector"] == "de"
     assert result["uiAfter"]["bodyLanguage"] == "de"
+    assert result["explicitPostHeld"] is True
+    assert result["generationAfterAutosave"] == result["generationBeforeAutosave"]
+    assert result["modelPosts"] == [{"model": "new-model", "provider": None}]
+    assert result["defaultModelPostOccurred"] is True
