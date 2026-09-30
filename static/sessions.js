@@ -2206,6 +2206,10 @@ function _setNewSessionPending(pending){
 
 async function newSession(flash, options={}){
   const existingContextIntent=options&&options.contextTransition;
+  const adoptedPaneClaim=options&&options._paneNavigationGeneration;
+  if(adoptedPaneClaim!=null&&!_paneNavigationClaimIsCurrent(adoptedPaneClaim)){
+    return {status:'superseded',session:null};
+  }
   if(_newSessionRequest){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     // A direct New Chat can already be queued behind the context intent that
@@ -2225,7 +2229,7 @@ async function newSession(flash, options={}){
   const request={
     started:false,
     start:null,
-    paneNavigationGeneration:_claimPaneNavigation(),
+    paneNavigationGeneration:adoptedPaneClaim!=null?adoptedPaneClaim:_claimPaneNavigation(),
     promise:new Promise((resolve,reject)=>{
       resolveRequest=resolve;
       rejectRequest=reject;
@@ -2250,6 +2254,11 @@ async function newSession(flash, options={}){
       options={...options,...takeoverOptions};
     }
     try{
+    // A queued request must not create a session after its original claim expires.
+    if(!_paneNavigationClaimIsCurrent(request.paneNavigationGeneration)){
+      request.resolve({status:'superseded',session:null});
+      return;
+    }
     _setNewSessionPending(true);
     try{
     // Starting a brand-new chat must not carry named context blocks selected in
@@ -3544,7 +3553,7 @@ function _sidebarSessionProfileName(session){
   return raw||'';
 }
 
-async function _ensureSidebarSessionProfile(session){
+async function _ensureSidebarSessionProfile(session,paneNavigationGeneration){
   const targetProfile=_sidebarSessionProfileName(session);
   if(!_showAllProfiles||!targetProfile) return false;
   const activeProfile=S.activeProfile||'default';
@@ -3552,7 +3561,7 @@ async function _ensureSidebarSessionProfile(session){
   if(typeof switchToProfile!=='function') return false;
   _profileSwitchOpeningExistingSession=true;
   try{
-    await switchToProfile(targetProfile);
+    await switchToProfile(targetProfile,undefined,paneNavigationGeneration);
   }finally{
     _profileSwitchOpeningExistingSession=false;
   }
@@ -3578,7 +3587,9 @@ async function _openSidebarSession(session, loadOpts={}){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
-  await _ensureSidebarSessionProfile(session);
+  if(!_paneNavigationClaimIsCurrent(paneNavigationGeneration)) return;
+  await _ensureSidebarSessionProfile(session,paneNavigationGeneration);
+  if(!_paneNavigationClaimIsCurrent(paneNavigationGeneration)) return;
   // Tell loadSession to skip its pre-hook — we already ran it above.
   await loadSession(session.session_id, Object.assign({}, loadOpts, {
     _preloadNotified:true,

@@ -99,7 +99,14 @@ _BOOTSTRAP = r"""
       }
       return Promise.resolve({entries: [{name: sid === 'session-b' ? 'B.txt' : 'A.txt'}]});
     }
-    if (path === '/api/profile/switch') return Promise.resolve({active: body.name, is_default: false});
+    if (path === '/api/profile/switch') {
+      if (window.__holdProfile && body.name === 'other') {
+        return new Promise((resolve, reject) => {
+          window.__pendingRequests.push({kind: 'profile', sid: null, resolve, reject, settled: false});
+        });
+      }
+      return Promise.resolve({active: body.name, is_default: false});
+    }
     if (path.startsWith('/api/sessions')) return Promise.resolve({sessions: []});
     if (kind === 'other') return Promise.resolve({});
     return new Promise((resolve, reject) => {
@@ -770,4 +777,138 @@ def test_direct_profile_choice_supersedes_pending_new_chat(production_page, stag
     assert observed["commands"] == []
     assert observed["starts"] == []
     assert observed["snapshot"]["text"] == text
+    assert errors == []
+
+
+@pytest.mark.parametrize('stage', ['draft', 'workspace'])
+@pytest.mark.parametrize('action', ['send', 'command'])
+@pytest.mark.parametrize('other_profile', [False, True], ids=['same-profile-C', 'cross-profile-C'])
+def test_newer_sidebar_choice_retires_queued_direct_profile_intent(
+    production_page, stage, action, other_profile
+):
+    """Exact review schedule: A settling, direct profile B queued, then sidebar C."""
+    page, errors = production_page
+    text = '/local keep-this' if action == 'command' else 'keep-this'
+    page.evaluate(r'''({stage, text}) => {
+      __enableWorkspace();
+      window.__holdDraft = stage === 'draft';
+      window.__holdWorkspace = stage === 'workspace';
+      $('msg').value = text;
+      S.pendingFiles = [new File(['A'], 'A.txt')];
+      window.__actionDone = newSession(false, {awaitWorkspaceLoad: true})
+        .then(result => { window.__result = result; });
+    }''', {'stage': stage, 'text': text})
+    page.wait_for_function("() => !!__pendingRequest('new')")
+    page.evaluate("() => __resolveRequest('new', null, {session: {session_id: 'session-a', profile: 'default', workspace: '/workspace-a', messages: [], composer_draft: {}}})")
+    page.wait_for_function("() => !!__pendingRequest('draft', 'session-a')" if stage == 'draft' else "() => !!window.__releaseWorkspace")
+    profile = 'third' if other_profile else 'default'
+    page.evaluate(r'''profile => {
+      window.__sendDone = send();
+      window.__profileDone = switchToProfile('other').then(result => { window.__profileResult = result; });
+      _showAllProfiles = true;
+      _rememberComposerPendingFiles('session-c', [new File(['C'], 'C.txt')], profile);
+      window.__navigationDone = _openSidebarSession({session_id: 'session-c', profile}, {force: true});
+    }''', profile)
+    assert page.evaluate("() => __apiLog.filter(c => c.path === '/api/profile/switch').length") == 0
+    if stage == 'draft':
+        page.evaluate("() => { window.__holdDraft = false; __resolveRequest('draft', 'session-a', {}); }")
+    else:
+        page.evaluate("() => window.__releaseWorkspace()")
+    page.wait_for_function("() => !!__pendingRequest('metadata', 'session-c') || __apiLog.filter(c => c.kind === 'new').length > 1")
+    before_c = page.evaluate("() => ({creates: __apiLog.filter(c => c.kind === 'new'), switches: __apiLog.filter(c => c.path === '/api/profile/switch'), metadata: !!__pendingRequest('metadata', 'session-c')})")
+    assert len(before_c['creates']) == 1, 'retired profile B must not create a replacement session'
+    assert [c['body']['name'] for c in before_c['switches']] == (['third'] if other_profile else [])
+    assert before_c['metadata'], before_c
+    page.evaluate("profile => __resolveRequest('metadata', 'session-c', {session: {session_id: 'session-c', profile, workspace: '/workspace-c', messages: [], message_count: 1, composer_draft: {text: 'draft C', files: []}}})", profile)
+    page.wait_for_function("() => !!__pendingRequest('messages', 'session-c')")
+    page.evaluate("profile => __resolveRequest('messages', 'session-c', {session: {session_id: 'session-c', profile, workspace: '/workspace-c', messages: [{role: 'assistant', content: 'C transcript'}], message_count: 1, tool_calls: []}})", profile)
+    page.evaluate("() => Promise.all([__actionDone, __profileDone, __navigationDone, __sendDone, _waitForContextTransitionSettlement()])")
+    observed = page.evaluate(r'''() => ({
+      result: __result, profileResult: __profileResult, sid: S.session.session_id,
+      profile: S.activeProfile, text: $('msg').value, files: S.pendingFiles.map(f => f.name),
+      messages: S.messages, starts: __apiLog.filter(c => c.kind === 'chat-start'), commands: __commandCalls,
+      pending: _newSessionRequest !== null || _newSessionInFlight !== null,
+      sendPending: _sendInProgress, snapshot: _composerRememberedOwnerSnapshot('session-a', 'default'),
+    })''')
+    assert observed['result']['status'] == 'superseded'
+    assert observed['profileResult'] is False
+    assert (observed['sid'], observed['profile'], observed['text'], observed['files']) == ('session-c', profile, 'draft C', ['C.txt'])
+    assert observed['messages'] == [{'role': 'assistant', 'content': 'C transcript'}]
+    assert observed['snapshot']['text'] == text
+    assert observed['commands'] == [] and observed['starts'] == []
+    assert observed['pending'] is False and observed['sendPending'] is False
+    assert errors == []
+
+
+@pytest.mark.parametrize('stage', ['profile', 'create', 'draft', 'workspace'])
+def test_direct_profile_intent_revalidates_awaits_and_reuses_its_pane_claim(production_page, stage):
+    page, errors = production_page
+    page.evaluate(r'''stage => {
+      __enableWorkspace();
+      S.session = {session_id: 'old', profile: 'default', workspace: '/old', messages: [{role: 'user', content: 'old'}]};
+      S.messages = S.session.messages;
+      $('msg').value = 'old draft';
+      if (stage === 'workspace') _workspacePanelMode = 'files';
+      window.__holdProfile = stage === 'profile';
+      window.__holdWorkspace = stage === 'workspace';
+      window.__profileDone = switchToProfile('other').then(result => { window.__profileResult = result; });
+      window.__profileClaim = _paneNavigationGeneration;
+    }''', stage)
+    if stage == 'profile':
+        page.wait_for_function("() => !!__pendingRequest('profile')")
+    else:
+        page.wait_for_function("() => !!__pendingRequest('new')")
+        assert page.evaluate("() => _paneNavigationGeneration === __profileClaim"), 'nested New Chat must adopt the direct profile claim'
+        if stage in ('draft', 'workspace'):
+            page.evaluate("stage => { window.__holdDraft = stage === 'draft'; __resolveRequest('new', null, {session: {session_id: 'session-a', profile: 'other', workspace: '/workspace-a', messages: [], composer_draft: {text: 'destination draft', files: []}}}); }", stage)
+            page.wait_for_function("() => !!__pendingRequest('draft', 'session-a')" if stage == 'draft' else "() => !!window.__releaseWorkspace")
+    page.evaluate(r'''stage => {
+      if (stage !== 'profile') window.__sendDone = send();
+      _showAllProfiles = true;
+      window.__navigationDone = _openSidebarSession({session_id: 'session-c', profile: 'default'}, {force: true});
+      if (stage === 'profile') __resolveRequest('profile', null, {active: 'other', is_default: false});
+      else if (stage === 'create') __resolveRequest('new', null, {session: {session_id: 'session-a', profile: 'other', workspace: '/workspace-a', messages: [], composer_draft: {}}});
+      else if (stage === 'draft') { window.__holdDraft = false; __resolveRequest('draft', 'session-a', {}); }
+      else window.__releaseWorkspace();
+    }''', stage)
+    page.wait_for_function("() => !!__pendingRequest('metadata', 'session-c')")
+    page.evaluate("() => __resolveRequest('metadata', 'session-c', {session: {session_id: 'session-c', profile: 'default', workspace: '/workspace-c', messages: [], message_count: 1, composer_draft: {text: 'draft C', files: []}}})")
+    page.wait_for_function("() => !!__pendingRequest('messages', 'session-c')")
+    page.evaluate("() => __resolveRequest('messages', 'session-c', {session: {session_id: 'session-c', profile: 'default', workspace: '/workspace-c', messages: [{role: 'assistant', content: 'C'}], message_count: 1, tool_calls: []}})")
+    page.evaluate("() => Promise.all([__profileDone, __navigationDone, window.__sendDone, _waitForContextTransitionSettlement()])")
+    observed = page.evaluate(r'''() => ({
+      result: __profileResult, sid: S.session.session_id, profile: S.activeProfile,
+      creates: __apiLog.filter(c => c.kind === 'new').length,
+      starts: __apiLog.filter(c => c.kind === 'chat-start'), commands: __commandCalls,
+      pending: _newSessionRequest !== null || _newSessionInFlight !== null || _sendInProgress,
+      text: $('msg').value, embargo: _profileSwitchListEmbargo, disabled: $('btnNewChat').disabled,
+      toasts: __toasts,
+    })''')
+    assert observed['result'] is False
+    assert (observed['sid'], observed['profile'], observed['text']) == ('session-c', 'default', 'draft C')
+    assert observed['creates'] == (0 if stage == 'profile' else 1)
+    assert observed['starts'] == [] and observed['commands'] == []
+    assert observed['pending'] is False and observed['embargo'] is False and observed['disabled'] is False
+    assert not any(toast[0] == 'profile_switched_new_conversation' for toast in observed['toasts'])
+    assert errors == []
+
+
+def test_sidebar_import_cannot_borrow_a_newer_profile_choices_claim(production_page):
+    page, errors = production_page
+    page.evaluate(r'''() => {
+      _showAllProfiles = true;
+      _isExternalSession = session => session.session_id === 'older';
+      const fixtureApi = api;
+      window.api = (path, options) => path === '/api/session/import_cli'
+        ? new Promise(resolve => { window.__releaseImport = resolve; })
+        : fixtureApi(path, options);
+      window.__olderDone = _openSidebarSession({session_id: 'older', profile: 'third'});
+    }''')
+    page.wait_for_function('() => !!window.__releaseImport')
+    page.evaluate("() => { window.__newerDone = switchToProfile('other'); }")
+    page.evaluate('() => window.__newerDone')
+    page.evaluate('() => { window.__releaseImport({}); }')
+    page.evaluate('() => Promise.all([__olderDone, _waitForContextTransitionSettlement()])')
+    observed = page.evaluate("() => ({profile: S.activeProfile, switches: __apiLog.filter(c => c.path === '/api/profile/switch').map(c => c.body.name), opens: __apiLog.filter(c => c.kind === 'metadata'), pending: _newSessionRequest !== null})")
+    assert observed == {'profile': 'other', 'switches': ['other'], 'opens': [], 'pending': False}
     assert errors == []

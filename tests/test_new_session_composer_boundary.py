@@ -1427,7 +1427,10 @@ def test_profile_owned_new_chat_takeover_forwards_explicit_worktree_opt_out():
         (async()=>{{
           const switching=switchToProfile('beta');
           await spinUntil(()=>apiCalls.includes('/api/profile/switch'));
-          const queuedNewChat=newSession(false);
+          // Join the existing profile intent without claiming a newer pane.
+          const queuedNewChat=newSession(false, {{
+            _paneNavigationGeneration:_paneNavigationGeneration,
+          }});
           for(let i=0;i<20;i++)await Promise.resolve();
           const createStartedBeforeProfileSettled=createCalls>0;
           profileSwitch.resolve({{

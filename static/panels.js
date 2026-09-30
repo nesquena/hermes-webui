@@ -7036,15 +7036,21 @@ function _openProfileSwitchSessionBrowser(){
 
 async function switchToProfile(name) {
   const contextIntent=arguments[1];
+  let paneNavigationGeneration=arguments[2]!=null?arguments[2]
+    :(typeof _paneNavigationGeneration==='number'?_paneNavigationGeneration:null);
   // A direct profile choice claims the pane when requested, even if its
   // serialized context work must wait for an older New Chat to settle.
   // Sidebar opens already carry their own pane claim into the profile switch.
   if(!contextIntent
     &&!(typeof _profileSwitchOpeningExistingSession!=='undefined'&&_profileSwitchOpeningExistingSession)
     &&name&&name!==S.activeProfile&&typeof _claimPaneNavigation==='function'){
-    _claimPaneNavigation();
+    paneNavigationGeneration=_claimPaneNavigation();
   }
+  const ownsPane=()=>paneNavigationGeneration===null
+    ||_paneNavigationClaimIsCurrent(paneNavigationGeneration);
   return _runContextTransition('profile-switch',contextIntent,async intent=>{
+  // Keep the authority captured at click time; queue admission cannot renew it.
+  if(!ownsPane()) return false;
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -7152,6 +7158,7 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if(!ownsPane()) return false;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7262,8 +7269,10 @@ async function switchToProfile(name) {
             model: S.session.model,
             model_provider: S.session.model_provider||null,
           })});
+          if(!ownsPane()) return false;
           S.session.workspace = data.default_workspace;
         } catch (_) {}
+        if(!ownsPane()) return false;
       }
     }
 
@@ -7279,14 +7288,19 @@ async function switchToProfile(name) {
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!ownsPane()) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false, contextTransition:intent});
-      if (_switchGen !== _profileSwitchGeneration) return false;
+      const newSessionResult=await newSession(false, {
+        awaitWorkspaceLoad: workspaceVisible, worktree:false, contextTransition:intent,
+        _paneNavigationGeneration:paneNavigationGeneration,
+      });
+      if(_newSessionResultWasSuperseded(newSessionResult)
+        ||_switchGen!==_profileSwitchGeneration||!ownsPane()) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -7301,6 +7315,7 @@ async function switchToProfile(name) {
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!ownsPane()) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7323,7 +7338,8 @@ async function switchToProfile(name) {
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!ownsPane()) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
@@ -7331,6 +7347,7 @@ async function switchToProfile(name) {
       if (S.session && S.session.workspace) {
         const dirLoad = loadDir('.');
         if (workspaceVisible) await dirLoad;
+        if(!ownsPane()) return false;
       } else if (typeof clearWorkspaceTreeSkeleton === 'function') {
         // New profile has no bound workspace — clear the up-front skeleton so it
         // doesn't strand (#4662 Opus gate).
@@ -7340,6 +7357,7 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
+    if(!ownsPane()) return false;
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 
