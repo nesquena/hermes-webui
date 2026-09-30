@@ -100,7 +100,8 @@ def test_configured_mistral_key_becomes_selectable_and_savable(
            "model": {"provider": "mistralai"}}
     if ambient_mistral_key is not None:
         monkeypatch.setenv("MISTRAL_API_KEY", ambient_mistral_key)
-    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    else:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
     monkeypatch.setattr(providers, "_thread_local_env_value", lambda _name, default="": default)
     monkeypatch.setattr(providers, "_load_env_file", lambda _path: {})
@@ -125,9 +126,72 @@ def test_configured_mistral_key_becomes_selectable_and_savable(
 
 
 def test_session_restore_preserves_established_provider_ids():
-    for provider in ("ollama", "google", "x-ai", "qwen", "custom", "custom:local", "unknown"):
+    assert routes._clean_session_model_provider("unknown_provider") == "unknown_provider"
+    for provider in ("", "default", "@", "@:"):
+        assert routes._clean_session_model_provider(provider) is None
+    for provider in (
+        "ollama",
+        "google",
+        "x-ai",
+        "qwen",
+        "custom",
+        "custom:local",
+        "custom:my_proxy",
+        "unknown",
+    ):
         assert routes._clean_session_model_provider(provider) == provider
+    assert routes._clean_session_model_provider(
+        "@custom:my_proxy:vendor/model"
+    ) == "custom:my_proxy"
     assert routes._clean_session_model_provider("mistralai") == "mistral"
+
+
+def test_session_restore_preserves_underscore_custom_provider_metadata(monkeypatch):
+    cfg = {
+        "model": {"provider": "anthropic", "default": "claude-sonnet-4-6"},
+        "custom_providers": [
+            {
+                "name": "my_proxy",
+                "base_url": "https://my-proxy.example/v1",
+                "api_key": "my-proxy-key",
+                "models": {"vendor/model": {"context_length": 8192}},
+            },
+            {
+                "name": "another_proxy",
+                "base_url": "https://another-proxy.example/v1",
+                "api_key": "another-proxy-key",
+                "models": {"other/other-model": {"context_length": 2048}},
+            },
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", cfg)
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    session = SimpleNamespace(
+        model="model", model_provider="custom:my_proxy", profile=None
+    )
+
+    provider = routes._resolve_effective_session_model_provider_for_display(session)
+    model = routes._resolve_effective_session_model_for_display(session)
+    assert provider == "custom:my_proxy"
+    assert model == "vendor/model"
+
+    resolved = routes._session_context_length_lookup_state(model, provider)
+    assert resolved == (
+        "vendor/model",
+        "custom:my_proxy",
+        "https://my-proxy.example/v1",
+        "my-proxy-key",
+    )
+    metadata = routes._context_length_lookup_inputs_for_model(
+        model,
+        provider,
+        base_url=resolved[2],
+        api_key=resolved[3],
+        cfg=cfg,
+    )
+    assert metadata.config_context_length == 8192
+    assert metadata.base_url == "https://my-proxy.example/v1"
+    assert metadata.api_key == "my-proxy-key"
 
 
 def test_provider_cards_keep_google_and_gemini_separate(monkeypatch, tmp_path):
@@ -615,11 +679,15 @@ def test_catalog_endpoint_uses_canonical_equivalent_key_not_custom_key(monkeypat
     config.invalidate_models_cache()
 
     config.get_available_models(force_refresh=True)
-    assert calls == [(
+    mistral_calls = [
+        call for call in calls if call[0] == "https://proxy.example/v1/models"
+    ]
+    assert mistral_calls == [(
         "https://proxy.example/v1/models",
         "Bearer legacy-mistral-key",
         5.0,
     )]
+    assert all(authorization != "Bearer wrong-custom-key" for _, authorization, _ in calls)
 
 
 def test_live_models_never_forwards_another_provider_key(monkeypatch):
