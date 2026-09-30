@@ -12,7 +12,6 @@ import api.config as config
 from api.config import (
     _parse_provider_qualified_model_id,
     model_with_provider_context,
-    resolve_model_provider,
 )
 from api.routes import _clean_session_model_provider, _split_provider_qualified_model
 
