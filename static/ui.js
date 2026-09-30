@@ -19625,7 +19625,7 @@ function _mediaPreviewErrorKey(error,fallbackKey){
 }
 
 function _mediaPreviewAllowsDownload(errorKey){
-  return errorKey!=='media_preview_forbidden'&&errorKey!=='media_preview_not_found';
+  return errorKey!=='media_preview_unauthorized'&&errorKey!=='media_preview_forbidden'&&errorKey!=='media_preview_not_found';
 }
 
 function _requireMediaResponse(response){
@@ -19936,7 +19936,8 @@ function loadPdfInline(container){
           const fileHtml=_mediaPreviewAllowsDownload(errorKey)
             ? `<a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
             : esc(fname);
-          el.outerHTML=`<div class="pdf-preview-fallback">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
+          const errorClass=_mediaPreviewAllowsDownload(errorKey)?'pdf-preview-fallback':'diff-inline-error';
+          el.outerHTML=`<div class="${errorClass}">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
         });
     };
     if(_pdfjsReady){
@@ -19997,7 +19998,8 @@ function loadHtmlInline(container){
         const fileHtml=_mediaPreviewAllowsDownload(errorKey)
           ? `<a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
           : esc(fname);
-        el.outerHTML=`<div class="html-preview-fallback">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
+        const errorClass=_mediaPreviewAllowsDownload(errorKey)?'html-preview-fallback':'diff-inline-error';
+        el.outerHTML=`<div class="${errorClass}">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
       });
   });
 }

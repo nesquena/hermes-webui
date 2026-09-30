@@ -167,7 +167,7 @@ process.stdout.write(JSON.stringify({{keys,networkKey,ok}}));
     }
 
 
-def test_unavailable_media_download_policy_only_blocks_forbidden_and_missing():
+def test_unavailable_media_download_policy_blocks_all_access_errors():
     allows_download = _function_source("_mediaPreviewAllowsDownload")
     result = _run_node(f"""
 {allows_download}
@@ -180,7 +180,7 @@ const keys=[
 const allowed=keys.map(key=>_mediaPreviewAllowsDownload(key));
 process.stdout.write(JSON.stringify({{allowed}}));
 """)
-    assert result == {"allowed": [True, False, False, True]}
+    assert result == {"allowed": [False, False, False, True]}
 
 
 @pytest.mark.parametrize(
@@ -259,7 +259,7 @@ setTimeout(()=>process.stdout.write(JSON.stringify({{html:el.outerHTML}})),0);
     [
         ("403", "FORBIDDEN", False),
         ("404", "NOT FOUND", False),
-        ("401", "UNAUTHORIZED", True),
+        ("401", "UNAUTHORIZED", False),
         ("network", "FORMAT ERROR", True),
     ],
 )
@@ -294,6 +294,8 @@ setTimeout(()=>process.stdout.write(JSON.stringify({{html:el.outerHTML}})),0);
     result = _run_node(script)
     html = result["html"]
     assert expected_message in html
+    if not should_link:
+        assert 'class="diff-inline-error"' in html
     assert escaped_fname in html
     assert raw_fname not in html
     if should_link:
