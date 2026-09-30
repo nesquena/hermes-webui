@@ -130,13 +130,19 @@ def locale_block(locale: str) -> str:
 
 
 def locale_key_names(locale: str) -> set[str]:
-    return set(re.findall(r"^\s{2,}([A-Za-z_$][A-Za-z0-9_$]*):", locale_block(locale), re.MULTILINE))
+    keys = re.findall(
+        r"^\s{2,}(?:([A-Za-z_$][A-Za-z0-9_$]*)|['\"]((?:\\.|[^'\"\\])+?)['\"]):",
+        locale_block(locale),
+        re.MULTILINE,
+    )
+    return {plain or quoted for plain, quoted in keys}
 
 
 def locale_string_value(locale: str, key: str) -> str | None:
     block = locale_block(locale)
+    key_pattern = rf"""(?:\b{re.escape(key)}\b|['"]{re.escape(key)}['"])"""
     for quote in ("'", '"'):
-        pattern = rf"\b{re.escape(key)}:\s*{quote}((?:\\.|[^{quote}\\])*){quote}"
+        pattern = rf"{key_pattern}:\s*{quote}((?:\\.|[^{quote}\\])*){quote}"
         match = re.search(pattern, block)
         if match:
             return match.group(1)
