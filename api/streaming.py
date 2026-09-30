@@ -14333,10 +14333,17 @@ def _run_agent_streaming(
 _LOCAL_STEERABLE_PHASES = frozenset({"starting", "running"})
 
 
+# Sentinel returned by _steer_bound_stream when gateway ownership is proven and
+# the real delivery attempt must happen OUTSIDE the registry locks (HTTP write).
+_GATEWAY_STEER_PENDING = "_gateway_steer_pending"
+
+
 def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
     """Deliver to a verified live worker; None retains cache-only compatibility.
 
     Never perform HTTP writes or cache/database teardown under stream locks.
+    A gateway-owned stream returns _GATEWAY_STEER_PENDING for the caller to
+    attempt delivery via _steer_gateway_or_queue outside the locks.
     """
     from api import config as cfg
 
@@ -14352,7 +14359,7 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
                     or owner != sid or run.get("session_id") != sid
                     or run.get("phase") == "cancelling"):
                 return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
-            return {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": stream_id}
+            return {_GATEWAY_STEER_PENDING: True, "stream_id": stream_id}
         if (stream_id in cfg.STREAMS and owner == sid
                 and run.get("session_id") == sid
                 and run.get("backend") == WEBUI_LOCAL_CHAT_BACKEND
@@ -14380,6 +14387,36 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
             logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
             return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
         return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
+
+
+def _steer_gateway_or_queue(sid: str, stream_id: str, text: str) -> dict:
+    """Try real gateway steering first; fall back to the client-side queue.
+
+    The gateway's Runs API accepts guidance for a RUNNING run mid-turn
+    (``agent.steer()`` applies it at the next tool-result boundary). Only when
+    the endpoint refuses or is unreachable does the client-side queue take
+    over, exactly as before. Never called under a registry lock: the HTTP
+    write happens outside STREAMS_LOCK/ACTIVE_RUNS_LOCK.
+    """
+    try:
+        from api.gateway_chat import gateway_run_id_for_stream, steer_gateway_run
+    except Exception:
+        logger.debug("gateway steer imports failed for session %s", sid, exc_info=True)
+        return {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": stream_id}
+    run_id = gateway_run_id_for_stream(stream_id)
+    if not run_id:
+        # No admitted run id yet (or a reattached-era stream): queue as before.
+        return {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": stream_id}
+    outcome = steer_gateway_run(run_id, text)
+    if outcome.get("accepted"):
+        return {"accepted": True, "fallback": None, "stream_id": stream_id}
+    logger.info(
+        "Gateway steer not delivered for session=%s run=%s (%s); queueing instead",
+        sid,
+        run_id,
+        outcome.get("error"),
+    )
+    return {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": stream_id}
 
 
 def _handle_chat_steer(handler, body: dict) -> bool:
@@ -14429,6 +14466,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if stream_id:
         result = _steer_bound_stream(sid, stream_id, text)
         if result is not None:
+            if result.get(_GATEWAY_STEER_PENDING):
+                # Gateway-owned: attempt real delivery outside the locks.
+                return j(handler, _steer_gateway_or_queue(sid, stream_id, text))
             return j(handler, result)
 
     with _cfg.SESSION_AGENT_CACHE_LOCK:
@@ -14449,8 +14489,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                     with _cfg.ACTIVE_RUNS_LOCK:
                         active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
                     if active_run.get("backend") == "gateway":
-                        return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
-                                           "stream_id": active_stream_id})
+                        return j(handler, _steer_gateway_or_queue(sid, active_stream_id, text))
                 except Exception:
                     logger.warning(
                         "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
@@ -14510,7 +14549,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                 backend = run.get("backend")
                 if backend == "gateway":
                     # Gateway owns transport; a local cache object is never steered.
-                    result = {"accepted": False, "fallback": "gateway_steer_queued",
+                    # Delivery is attempted after the locks, by the caller below.
+                    result = {_GATEWAY_STEER_PENDING: True,
                               "stream_id": active_stream_id}
                 elif backend == WEBUI_LOCAL_CHAT_BACKEND and run.get("phase") == "finalizing":
                     result = {"accepted": False, "fallback": "not_running",
@@ -14526,6 +14566,11 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                     else:
                         result = {"accepted": accepted, "fallback": None,
                                   "stream_id": active_stream_id}
+
+    if result.get(_GATEWAY_STEER_PENDING):
+        # Resolve the sentinel outside the locks: attempt real gateway
+        # delivery, falling back to the client-side queue as before.
+        result = _steer_gateway_or_queue(sid, result.get("stream_id"), text)
 
     return j(handler, result)
 

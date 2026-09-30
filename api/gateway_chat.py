@@ -52,6 +52,15 @@ GATEWAY_RUN_ID_WAIT_TIMEOUT = 5.0
 _STREAM_ENDPOINTS: dict[str, tuple[str, str]] = {}
 
 
+def gateway_run_id_for_stream(stream_id: str) -> str | None:
+    """Best-effort gateway run id for a stream; None before admission."""
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    with _STREAM_RUN_STARTING_CONDITION:
+        return str(_STREAM_RUN_IDS.get(stream_id) or "").strip() or None
+
+
 def gateway_run_endpoint(run_id: str) -> tuple[str, str]:
     """URL and key of the Gateway that owns run_id; the process Gateway if no live stream holds it."""
     run_id = str(run_id or "").strip()
@@ -858,6 +867,38 @@ def stop_gateway_run(run_id: str) -> bool:
     except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
         logger.debug("Gateway stop failed for run %s", run_id, exc_info=True)
         return False
+
+
+def steer_gateway_run(run_id: str, text: str) -> dict:
+    """POST /v1/runs/{id}/steer; report whether the gateway accepted the guidance."""
+    run_id = str(run_id or "").strip()
+    text = str(text or "").strip()
+    if not run_id or not text:
+        return {"accepted": False, "error": "invalid_request"}
+    base_url, api_key = gateway_run_endpoint(run_id)
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    body = json.dumps({"input": text}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/v1/runs/{urllib.parse.quote(run_id, safe='')}/steer",
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+            if 200 <= status < 300:
+                return {"accepted": True, "error": None}
+            return {"accepted": False, "error": f"gateway_steer_status_{status}"}
+    except urllib.error.HTTPError as exc:
+        # 409 = the run exists but is between turns / finalizing: the steer was
+        # not delivered; the caller decides whether to queue instead.
+        return {"accepted": False, "error": f"gateway_steer_status_{exc.code}"}
+    except (urllib.error.URLError, OSError, ValueError):
+        logger.debug("Gateway steer failed for run %s", run_id, exc_info=True)
+        return {"accepted": False, "error": "gateway_unreachable"}
 
 
 _GATEWAY_RUN_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
