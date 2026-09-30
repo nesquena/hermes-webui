@@ -368,9 +368,16 @@ def test_environment_detection_respects_roster_authentication_matrix(monkeypatch
 def test_catalog_preserves_webui_active_provider_ids(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
     monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid: False)
     _install_hermes_modules(monkeypatch)
 
-    expected = {"google": "google", "x-ai": "x-ai", "qwen": "qwen", "mistralai": "mistral"}
+    expected = {
+        "google": "google",
+        "x-ai": "x-ai",
+        "qwen": "qwen",
+        "mistralai": "mistral",
+        "custom:my_proxy": "custom:my_proxy",
+    }
     for raw_provider, expected_provider in expected.items():
         cfgfile = tmp_path / f"{raw_provider}.yaml"
         cfgfile.write_text(
@@ -382,6 +389,40 @@ def test_catalog_preserves_webui_active_provider_ids(monkeypatch, tmp_path):
         config.invalidate_models_cache()
         catalog = config.get_available_models(force_refresh=True)
         assert catalog["active_provider"] == expected_provider
+        for static_builder in (
+            config._minimal_static_models_catalog,
+            config._static_models_catalog_without_live_probes,
+        ):
+            static_catalog = static_builder()
+            assert static_catalog["active_provider"] == expected_provider
+            assert any(
+                group.get("provider_id") == expected_provider
+                for group in static_catalog["groups"]
+            )
+
+    auth_path = tmp_path / "auth.json"
+    cfgfile = tmp_path / "auth-fallback.yaml"
+    cfgfile.write_text("model:\n  default: test-model\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    for raw_provider, expected_provider in expected.items():
+        auth_path.write_text(
+            f'{{"active_provider":"{raw_provider}"}}',
+            encoding="utf-8",
+        )
+        config.reload_config()
+        config.invalidate_models_cache()
+        live_catalog = config.get_available_models(force_refresh=True)
+        assert live_catalog["active_provider"] == expected_provider
+        for static_builder in (
+            config._minimal_static_models_catalog,
+            config._static_models_catalog_without_live_probes,
+        ):
+            static_catalog = static_builder()
+            assert static_catalog["active_provider"] == expected_provider
+            assert any(
+                group.get("provider_id") == expected_provider
+                for group in static_catalog["groups"]
+            )
 
 
 def test_catalog_merges_canonical_and_legacy_provider_models(monkeypatch, tmp_path):

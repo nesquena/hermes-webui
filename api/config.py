@@ -1635,6 +1635,19 @@ def _canonicalise_provider_id(name: object) -> str:
     return raw
 
 
+def _webui_catalog_provider_id(
+    provider: object,
+    config_obj: dict | None = None,
+    *,
+    base_url: object = None,
+) -> str:
+    named_slug = _named_custom_provider_slug_for_provider(provider, config_obj)
+    canonical = named_slug or _canonicalise_provider_id(provider)
+    if canonical == "custom" and base_url:
+        return _named_custom_provider_slug_for_base_url(base_url, config_obj) or canonical
+    return canonical
+
+
 def _canonical_provider_config_keys(config_obj: dict | None, provider: object) -> list[str]:
     """Return raw provider-config keys equivalent to a WebUI provider id."""
     providers_cfg = (config_obj or {}).get("providers", {}) if isinstance(config_obj, dict) else {}
@@ -7195,7 +7208,7 @@ def _minimal_static_models_catalog() -> dict:
             cfg_base_url = model_cfg.get("base_url", "") or ""
         if active_provider:
             try:
-                active_provider = _resolve_configured_provider_id(
+                active_provider = _webui_catalog_provider_id(
                     active_provider, cfg, base_url=cfg_base_url
                 )
             except Exception:
@@ -7206,7 +7219,7 @@ def _minimal_static_models_catalog() -> dict:
                 if _ap.exists():
                     _store = json.loads(_ap.read_text(encoding="utf-8"))
                     active_provider = (
-                        _resolve_configured_provider_id(
+                        _webui_catalog_provider_id(
                             _store.get("active_provider"), cfg, base_url=cfg_base_url
                         )
                         or None
@@ -7258,7 +7271,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             cfg_base_url = model_cfg.get("base_url", "") or ""
         if active_provider:
             try:
-                active_provider = _resolve_configured_provider_id(
+                active_provider = _webui_catalog_provider_id(
                     active_provider,
                     cfg,
                     base_url=cfg_base_url,
@@ -7273,7 +7286,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                 auth_store = json.loads(auth_store_path.read_text(encoding="utf-8"))
                 if not active_provider:
                     active_provider = (
-                        _resolve_configured_provider_id(
+                        _webui_catalog_provider_id(
                             auth_store.get("active_provider"),
                             cfg,
                             base_url=cfg_base_url,
@@ -8970,13 +8983,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # user-facing name from config.yaml (``provider: ollama-local``) and
         # route it through the same ``custom:<name>`` slug the picker emits.
         if active_provider:
-            _named_provider = _named_custom_provider_slug_for_provider(active_provider, cfg)
-            active_provider = _named_provider or _canonicalise_provider_id(active_provider)
-            if active_provider == "custom" and cfg_base_url:
-                active_provider = (
-                    _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
-                    or active_provider
-                )
+            active_provider = _webui_catalog_provider_id(
+                active_provider, cfg, base_url=cfg_base_url
+            )
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
         auth_store = {}
@@ -8988,13 +8997,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
                 if not active_provider:
                     _stored_provider = auth_store.get("active_provider")
-                    _named_provider = _named_custom_provider_slug_for_provider(_stored_provider, cfg)
-                    active_provider = _named_provider or _canonicalise_provider_id(_stored_provider)
-                    if active_provider == "custom" and cfg_base_url:
-                        active_provider = (
-                            _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
-                            or active_provider
-                        )
+                    active_provider = _webui_catalog_provider_id(
+                        _stored_provider, cfg, base_url=cfg_base_url
+                    )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
 
