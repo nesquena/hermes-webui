@@ -12142,6 +12142,18 @@ def _unwrap_state_db_steer_row(msg, display_kind=None):
     touched, and anything that is not exactly one complete frame is preserved
     byte-for-byte — matching ``api.streaming._unwrap_steer_row_oob_marker``.
 
+    The frame is a **trust boundary marker**: the Agent's own system note
+    (``STEER_CHANNEL_NOTE``) tells the model to trust only that exact shape, so
+    the raw bytes must survive for model-facing callers.  This therefore uses
+    the same display/provider split the sidecar path uses (#7600's own test file
+    asserts ``session.context_messages`` is marker-free): the unwrapped text
+    lands in ``content`` for rendering, and the original framed bytes are moved
+    into the durable provider-facing sidecar ``api_content`` — which the Agent
+    substitutes back over ``content`` at API-build time
+    (``turn_context.substitute_api_content``) exactly when no provider value was
+    already recorded.  The sidecar is only written when this row owns the raw
+    frame; a row that already carries provider bytes is never overwritten.
+
     Mutates ``msg`` in place; returns True when the row was a steer row.
     """
     if not isinstance(msg, dict):
@@ -12154,7 +12166,12 @@ def _unwrap_state_db_steer_row(msg, display_kind=None):
     except Exception:
         return False
     msg.setdefault('display_kind', 'steer')
+    raw_content = msg.get('content')
     _unwrap_steer_row_oob_marker(msg)
+    if msg.get('content') is not raw_content:
+        existing_api_content = msg.get('api_content')
+        if not (isinstance(existing_api_content, str) and existing_api_content):
+            msg['api_content'] = raw_content
     return True
 
 
@@ -12610,34 +12627,48 @@ def get_state_db_session_message_keys_before_timestamp(
             if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
                 return None
             api_content_select = ", api_content" if "api_content" in available else ""
+            display_kind_select = ", display_kind" if "display_kind" in available else ""
             cur.execute(
                 f"""
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
-                    tool_calls{api_content_select}
+                    tool_calls{api_content_select}{display_kind_select}
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
                 ORDER BY timestamp ASC, id ASC
                 """,
                 (str(sid), before_ts),
             )
-            return [
-                _session_message_visible_key(
-                    {
-                        "role": row["role"],
-                        # Same guarded decode as the projected tail: prefix and
-                        # tail keys must share one representation or the
-                        # prefix/tail collision proof can miss a genuine
-                        # repeated recovered turn.
-                        "content": _decode_state_db_content(row["content"]),
-                        "tool_calls": _json_loads_if_string(row["tool_calls"]),
-                        "api_content": row["api_content"] if "api_content" in available else None,
-                    },
-                    normalize_workspace_prefix=True,
+            prefix_keys = []
+            for row in cur.fetchall():
+                # #7600: the same steer projection the canonical reader applies
+                # (``_unwrap_state_db_steer_row``), so the prefix identity is
+                # taken from the unwrapped ``content`` plus the raw frame's
+                # ``api_content`` sidecar, exactly like the projected tail.
+                # Without this, a settled steer below the floor keys on its
+                # transport frame and every optimized read falls back.
+                key_msg = {
+                    "role": row["role"],
+                    # Same guarded decode as the projected tail: prefix and
+                    # tail keys must share one representation or the
+                    # prefix/tail collision proof can miss a genuine
+                    # repeated recovered turn.
+                    "content": _decode_state_db_content(row["content"]),
+                    "tool_calls": _json_loads_if_string(row["tool_calls"]),
+                    "api_content": row["api_content"] if "api_content" in available else None,
+                }
+                _unwrap_state_db_steer_row(
+                    key_msg,
+                    row["display_kind"] if "display_kind" in available else None,
                 )
-                for row in cur.fetchall()
-            ]
+                prefix_keys.append(
+                    _session_message_visible_key(
+                        key_msg,
+                        normalize_workspace_prefix=True,
+                    )
+                )
+            return prefix_keys
     except Exception:
         return None
 

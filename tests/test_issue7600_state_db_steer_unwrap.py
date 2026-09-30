@@ -44,8 +44,28 @@ STEER_TEXT = "use the staging bucket this time"
 WRAPPED = f"{OPEN}\n{STEER_TEXT}\n{CLOSE}"
 
 
-def _contains_oob(value) -> bool:
-    return "OUT-OF-BAND USER MESSAGE" in json.dumps(value, default=str)
+def _display_leaks_oob(messages) -> bool:
+    """True when the RENDERED text (``content`` only) still carries the raw
+    transport frame.
+
+    ``api_content`` is a durable provider-facing sidecar that legitimately
+    keeps the raw framed bytes (see
+    ``tests/test_issue7600_state_db_steer_model_facing.py``), so a whole-row
+    scan cannot be used here — the display contract is about ``content``.
+    """
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        if "OUT-OF-BAND USER MESSAGE" in str(m.get("content") or ""):
+            return True
+        content = m.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and "OUT-OF-BAND USER MESSAGE" in str(
+                    part.get("text") or ""
+                ):
+                    return True
+    return False
 
 
 def _make_state_db(path: Path, sid: str, rows) -> None:
@@ -144,7 +164,7 @@ def test_state_db_projection_unwraps_typed_steer_row(monkeypatch, tmp_path):
 
     rows = models.get_state_db_session_messages(sid)
 
-    assert not _contains_oob(rows), (
+    assert not _display_leaks_oob(rows), (
         "raw [OUT-OF-BAND USER MESSAGE] wrapper leaked from the state.db "
         "projection into the display transcript"
     )
@@ -169,7 +189,7 @@ def test_state_db_only_session_reconciles_to_a_clean_display_list(monkeypatch, t
 
     display = models.reconciled_state_db_messages_for_session(session)
 
-    assert not _contains_oob(display), (
+    assert not _display_leaks_oob(display), (
         "the reconciled display list re-surfaced the raw steer wrapper"
     )
     steer_rows = [r for r in display if r.get("role") == "user" and STEER_TEXT in str(r.get("content") or "")]
@@ -300,7 +320,7 @@ def test_session_get_returns_clean_steer_row_for_cli_session(monkeypatch, tmp_pa
     assert handler.status == 200
     messages = handler.response_json["session"]["messages"]
 
-    assert not _contains_oob(messages), (
+    assert not _display_leaks_oob(messages), (
         "GET /api/session still renders the raw [OUT-OF-BAND USER MESSAGE] wrapper"
     )
     steer_rows = [m for m in messages if m.get("role") == "user" and STEER_TEXT in str(m.get("content") or "")]
