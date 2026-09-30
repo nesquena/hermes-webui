@@ -8373,6 +8373,18 @@ def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None
         return None
 
 
+def _touch_models_cache_mtime(cache_path: Path | None = None) -> bool:
+    """Update mtime of the on-disk models cache to keep sliding freshness active (#7723)."""
+    try:
+        path = cache_path or _get_models_cache_path()
+        if path.is_file():
+            os.utime(path, None)
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def warm_models_catalog_provenance_if_cold() -> None:
     """Best-effort, NON-BLOCKING, disk-only publish of catalog provenance.
 
@@ -8490,6 +8502,7 @@ def get_available_models_for_session_visit() -> dict:
             cached = _get_fresh_memory_models_cache(now_mono)
             if cached is not None:
                 _mark("memory_cache_hit")
+                _touch_models_cache_mtime(cache_path)
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
         _mark("memory_cache_miss_loading_disk")
@@ -8499,6 +8512,7 @@ def get_available_models_for_session_visit() -> dict:
                 cached = _get_fresh_memory_models_cache(time.monotonic())
                 if cached is not None:
                     _mark("disk_then_memory_cache_hit")
+                    _touch_models_cache_mtime(cache_path)
                     _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                     return cached
                 _available_models_cache = copy.deepcopy(disk_cached)
@@ -8506,6 +8520,7 @@ def get_available_models_for_session_visit() -> dict:
                 _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
                 _sync_models_cache_provenance()
             _mark("disk_cache_returned")
+            _touch_models_cache_mtime(cache_path)
             _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
             return copy.deepcopy(disk_cached)
 
