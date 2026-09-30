@@ -1613,6 +1613,9 @@ def _canonicalise_provider_id(name: object) -> str:
         return ""
     if raw.startswith("custom:"):
         return raw
+    # Registered plugin slugs are WebUI identities, not built-in aliases.
+    if _is_plugin_model_provider(raw):
+        return raw
     raw = raw.replace("_", "-")
     # xAI is a WebUI-owned ``x-ai`` provider. Keep dotted and display-name
     # spellings in that namespace before adapting to the Agent alias later.
