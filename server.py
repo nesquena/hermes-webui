@@ -112,7 +112,7 @@ from api.helpers import (
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import (
     handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers,
-    _raw_peer_is_trusted_proxy, _forwarded_client_ip_from_trusted_proxy,
+    _extract_log_ips,
 )
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
@@ -350,26 +350,7 @@ class Handler(BaseHTTPRequestHandler):
         """Structured JSON logs for each request."""
         import json as _json
         duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
-        remote = '-'
-        try:
-            if getattr(self, 'client_address', None):
-                remote = str(self.client_address[0])
-        except Exception:
-            remote = '-'
-        forwarded_for = None
-        try:
-            forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
-        except Exception:
-            forwarded_for = None
-
-        client_ip = remote
-        try:
-            if remote != '-' and _raw_peer_is_trusted_proxy(self):
-                resolved = _forwarded_client_ip_from_trusted_proxy(self)
-                client_ip = resolved if resolved else '-'
-        except Exception:
-            client_ip = remote
-
+        remote, client_ip, forwarded_for = _extract_log_ips(self)
         record_data = {
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'remote': remote,

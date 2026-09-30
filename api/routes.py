@@ -6384,6 +6384,32 @@ def _forwarded_client_ip_from_trusted_proxy(handler):
     return _request_client_ip(handler)
 
 
+def _extract_log_ips(handler) -> tuple[str, str, str | None]:
+    """Extract (remote, client_ip, forwarded_for) for structured request logging.
+    
+    Forwarded headers are resolved to client_ip only when raw socket peer is a trusted proxy.
+    """
+    remote = '-'
+    try:
+        if getattr(handler, 'client_address', None):
+            remote = str(handler.client_address[0])
+    except Exception:
+        remote = '-'
+    forwarded_for = None
+    try:
+        forwarded_for = (handler.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
+    except Exception:
+        forwarded_for = None
+    client_ip = remote
+    try:
+        if remote != '-' and _raw_peer_is_trusted_proxy(handler):
+            resolved = _forwarded_client_ip_from_trusted_proxy(handler)
+            client_ip = resolved if resolved else '-'
+    except Exception:
+        client_ip = remote
+    return remote, client_ip, forwarded_for
+
+
 def _onboarding_request_is_local(handler) -> bool:
     """Return True when an unauthenticated onboarding request is local/private.
 
