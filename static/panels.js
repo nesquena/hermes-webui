@@ -9561,7 +9561,8 @@ async function _autosavePreferencesSettings(payload){
   try{
     const selector=$('settingsLanguage');
     const requestedLanguage=(selector&&selector.value)||((typeof getActiveLocale==='function')?getActiveLocale():(payload&&payload.language));
-    const localeCommit=await _commitSettingsLocale(requestedLanguage,selector,payload);
+    // Same-locale autosaves must not supersede a model save awaiting its Settings POST.
+    const localeCommit=await _commitSettingsLocale(requestedLanguage,selector,payload,true);
     if(!localeCommit) return;
     if(payload) payload={...payload,language:localeCommit.active};
     const settingsLocaleGeneration=localeCommit.generation;
@@ -9704,8 +9705,12 @@ function _reconcileSettingsLocaleSelector(selector,result){
   return true;
 }
 
-async function _commitSettingsLocale(requested,selector,payload){
-  const result=await _settleSettingsLocale(requested,selector);
+async function _commitSettingsLocale(requested,selector,payload,skipSameActive){
+  const activeBefore=(typeof getActiveLocale==='function')?getActiveLocale():'en';
+  const resolvedRequested=(typeof resolveLocale==='function')?resolveLocale(requested||'en'):(requested||'en');
+  const result=skipSameActive&&resolvedRequested===activeBefore
+    ? {status:'applied',requested:resolvedRequested,active:activeBefore,fallback:false,generation:(typeof getLocaleActivationGeneration==='function')?getLocaleActivationGeneration():undefined}
+    : await _settleSettingsLocale(requested,selector);
   if(result&&result.status==='superseded') return null;
   const generation=result&&result.generation;
   if(!_settingsLocaleCommitIsCurrent(generation)) return null;
@@ -10052,7 +10057,6 @@ async function loadSettingsPanel(){
     // Keep settings modal and current page strings in sync with the resolved locale.
     const settingsLanguageSelector=document.getElementById('settingsLanguage');
     const localeResult=await _settleSettingsLocale(resolvedLanguage,settingsLanguageSelector);
-    const localeSettlementCurrent=_settingsLocaleSettlementIsCurrent(localeResult);
     // Populate model dropdown from /api/models + live model fetch (#872)
     const modelSel=$('settingsModel');
     if(modelSel){
@@ -10119,7 +10123,7 @@ async function loadSettingsPanel(){
           langSel.appendChild(opt);
         }
       }
-      if(localeSettlementCurrent) langSel.value=pendingLanguage||getActiveLocale();
+      langSel.value=pendingLanguage||getActiveLocale();
       langSel.addEventListener('change',async function(){
         await _settleSettingsLocale(this.value,this);
         _schedulePreferencesAutosave();
