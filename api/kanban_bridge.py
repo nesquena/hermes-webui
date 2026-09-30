@@ -429,21 +429,32 @@ def _patch_task(conn, task_id: str, body: dict):
             "Cannot set status to 'running' directly; use the dispatcher/claim path"
         )
     elif status == "ready":
-        # If the task is currently 'blocked', use the structured unblock
-        # verb so the unblocked event fires. Otherwise it's a legitimate
+        # If the task is currently 'blocked' or 'scheduled', use the structured unblock
+        # verb so parent re-gating and events fire correctly. Otherwise it's a legitimate
         # drag-drop or click move (e.g. todo → ready, running → ready when
         # the user yanks a stuck worker back to the queue) and we use the
         # claim-aware direct status write.
         current = kb.get_task(conn, task_id)
         if not current:
             raise LookupError("task not found")
-        if current.status == "blocked":
+        if current.status in ("blocked", "scheduled"):
             if not kb.unblock_task(conn, task_id):
                 raise LookupError("task not found")
         else:
             if not _set_status_direct(conn, task_id, "ready"):
                 raise LookupError("task not found")
-    elif status in ("triage", "todo", "scheduled"):
+    elif status == "scheduled":
+        current = kb.get_task(conn, task_id)
+        if not current:
+            raise LookupError("task not found")
+        if hasattr(kb, "schedule_task"):
+            reason = str(body.get("reason") or "Moved to scheduled via WebUI")
+            if not kb.schedule_task(conn, task_id, reason=reason):
+                raise ValueError(f"cannot schedule task from status: {current.status}")
+        else:
+            if not _set_status_direct(conn, task_id, "scheduled"):
+                raise LookupError("task not found")
+    elif status in ("triage", "todo"):
         # Direct status write for drag-drop moves between non-running,
         # non-terminal columns. Uses the claim-aware helper that nulls out
         # claim_lock / claim_expires / worker_pid when leaving 'running'

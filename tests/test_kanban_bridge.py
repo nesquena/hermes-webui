@@ -209,11 +209,21 @@ class FakeKanbanDB:
         self._event(task_id, "archived", {})
         return True
 
+    def schedule_task(self, conn, task_id, reason=None):
+        task = self.get_task(conn, task_id)
+        if not task or task.status not in ("todo", "ready", "running", "blocked"):
+            return False
+        task.status = "scheduled"
+        self._event(task_id, "scheduled", {"reason": reason})
+        return True
+
     def unblock_task(self, conn, task_id):
         task = self.get_task(conn, task_id)
         if not task:
             return False
-        task.status = "ready"
+        parents = self.parent_ids(conn, task_id)
+        unfinished_parents = [p for p in parents if (t := self.get_task(conn, p)) and t.status != "done"]
+        task.status = "todo" if unfinished_parents else "ready"
         self._event(task_id, "unblocked", {})
         return True
 
@@ -1352,4 +1362,44 @@ def test_issue7900_scheduled_column_and_status(monkeypatch):
     assert sched_col is not None, "scheduled column missing from board payload"
     sched_ids = {task["id"] for task in sched_col["tasks"]}
     assert "t_sched" in sched_ids
+
+
+def test_issue7900_schedule_task_refused_for_done(monkeypatch):
+    """Moving a Done task to Scheduled must be refused with ValueError (HTTP 400)."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    done_task = FakeTask("t_done", "Completed card", "done", "bob")
+    fake_kanban.tasks.append(done_task)
+
+    import pytest
+    with pytest.raises(ValueError, match="cannot schedule task from status: done"):
+        with bridge._conn() as conn:
+            bridge._patch_task(conn, "t_done", {"status": "scheduled"})
+
+
+def test_issue7900_scheduled_to_ready_regates_parents(monkeypatch):
+    """Moving Scheduled -> Ready re-gates on parent completion (lands in Todo if parent open)."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+
+    parent = FakeTask("t_parent", "Parent task", "todo", "bob")
+    child = FakeTask("t_child", "Child task", "scheduled", "bob")
+    fake_kanban.tasks.extend([parent, child])
+    fake_kanban.links.append(("t_parent", "t_child"))
+
+    with bridge._conn() as conn:
+        bridge._patch_task(conn, "t_child", {"status": "ready"})
+
+    # Child has unfinished parent, so unblock_task lands it in 'todo'
+    assert child.status == "todo"
+
+    # Now complete the parent
+    parent.status = "done"
+    with bridge._conn() as conn:
+        child.status = "scheduled"
+        bridge._patch_task(conn, "t_child", {"status": "ready"})
+
+    # Child has all parents done, so unblock_task lands it in 'ready'
+    assert child.status == "ready"
+
 
