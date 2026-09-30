@@ -929,17 +929,16 @@ def test_load_session_rearms_stream_on_every_early_return():
     assert "function _rearmActiveSessionStream(" in js, (
         "expected a dedicated idempotent re-arm helper"
     )
-    helper_ix = js.index("function _rearmActiveSessionStream(")
-    helper_src = js[helper_ix:helper_ix + 400]
+    helper_src = _js_function_decl(js, "_rearmActiveSessionStream")
     assert "S.session" in helper_src and "startSessionStream(" in helper_src, (
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )
 
-    # Isolate the loadSession body. Widened window: navigation-ownership guards
-    # and the #4946 visit-ack helpers push the fetch-error catch beyond the old
-    # 16000-char cutoff.
+    # Use the next stable module declaration as the function boundary instead
+    # of a character limit; loadSession's comments include brace-like text.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 22000]
+    fn_end = js.index("const _HANDOFF_THRESHOLD", fn_ix)
+    body = js[fn_ix:fn_end]
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).
@@ -950,7 +949,7 @@ def test_load_session_rearms_stream_on_every_early_return():
     # exit — 3 helper call sites is the floor. (The fetch-error path uses its
     # own `_selfHealedCurrent`-guarded restart, asserted separately below; the
     # rapid-switch post-draft handoff is owned by the newer load's own arming.)
-    assert js.count("_rearmActiveSessionStream()") >= 3, (
+    assert body.count("_rearmActiveSessionStream()") >= 3, (
         "each failed/early-return loadSession exit after stopSessionStream() "
         "must re-arm the on-screen session's stream, else bg_task_complete "
         "delivery dies until a page reload (Greptile P1 r3377162160)"
@@ -963,8 +962,8 @@ def test_load_session_rearms_stream_on_every_early_return():
     # guard when no different in-flight load is running; it's idempotent so
     # the real-switch path is unaffected.
     guard_ix = body.index("currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)")
-    pre_guard = body[max(0, guard_ix - 600):guard_ix]
-    assert "_rearmActiveSessionStream()" in pre_guard, (
+    same_session_setup = body[body.index("const sameSessionForceReload"):guard_ix]
+    assert "_rearmActiveSessionStream()" in same_session_setup, (
         "a re-arm must run before the same-session no-op guard so a "
         "previously-killed stream is revived on re-selecting the session"
     )
@@ -973,7 +972,8 @@ def test_load_session_rearms_stream_on_every_early_return():
     # but guarded against the self-healed-current (404'd) case so it never
     # spins the reconnect loop against a dead session_id.
     catch_ix = body.index("const _selfHealedCurrent")
-    catch_src = body[catch_ix:catch_ix + 2200]
+    catch_end = body.index("\n  if (!data) {", catch_ix)
+    catch_src = body[catch_ix:catch_end]
     assert "!_selfHealedCurrent" in catch_src and "startSessionStream(currentSid)" in catch_src, (
         "fetch-error path must restart the on-screen stream, guarded against "
         "the self-healed-current (deleted/404) session"

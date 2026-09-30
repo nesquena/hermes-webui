@@ -263,7 +263,7 @@ def _load_env_file(env_path: Path) -> dict[str, str]:
 
 def _load_yaml_config(config_path: Path) -> dict:
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return {}
 
@@ -278,7 +278,7 @@ def _load_yaml_config(config_path: Path) -> dict:
 
 def _save_yaml_config(config_path: Path, config: dict) -> None:
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 

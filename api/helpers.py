@@ -3,6 +3,7 @@ Hermes Web UI -- HTTP helper functions.
 """
 import base64 as _base64
 import binascii as _binascii
+import errno
 import functools
 import json as _json
 import logging
@@ -39,6 +40,52 @@ _CLIENT_DISCONNECT_ERRORS = (
     TimeoutError,
     ssl.SSLError,
 )
+
+
+# A peer that vanishes at the *network* layer (a phone that left the LAN, a
+# Tailscale peer that dropped, an ARP entry that went stale) surfaces on the
+# next write as a bare OSError carrying a routing errno — most commonly
+# EHOSTUNREACH ("No route to host"). Those are not BrokenPipe/Reset, so they
+# escape _CLIENT_DISCONNECT_ERRORS and every long-lived SSE strand ends as a
+# 500 + traceback instead of a clean disconnect.
+#
+# OSError itself stays OUT of the tuple on purpose (too broad — it also covers
+# ENOSPC and file errors, see TestClientDisconnectErrorsTuple), so the
+# narrowing lives here, by errno, and is applied by the SSE write helpers.
+_CLIENT_DISCONNECT_ERRNOS = frozenset({
+    errno.EPIPE,
+    errno.ECONNRESET,
+    errno.ECONNABORTED,
+    errno.EHOSTUNREACH,
+    errno.ENETUNREACH,
+    errno.ENETDOWN,
+    errno.EHOSTDOWN,
+    errno.ENOTCONN,
+    errno.ECONNREFUSED,
+    errno.ETIMEDOUT,
+})
+
+
+def _is_client_disconnect_error(exc: BaseException) -> bool:
+    """True when `exc` means "the client is gone", not "the server is broken".
+
+    Narrow by design: the explicit tuple first, then an errno check for the
+    bare-OSError routing failures the tuple deliberately excludes. Anything
+    else (ENOSPC, EACCES, file errors) returns False and still propagates.
+    """
+    if isinstance(exc, _CLIENT_DISCONNECT_ERRORS):
+        return True
+    return isinstance(exc, OSError) and exc.errno in _CLIENT_DISCONNECT_ERRNOS
+
+
+def _as_client_disconnect(exc: OSError) -> ConnectionResetError:
+    """Rebrand a routing-errno OSError as ConnectionResetError.
+
+    The SSE loops in api/routes.py already read `except
+    _CLIENT_DISCONNECT_ERRORS:`, so converting once here fixes every one of
+    them without touching their catches.
+    """
+    return ConnectionResetError(exc.errno, exc.strerror or 'client disconnected')
 
 
 def require(body: dict, *fields) -> None:

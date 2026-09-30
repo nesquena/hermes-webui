@@ -1967,7 +1967,7 @@ def _run_new_session_load_interleave_harness(
         """
     )
     proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+        [node], input=script, cwd=ROOT, text=True, capture_output=True, timeout=30
     )
     assert proc.returncode == 0, proc.stderr or proc.stdout
     return json.loads(proc.stdout)

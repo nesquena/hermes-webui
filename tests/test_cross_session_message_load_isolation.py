@@ -244,7 +244,6 @@ function createEnvironment() {
   globalThis._sessionProfileMismatchFromError = () => null;
   globalThis._switchProfileForSessionLoad = async () => {};
   globalThis._clearSameSessionForceReloadHint = () => { clearHintCalls += 1; };
-  globalThis._clearStuckSessionOnBoot = () => {};
   globalThis._setSessionViewedCount = () => {};
   // #4946: loadSession() now routes its viewed-count/unread clear through
   // _acknowledgeSessionVisit(). This harness exercises cross-session load

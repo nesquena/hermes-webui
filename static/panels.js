@@ -7036,6 +7036,14 @@ function _openProfileSwitchSessionBrowser(){
 
 async function switchToProfile(name) {
   const contextIntent=arguments[1];
+  // A direct profile choice claims the pane when requested, even if its
+  // serialized context work must wait for an older New Chat to settle.
+  // Sidebar opens already carry their own pane claim into the profile switch.
+  if(!contextIntent
+    &&!(typeof _profileSwitchOpeningExistingSession!=='undefined'&&_profileSwitchOpeningExistingSession)
+    &&name&&name!==S.activeProfile&&typeof _claimPaneNavigation==='function'){
+    _claimPaneNavigation();
+  }
   return _runContextTransition('profile-switch',contextIntent,async intent=>{
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never

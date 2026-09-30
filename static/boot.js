@@ -1815,8 +1815,14 @@ window.renderTranscript=function(container, messages, opts){
     };
     if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
       // Let the handoff settle first: its drained transcript is what send() captures.
-      Promise.resolve(_newSessionInFlight).catch(()=>{}).then(()=>{
+      Promise.resolve(_newSessionInFlight).catch(()=>{}).then(result=>{
         if(!_voiceModeActive)return;
+        if(typeof _newSessionResultWasSuperseded==='function'
+          &&_newSessionResultWasSuperseded(result)){
+          _voiceModeThinkingSid=null;
+          _startListening();
+          return;
+        }
         commitSend();
       });
       return;
@@ -3970,7 +3976,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       }
       S._bootReady=true;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
-    catch(e){localStorage.removeItem('hermes-webui-session');}
+    catch(_){/* loadSession owns targeted 404 cleanup; retain unrelated saved sessions */}
   }
   // no saved session - show empty state, wait for user to hit +
   S._bootReady=true;
@@ -3980,7 +3986,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
-  await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+  // A route-only 404 can leave another saved session available for the next boot.
+  if(!localStorage.getItem('hermes-webui-session')) await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
