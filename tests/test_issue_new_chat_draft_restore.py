@@ -27,11 +27,11 @@ def _load_session_clear_block() -> str:
     return SESSIONS_JS[start:clear_end]
 
 
-def test_new_chat_candidate_claims_on_first_draft_not_at_creation():
+def test_new_chat_candidate_claims_after_persistence_not_at_creation():
     """#7824 review: an empty background launch must not claim the candidate.
 
     The draft-candidate registration moved from session creation to the first
-    nonempty draft observation, so the pointer means "a session with a draft"
+    successfully persisted nonempty draft, so the pointer means "a session with a draft"
     and merely creating an empty session (e.g. a background tab opened by
     middle-clicking +) leaves the current owner untouched.
     """
@@ -50,12 +50,12 @@ def test_new_chat_candidate_claims_on_first_draft_not_at_creation():
     assert save_start != -1 and save_end != -1, "_saveComposerDraft block not found"
     save_body = SESSIONS_JS[save_start:save_end]
     payload_idx = save_body.find("_composerDraftHasPayload(normalizedText, normalizedFiles)")
-    claim_idx = save_body.find("_rememberNewChatDraftSession(S.session)")
+    claim_idx = save_body.find("_rememberNewChatDraftSession(draftSession)")
     timer_idx = save_body.find("_draftSaveTimer = setTimeout")
     assert payload_idx != -1, "draft save must still detect a nonempty payload"
-    assert claim_idx != -1, "the first nonempty draft must claim the New Chat candidate"
-    assert payload_idx < claim_idx < timer_idx, (
-        "the claim must be synchronous for a nonempty draft, before the debounced save"
+    assert claim_idx != -1, "a persisted nonempty draft must claim the New Chat candidate"
+    assert payload_idx < timer_idx < claim_idx, (
+        "the claim must follow the successful debounced save, never unsaved input"
     )
     assert "S.session.session_id === sid" in save_body, (
         "only the session the composer belongs to may claim the candidate"
