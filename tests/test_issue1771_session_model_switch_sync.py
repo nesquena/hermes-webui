@@ -26,21 +26,29 @@ const fs = require('fs');
 const ui = fs.readFileSync(process.argv[2], 'utf8');
 
 function extractFunc(name, opts = {}) {
-  const re = new RegExp('function\\s+' + name + '\\s*\\(');
-  const start = ui.search(re);
-  if (start < 0) {
-    if (opts.optional) return '';
-    throw new Error(name + ' not found');
-  }
-  let i = ui.indexOf('{', start);
-  let depth = 1;
-  i++;
-  while (depth > 0 && i < ui.length) {
-    if (ui[i] === '{') depth++;
-    else if (ui[i] === '}') depth--;
+  const fnRe = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = ui.search(fnRe);
+  if (start >= 0) {
+    let i = ui.indexOf('{', start);
+    let depth = 1;
     i++;
+    while (depth > 0 && i < ui.length) {
+      if (ui[i] === '{') depth++;
+      else if (ui[i] === '}') depth--;
+      i++;
+    }
+    return ui.slice(start, i);
   }
-  return ui.slice(start, i);
+  // Declaration extractor (#6657 review): top-level const/let bindings that
+  // ui.js ships as single lines (_PY_WS_CLASS, the slug regexes,
+  // _dynamicProviderIds). Re-spelled var so sloppy-mode eval'd functions can
+  // reach them. Listing a binding without this path silently skipped it —
+  // dead setup that claimed coverage the driver never had.
+  const declRe = new RegExp('^(?:const|let)\\s+' + name + '=.*$', 'm');
+  const decl = ui.match(declRe);
+  if (decl) return decl[0].replace(/^(?:const|let)\s+/, 'var ');
+  if (opts.optional) return '';
+  throw new Error(name + ' not found');
 }
 
 const calls = {syncModelChip: 0, renderModelDropdown: 0, positionModelDropdown: 0, fetches: []};
@@ -172,13 +180,10 @@ for (const name of [
 ]) {
   const src = extractFunc(name, {optional: name !== 'syncTopbar'});
   if (!src) continue;
-  if (name === '_PY_WS_CLASS' || name === '_CUSTOM_SLUG_TRIM_RE' || name === '_CUSTOM_SLUG_HOST_REJECT_RE') {
-    eval(src.replace(/^const /, 'var '));
-  } else if (name === '_dynamicProviderIds') {
-    eval(src.replace(/^let /, 'var '));
-  } else {
-    eval(src);
-  }
+  // Both paths of extractFunc (function bodies AND const/let declarations)
+  // re-spell the binding as var before returning, so every name here is
+  // eval'd the same way — no per-name branches to silently skip an entry.
+  eval(src);
 }
 
 const args = JSON.parse(process.argv[3]);
