@@ -6868,8 +6868,7 @@ def _clean_session_model_provider(value: str | None) -> str | None:
     if provider.startswith("@"):
         parsed = _parse_provider_qualified_model_id(provider)
         provider = parsed[1].strip() if parsed else provider[1:]
-    from api.config import _canonicalise_provider_id
-    return _canonicalise_provider_id(provider) or None
+    return ("mistral" if provider == "mistralai" else provider) or None
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
