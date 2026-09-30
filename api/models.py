@@ -9695,6 +9695,36 @@ def _decode_state_db_content(value):
     return decoded
 
 
+_OOB_STEER_FRAME_RE = re.compile(
+    r'^\s*\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)\s*.*?)?\]\s*(.*?)\s*\[/OUT-OF-BAND\s+USER\s+MESSAGE\]\s*$',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _unwrap_steer_row_oob_marker(content):
+    """Unwrap a single complete [OUT-OF-BAND USER MESSAGE] frame (#7834).
+
+    When Hermes Agent persists a steer turn, it wraps the user instruction in
+    an out-of-band delivery frame so the runtime and replay loop can treat it
+    as an out-of-band injection.  In WebUI transcript queries and visible keys,
+    we project the clean user text while preserving the raw transport envelope
+    in ``api_content``.
+
+    Legacy tool rows, untyped user messages, and rows where markers are
+    multiple, nested, incomplete, or contain ambiguous delimiters are preserved
+    byte-for-byte.
+    """
+    if not isinstance(content, str):
+        return content
+    lower = content.lower()
+    if lower.count("[out-of-band user message") != 1 or lower.count("[/out-of-band user message]") != 1:
+        return content
+    m = _OOB_STEER_FRAME_RE.match(content)
+    if not m:
+        return content
+    return m.group(1).strip()
+
+
 def _project_state_db_message(row, available, id_col, optional):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
@@ -9737,6 +9767,14 @@ def _project_state_db_message(row, available, id_col, optional):
         msg['_state_db_row_id'] = row['id']
     if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
         msg['name'] = msg['tool_name']
+    if msg.get('role') == 'user' and msg.get('display_kind') == 'steer':
+        raw_content = msg.get('content')
+        if isinstance(raw_content, str):
+            unwrapped = _unwrap_steer_row_oob_marker(raw_content)
+            if unwrapped != raw_content:
+                if 'api_content' not in msg or not msg['api_content']:
+                    msg['api_content'] = raw_content
+                msg['content'] = unwrapped
     return msg
 
 
@@ -9846,6 +9884,7 @@ def get_state_db_session_messages(
                 # sidecar in the WebUI's internal history; the provider-safe
                 # projection strips it before any direct API request.
                 'api_content',
+                'display_kind',
             ]
             id_col = ['id'] if 'id' in available else []
             revision_cols = []
@@ -10120,34 +10159,47 @@ def get_state_db_session_message_keys_before_timestamp(
             if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
                 return None
             api_content_select = ", api_content" if "api_content" in available else ""
+            display_kind_select = ", display_kind" if "display_kind" in available else ""
             cur.execute(
                 f"""
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
-                    tool_calls{api_content_select}
+                    tool_calls{api_content_select}{display_kind_select}
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
                 ORDER BY timestamp ASC, id ASC
                 """,
                 (str(sid), before_ts),
             )
-            return [
-                _session_message_visible_key(
-                    {
-                        "role": row["role"],
-                        # Same guarded decode as the projected tail: prefix and
-                        # tail keys must share one representation or the
-                        # prefix/tail collision proof can miss a genuine
-                        # repeated recovered turn.
-                        "content": _decode_state_db_content(row["content"]),
-                        "tool_calls": _json_loads_if_string(row["tool_calls"]),
-                        "api_content": row["api_content"] if "api_content" in available else None,
-                    },
-                    normalize_workspace_prefix=True,
+            rows = []
+            for row in cur.fetchall():
+                content = _decode_state_db_content(row["content"])
+                role = row["role"]
+                display_kind = row["display_kind"] if "display_kind" in available else None
+                api_content = row["api_content"] if "api_content" in available else None
+                if display_kind == "steer" and role == "user" and isinstance(content, str):
+                    unwrapped = _unwrap_steer_row_oob_marker(content)
+                    if unwrapped != content:
+                        if api_content is None:
+                            api_content = content
+                        content = unwrapped
+                rows.append(
+                    _session_message_visible_key(
+                        {
+                            "role": role,
+                            # Same guarded decode as the projected tail: prefix and
+                            # tail keys must share one representation or the
+                            # prefix/tail collision proof can miss a genuine
+                            # repeated recovered turn.
+                            "content": content,
+                            "tool_calls": _json_loads_if_string(row["tool_calls"]),
+                            "api_content": api_content,
+                        },
+                        normalize_workspace_prefix=True,
+                    )
                 )
-                for row in cur.fetchall()
-            ]
+            return rows
     except Exception:
         return None
 
@@ -10235,6 +10287,8 @@ def get_state_db_regeneration_tail_snapshot(
                 prefix_key_cols += ", tool_calls"
             if 'api_content' in available:
                 prefix_key_cols += ", api_content"
+            if 'display_kind' in available:
+                prefix_key_cols += ", display_kind"
             prefix_key_sql = (
                 f"SELECT {prefix_key_cols} FROM messages "
                 "WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ? "
@@ -10245,20 +10299,34 @@ def get_state_db_regeneration_tail_snapshot(
             except Exception:
                 cur.execute("ROLLBACK")
                 return None
-            prefix_keys = [
-                _session_message_visible_key({
-                    "role": r["role"],
-                    "content": _decode_state_db_content(r["content"]),
-                    "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
-                    "api_content": r["api_content"] if "api_content" in r.keys() else None,
-                }, normalize_workspace_prefix=True)
-                for r in cur.fetchall()
-            ]
+            prefix_keys = []
+            for r in cur.fetchall():
+                content = _decode_state_db_content(r["content"])
+                role = r["role"]
+                display_kind = r["display_kind"] if "display_kind" in r.keys() else None
+                api_content = r["api_content"] if "api_content" in r.keys() else None
+                if display_kind == "steer" and role == "user" and isinstance(content, str):
+                    unwrapped = _unwrap_steer_row_oob_marker(content)
+                    if unwrapped != content:
+                        if api_content is None:
+                            api_content = content
+                        content = unwrapped
+                prefix_keys.append(
+                    _session_message_visible_key(
+                        {
+                            "role": role,
+                            "content": content,
+                            "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
+                            "api_content": api_content,
+                        },
+                        normalize_workspace_prefix=True,
+                    )
+                )
             # 3) bounded tail (rows >= floor) with the canonical projection
             optional = [
                 'tool_call_id', 'tool_calls', 'tool_name', 'reasoning',
                 'reasoning_details', 'codex_reasoning_items', 'reasoning_content',
-                'codex_message_items', 'api_content',
+                'codex_message_items', 'api_content', 'display_kind',
             ]
             tail_select = ['id', 'role', 'content', 'timestamp'] if 'id' in available else ['role', 'content', 'timestamp']
             for col in optional + (['active'] if 'active' in available else []):
