@@ -11928,6 +11928,7 @@ def merge_session_messages_append_only(
     truncation_watermark=None,
     truncation_boundary=None,
     incoming_provenance: Literal["unverified", "state_db"] = "unverified",
+    recovery_watermark=None,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -11942,6 +11943,7 @@ def merge_session_messages_append_only(
             truncation_watermark=truncation_watermark,
             truncation_boundary=truncation_boundary,
             incoming_provenance=incoming_provenance,
+            recovery_watermark=recovery_watermark,
         )
     finally:
         _STRUCTURED_IDENTITY_MEMO.reset(token)
@@ -12037,6 +12039,7 @@ def _merge_session_messages_append_only_impl(
     truncation_watermark=None,
     truncation_boundary=None,
     incoming_provenance=None,
+    recovery_watermark=None,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -12175,6 +12178,12 @@ def _merge_session_messages_append_only_impl(
         return value
 
     watermark_timestamp = _message_timestamp_as_float({"timestamp": truncation_watermark})
+    # Gateway-run recovery watermark: rows in state.db ABOVE this timestamp were produced
+    # during a run whose live events never reached the sidecar (WebUI restart mid-run, dead
+    # event pump). The "already observed" gate below must NOT swallow them — they are
+    # recovered chronologically instead of being skipped, or a whole turn block would only
+    # surface when a LATER turn writes something newer than the stale sidecar tail.
+    recovery_watermark_ts = _message_timestamp_as_float({"timestamp": recovery_watermark})
     if not state_messages:
         return sidecar_messages
     if not sidecar_messages:
@@ -12702,6 +12711,23 @@ def _merge_session_messages_append_only_impl(
             and timestamp <= max_sidecar_timestamp
             and not row_id_sidecar_conflict
         ):
+            # Gateway-run recovery (#7933 follow-up): rows produced during a run whose
+            # events never reached the sidecar sit BELOW the newest sidecar row only
+            # because the terminal result was journaled first. Above the recovery
+            # watermark they are unobserved, so recover them in place instead of
+            # swallowing them as "already seen".
+            if (
+                recovery_watermark_ts is not None
+                and timestamp > recovery_watermark_ts
+                and content_key not in seen_content_keys
+            ):
+                if _insert_state_message_chronologically(merged_messages, msg):
+                    seen_message_keys.add(key)
+                    seen_dedup_keys.add(dedup_key)
+                    seen_content_keys.add(content_key)
+                    seen_visible_keys.add(visible_key)
+                    _remember_merged_message(msg, source="state")
+                continue
             # When a truncation watermark is active and the sidecar holds only
             # the edited user checkpoint, state.db may contain an assistant/tool
             # reply at the same timestamp that is NOT in the sidecar.  This
@@ -12797,6 +12823,22 @@ def reconciled_state_db_messages_for_session(
     state_messages: list | StateDBSessionMessagesSnapshot | None = None,
     with_revision: Literal[True],
 ) -> StateDBSessionMessagesSnapshot: ...
+
+
+def _gateway_run_recovery_watermark(session) -> float | None:
+    """Sidecar message timestamp at gateway-run admission, from the persisted run record.
+
+    state.db rows above this stamp were produced during the run (parent answers, steers,
+    tool results) and may never have reached the sidecar if the WebUI restarted mid-run —
+    the message merge must recover them instead of treating them as already observed.
+    """
+    try:
+        run = getattr(session, "gateway_run", None)
+        stamp = (run or {}).get("sidecar_msg_ts_at_admission")
+        stamp = float(stamp) if stamp is not None else None
+        return stamp if stamp and stamp > 0 else None
+    except Exception:
+        return None
 
 
 def reconciled_state_db_messages_for_session(
@@ -12901,6 +12943,7 @@ def reconciled_state_db_messages_for_session(
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
+        recovery_watermark=_gateway_run_recovery_watermark(session),
     )
     if not prefer_context:
         reconciled_messages = _project_native_image_payload_conflicts_for_display(

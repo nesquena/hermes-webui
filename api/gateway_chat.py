@@ -904,6 +904,12 @@ def _record_gateway_run(session_id: str, stream_id: str, run_id: str, request=No
             if not _stream_writeback_is_current(session, stream_id):
                 return
             session.gateway_run = {"run_id": run_id, "stream_id": stream_id, **extra}
+            try:
+                _msgs = session.messages or []
+                _last = _msgs[-1].get("timestamp") if _msgs else None
+                session.gateway_run["sidecar_msg_ts_at_admission"] = float(_last) if _last is not None else 0.0
+            except Exception:
+                session.gateway_run.setdefault("sidecar_msg_ts_at_admission", 0.0)
             if not run_id:
                 session.gateway_run["request"] = request
             session.save(touch_updated_at=False)
