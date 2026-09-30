@@ -5820,10 +5820,11 @@ function _renderBatchActionBar(){
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
     const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
-    // #7826 round 3: preflight the complete snapshot BEFORE any request.
-    // A missing snapshot, a profile-less row, or mixed owners fails closed
-    // with zero API calls — the archive handler would otherwise resolve
-    // some rows to 409/404 mid-batch and leave a partial archive behind.
+    // #7826 round 4: preflight resolves every row's owner (sidebar row over
+    // snapshot, legacy WebUI sidecar → root). Only rows with NO derivable
+    // owner — unknown CLI metadata — fail closed here; mixed WebUI profiles
+    // now archive group-by-group inside _archiveBatchSessions instead of
+    // being rejected whole.
     const preflight=_archiveBatchOwners(ids,sessionsById);
     if(!preflight.owner){
       showToast(t('session_batch_archive_mixed_profiles'),3500);
@@ -5836,9 +5837,13 @@ function _renderBatchActionBar(){
       danger:true
     });
     if(!ok)return;
-    const outcome=await _archiveBatchSessions(ids,sessionsById,preflight.owner);
+    const outcome=await _archiveBatchSessions(ids,sessionsById);
     if(outcome.error){
-      showToast(t('session_archive_failed')+outcome.error);
+      const n=Number(outcome.archivedCount||0);
+      const detail=n
+        ?` (${n}/${outcome.totalCount||ids.length} archived)`
+        :'';
+      showToast(t('session_archive_failed')+outcome.error+detail,0,'error');
       return;
     }
     showToast(outcome.retainedCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
@@ -6479,10 +6484,71 @@ function _playSessionActionMenuEntrance(menu){
   menu.classList.add('open-animated');
 }
 
+// #7826: the all-profiles sidebar can offer archives for sessions owned
+// by another profile. The server answers those with the structured
+// session_profile_mismatch envelope — switch to the owning profile and
+// retry exactly once, guarded against infinite recursion.
+//
+// CORE (#7826 re-gate): the switch changes S.activeProfile but never touches
+// S.session, so the chat on screen stays bound to the ORIGINAL profile whose
+// active-profile cookie was just replaced — its next send is rejected with
+// 409. Restore the original profile after the archive attempt (success AND
+// failure) whenever the displayed session belongs to it. The switch is a
+// no-op when the displayed session is not ours (a genuine archive-then-stay
+// on the target profile is correct there) or when the owner already matched
+// the active profile, so the common same-profile path performs no switch at
+// all. If the restore itself fails we return the archive outcome, not false —
+// the archive already landed and reporting a failure would be a lie.
+async function _restoreProfileAfterArchive(originalProfile, originalIsDefault, archivedSessionId, outcome){
+  if(typeof originalProfile!=='string'||!originalProfile.trim()) return outcome;
+  const currentActive=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+    ?S.activeProfile.trim()
+    :'default';
+  const displayed=S.session&&S.session.session_id;
+  // Only bounce back when the chat the user is looking at was loaded under the
+  // profile we switched away from. Archiving a foreign sidebar row while a
+  // session from the TARGET profile is on screen must leave the switch in
+  // place.
+  if(!displayed||displayed===archivedSessionId) return outcome;
+  if(_profileMatchesActiveProfile(originalProfile,currentActive)) return outcome;
+  try{
+    await _switchProfileForActiveProfile(originalProfile,originalIsDefault);
+  }catch(_){ /* keep the archive outcome; the switch failed, not the archive */ }
+  return outcome;
+}
+
+// #7826: switch away from the active profile WITHOUT the session-list
+// skeleton/embargo machinery that _switchProfileForSessionLoad drives. Used by
+// _restoreProfileAfterArchive to put the user back where they started after a
+// cross-profile archive. Deliberately not routed through switchToProfile:
+// that helper may create a new blank session or retag S.session to the target
+// profile, which is exactly the cross-tagging this restore exists to avoid.
+async function _switchProfileForActiveProfile(name, isDefault){
+  const profile=String(name||'').trim();
+  if(!profile) throw new Error('missing profile');
+  const current=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+    ?S.activeProfile.trim()
+    :'default';
+  if(profile===current) return {active:profile};
+  const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name:profile}),timeoutToast:false});
+  S.activeProfile=data.active||profile;
+  S.activeProfileIsDefault=!!data.is_default;
+  if(typeof startGatewaySSE==='function') startGatewaySSE();
+  if(typeof syncTopbar==='function') syncTopbar();
+  void renderSessionList();
+  return {active:S.activeProfile};
+}
+
 async function _archiveSession(session, archived=true, beforeListRender=null, _retried=false){
   if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
+  // #7826 re-gate: snapshot the profile context BEFORE the cross-profile
+  // retry below can switch it away, so the restore knows where "back" is.
+  const _preProfile=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+    ?S.activeProfile.trim()
+    :'default';
+  const _preIsDefault=!!(S&&S.activeProfileIsDefault);
   try{
     const _archivePayload={session_id:session.session_id,archived};
     if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&session.profile){_archivePayload.all_profiles=true;_archivePayload.profile=session.profile;}
@@ -6511,11 +6577,15 @@ async function _archiveSession(session, archived=true, beforeListRender=null, _r
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile to archive this session…`,2200);
         await _switchProfileForSessionLoad(profileMismatch.profile);
         const target=_sessionSnapshotById(session.session_id)||session;
-        return _archiveSession(target,archived,null,true);
+        // #7826 re-gate: the retry's SUCCESS branch returns directly, so the
+        // restore has to wrap the recursion outcome here — not only live in
+        // the catch's own return paths.
+        const result=await _archiveSession(target,archived,null,true);
+        return _restoreProfileAfterArchive(_preProfile,_preIsDefault,session.session_id,result);
       }catch(switchErr){
         _pendingSessionReflowPositions=null;
         showToast(t('session_archive_failed')+switchErr.message);
-        return false;
+        return _restoreProfileAfterArchive(_preProfile,_preIsDefault,session.session_id,false);
       }
     }
     if(renderHold) await renderHold.catch(()=>{});
@@ -6614,59 +6684,140 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
   if(contextPoint) currentAnchor._projectPickerContextPoint=contextPoint;
   return {session:currentSession,anchorEl:currentAnchor};
 }
+
+// #7826: the cross-profile archive retry switches the active profile away
+// from what the user was looking at. This bounce-back restores it.
+// See _archiveSession.
+//
+// #7826 round 4: resolve a batch member's owner the way the SERVER does,
+// never from a raw snapshot string comparison.
+//
+//   1. The sidebar row wins over the snapshot. For the currently open legacy
+//      root-owned session `_sessionSnapshotById()` returns `S.session`, whose
+//      `profile` is null even though its sidebar row says `default` — the old
+//      code failed the whole batch closed on it, so legacy root-owned WebUI
+//      sessions could no longer be batch-archived at all.
+//   2. A WebUI-sidecar row with no profile at all is root-owned by contract
+//      (`Session.profile` defaults to None for sidecars created before the
+//      profile field existed, and WebUI sessions are never materialized into a
+//      foreign profile). Unknown CLI rows stay rejected: their owner is
+//      genuinely unknowable client-side and the server 404s them by contract.
+//   3. Owner equality goes through `_profileMatchesActiveProfile`, which
+//      understands the renamed-root alias ('default' ↔ the root's display
+//      name). The raw `owner!==activeProfile` string compare made a row
+//      labelled `default` under a renamed root request a switch that a
+//      profile-bound auth session then refuses, failing the archive.
+function _archiveBatchOwnerForRow(sid, sessionsById){
+  const snap=(sessionsById&&sessionsById.get)?sessionsById.get(sid):null;
+  if(!snap) return {owner:null, reason:'missing-snapshot'};
+  const rowProfile=(typeof snap.profile==='string'&&snap.profile.trim())?snap.profile.trim():null;
+  if(rowProfile) return {owner:rowProfile};
+  // No profile on the snapshot. A WebUI session in this position is a legacy
+  // root-owned sidecar — the server resolves it against the active profile
+  // and archives it normally. Anything else (unknown CLI/metadata row) has no
+  // derivable owner and must fail closed.
+  const isWebUiRow=typeof _isWebUiSourceSession==='function'
+    ?_isWebUiSourceSession(snap)
+    :false;
+  if(isWebUiRow||snap===S.session) return {owner:'default'};
+  return {owner:null, reason:'unknown-owner'};
+}
+
 // #7826 round 3: preflight the complete batch selection before any
-// archive request. Missing snapshots and profile-less rows fail closed —
-// the server 404s profile-less metadata rows by contract, and a raw
+// archive request. Missing snapshots and unowned rows fail closed — the
+// server 404s profile-less metadata rows by contract, and a raw
 // Promise.all would let earlier requests mutate the store before the
 // 404 lands, leaving a partial archive behind a generic failure toast.
-// Requires exactly one non-empty owner across the whole selection.
+// Requires exactly one resolvable owner across the whole selection.
 function _archiveBatchOwners(ids, sessionsById){
   let owner=null;
   for(const sid of ids){
-    const snap=(sessionsById&&sessionsById.get)?sessionsById.get(sid):null;
-    const profile=(snap&&typeof snap.profile==='string'&&snap.profile.trim())?snap.profile.trim():null;
-    if(!profile) return {owner:null, reason:'missing-or-profileless'};
-    if(owner && owner!==profile) return {owner:null, reason:'mixed'};
-    owner=profile;
+    const resolved=_archiveBatchOwnerForRow(sid,sessionsById);
+    if(!resolved.owner) return {owner:null, reason:resolved.reason};
+    if(owner && !_archiveBatchOwnersMatch(owner,resolved.owner)) return {owner:null, reason:'mixed'};
+    owner=resolved.owner;
   }
   return owner?{owner}:{owner:null, reason:'empty'};
 }
 
-// #7826 round 3: archive a preflighted, uniform-owner batch. If the sole
-// owner differs from the active profile, switch profile ONCE before any
-// request — never per-row in parallel. Then archive sequentially: a
-// mid-batch failure stops the loop and reports an error, so the batch
-// can never claim success after only a subset was archived. Returns
-// {error} on failure (partial progress possible but never reported as
-// success) or {ok:true, retainedCount} on full success.
-async function _archiveBatchSessions(ids, sessionsById, owner){
-  // fail closed: preflight must have resolved exactly one non-empty owner;
-  // a caller that skips preflight must never fire archive requests.
-  if(!(typeof owner==='string'&&owner.trim())) return {ok:false,error:'missing-owner'};
-  const activeProfile=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
-    ?S.activeProfile.trim()
-    :'default';
-  if(owner&&owner!==activeProfile){
-    try{
-      if(typeof showToast==='function') showToast(`Switching to ${owner} profile to archive these sessions…`,2200);
-      await _switchProfileForSessionLoad(owner);
-    }catch(switchErr){
-      return {ok:false,error:(switchErr&&switchErr.message)||String(switchErr)};
-    }
+// Two owner names describe the same group when either direction matches the
+// active profile's alias set (renamed root ⇄ 'default'). Mirrors the server's
+// _profiles_match for the alias case that matters here.
+function _archiveBatchOwnersMatch(a,b){
+  if(a===b) return true;
+  return typeof _profileMatchesActiveProfile==='function'
+    ?(_profileMatchesActiveProfile(a,b)||_profileMatchesActiveProfile(b,a))
+    :false;
+}
+
+// #7826 round 3: archive a preflighted batch. Rows are grouped by OWNER
+// (so a mixed-profile WebUI selection — which the archive route accepts by
+// resolving sidecars by ID — still archives everything instead of being
+// rejected whole), the groups are processed one at a time, and each group
+// performs at most ONE profile switch. A group whose switch fails, or a
+// mid-group archive failure, is reported as a partial failure rather than
+// silently skipped or falsely reported as full success.
+// Returns {error} on failure with whatever partial progress landed, or
+// {ok:true, retainedCount} when every selected row archived.
+async function _archiveBatchSessions(ids, sessionsById){
+  if(!Array.isArray(ids)||!ids.length) return {ok:false,error:'empty-selection'};
+  // Group the selection by resolved owner, preserving first-seen order so the
+  // reported progress matches the order the user selected.
+  const groups=new Map();
+  for(const sid of ids){
+    const resolved=_archiveBatchOwnerForRow(sid,sessionsById);
+    if(!resolved.owner) return {ok:false,error:resolved.reason||'unowned-row'};
+    let group=groups.get(resolved.owner);
+    if(!group){ group=[]; groups.set(resolved.owner,group); }
+    group.push(sid);
   }
   let retainedCount=0;
-  for(const sid of ids){
-    const session=(sessionsById&&sessionsById.get(sid))||null;
-    let response;
-    try{
-      response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})});
-    }catch(e){
-      return {ok:false,error:(e&&e.message)||String(e)};
+  let archivedCount=0;
+  const failedGroups=[];
+  for(const [owner,groupIds] of groups){
+    // Fail closed inside the executor too: an unowned row that somehow
+    // reaches a later caller must never fire an archive request.
+    if(!(typeof owner==='string'&&owner.trim())) return {ok:false,error:'missing-owner'};
+    const activeProfile=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+      ?S.activeProfile.trim()
+      :'default';
+    // _profileMatchesActiveProfile understands the renamed-root alias, so a
+    // 'default' row under a renamed root no longer requests a pointless
+    // switch (which a profile-bound auth session would refuse).
+    if(!_profileMatchesActiveProfile(owner,activeProfile)){
+      try{
+        if(typeof showToast==='function') showToast(`Switching to ${owner} profile to archive these sessions…`,2200);
+        await _switchProfileForSessionLoad(owner);
+      }catch(switchErr){
+        failedGroups.push(owner);
+        continue;
+      }
     }
-    if(session) session.archived=true;
-    if(_sessionResponseRetainsWorktree(response,session)) retainedCount++;
+    let groupFailed=false;
+    for(const sid of groupIds){
+      const session=(sessionsById&&sessionsById.get)?sessionsById.get(sid):null;
+      let response;
+      try{
+        response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})});
+      }catch(e){
+        groupFailed=true;
+        break;
+      }
+      if(session) session.archived=true;
+      archivedCount++;
+      if(_sessionResponseRetainsWorktree(response,session)) retainedCount++;
+    }
+    if(groupFailed) failedGroups.push(owner);
   }
-  return {ok:true,retainedCount};
+  if(failedGroups.length){
+    return {
+      ok:false,
+      error:'batch-partial-failure:'+failedGroups.join(','),
+      archivedCount,
+      totalCount:ids.length,
+    };
+  }
+  return {ok:true,retainedCount,archivedCount};
 }
 
 function _openSessionActionMenu(session, anchorEl){
