@@ -47,12 +47,15 @@ function extractConstDotted(name) {
 eval(extractConstDotted('_PY_WS_CLASS'));
 eval(extractConstDotted('_CUSTOM_SLUG_TRIM_RE'));
 eval(extractConstDotted('_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval(extractConstDotted('MODEL_STATE_KEY'));
 eval([
   '_customSlugIsEndpointAuthority',
   '_parseQualifiedCustomId',
   '_optionDeclaredProviderId',
   '_dynamicProviderIds',
   '_clientProviderAuthorityForModel',
+  '_storedModelProvider',
+  '_readPersistedModelState',
   '_persistedProviderAuthorityForModel',
   '_dynamicProviderAuthorityForQualifiedCustomId',
   '_qualifiedCustomIdNeedsBackendAuthority',
@@ -74,6 +77,12 @@ eval([
   return extractFunction(uiSrc, name);
 }).join('\n'));
 
+// Production storage (empty): the persisted-state lane
+// (_readPersistedModelState via MODEL_STATE_KEY) must execute its real path
+// against real storage — with no storage defined at all, the ReferenceError
+// is swallowed by _persistedProviderAuthorityForModel's catch and a missing
+// dependency silently reads as "no authority" (#6657 review).
+globalThis.localStorage = {getItem: () => null, setItem: () => {}, removeItem: () => {}};
 globalThis._refreshOpenModelDropdown = () => {};
 globalThis.syncModelChip = () => {};
 globalThis._dynamicProviderIds = {};
@@ -231,12 +240,15 @@ function extractConstDotted(name) {
 eval(extractConstDotted('_PY_WS_CLASS'));
 eval(extractConstDotted('_CUSTOM_SLUG_TRIM_RE'));
 eval(extractConstDotted('_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval(extractConstDotted('MODEL_STATE_KEY'));
 eval([
   '_customSlugIsEndpointAuthority',
   '_parseQualifiedCustomId',
   '_optionDeclaredProviderId',
   '_dynamicProviderIds',
   '_clientProviderAuthorityForModel',
+  '_storedModelProvider',
+  '_readPersistedModelState',
   '_persistedProviderAuthorityForModel',
   '_dynamicProviderAuthorityForQualifiedCustomId',
   '_qualifiedCustomIdNeedsBackendAuthority',
@@ -253,6 +265,20 @@ eval([
   }
   return extractFunction(uiSrc, name);
 }).join('\n'));
+
+// Production storage, recording: the no-client-authority calls below
+// (_modelStateForSelect for missing options and _modelProviderForSend) reach
+// the persisted-state lane (_readPersistedModelState via MODEL_STATE_KEY).
+// The production catches swallow a missing helper as "no authority", so the
+// driver records the reads: persistedLaneRan proves the lane actually
+// executed — a missing dependency turns the run fatal instead of silently
+// passing for the wrong reason (#6657 review).
+const __persistedReads = [];
+globalThis.localStorage = {
+  getItem(key) { __persistedReads.push(String(key)); return null; },
+  setItem() {},
+  removeItem() {},
+};
 
 globalThis.document = {
   createElement(tag) {
@@ -353,6 +379,12 @@ process.stdout.write(JSON.stringify({
   colonBearingModel: _modelStateForSelect(select, '@custom:hetmer.net:model-a:free'),
   localhostEndpoint: _modelStateForSelect(select, '@custom:localhost:11434:llama3.2'),
   missingOptionCustomInput: _modelStateForSelect(select, '@custom:localhost:11434:mistral-custom'),
+  // Proof the persisted-state lane executed through its REAL dependency:
+  // _readPersistedModelState reads localStorage[MODEL_STATE_KEY]. If the
+  // extraction drops that helper, the production catch converts the
+  // ReferenceError to empty authority and no read is recorded — the Python
+  // assertion on persistedLaneRan then fails the run (#6657 review).
+  persistedLaneRan: __persistedReads.includes(MODEL_STATE_KEY),
   preHydrationHostPort: {
     provider: _providerFromModelValue('@custom:llm:8080:qwen3'),
     model: _parseQualifiedCustomId('@custom:llm:8080:qwen3').model,
@@ -413,6 +445,12 @@ def test_non_default_named_custom_provider_model_strips_qualified_prefix():
         "model": "@custom:localhost:11434:mistral-custom",
         "model_provider": None,
     }
+    # The persisted-state lane RAN through its real dependency chain: with
+    # _readPersistedModelState missing from the extraction, the production
+    # catch swallows the ReferenceError, no localStorage read happens, and
+    # this assertion fails — a missing dependency is fatal, not a silent
+    # no-authority pass (#6657 review, blocker 2).
+    assert payload["persistedLaneRan"] is True
     # Deep-review 2026-09-27, #6657 defect 2: the single-label host and the
     # bracketed-IPv6 endpoint must split the SAME way pre-hydration (no
     # option metadata) and when hydrated — state and send included. The
