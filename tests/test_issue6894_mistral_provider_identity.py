@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import os
 import sys
 import types
@@ -919,3 +920,403 @@ def test_mixed_mistral_model_shapes_feed_catalogs_and_cards(
     card_models = {model["id"]: model for model in card["models"]}
     assert {"shared-model", "legacy-only", "canonical-only"}.issubset(card_models)
     assert card_models["shared-model"]["label"] == "Canonical label"
+
+
+def test_mixed_mistral_model_shapes_preserve_scalar_context(monkeypatch):
+    missing = object()
+    real_owner = config._canonical_provider_config
+    real_parser = routes._models_config_context_length
+    owner_supports_projection = (
+        "include_context_models" in inspect.signature(real_owner).parameters
+    )
+    owner_calls = []
+    owner_results = []
+    parser_calls = []
+
+    def owner_spy(config_obj, provider, *args, **kwargs):
+        include_context_models = kwargs.get("include_context_models", False)
+        owner_calls.append((provider, include_context_models))
+        if not owner_supports_projection:
+            kwargs.pop("include_context_models", None)
+        result = real_owner(config_obj, provider, *args, **kwargs)
+        owner_results.append(copy.deepcopy(result))
+        return result
+
+    def parser_spy(models_cfg, model):
+        result = real_parser(models_cfg, model)
+        parser_calls.append((copy.deepcopy(models_cfg), model, result))
+        return result
+
+    monkeypatch.setattr(config, "_canonical_provider_config", owner_spy)
+    monkeypatch.setattr(routes, "_models_config_context_length", parser_spy)
+
+    failures = []
+
+    def run_case(label, providers_cfg, model, expected_context, expected_projection, expected_results):
+        owner_calls.clear()
+        owner_results.clear()
+        parser_calls.clear()
+        snapshot = {
+            "model": {"context_length": 65536},
+            "providers": providers_cfg,
+        }
+        try:
+            actual = routes._context_length_lookup_inputs_for_model(
+                model,
+                "mistral",
+                api_key="caller-key",
+                cfg=snapshot,
+            ).config_context_length
+        except Exception as exc:  # pragma: no cover - harness guard
+            failures.append(f"{label}: helper raised {type(exc).__name__}: {exc}")
+            return
+
+        if actual != expected_context:
+            failures.append(f"{label}: context {actual!r}, expected {expected_context!r}")
+        raw_provider = next(iter(providers_cfg))
+        if owner_calls != [(raw_provider, False), (raw_provider, True)]:
+            failures.append(f"{label}: owner calls {owner_calls!r}")
+        elif len(owner_results) != 2 or owner_results[-1] != expected_projection:
+            failures.append(
+                f"{label}: context projection {owner_results[-1:]!r}, "
+                f"expected {expected_projection!r}"
+            )
+        expected_models = expected_projection[: len(expected_results)]
+        actual_parser_rows = [(models_cfg, result) for models_cfg, _, result in parser_calls]
+        if actual_parser_rows != list(zip(expected_models, expected_results)):
+            failures.append(
+                f"{label}: parser inputs/results {actual_parser_rows!r}, expected "
+                f"{list(zip(expected_models, expected_results))!r}"
+            )
+
+    def row(model_id, context=missing):
+        result = {"id": model_id}
+        if context is not missing:
+            result["context_length"] = context
+        return result
+
+    def both(legacy_models, canonical_models, order=("mistralai", "mistral")):
+        values = {"mistralai": {"models": legacy_models}, "mistral": {"models": canonical_models}}
+        return {key: values[key] for key in order}
+
+    query = "vendor/chosen-model"
+    scalar_list = [row("unrelated-model", 4096)]
+    for value in (32768, "32768"):
+        scalar_dict = {query: value}
+        for order in (("mistralai", "mistral"), ("mistral", "mistralai")):
+            run_case(
+                f"scalar legacy dict {value!r} {order}",
+                both(scalar_dict, scalar_list, order), query, 32768,
+                [scalar_list, scalar_dict], [None, 32768],
+            )
+            run_case(
+                f"scalar canonical dict {value!r} {order}",
+                both(scalar_list, scalar_dict, order), query, 32768,
+                [scalar_dict, scalar_list], [32768],
+            )
+
+    for full_first in (False, True):
+        dictionary_items = [
+            ("vendor/chosen-model", {"context_length": 32768}),
+            ("chosen-model", {"context_length": 8192}),
+        ]
+        if not full_first:
+            dictionary_items.reverse()
+        canonical_dict = dict(dictionary_items)
+        for order in (("mistralai", "mistral"), ("mistral", "mistralai")):
+            run_case(
+                f"dict full/bare insertion {full_first} {order}",
+                both(scalar_list, canonical_dict, order), query, 32768,
+                [canonical_dict, scalar_list], [32768],
+            )
+            run_case(
+                f"legacy dict full/bare insertion {full_first} {order}",
+                both(canonical_dict, scalar_list, order), query, 32768,
+                [scalar_list, canonical_dict], [None, 32768],
+            )
+
+        canonical_rows = [
+            row("vendor/chosen-model", 32768),
+            row("chosen-model", 8192),
+        ]
+        if not full_first:
+            canonical_rows.reverse()
+        legacy_dict = {"legacy-model": {"context_length": 16384}}
+        for order in (("mistralai", "mistral"), ("mistral", "mistralai")):
+            run_case(
+                f"list row order {full_first} {order}",
+                both(legacy_dict, canonical_rows, order), query,
+                32768 if full_first else 8192,
+                [canonical_rows, legacy_dict], [32768 if full_first else 8192],
+            )
+
+        legacy_duplicate = [row("vendor/chosen-model", 16384)]
+        for order in (("mistralai", "mistral"), ("mistral", "mistralai")):
+            run_case(
+                f"duplicate position {full_first} {order}",
+                both(legacy_duplicate, canonical_rows, order), query,
+                32768 if full_first else 8192,
+                [canonical_rows], [32768 if full_first else 8192],
+            )
+
+    legacy_full_dict = {"vendor/chosen-model": {"context_length": 16384}}
+    legacy_full_list = [row("vendor/chosen-model", 16384)]
+    canonical_bare_dict = {"chosen-model": {"context_length": 8192}}
+    canonical_bare_list = [row("chosen-model", 8192)]
+    for canonical_models, legacy_models in (
+        (canonical_bare_dict, legacy_full_dict),
+        (canonical_bare_dict, legacy_full_list),
+        (canonical_bare_list, legacy_full_dict),
+        (canonical_bare_list, legacy_full_list),
+    ):
+        for order in (("mistralai", "mistral"), ("mistral", "mistralai")):
+            expected_projection = [canonical_models, legacy_models]
+            run_case(
+                f"canonical contributor precedes legacy full id {type(canonical_models).__name__}/{type(legacy_models).__name__} {order}",
+                both(legacy_models, canonical_models, order), query, 8192,
+                expected_projection, [8192],
+            )
+
+    for models_cfg in (
+        {"vendor/chosen-model": {"context_length": 32768}, "chosen-model": {"context_length": 8192}},
+        {"chosen-model": {"context_length": 8192}, "vendor/chosen-model": {"context_length": 32768}},
+    ):
+        run_case(
+            f"dictionary only {list(models_cfg)}",
+            {"mistral": {"models": models_cfg}}, query, 32768,
+            [models_cfg], [32768],
+        )
+
+    for full_first in (False, True):
+        canonical_rows = [
+            row("vendor/chosen-model", 32768),
+            row("chosen-model", 8192),
+        ]
+        if not full_first:
+            canonical_rows.reverse()
+        run_case(
+            f"list only {full_first}",
+            {"mistral": {"models": canonical_rows}}, query,
+            32768 if full_first else 8192,
+            [canonical_rows], [32768 if full_first else 8192],
+        )
+
+    for legacy_models, canonical_models in (
+        ([row("chosen-model", 8192)], {"chosen-model": 32768}),
+        ({"chosen-model": 8192}, [row("chosen-model", 32768)]),
+    ):
+        for order in (("mistralai", "mistral"), ("mistral", "mistralai")):
+            run_case(
+                f"canonical same-id valid replacement {type(legacy_models).__name__}/{type(canonical_models).__name__} {order}",
+                both(legacy_models, canonical_models, order), "chosen-model", 32768,
+                [canonical_models], [32768],
+            )
+
+    repeated_rows = [
+        ([row("chosen-model", 8192), row("chosen-model", 32768)], 8192),
+        ([row("chosen-model", 8192), row("chosen-model", None)], 8192),
+        ([row("chosen-model", 8192), row("chosen-model", -1)], 8192),
+        ([row("chosen-model", None), row("chosen-model", 32768)], 32768),
+        ([row("chosen-model", -1), row("chosen-model", 32768)], 32768),
+        ([row("chosen-model"), row("chosen-model", 32768)], 32768),
+        ([row("chosen-model", None), row("chosen-model", -1)], 65536),
+    ]
+    for rows, expected in repeated_rows:
+        parser_result = None if expected == 65536 else expected
+        run_case(
+            f"canonical repeated rows {rows!r}",
+            {"mistral": {"models": rows}}, "chosen-model", expected,
+            [rows], [parser_result],
+        )
+        run_case(
+            f"legacy-only repeated rows {rows!r}",
+            {"mistralai": {"models": rows}}, "chosen-model", expected,
+            [rows], [parser_result],
+        )
+        for legacy_shape in (
+            [row("chosen-model", 16384)],
+            {"chosen-model": {"context_length": 16384}},
+        ):
+            for order in (("mistralai", "mistral"), ("mistral", "mistralai")):
+                run_case(
+                    f"canonical repeated masks legacy {type(legacy_shape).__name__} {order} {rows!r}",
+                    both(legacy_shape, rows, order), "chosen-model", expected,
+                    [rows], [parser_result],
+                )
+
+    invalid_canonical = [row("chosen-model", None), row("chosen-model", -1), row("chosen-model")]
+    for legacy_shape in (
+        [row("chosen-model", 16384)],
+        {"chosen-model": {"context_length": 16384}},
+    ):
+        for order in (("mistralai", "mistral"), ("mistral", "mistralai")):
+            run_case(
+                f"all invalid canonical rows mask {type(legacy_shape).__name__} {order}",
+                both(legacy_shape, invalid_canonical, order), "chosen-model", 65536,
+                [invalid_canonical], [None],
+            )
+
+    for legacy_shape in (
+        [row("chosen-model", 8192), row("vendor/chosen-model", 16384)],
+        {"chosen-model": {"context_length": 8192}, "vendor/chosen-model": {"context_length": 16384}},
+    ):
+        legacy_projection = (
+            [row("vendor/chosen-model", 16384)]
+            if isinstance(legacy_shape, list)
+            else {"vendor/chosen-model": {"context_length": 16384}}
+        )
+        for order in (("mistralai", "mistral"), ("mistral", "mistralai")):
+            run_case(
+                f"distinct legacy id survives {type(legacy_shape).__name__} {order}",
+                both(legacy_shape, invalid_canonical, order), query, 16384,
+                [invalid_canonical, legacy_projection], [None, 16384],
+            )
+
+    for bad_value in (0, -1, "invalid"):
+        invalid_dict = {query: bad_value}
+        run_case(
+            f"invalid scalar fallback {bad_value!r}",
+            {"mistral": {"models": invalid_dict}}, query, 65536,
+            [invalid_dict], [None],
+        )
+
+    assert not failures, "\n".join(failures[:30])
+
+
+@pytest.mark.parametrize("provider_order", [("mistralai", "mistral"), ("mistral", "mistralai")])
+def test_mistral_context_lookup_uses_canonical_config_in_both_orders(monkeypatch, provider_order):
+    entries = {
+        "mistralai": {
+            "api_key": "legacy-key",
+            "base_url": "https://legacy.example/v1",
+            "models": {"chosen-model": {"context_length": 8192}},
+        },
+        "mistral": {
+            "api_key": "${MISTRAL_CONTEXT_KEY}",
+            "base_url": "https://canonical.example/v1",
+            "models": {"chosen-model": {"context_length": 32768}},
+        },
+    }
+    snapshot = {
+        "providers": {key: entries[key] for key in provider_order},
+        "model": {},
+    }
+    monkeypatch.setenv("MISTRAL_CONTEXT_KEY", "canonical-key")
+
+    metadata = routes._context_length_lookup_inputs_for_model(
+        "chosen-model", "mistral", cfg=snapshot
+    )
+
+    assert metadata.config_context_length == 32768
+    assert metadata.base_url == "https://canonical.example/v1"
+    assert routes._context_length_config_api_key_for_provider("mistral", snapshot) == "canonical-key"
+    assert metadata.api_key == "canonical-key"
+
+    explicit = routes._context_length_lookup_inputs_for_model(
+        "chosen-model",
+        "mistral",
+        base_url="https://caller.example/v1",
+        api_key="caller-key",
+        cfg=snapshot,
+    )
+    assert explicit.base_url == "https://caller.example/v1"
+    assert explicit.api_key == "caller-key"
+    assert explicit.config_context_length == 32768
+
+    model_owned = routes._context_length_lookup_inputs_for_model(
+        "chosen-model",
+        "mistral",
+        cfg={
+            "model": {
+                "provider": "mistralai",
+                "base_url": "https://model-owner.example/v1",
+                "api_key": "model-owner-key",
+            }
+        },
+    )
+    assert model_owned.base_url == "https://model-owner.example/v1"
+    assert model_owned.api_key == "model-owner-key"
+
+    alias_entries = {
+        "google": {"api_key": "google-context-key", "models": {"chosen-model": {"context_length": 8192}}},
+        "gemini": {"api_key": "gemini-context-key", "models": {"chosen-model": {"context_length": 16384}}},
+    }
+    for alias_order in (("google", "gemini"), ("gemini", "google")):
+        alias_cfg = {"providers": {key: alias_entries[key] for key in alias_order}, "model": {}}
+        expected = alias_entries[alias_order[0]]
+        alias_metadata = routes._context_length_lookup_inputs_for_model(
+            "chosen-model", "gemini", cfg=alias_cfg
+        )
+        assert alias_metadata.config_context_length == expected["models"]["chosen-model"]["context_length"]
+        assert alias_metadata.api_key == expected["api_key"]
+
+
+def test_legacy_only_unknown_mistral_reasoning_settings_are_used(monkeypatch):
+    snapshot = {
+        "providers": {"mistralai": {"reasoning_efforts": ["high"]}},
+    }
+    monkeypatch.setattr(config, "cfg", snapshot)
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+    monkeypatch.setattr(config, "_heuristic_reasoning_efforts", lambda *_args: ["low"])
+
+    assert config._resolve_model_reasoning_efforts_impl("unknown-local-model", "mistralai") == ["high"]
+    assert config._resolve_model_reasoning_efforts_impl("unknown-local-model", "mistral") == ["high"]
+
+
+@pytest.mark.parametrize(
+    "provider_order,legacy_shape,canonical_shape",
+    [
+        (("mistralai", "mistral"), "list", "dict"),
+        (("mistral", "mistralai"), "list", "dict"),
+        (("mistralai", "mistral"), "dict", "list"),
+        (("mistral", "mistralai"), "dict", "list"),
+    ],
+)
+def test_mixed_mistral_model_shapes_preserve_model_reasoning_metadata(
+    monkeypatch, provider_order, legacy_shape, canonical_shape
+):
+    def models(shape, entries):
+        if shape == "list":
+            return [
+                {"id": model_id, "reasoning_efforts": efforts}
+                for model_id, efforts in entries.items()
+            ]
+        return {
+            model_id: {"reasoning_efforts": efforts}
+            for model_id, efforts in entries.items()
+        }
+
+    entries = {
+        "mistralai": {
+            "reasoning_efforts": ["low"],
+            "models": models(
+                legacy_shape,
+                {"legacy-only": ["medium"], "shared-model": ["low"]},
+            ),
+        },
+        "mistral": {
+            "reasoning_efforts": ["low"],
+            "models": models(
+                canonical_shape,
+                {
+                    "canonical-only": ["high"],
+                    "shared-model": ["high"],
+                    "SHARED-MODEL": ["medium"],
+                    "invalid-model": ["bogus"],
+                    "empty-model": [],
+                },
+            ),
+        },
+    }
+    snapshot = {"providers": {key: entries[key] for key in provider_order}}
+    monkeypatch.setattr(config, "cfg", snapshot)
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+    monkeypatch.setattr(config, "_heuristic_reasoning_efforts", lambda *_args: ["none"])
+
+    assert config._resolve_model_reasoning_efforts_impl("legacy-only", "mistral") == ["medium"]
+    assert config._resolve_model_reasoning_efforts_impl("canonical-only", "mistral") == ["high"]
+    assert config._resolve_model_reasoning_efforts_impl("shared-model", "mistral") == ["high"]
+    assert config._resolve_model_reasoning_efforts_impl("SHARED-MODEL", "mistral") == ["medium"]
+    assert config._resolve_model_reasoning_efforts_impl("Shared-Model", "mistral") == ["high"]
+    assert config._resolve_model_reasoning_efforts_impl("invalid-model", "mistral") == ["low"]
+    assert config._resolve_model_reasoning_efforts_impl("empty-model", "mistral") == ["low"]

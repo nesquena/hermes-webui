@@ -1644,11 +1644,16 @@ def _canonical_provider_config_keys(config_obj: dict | None, provider: object) -
     return [str(key) for key in providers_cfg if _canonicalise_provider_id(key) == canonical]
 
 
-def _canonical_provider_config(config_obj: dict | None, provider: object) -> dict:
+def _canonical_provider_config(
+    config_obj: dict | None,
+    provider: object,
+    *,
+    include_context_models: bool = False,
+) -> dict | list:
     """Merge equivalent provider config entries, with canonical keys winning."""
     providers_cfg = (config_obj or {}).get("providers", {}) if isinstance(config_obj, dict) else {}
     if not isinstance(providers_cfg, dict):
-        return {}
+        return [] if include_context_models else {}
     keys = _canonical_provider_config_keys(config_obj, provider)
     canonical = _canonicalise_provider_id(provider)
     # Read legacy aliases first and the canonical key last so canonical scalar
@@ -1660,6 +1665,7 @@ def _canonical_provider_config(config_obj: dict | None, provider: object) -> dic
     model_values: list = []
     model_map: dict | None = None
     model_entries: list[tuple[str, object, bool]] = []
+    model_contributors: list[tuple[str, object]] = []
     has_model_list = False
     has_model_dict = False
     for key in keys:
@@ -1668,6 +1674,7 @@ def _canonical_provider_config(config_obj: dict | None, provider: object) -> dic
             merged.update(value)
             if isinstance(value.get("models"), list):
                 has_model_list = True
+                model_contributors.append((key, value["models"]))
                 model_values.extend(value["models"])
                 for item in value["models"]:
                     model_id = _configured_model_ids([item])
@@ -1675,6 +1682,7 @@ def _canonical_provider_config(config_obj: dict | None, provider: object) -> dic
                         model_entries.append((model_id[0], item, True))
             elif isinstance(value.get("models"), dict):
                 has_model_dict = True
+                model_contributors.append((key, value["models"]))
                 if model_map is None:
                     model_map = {}
                 model_map.update(value["models"])
@@ -1716,6 +1724,48 @@ def _canonical_provider_config(config_obj: dict | None, provider: object) -> dic
         merged["models"] = merged_models
     elif model_map is not None:
         merged["models"] = model_map
+
+    if include_context_models:
+        # The default merge deduplicates catalog rows. Context lookup needs each
+        # winning list occurrence so its first-valid parser can preserve order.
+        canonical_contributor = providers_cfg.get(canonical, {})
+        context_contributors = []
+        if canonical in keys and isinstance(canonical_contributor, dict):
+            canonical_models = canonical_contributor.get("models")
+            if isinstance(canonical_models, (list, dict)):
+                context_contributors.append(canonical_models)
+        context_contributors.extend(
+            contributor
+            for key, contributor in reversed(model_contributors)
+            if key != canonical
+        )
+        context_models: list = []
+        claimed_model_ids: set[str] = set()
+        for contributor in context_contributors:
+            if isinstance(contributor, dict):
+                model_ids = {
+                    str(model_id).strip()
+                    for model_id in contributor
+                    if isinstance(model_id, str) and model_id.strip()
+                }
+                selected_ids = model_ids - claimed_model_ids
+                selected = {
+                    model_id: metadata
+                    for model_id, metadata in contributor.items()
+                    if isinstance(model_id, str) and model_id.strip() in selected_ids
+                }
+            else:
+                model_ids = set(_configured_model_ids(contributor))
+                selected_ids = model_ids - claimed_model_ids
+                selected = []
+                for item in contributor:
+                    item_ids = _configured_model_ids([item])
+                    if not item_ids or item_ids[0] in selected_ids:
+                        selected.append(item)
+            claimed_model_ids.update(model_ids)
+            if selected:
+                context_models.append(selected)
+        return context_models
     return merged
 
 
@@ -5781,8 +5831,9 @@ def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
 
     configured_lists = []
     models = provider_entry.get("models")
+    model_id = str(model_id or "").strip()
+    model_key = model_id.lower()
     if isinstance(models, dict):
-        model_key = str(model_id or "").strip().lower()
         model_entry = models.get(model_id)
         if not isinstance(model_entry, dict) and model_key:
             model_entry = next(
@@ -5791,6 +5842,29 @@ def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
                     for configured_id, metadata in models.items()
                     if str(configured_id).strip().lower() == model_key
                     and isinstance(metadata, dict)
+                ),
+                None,
+            )
+        if isinstance(model_entry, dict):
+            configured_lists.append(model_entry.get("reasoning_efforts"))
+    elif isinstance(models, list) and model_key:
+        model_entries = []
+        for row in models:
+            if not isinstance(row, dict):
+                continue
+            model_ids = _configured_model_ids([row])
+            if model_ids:
+                model_entries.append((model_ids[0], row))
+        model_entry = next(
+            (row for configured_id, row in model_entries if configured_id == model_id),
+            None,
+        )
+        if model_entry is None:
+            model_entry = next(
+                (
+                    row
+                    for configured_id, row in model_entries
+                    if configured_id.lower() == model_key
                 ),
                 None,
             )
@@ -5848,7 +5922,7 @@ def _resolve_model_reasoning_efforts_impl(
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = _canonical_provider_config(cfg, provider)
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model

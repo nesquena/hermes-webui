@@ -7128,11 +7128,14 @@ def _context_length_config_api_key_for_provider(
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
+        from api.config import _canonical_provider_config
+
         for provider_key, provider_cfg in providers_cfg.items():
             if not isinstance(provider_cfg, dict):
                 continue
             if not _providers_match_for_context(provider_key, provider):
                 continue
+            provider_cfg = _canonical_provider_config(cfg, provider_key)
             api_key = _resolve_key(provider_cfg.get("api_key"), provider_cfg.get("key_env"))
             if api_key:
                 return api_key
@@ -7221,17 +7224,28 @@ def _context_length_lookup_inputs_for_model(
     provider_context_length = None
     providers_cfg = (cfg.get("providers") or {}) if isinstance(cfg, dict) else {}
     if isinstance(providers_cfg, dict):
+        from api.config import _canonical_provider_config
+
         for provider_key, provider_cfg in providers_cfg.items():
             if not isinstance(provider_cfg, dict):
                 continue
             if not _providers_match_for_context(provider_key, effective_provider):
                 continue
+            provider_cfg = _canonical_provider_config(cfg, provider_key)
+            context_model_configs = _canonical_provider_config(
+                cfg,
+                provider_key,
+                include_context_models=True,
+            )
             if not effective_base_url:
                 effective_base_url = str(provider_cfg.get("base_url") or "").strip()
-            provider_context_length = _models_config_context_length(
-                provider_cfg.get("models"),
-                bare_model or model_for_lookup,
-            )
+            for models_cfg in context_model_configs:
+                provider_context_length = _models_config_context_length(
+                    models_cfg,
+                    bare_model or model_for_lookup,
+                )
+                if provider_context_length is not None:
+                    break
             break
 
     custom_context_length = None
