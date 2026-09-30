@@ -39,6 +39,7 @@ from api.config import (
     _canonical_provider_config,
     _canonical_provider_config_keys,
     _canonicalise_provider_id,
+    _configured_model_options,
     _configured_model_ids,
     _custom_provider_slug_from_name,
     _get_label_for_model,
@@ -2784,11 +2785,7 @@ def get_providers() -> dict[str, Any]:
         if isinstance(providers_cfg, dict):
             provider_cfg = _canonical_provider_config(cfg, pid)
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
-                cfg_models = provider_cfg["models"]
-                if isinstance(cfg_models, dict):
-                    models = models + [{"id": k, "label": k} for k in cfg_models.keys()]
-                elif isinstance(cfg_models, list):
-                    models = models + [{"id": k, "label": k} for k in cfg_models]
+                models.extend(_configured_model_options(provider_cfg["models"]))
                 # Recompute models_total when config.yaml contributes additional
                 # entries on top of the live/static catalog. For non-Nous
                 # providers models_total still equals len(models); for Nous
