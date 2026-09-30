@@ -425,6 +425,29 @@ def test_catalog_preserves_webui_active_provider_ids(monkeypatch, tmp_path):
             )
 
 
+def test_static_catalog_preserves_google_fallback_identity(monkeypatch, tmp_path):
+    cfgfile = tmp_path / "config.yaml"
+    cfgfile.write_text(
+        "model:\n  provider: google\n  default: gemini-2.5-pro\n"
+        "fallback_providers:\n  - provider: google\n    model: gemini-2.5-flash\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid: False)
+    _install_hermes_modules(monkeypatch)
+    config.reload_config()
+
+    catalog = config._static_models_catalog_without_live_probes()
+    provider_ids = {group.get("provider_id") for group in catalog["groups"]}
+    assert "google" in provider_ids
+    assert "gemini" not in provider_ids
+    badge = catalog["configured_model_badges"]["gemini-2.5-flash"]
+    assert badge["provider"] == "google"
+    assert badge["role"] == "fallback"
+
+
 def test_catalog_merges_canonical_and_legacy_provider_models(monkeypatch, tmp_path):
     cfgfile = tmp_path / "config.yaml"
     cfgfile.write_text(
