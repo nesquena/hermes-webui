@@ -8964,9 +8964,7 @@ async function _autosavePreferencesSettings(payload){
     const localeCommit=await _commitSettingsLocale(requestedLanguage,selector,payload,true);
     if(!localeCommit) return;
     if(payload) payload={...payload,language:localeCommit.active};
-    const settingsLocaleGeneration=localeCommit.generation;
     const saved=await _postSettingsAtLocaleCommit(payload);
-    if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -12207,7 +12205,7 @@ async function deletePasskey(id){
 }
 
 async function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
+  const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showQuotaChip=showQuotaChip===true;
@@ -12253,13 +12251,6 @@ async function _applySavedSettingsUi(saved, body, opts){
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
-  const localeResult=await _settleSettingsLocale(
-    (($('settingsLanguage')||{}).value)||((typeof getActiveLocale==='function')?getActiveLocale():language),
-    $('settingsLanguage')
-  );
-  if(localeResult&&localeResult.status==='superseded') return;
-  if(!_settingsLocaleSettlementIsCurrent(localeResult)) return;
-  if(localeResult) body.language=localeResult.active;
   _ensureComposerControlVisibilityState(saved||body||{});
   const composerOrderSource=(saved&&Array.isArray(saved.composer_control_order))
     ? saved.composer_control_order
@@ -12949,7 +12940,6 @@ async function saveSettings(andClose){
     body
   );
   if(!localeCommit) return;
-  const settingsLocaleGeneration=localeCommit.generation;
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
   if(maxTokensField){
@@ -13018,8 +13008,7 @@ async function saveSettings(andClose){
           return;
         }
       }
-      if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
-      await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
       const pwField=$('settingsPassword'); if(pwField) pwField.value='';
@@ -13055,8 +13044,7 @@ async function saveSettings(andClose){
           return;
         }
     }
-    if(!_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)) return;
-    await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    await _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();

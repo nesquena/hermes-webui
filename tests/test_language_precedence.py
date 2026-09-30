@@ -10,6 +10,7 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 I18N_CORE_JS = (REPO_ROOT / "static" / "i18n-core.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
 
 
@@ -349,7 +350,7 @@ def test_selected_locale_is_applied_only_after_bundle_registration():
         vm.runInContext(bundle, ctx);
         pendingScript.onload();
         ready.then((result) => {{
-          process.stdout.write(JSON.stringify({{ before, after: label.textContent, active: result.active, state: vm.runInContext("LOCALE_STATES.it", ctx) }}));
+          process.stdout.write(JSON.stringify({{ before, after: label.textContent, active: result.active, status: result.status }}));
         }});
         """
     )
@@ -360,7 +361,7 @@ def test_selected_locale_is_applied_only_after_bundle_registration():
         "before": "Connection lost",
         "after": "Connessione persa",
         "active": "it",
-        "state": "loaded",
+        "status": "applied",
     }
 
 
@@ -370,15 +371,17 @@ def test_failed_bundle_keeps_english_fallback_and_previous_locale():
 (async () => {
   const before = t('offline_title');
   const result = await activateLocale('fr');
-  return { before, active: result.active, fallback: result.fallback, state: LOCALE_STATES.fr };
+  return { before, after: t('offline_title'), active: result.active, fallback: result.fallback, stored: localStorage.getItem('hermes-lang'), htmlLang: document.documentElement.lang };
 })()
         """
     )
     assert result == {
         "before": "Connection lost",
+        "after": "Connection lost",
         "active": "en",
         "fallback": True,
-        "state": "failed",
+        "stored": "en",
+        "htmlLang": "en-US",
     }
 
 
@@ -401,7 +404,8 @@ def test_activation_generation_owns_completion_order_and_stale_side_effects():
           const element = {{getAttribute: () => 'offline_title', hasAttribute: () => false}};
           Object.defineProperty(element, 'textContent', {{set: () => writes.dom++}});
           const documentElement = {{}};
-          Object.defineProperty(documentElement, 'lang', {{set: () => writes.lang++}});
+          let documentLang = '';
+          Object.defineProperty(documentElement, 'lang', {{get: () => documentLang, set: (value) => {{ documentLang = value; writes.lang++; }}}});
           const ctx = {{
             localStorage: {{
               getItem: (key) => storage[key] || null,
@@ -470,7 +474,32 @@ def test_activation_generation_owns_completion_order_and_stale_side_effects():
           await prior;
           const failed = vm.runInContext("activateLocale('fr')", env.ctx);
           env.scripts.find((script) => script.src.includes('/fr.js')).onerror();
-          return await failed;
+          const result = await failed;
+          return {{
+            result,
+            active: vm.runInContext('getActiveLocale()', env.ctx),
+            stored: env.storage['hermes-lang'],
+            lang: vm.runInContext('document.documentElement.lang', env.ctx),
+            text: vm.runInContext("t('offline_title')", env.ctx),
+          }};
+        }}
+
+        async function retryAfterFailure() {{
+          const env = setup();
+          const first = vm.runInContext("activateLocale('fr')", env.ctx);
+          env.scripts[0].onerror();
+          const firstResult = await first;
+          const retry = vm.runInContext("activateLocale('fr')", env.ctx);
+          const retryScript = env.scripts.filter((script) => script.src.includes('/fr.js')).at(-1);
+          vm.runInContext(fs.readFileSync(bundles.fr, 'utf8'), env.ctx);
+          retryScript.onload();
+          return {{
+            first: firstResult,
+            retry: await retry,
+            active: vm.runInContext('getActiveLocale()', env.ctx),
+            stored: env.storage['hermes-lang'],
+            requests: env.scripts.length,
+          }};
         }}
 
         (async () => {{
@@ -484,6 +513,7 @@ def test_activation_generation_owns_completion_order_and_stale_side_effects():
             englishSelection: await englishSelectionWhilePending(),
             englishFallback: await fallbackFrom('en'),
             nonEnglishFallback: await fallbackFrom('de'),
+            retry: await retryAfterFailure(),
             missingKey: vm.runInContext("t('offline_title')", missing.ctx),
           }}));
         }})();
@@ -504,18 +534,28 @@ def test_activation_generation_owns_completion_order_and_stale_side_effects():
     assert result["englishSelection"]["pending"]["status"] == "superseded"
     assert result["englishSelection"]["active"] == "en"
     assert result["englishSelection"]["after"] == result["englishSelection"]["before"]
-    assert result["englishFallback"]["status"] == "fallback"
+    assert result["englishFallback"]["result"]["status"] == "fallback"
     assert result["englishFallback"]["active"] == "en"
-    assert result["nonEnglishFallback"]["status"] == "fallback"
+    assert result["englishFallback"]["stored"] == "en"
+    assert result["englishFallback"]["lang"] == "en-US"
+    assert result["nonEnglishFallback"]["result"]["status"] == "fallback"
     assert result["nonEnglishFallback"]["active"] == "de"
+    assert result["nonEnglishFallback"]["stored"] == "de"
+    assert result["nonEnglishFallback"]["lang"] == "de-DE"
+    assert result["nonEnglishFallback"]["text"] != "Connection lost"
+    assert result["retry"]["first"]["status"] == "fallback"
+    assert result["retry"]["retry"]["status"] == "applied"
+    assert result["retry"]["active"] == "fr"
+    assert result["retry"]["stored"] == "fr"
+    assert result["retry"]["requests"] == 2
     assert result["missingKey"] == "Connection lost"
 
 
 def test_settings_routes_persist_only_effective_locale():
     assert "function _settleSettingsLocale(" in PANELS_JS
     assert "payload.language=(typeof getActiveLocale==='function')?getActiveLocale():langSel.value" in PANELS_JS
-    assert PANELS_JS.count("await _settleSettingsLocale(") >= 4
-    assert "body.language=localeResult.active" in PANELS_JS
+    assert PANELS_JS.count("await _settleSettingsLocale(") >= 3
+    assert "if(payload) payload.language=active;" in _function_source(PANELS_JS, "_commitSettingsLocale")
 
 
 # --- #7622 round-3 behavioural pins -----------------------------------------
@@ -784,11 +824,11 @@ def test_failed_browser_load_settles_boot_error_to_english_before_late_registrat
     assert result["afterLate"] == result["beforeLate"]
 
 
-def test_settings_locale_continuations_recheck_current_settlement():
+def test_settings_language_hydration_keeps_the_current_selector_owner():
     assert "const pendingLanguage=langSel.value;" in PANELS_JS
-    assert "_settingsLocaleSettlementIsCurrent(localeResult)" in PANELS_JS
     assert "_reconcileSettingsLocaleSelector(selector,settled)" in PANELS_JS
     assert "const requestedLanguage=(selector&&selector.value)" in PANELS_JS
+    assert "langSel.value=pendingLanguage||getActiveLocale();" in PANELS_JS
 
 
 def test_superseded_settings_hydration_preserves_native_selector_and_next_save_language():
@@ -894,6 +934,320 @@ def test_superseded_settings_hydration_preserves_native_selector_and_next_save_l
     }
 
 
+def test_accepted_settings_effects_finish_after_locale_changes():
+    sources = [
+        _function_source(PANELS_JS, "_settleSettingsLocale"),
+        _function_source(PANELS_JS, "_reconcileSettingsLocaleSelector"),
+        _function_source(PANELS_JS, "_settingsLocaleSettlementIsCurrent"),
+        _function_source(PANELS_JS, "_settingsLocaleCommitIsCurrent"),
+        _function_source(PANELS_JS, "_commitSettingsLocale"),
+        _function_source(PANELS_JS, "_enqueueSettingsPost"),
+        _function_source(PANELS_JS, "_postSettingsAtLocaleCommit"),
+        _function_source(PANELS_JS, "_updateCurrentPasswordVisibility"),
+        _function_source(PANELS_JS, "_renderSettingsAuthStatus"),
+        _function_source(PANELS_JS, "_applySavedSettingsUi"),
+        _function_source(PANELS_JS, "saveSettings"),
+        _function_source(PANELS_JS, "_autosavePreferencesSettings"),
+        _new_session_source(),
+    ]
+    bundle_sources = [
+        (REPO_ROOT / "static" / "locales" / f"{code}.js").read_text(encoding="utf-8")
+        for code in ("de", "fr")
+    ]
+    combined_sources = (
+        I18N_CORE_JS
+        + "\n"
+        + "\n".join(bundle_sources)
+        + "\n"
+        "let _settingsPanelPostQueue=Promise.resolve();"
+        "let _settingsLocalePostInFlight=null;"
+        "let _newSessionInFlight=null;"
+        "let _messagesTruncated=false;"
+        "let _oldestIdx=0;\n"
+        + "\n".join(sources)
+    )
+    script = textwrap.dedent(
+        """
+        (async () => {
+          const vm = require('vm');
+          const elements = Object.create(null);
+          const element = (id) => elements[id] || (elements[id] = {
+            value: '', checked: false, dataset: {}, style: {},
+            addEventListener() {}, focus() {},
+          });
+          element('settingsLanguage').value = 'de';
+          element('settingsTheme').value = 'dark';
+          element('settingsSkin').value = 'default';
+          element('settingsFontSize').value = 'default';
+          element('settingsSidebarDensity').value = 'compact';
+          element('settingsDefaultMessageMode').value = 'steer';
+          element('settingsModel').value = 'normal-model';
+          element('settingsModel').dataset.provider = 'provider-normal';
+          const storage = {'hermes-lang': 'de'};
+          const pendingSettings = [];
+          const settingsPosts = [];
+          const modelPosts = [];
+          const newChatPosts = [];
+          let authStatusFetches = 0;
+          let lastAutosaveStatus = '';
+          let workspaceVisibilityUpdates = 0;
+          const documentElement = {lang: 'de-DE', dataset: {}};
+          const ctx = {
+            console,
+            URL,
+            window: {_defaultModel: 'old-model', _activeProvider: 'old-provider'},
+            document: {
+              documentElement,
+              querySelector: () => null,
+              querySelectorAll: () => [],
+              createElement: () => ({dataset: {}, style: {}, appendChild() {}}),
+            },
+            localStorage: {
+              getItem: (key) => Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : null,
+              setItem: (key, value) => { storage[key] = String(value); },
+            },
+            navigator: {languages: ['de-DE'], language: 'de-DE'},
+            $: element,
+            api: (path, options) => {
+              if (path === '/api/settings' && options.method === 'POST') {
+                const body = JSON.parse(options.body);
+                settingsPosts.push(body);
+                return new Promise((resolve) => pendingSettings.push(() => resolve({
+                  ...body,
+                  auth_enabled: true,
+                  password_auth_enabled: true,
+                  auth_just_enabled: !!body._set_password,
+                })));
+              }
+              if (path === '/api/default-model') {
+                modelPosts.push(JSON.parse(options.body));
+                return Promise.resolve({});
+              }
+              if (path === '/api/auth/status') {
+                authStatusFetches++;
+                return Promise.resolve({auth_enabled: true, password_auth_enabled: true});
+              }
+              if (path === '/api/session/new') {
+                const body = JSON.parse(options.body);
+                newChatPosts.push(body);
+                return Promise.resolve({session: {
+                  session_id: `session-${newChatPosts.length}`,
+                  messages: [], model: body.model, model_provider: body.model_provider,
+                }});
+              }
+              return Promise.resolve({});
+            },
+            checkWebUIVersionSkew() {},
+            _settingsPasswordAuthEnabled: false,
+            _settingsHermesDefaultModelOnOpen: 'old-model',
+            _settingsHermesDefaultModelProviderOnOpen: 'old-provider',
+            _settingsDirty: false,
+            _workspaceTodosTab: false,
+            _settingsThemeOnOpen: 'dark',
+            _settingsSkinOnOpen: 'default',
+            _settingsFontSizeOnOpen: 'default',
+            _settingsPreferencesAutosaveRetryPayload: null,
+            _captureModelDropdownSelection: (control) => ({
+              model: control.value,
+              model_provider: control.dataset.provider || null,
+            }),
+            _speechPreferencesPayloadFromUi: () => ({}),
+            _structuredCodeViewFromUi: () => ({}),
+            _composerControlVisibilityPayload: () => ({}),
+            _getComposerControlOrder: () => [],
+            _setPreferencesAutosaveStatus: (value) => { lastAutosaveStatus = value; },
+            _setSettingsAuthButtonsVisible() {},
+            _resetSettingsPanelState() {},
+            _setDefaultModel() {},
+            _hideSettingsPanel() {},
+            _loadAuxiliaryModels() {},
+            _bindMainAdvancedOptionsButton() {},
+            _markSettingsDirty() {},
+            _applyWorkspaceTodosTabVisibility() { workspaceVisibilityUpdates++; },
+            _syncChatActivityDisplayModeControl() {},
+            _syncTransparentEventTimestampsControl() {},
+            _applySessionNavigationPrefs() {},
+            _persistDefaultMessageMode: (value) => value,
+            _persistAutoScrollFollow() {},
+            _ensureComposerControlVisibilityState() {},
+            _setComposerControlOrder: () => [],
+            _renderComposerControlChips() {},
+            _renderComposerSituationalControlChips() {},
+            _applyComposerFooterVisibilitySettings() {},
+            _syncSettingsMaxTokensPlaceholder() {},
+            _applyStructuredCodeViewSettings() {},
+            applyConversationOutlinePreference() {},
+            applyBotName() {},
+            _updateAuthWarningBadge() {},
+            _updateAuthDisabledWarning() {},
+            clearMessageRenderCache() {},
+            renderMessages() {},
+            syncTopbar() {},
+            renderSessionList() {},
+            showToast() {},
+            t: (key) => key,
+            S: {session: null, activeProfile: 'default', toolCalls: [], messages: []},
+            NO_PROJECT_FILTER: '__none__',
+            _activeProject: null,
+            _sessionSourceFilter: 'webui',
+            _setNewSessionPending() {},
+            updateQueueBadge() {},
+            clearLiveToolCards() {},
+            _readEmptyComposerModelOverride: () => null,
+            _modelStateForSelect: () => ({model: '', model_provider: null}),
+            _applyModelToDropdown: () => true,
+            _rememberNewChatDraftSession() {},
+            _setActiveSessionUrl() {},
+            startSessionStream() {},
+            _setSessionViewedCount() {},
+            _hydrateTodosFromSession() {},
+            _adoptRegenerationRevision() {},
+            _setLiveAssistantTps() {},
+            _syncCtxIndicator() {},
+            updateSendBtn() {},
+            setStatus() {},
+            setComposerStatus() {},
+            _deferWorkspaceRefreshForSession() {},
+            refreshSessionList: () => Promise.resolve(),
+          };
+          vm.createContext(ctx);
+          vm.runInContext(combinedSources, ctx);
+          const tick = () => new Promise((resolve) => setImmediate(resolve));
+          const changeLocale = async (code) => {
+            await vm.runInContext(`activateLocale('${code}')`, ctx);
+            element('settingsLanguage').value = code;
+          };
+          const newChatPayload = async () => {
+            ctx.S.session = null;
+            ctx.S.messages = [];
+            await vm.runInContext('newSession(false)', ctx);
+            return newChatPosts[newChatPosts.length - 1];
+          };
+
+          const normalSave = vm.runInContext('saveSettings(false)', ctx);
+          await tick();
+          const normalPostHeld = settingsPosts.length === 1;
+          await changeLocale('fr');
+          const normalGeneration = vm.runInContext('getLocaleActivationGeneration()', ctx);
+          pendingSettings.shift()();
+          await normalSave;
+          const normalState = {
+            active: vm.runInContext('getActiveLocale()', ctx), selector: element('settingsLanguage').value, htmlLang: documentElement.lang,
+            stored: storage['hermes-lang'], model: ctx.window._defaultModel, provider: ctx.window._activeProvider,
+            generation: vm.runInContext('getLocaleActivationGeneration()', ctx),
+          };
+          const normalNewChat = await newChatPayload();
+
+          element('settingsModel').value = 'password-model';
+          element('settingsModel').dataset.provider = 'provider-password';
+          element('settingsPassword').value = 'first-password';
+          const passwordSave = vm.runInContext('saveSettings(false)', ctx);
+          await tick();
+          const passwordPostHeld = settingsPosts.length === 2;
+          await changeLocale('de');
+          const passwordGeneration = vm.runInContext('getLocaleActivationGeneration()', ctx);
+          pendingSettings.shift()();
+          await passwordSave;
+          const passwordState = {
+            active: vm.runInContext('getActiveLocale()', ctx), selector: element('settingsLanguage').value, htmlLang: documentElement.lang,
+            stored: storage['hermes-lang'], model: ctx.window._defaultModel, provider: ctx.window._activeProvider,
+            password: element('settingsPassword').value,
+            currentPassword: element('settingsCurrentPassword').value,
+            authEnabled: ctx._settingsPasswordAuthEnabled,
+            currentPasswordDisplay: element('settingsCurrentPasswordBlock').style.display,
+            authStatusFetches,
+            generation: vm.runInContext('getLocaleActivationGeneration()', ctx),
+          };
+          const passwordNewChat = await newChatPayload();
+
+          element('settingsPassword').value = 'updated-password';
+          element('settingsCurrentPassword').value = 'current-password';
+          const updateSave = vm.runInContext('saveSettings(false)', ctx);
+          await tick();
+          const nextPasswordPayload = settingsPosts[2];
+          pendingSettings.shift()();
+          await updateSave;
+
+          const visibilityBeforeAutosave = workspaceVisibilityUpdates;
+          const autosave = vm.runInContext("_autosavePreferencesSettings({language: 'de', workspace_todos_tab: true})", ctx);
+          await tick();
+          const autosavePostHeld = settingsPosts.length === 4;
+          await changeLocale('fr');
+          const autosaveGeneration = vm.runInContext('getLocaleActivationGeneration()', ctx);
+          pendingSettings.shift()();
+          await autosave;
+          process.stdout.write(JSON.stringify({
+            normalPostHeld,
+            normalState,
+            normalNewChat,
+            passwordPostHeld,
+            passwordState,
+            passwordAuthStatusHtml: element('settingsAuthStatus').innerHTML,
+            passwordNewChat,
+            nextPasswordPayload,
+            authStatusFetches,
+            autosavePostHeld,
+            autosaveState: {
+              active: vm.runInContext('getActiveLocale()', ctx), selector: element('settingsLanguage').value, htmlLang: documentElement.lang,
+              stored: storage['hermes-lang'], workspaceTodos: ctx.window._workspaceTodosTab,
+              status: lastAutosaveStatus, visibilityUpdates: workspaceVisibilityUpdates,
+              generation: vm.runInContext('getLocaleActivationGeneration()', ctx),
+            },
+            normalGeneration,
+            passwordGeneration,
+            autosaveGeneration,
+            visibilityBeforeAutosave,
+          }));
+        })()
+        """
+    ).replace("combinedSources", json.dumps(combined_sources))
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+    assert result["normalPostHeld"] is True
+    assert result["normalState"] == {
+        "active": "fr",
+        "selector": "fr",
+        "htmlLang": "fr-FR",
+        "stored": "fr",
+        "model": "normal-model",
+        "provider": "provider-normal",
+        "generation": result["normalGeneration"],
+    }
+    assert result["normalNewChat"]["model"] == "normal-model"
+    assert result["normalNewChat"]["model_provider"] == "provider-normal"
+    assert result["passwordPostHeld"] is True
+    assert result["passwordState"] == {
+        "active": "de",
+        "selector": "de",
+        "htmlLang": "de-DE",
+        "stored": "de",
+        "model": "password-model",
+        "provider": "provider-password",
+        "password": "",
+        "currentPassword": "",
+        "authEnabled": True,
+        "currentPasswordDisplay": "block",
+        "authStatusFetches": 1,
+        "generation": result["passwordGeneration"],
+    }
+    assert result["passwordAuthStatusHtml"].startswith('<span class="detail-badge ok"')
+    assert result["passwordNewChat"]["model"] == "password-model"
+    assert result["passwordNewChat"]["model_provider"] == "provider-password"
+    assert result["nextPasswordPayload"]["_current_password"] == "current-password"
+    assert result["autosavePostHeld"] is True
+    assert result["autosaveState"] == {
+        "active": "fr",
+        "selector": "fr",
+        "htmlLang": "fr-FR",
+        "stored": "fr",
+        "workspaceTodos": True,
+        "status": "saved",
+        "visibilityUpdates": result["visibilityBeforeAutosave"] + 1,
+        "generation": result["autosaveGeneration"],
+    }
+
+
 def _function_source(src: str, name: str) -> str:
     async_token = f"async function {name}("
     start = src.find(async_token)
@@ -909,6 +1263,20 @@ def _function_source(src: str, name: str) -> str:
             if depth == 0:
                 return src[start : index + 1]
     raise AssertionError(f"unclosed function {name}")
+
+
+def _new_session_source() -> str:
+    start = SESSIONS_JS.index("async function newSession")
+    brace = SESSIONS_JS.index("{\n", start)
+    depth = 0
+    for index in range(brace, len(SESSIONS_JS)):
+        if SESSIONS_JS[index] == "{":
+            depth += 1
+        elif SESSIONS_JS[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return SESSIONS_JS[start : index + 1]
+    raise AssertionError("unclosed function newSession")
 
 
 def _run_node_script(script: str) -> subprocess.CompletedProcess:
@@ -1002,12 +1370,6 @@ def test_settings_post_serializes_after_locale_settlement_and_ignores_stale_succ
         "selector": "fr",
         "serverLanguage": "fr",
     }
-
-
-def test_settings_save_paths_use_the_same_locale_commit_boundary():
-    assert PANELS_JS.count("_postSettingsAtLocaleCommit(") >= 3
-    assert PANELS_JS.count("_settingsLocaleCommitIsCurrent(settingsLocaleGeneration)") >= 3
-    assert "if(result&&result.status==='superseded') return null;" in _function_source(PANELS_JS, "_commitSettingsLocale")
 
 
 def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
@@ -1186,7 +1548,7 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
     assert result["passwordAfter"] == "de"
     assert result["loadAfter"] == "de"
     assert result["uiAfter"]["selector"] == "de"
-    assert result["uiAfter"]["bodyLanguage"] == "de"
+    assert result["uiAfter"]["bodyLanguage"] == "fr"
     assert result["explicitPostHeld"] is True
     assert result["generationAfterAutosave"] == result["generationBeforeAutosave"]
     assert result["modelPosts"] == [

@@ -80,11 +80,9 @@ const LOCALE_REGISTRY = Object.freeze({
 });
 const LOCALE_METADATA = LOCALE_REGISTRY;
 const LOCALES = Object.create(null);
-const LOCALE_STATES = Object.create(null);
 const _LOCALE_LOAD_PROMISES = Object.create(null);
 let _activeLocale = 'en';
 let _activationGeneration = 0;
-for (const code of Object.keys(LOCALE_REGISTRY)) LOCALE_STATES[code] = 'known';
 
 
 const _I18N_TOOL_ACTION_TEXT_EN = {
@@ -188,9 +186,8 @@ function getLocaleBundle(code) {
 }
 
 function registerLocale(code, bundle) {
-  if (!LOCALE_REGISTRY[code] || !bundle || typeof bundle !== 'object' || bundle._lang !== code) return false;
+  if (!LOCALE_REGISTRY[code] || !bundle || typeof bundle !== 'object') return false;
   LOCALES[code] = bundle;
-  LOCALE_STATES[code] = 'loaded';
   const pending = _LOCALE_LOAD_PROMISES[code];
   if (pending) {
     delete _LOCALE_LOAD_PROMISES[code];
@@ -237,7 +234,6 @@ function ensureLocale(lang) {
   if (!resolved || resolved === 'en' || LOCALES[resolved]) return Promise.resolve(resolved || 'en');
   if (_LOCALE_LOAD_PROMISES[resolved]) return _LOCALE_LOAD_PROMISES[resolved].promise;
   if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
-    LOCALE_STATES[resolved] = 'failed';
     return Promise.reject(new Error('Locale bundle loading requires a document'));
   }
   let resolvePending;
@@ -247,19 +243,16 @@ function ensureLocale(lang) {
     rejectPending = rejectPromise;
   });
   _LOCALE_LOAD_PROMISES[resolved] = { promise, resolve: resolvePending, reject: rejectPending };
-  LOCALE_STATES[resolved] = 'pending';
   const script = document.createElement('script');
   script.src = _localeAssetUrl(resolved);
   script.async = true;
   script.onload = () => {
     if (LOCALES[resolved]) return;
-    LOCALE_STATES[resolved] = 'failed';
     const pending = _LOCALE_LOAD_PROMISES[resolved];
     delete _LOCALE_LOAD_PROMISES[resolved];
     if (pending) pending.reject(new Error(`Locale bundle did not register: ${resolved}`));
   };
   script.onerror = () => {
-    LOCALE_STATES[resolved] = 'failed';
     const pending = _LOCALE_LOAD_PROMISES[resolved];
     delete _LOCALE_LOAD_PROMISES[resolved];
     if (pending) pending.reject(new Error(`Locale bundle unavailable: ${resolved}`));
