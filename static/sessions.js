@@ -3664,6 +3664,22 @@ function _messageReloadLimitForSession(sid){
   return _INITIAL_MSG_LIMIT;
 }
 
+function _stitchBoundedReloadTail(prevMessages, offset, tailMessages){
+  // #7899: bounded same-session reload — stitch a fresh server tail onto the
+  // already-rendered prefix instead of re-downloading the whole transcript.
+  // prevMessages is the currently-rendered transcript, offset is how many
+  // leading rows the bounded response clipped (_messages_offset), and
+  // tailMessages is the fresh tail the server returned. When the client
+  // prefix covers the clipped region the result is seamless; when the prefix
+  // is shorter (client fell far behind), keep the entire prefix so no
+  // visible rows disappear and append the fresh tail (Codex gate #6154
+  // row-retention).
+  if(!Array.isArray(prevMessages) || !prevMessages.length) return Array.isArray(tailMessages)?tailMessages:[];
+  const clipped=Math.max(0,Number(offset)||0);
+  if(!clipped) return Array.isArray(tailMessages)?tailMessages:[];
+  return prevMessages.slice(0, clipped).concat(Array.isArray(tailMessages)?tailMessages:[]);
+}
+
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   const msgs=Array.isArray(messages)?messages:[];
   // During active streaming, skip — clearing S.toolCalls would lose Activity
@@ -3716,15 +3732,15 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  // A reload window above the server's msg_limit ceiling would be clamped by
-  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
-  // silently SHRINK an already-loaded transcript that had more than the ceiling
-  // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
-  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
+  // #7899: A reload window above the server's msg_limit ceiling used to fall
+  // back to a bare full-transcript request (no msg_limit / no
+  // expand_renderable), turning every focus/SSE reconciliation on a >500-row
+  // session into a full multi-MB transcript download. Keep the request on the
+  // bounded tail path instead: clamp to the server ceiling and stitch the
+  // returned tail onto the already-rendered prefix (_stitchBoundedReloadTail)
+  // so no loaded rows are lost (Codex gate #6154, silent row-loss).
+  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : _msgLimitMax;
+  const reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
@@ -3750,6 +3766,15 @@ async function _ensureMessagesLoaded(sid, opts) {
   // toast on every mobile message (SSE/visibility events trigger this reload path
   // more aggressively on mobile).
   let msgs = (data.session.messages || []).filter(m => m && m.role);
+  // #7899: bounded reload tail stitching. When the server clipped the window
+  // (_messages_offset > 0) on a same-session refresh that kept the old
+  // transcript in place (keep-stale path), re-attach the already-rendered
+  // prefix so a >500-row session refresh neither drops rows (Codex gate
+  // #6154) nor re-downloads the entire transcript on every focus/SSE event.
+  const _reloadOffset = Number(data.session._messages_offset) || 0;
+  if (_reloadOffset > 0 && Array.isArray(S.messages) && S.messages.length > 0) {
+    msgs = _stitchBoundedReloadTail(S.messages, _reloadOffset, msgs);
+  }
   // Skip _syncToolCalls when INFLIGHT exists — the INFLIGHT restore path
   // (loadSession line ~871) will overwrite S.toolCalls from INFLIGHT[sid].toolCalls.
   // Clearing here and then overwriting is wasteful, and if S.busy becomes true
