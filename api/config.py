@@ -7378,6 +7378,7 @@ def _invoke_models_rebuild(builder):
 def _configured_model_badges_from_static_catalog(
     groups: list[dict],
     *,
+    config_obj: dict | None,
     active_provider: str | None,
     default_model: str,
 ) -> dict[str, dict[str, str]]:
@@ -7392,12 +7393,16 @@ def _configured_model_badges_from_static_catalog(
             }
         )
 
-    fallback_cfg = cfg.get("fallback_providers", []) if isinstance(cfg, dict) else []
+    fallback_cfg = (
+        config_obj.get("fallback_providers", [])
+        if isinstance(config_obj, dict)
+        else []
+    )
     if isinstance(fallback_cfg, list):
         for idx, entry in enumerate(fallback_cfg, start=1):
             if not isinstance(entry, dict):
                 continue
-            provider = _resolve_provider_alias(entry.get("provider"))
+            provider = _webui_catalog_provider_id(entry.get("provider"), config_obj)
             model = str(entry.get("model") or "").strip()
             if not provider or not model:
                 continue
@@ -7688,7 +7693,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             for entry in fallback_cfg:
                 if not isinstance(entry, dict):
                     continue
-                provider = _resolve_provider_alias(entry.get("provider"))
+                provider = _webui_catalog_provider_id(entry.get("provider"), cfg)
                 if provider:
                     detected_providers.add(provider)
                     _append_model_id(provider, entry.get("model"))
@@ -7902,6 +7907,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             "default_model": default_model,
             "configured_model_badges": _configured_model_badges_from_static_catalog(
                 groups,
+                config_obj=cfg,
                 active_provider=active_provider,
                 default_model=default_model,
             ),
