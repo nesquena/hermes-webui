@@ -448,6 +448,53 @@ def test_static_catalog_preserves_google_fallback_identity(monkeypatch, tmp_path
     assert badge["role"] == "fallback"
 
 
+@pytest.mark.parametrize("builder", ["static", "live"])
+def test_catalog_preserves_google_credential_pool_identity(monkeypatch, tmp_path, builder):
+    import json
+
+    cfgfile = tmp_path / "config.yaml"
+    authfile = tmp_path / "auth.json"
+    cfgfile.write_text(
+        "model:\n  provider: google\n  default: gemini-2.5-pro\n",
+        encoding="utf-8",
+    )
+    authfile.write_text(
+        json.dumps({
+            "credential_pool": {
+                "google": [{"id": "google-key", "source": "manual"}],
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: authfile)
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid: False)
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    _install_hermes_modules(monkeypatch)
+    if builder == "live":
+        class Pool:
+            def entries(self):
+                return [SimpleNamespace(source="manual", label="", key_source="")]
+
+        fake_agent = types.ModuleType("agent")
+        fake_agent.__path__ = []
+        fake_pool = types.ModuleType("agent.credential_pool")
+        fake_pool.load_pool = lambda _provider_id: Pool()
+        monkeypatch.setitem(sys.modules, "agent", fake_agent)
+        monkeypatch.setitem(sys.modules, "agent.credential_pool", fake_pool)
+        config._CREDENTIAL_POOL_CACHE.clear()
+    config.reload_config()
+
+    catalog = (
+        config._static_models_catalog_without_live_probes()
+        if builder == "static"
+        else config.get_available_models(force_refresh=True)
+    )
+    provider_ids = {group.get("provider_id") for group in catalog["groups"]}
+    assert "google" in provider_ids
+    assert "gemini" not in provider_ids
+
+
 def test_catalog_merges_canonical_and_legacy_provider_models(monkeypatch, tmp_path):
     cfgfile = tmp_path / "config.yaml"
     cfgfile.write_text(
@@ -704,6 +751,74 @@ def test_inactive_named_custom_catalog_inherits_shared_custom_provider_key(monke
     catalog = config.get_available_models(force_refresh=True)
     group = next(group for group in catalog["groups"] if group.get("provider_id") == "custom:demo")
     assert calls == [("https://proxy.example/v1/models", "Bearer shared-custom-key", 5.0)]
+    assert "@custom:demo:inactive-live-model" in {model["id"] for model in group["models"]}
+
+
+def test_inactive_named_custom_catalog_prefers_own_pool_key_over_shared_key(monkeypatch, tmp_path):
+    import json
+    import urllib.request
+
+    import api.profiles as profiles
+
+    cfgfile = tmp_path / "config.yaml"
+    cfgfile.write_text(
+        "model:\n  provider: google\n  default: gemini-2.5-pro\n"
+        "providers:\n  google:\n    api_key: google-key\n"
+        "  custom:\n    api_key: shared-custom-key\n"
+        "custom_providers:\n  - name: Demo\n    base_url: https://proxy.example/v1\n",
+        encoding="utf-8",
+    )
+    calls = []
+    pool_calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": "inactive-live-model"}]}).encode("utf-8")
+
+    class Pool:
+        def select(self):
+            return SimpleNamespace(runtime_api_key="named-pool-key", base_url="")
+
+    def fake_urlopen(req, timeout=None):
+        calls.append((req.full_url, req.headers.get("Authorization"), timeout))
+        return Response()
+
+    fake_agent = types.ModuleType("agent")
+    fake_agent.__path__ = []
+    fake_pool = types.ModuleType("agent.credential_pool")
+
+    def load_pool(provider_id):
+        pool_calls.append(provider_id)
+        return Pool()
+
+    fake_pool.load_pool = load_pool
+    monkeypatch.setitem(sys.modules, "agent", fake_agent)
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", fake_pool)
+    for name in tuple(os.environ):
+        if name.endswith(("_API_KEY", "_TOKEN")) or name == "API_KEY":
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(config, "_get_models_cache_path", lambda: tmp_path / "models.json")
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: True)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_hermes_modules(monkeypatch)
+    config.reload_config()
+    config.invalidate_models_cache()
+
+    catalog = config.get_available_models(force_refresh=True)
+    group = next(group for group in catalog["groups"] if group.get("provider_id") == "custom:demo")
+    assert calls == [("https://proxy.example/v1/models", "Bearer named-pool-key", 5.0)]
+    assert pool_calls == ["custom:demo"]
     assert "@custom:demo:inactive-live-model" in {model["id"] for model in group["models"]}
 
 

@@ -1365,8 +1365,8 @@ def _is_known_model_provider(provider_id: str) -> bool:
     Without this gate, #4247's pool-detection loop added *every* pool key to
     ``detected_providers``; unknown ids then fell through to the global
     auto-detected catalog and each phantom provider was painted with the full
-    model list (#4324).  ``provider_id`` is expected to be the canonical slug
-    (post ``_resolve_provider_alias``); the lookup is case-insensitive.
+    model list (#4324).  ``provider_id`` is a canonical WebUI provider ID;
+    the lookup is case-insensitive.
 
     A provider is "known" when it is a configured custom-provider slug
     (``custom:*``), appears in WebUI's static ``_PROVIDER_DISPLAY`` /
@@ -7337,7 +7337,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                         )
                         for _entry in _entries
                     ):
-                        detected_providers.add(_resolve_provider_alias(str(_pid)))
+                        detected_providers.add(_webui_catalog_provider_id(str(_pid), cfg))
         except Exception:
             logger.debug("Failed to inspect auth-store credential pool", exc_info=True)
 
@@ -9022,7 +9022,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                     for _pid in list(_pool.keys()):
                         try:
-                            _canonical_pid = _resolve_provider_alias(str(_pid))
+                            _canonical_pid = _webui_catalog_provider_id(str(_pid), cfg)
                             # Check credential pool cache first (profile-scoped key
                             # so a pool loaded under another profile can't leak in).
                             _ck = (_credential_pool_profile_tag(), _pid)
@@ -9067,7 +9067,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             for _entry in _entries
                         )
                         if _has_explicit_cred:
-                            _canonical_pid = _resolve_provider_alias(str(_pid))
+                            _canonical_pid = _webui_catalog_provider_id(str(_pid), cfg)
                             if _is_known_model_provider(_canonical_pid):
                                 detected_providers.add(_canonical_pid)
         except Exception:
@@ -9602,10 +9602,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cp_key_env = str(_cp.get("key_env") or "").strip()
                     if _cp_key_env:
                         _cp_api_key = _thread_local_env_value(_cp_key_env).strip()
-                if not _cp_api_key:
-                    _cp_provider_cfg = _canonical_provider_config(cfg, "custom")
-                    if isinstance(_cp_provider_cfg, dict):
-                        _cp_api_key = str(_cp_provider_cfg.get("api_key") or "").strip()
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:
                     try:
@@ -9623,6 +9619,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                         _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
                     except ImportError:
                         pass
+                if not _cp_api_key:
+                    _cp_provider_cfg = _canonical_provider_config(cfg, "custom")
+                    if isinstance(_cp_provider_cfg, dict):
+                        _cp_api_key = str(_cp_provider_cfg.get("api_key") or "").strip()
 
                 if _slug and _cp_base_url:
                     # Check if user has configured models in config.yaml —
