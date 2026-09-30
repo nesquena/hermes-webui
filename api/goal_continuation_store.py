@@ -233,6 +233,67 @@ def retire_pending_goal_continuation(
         )
 
 
+def normalize_continuation_text(value: str) -> str:
+    """Canonical form used to compare an incoming turn with a recorded intent.
+
+    The browser echoes ``continuation_prompt`` back verbatim as the next user
+    turn, but whitespace is not a stable identity across the SSE hop (JSON
+    escaping, ``.strip()`` on both ends, CRLF). Collapsing runs of whitespace
+    makes the match tolerant without ever widening it into "any turn matches":
+    an unrelated message still normalizes to a different string.
+    """
+    return " ".join(str(value or "").split())
+
+
+def consume_pending_goal_continuation(
+    session_id: str,
+    incoming_text: str = "",
+) -> bool:
+    """Consume this session's durable intent ONLY if the turn is the continuation.
+
+    Before #7862 the marker was retired by session id alone, which was safe
+    only while it lived for the few seconds between ``goal_continue`` firing
+    and the browser's automatic send. Now the marker can come back at startup
+    long after that browser is gone, so an unrelated next message would be
+    swallowed as a goal continuation, retiring the marker and letting the
+    goal machinery queue another automatic continuation on top of it.
+
+    The recorded canonical prompt is the contract: a restored marker is only
+    spent when the incoming turn IS that continuation. Any other send stays
+    an ordinary turn and leaves the pending intent in place (expiry still
+    bounds it via ``sweep_expired_goal_continuations``).
+
+    Returns True when the intent was consumed. Never raises into the chat path.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    incoming = normalize_continuation_text(incoming_text)
+    with _LOCK:
+        record = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
+        if record is None:
+            # No durable record: a bare in-memory marker (legacy path or a
+            # v1 file upgraded without prompt text) cannot be matched safely.
+            # Leave it alone rather than retire an intent we cannot verify --
+            # expiry bounds it, and swallowing an unrelated turn is the exact
+            # data-loss bug this function exists to prevent.
+            return False
+        recorded = normalize_continuation_text(record.get("prompt") or "")
+        if not recorded or recorded != incoming:
+            return False
+        _next_generation_unlocked()
+        PENDING_GOAL_CONTINUATION.discard(sid)
+        PENDING_GOAL_CONTINUATION_RECORDS.pop(sid, None)
+        _write_registry_unlocked(
+            PENDING_GOAL_CONTINUATION_RECORDS,
+            context=f"consume sid={sid}",
+        )
+        _RETIRED_LOG.append({"session_id": sid, "reason": "consumed", "at": time.time()})
+        return True
+
+
 def restore_goal_continuations() -> int:
     """Startup-only restore: merge durable records into the live marker set.
 

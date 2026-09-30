@@ -107,6 +107,117 @@ class TestStoreRoundtrip:
         assert "last_load_error" in diag
 
 
+class TestRestoreConsumptionIsMatchGated:
+    """#7862 review round 3: a restored marker is spent ONLY by its own continuation.
+
+    The core blocker: the marker used to be retired by session id alone. That
+    was safe only while it lived for the few seconds between ``goal_continue``
+    firing and the browser's automatic send. #7862 makes it durable, so it can
+    come back at startup long after that browser is gone -- and then the user's
+    next message of ANY kind was swallowed as a goal continuation, retiring the
+    marker and letting the goal machinery queue another automatic continuation
+    on top of an unrelated turn.
+    """
+
+    PROMPT = "Continue the standing goal: finish the migration checklist."
+
+    def _arm_then_simulate_restart(self, prompt=PROMPT, sid="sess-restore"):
+        """Arm, then drop all in-memory state and re-restore from disk."""
+        from api import goal_continuation_store as store
+        from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+        store.arm_pending_goal_continuation(sid, prompt, reason="goal_continue")
+        # Simulate the restart: process memory is gone, the file is all we have.
+        with store._LOCK:
+            PENDING_GOAL_CONTINUATION.clear()
+            PENDING_GOAL_CONTINUATION_RECORDS.clear()
+        assert store.restore_goal_continuations() == 1
+        return sid
+
+    def test_restore_then_unrelated_message_stays_pending(self, clean_registry):
+        """REQUIRED: unrelated message must NOT be goal-related, marker survives."""
+        from api import goal_continuation_store as store
+        from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+        sid = self._arm_then_simulate_restart()
+
+        # The user's next message after the restart, unrelated to the goal.
+        assert store.consume_pending_goal_continuation(sid, "thanks, also what time is it?") is False
+
+        # Not consumed: the pending intent is still there for the real continuation.
+        assert sid in PENDING_GOAL_CONTINUATION
+        assert sid in PENDING_GOAL_CONTINUATION_RECORDS
+        assert store.load_pending_goal_continuations()[sid]["prompt"] == self.PROMPT
+
+    def test_restore_then_matching_continuation_consumed_exactly_once(self, clean_registry):
+        """REQUIRED: the real continuation is consumed, and only once."""
+        from api import goal_continuation_store as store
+        from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+        sid = self._arm_then_simulate_restart()
+
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT) is True
+        assert sid not in PENDING_GOAL_CONTINUATION
+        assert sid not in PENDING_GOAL_CONTINUATION_RECORDS
+        assert sid not in store.load_pending_goal_continuations()
+
+        # Exactly once: a replay of the same text cannot consume a second time.
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT) is False
+
+    def test_whitespace_tolerant_but_not_widened(self, clean_registry):
+        """Cosmetic whitespace differences match; different text still does not."""
+        from api import goal_continuation_store as store
+
+        sid = self._arm_then_simulate_restart(prompt="Continue   the goal:\n  finish it.")
+
+        assert store.consume_pending_goal_continuation(
+            sid, "  Continue the goal:   finish it.  "
+        ) is True
+
+        sid2 = self._arm_then_simulate_restart(prompt="Continue the goal.", sid="sess-restore-2")
+        assert store.consume_pending_goal_continuation(
+            sid2, "Continue the goal please, but differently."
+        ) is False
+
+    def test_promptless_record_is_never_consumed(self, clean_registry):
+        """A v1-upgraded record carries no prompt, so it cannot be matched safely.
+
+        Retiring it on an arbitrary message is the exact data-loss bug this gate
+        exists to prevent; expiry bounds it instead.
+        """
+        from api import goal_continuation_store as store
+        from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+        store._PENDING_GOAL_FILE.write_text(json.dumps(["sess-v1"]), encoding="utf-8")
+        assert store.restore_goal_continuations() == 1
+
+        assert store.consume_pending_goal_continuation("sess-v1", "anything at all") is False
+        assert "sess-v1" in PENDING_GOAL_CONTINUATION
+        assert "sess-v1" in PENDING_GOAL_CONTINUATION_RECORDS
+
+    def test_matching_is_per_session_not_global(self, clean_registry):
+        """One session's continuation text must not consume another session's intent."""
+        from api import goal_continuation_store as store
+        from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+        store.arm_pending_goal_continuation("sess-1", "Do the first thing.", reason="goal_continue")
+        store.arm_pending_goal_continuation("sess-2", "Do the second thing.", reason="goal_continue")
+
+        # sess-2 sends its own continuation -> only sess-2 is consumed.
+        assert store.consume_pending_goal_continuation("sess-2", "Do the second thing.") is True
+        assert "sess-2" not in PENDING_GOAL_CONTINUATION
+        assert "sess-1" in PENDING_GOAL_CONTINUATION
+        assert "sess-1" in PENDING_GOAL_CONTINUATION_RECORDS
+
+        # sess-1's own continuation still works afterwards.
+        assert store.consume_pending_goal_continuation("sess-1", "Do the first thing.") is True
+
+    def test_unknown_session_and_empty_ids_are_noops(self, clean_registry):
+        from api import goal_continuation_store as store
+        assert store.consume_pending_goal_continuation("sess-nope", "hello") is False
+        assert store.consume_pending_goal_continuation("", "hello") is False
+
+
 class TestConcurrentWriters:
     def test_concurrent_arms_final_file_equals_newest_generation(self, clean_registry):
         """Barrier-controlled overlapping arms: NO lost update, no tmp leftovers."""
@@ -370,12 +481,23 @@ class TestSourceShapes:
         tail = src[m.end():m.end() + 400]
         assert "arm_pending_goal_continuation" in tail
 
-    def test_routes_consumes_via_locked_mutator(self):
+    def test_routes_consumes_via_match_gated_mutator(self):
+        """#7862: routes must consume through the match-gated mutator.
+
+        The previous shape (bare ``discard(s.session_id)`` followed by an
+        unconditional retire) is exactly the id-only consumption the reviewer
+        blocked, so this guard now pins the match-gated call AND asserts the
+        id-only form is gone.
+        """
         src = Path("api/routes.py").read_text(encoding="utf-8")
-        m = re.search(r"PENDING_GOAL_CONTINUATION\.discard\(s\.session_id\)", src)
+        m = re.search(
+            r"consume_pending_goal_continuation\(\s*s\.session_id,\s*msg\s*\)", src
+        )
         assert m is not None
-        tail = src[m.end():m.end() + 400]
-        assert "retire_pending_goal_continuation" in tail
+        tail = src[m.end():m.end() + 200]
+        assert "goal_related = True" in tail
+        # The id-only consumption must not reappear anywhere in the chat path.
+        assert "PENDING_GOAL_CONTINUATION.discard(s.session_id)" not in src
 
     def test_old_snapshot_api_removed(self):
         for name in ("api/streaming.py", "api/gateway_chat.py", "api/routes.py"):

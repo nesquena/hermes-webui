@@ -2973,7 +2973,10 @@ from api.config import (
     _parse_provider_qualified_model_id,
 )
 from api import config as api_config
-from api.goal_continuation_store import retire_pending_goal_continuation
+from api.goal_continuation_store import (
+    consume_pending_goal_continuation,
+    retire_pending_goal_continuation,
+)
 
 from api.helpers import (
     require,
@@ -24684,10 +24687,26 @@ def _start_chat_stream_for_session(
     def consume_continuation_markers() -> None:
         nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
         if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-            goal_related = True
-            PENDING_GOAL_CONTINUATION.discard(s.session_id)
-            retire_pending_goal_continuation(s.session_id)
-            consumed_goal_continuation = True
+            # #1932 / #7862: consume a pending goal continuation, but ONLY when
+            # this turn actually IS the recorded continuation. The marker used
+            # to be spent by session id alone, which was safe only while it
+            # lived for the few seconds between goal_continue firing and the
+            # browser's automatic send. #7862 makes it durable, so it can come
+            # back at startup long after that browser is gone; retiring on the
+            # next message of any kind would swallow an unrelated turn and
+            # queue another automatic continuation on top of it. A non-matching
+            # send stays an ordinary turn and leaves the intent pending
+            # (bounded by sweep_expired_goal_continuations).
+            try:
+                if consume_pending_goal_continuation(s.session_id, msg):
+                    goal_related = True
+                    consumed_goal_continuation = True
+            except Exception:
+                logger.debug(
+                    "Failed to consume pending goal continuation for session %s",
+                    s.session_id,
+                    exc_info=True,
+                )
         if s.session_id in PENDING_BG_TASK_COMPLETIONS:
             PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
             consumed_bg_task_completion = True
