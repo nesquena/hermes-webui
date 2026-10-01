@@ -30,20 +30,59 @@ REPO = Path(__file__).resolve().parent.parent
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
+def _preview_base_font_size() -> int:
+    """The default `--preview-font-size` from :root.
+
+    `.preview-md` heading/table sizes are now expressed relative to the zoom
+    variable (so A−/A+ actually scales them), which means the effective value
+    has to be resolved against this base instead of read as a literal px. The
+    base is parsed from the stylesheet rather than hard-coded here so it cannot
+    silently drift out of sync.
+    """
+    m = re.search(r"--preview-font-size:\s*(\d+)px", CSS)
+    assert m, "default --preview-font-size not found in static/style.css"
+    return int(m.group(1))
+
+
 def _font_size(scope: str, level: str) -> int:
-    """Extract the integer font-size (px) for the BARE `<scope> <level>` selector.
+    """Extract the effective integer font-size (px) for the BARE `<scope> <level>`.
 
     Anchors at the start of a line (after whitespace) so the data-font-size
     overrides like `[data-font-size="small"] .msg-body h1` are not matched.
+
+    Accepts either a literal (`font-size:24px`) or a value derived from
+    `--preview-font-size` (`font-size:calc(var(--preview-font-size,13px) * 1.85)`),
+    resolving the latter against the :root default so the assertion still
+    compares real rendered sizes. The `.preview-md` rules use the latter form
+    because preview text has to follow the A−/A+ zoom.
     """
-    # Match `^<whitespace><scope> <level>{...font-size:Npx...}` (whole rule on one line)
     pat = re.compile(
-        rf"^\s*{re.escape(scope)}\s+{level}\s*\{{[^}}]*font-size:\s*(\d+)px",
+        rf"^\s*{re.escape(scope)}\s+{level}\s*\{{[^}}]*font-size:\s*([^;]+);",
         re.M,
     )
     m = pat.search(CSS)
     assert m, f"font-size not found for `{scope} {level}` (line-anchored bare selector)"
-    return int(m.group(1))
+    value = m.group(1).strip()
+
+    literal = re.fullmatch(r"(\d+)px", value)
+    if literal:
+        return int(literal.group(1))
+
+    # calc(var(--preview-font-size,13px) * 1.85) and friends.
+    scaled = re.fullmatch(
+        r"calc\(\s*var\(--preview-font-size\s*,\s*\d+px\s*\)\s*\*\s*([\d.]+)\s*\)",
+        value,
+    )
+    if scaled:
+        return round(_preview_base_font_size() * float(scaled.group(1)))
+
+    bare_var = re.fullmatch(
+        r"var\(--preview-font-size\s*,\s*(\d+)px\s*\)", value
+    )
+    if bare_var:
+        return _preview_base_font_size()
+
+    raise AssertionError(f"unrecognised font-size form for `{scope} {level}`: {value}")
 
 
 # ── Hierarchy: each level larger than the next ───────────────────────────────
@@ -137,9 +176,16 @@ def test_preview_md_heading_sizes_match_msg_body():
 
 
 def test_preview_md_has_h4_h5_h6_rules():
-    """Pre-fix .preview-md only had h1-h3 rules. Post-fix must have all six."""
+    """Pre-fix .preview-md only had h1-h3 rules. Post-fix must have all six.
+
+    Accepts either a literal px size or one derived from `--preview-font-size`
+    (the zoom variable), since `.preview-md` sizes now follow the A−/A+ zoom.
+    """
     for level in ("h4", "h5", "h6"):
-        match = re.search(rf"\.preview-md\s+{level}\s*\{{[^}}]*font-size:\s*\d+px", CSS)
+        match = re.search(
+            rf"\.preview-md\s+{level}\s*\{{[^}}]*font-size:\s*(?:\d+(?:\.\d+)?px|calc\(|var\(--)",
+            CSS,
+        )
         assert match, f".preview-md {level} rule missing"
 
 

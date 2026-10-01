@@ -31,10 +31,15 @@ class TestFontSizeCssModifiers:
 
     def test_small_large_and_xlarge_scale_from_default(self):
         css = _read("static/style.css")
-        # Match both compact {font-size:12px} and spaced { font-size: 12px; } formats
-        m_small = re.search(r':root\[data-font-size="small"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
-        m_large = re.search(r':root\[data-font-size="large"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
-        m_xlarge = re.search(r':root\[data-font-size="xlarge"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
+        # Match both compact {font-size:12px} and spaced { font-size: 12px; } formats.
+        # Require a declaration boundary before `font-size` so a custom property
+        # that merely ENDS in `-font-size` (e.g. the previews' own
+        # `--preview-font-size:14px`) is not mistaken for the container rule's
+        # `font-size` — without the boundary the capture silently read the wrong
+        # property as soon as another rule added one.
+        m_small = re.search(r':root\[data-font-size="small"\][^{]*\{[^}]*[{;]font-size:\s*(\d+)px', css)
+        m_large = re.search(r':root\[data-font-size="large"\][^{]*\{[^}]*[{;]font-size:\s*(\d+)px', css)
+        m_xlarge = re.search(r':root\[data-font-size="xlarge"\][^{]*\{[^}]*[{;]font-size:\s*(\d+)px', css)
         assert m_small and m_large and m_xlarge, (
             "Small, large, and extra-large font-size rules must set px values"
         )
