@@ -44,6 +44,86 @@
 
 ### Fixed
 
+- **The clarify tool works again with current Hermes Agent.** Hermes Agent changed its clarify
+  callback to pass one list of questions and expect the answers back as a structured reply. The WebUI
+  still registered the older two-argument callback, so every clarify call in a WebUI chat failed with
+  "missing 1 required positional argument: 'choices'" before the card could appear. The bridge now
+  accepts both shapes. With current Agent builds it shows the questions one card at a time and returns
+  each answer keyed by question; a timeout, a Stop, or a missing clarify surface ends the batch and is
+  reported as such, so the agent can tell an unanswered question from a cancelled one. Older Agent
+  builds keep the previous behaviour. Thanks @shentonyan. (#7923, closes #7922)
+- **The Nix package starts again.** Since `managed_agent_startup.py` was added, `server.py` imports it
+  at startup, but the Nix derivation didn't copy it into the package, so the packaged binary exited
+  with `ModuleNotFoundError` and crash-looped under a supervisor. It is now packaged with the other
+  startup modules. Thanks @erikcw. (#7928, closes #7929)
+- **A phone that drops off the network no longer turns a live stream into a server error.** When a
+  client vanished at the network layer (left the Wi-Fi, a Tailscale peer dropped), the next write on
+  a long-lived stream (chat, gateway events, terminal output, approvals, clarify) failed with a
+  routing error such as "No route to host". That wasn't recognised as a disconnect, so it ended as a
+  500 with a traceback in the log instead of a quiet disconnect. Those routing errors are now treated
+  like any other disconnect at the stream's single write point; real server errors such as a full
+  disk still surface. Thanks @fedebyes. (#7857)
+
+- **Delegated subagent rows under a chat no longer repeat "Subagent: ".** Under a parent's "N
+  children" badge, each delegated child read `-> Subagent: Audit the retry path…`, which spent the
+  narrowest rows in the sidebar on a word the badge and indent already say. Those nested rows now
+  show the task itself. The stored title, rename, search, flat rows and the opened child's title
+  bar keep the full `Subagent: …` title, and fork children are unchanged. Thanks @carlotestor.
+  (#7884)
+- **On phones, the closed workspace drawer no longer traps keyboard focus.** The drawer only slid
+  off-screen when closed, so tabbing from the composer walked into its invisible buttons and could
+  open the hidden file picker. The closed drawer is now out of the tab order and ignores taps; the
+  slide animation and the open drawer are unchanged. Thanks @happy5318. (#7866, closes #7713)
+
+- **The conversation-lifecycle browser check no longer flakes at a minute boundary.** It compared a
+  settled terminal row's text with the same row after a reload, and the trailing rendered clock
+  (`12:34 PM` → `12:35 PM`) made them differ whenever the reload crossed a minute. It now strips only
+  a trailing clock line before comparing; real content differences still fail. Test-only. Thanks
+  @webtecnica. (#7911, closes #7792)
+
+- **The Codex model picker no longer offers retired models when live discovery is unavailable.**
+  When the WebUI couldn't reach Codex's account-aware catalog, the `openai-codex` picker fell back to
+  a static list that still carried retired models (`gpt-5.3-codex`, `gpt-5.2-codex`,
+  `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`, `codex-mini-latest`) and a nonexistent `gpt-5.5-mini`,
+  and generic Agent-core seeding could add entitlement-dependent Codex IDs back. The fallback now
+  lists the current subscription models, Codex is excluded from core seeding (its live/cache path
+  owns freshness), `gpt-5.5-mini` is gone from the OpenAI fallbacks, and a Codex model is always
+  sent with its provider so an overlapping configured provider can't claim the bare ID.
+  Thanks @starship-s. (#6817)
+
+- **A brief server error while reloading no longer forgets which conversation you had open.** If
+  the session's metadata request failed with a transient error (a 500, a timeout, a dropped
+  connection) during a page reload, the WebUI treated that as proof the saved session no longer
+  existed: it cleared the saved session id and the `/session/<id>` address, so the next reload
+  opened a blank new chat instead of your conversation. It now keeps both on any non-404 failure
+  and shows the usual "Failed to load session" message, so reloading once the server recovers
+  brings the conversation back. A real 404 (the session was deleted) still clears them as before.
+  Thanks @starship-s. (#7071)
+
+- **Adding, toggling or deleting an MCP server no longer writes expanded secrets or half-applied
+  changes.** MCP writes edited the same cached, environment-expanded config the runtime reads, so a
+  save could write resolved `${VAR}` values into `config.yaml`, leave the runtime changed after the
+  save itself failed, or persist another request's in-flight edit. Each MCP write now pins the
+  active profile's config path under the config lock, edits a private copy of the raw file
+  (placeholders, masked values and unrelated sections preserved), refuses to save when the existing
+  file can't be read as a mapping, and reloads the runtime only after the atomic save succeeds.
+  Thanks @franksong2702. (#7822)
+
+- **WebUI starts again after `hermes update` moves the Agent onto its managed runtime.** Current
+  Hermes Agent source installs relaunch any process that isn't on the Agent's managed interpreter,
+  and that managed environment ships `ruamel.yaml` but not necessarily PyYAML. WebUI then never
+  served: the bootstrap probe imported PyYAML before the Agent and rejected every interpreter (and
+  on some hosts tried to build a local venv and failed), and a direct `python server.py` launch died
+  on `No module named 'api'` or `'yaml'` after the relaunch. Startup now activates the Agent's
+  dependency layer (`hermes_bootstrap`) before any WebUI import that needs a third-party package,
+  without importing the Agent application before the active profile is selected (#7886), and keeps
+  its own directory importable through the relaunch. WebUI reads and writes YAML through a small
+  compatibility module that uses PyYAML when present and falls back to `ruamel.yaml` with the same
+  YAML 1.1 rules, so values like `tool_progress: off` keep their meaning, and the bootstrap probe
+  accepts either library. A broken Agent bootstrap now logs a warning instead of stopping WebUI.
+  The interim workaround `HERMES_DISABLE_LAZY_INSTALLS=1` is no longer needed. Thanks @snoyberg
+  (#7876) and @carlotestor (#7875); closes #7831, #7848.
+
 - **Gateway-backend turns survive a WebUI restart.** With the Gateway runs API enabled
   (`HERMES_WEBUI_CHAT_BACKEND=gateway` + `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`), the Gateway
   runs the turn, but restarting the WebUI still marked it interrupted, because the Gateway `run_id`

@@ -7445,7 +7445,7 @@ def _read_profile_config_cached(profile_name: str, cfg_path: str) -> dict | None
                 if _current_content == cached_content:
                     return cached_dict
                 # Content changed while key collided — fall through to re-parse
-    import yaml
+    from api import yaml_compat as yaml
     try:
         with open(cfg_path, encoding="utf-8") as _f:
             content = _f.read()
@@ -7478,7 +7478,7 @@ def _load_profile_config_dict(session) -> dict | None:
         )
         if not os.path.isfile(_profile_cfg_path):
             return None
-        import yaml
+        from api import yaml_compat as yaml
 
         with open(_profile_cfg_path, encoding="utf-8") as _f:
             _pcfg = yaml.safe_load(_f) or {}
@@ -11052,6 +11052,8 @@ from api.upload import (
 )
 from api.streaming import (
     _sse,
+    _sse_write,
+    _sse_keepalive,
     _sse_set_write_deadline,
     _run_agent_streaming,
     cancel_stream,
@@ -18827,8 +18829,17 @@ def _handle_escape_file_raw(handler, parsed):
 
 
 def _sse_with_id(handler, event, data, event_id=None):
+    """Emit one SSE event carrying a journal id.
+
+    The ``id:`` prefix is a write like any other, so it goes through the same
+    conversion boundary as the event body: a peer that vanished at the network
+    layer (a routing errno such as EHOSTUNREACH) must be classified as a
+    disconnect here too. Writing it directly let that OSError escape every
+    handler's ``except _CLIENT_DISCONNECT_ERRORS`` and turn a normal disconnect
+    of an id-carrying stream into a 500 plus traceback.
+    """
     if event_id:
-        handler.wfile.write(f"id: {event_id}\n".encode("utf-8"))
+        _sse_write(handler, f"id: {event_id}\n".encode("utf-8"))
     _sse(handler, event, data)
 
 
@@ -19388,8 +19399,7 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
                 if state in ("completed", "complete", "failed", "error", "cancelled", "canceled"):
                     _sse(handler, "stream_end", {"run_id": run_id, "status": state})
                     break
-                handler.wfile.write(b": heartbeat\n\n")
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
     except _CLIENT_DISCONNECT_ERRORS:
         pass
@@ -19477,8 +19487,7 @@ def _handle_sse_stream(handler, parsed):
             try:
                 item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b": heartbeat\n\n")
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if len(item) >= 3:
                 event, data, queued_event_id = item[0], item[1], item[2]
@@ -19610,8 +19619,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 if _current_journal_fp != _idle_journal_fp:
                     _idle_journal_fp = _current_journal_fp
                     emit_session_snapshot(active_stream_id)
-                handler.wfile.write(b": keepalive\n\n")
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
         if subscriber is None:
             return True
@@ -19627,8 +19635,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 try:
                     item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
                 except queue.Empty:
-                    handler.wfile.write(b": keepalive\n\n")
-                    handler.wfile.flush()
+                    _sse_keepalive(handler)
                     continue
                 if len(item) >= 3:
                     event, data, queued_event_id = item[0], item[1], item[2]
@@ -19836,8 +19843,7 @@ def _handle_terminal_output(handler, parsed):
             try:
                 event_seq, event, data = output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b": terminal heartbeat\n\n")
-                handler.wfile.flush()
+                _sse_write(handler, b": terminal heartbeat\n\n")
                 if term.closed.is_set() and output.empty():
                     _sse(handler, "terminal_closed", {"exit_code": term.proc.poll()})
                     break
@@ -19945,8 +19951,7 @@ def _handle_gateway_sse_stream(handler, parsed):
             try:
                 event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if event_data is None:
                 break  # watcher is stopping
@@ -19975,8 +19980,7 @@ def _handle_session_events_stream(handler):
             try:
                 event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
     except _CLIENT_DISCONNECT_ERRORS:
@@ -21739,8 +21743,7 @@ def _handle_approval_sse_stream(handler, parsed):
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
                 # Keepalive — SSE comment line prevents proxy/CDN timeout.
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if payload is None:
                 break  # signal to close
@@ -21840,8 +21843,7 @@ def _handle_clarify_sse_stream(handler, parsed):
             try:
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if payload is None:
                 break
@@ -22012,8 +22014,7 @@ def _handle_session_sse_stream(handler, parsed):
             try:
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if payload is None:
                 break
@@ -30397,21 +30398,47 @@ def _handle_mcp_servers_list(handler):
     })
 
 
+def _load_mcp_config_for_write(config_path: Path) -> dict:
+    """Load a private raw mapping; unknown existing data must never be overwritten.
+
+    Read-only loaders tolerate malformed YAML and expand environment references.
+    A config edit must do neither: preserve placeholders and let read/parse errors
+    abort before the atomic save. Caller owns _cfg_lock for the whole transaction.
+    """
+    from api import yaml_compat as yaml
+
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    loaded = yaml.safe_load(raw)
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ValueError("MCP config must be a YAML mapping")
+    return loaded
+
+
 def _handle_mcp_server_delete(handler, name):
-    """Delete an MCP server by name."""
+    """Delete an MCP server by name without mutating the shared runtime config."""
     from urllib.parse import unquote
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    del servers[name]
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    error = None
+    with _cfg_lock:
+        config_path = _get_config_path()
+        cfg = _load_mcp_config_for_write(config_path)
+        servers = cfg.get("mcp_servers", {})
+        servers = dict(servers) if isinstance(servers, dict) else {}
+        if name not in servers:
+            error = (f"MCP server '{name}' not found", 404)
+        else:
+            del servers[name]
+            cfg["mcp_servers"] = servers
+            _save_yaml_config_file(config_path, cfg)
+    if error is not None:
+        return bad(handler, *error)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
 
@@ -30425,17 +30452,23 @@ def _handle_mcp_server_toggle(handler, name, body):
     if "enabled" not in body:
         return bad(handler, "enabled field is required")
     enabled = bool(body["enabled"])
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    if not isinstance(servers[name], dict):
-        return bad(handler, f"MCP server '{name}' has invalid config", 400)
-    servers[name]["enabled"] = enabled
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    error = None
+    with _cfg_lock:
+        config_path = _get_config_path()
+        cfg = _load_mcp_config_for_write(config_path)
+        servers = cfg.get("mcp_servers", {})
+        servers = dict(servers) if isinstance(servers, dict) else {}
+        if name not in servers:
+            error = (f"MCP server '{name}' not found", 404)
+        elif not isinstance(servers[name], dict):
+            error = (f"MCP server '{name}' has invalid config", 400)
+        else:
+            # Valid YAML aliases may share this mapping with another server.
+            servers[name] = {**servers[name], "enabled": enabled}
+            cfg["mcp_servers"] = servers
+            _save_yaml_config_file(config_path, cfg)
+    if error is not None:
+        return bad(handler, *error)
     reload_config()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
@@ -30461,37 +30494,37 @@ def _strip_masked_values(submitted, existing):
 
 
 def _handle_mcp_server_update(handler, name, body):
-    """Add or update an MCP server."""
+    """Add or update an MCP server through a pinned raw-file transaction."""
     from urllib.parse import unquote
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    # Validate: must have url (http) or command (stdio)
-    server_cfg = {}
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    existing_cfg = servers.get(name, {})
-    if body.get("url"):
-        server_cfg["url"] = body["url"].strip()
-        if body.get("headers"):
-            server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
-    elif body.get("command"):
-        server_cfg["command"] = body["command"].strip()
-        if body.get("args"):
-            server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
-        if body.get("env"):
-            server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
-    else:
+    if not body.get("url") and not body.get("command"):
         return bad(handler, "url or command is required")
-    if body.get("timeout") is not None:
-        try:
-            server_cfg["timeout"] = int(body["timeout"])
-        except (ValueError, TypeError):
-            pass
-    servers[name] = server_cfg
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    server_cfg = {}
+    with _cfg_lock:
+        config_path = _get_config_path()
+        cfg = _load_mcp_config_for_write(config_path)
+        servers = cfg.get("mcp_servers", {})
+        servers = dict(servers) if isinstance(servers, dict) else {}
+        existing_cfg = servers.get(name, {})
+        if body.get("url"):
+            server_cfg["url"] = body["url"].strip()
+            if body.get("headers"):
+                server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
+        else:
+            server_cfg["command"] = body["command"].strip()
+            if body.get("args"):
+                server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
+            if body.get("env"):
+                server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
+        if body.get("timeout") is not None:
+            try:
+                server_cfg["timeout"] = int(body["timeout"])
+            except (ValueError, TypeError):
+                pass
+        servers[name] = server_cfg
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(config_path, cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})

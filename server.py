@@ -97,6 +97,14 @@ except ImportError:  # pragma: no cover - resource is Unix-only
     resource = None
 from urllib.parse import urlparse
 
+# Agent's isolated interpreter relaunch uses runpy.run_path(), which does not
+# put this script's directory on sys.path. Restore it before local imports.
+_webui_root = os.path.dirname(os.path.abspath(__file__))
+if _webui_root not in sys.path:
+    sys.path.insert(0, _webui_root)
+from managed_agent_startup import activate_managed_agent
+activate_managed_agent()
+
 logger = logging.getLogger(__name__)
 
 from api.request_logging import emit_request_log
