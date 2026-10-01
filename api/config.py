@@ -4874,6 +4874,32 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if provider == config_provider:
         return model
 
+    # ALIAS-COLLAPSED case (#7955): local endpoints (ollama, vllm, llamacpp,
+    # ...) are aliased to ``custom`` by the provider alias tables, and the
+    # session persists that aliased name, so the passthrough above misses.
+    # Minting ``@custom:<model>`` would make resolve_model_provider() parse the
+    # first colon segment of a version-tagged id (``qwen3.8:27b``) as a
+    # named-provider slug and fail with "Custom provider 'custom:qwen3.8' is
+    # not configured". Returning the model bare is not safe either: the bare
+    # id goes through the custom_providers[] / providers: ownership scans, so
+    # another configured endpoint listing the same id would take the request
+    # away from the endpoint the user picked. Emit the CONFIGURED provider as
+    # the hint instead: the encoded id skips the ownership scans, the parser
+    # keeps the whole tagged id as the model, and _get_provider_base_url()
+    # returns model.base_url for the configured provider. Legacy ``local`` is
+    # healed to bare ``custom`` by resolve_model_provider(), which makes it the
+    # same lane as the session, so it takes the passthrough contract above.
+    # Scoped to ``provider == "custom"`` so the named-custom path
+    # (``custom:<slug>``) keeps minting its ``@custom:<slug>:`` hint.
+    if (
+        provider == "custom"
+        and config_provider
+        and str(_resolve_provider_alias(config_provider) or "").strip().lower() == "custom"
+    ):
+        if config_provider == "local":
+            return model
+        return f"@{config_provider}:{model}"
+
     # OpenRouter selections with slash IDs are explicit provider/model paths.
     if provider == "openrouter":
         return f"@{provider}:{model}"
