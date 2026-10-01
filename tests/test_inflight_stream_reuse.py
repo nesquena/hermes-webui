@@ -2748,3 +2748,120 @@ assert.strictEqual(live.content, 'authoritative settled answer',
 """
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_deferred_save_keeps_current_live_reply_that_repeats_earlier_answer():
+    """Maintainer review (2026-10-01): returning to an active deferred-save
+    session must not hide the current reply when it happens to repeat an
+    earlier answer's text.
+
+    In deferred-save mode the base transcript still ends with the PREVIOUS
+    turn's settled user+assistant while the current turn's user row and live
+    reply exist only in the INFLIGHT snapshot. The merge loop's assistant
+    dedup used to compare against merged.slice(-Math.max(5, tail.length + 2)),
+    a window that runs back ACROSS the latest user row. So an earlier turn's
+    identical assistant text ("Done.", "Sounds good.", a repeated status
+    line) counted as a duplicate of the CURRENT live reply, which was then
+    never pushed — the user came back to a transcript whose current reply had
+    vanished: [previous user, previous answer, current user].
+
+    Assistant candidates may only be deduped against rows that come after the
+    latest user message in `merged`. The same-turn settled-response
+    suppression must stay intact (a settled row after the current-turn user is
+    still checked, so a stale live partial is still deduped away).
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// Two consecutive turns whose assistant text is byte-identical, with the base
+// holding ONLY the previous turn (deferred save: the current user row has not
+// been persisted yet).
+let base = [
+  {{role:'user', content:'first prompt'}},
+  {{role:'assistant', content:'Done.'}},
+];
+let inflight = [
+  {{role:'user', content:'second prompt'}},
+  {{role:'assistant', _live:true, content:'Done.'}},
+];
+let merged = _mergeInflightTailMessages(base, inflight);
+let rows = merged.map(m => m.role + ':' + m.content);
+assert.strictEqual(
+  rows.length, 4,
+  'Current live reply must survive: expected 4 rows, got ' + rows.length +
+  ' (' + JSON.stringify(rows) + ')');
+assert.strictEqual(rows[2], 'user:second prompt',
+  'Current turn user must be appended: ' + JSON.stringify(rows));
+let current = merged[3];
+assert.strictEqual(current.role, 'assistant',
+  'Current reply must be appended as an assistant row: ' + JSON.stringify(rows));
+assert.strictEqual(current.content, 'Done.');
+assert.strictEqual(current._live, true,
+  'Current reply must stay the live row (not silently replaced by the settled copy)');
+
+// Long repeated status line — the same shape as a re-emitted status update.
+base = [
+  {{role:'user', content:'run it'}},
+  {{role:'assistant', content:'Still working on the export, hang tight.'}},
+  {{role:'user', content:'and again'}},
+  {{role:'assistant', content:'Still working on the export, hang tight.'}},
+];
+inflight = [
+  {{role:'user', content:'third time'}},
+  {{role:'assistant', _live:true, content:'Still working on the export, hang tight.'}},
+];
+merged = _mergeInflightTailMessages(base, inflight);
+let assistants = merged.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants.length, 3,
+  'A repeated status line must not swallow the current live reply: ' +
+  JSON.stringify(merged.map(m => m.role + ':' + m.content)));
+assert.ok(assistants[assistants.length - 1]._live,
+  'The last assistant row must be the current live reply');
+
+// Same-turn suppression must stay: when the base ALREADY carries the current
+// turn's user (normal recovery after a lost `done` event), a live row whose
+// text matches the settled answer after that user is still deduped away, so
+// the settled answer is not shadowed by an identical live row. In the real
+// loadSession flow _prepareRunningLiveTail reconciles a divergent live row's
+// content to the persisted text first; this bare helper then text-dedupes it.
+base = [
+  {{role:'user', content:'same turn prompt'}},
+  {{role:'assistant', content:'settled answer'}},
+];
+inflight = [
+  {{role:'user', content:'same turn prompt'}},
+  {{role:'assistant', _live:true, content:'settled answer'}},
+];
+merged = _mergeInflightTailMessages(base, inflight);
+let sameTurn = merged.filter(m => m.role === 'assistant');
+assert.strictEqual(sameTurn.length, 1,
+  'Same-turn settled suppression must still dedupe the live partial: ' +
+  JSON.stringify(merged.map(m => m.role + ':' + m.content)));
+assert.strictEqual(sameTurn[0].content, 'settled answer');
+assert.ok(!sameTurn[0]._live,
+  'The surviving row must be the settled (non-live) assistant');
+
+// A genuinely divergent same-turn live partial still gets appended by this
+// bare helper (the real flow handles it via _prepareRunningLiveTail); what
+// must NOT happen is the current-turn user row disappearing.
+base = [
+  {{role:'user', content:'same turn prompt'}},
+  {{role:'assistant', content:'settled answer'}},
+];
+inflight = [
+  {{role:'user', content:'same turn prompt'}},
+  {{role:'assistant', _live:true, content:'stale divergent partial'}},
+];
+merged = _mergeInflightTailMessages(base, inflight);
+assert.strictEqual(merged.filter(m => m.role === 'user').length, 1,
+  'Same-turn user must still be deduped to one row: ' +
+  JSON.stringify(merged.map(m => m.role + ':' + m.content)));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr

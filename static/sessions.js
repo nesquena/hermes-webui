@@ -4322,13 +4322,47 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
   if(firstLiveIdx>0&&inflight[firstLiveIdx-1]&&inflight[firstLiveIdx-1].role==='user') start=firstLiveIdx-1;
   const tail=inflight.slice(start).filter(m=>m&&m.role&&!m._supersededBySettled);
   const merged=[...base];
+  // Assistant candidates may only be deduped against rows that come AFTER
+  // the latest user message, never against an earlier turn's settled
+  // assistant. The previous merged.slice(-Math.max(5,tail.length+2)) window
+  // ran back ACROSS the latest user row, so an earlier turn's identical
+  // assistant text ("Done.", "Sounds good.", a repeated status line) counted
+  // as a duplicate of the CURRENT live reply — which then was never pushed,
+  // hiding the current reply when returning to an active deferred-save
+  // session (#6649 maintainer review 2026-10-01).
+  //
+  // The base may legitimately END with a completed assistant of the SAME
+  // turn when the `done` event was lost, so the scan walks past trailing
+  // assistant/tool/live rows to find the turn's user boundary — the same
+  // same-turn allowance _hasInflightTailUserDuplicate already relies on. That
+  // keeps the same-turn settled-response suppression: a settled row sitting
+  // after the current-turn user is still checked, so a stale live partial is
+  // still deduped away, just never against a PREVIOUS turn's answer.
+  //
+  // The boundary is advanced when the current-turn user itself is pushed
+  // (deferred save: the user row is new to the base), so the live reply that
+  // follows can never be compared against rows belonging to a previous turn.
+  let boundary=-1;
+  for(let i=merged.length-1;i>=0;i--){
+    const msg=merged[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user'){boundary=i;break;}
+    if(msg._live||String(msg.role||'')==='tool'||String(msg.role||'')==='assistant') continue;
+    boundary=i;
+    break;
+  }
+  const isAfterCurrentUser=(existing,idx)=>boundary<0||idx>boundary;
+  const push=(row)=>{merged.push(row);return merged.length-1;};
   for(const msg of tail){
     let candidate=msg;
     if(!candidate) continue;
     const duplicate=String(candidate.role||'')==='user'
       ? _hasInflightTailUserDuplicate(merged,candidate)
-      : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
-    if(!duplicate) merged.push(candidate);
+      : merged.some((existing,idx)=>isAfterCurrentUser(existing,idx)&&_sameTranscriptMessage(existing,candidate));
+    if(!duplicate){
+      if(String(candidate.role||'')==='user') boundary=push(candidate);
+      else push(candidate);
+    }
   }
   return merged;
 }
