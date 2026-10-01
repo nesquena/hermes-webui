@@ -9942,6 +9942,114 @@ _lineage_display_cache: "OrderedDict[str, dict]" = OrderedDict()
 _lineage_display_cache_lock = threading.Lock()
 
 
+def _snapshot_parent_replays_nothing(parent_meta) -> bool:
+    """Return True when a snapshot ancestor carries the truncate-to-empty sentinel.
+
+    ``merge_session_messages_append_only`` treats a truncation watermark of 0
+    as the truncate-to-empty sentinel (#2914) and returns ``[]`` outright —
+    but ONLY when the accumulated prefix handed to it is still empty
+    (``api/models.py``, the ``if not sidecar_messages`` branch). With a
+    non-empty prefix the sentinel takes the general merge path and the older
+    history survives. This predicate therefore only says "this stub is a
+    sentinel snapshot"; whether the walk may stop on it is decided by
+    ``_older_ancestors_provably_replay_nothing``, which proves the complete
+    older fold stays empty.
+
+    Detecting the sentinel from the cheap metadata prefix lets the walk stop
+    before ``Session.load()`` parses a multi-MB messages array whose rows are
+    guaranteed to be discarded. On a 9-hop / 167MB lineage this was ~85% of a
+    9.87s cold ``GET /api/session``.
+
+    Fail-closed: any ancestor that is not a snapshot, or whose watermark is
+    absent/non-zero/unparseable, returns False and takes the normal full-load
+    path. Only the exact sentinel value qualifies.
+    """
+    if not getattr(parent_meta, "pre_compression_snapshot", False):
+        return False
+    watermark = getattr(parent_meta, "truncation_watermark", None)
+    if watermark is None:
+        return False
+    watermark_timestamp = _message_timestamp_as_float({"timestamp": watermark})
+    return watermark_timestamp == 0
+
+
+_LINEAGE_REPLAY_PROOF_FIELDS = frozenset({
+    "parent_session_id",
+    "pre_compression_snapshot",
+    "truncation_watermark",
+})
+
+
+def _metadata_stub_has_lineage_replay_proof(parent_meta) -> bool:
+    """Return whether a cheap stub materially carried every lineage proof field."""
+    prefix_fields = getattr(parent_meta, "_metadata_prefix_fields", None)
+    return isinstance(prefix_fields, (tuple, list, set, frozenset)) and (
+        _LINEAGE_REPLAY_PROOF_FIELDS.issubset(prefix_fields)
+    )
+
+
+def _older_ancestors_provably_replay_nothing(
+    sentinel_meta, *, seen, max_hops, load_metadata=None
+) -> bool:
+    """Return True when every ancestor above a sentinel snapshot folds to ``[]``.
+
+    The full walk merges segments oldest-first, seeded with ``merged = []``.
+    A zero-watermark snapshot resets that accumulator to ``[]`` only if the
+    accumulator is still empty when it is reached. An older CONTRIBUTING
+    snapshot (watermark ``None``/positive) sitting above the sentinel fills
+    the accumulator first, the sentinel then takes the general merge path,
+    and the older history reaches the display list. Stopping the walk on the
+    sentinel in that shape silently drops the archived transcript.
+
+    So the shortcut is sound only when the complete older fold is provably
+    empty. Prove it from metadata alone (no messages array is parsed): walk
+    upward from the sentinel and require that every ancestor is itself a
+    sentinel snapshot, until the chain ends — either no ``parent_session_id``
+    or a parent that is not a ``pre_compression_snapshot``, which is exactly
+    where the full walk breaks without adding a segment. Any other shape
+    (contributing snapshot, unreadable/missing stub, unsafe or repeated id,
+    ``max_hops`` exhausted before the chain end was observed) is NOT proven
+    and returns False so the caller performs the original full traversal.
+
+    ``load_metadata`` lets the caller memoize stub reads across repeated
+    proofs within one walk; it defaults to ``Session.load_metadata_only``.
+    """
+    if load_metadata is None:
+        load_metadata = Session.load_metadata_only
+    seen = set(seen)
+    current = sentinel_meta
+    for _ in range(max(0, int(max_hops))):
+        # load_metadata_only() constructs a Session and constructor defaults can
+        # look like real false/empty metadata. Both successful proof exits below
+        # are valid only when every field they depend on was materially present
+        # before the messages stop key. Unknown key order must full-load instead.
+        if not _metadata_stub_has_lineage_replay_proof(current):
+            return False
+        parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
+        if not parent_id:
+            return True
+        if parent_id in seen or not is_safe_session_id(parent_id):
+            return False
+        parent_meta = load_metadata(parent_id)
+        if parent_meta is None:
+            return False
+        if not _metadata_stub_has_lineage_replay_proof(parent_meta):
+            return False
+        if not getattr(parent_meta, "pre_compression_snapshot", False):
+            # The full walk breaks here without appending a segment: nothing
+            # above this ancestor can reach the fold.
+            return True
+        if not _snapshot_parent_replays_nothing(parent_meta):
+            # A contributing snapshot: the fold below it is non-empty, so the
+            # sentinel will NOT reset the accumulator. Not provable — bail.
+            return False
+        seen.add(parent_id)
+        current = parent_meta
+    # Budget exhausted while still walking sentinel stubs: leave the decision
+    # to the full traversal rather than reasoning about the hop cap here.
+    return False
+
+
 def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
     """Return WebUI sidecar messages stitched across compression snapshots.
 
@@ -10000,6 +10108,17 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     seen = {str(getattr(session, "session_id", "") or "")}
     parent_sigs: list[tuple[str, tuple]] = []
     parent_signatures_complete = True
+    neutralized_ancestor = False
+    # Per-walk memo for the cheap metadata stubs: the older-fold proof below
+    # may re-read the same ancestors when a sentinel turns out to be
+    # non-skippable and the walk keeps climbing. One read per stub per walk.
+    _meta_stubs: dict[str, object] = {}
+
+    def _load_meta_stub(stub_id):
+        if stub_id not in _meta_stubs:
+            _meta_stubs[stub_id] = Session.load_metadata_only(stub_id)
+        return _meta_stubs[stub_id]
+
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
         if not parent_id:
@@ -10009,6 +10128,66 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             break
         parent_path = SESSION_DIR / f"{parent_id}.json"
         parent_sig_before = _sidecar_stat_signature(parent_path)
+        # perf: decide whether this ancestor can contribute BEFORE paying for
+        # its messages array. A snapshot parent whose truncation watermark is
+        # the truncate-to-empty sentinel replays nothing: the merge below takes
+        # the `watermark_timestamp == 0` branch in
+        # merge_session_messages_append_only() and returns [], resetting the
+        # accumulator on every hop. Loading tens of MB of JSON to produce zero
+        # visible rows was the dominant cost of a cold GET /api/session on a
+        # deep lineage (measured 9.87s vs 0.04s warm; ~85% of it ancestor
+        # loads). load_metadata_only() reads only the JSON prefix (~100x
+        # cheaper) and carries the same watermark/snapshot fields.
+        parent_meta = _load_meta_stub(parent_id)
+        parent_source = str(
+            getattr(parent_meta, "session_source", "") or ""
+        ).strip().lower()
+        # Only the POST-normalization count may stand in for the parent's
+        # loaded length. ``Session.load()`` collapses adjacent duplicate
+        # ``_partial`` rows before the cumulative-prefix test below, so the
+        # raw ``message_count`` can exceed the loaded length while the loaded
+        # parent is still a true prefix of the child. ``Session.save()``
+        # persists ``post_collapse_message_count`` with exactly that
+        # provenance (api/models.py); a stub without it (pre-key sidecar,
+        # legacy layout, unparseable value) proves nothing and falls through
+        # to the full parent load, which keeps the prefix return intact.
+        parent_loaded_length = getattr(
+            parent_meta, "_metadata_post_collapse_message_count", None
+        )
+        if isinstance(parent_loaded_length, bool) or not isinstance(
+            parent_loaded_length, int
+        ) or parent_loaded_length < 0:
+            parent_loaded_length = None
+        fork_boundary_cannot_apply = not root_is_fork or parent_source == "fork"
+        prefix_return_cannot_apply = bool(segments) or (
+            parent_loaded_length is not None
+            and parent_loaded_length > len(session_messages)
+        )
+        if (
+            parent_meta is not None
+            and fork_boundary_cannot_apply
+            and prefix_return_cannot_apply
+            and _snapshot_parent_replays_nothing(parent_meta)
+            and _older_ancestors_provably_replay_nothing(
+                parent_meta,
+                seen=seen | {parent_id},
+                max_hops=max_hops,
+                load_metadata=_load_meta_stub,
+            )
+        ):
+            # Neutralized ancestor: it resets the fold to [] and nothing above
+            # it can refill it (proven from metadata — see
+            # _older_ancestors_provably_replay_nothing; a contributing older
+            # snapshot above the sentinel would otherwise be dropped). Stop
+            # the walk here rather than loading it and every ancestor above.
+            # The metadata gates also prove the earlier explicit-fork and
+            # cumulative-prefix returns cannot apply; uncertainty falls back
+            # to the full parent load below.
+            # Provenance stays incomplete on purpose — the ancestry was not
+            # fully verified, so this result must never enter the cache.
+            neutralized_ancestor = True
+            parent_signatures_complete = False
+            break
         parent = Session.load(parent_id)
         if not parent:
             parent_signatures_complete = False
@@ -10041,7 +10220,20 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         parent_signatures_complete = False
 
     if not segments:
-        return list(getattr(session, "messages", []) or [])
+        own_messages = list(getattr(session, "messages", []) or [])
+        if not neutralized_ancestor:
+            return own_messages
+        # The walk stopped on a neutralized ancestor. The unoptimised path
+        # would still have run the child through the final append-only merge,
+        # which dedupes rows against the (empty) stitched prefix. Skipping that
+        # merge would hand back raw sidecar rows and change the visible output
+        # (measured: 6747 rows instead of 6564 on a real lineage). Reproduce it
+        # exactly against the empty prefix the ancestors would have produced.
+        return merge_session_messages_append_only(
+            [],
+            own_messages,
+            truncation_watermark=None,
+        )
 
     merged = []
     for segment in reversed(segments):
