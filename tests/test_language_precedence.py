@@ -1395,6 +1395,7 @@ def test_explicit_settings_save_waits_for_latest_locale_after_supersession():
             settingsPassword: {{value: 'password-at-click'}},
             settingsCurrentPassword: {{value: 'current-at-click'}},
             settingsTheme: {{value: 'light-at-click'}},
+            settingsShowTps: {{checked: true}},
           }}, {{
             get: (target, key) => target[key] || {{value: '', checked: false, dataset: {{}}, style: {{}}, focus() {{}}}},
           }});
@@ -1478,6 +1479,8 @@ def test_explicit_settings_save_waits_for_latest_locale_after_supersession():
           elements.settingsModel.value = 'model-after-click';
           elements.settingsModel.provider = 'provider-after-click';
           elements.settingsPassword.value = 'password-after-click';
+          elements.settingsCurrentPassword.value = 'current-after-click';
+          elements.settingsShowTps.checked = false;
           selector.value = 'de';
           const germanSelection = vm.runInContext("_settleSettingsLocale('de', $('settingsLanguage'))", ctx);
           await tick();
@@ -1517,6 +1520,7 @@ def test_explicit_settings_save_waits_for_latest_locale_after_supersession():
     }
     assert result["settingsPosts"][0]["language"] == "de"
     assert result["settingsPosts"][0]["theme"] == "light-at-click"
+    assert result["settingsPosts"][0]["show_tps"] is True
     assert result["settingsPosts"][0]["_set_password"] == "password-at-click"
     assert result["settingsPosts"][0]["_current_password"] == "current-at-click"
     assert result["modelPosts"] == [{"model": "model-at-click", "provider": "provider-at-click"}]
