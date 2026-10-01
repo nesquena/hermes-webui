@@ -116,6 +116,68 @@ def safe_resolve(root: Path, requested: str) -> Path:
     return resolved
 
 
+def split_media_token_ref(text: str, match) -> tuple[str, str] | None:
+    """Split a MEDIA regex match into its clean ref and detached prose suffix."""
+    ref = str(match.group(1) or "")
+    suffix = ""
+    before = str(text or "")[: match.start()]
+    for value, forms in (
+        ('"', ('"', "&quot;")),
+        ("'", ("'", "&#39;")),
+    ):
+        if not any(before.endswith(form) for form in forms):
+            continue
+        close_form = ""
+        close_at = -1
+        for form in forms:
+            index = ref.rfind(form)
+            if index > close_at:
+                close_form = form
+                close_at = index
+        if close_at <= 0:
+            continue
+        after_quote = ref[close_at + len(close_form) :]
+        if not _re.fullmatch(r"[.,;:!?]*", after_quote):
+            continue
+        ref = ref[:close_at]
+        suffix = value + after_quote
+        break
+    punctuation_start = len(ref)
+    while punctuation_start and ref[punctuation_start - 1] in ".,;:!?":
+        punctuation_start -= 1
+    trailing_punctuation = ref[punctuation_start:]
+    for delimiter in ("***", "___", "**", "__", "*", "_", "`"):
+        if not before.endswith(delimiter):
+            continue
+        opener_start = len(before) - len(delimiter)
+        if opener_start > 0 and before[opener_start - 1] == delimiter[0]:
+            continue
+        candidate = ref
+        after_delimiter = ""
+        if trailing_punctuation and candidate[: -len(trailing_punctuation)].endswith(delimiter):
+            candidate = candidate[: -len(trailing_punctuation)]
+            after_delimiter = trailing_punctuation
+        if candidate == delimiter:
+            return None
+        if candidate.endswith(delimiter) and len(candidate) > len(delimiter):
+            closer_start = len(candidate) - len(delimiter)
+            if candidate[closer_start - 1] == delimiter[0]:
+                continue
+            ref = candidate[: -len(delimiter)]
+            # The matching closer proves only its own bytes are outside the
+            # reference. Punctuation immediately before it may be a legal
+            # filename or URL byte and must remain bound to the ref.
+            suffix = delimiter + after_delimiter + suffix
+            break
+    # A bare trailing punctuation byte is ambiguous: it may be prose, but it
+    # may also be part of a real local filename or remote URL. Only the quote
+    # and delimiter branches above have evidence from a matching opener that a
+    # closer is outside the MEDIA ref, so preserve every other byte verbatim.
+    if not ref:
+        return None
+    return ref, suffix
+
+
 _CSP_CONNECT_BASE = (
     "'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost "
     "https://127.0.0.1:* https://localhost:* "

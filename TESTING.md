@@ -2057,3 +2057,15 @@ Keep a saved draft in tab A, open an empty chat in tab B, then type in B.
 Before the debounce and POST complete, New Chat in another tab must still restore A.
 After B saves successfully, it may restore B. Failed saves, typing then erasing,
 or sending before an older save completes must not publish that obsolete draft.
+
+### MEDIA boundary regression checks (#6923)
+
+- Bare local paths and remote path-only URLs preserve every trailing byte,
+  including `.`, `,`, `;`, `:`, `!`, and `?`; those bytes are ambiguous and
+  may be part of the actual filename or URL. Punctuation detaches only when a
+  matching Markdown or quote wrapper proves that it is outside the token.
+- Query and fragment values retain all punctuation, including punctuation-only values.
+- Render `MEDIA:_`, `MEDIA:__`, and `MEDIA:*`: these are local filenames.
+  Matching empty wrappers such as `**MEDIA:**` must remain prose.
+- Recheck settled and safe/fade streaming output across callback boundaries.
+  Automated coverage: renderer behavior, MEDIA consumer parity, and SMD stream tests.
