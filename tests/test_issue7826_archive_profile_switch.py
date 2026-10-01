@@ -455,7 +455,12 @@ def test_batch_partial_failure_reports_failed_sid_zero_switches():
     the WHOLE id list to the restore, so a selected-but-failed row made the
     restore believe the displayed chat was archived and skip the bounce-back.
     Root fix: only rows that actually archived count, every failed sid lands
-    in the partial-failure envelope, and zero switches happen."""
+    in the partial-failure envelope, and zero switches happen.
+
+    Round-3 contract restored: a mid-batch failure STOPS the loop, so w3 is
+    never requested (``test_batch_mid_failure_stops_before_later_rows``
+    pins that separately).
+    """
     if NODE is None:
         return
     rows = [{"id": "w1", "profile": "work"}, {"id": "w2", "profile": "work"},
@@ -464,14 +469,40 @@ def test_batch_partial_failure_reports_failed_sid_zero_switches():
     assert data["outcome"]["ok"] is False, (
         f"partial success must not report ok: {data}")
     assert "batch-partial-failure:w2" in data["outcome"]["error"], data
-    assert data["outcome"]["archivedCount"] == 2, (
+    assert data["outcome"]["archivedCount"] == 1, (
         f"only rows that really archived count: {data}")
     assert data["outcome"]["totalCount"] == 3, data
-    assert data["archivedSids"] == ["w1", "w3"], (
+    assert data["archivedSids"] == ["w1"], (
         f"the failed row must not be treated as archived: {data}")
     assert data["switchCalls"] == 0, (
         f"partial failure must never trigger a profile switch: {data}")
     assert data["activeProfile"] == "default", data
+
+
+def test_batch_mid_failure_stops_before_later_rows():
+    """Round-3 contract (maintainer-gated at 8e4f00dd): a mid-batch archive
+    failure STOPS the sequential loop — no request may be sent for rows after
+    the failing one, and the outcome is never reported as success.
+
+    The profile-scoped rework had briefly changed this to "keep going, collect
+    the failed sids", which silently archived a DIFFERENT subset than the user
+    selected. That is a behaviour change on an already-gated contract, not an
+    implementation detail, so the round-3 semantics are restored here and
+    pinned.
+    """
+    if NODE is None:
+        return
+    rows = [{"id": "w1", "profile": "work"}, {"id": "w2", "profile": "work"},
+            {"id": "w3", "profile": "work"}]
+    data = _run_batch("fail-w2", rows)
+    assert data["archivedSids"] == ["w1"], (
+        f"no row after the failure may be archived: {data}")
+    assert data["apiCalls"] == 2, (
+        f"the failing request is the LAST one sent (w1 + the failed w2): {data}")
+    assert data["outcome"]["ok"] is False, data
+    assert "batch-partial-failure" in data["outcome"]["error"], data
+    assert data["outcome"]["archivedCount"] == 1, (
+        f"the aborted tail must not be counted as archived: {data}")
 
 
 def test_batch_unknown_cli_row_still_fails_closed():
