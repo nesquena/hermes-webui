@@ -10388,6 +10388,50 @@ def _live_tool_calls_by_tid(live_tool_calls):
     return by_tid
 
 
+def _extract_tool_call_occurrences(messages):
+    """#7358 round 9: per-tid occurrence scope over the assistant rows.
+
+    Tool-call ids are NOT unique in practice — llama.cpp emits one
+    constant id for every call it ever returns and other providers reuse
+    ``call_0`` per turn (see
+    ``agent/conversation_compression_reply_anchor._reused_tool_call_ids``).
+    A verdict keyed on ``tid`` alone therefore cannot be attributed to a
+    specific call. This pre-pass mirrors the id normalisation the main
+    settlement loop uses (``id`` before ``call_id`` for ``tool_calls``,
+    ``id`` for a ``tool_use`` content part) and returns, per tid:
+
+    - ``counts`` — how many distinct assistant messages emit the id;
+    - ``last_owner`` — the largest assistant ``msg_idx`` emitting it
+      (the "last" occurrence, which is the one the current turn's live
+      mirror still owns).
+
+    Returns ``(counts, last_owner_of_by_tid)``.
+    """
+    counts: dict = {}
+    last_owner: dict = {}
+    for m_idx, m in enumerate(messages or []):
+        if not isinstance(m, dict) or m.get('role') != 'assistant':
+            continue
+        tids = set()
+        content = m.get('content')
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'tool_use':
+                    _part_tid = part.get('id', '')
+                    if _part_tid:
+                        tids.add(str(_part_tid))
+        for tc in m.get('tool_calls') or []:
+            if not isinstance(tc, dict):
+                continue
+            _tc_tid = tc.get('id', '') or tc.get('call_id', '')
+            if _tc_tid:
+                tids.add(str(_tc_tid))
+        for _tid in tids:
+            counts[_tid] = counts.get(_tid, 0) + 1
+            last_owner[_tid] = m_idx
+    return counts, last_owner
+
+
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback.
 
@@ -10419,16 +10463,35 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
     pending_asst_idx = {}
     tool_msg_sequence = []
     live_by_tid = _live_tool_calls_by_tid(live_tool_calls)
+    # #7358 round 9 (reviewer Finding 1, SILENT): key every verdict on
+    # the call OCCURRENCE, never the tid alone. Tool-call ids are not
+    # unique (llama.cpp constant id; ``call_0`` reused per turn), so a
+    # live/prior verdict looked up by tid leaks onto every other
+    # occurrence of the same id. Scope the lookups below with the
+    # occurrence counts + last-owner of each tid in THIS history.
+    _occ_counts, _occ_last_owner = _extract_tool_call_occurrences(messages)
     # #7358 round 6: index prior verdicts by tid so the merge step
     # below can fall back to them when the new turn's live mirror
     # has lost the call (the cause of the two-turn regression).
+    # #7358 round 9: track tids that the prior summary carries more than
+    # once (reused id in prior) and the owner assistant_msg_idx of the
+    # first prior row — both are needed to refuse a prior verdict that
+    # can't be attributed to the occurrence being settled.
     prior_by_tid = {}
+    prior_reused = set()
+    prior_owner = {}
     for _ptc in (prior_tool_calls or []):
         if not isinstance(_ptc, dict):
             continue
         _ptid = _ptc.get('tid') or ''
         if _ptid:
-            prior_by_tid.setdefault(_ptid, _ptc)
+            if _ptid in prior_by_tid:
+                prior_reused.add(_ptid)
+            else:
+                prior_by_tid.setdefault(_ptid, _ptc)
+                _po = _ptc.get('assistant_msg_idx')
+                if isinstance(_po, int):
+                    prior_owner[_ptid] = _po
 
     for msg_idx, m in enumerate(messages or []):
         if not isinstance(m, dict):
@@ -10465,7 +10528,22 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
             if tid:
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
-                    live_tc = live_by_tid.get(tid)
+                    _owner_idx = pending_asst_idx.get(tid, -1)
+                    # #7358 round 9 (reviewer Finding 1, SILENT): bind
+                    # the live verdict only to the LAST occurrence of a
+                    # reused tid. The live mirror holds only the current
+                    # turn's calls; an EARLIER occurrence of a reused id
+                    # is an older call whose live row has been replaced.
+                    # Binding it here copies the current failure onto a
+                    # previously-successful call (verified repro: turn-1
+                    # call_0 success + turn-2 call_0 failure, single live
+                    # entry -> turn-1 must stay successful).
+                    live_tc = (
+                        None
+                        if _occ_counts.get(tid, 0) > 1
+                        and _owner_idx != _occ_last_owner.get(tid, _owner_idx)
+                        else live_by_tid.get(tid)
+                    )
                     # #7358 round 6: prefer live classification; fall
                     # back to the prior turn's verdict when the live
                     # mirror no longer carries this call (the two-turn
@@ -10490,7 +10568,19 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                     # determined-False one if it chooses to.
                     _is_error = live_tc.get('is_error') if live_tc else None
                     if _is_error is None:
-                        _prior_tc = prior_by_tid.get(tid)
+                        # #7358 round 9 (reviewer Finding 1, SILENT): the
+                        # prior verdict is a fallback for the SAME call
+                        # occurrence only. Refuse it when the prior summary
+                        # reuses the id (cannot be attributed to one slot)
+                        # or names a different owning assistant row than
+                        # this one — otherwise a later turn's prior failure
+                        # leaks onto an earlier successful occurrence.
+                        _prior_tc = None
+                        if tid not in prior_reused:
+                            _prior_tc = prior_by_tid.get(tid)
+                            _po = prior_owner.get(tid)
+                            if _po is not None and _po != _owner_idx:
+                                _prior_tc = None
                         if _prior_tc is not None:
                             _is_error = _prior_tc.get('is_error')
                         if _is_error is None:

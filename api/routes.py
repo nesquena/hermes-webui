@@ -5848,13 +5848,23 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         # Only ever *upgrade* to error: an incoming ``False`` never
         # downgrades an already-error row, so the merge cannot flip a
         # failure back to success.
-        if incoming_tool.get("is_error"):
-            merged_tool["is_error"] = True
-        if incoming_payload.get("is_error"):
-            merged_payload["is_error"] = True
-        if incoming_tool.get("is_error") or incoming_payload.get("is_error"):
-            merged["status"] = "error"
-            merged_payload["status"] = "error"
+        # #7358 round 9 (reviewer Finding 3, SILENT): the name+invocation
+        # fallback can pair two rows that carry DIFFERENT explicit ids
+        # (e.g. two turns both emitting ``call_0`` — llama.cpp constant
+        # id / per-turn reuse). Copying the incoming failure onto the
+        # existing row there would flip an older success into error. The
+        # error upgrade is therefore gated on the two rows NOT carrying
+        # different explicit ids; the presentation keys above still merge
+        # regardless, but the verdict only crosses a same-id (or
+        # id-absent) seam.
+        if not _anchor_scene_tool_rows_have_different_explicit_ids(existing, incoming):
+            if incoming_tool.get("is_error"):
+                merged_tool["is_error"] = True
+            if incoming_payload.get("is_error"):
+                merged_payload["is_error"] = True
+            if incoming_tool.get("is_error") or incoming_payload.get("is_error"):
+                merged["status"] = "error"
+                merged_payload["status"] = "error"
         merged["tool"] = merged_tool
         merged["payload"] = merged_payload
         return merged
