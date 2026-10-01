@@ -189,6 +189,16 @@ def test_same_profile_session_still_archives(
 
     def fake_import(*args, **kwargs):
         fake_session.is_cli_session = True
+        # #7738: the archive handler re-resolves the session under the agent
+        # lock (``SESSIONS.get(sid)`` -> ``Session.load(sid)``) before it
+        # mutates ``archived``. The real ``import_cli_session`` persists the
+        # sidecar, so that re-resolve finds it again; this stand-in has no
+        # disk, so it must publish into the LRU the same way. Without this the
+        # handler 404s on its own freshly-imported session — a fake-only
+        # artifact, not a production regression.
+        with routes_module.LOCK:
+            routes_module.SESSIONS[fake_session.session_id] = fake_session
+            routes_module.SESSIONS.move_to_end(fake_session.session_id)
         return fake_session
     monkeypatch.setattr(routes_module, "import_cli_session", fake_import)
     monkeypatch.setattr(routes_module, "is_cli_session_row", lambda _m: True)
