@@ -3664,20 +3664,36 @@ function _messageReloadLimitForSession(sid){
   return _INITIAL_MSG_LIMIT;
 }
 
-function _stitchBoundedReloadTail(prevMessages, offset, tailMessages){
+function _stitchBoundedReloadTail(prevMessages, previousOffset, newOffset, tailMessages){
   // #7899: bounded same-session reload — stitch a fresh server tail onto the
   // already-rendered prefix instead of re-downloading the whole transcript.
-  // prevMessages is the currently-rendered transcript, offset is how many
-  // leading rows the bounded response clipped (_messages_offset), and
-  // tailMessages is the fresh tail the server returned. When the client
-  // prefix covers the clipped region the result is seamless; when the prefix
-  // is shorter (client fell far behind), keep the entire prefix so no
-  // visible rows disappear and append the fresh tail (Codex gate #6154
-  // row-retention).
+  // prevMessages is the currently-rendered transcript, previousOffset is the
+  // GLOBAL origin of its first row (the _messages_offset of the response that
+  // produced it, i.e. the pre-overwrite _oldestIdx), newOffset is the global
+  // origin of tailMessages' first row (this response's _messages_offset), and
+  // tailMessages is the fresh tail the server returned. Both offsets index the
+  // server's full message array (api/routes.py _message_window_for_display
+  // returns the window's absolute start_idx), so the overlap between the
+  // client prefix and the fresh tail is newOffset - previousOffset — NOT
+  // newOffset treated as a client-local slice length. Slicing prevMessages by
+  // the global offset duplicated every already-visible turn whenever the
+  // prefix started at a nonzero global origin (the >500-row reload case this
+  // helper exists for).
+  //
+  // Overlap policy: keep exactly the non-overlapping prefix. When
+  // prefixLength = newOffset - previousOffset exceeds prevMessages.length the
+  // client tail itself begins beyond the fresh window (it fell further behind),
+  // so retaining the old tail plus the new tail leaves a GAP in the global
+  // order — an authoritative wider fetch is preferable, but a gap is strictly
+  // better than duplicating rows, which would repeat turns in the visible
+  // transcript.
   if(!Array.isArray(prevMessages) || !prevMessages.length) return Array.isArray(tailMessages)?tailMessages:[];
-  const clipped=Math.max(0,Number(offset)||0);
-  if(!clipped) return Array.isArray(tailMessages)?tailMessages:[];
-  return prevMessages.slice(0, clipped).concat(Array.isArray(tailMessages)?tailMessages:[]);
+  const prevOrigin=Math.max(0,Number(previousOffset)||0);
+  const clipped=Math.max(0,Number(newOffset)||0);
+  if(clipped<=prevOrigin) return Array.isArray(tailMessages)?tailMessages:[];
+  const prefixLength=clipped-prevOrigin;
+  const prefix=prevMessages.slice(0,Math.min(prefixLength,prevMessages.length));
+  return prefix.concat(Array.isArray(tailMessages)?tailMessages:[]);
 }
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
@@ -3757,6 +3773,15 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
+  // #7899: capture the PREVIOUS global origin of the currently-rendered
+  // transcript BEFORE _oldestIdx is overwritten with this response's
+  // _messages_offset below. Both values index the server's full message array
+  // (api/routes.py _message_window_for_display returns the window's absolute
+  // start_idx), and the stitched overlap is newOffset - previousOffset — so
+  // reading _oldestIdx after the overwrite would feed the helper the NEW
+  // offset in both slots and collapse the overlap math to the buggy
+  // single-offset form that duplicated every visible turn (#7925).
+  const _previousReloadOffset = Math.max(0, Number(_oldestIdx) || 0);
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
@@ -3773,7 +3798,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   // #6154) nor re-downloads the entire transcript on every focus/SSE event.
   const _reloadOffset = Number(data.session._messages_offset) || 0;
   if (_reloadOffset > 0 && Array.isArray(S.messages) && S.messages.length > 0) {
-    msgs = _stitchBoundedReloadTail(S.messages, _reloadOffset, msgs);
+    msgs = _stitchBoundedReloadTail(S.messages, _previousReloadOffset, _reloadOffset, msgs);
   }
   // Skip _syncToolCalls when INFLIGHT exists — the INFLIGHT restore path
   // (loadSession line ~871) will overwrite S.toolCalls from INFLIGHT[sid].toolCalls.
