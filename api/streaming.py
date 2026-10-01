@@ -64,6 +64,8 @@ from api.helpers import (
     redact_session_data,
     scrub_internal_replay_fields,
     _redact_text,
+    _is_client_disconnect_error,
+    _as_client_disconnect,
 )
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
@@ -670,7 +672,7 @@ def _apply_profile_home_context_to_streaming_model(
         return model, provider_context, False
 
     try:
-        import yaml as _yaml_pp
+        from api import yaml_compat as _yaml_pp
 
         _pp_cfg_path = Path(profile_home) / "config.yaml"
         if not _pp_cfg_path.is_file():
@@ -1119,6 +1121,53 @@ def _await_clarify_response(entry, timeout, cancel_evt) -> tuple[str, bool]:
             wait_for = min(1.0, remaining)
         if entry.event.wait(timeout=wait_for):
             return str(entry.result or "").strip(), False
+
+
+_CLARIFY_NO_RESPONSE_TEXT = (
+    "The user did not provide a response within the time limit. "
+    "Use your best judgement to make the choice and proceed."
+)
+
+
+def _clarify_batch_reply(questions, ask_one, cancel_evt) -> dict:
+    """Answer a Hermes Agent clarify batch with the current callback contract.
+
+    Newer Hermes Agent builds call ``clarify_callback(questions)`` with a list of
+    normalized ``{qid, question, choices, choices_offered, multi_select}``
+    entries and expect ``{"answers": {qid: answer}, "outcome", "notice"?}``
+    back (``tools/clarify_tool.py``). The WebUI card asks one question at a
+    time, so questions are asked in order and the batch stops at the first one
+    that ends without an answer, mirroring the messaging gateway.
+
+    ``ask_one(question, choices)`` returns ``(response, expired)`` from
+    ``_await_clarify_response`` or ``None`` when no clarify surface exists.
+    A question left out of ``answers`` is reported as unanswered by the tool;
+    ``outcome`` says why the wait ended.
+    """
+    answers: dict = {}
+    reply: dict = {"answers": answers, "outcome": "submitted"}
+    for index, entry in enumerate(questions or []):
+        if not isinstance(entry, dict):
+            entry = {"question": entry}
+        qid = str(entry.get("qid") or f"q{index}")
+        asked = ask_one(entry.get("question"), entry.get("choices"))
+        if asked is None:
+            reply["outcome"] = "undelivered"
+            reply["notice"] = "The WebUI clarify prompt is not available in this runtime."
+            break
+        response, expired = asked
+        if response:
+            answers[qid] = response
+            continue
+        if expired and not cancel_evt.is_set():
+            reply["outcome"] = "timed_out"
+            reply["notice"] = _CLARIFY_NO_RESPONSE_TEXT
+        else:
+            # Stop/cancel clears the pending prompt, which releases the wait
+            # without a response: the user cancelled, not a timeout.
+            reply["outcome"] = "cancelled"
+        break
+    return reply
 
 
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
@@ -8689,11 +8738,40 @@ def _upsert_current_turn_partial(
     return canonical
 
 
+def _sse_write(handler, payload: bytes) -> None:
+    """Write raw bytes to an SSE client, classifying a vanished peer correctly.
+
+    A dead peer is not always a BrokenPipe/Reset: when it disappeared at the
+    network layer (phone left the LAN, Tailscale peer dropped, stale ARP) the
+    write raises a bare OSError with a routing errno such as EHOSTUNREACH.
+    Those escaped every SSE handler's `except _CLIENT_DISCONNECT_ERRORS:` and
+    were reported as a 500 + traceback for what is just a normal disconnect.
+    Convert that narrow class of OSError here — a genuine failure (ENOSPC,
+    file errors) still propagates untouched.
+    """
+    try:
+        handler.wfile.write(payload)
+        handler.wfile.flush()
+    except OSError as exc:
+        if _is_client_disconnect_error(exc):
+            raise _as_client_disconnect(exc) from None
+        raise
+
+
+# App-level heartbeat comment. SSE lines starting with ':' are ignored by
+# EventSource; it only exists to keep the socket warm between real events.
+_SSE_KEEPALIVE_BYTES = b": keepalive\n\n"
+
+
+def _sse_keepalive(handler) -> None:
+    """Emit one app-level heartbeat comment on a long-lived SSE stream."""
+    _sse_write(handler, _SSE_KEEPALIVE_BYTES)
+
+
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-    handler.wfile.write(payload.encode('utf-8'))
-    handler.wfile.flush()
+    _sse_write(handler, payload.encode('utf-8'))
 
 
 # ── SSE write deadline (Defect A: per-connection thread exhaustion) ─────────
@@ -10635,8 +10713,12 @@ def _run_agent_streaming(
         except ImportError:
             logger.debug("Clarify module not available, falling back to polling")
 
-        def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
-            """Bridge Hermes clarify prompts to the WebUI."""
+        def _clarify_ask_one(question, choices, sid, cancel_evt):
+            """Show one clarify card and wait for it.
+
+            Returns ``(response, expired)`` or ``None`` when the clarify
+            module is unavailable.
+            """
             timeout = _clarify_timeout_seconds(_clarify_session_config(sid))
             choices_list = [str(choice) for choice in (choices or [])]
             data = {
@@ -10650,20 +10732,38 @@ def _run_agent_streaming(
             try:
                 from api.clarify import submit_pending as _submit_clarify_pending, clear_pending as _clear_clarify_pending
             except ImportError:
-                return (
-                    "The user did not provide a response within the time limit. "
-                    "Use your best judgement to make the choice and proceed."
-                )
+                return None
 
             entry = _submit_clarify_pending(sid, data)
             response, expired = _await_clarify_response(entry, timeout, cancel_evt)
             if expired:
                 _clear_clarify_pending(sid)
-            return (
-                response
-                or "The user did not provide a response within the time limit. "
-                   "Use your best judgement to make the choice and proceed."
-            )
+            return response, expired
+
+        def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
+            """Bridge legacy ``callback(question, choices) -> str`` clarify prompts."""
+            asked = _clarify_ask_one(question, choices, sid, cancel_evt)
+            response = asked[0] if asked else ''
+            return response or _CLARIFY_NO_RESPONSE_TEXT
+
+        def _clarify_callback(*args, **kwargs):
+            """Accept both Hermes Agent clarify callback contracts.
+
+            Current agents call ``callback(questions)`` and expect a
+            ``{answers, outcome, notice?}`` dict; older agents call
+            ``callback(question, choices)`` and expect the answer string.
+            """
+            if len(args) == 1 and not kwargs and isinstance(args[0], (list, tuple)):
+                return _clarify_batch_reply(
+                    args[0],
+                    lambda question, choices: _clarify_ask_one(
+                        question, choices, session_id, cancel_event
+                    ),
+                    cancel_event,
+                )
+            question = args[0] if args else kwargs.get('question')
+            choices = args[1] if len(args) > 1 else kwargs.get('choices')
+            return _clarify_callback_impl(question, choices, session_id, cancel_event, put)
 
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
@@ -11506,11 +11606,7 @@ def _run_agent_streaming(
                 stream_delta_callback=on_token,
                 reasoning_callback=on_reasoning,
                 tool_progress_callback=on_tool,
-                clarify_callback=(
-                    lambda question, choices: _clarify_callback_impl(
-                        question, choices, session_id, cancel_event, put
-                    )
-                ),
+                clarify_callback=_clarify_callback,
             )
             # reasoning_config has been an AIAgent param for several releases,
             # but guard defensively to avoid TypeError on an older agent build.

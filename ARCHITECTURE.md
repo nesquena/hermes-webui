@@ -541,6 +541,26 @@ Status and inventory stay passive: they never start or probe an MCP server. Ledg
 helpers resolve to Hermes Agent's `tools.mcp_tool_scope` when present so the key shape
 has one owner; the local fallbacks only cover Agents that predate that module.
 
+#### MCP configuration writes
+
+MCP create/update, toggle and delete are separate from Agent runtime ownership.
+Each edit resolves the existing `_get_config_path()` once under `_cfg_lock`,
+reads a private raw YAML mapping, and commits to that same path with the existing
+atomic writer. `HERMES_CONFIG_PATH` keeps its documented precedence; this does
+not redirect operator-configured files or change profile resolution.
+
+Raw `${ENV_VAR}` references, unrelated configuration and masked credentials keep
+their original stored values. YAML-aliased containers and the selected server
+entry are detached before mutation so an edit cannot change a sibling or template. Runtime-expanded cache dictionaries are never the
+write source. An unreadable, malformed or non-mapping existing document aborts
+without overwriting it; a missing/empty document can be initialized. Failed disk
+writes do not publish uncommitted mutations into the runtime cache. Reloading
+that cache and sending HTTP responses happen after the lock is released.
+
+This transaction serializes cooperating writes/reloads in one WebUI process.
+It does not lock out other processes or provide Agent status/schema/dispatch
+isolation; those remain the runtime boundary described above.
+
 ---
 
 ## 5. Frontend Architecture: Current State

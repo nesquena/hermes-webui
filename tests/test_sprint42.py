@@ -480,6 +480,71 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         self.assertEqual(len(result["payloads"]), 1)
         self.assertEqual(result["payloads"][0]["timeout_seconds"], 300)
 
+    def test_clarify_callback_accepts_questions_list_contract(self):
+        """#7922: current Hermes Agent calls ``clarify_callback(questions)`` with
+        normalized entries and expects ``{answers, outcome}``; the bridge must not
+        raise ``missing 1 required positional argument: 'choices'``."""
+        questions = [
+            {"qid": "q0", "question": "Pick a database",
+             "choices": ["Postgres (Recommended)", "SQLite"],
+             "choices_offered": ["Postgres", "SQLite"], "multi_select": False},
+            {"qid": "q1", "question": "Any notes?", "choices": None,
+             "choices_offered": None, "multi_select": False},
+        ]
+        result = self._capture_clarify_timeout(
+            {"clarify": {"timeout": 300}},
+            invoke=lambda callback: callback(questions),
+        )
+        self.assertEqual(
+            result["clarify_result"],
+            {"answers": {"q0": "selected", "q1": "selected"}, "outcome": "submitted"},
+        )
+        self.assertEqual(len(result["payloads"]), 2)
+        self.assertEqual(result["payloads"][0]["question"], "Pick a database")
+        self.assertEqual(
+            result["payloads"][0]["choices_offered"], ["Postgres (Recommended)", "SQLite"]
+        )
+        self.assertEqual(result["payloads"][1]["question"], "Any notes?")
+        self.assertEqual(result["payloads"][1]["choices_offered"], [])
+        self.assertEqual(result["payloads"][0]["timeout_seconds"], 300)
+
+    def test_clarify_batch_reply_timeout_and_cancel_outcomes(self):
+        """#7922: a question left unanswered stops the batch and reports why."""
+        import api.streaming as streaming
+
+        not_cancelled = threading.Event()
+        timed_out = streaming._clarify_batch_reply(
+            [{"qid": "q0", "question": "a"}, {"qid": "q1", "question": "b"}],
+            lambda _q, _c: ("", True),
+            not_cancelled,
+        )
+        self.assertEqual(timed_out["answers"], {})
+        self.assertEqual(timed_out["outcome"], "timed_out")
+        self.assertTrue(timed_out.get("notice"))
+
+        cancelled_evt = threading.Event()
+        cancelled_evt.set()
+        replies = iter([("first", False), ("", True)])
+        cancelled = streaming._clarify_batch_reply(
+            [{"qid": "q0", "question": "a"}, {"qid": "q1", "question": "b"},
+             {"qid": "q2", "question": "c"}],
+            lambda _q, _c: next(replies),
+            cancelled_evt,
+        )
+        self.assertEqual(cancelled, {"answers": {"q0": "first"}, "outcome": "cancelled"})
+
+        # Stop clears the pending prompt, releasing the wait with no response.
+        released = streaming._clarify_batch_reply(
+            [{"qid": "q0", "question": "a"}], lambda _q, _c: ("", False), not_cancelled,
+        )
+        self.assertEqual(released["outcome"], "cancelled")
+
+        undelivered = streaming._clarify_batch_reply(
+            [{"qid": "q0", "question": "a"}], lambda _q, _c: None, not_cancelled,
+        )
+        self.assertEqual(undelivered["outcome"], "undelivered")
+        self.assertEqual(undelivered["answers"], {})
+
     def test_clarify_callback_zero_timeout_is_unlimited(self):
         """0 (or negative) must pass through as unlimited — never fall back to a default."""
         for config in ({"clarify": {"timeout": 0}}, {"agent": {"clarify_timeout": 0}}):
@@ -578,10 +643,11 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         item2 = _with_timeout_metadata({"timeout_seconds": 300, "requested_at": 1234.0})
         self.assertEqual(item2["expires_at"], 1534.0)
 
-    def _capture_clarify_timeout(self, config):
+    def _capture_clarify_timeout(self, config, invoke=None):
         """Drive _run_agent_streaming with a fake agent that invokes the clarify
         callback, capturing the payload the bridge submits. Returns a dict with
-        ``clarify_result`` and ``payloads``."""
+        ``clarify_result`` and ``payloads``. ``invoke(callback)`` overrides how
+        the fake agent calls the callback (default: legacy two-arg shape)."""
         import api.streaming as streaming
 
         captured = {}
@@ -611,10 +677,13 @@ class TestRuntimeRouteInjection(unittest.TestCase):
 
             def run_conversation(self, **kwargs):
                 if self.clarify_callback:
-                    captured["clarify_result"] = self.clarify_callback(
-                        "Need user confirmation",
-                        ["first", "second"],
-                    )
+                    if invoke is not None:
+                        captured["clarify_result"] = invoke(self.clarify_callback)
+                    else:
+                        captured["clarify_result"] = self.clarify_callback(
+                            "Need user confirmation",
+                            ["first", "second"],
+                        )
                 return {
                     "messages": [
                         {"role": "user", "content": kwargs.get("persist_user_message", "")},
@@ -698,6 +767,10 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 "hermes_cli.runtime_provider": fake_rt_module,
                 "hermes_state": fake_hermes_state,
              }):
+            # A cached agent from an earlier call would keep that call's
+            # ``invoke`` closure; start each capture from a fresh agent.
+            from api.config import SESSION_AGENT_CACHE
+            SESSION_AGENT_CACHE.pop("sess-clarify-timeout", None)
             streaming.STREAMS[fake_stream_id] = fake_queue
             streaming._run_agent_streaming(
                 session_id="sess-clarify-timeout",

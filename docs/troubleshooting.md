@@ -106,6 +106,35 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ---
 
+### Hermes package-managed runtime bootstrap order
+
+For package-managed Hermes installs, the server activates the discovered Agent's
+`hermes_bootstrap` dependency layer before importing WebUI modules that need
+third-party packages. It must **not** import `run_agent` at that point:
+`api.config` first selects the active profile, then profile-sensitive Agent
+application modules can be imported. Importing skills under the launch/base home
+before selecting a named profile can disable their context-local home resolution
+and force turns and model-catalog scopes into the legacy whole-turn lock.
+
+The dependency layer retains Agent-owned activation and re-exec behavior; WebUI
+does not choose generation directories or install into an obsolete Agent venv.
+Legacy Agents and browser-only fixtures without `hermes_bootstrap.py` skip this
+early activation. A failure inside a present bootstrap is logged as a warning
+and startup continues, as it did when the Agent import was lazy, so the UI,
+diagnostics and updater stay reachable; the Agent's own relaunch or repair exit
+still stops the process. The interpreter compatibility probe may still import
+`run_agent` in its disposable subprocess; that import must not leak into server
+startup. If a restart fails, inspect the current service journal and selected
+interpreter. This ordering repair does not remove the static fallback lock or
+change cross-profile credential handling.
+
+Current Hermes managed environments ship `ruamel.yaml` and may not include
+PyYAML. WebUI reads and writes YAML through `api/yaml_compat.py`, which uses
+PyYAML when it is importable and falls back to `ruamel.yaml` otherwise, and the
+bootstrap probe accepts either backend.
+
+---
+
 ## "Response interrupted." marker keeps saying "no agent output was recovered"
 
 **Symptom.** After a live response stream stops before a turn completes (manual restart, OOM, crash, browser/SSE disconnect, lost worker bookkeeping, …), the affected chat shows an `**Response interrupted.**` marker. If the run-journal for that turn is already visible on disk, the marker says the partial output was recovered; if not, it preserves the user turn and says no agent output was recovered yet.
