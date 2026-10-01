@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,7 +62,7 @@ def test_context_indicator_surfaces_cache_hit_rate():
 
 
 def test_cache_usage_labels_are_localized():
-    src = (ROOT / "static" / "i18n.js").read_text()
+    src = locale_source_text()
 
     assert src.count("usage_cache_hit_detail:") == 15
     assert src.count("usage_cached_percent:") == 15

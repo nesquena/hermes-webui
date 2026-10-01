@@ -1,9 +1,10 @@
+from tests.i18n_locale_loader import locale_codes, locale_key_names, locale_source_text
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
@@ -62,21 +63,9 @@ def test_model_health_i18n_keys_exist_in_locale_blocks():
         "insights_model_health_replacement",
         "insights_model_health_cost_per_m",
     ]
-    # Split i18n.js into per-locale blocks (top-level "  <code>: {" entries) and
-    # assert EVERY locale carries all four keys — a `count >= N` check silently
-    # tolerates a locale missing the keys (English fallback). #3634 pt gap.
-    import re
-
-    locale_starts = [
-        (m.group(1), m.start())
-        for m in re.finditer(r"""^  ['"]?([A-Za-z_-]+)['"]?: \{$""", I18N_JS, re.MULTILINE)
-    ]
-    assert len(locale_starts) >= 13, f"expected 13+ locale blocks, found {len(locale_starts)}"
-    bounds = locale_starts + [("__end__", len(I18N_JS))]
-    for i, (code, start) in enumerate(locale_starts):
-        block = I18N_JS[start : bounds[i + 1][1]]
-        for key in keys:
-            assert f"{key}:" in block, f"locale '{code}' is missing {key}"
+    assert len(locale_codes()) == 15
+    for code in locale_codes():
+        assert set(keys).issubset(locale_key_names(code)), f"locale '{code}' is missing a model-health key"
 
 
 def test_model_health_table_css_is_responsive_and_contained():

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Regression tests for the workspace panel persisting across page reload on
 empty-session and no-session boot paths.
@@ -31,7 +32,7 @@ import pathlib
 REPO = pathlib.Path(__file__).parent.parent
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _html_tag_by_id(element_id: str) -> str:
@@ -153,7 +154,7 @@ class TestToggleStaysEnabledWithProfileWorkspace:
 class TestWorkspacePanelStatefulLocalization:
     def test_locale_pass_resyncs_stateful_panel_tooltips(self):
         """Locale re-stamping must finish by restoring open/closed panel labels."""
-        assert "if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();" in I18N_JS
+        assert "if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();" in I18N_SOURCE
 
     def test_stateful_toggle_buttons_do_not_carry_static_title_keys(self):
         """The show/hide tooltip belongs to syncWorkspacePanelUI(), not static DOM i18n."""

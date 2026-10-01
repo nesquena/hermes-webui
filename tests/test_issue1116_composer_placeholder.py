@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for #1116 — composer placeholder reflects active profile name."""
 import re
 
@@ -64,7 +65,7 @@ class TestComposerPlaceholderProfile:
     def test_settings_copy_names_default_assistant_scope(self):
         """The preference copy must say that only the default profile is renamed."""
         index_src = _src("index.html")
-        i18n_src = _src("i18n.js")
+        i18n_src = locale_source_text()
         assert "Default assistant name" in index_src
         assert "Used for the default profile only. Other profiles use their own profile names." in index_src
         assert "settings_label_bot_name: 'Default assistant name'" in i18n_src

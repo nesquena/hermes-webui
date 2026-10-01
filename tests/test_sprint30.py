@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_block, locale_source_text
 """
 Sprint 30: Approval card UI, i18n coverage, and approval flow polish.
 
@@ -200,36 +201,27 @@ class TestApprovalI18nKeys:
     ]
 
     def test_english_locale_has_all_approval_keys(self):
-        src = read(REPO / "static/i18n.js")
-        # Find en locale block (before the first closing };)
-        en_block_end = src.find("\n};")
-        en_block = src[:en_block_end]
         for key in self.REQUIRED_KEYS:
-            assert f"{key}:" in en_block, \
+            assert f"{key}:" in locale_block("en"), \
                 f"English locale missing i18n key: {key}"
 
     def test_chinese_locale_has_all_approval_keys(self):
-        src = read(REPO / "static/i18n.js")
-        # Find zh locale block (from `  zh: {` to the closing `  },` before `};`)
-        zh_start = src.find("\n  zh: {")
-        assert zh_start != -1, "zh locale block not found in i18n.js"
-        zh_block = src[zh_start:]
         for key in self.REQUIRED_KEYS:
-            assert f"{key}:" in zh_block, \
+            assert f"{key}:" in locale_block("zh"), \
                 f"Chinese locale missing i18n key: {key}"
 
     def test_approval_heading_english_value(self):
-        src = read(REPO / "static/i18n.js")
+        src = locale_source_text()
         assert "approval_heading: 'Approval required'" in src, \
             "English approval_heading value incorrect"
 
     def test_approval_btn_once_english_value(self):
-        src = read(REPO / "static/i18n.js")
+        src = locale_source_text()
         assert "approval_btn_once: 'Allow once'" in src, \
             "English approval_btn_once value incorrect"
 
     def test_approval_btn_deny_english_value(self):
-        src = read(REPO / "static/i18n.js")
+        src = locale_source_text()
         assert "approval_btn_deny: 'Deny'" in src, \
             "English approval_btn_deny value incorrect"
 
@@ -246,22 +238,15 @@ class TestClarifyI18nKeys:
     ]
 
     def test_english_locale_has_all_clarify_keys(self):
-        src = read(REPO / "static/i18n.js")
-        en_block_end = src.find("\n};")
-        en_block = src[:en_block_end]
         for key in self.REQUIRED_KEYS:
-            assert f"{key}:" in en_block, f"English locale missing i18n key: {key}"
+            assert f"{key}:" in locale_block("en"), f"English locale missing i18n key: {key}"
 
     def test_chinese_locale_has_all_clarify_keys(self):
-        src = read(REPO / "static/i18n.js")
-        zh_start = src.find("\n  zh: {")
-        assert zh_start != -1, "zh locale block not found in i18n.js"
-        zh_block = src[zh_start:]
         for key in self.REQUIRED_KEYS:
-            assert f"{key}:" in zh_block, f"Chinese locale missing i18n key: {key}"
+            assert f"{key}:" in locale_block("zh"), f"Chinese locale missing i18n key: {key}"
 
     def test_clarify_heading_english_value(self):
-        src = read(REPO / "static/i18n.js")
+        src = locale_source_text()
         assert "clarify_heading: 'Clarification needed'" in src, \
             "English clarify_heading value incorrect"
 

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Tests for issue #266 — provider/model mismatch warning.
 
@@ -5,7 +6,7 @@ Covers:
   1. streaming.py: auth errors detected and classified as 'auth_mismatch'
   2. static/ui.js: _checkProviderMismatch() helper exists and logic is correct
   3. static/messages.js: apperror handler has auth_mismatch branch
-  4. static/i18n.js: provider_mismatch_warning and provider_mismatch_label keys
+  4. static/split locale bundles: provider_mismatch_warning and provider_mismatch_label keys
      present in all locales (en, es, de, ru, zh, zh-Hant)
   5. static/boot.js: modelSelect.onchange calls _checkProviderMismatch
   6. /api/models: response includes active_provider field
@@ -206,7 +207,7 @@ class TestApperrorHandler:
         )
 
 
-# ── 4. static/i18n.js: all locales ───────────────────────────────────────────
+# ── 4. static/split locale bundles: all locales ───────────────────────────────────────────
 
 class TestI18nProviderMismatch:
     """All locales must have provider_mismatch_warning and provider_mismatch_label."""
@@ -228,7 +229,7 @@ class TestI18nProviderMismatch:
 
     def test_all_locales_have_warning_key(self):
         """provider_mismatch_warning must appear in all locales."""
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         locale_count = len(self._locale_names(src))
         count = self._count_key(src, "provider_mismatch_warning")
         assert count >= locale_count, (
@@ -238,7 +239,7 @@ class TestI18nProviderMismatch:
 
     def test_all_locales_have_label_key(self):
         """provider_mismatch_label must appear in all locales."""
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         locale_count = len(self._locale_names(src))
         count = self._count_key(src, "provider_mismatch_label")
         assert count >= locale_count, (
@@ -247,7 +248,7 @@ class TestI18nProviderMismatch:
 
     def test_warning_is_function_in_en(self):
         """English provider_mismatch_warning must be a function (m, p) => ..."""
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         # Find the en block
         en_start = src.find("\n  en: {")
         es_start = src.find("\n  es: {")
@@ -263,7 +264,7 @@ class TestI18nProviderMismatch:
 
     def test_spanish_locale_key_coverage(self):
         """Spanish locale must have the new keys (parity with English)."""
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         es_start = src.find("\n  es: {")
         de_start = src.find("\n  de: {")
         es_block = src[es_start:de_start]

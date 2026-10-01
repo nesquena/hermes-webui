@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for issue #697 — searchable global MCP tool inventory."""
 import json
 from unittest.mock import MagicMock, patch
@@ -126,7 +127,7 @@ class TestMcpToolInventoryUi:
         assert "mcp-tool-error-state" in js
 
     def test_mcp_tool_i18n_keys_are_present(self):
-        i18n = _read("static/i18n.js")
+        i18n = locale_source_text()
         for key in [
             "mcp_tools_title",
             "mcp_tools_desc",

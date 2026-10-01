@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Static-analysis tests for the conversation outline panel (issue #2124)."""
 
 from pathlib import Path
@@ -6,14 +7,14 @@ import re
 ROOT        = Path(__file__).parent.parent
 STATIC      = ROOT / "static"
 INDEX_HTML  = (STATIC / "index.html").read_text(encoding="utf-8")
-I18N_JS     = (STATIC / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 OUTLINE_JS  = (STATIC / "outline.js").read_text(encoding="utf-8")
 STYLE_CSS   = (STATIC / "style.css").read_text(encoding="utf-8")
 BOOT_JS     = (STATIC / "boot.js").read_text(encoding="utf-8")
 PANELS_JS   = (STATIC / "panels.js").read_text(encoding="utf-8")
 CONFIG_PY   = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 
-# Number of locale blocks in i18n.js: en, it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, tr
+# Number of locale blocks in split locale bundles: en, it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, tr
 LOCALE_COUNT = 12
 
 
@@ -45,7 +46,7 @@ def test_outline_panel_html_and_i18n_contract():
         "settings_label_conversation_outline:",
         "settings_desc_conversation_outline:",
     ):
-        assert I18N_JS.count(key) >= LOCALE_COUNT
+        assert I18N_SOURCE.count(key) >= LOCALE_COUNT
 
 
 def test_outline_setting_round_trip_contract():

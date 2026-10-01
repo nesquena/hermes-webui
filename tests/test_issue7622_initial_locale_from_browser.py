@@ -1,22 +1,12 @@
-"""Regression coverage for #7622 — initial install locale from browser hint.
+"""Regression coverage for #7622 browser-based first-visit locale selection.
 
-The renderer's `loadLocale()` was strictly a localStorage-or-English
-fallback — non-English speakers had to dig into Settings after every
-fresh install.  This fix consults `navigator.languages[0]` /
-`navigator.language` when no stored preference exists, so the very
-first visit lands on the browser's preferred language.
-
-The test drives the real `loadLocale()` in `static/i18n.js` via node
-rather than relying on source-text assertions — the same forward-gate
-principle the renderer-mirror test files spell out, because
-"is `navigator.languages` consulted?" is a runtime fact that
-source-text grepping can easily miss.
+These tests execute the split production core, hold its requested script,
+register the matching locale bundle, and await the active locale and storage.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,128 +14,75 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-I18N_JS_PATH = REPO_ROOT / "static" / "i18n.js"
+I18N_CORE_PATH = REPO_ROOT / "static" / "i18n-core.js"
 
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
-def _extract_block(src: str, start_marker: str) -> str:
-    """Slice out a `const LOCALES = { ... };` (or any `… = { … };`) block
-    starting at the first occurrence of ``start_marker``."""
-    idx = src.index(start_marker)
-    brace_idx = src.index("{", idx)
-    depth = 1
-    i = brace_idx + 1
-    while depth and i < len(src):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-        i += 1
-    if depth:
-        raise ValueError(f"unterminated block starting at {start_marker!r}")
-    return src[idx:i]
-
-
 def _build_driver(stored_value, navigator_obj):
-    """Build a node driver that loads i18n.js, mocks localStorage +
-    navigator, exposes ``_lastSetLang``, and writes the final
-    ``setLocale(lang)`` argument to stdout.
-
-    The driver runs the full i18n.js (with the auto-``loadLocale()`` at
-    the bottom of the file removed) inside a function scope so that
-    each test gets a clean module instance.
-    """
-    src = I18N_JS_PATH.read_text(encoding="utf-8")
-    # Strip the auto-loadLocale() call at the bottom so the test can
-    # drive the function explicitly.  It's a single top-level call.
-    src = re.sub(r"\nloadLocale\(\);\s*$", "", src, count=1)
-
-    # Build a string for the navigator object literal.
     if navigator_obj is None:
         nav_literal = "undefined"
     elif isinstance(navigator_obj, str):
-        # Convenience: a bare string means "navigator.languages is missing,
-        # navigator.language is <that string>".
-        nav_literal = f'{{ language: {navigator_obj!r}, languages: undefined }}'
+        nav_literal = json.dumps({"language": navigator_obj})
     elif isinstance(navigator_obj, list):
-        nav_literal = (
-            f'{{ language: {navigator_obj[0]!r}, languages: {navigator_obj!r} }}'
-        )
+        nav_literal = json.dumps({"languages": navigator_obj, "language": navigator_obj[0]})
     else:
         raise TypeError(navigator_obj)
-
-    # Build a string for the localStorage mock.
-    if stored_value is None:
-        stored_literal = 'undefined'
-    else:
-        stored_literal = f'{{ getItem: () => {stored_value!r} }}'
-
+    stored_seed = "" if stored_value is None else f"storage['hermes-lang'] = {json.dumps(stored_value)};"
+    locale_dir = json.dumps(str(REPO_ROOT / "static" / "locales"))
     return f"""
 const fs = require('fs');
-const src = {src!r};
-
-// Mock localStorage (must be set BEFORE eval, i18n.js may read on load)
-global.localStorage = {stored_literal};
-
-// Mock document (i18n.js calls setLocale → document.documentElement.lang = ...)
-global.document = {{
-  documentElement: {{ set lang(_) {{}} }},
-  querySelectorAll: () => [],
-  querySelector: () => null,
-  addEventListener: () => {{}},
+const path = require('path');
+const vm = require('vm');
+const src = {I18N_CORE_PATH.read_text(encoding="utf-8")!r};
+const localeDir = {locale_dir};
+const storage = {{}};
+{stored_seed}
+const scripts = [];
+const ctx = {{
+  URL,
+  localStorage: {{
+    getItem: (key) => Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : null,
+    setItem: (key, value) => {{ storage[key] = String(value); }},
+  }},
+  document: {{
+    baseURI: 'https://example.test/',
+    currentScript: null,
+    documentElement: {{ lang: '' }},
+    querySelectorAll: () => [],
+    createElement: () => ({{ async: false }}),
+    head: {{ appendChild: (script) => scripts.push(script) }},
+  }},
+  navigator: {nav_literal},
 }};
-
-// Eval the i18n source — this installs `loadLocale`, `setLocale`, `t`,
-// `resolveLocale`, `_locale`, and `LOCALES` in the current scope.  Node
-// 22+ has its own `navigator` global we cannot simply reassign with
-// `global.navigator = ...`; we use `Object.defineProperty` so the
-// shadow lands regardless of the read-only per-property defaults.
-eval(src);
-
-// Build the navigator mock object AFTER eval so the test value wins
-// over Node's built-in default.  `Object.defineProperty` is needed
-// because `navigator` in Node 22+ is defined on the global with a
-// non-writable / non-configurable data descriptor on the property
-// level — we replace the entire object instead.
-const _navigatorMock = {nav_literal};
-Object.defineProperty(global, 'navigator', {{
-  value: _navigatorMock,
-  writable: true,
-  configurable: true,
-  enumerable: true,
+vm.createContext(ctx);
+vm.runInContext(src, ctx);
+const started = vm.runInContext('loadLocale()', ctx);
+const requested = storage['hermes-lang'] || null;
+for (const script of scripts) {{
+  const filename = script.src.split(/[?#]/, 1)[0].split('/').pop();
+  vm.runInContext(fs.readFileSync(path.join(localeDir, filename), 'utf8'), ctx);
+  script.onload();
+}}
+Promise.resolve(started).then((result) => {{
+  process.stdout.write(JSON.stringify({{
+    lang: vm.runInContext('getActiveLocale()', ctx),
+    requested,
+    result: result.status,
+    stored: storage['hermes-lang'] || null,
+    htmlLang: ctx.document.documentElement.lang,
+    loaded: vm.runInContext('Object.keys(LOCALES)', ctx),
+    requestCount: scripts.length,
+  }}));
 }});
-
-// Wrap setLocale in-place by re-assigning the function name.  Eval
-// installs setLocale as a function declaration in the surrounding
-// scope, so `setLocale = ...` rebinds it for any subsequent caller
-// in the same scope.
-const _origSetLocale = setLocale;
-setLocale = function(lang) {{
-  global._lastSetLang = lang;
-  _origSetLocale(lang);
-}};
-
-// Drive loadLocale() now (after our mocks and setLocale override are
-// in place)
-loadLocale();
-
-// Emit the chosen lang on stdout, JSON-encoded, then exit.  Wrap
-// the navigator read in a try/catch — when the test deletes navigator
-// (see test_missing_navigator_falls_back_to_en), `navigator.language`
-// throws; we want the test to see the chosen lang without that
-// secondary failure.
-let _navInfo = {{}};
-try {{ _navInfo = {{ nav_language: navigator.language, nav_languages: navigator.languages }}; }} catch (_) {{}}
-process.stdout.write(JSON.stringify({{ lang: global._lastSetLang, ..._navInfo }}));
 """
 
 
 @pytest.fixture(scope="module")
 def i18n_src() -> str:
-    return I18N_JS_PATH.read_text(encoding="utf-8")
+    return I18N_CORE_PATH.read_text(encoding="utf-8")
 
 
 def _run(driver_src: str) -> str:
@@ -183,10 +120,15 @@ class TestInitialLocaleFromBrowserHint:
         """
         driver = _build_driver(stored_value=None, navigator_obj="zh-CN")
         out = _run(driver)
-        assert json.loads(out)["lang"] == "zh", (
+        result = json.loads(out)
+        assert result["lang"] == "zh", (
             f"first-visit zh-CN browser must default to 'zh' (the "
             f"available Chinese locale). Got: {out!r}"
         )
+        assert result["stored"] == "zh"
+        assert result["htmlLang"] == "zh-CN"
+        assert result["loaded"] == ["en", "zh"]
+        assert result["requestCount"] == 1
 
     def test_first_visit_en_us_falls_back_to_en(self, i18n_src):
         """First-visit en-US must still default to en (regression guard
@@ -203,10 +145,15 @@ class TestInitialLocaleFromBrowserHint:
         supported locales)."""
         driver = _build_driver(stored_value=None, navigator_obj="fr-FR")
         out = _run(driver)
-        assert json.loads(out)["lang"] == "fr", (
+        result = json.loads(out)
+        assert result["lang"] == "fr", (
             f"first-visit fr-FR browser must default to 'fr'. "
             f"Got: {out!r}"
         )
+        assert result["stored"] == "fr"
+        assert result["htmlLang"] == "fr-FR"
+        assert result["loaded"] == ["en", "fr"]
+        assert result["requestCount"] == 1
 
     def test_first_visit_unsupported_locale_falls_back_to_en(self, i18n_src):
         """First-visit on a browser that reports a locale with no
@@ -308,24 +255,19 @@ class TestComposedResolverPrecedence:
     then `'en'`.  No `primary === 'en'` skip."""
 
     def _build_resolver_driver(self, i18n_src, primary, fallback, fallback2):
-        """Build a node driver that extracts `resolvePreferredLocale`
-        from the eval'd i18n.js and calls it once with the given args.
-        Returns the resolved lang on stdout.
-        """
-        # Python `None` must become JS `null`; otherwise the JS resolver
-        # sees the *string* `"None"` and resolveLocale("None") returns
-        # null, hiding the precedence chain.
-        def _js(v):
-            return "null" if v is None else repr(v)
+        arguments = ", ".join(
+            "null" if value is None else json.dumps(value)
+            for value in (primary, fallback, fallback2)
+        )
+        call = json.dumps(f"resolvePreferredLocale({arguments})")
         return f"""
-const fs = require('fs');
-const src = {i18n_src!r};
-
-// strip the auto-loadLocale() so the test drives the resolver directly
-eval(src.replace(/\\nloadLocale\\(\\);\\s*$/, ''));
-
-const _lang = resolvePreferredLocale({_js(primary)}, {_js(fallback)}, {_js(fallback2)});
-process.stdout.write(JSON.stringify({{ lang: _lang }}));
+const vm = require('vm');
+const src = {i18n_src!r}.replace(/\\nloadLocale\\(\\);\\s*$/, '');
+const ctx = {{localStorage: {{getItem: () => null, setItem: () => {{}}}}}};
+vm.createContext(ctx);
+vm.runInContext(src, ctx);
+const lang = vm.runInContext({call}, ctx);
+process.stdout.write(JSON.stringify({{lang}}));
 """
 
     def test_fresh_install_no_primary_uses_browser_hint(self, i18n_src):
@@ -433,7 +375,7 @@ process.stdout.write(JSON.stringify({{ lang: _lang }}));
 # ── 3. Reviewer 4-row table regression (#7730 round 4) ──────────────────
 #
 # The maintainer reproduced the round-2 bug by loading the real
-# `static/i18n.js` in a Node `vm` sandbox and calling
+# `static/i18n-core.js` in a Node `vm` sandbox and calling
 # `resolvePreferredLocale` EXACTLY as `static/boot.js` calls it:
 #
 #     resolvePreferredLocale(s.language,
@@ -464,46 +406,36 @@ class TestReviewerTableServerTriState:
     browser hint must never override a saved choice."""
 
     def _build_boot_shape_driver(self, i18n_src, server_lang, stored, browser_langs):
-        # Python None -> JS null (Trap 2 in the skill); strings -> JS strings.
         js_server = "null" if server_lang is None else json.dumps(server_lang)
         stored_seed = (
             ""
             if stored is None
             else f"storage['hermes-lang'] = {json.dumps(stored)};"
         )
-        nav_literal = json.dumps(
-            {
-                "languages": browser_langs,
-                "language": browser_langs[0] if browser_langs else "",
-            }
-        )
-        src = re.sub(r"\nloadLocale\(\);\s*$", "", i18n_src, count=1)
+        nav_literal = json.dumps({
+            "languages": browser_langs,
+            "language": browser_langs[0] if browser_langs else "",
+        })
         call = (
             f"resolvePreferredLocale({js_server}, "
-            f"localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())"
+            "localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())"
         )
         return f"""
-const fs = require('fs');
 const vm = require('vm');
-const src = {src!r};
+const src = {i18n_src!r}.replace(/\\nloadLocale\\(\\);\\s*$/, '');
 const storage = {{}};
 {stored_seed}
 const ctx = {{
   localStorage: {{
-    getItem: (k) => Object.prototype.hasOwnProperty.call(storage, k) ? storage[k] : null,
-    setItem: (k, v) => {{ storage[k] = String(v); }},
-  }},
-  document: {{
-    documentElement: {{ lang: '' }},
-    querySelectorAll: () => [],
+    getItem: (key) => Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : null,
+    setItem: (key, value) => {{ storage[key] = String(value); }},
   }},
   navigator: {nav_literal},
 }};
 vm.createContext(ctx);
 vm.runInContext(src, ctx);
-// Same call shape as static/boot.js:3443-3445.
-const out = vm.runInContext({json.dumps(call)}, ctx);
-process.stdout.write(JSON.stringify(out));
+const result = vm.runInContext({json.dumps(call)}, ctx);
+process.stdout.write(JSON.stringify(result));
 """
 
     def test_four_row_table_server_tri_state_boot_shape(self, i18n_src):

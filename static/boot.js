@@ -3453,22 +3453,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
-    if(typeof setLocale==='function'){
-      // #7622 (round 3): the settings payload's `s.language` is
-      // absent (None) for a fresh install, so an explicit non-empty
-      // value is the user's genuine saved choice.  The browser
-      // navigator hint is now read via the guarded
-      // `_detectBrowserLanguageHint()` helper (round-3 finding 2) so
-      // a throwing `navigator` accessor in some embedded webviews
-      // can no longer abort this branch and reset loaded preferences.
-      // The fallback ternary preserves the pre-#7622 boot behaviour
-      // when neither helper is in scope (defence in depth).
-      const _lang=typeof resolvePreferredLocale==='function'
-        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
-        : (s.language || localStorage.getItem('hermes-lang') || 'en');
-      setLocale(_lang);
-      if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
-    }
+    const _lang=typeof resolvePreferredLocale==='function'
+      ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
+      : (s.language || localStorage.getItem('hermes-lang') || 'en');
+    await activateLocale(_lang);
     _mirrorSpeechSettingsFromServer(s);
     // Apply voice-mode visibility BEFORE computing the divider so the
     // .composer-divider (#5451) sees #btnVoiceMode final display even
@@ -3530,13 +3518,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     _applyComposerControlOrder(window._composerControlOrder);
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
-    if(typeof setLocale==='function'){
-      const _lang=typeof resolvePreferredLocale==='function'
-        ? resolvePreferredLocale(null, localStorage.getItem('hermes-lang'))
-        : (localStorage.getItem('hermes-lang') || 'en');
-      setLocale(_lang);
-      if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
-    }
+    const _lang=typeof resolvePreferredLocale==='function'
+      ? resolvePreferredLocale(null, localStorage.getItem('hermes-lang'))
+      : (localStorage.getItem('hermes-lang') || 'en');
+    await activateLocale(_lang);
     // Apply voice-mode visibility BEFORE computing the divider so the
     // .composer-divider (#5451) sees #btnVoiceMode final display even when
     // a server/localStorage sync path flipped the pref between module init

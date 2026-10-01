@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Visible-order contract for the first anchor-backed Compact Worklog handoff."""
 
 import json
@@ -14,7 +15,7 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 NODE = shutil.which("node")
 
 
@@ -732,13 +733,13 @@ def test_tool_worklog_action_summaries_are_i18n_backed():
     assert "tool_summary_join" in UI_JS
     assert "tool_target_skill_suffix" in UI_JS
 
-    assert "tool_action_label" in I18N_JS
-    assert "tool_worklog_summary" in I18N_JS
-    assert "tool_summary_join" in I18N_JS
-    assert "worklog_thinking" in I18N_JS
-    assert "已读取" in I18N_JS and "已搜索代码" in I18N_JS
-    assert "已讀取" in I18N_JS and "已搜尋程式碼" in I18N_JS
-    assert "正在思考" in I18N_JS
+    assert "tool_action_label" in I18N_SOURCE
+    assert "tool_worklog_summary" in I18N_SOURCE
+    assert "tool_summary_join" in I18N_SOURCE
+    assert "worklog_thinking" in I18N_SOURCE
+    assert "已读取" in I18N_SOURCE and "已搜索代码" in I18N_SOURCE
+    assert "已讀取" in I18N_SOURCE and "已搜尋程式碼" in I18N_SOURCE
+    assert "正在思考" in I18N_SOURCE
 
 
 def test_live_anchor_scene_rerender_preserves_inner_tool_detail_state():

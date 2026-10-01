@@ -9,11 +9,12 @@ from pathlib import Path
 import pytest
 
 from api import workspace as workspace_api
+from tests.i18n_locale_loader import locale_source_text
 
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+LOCALE_SOURCE = locale_source_text()
 
 
 def test_list_dir_emits_birthtime_ns(tmp_path):
@@ -367,8 +368,8 @@ def test_sort_public_surface_text_shape():
                 "workspace_sort_by", "workspace_sort_name_asc", "workspace_sort_name_desc",
                 "workspace_sort_created_desc", "workspace_sort_modified_desc",
                 "workspace_sort_created_unavailable"):
-        assert key in UI_JS or key in I18N_JS
+        assert key in UI_JS or key in LOCALE_SOURCE
     assert UI_JS.count("const active=_effectiveWorkspaceSortKey();") >= 2
     assert "row.setAttribute('aria-disabled',disabled?'true':'false');" in UI_JS
     assert "Number(a[field])" not in UI_JS
-    assert I18N_JS.count("workspace_sort_by:") == I18N_JS.count("workspace_show_hidden_files:")
+    assert LOCALE_SOURCE.count("workspace_sort_by:") == LOCALE_SOURCE.count("workspace_show_hidden_files:")

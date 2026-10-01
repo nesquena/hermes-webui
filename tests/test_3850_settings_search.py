@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for searchable settings feature.
 
 The Settings panel must have a search input and filtering capability to allow
@@ -10,7 +11,7 @@ import re
 
 INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 STYLE_CSS = (Path(__file__).parent.parent / "static" / "style.css").read_text(encoding="utf-8")
 
 
@@ -103,21 +104,21 @@ class TestSettingsSearch:
             "_beginSettingsPanelSession must reset _settingsIndex to null"
         )
 
-    def test_i18n_js_has_search_placeholder_key(self):
-        """i18n.js must contain settings_search_placeholder key."""
-        assert "settings_search_placeholder:" in I18N_JS, (
-            "i18n.js must contain settings_search_placeholder key"
+    def test_I18N_SOURCE_has_search_placeholder_key(self):
+        """split locale bundles must contain settings_search_placeholder key."""
+        assert "settings_search_placeholder:" in I18N_SOURCE, (
+            "split locale bundles must contain settings_search_placeholder key"
         )
-        assert "Search settings" in I18N_JS, (
+        assert "Search settings" in I18N_SOURCE, (
             "settings_search_placeholder must have an appropriate translation"
         )
 
-    def test_i18n_js_has_no_results_key(self):
-        """i18n.js must contain settings_search_no_results key."""
-        assert "settings_search_no_results:" in I18N_JS, (
-            "i18n.js must contain settings_search_no_results key"
+    def test_I18N_SOURCE_has_no_results_key(self):
+        """split locale bundles must contain settings_search_no_results key."""
+        assert "settings_search_no_results:" in I18N_SOURCE, (
+            "split locale bundles must contain settings_search_no_results key"
         )
-        assert "No settings found" in I18N_JS, (
+        assert "No settings found" in I18N_SOURCE, (
             "settings_search_no_results must have an appropriate translation"
         )
 

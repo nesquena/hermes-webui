@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text, locale_string_value
 from collections import Counter
 from pathlib import Path
 import re
@@ -16,7 +17,7 @@ def read(path: Path) -> str:
 
 
 def test_vietnamese_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = locale_source_text()
     assert "\n    _lang: 'vi'," in src
     assert "_label: 'Tiếng Việt'" in src
     assert "_speech: 'vi-VN'" in src
@@ -83,24 +84,22 @@ def extract_locale_block(src: str, locale_key: str) -> str:
 
 
 def test_vietnamese_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
-    vi_block = extract_locale_block(src, "vi")
-    expected = [
-        "settings_heading_title: 'Trung tâm điều khiển'",
-        "settings_heading_subtitle: 'Tùy chọn, công cụ hội thoại và điều khiển hệ thống.'",
-        "approval_skip_all: 'Bỏ qua tất cả trong phiên này'",
-        "checkpoint_title: 'Checkpoint'",
-        "composer_send: 'Gửi tin nhắn'",
-        "gateway_restart: 'Khởi động lại'",
-        "wiki_browse: 'Duyệt wiki'",
-        "yolo_pill_title_active: 'Chế độ YOLO đang bật — bấm để tắt'",
-    ]
-    for entry in expected:
-        assert entry in vi_block
+    expected = {
+        "settings_heading_title": "Trung tâm điều khiển",
+        "settings_heading_subtitle": "Tùy chọn, công cụ hội thoại và điều khiển hệ thống.",
+        "approval_skip_all": "Bỏ qua tất cả trong phiên này",
+        "checkpoint_title": "Checkpoint",
+        "composer_send": "Gửi tin nhắn",
+        "gateway_restart": "Khởi động lại",
+        "wiki_browse": "Duyệt wiki",
+        "yolo_pill_title_active": "Chế độ YOLO đang bật — bấm để tắt",
+    }
+    for key, value in expected.items():
+        assert locale_string_value("vi", key) == value
 
 
 def test_vietnamese_locale_covers_english_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = locale_source_text()
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
     en_keys = set(key_pattern.findall(extract_locale_block(src, "en")))
     vi_keys = set(key_pattern.findall(extract_locale_block(src, "vi")))
@@ -110,7 +109,7 @@ def test_vietnamese_locale_covers_english_keys():
 
 
 def test_vietnamese_locale_has_no_duplicate_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = locale_source_text()
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
     keys = key_pattern.findall(extract_locale_block(src, "vi"))
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_key_names, locale_source_text
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -89,16 +90,13 @@ def test_auth_sessions_have_lock_and_success_can_clear_login_attempts(monkeypatc
 
 
 def _english_i18n_keys():
-    text = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-    match = re.search(r"en:\s*\{([\s\S]*?)\n\s*\},\n\s*[a-z]{2}:", text)
-    assert match, "could not find English locale block"
-    return set(re.findall(r"^\s*([A-Za-z0-9_]+):", match.group(1), re.M))
+    return locale_key_names("en")
 
 
 def _literal_i18n_refs():
     refs = set()
     for path in (ROOT / "static").glob("*.js"):
-        if path.name == "i18n.js":
+        if path.name == "split locale bundles":
             continue
         text = path.read_text(encoding="utf-8")
         refs.update(re.findall(r"\bt\(\s*['\"]([A-Za-z0-9_]+)['\"]", text))
@@ -115,14 +113,14 @@ def test_static_literal_i18n_keys_exist_in_english_locale():
 def test_critical_boot_storage_access_is_guarded():
     index = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
     boot = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = locale_source_text()
 
     theme_script = re.search(r"<script>\(function\(\)\{[\s\S]*?hermes-theme[\s\S]*?\}\)\(\)</script>", index)
     font_script = re.search(r"<script>\(function\(\)\{[\s\S]*?hermes-font-size[\s\S]*?\}\)\(\)</script>", index)
     assert theme_script and "try" in theme_script.group(0)
     assert font_script and "try" in font_script.group(0)
     assert "try{localStorage.removeItem('hermes-webui-server-stopped')" in boot
-    assert "try { localStorage.setItem('hermes-lang', resolved); } catch" in i18n
+    assert "try { localStorage.setItem('hermes-lang', active); } catch" in i18n
     assert "try { stored = localStorage.getItem('hermes-lang'); } catch" in i18n
 
 
