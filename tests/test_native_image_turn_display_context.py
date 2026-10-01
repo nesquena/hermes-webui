@@ -18,6 +18,7 @@ from api.streaming import (
     _new_turn_context_from_messages,
     _active_turn_authority,
     _find_active_turn_checkpoint_index,
+    _record_agent_history_replay_authority,
     _sanitize_messages_for_agent,
     _settle_result_messages,
 )
@@ -1288,6 +1289,7 @@ def test_settlement_reload_and_next_turn_keep_one_clean_bubble_and_rich_context(
         "turn_id": "agent-turn-second",
         "agent_turn_boundary_resolved": True,
     })
+    _record_agent_history_replay_authority(second_identity, model_history)
     checkpoint = _materialize_active_turn_user(second_identity, second_text, "webui")
     second_identity["checkpoint"] = checkpoint
     previous_display = [*display_rows, checkpoint]
@@ -2053,6 +2055,49 @@ def test_untrusted_native_image_row_identity_deduplicates_stably(
             assert public == first_public
             assert replay == first_replay
         session.messages = display
+        session.context_messages = context
+
+
+def test_untrusted_native_image_row_identity_preserves_payload_distinct_rows():
+    import api.models as models
+
+    timestamp = 881.0
+    session, identity, api_content = _settle_image_turn(
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    state_rows = [
+        {
+            "role": "user",
+            "content": mirror,
+            "timestamp": timestamp,
+            "api_content": payload,
+            "_state_db_row_id": "malformed",
+        }
+        for payload in (api_content, f"{api_content} ")
+    ]
+
+    for _ in range(3):
+        context = models.reconciled_state_db_messages_for_session(
+            session,
+            prefer_context=True,
+            state_messages=state_rows,
+        )
+        mirrored_rows = [
+            message for message in context
+            if message.get("content") == mirror
+            and message.get("timestamp") == timestamp
+        ]
+        assert len(mirrored_rows) == 2
+        assert {message["api_content"] for message in mirrored_rows} == {
+            api_content,
+            f"{api_content} ",
+        }
         session.context_messages = context
 
 

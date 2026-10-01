@@ -25419,18 +25419,12 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
-                _active_turn_boundary,
-                _assign_stable_message_ids,
-                _dedupe_replayed_context_messages,
-                _find_active_turn_checkpoint_index,
-                _merge_display_messages_after_agent_result,
+                _record_agent_history_replay_authority,
                 _resolve_active_turn_authority,
-                _restore_display_reasoning_metadata,
-                _restore_reasoning_metadata_before_boundary,
-                _settle_current_turn_boundary,
                 _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
+                _settle_result_messages,
                 _workspace_context_prefix,
             )
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
@@ -25455,17 +25449,38 @@ def _handle_chat_sync(handler, body):
 
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
+            _sync_turn_source = getattr(s, "pending_user_source", None) or "webui"
+            # Synchronous requests have no SSE stream token, but they still
+            # need an explicit request-local turn identity.  The Agent's
+            # persisted user index + turn id complete this provenance after
+            # run_conversation returns; strict settlement then uses the same
+            # authority as the asynchronous path instead of visible-text
+            # prefix inference.
+            _sync_active_turn_identity = {
+                "token": f"sync:{uuid.uuid4().hex}",
+                "text": msg,
+                "timestamp": time.time(),
+                "source": _sync_turn_source,
+                "attachments": [],
+                "current_turn_user_idx": None,
+                "turn_id": "",
+            }
+            _sync_agent_bound_history = _sanitize_messages_for_agent(
+                _previous_context_messages,
+                cfg=get_config(),
+                effective_model=_model,
+                effective_provider=_provider,
+                effective_base_url=_base_url,
+            )
+            _record_agent_history_replay_authority(
+                _sync_active_turn_identity,
+                _sync_agent_bound_history,
+            )
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_agent(
-                    _previous_context_messages,
-                    cfg=get_config(),
-                    effective_model=_model,
-                    effective_provider=_provider,
-                    effective_base_url=_base_url,
-                ),
+                conversation_history=_sync_agent_bound_history,
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
@@ -25485,79 +25500,33 @@ def _handle_chat_sync(handler, body):
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
-        # Active-turn boundary is fixed BEFORE any restoration (same as streaming),
-        # using whatever exact turn authority the result/Agent pair exported.
-        _active_turn_identity = _resolve_active_turn_authority(
-            {"token": None, "text": msg, "current_turn_user_idx": None, "turn_id": ""},
+        _sync_active_turn_identity = _resolve_active_turn_authority(
+            _sync_active_turn_identity,
             result=result,
             agent=agent,
         )
-        if (
-            isinstance(_active_turn_identity, dict)
-            and _active_turn_identity.get("agent_turn_boundary_resolved") is True
-            and not _active_turn_identity.get("token")
-        ):
-            _active_image_index = _find_active_turn_checkpoint_index(
-                _result_messages,
-                _previous_context_messages,
-                _active_turn_identity,
-                msg,
-            )
-            _active_image_content = (
-                _result_messages[_active_image_index].get("content")
-                if _active_image_index is not None
-                else None
-            )
-            if isinstance(_active_image_content, list) and any(
-                isinstance(part, dict)
-                and part.get("type") in {"image", "image_url", "input_image"}
-                for part in _active_image_content
-            ):
-                from api.process_event_utils import build_active_turn_token
-
-                _active_turn_identity["token"] = build_active_turn_token(
-                    f"sync:{s.session_id}:{_active_turn_identity['turn_id']}",
-                    time.time(),
-                )
-        _turn_boundary = _active_turn_boundary(
-            _result_messages, _previous_context_messages, _active_turn_identity, msg,
-        )
-        _next_context_messages = _restore_reasoning_metadata_before_boundary(
-            _previous_context_messages,
-            _result_messages,
-            _turn_boundary,
-        )
-        # Mint ids on the shared result rows BEFORE dedupe deep-copies any
-        # stale-user boundary row, so both arrays share the id (#5564).
-        _assign_stable_message_ids(
-            _result_messages, _previous_messages, _previous_context_messages
-        )
-        _next_context_messages = _dedupe_replayed_context_messages(
-            _previous_context_messages,
-            _next_context_messages,
-            msg,
-        )
-        if _active_turn_identity.get("token"):
-            _next_context_messages = _settle_current_turn_boundary(
-                _previous_context_messages,
-                _next_context_messages,
-                _active_turn_identity,
-                msg,
-                getattr(s, "pending_user_source", None) or "webui",
-            )
-        s.context_messages = _next_context_messages
-        s.messages = _merge_display_messages_after_agent_result(
+        _settle_result_messages(
+            s,
             _previous_messages,
             _previous_context_messages,
-            _restore_display_reasoning_metadata(
-                _previous_messages, _result_messages, current_turn_boundary=_turn_boundary,
-            ),
+            _result_messages,
             msg,
-            source=getattr(s, "pending_user_source", None) or "webui",
-            verification_nudge_provenance={
-                "active_turn_identity": _active_turn_identity,
-            },
+            _sync_turn_source,
+            _sync_active_turn_identity,
         )
+        # The synchronous endpoint has no reconnectable stream. Its request-
+        # local token is useful only while the shared settlement pipeline aligns
+        # display/context ownership; do not persist it as durable transcript
+        # metadata after the request has reached a terminal result.
+        _sync_turn_token = _sync_active_turn_identity.get("token")
+        if _sync_turn_token:
+            for _projection in (s.messages, s.context_messages):
+                for _message in _projection or []:
+                    if (
+                        isinstance(_message, dict)
+                        and _message.get("_active_turn_token") == _sync_turn_token
+                    ):
+                        _message.pop("_active_turn_token", None)
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":

@@ -3,9 +3,9 @@ _merge_display_messages_after_agent_result (salvaged from #4314).
 
 The optimization replaces an `in context_keys[_cursor:]` list-slice membership
 test with an O(1) count-keyed dict mirror. The subtle correctness requirement:
-_message_identity intentionally returns DUPLICATE keys for identical-content
-turns (and None for empty rows). A plain set would diverge from the original
-list-slice semantics; a multiset (count dict, including None) is exact.
+The projection-aware backfill key intentionally returns DUPLICATE keys for
+exact rows and visible-identical non-assistant turns. A plain set would diverge
+from the original list-slice semantics; a multiset count is exact.
 
 This test asserts the optimized merge produces byte-identical output to a
 reference implementation of the ORIGINAL list-slice semantics, over adversarial
@@ -28,7 +28,7 @@ def _msg(role, text, **extra):
 def test_backfill_optimization_preserves_duplicate_identity_turns():
     """Two identical-content user turns both survive the backfill merge.
 
-    _message_identity collapses identical user text to the same key. The
+    The backfill key collapses identical user text to the same key. The
     optimization must not drop the second identical turn (a plain-set mirror
     would). previous_display is the visible backbone; both 'Ok' user bubbles
     plus the interleaved assistant rows must be preserved in order.
@@ -67,6 +67,136 @@ def test_backfill_optimization_preserves_duplicate_identity_turns():
     assert contents.index("first reply") < contents.index("second reply")
 
 
+def test_backfill_matches_stable_row_across_display_only_metadata():
+    """Display enrichment must not make one stable assistant row appear twice."""
+    previous_display = [
+        _msg("user", "old prompt", id="old-user"),
+        _msg(
+            "assistant",
+            "first answer",
+            id="assistant-a",
+            _media_snapshots={"/tmp/result.png": "sha256:a"},
+            _turnUsage={"input_tokens": 3, "output_tokens": 5},
+        ),
+    ]
+    previous_context = [
+        _msg("user", "old prompt", id="old-user"),
+        _msg("assistant", "first answer", id="assistant-a"),
+        _msg("assistant", "context-only answer", id="assistant-b"),
+    ]
+    result_messages = [
+        *previous_context,
+        _msg("user", "current prompt", id="current-user"),
+        _msg("assistant", "final answer", id="assistant-final"),
+    ]
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        "current prompt",
+        result_has_authoritative_full_history_prefix=True,
+    )
+
+    assert [message.get("id") for message in merged] == [
+        "old-user",
+        "assistant-a",
+        "assistant-b",
+        "current-user",
+        "assistant-final",
+    ]
+    assert merged[1]["_media_snapshots"] == {"/tmp/result.png": "sha256:a"}
+    assert merged[1]["_turnUsage"] == {"input_tokens": 3, "output_tokens": 5}
+
+
+def test_backfill_projection_keys_keep_strict_ids_and_unknown_metadata():
+    display = [
+        _msg("assistant", "same", id=7, _statusCard={"phase": "done"}),
+        _msg("assistant", "typed", id=7),
+        _msg("assistant", "unknown", provider_metadata={"attempt": "alpha"}),
+        _msg("assistant", "one-sided"),
+    ]
+    context = [
+        _msg("assistant", "same", id=7),
+        _msg("assistant", "typed", id="7"),
+        _msg("assistant", "unknown", provider_metadata={"attempt": "beta"}),
+        _msg("assistant", "one-sided", id=9),
+    ]
+
+    display_keys, context_keys = streaming._display_backfill_projection_keys(
+        display,
+        context,
+    )
+
+    assert display_keys[0] == context_keys[0]
+    assert display_keys[1] != context_keys[1]
+    assert display_keys[2] != context_keys[2]
+    assert display_keys[3] == context_keys[3]
+
+
+def test_backfill_preserves_duplicate_context_multiplicity():
+    repeated = _msg("user", "repeat")
+    previous_display = [dict(repeated)]
+    previous_context = [dict(repeated), dict(repeated)]
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        [*previous_context, _msg("assistant", "final", id="assistant-final")],
+        "current prompt",
+        result_has_authoritative_full_history_prefix=True,
+    )
+
+    assert sum(
+        message.get("role") == "user" and message.get("content") == "repeat"
+        for message in merged
+    ) == 2
+
+
+def test_backfill_suffix_lookup_has_bounded_key_comparisons(monkeypatch):
+    comparisons = 0
+
+    class _Key:
+        def __init__(self, value):
+            self.value = value
+
+        def __hash__(self):
+            return hash(self.value)
+
+        def __eq__(self, other):
+            nonlocal comparisons
+            comparisons += 1
+            return isinstance(other, _Key) and self.value == other.value
+
+    size = 500
+    anchor = _Key("anchor")
+    context_only = _Key("context-only")
+    display_keys = [_Key(f"display-{index}") for index in range(size)] + [anchor]
+    context_keys = [context_only, anchor]
+    monkeypatch.setattr(
+        streaming,
+        "_display_backfill_projection_keys",
+        lambda _display, _context: (display_keys, context_keys),
+    )
+    previous_display = [
+        _msg("user", f"display-{index}")
+        for index in range(size + 1)
+    ]
+    previous_context = [
+        _msg("user", "context-only"),
+        _msg("user", "anchor"),
+    ]
+
+    streaming._merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        [_msg("assistant", "final")],
+        "current prompt",
+    )
+
+    assert comparisons < size * 20
+
+
 def test_backfill_optimization_matches_reference_listslice_semantics():
     """Differential check: optimized merge == reference (original) semantics
     over adversarial inputs with duplicate identities and empty rows."""
@@ -75,71 +205,75 @@ def test_backfill_optimization_matches_reference_listslice_semantics():
 
     def reference_merge(previous_display, previous_context, result_messages, msg_text):
         # Faithful re-implementation of the PRE-optimization inner loop using the
-        # original `in context_keys[_cursor:]` list-slice membership test.
+        # original `in context_keys[_cursor:]` list-slice membership test. Apply
+        # the production replay reducer before and after that loop so this oracle
+        # isolates only the count-dict optimization under the current strict
+        # exact-payload contract.
         previous_display = list(previous_display or [])
-        _partial_seen = set()
-        _deduped_rev = []
-        for m in reversed(previous_display):
-            if isinstance(m, dict) and m.get("_partial"):
-                key = streaming._message_identity(m)
-                if key is not None:
-                    if key in _partial_seen:
-                        continue
-                    _partial_seen.add(key)
-            _deduped_rev.append(m)
-        previous_display = list(reversed(_deduped_rev))
         previous_context = list(previous_context or [])
         result_messages = list(result_messages or [])
+        previous_display, _ = streaming._collapse_replayed_assistant_rows(
+            previous_display
+        )
+        previous_context, _ = streaming._collapse_replayed_assistant_rows(
+            previous_context
+        )
         if not result_messages:
             return previous_display
         if previous_display and previous_context:
-            _display_id_set = {streaming._message_identity(m) for m in previous_display}
-            _context_id_set = {
-                streaming._message_identity(m)
-                for m in previous_context
-                if not streaming._is_context_compression_marker(m)
+            display_keys, context_keys = streaming._display_backfill_projection_keys(
+                previous_display,
+                previous_context,
+            )
+            display_counts = {}
+            context_counts = {}
+            for key in display_keys:
+                display_counts[key] = display_counts.get(key, 0) + 1
+            for key in context_keys:
+                context_counts[key] = context_counts.get(key, 0) + 1
+            insert_budget = {
+                key: count - display_counts.get(key, 0)
+                for key, count in context_counts.items()
+                if count > display_counts.get(key, 0)
             }
-            if bool(_context_id_set - _display_id_set):
-                context_keys = [streaming._message_identity(m) for m in previous_context]
+            if insert_budget:
                 _backfilled = []
-                _context_inserted = set()
                 _cursor = 0
-                for _di, _dmsg in enumerate(previous_display):
-                    _dkey = streaming._message_identity(_dmsg)
-                    if _dkey is not None:
-                        _j = _cursor
-                        while _j < len(context_keys) and context_keys[_j] != _dkey:
-                            _j += 1
-                        if _j < len(context_keys):
-                            for _k in range(_cursor, _j):
-                                _ckey = context_keys[_k]
-                                _cmsg = previous_context[_k]
-                                if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not streaming._is_context_compression_marker(_cmsg):
-                                    _backfilled.append(_copy.deepcopy(_cmsg))
-                                    _context_inserted.add(_ckey)
-                            _cursor = _j + 1
-                        elif not any(
-                            streaming._message_identity(_f) in context_keys[_cursor:]
-                            for _f in previous_display[_di + 1:]
+
+                def backfill_range(start, stop):
+                    for index in range(start, stop):
+                        key = context_keys[index]
+                        message = previous_context[index]
+                        if (
+                            insert_budget.get(key, 0) > 0
+                            and not streaming._is_context_compression_marker(message)
+                            and not streaming._is_compressed_context_tool_result_summary_message(message)
                         ):
-                            for _k in range(_cursor, len(context_keys)):
-                                _ckey = context_keys[_k]
-                                _cmsg = previous_context[_k]
-                                if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not streaming._is_context_compression_marker(_cmsg):
-                                    _backfilled.append(_copy.deepcopy(_cmsg))
-                                    _context_inserted.add(_ckey)
-                            _cursor = len(context_keys)
+                            _backfilled.append(_copy.deepcopy(message))
+                            insert_budget[key] -= 1
+
+                for _di, _dmsg in enumerate(previous_display):
+                    _dkey = display_keys[_di]
+                    _j = _cursor
+                    while _j < len(context_keys) and context_keys[_j] != _dkey:
+                        _j += 1
+                    if _j < len(context_keys):
+                        backfill_range(_cursor, _j)
+                        _cursor = _j + 1
+                    elif not any(
+                        future_key in context_keys[_cursor:]
+                        for future_key in display_keys[_di + 1:]
+                    ):
+                        backfill_range(_cursor, len(context_keys))
+                        _cursor = len(context_keys)
                     _backfilled.append(_dmsg)
-                while _cursor < len(context_keys):
-                    _ckey = context_keys[_cursor]
-                    _cmsg = previous_context[_cursor]
-                    _cursor += 1
-                    if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not streaming._is_context_compression_marker(_cmsg):
-                        _backfilled.append(_copy.deepcopy(_cmsg))
-                        _context_inserted.add(_ckey)
+                backfill_range(_cursor, len(context_keys))
                 if len(_backfilled) > len(previous_display):
                     previous_display = _backfilled
         # Both share the identical tail-merge logic after backfill; compare backfill output.
+        previous_display, _ = streaming._collapse_replayed_assistant_rows(
+            previous_display
+        )
         return previous_display
 
     rng = random.Random(2026)
