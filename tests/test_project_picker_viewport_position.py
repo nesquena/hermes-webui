@@ -160,7 +160,12 @@ const showToast = () => {};
 const showPromptDialog = async () => null;
 const renderSessionList = async () => {};
 let repaints = 0;
-const renderSessionListFromCache = () => { repaints += 1; };
+let cachedLabels = {parent: 'old parent', child: 'old child'};
+let paintedLabels = {...cachedLabels};
+const renderSessionListFromCache = () => {
+  repaints += 1;
+  paintedLabels = {...cachedLabels};
+};
 const t = key => key;
 let nextTask = 0;
 const frames = new Map();
@@ -765,6 +770,14 @@ def _close_session_action_menu_source() -> str:
     return SESSIONS_JS[start:end]
 
 
+def _open_session_action_menu_source() -> str:
+    start = SESSIONS_JS.find("function _openSessionActionMenu(")
+    assert start >= 0, "_openSessionActionMenu not found in static/sessions.js"
+    end = SESSIONS_JS.find("\ndocument.addEventListener('click'", start)
+    assert end > start
+    return SESSIONS_JS[start:end]
+
+
 def test_closing_the_action_menu_drains_a_picker_deferred_repaint():
     assert NODE is not None
     script = r"""
@@ -801,3 +814,88 @@ console.log(JSON.stringify({drained, repaintsAfterNoop: repaints,
     assert data["drained"] == {"repaints": 1, "flagCleared": True}
     assert data["repaintsAfterNoop"] == 1
     assert data["keptForPicker"] is True
+
+
+def test_another_rows_real_action_menu_retires_picker_and_repaints_nested_rows():
+    """The ⋮ click owns the popover handoff even though it stops bubbling."""
+    assert NODE is not None
+    script = _DRIVER_PREFIX + _show_project_picker_source() + r"""
+let _sessionListRepaintDeferredByPicker = false;
+let _sessionActionMenu = null;
+let _sessionActionAnchor = null;
+let _sessionActionSessionId = null;
+let _sessionActionPreviousFocus = null;
+let _sessionActionMenuId = 0;
+function _focusSessionActionMenuRestoreTarget() { return true; }
+function _isReadOnlySession() { return true; }
+function _isMessagingSession() { return false; }
+function _isCliSession() { return false; }
+function _appendSessionCopyLinkAction() {}
+function _appendSessionExportHtmlAction() {}
+function _mountSessionActionMenu(menu, nextSession, nextAnchor) {
+  _sessionActionMenu = menu;
+  _sessionActionSessionId = nextSession.session_id;
+  _sessionActionAnchor = nextAnchor;
+}
+FakeElement.prototype.setAttribute = function(name, value) { this[name] = value; };
+FakeElement.prototype.removeAttribute = function(name) { delete this[name]; };
+""" + _close_session_action_menu_source() + _open_session_action_menu_source() + r"""
+const row = {classList: {remove() {}}};
+const otherRowMenuButton = {
+  isConnected: true,
+  classList: {contains: () => true, remove() {}, add() {}},
+  setAttribute() {},
+  removeAttribute() {},
+  closest: () => row,
+  contains: target => target === otherRowMenuButton,
+  click() {
+    this.onclick({stopPropagation() {}});
+  },
+};
+otherRowMenuButton.onclick = event => {
+  event.stopPropagation();
+  _openSessionActionMenu({session_id: 'nested-child'}, otherRowMenuButton);
+};
+
+openPicker(260);
+cachedLabels = {parent: 'renamed parent', child: 'renamed child'};
+// The production list guard records the skipped repaint while the picker owns
+// its row; exercise the popover handoff through the real action-menu function.
+_sessionListRepaintDeferredByPicker = true;
+otherRowMenuButton.click();
+flushTimers();
+const whileMenuOpen = {
+  pickerRetired: _projectPickerTeardown === null,
+  repaints,
+  labels: {...paintedLabels},
+};
+closeSessionActionMenu();
+flushTimers();
+console.log(JSON.stringify({
+  whileMenuOpen,
+  afterClose: {
+    repaints,
+    labels: paintedLabels,
+    flagCleared: _sessionListRepaintDeferredByPicker === false,
+  },
+}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["whileMenuOpen"] == {
+        "pickerRetired": True,
+        "repaints": 0,
+        "labels": {"parent": "old parent", "child": "old child"},
+    }
+    assert data["afterClose"] == {
+        "repaints": 1,
+        "labels": {"parent": "renamed parent", "child": "renamed child"},
+        "flagCleared": True,
+    }

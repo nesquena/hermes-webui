@@ -231,6 +231,44 @@ def _reset_password_hash_cache():
         _invalidate_password_hash_cache()
 
 
+def _strip_leaked_webui_password_env() -> None:
+    """Remove a leaked HERMES_WEBUI_PASSWORD between tests (#7168 review).
+
+    bootstrap.py runs _load_repo_dotenv() at import time, which copies values
+    from the developer's real repo .env straight into os.environ. When any
+    test imports bootstrap mid-session (e.g. tests/test_bootstrap_foreground.py
+    via its import_bootstrap fixture), a local .env containing
+    HERMES_WEBUI_PASSWORD leaks into the process environment OUTSIDE
+    monkeypatch's undo scope. Every later test then sees is_auth_enabled()
+    True and no-handler cookie helpers raise spurious
+    "build_profile_cookie requires a request handler" errors — exactly the
+    #5588 failure shape, but sourced from the repo .env instead of the hash
+    cache. Tests that legitimately enable auth set the var themselves AFTER
+    this strip; an intentionally-empty value ("") is preserved so
+    ctl.sh-style override semantics keep working.
+
+    HERMES_COMMAND gets the same treatment (#7168 re-gate round 7): a local
+    .env carrying HERMES_COMMAND leaks past bootstrap imports and redirects
+    gateway_restart._resolve_hermes_command() away from its mocked
+    shutil.which result, failing every later active-profile-restart test
+    with a machine-specific CLI path. Upstream code has no
+    HERMES_COMMAND override, so stripping a leaked value restores exact
+    upstream semantics.
+    """
+    if os.environ.get("HERMES_WEBUI_PASSWORD") == "":
+        pass  # intentional empty override preserved for the password var
+    else:
+        os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+    os.environ.pop("HERMES_COMMAND", None)
+
+
+@pytest.fixture(autouse=True)
+def _strip_leaked_webui_password():
+    _strip_leaked_webui_password_env()
+    yield
+    _strip_leaked_webui_password_env()
+
+
 @pytest.fixture(autouse=True)
 def _invalidate_providers_cache():
     """Clear the /api/providers TTL cache around every test (#6010).
@@ -651,6 +689,7 @@ def pytest_collection_modifyitems(config, items):
         'test_delivery_options_structure',
         'test_delivery_options_includes_common_platforms',
         'test_delivery_options_local_label',
+        'test_delivery_options_survives_the_authority_module_move',
         # Skills endpoints (need tools.skills_tool module)
         'test_skills_list',
         'test_skills_list_has_required_fields',
@@ -1192,6 +1231,24 @@ _AGENT_PATH_ENV_KEYS = ("HERMES_WEBUI_AGENT_DIR", "PYTHONPATH", "HERMES_WEBUI_PY
 _REAL_AGENT_ENV = {k: os.environ.get(k) for k in _AGENT_PATH_ENV_KEYS}
 _REAL_SYS_PATH = list(sys.path)
 
+# Keep the Windows restart seams inert after the suite isolation snapshots.
+from api import updates as _updates
+
+_real_windows_restart_spawn = _updates._windows_restart_spawn
+_real_windows_restart_exit = _updates._windows_restart_exit
+
+
+def _pytest_session_safe_windows_restart_spawn(_args, **_kwargs):  # pragma: no cover
+    return None
+
+
+def _pytest_session_safe_windows_restart_exit(_code):  # pragma: no cover
+    return None
+
+
+_updates._windows_restart_spawn = _pytest_session_safe_windows_restart_spawn
+_updates._windows_restart_exit = _pytest_session_safe_windows_restart_exit
+
 
 def _hermes_cli_is_healthy() -> bool:
     mod = sys.modules.get("hermes_cli")
@@ -1244,6 +1301,41 @@ def _restore_hermes_cli_module():
     # Restore the real sys.path if a test stripped the agent dir from it.
     if sys.path != _REAL_SYS_PATH:
         sys.path[:] = _REAL_SYS_PATH
+
+
+# ── hermes-agent API-drift compat: tools.approval._ApprovalEntry ─────────────
+# The core agent (commit 14791b4d4e, released in v2026.9.7) split tools/approval.py
+# into smart/human-wait/gateway-wait modules and dropped 43 back-compat facade
+# re-exports — including the module-level ``tools.approval._ApprovalEntry`` alias.
+# The class itself still exists, unchanged, at ``tools.approval_gateway_wait._ApprovalEntry``
+# (identical ``__init__(self, data)`` contract: threading.Event + data dict + an
+# auto-stamped request_id). Several webui gateway-approval tests reference
+# ``_ApprovalEntry`` through ``tools.approval`` (its pre-split public location):
+# on a box with the NEW agent installed the attribute is gone (AttributeError via
+# the module's PEP-562 ``__getattr__``); on an OLD agent it is still present. No
+# PRODUCTION webui code imports the dropped facade (verified: api/route_approvals.py
+# and api/streaming.py import only surviving names), so this is purely test-side
+# coupling to a moved internal symbol.
+#
+# This runs as an AUTOUSE fixture (not at conftest import time) because the agent
+# dir is only added to sys.path by the earlier autouse guards / server fixture —
+# ``tools.approval`` is not importable at conftest module load. The backfill is
+# idempotent and only aliases the class when the installed agent lacks it, using
+# the exact class object the agent uses internally. It keeps the tests working
+# across both the pre-split and post-split agent without touching ~22 call sites,
+# and is a no-op when tools.approval isn't importable (agent absent → tests skip).
+@pytest.fixture(autouse=True)
+def _backfill_approval_entry_facade():
+    try:
+        import tools.approval as _approval_mod
+    except Exception:
+        return  # agent not importable here → agent-dependent tests skip anyway
+    if getattr(_approval_mod, "_ApprovalEntry", None) is None:
+        try:
+            from tools.approval_gateway_wait import _ApprovalEntry as _entry_cls
+        except Exception:
+            return  # unexpected layout → let tests skip/fail loudly, don't fake it
+        _approval_mod._ApprovalEntry = _entry_cls
 
 
 # ── Per-test session cleanup ──────────────────────────────────────────────────
