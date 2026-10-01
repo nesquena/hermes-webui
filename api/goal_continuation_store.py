@@ -31,7 +31,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from typing import Deque, Optional
+from typing import Deque, Optional, Tuple
 
 from api.config import STATE_DIR
 
@@ -40,6 +40,11 @@ logger = logging.getLogger("api.goal_continuation_store")
 _PENDING_GOAL_FILE = STATE_DIR / "pending_goal_continuations.json"
 _FILE_VERSION = 2
 _MAX_RETIRED_LOG = 64
+# Bounded rollback receipts: one per in-flight chat start. A slot is only
+# occupied between a consume and its rejected-start rollback (milliseconds in
+# practice), and stale slots are dropped when a newer intent for the same
+# session is armed, so this can never accumulate.
+_MAX_ROLLBACK_RECEIPTS = 64
 _MAX_INTENT_AGE_SECONDS = 24 * 60 * 60  # stale disk intent must not survive forever
 
 # One owner lock: in-memory mutation + durable snapshot are a single critical
@@ -49,6 +54,10 @@ _GENERATION = 0  # bumped under _LOCK on every accepted mutation (arm/retire)
 _LAST_LOAD_ERROR: Optional[str] = None
 _LAST_WRITE_ERROR: Optional[str] = None
 _RETIRED_LOG: Deque[dict] = deque(maxlen=_MAX_RETIRED_LOG)
+# Rollback receipts: the record a consume popped, kept so a rejected chat
+# start can restore marker + record together. Keyed by session id; guarded by
+# the same _LOCK, dropped whenever a newer intent is armed for that session.
+_ROLLBACK_RECEIPTS: Deque[Tuple[str, dict]] = deque(maxlen=_MAX_ROLLBACK_RECEIPTS)
 
 
 def _next_generation_unlocked() -> int:
@@ -56,6 +65,13 @@ def _next_generation_unlocked() -> int:
     global _GENERATION
     _GENERATION += 1
     return _GENERATION
+
+
+def _drop_rollback_receipt_unlocked(sid: str) -> None:
+    """Drop every rollback receipt for ``sid``; callers must hold ``_LOCK``."""
+    for i in range(len(_ROLLBACK_RECEIPTS) - 1, -1, -1):
+        if _ROLLBACK_RECEIPTS[i][0] == sid:
+            del _ROLLBACK_RECEIPTS[i]
 
 
 def _write_registry_unlocked(records: dict, *, context: str = "") -> None:
@@ -201,6 +217,10 @@ def arm_pending_goal_continuation(
     prompt = "" if continuation_prompt is None else str(continuation_prompt)
     with _LOCK:
         generation = _next_generation_unlocked()
+        # A fresh intent supersedes any older one: drop a stale rollback
+        # receipt for this session so a late rejected-start rollback can never
+        # resurrect the generation the new intent replaced.
+        _drop_rollback_receipt_unlocked(sid)
         PENDING_GOAL_CONTINUATION.add(sid)
         PENDING_GOAL_CONTINUATION_RECORDS[sid] = {
             "prompt": prompt,
@@ -371,6 +391,82 @@ def consume_pending_goal_continuation(
             context=f"consume sid={sid}",
         )
         _RETIRED_LOG.append({"session_id": sid, "reason": "consumed", "at": time.time()})
+        # Keep the popped record as a rollback receipt: a chat start that is
+        # rejected AFTER the consume (stream-registration / worker-start
+        # failure, a 409) must be able to re-arm marker + record together,
+        # otherwise the retry runs as an ordinary turn and the goal loop
+        # loses its continuation. The receipt is only claimed by
+        # ``pop_goal_continuation_rollback_receipt`` (rejected-start paths)
+        # or dropped when a newer intent is armed for the same session.
+        _ROLLBACK_RECEIPTS.append((sid, dict(record)))
+        return True
+
+
+def pop_goal_continuation_rollback_receipt(session_id: str) -> Optional[dict]:
+    """Claim and remove the rollback receipt for ``session_id``, if any.
+
+    Returns the record a matching ``consume_pending_goal_continuation`` popped
+    (with its ``generation``), or ``None`` when there is no live receipt. The
+    caller compares the receipt's generation against the CURRENT one before
+    restoring, so an intent armed after the rejected start is never clobbered.
+    Never raises into the chat path.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    with _LOCK:
+        claimed: Optional[dict] = None
+        for i, (receipt_sid, record) in enumerate(_ROLLBACK_RECEIPTS):
+            if receipt_sid == sid:
+                claimed = record
+                del _ROLLBACK_RECEIPTS[i]
+                break
+        return claimed
+
+
+def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
+    """Re-arm a consumed continuation (marker + durable record) under ``_LOCK``.
+
+    The rejected-start rollback path (#7249, shipped exp-v0.52.392) restored
+    only the in-memory marker. Since #7862 a consume also deletes the durable
+    record, a marker-only restore leaves the retry unmatched: with no record
+    the consume deliberately refuses a bare marker, so the goal loop loses the
+    continuation (master's marker-only consume happened to still work).
+
+    Guarded per session: the restore only lands while NO newer intent has
+    been armed for this session since the receipt was taken, so a rollback can
+    never resurrect a superseded intent over a fresh one. Unrelated registry
+    churn (another session's arm/expire) is deliberately tolerated -- the
+    continuation contract for THIS session is still exactly what was consumed.
+
+    Returns True when the intent was restored. Never raises into the chat path.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+    sid = str(session_id or "").strip()
+    if not sid or not isinstance(record, dict):
+        return False
+    with _LOCK:
+        current = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
+        if current is not None:
+            # A newer intent for this same session is already live: if it is
+            # a DIFFERENT generation than the receipt describes, the receipt
+            # is stale and must not clobber it. (A byte-identical re-arm of
+            # the very same continuation_id cannot happen mid-flight, since
+            # arming drops the session's receipts, so any live record here
+            # is by construction newer.)
+            return False
+        _next_generation_unlocked()
+        restored = dict(record)
+        PENDING_GOAL_CONTINUATION.add(sid)
+        PENDING_GOAL_CONTINUATION_RECORDS[sid] = restored
+        _write_registry_unlocked(
+            PENDING_GOAL_CONTINUATION_RECORDS,
+            context=f"rollback-restore sid={sid}",
+        )
+        _RETIRED_LOG.append(
+            {"session_id": sid, "reason": "restored_rejected_start", "at": time.time()}
+        )
         return True
 
 
@@ -439,6 +535,7 @@ def durability_diagnostics() -> dict:
             "last_write_error": _LAST_WRITE_ERROR,
             "registry_exists": _PENDING_GOAL_FILE.exists(),
             "live_records": len(PENDING_GOAL_CONTINUATION_RECORDS),
+            "pending_rollback_receipts": len(_ROLLBACK_RECEIPTS),
             "retired": list(_RETIRED_LOG),
         }
 

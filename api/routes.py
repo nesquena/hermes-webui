@@ -2975,6 +2975,8 @@ from api.config import (
 from api import config as api_config
 from api.goal_continuation_store import (
     consume_pending_goal_continuation,
+    pop_goal_continuation_rollback_receipt,
+    restore_pending_goal_continuation,
     retire_pending_goal_continuation,
 )
 
@@ -24720,8 +24722,22 @@ def _start_chat_stream_for_session(
             consumed_bg_task_completion = True
 
     def restore_consumed_continuation_markers() -> None:
+        # #7249 (exp-v0.52.392) restored only the in-memory marker. Since
+        # #7862 a consume also deletes the durable record, so a marker-only
+        # rollback leaves the retry unmatched (the store deliberately refuses
+        # a bare marker) and the goal loop loses its continuation after a
+        # rejected start (stream registration / worker start failure, 409).
+        # Restore BOTH under the store lock, via the rollback receipt the
+        # matching consume left behind; the store compares generations so a
+        # newer intent armed in the meantime is never clobbered.
         if consumed_goal_continuation:
-            PENDING_GOAL_CONTINUATION.add(s.session_id)
+            receipt = pop_goal_continuation_rollback_receipt(s.session_id)
+            if receipt is not None:
+                restore_pending_goal_continuation(s.session_id, receipt)
+            else:
+                # Legacy marker-only consume (no receipt): keep the old
+                # behaviour so historical markers still round-trip.
+                PENDING_GOAL_CONTINUATION.add(s.session_id)
         if consumed_bg_task_completion:
             PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
 

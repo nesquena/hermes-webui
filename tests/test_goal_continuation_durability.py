@@ -37,6 +37,7 @@ def clean_registry():
         store._LAST_LOAD_ERROR = None
         store._LAST_WRITE_ERROR = None
         store._RETIRED_LOG.clear()
+        store._ROLLBACK_RECEIPTS.clear()
     store._PENDING_GOAL_FILE.unlink(missing_ok=True)
     for tmp in store._PENDING_GOAL_FILE.parent.glob("pending_goal_continuations.*.tmp"):
         tmp.unlink(missing_ok=True)
@@ -44,6 +45,7 @@ def clean_registry():
     with store._LOCK:
         PENDING_GOAL_CONTINUATION.clear()
         PENDING_GOAL_CONTINUATION_RECORDS.clear()
+        store._ROLLBACK_RECEIPTS.clear()
     store._PENDING_GOAL_FILE.unlink(missing_ok=True)
 
 
@@ -512,3 +514,167 @@ class TestSourceShapes:
         for name in ("api/streaming.py", "api/gateway_chat.py", "api/routes.py"):
             src = Path(name).read_text(encoding="utf-8")
             assert "snapshot_pending_goal_continuations" not in src, name
+
+
+class TestRejectedStartRollback:
+    """Review round 3 (CORE finding): a rejected chat start must not lose the
+    continuation, and a matching retry must still consume it.
+
+    ``consume_pending_goal_continuation`` deletes the durable record as well
+    as the marker; chat-start's rejected-start rollback used to restore only
+    the marker, so the retry ran as an ordinary turn and the goal loop lost
+    its continuation (master's marker-only consume hid this). The store now
+    hands back a rollback receipt and restores marker + record together.
+    """
+
+    PROMPT = "Continue the standing goal, please."
+
+    def test_failed_start_then_matching_retry_still_consumes(self, clean_registry):
+        """The exact sequence the reviewer reproduced, now via the real store."""
+        from api import goal_continuation_store as store
+        from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+        sid = "sess-reject"
+        # 1. arm
+        store.arm_pending_goal_continuation(
+            sid, self.PROMPT, reason="goal_continue", continuation_id="tok-1"
+        )
+        assert sid in PENDING_GOAL_CONTINUATION
+        assert PENDING_GOAL_CONTINUATION_RECORDS.get(sid) is not None
+        # 2. the consume for the start that is about to be rejected
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-1") is True
+        assert sid not in PENDING_GOAL_CONTINUATION
+        assert PENDING_GOAL_CONTINUATION_RECORDS.get(sid) is None
+        # 3. rollback, as restore_consumed_continuation_markers() now does:
+        #    marker True AND record True (the receipt carries the record back)
+        receipt = store.pop_goal_continuation_rollback_receipt(sid)
+        assert receipt is not None
+        assert receipt.get("prompt") == self.PROMPT
+        assert store.restore_pending_goal_continuation(sid, receipt) is True
+        assert sid in PENDING_GOAL_CONTINUATION
+        assert PENDING_GOAL_CONTINUATION_RECORDS.get(sid) is not None
+        assert PENDING_GOAL_CONTINUATION_RECORDS[sid]["prompt"] == self.PROMPT
+        # 4. the retry still consumes as the continuation
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-1") is True
+
+    def test_rollback_survives_the_disk_registry(self, clean_registry):
+        """The restored intent is durable, not just an in-memory marker."""
+        from api import goal_continuation_store as store
+
+        sid = "sess-durable-rollback"
+        store.arm_pending_goal_continuation(sid, self.PROMPT, continuation_id="tok-2")
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-2") is True
+        receipt = store.pop_goal_continuation_rollback_receipt(sid)
+        assert receipt is not None
+        assert store.restore_pending_goal_continuation(sid, receipt) is True
+        # What a restarted process would reload from disk is the SAME intent.
+        disk = store.load_pending_goal_continuations()
+        assert disk[sid]["prompt"] == self.PROMPT
+        assert disk[sid]["continuation_id"] == "tok-2"
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-2") is True
+        assert store.load_pending_goal_continuations() == {}
+    def test_rollback_receipt_is_single_use(self, clean_registry):
+        """Popping the receipt twice yields None the second time."""
+        from api import goal_continuation_store as store
+
+        sid = "sess-single-use"
+        store.arm_pending_goal_continuation(sid, self.PROMPT)
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT) is True
+        first = store.pop_goal_continuation_rollback_receipt(sid)
+        assert first is not None
+        assert store.pop_goal_continuation_rollback_receipt(sid) is None
+
+    def test_newer_intent_discards_stale_receipt(self, clean_registry):
+        """An intent armed after the rejected start must not be resurrectable
+        by the older receipt: arming drops the stale receipt."""
+        from api import goal_continuation_store as store
+        from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+        sid = "sess-supersede"
+        store.arm_pending_goal_continuation(sid, self.PROMPT, continuation_id="tok-old")
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-old") is True
+        # A newer intent arrives (e.g. the goal loop queued a fresh one).
+        store.arm_pending_goal_continuation(
+            sid, "A NEWER continuation prompt.", continuation_id="tok-new"
+        )
+        # The stale receipt for the OLD generation is gone.
+        assert store.pop_goal_continuation_rollback_receipt(sid) is None
+        # The live intent is the newer one, untouched.
+        assert PENDING_GOAL_CONTINUATION_RECORDS[sid]["prompt"] == "A NEWER continuation prompt."
+        assert store.consume_pending_goal_continuation(
+            sid, "A NEWER continuation prompt.", "tok-new"
+        ) is True
+
+    def test_stale_receipt_cannot_overwrite_newer_generation(self, clean_registry):
+        """Even a hand-held receipt must not clobber a newer live intent."""
+        from api import goal_continuation_store as store
+        from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+        sid = "sess-gen-guard"
+        store.arm_pending_goal_continuation(sid, self.PROMPT, continuation_id="tok-old")
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-old") is True
+        receipt = store.pop_goal_continuation_rollback_receipt(sid)
+        assert receipt is not None
+        # Newer intent armed before the (late) rollback tries to land.
+        store.arm_pending_goal_continuation(
+            sid, "A NEWER continuation prompt.", continuation_id="tok-new"
+        )
+        assert store.restore_pending_goal_continuation(sid, receipt) is False
+        assert PENDING_GOAL_CONTINUATION_RECORDS[sid]["prompt"] == "A NEWER continuation prompt."
+
+    def test_receipts_are_bounded(self, clean_registry):
+        """The receipt deque never grows without bound."""
+        from api import goal_continuation_store as store
+
+        for i in range(store._MAX_ROLLBACK_RECEIPTS + 20):
+            sid = f"sess-bound-{i}"
+            store.arm_pending_goal_continuation(sid, self.PROMPT)
+            store.consume_pending_goal_continuation(sid, self.PROMPT)
+        assert len(store._ROLLBACK_RECEIPTS) <= store._MAX_ROLLBACK_RECEIPTS
+
+    def test_unrelated_turn_is_not_swallowed_after_restore(self, clean_registry):
+        """The restored intent keeps the match-gated consume semantics."""
+        from api import goal_continuation_store as store
+
+        sid = "sess-unrelated"
+        store.arm_pending_goal_continuation(sid, self.PROMPT, continuation_id="tok-3")
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-3") is True
+        receipt = store.pop_goal_continuation_rollback_receipt(sid)
+        assert store.restore_pending_goal_continuation(sid, receipt) is True
+        # An unrelated human message still does NOT consume the intent.
+        assert store.consume_pending_goal_continuation(sid, "unrelated chatter", "") is False
+
+    def test_pending_receipts_are_observable_in_diagnostics(self, clean_registry):
+        """Pending rollback receipts surface in durability_diagnostics."""
+        from api import goal_continuation_store as store
+
+        sid = "sess-diag"
+        store.arm_pending_goal_continuation(sid, self.PROMPT)
+        assert store.durability_diagnostics()["pending_rollback_receipts"] == 0
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT) is True
+        assert store.durability_diagnostics()["pending_rollback_receipts"] == 1
+        assert store.pop_goal_continuation_rollback_receipt(sid) is not None
+        assert store.durability_diagnostics()["pending_rollback_receipts"] == 0
+
+
+class TestRejectedStartRollbackRouteShape:
+    """routes.py must restore marker + record, not the marker alone."""
+
+    def test_rollback_restores_via_store_receipt(self):
+        """routes.py rollback must restore marker + record via the store receipt.
+
+        Pins the fix for the round-3 CORE regression: the marker-only restore
+        left the retry unmatched, so a rejected chat start lost the goal
+        continuation. The rollback now claims the consume's receipt and
+        restores through the locked store mutator.
+        """
+        src = Path("api/routes.py").read_text(encoding="utf-8")
+        m = re.search(r"def restore_consumed_continuation_markers\(\).*?(?=\n    session_lock)", src, re.DOTALL)
+        assert m is not None
+        window = m.group(0)
+        assert "pop_goal_continuation_rollback_receipt" in window
+        assert "restore_pending_goal_continuation" in window
+        # The bare marker-only restore is only the legacy fallback (no
+        # receipt), never the unconditional path it used to be.
+        assert window.count("PENDING_GOAL_CONTINUATION.add(s.session_id)") <= 1
+        assert "receipt is not None" in window
