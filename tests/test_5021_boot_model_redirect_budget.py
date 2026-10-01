@@ -179,10 +179,14 @@ function installGlobals(select, redirects, fetchQueue, jsonCalls) {
   windowObj.location = {
     pathname: '/session/abc',
     search: '?workspace=test',
+    reload() {
+      redirects.push(`reload:${this.pathname}${this.search}`);
+    },
     set href(value) {
       redirects.push(value);
     },
   };
+  globalThis._authReloadStarted = false;
   globalThis.location = windowObj.location;
   globalThis.sessionStorage = new FakeStorage();
   globalThis.localStorage = new FakeStorage();
@@ -486,7 +490,7 @@ def test_post_boot_model_refresh_keeps_normal_401_redirect(driver_path):
         },
     )
 
-    assert payload["redirects"] == ["login?next=%2Fsession%2Fabc%3Fworkspace%3Dtest"]
+    assert payload["redirects"] == ["reload:/session/abc?workspace=test"]
     assert payload["jsonCalls"] == 0
     assert payload["storage"] == {}
     assert "window._ensureModelDropdownReady=_startModelDropdown;" in BOOT_JS.read_text(encoding="utf-8")

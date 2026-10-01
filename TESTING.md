@@ -15,6 +15,27 @@
 
 ---
 
+## Session title authority regression gate
+
+```bash
+./scripts/test.sh tests/test_session_title_authority.py \
+  tests/test_issue6892_sync_title_coverage.py tests/test_issue6964_title_dedup.py
+./scripts/test.sh tests/*title*.py tests/test_issue2762_state_sync_profile_kwarg.py
+```
+
+The SQLite cases require the Agent checkout to be importable. When it is not
+installed in the test environment, prefix the commands with
+`PYTHONPATH="$HERMES_WEBUI_AGENT_DIR"` (set that variable to the Agent checkout)
+and check that those cases pass rather than skip.
+
+The authority suite uses temporary Agent SQLite stores and real WebUI sidecar
+saves/compact projections. It checks exact canonical titles in the regeneration
+API response, collision suffixes, equal-provenance refresh, manual/unknown
+provenance, generation-time CLI/WebUI rename races, shared-generator routing,
+legacy-store compatibility, and failure status. Provider outputs are fixtures;
+this is not a live model or browser rendering certification. The older routing
+unit tests explicitly model standalone WebUI without an Agent title DB.
+
 ## Static JS runtime lint (brick-class regression guard)
 
 Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function

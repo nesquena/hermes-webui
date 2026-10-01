@@ -175,7 +175,7 @@ def test_cleared_title_allows_initial_auto_generation(monkeypatch):
     )
     monkeypatch.setattr(
         "api.state_sync.sync_session_title",
-        lambda *_args, **_kwargs: None,
+        lambda _sid, title, **_kwargs: (title, 'llm'),
     )
 
     streaming._run_background_title_update(
@@ -230,7 +230,7 @@ def test_clear_route_uses_rename_helper_not_bare_title_assignment():
     # Window from the clear handler to the next route branch.
     next_idx = routes_src.find('if parsed.path == "/api/session/truncate"', clear_idx)
     clear_block = routes_src[clear_idx:next_idx if next_idx != -1 else clear_idx + 2000]
-    assert "apply_session_title_rename(s, \"Untitled\")" in clear_block, (
-        "clear handler must reset the title via apply_session_title_rename to "
-        "clear the manual_title lock"
+    assert "apply_session_title_rename(s, reset_title)" in clear_block, (
+        "clear handler must project the canonical reset winner via "
+        "apply_session_title_rename so the manual_title lock is cleared"
     )
