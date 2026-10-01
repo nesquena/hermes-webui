@@ -1372,6 +1372,158 @@ def test_settings_post_serializes_after_locale_settlement_and_ignores_stale_succ
     }
 
 
+def test_explicit_settings_save_waits_for_latest_locale_after_supersession():
+    sources = [
+        _function_source(PANELS_JS, "_settleSettingsLocale"),
+        _function_source(PANELS_JS, "_reconcileSettingsLocaleSelector"),
+        _function_source(PANELS_JS, "_settingsLocaleCommitIsCurrent"),
+        _function_source(PANELS_JS, "_settingsLocaleSettlementIsCurrent"),
+        _function_source(PANELS_JS, "_commitSettingsLocale"),
+        _function_source(PANELS_JS, "_enqueueSettingsPost"),
+        _function_source(PANELS_JS, "_postSettingsAtLocaleCommit"),
+        _function_source(PANELS_JS, "saveSettings"),
+    ]
+    combined_sources = "let _settingsPanelPostQueue=Promise.resolve();\n" + "\n".join(sources)
+    script = textwrap.dedent(
+        f"""
+        (async () => {{
+          const vm = require('vm');
+          const selector = {{value: 'fr'}};
+          const elements = new Proxy({{
+            settingsLanguage: selector,
+            settingsModel: {{value: 'model-at-click', provider: 'provider-at-click'}},
+            settingsPassword: {{value: 'password-at-click'}},
+            settingsCurrentPassword: {{value: 'current-at-click'}},
+            settingsTheme: {{value: 'light-at-click'}},
+          }}, {{
+            get: (target, key) => target[key] || {{value: '', checked: false, dataset: {{}}, style: {{}}, focus() {{}}}},
+          }});
+          const locale = {{active: 'en', generation: 0, rendered: []}};
+          const activations = [];
+          const settingsPosts = [];
+          const modelPosts = [];
+          const ctx = {{
+            console,
+            window: {{_workspaceTodosTab: false, _showThinking: true}},
+            document: {{documentElement: {{dataset: {{}}}}, querySelector: () => null, getElementById: (id) => elements[id]}},
+            localStorage: {{getItem: () => null, setItem: () => {{}}}},
+            $: (id) => elements[id],
+            getActiveLocale: () => locale.active,
+            getLocaleActivationGeneration: () => locale.generation,
+            resolveLocale: (value) => value,
+            activateLocale: (requested) => {{
+              const generation = ++locale.generation;
+              return new Promise((resolve) => activations.push({{requested, generation, resolve, settled: false}}));
+            }},
+            api: (path, options) => {{
+              if (path === '/api/settings') {{
+                const body = JSON.parse(options.body);
+                settingsPosts.push(body);
+                return Promise.resolve({{...body, auth_just_enabled: true, password_auth_enabled: true}});
+              }}
+              if (path === '/api/default-model') {{
+                modelPosts.push(JSON.parse(options.body));
+                return Promise.resolve({{}});
+              }}
+              if (path === '/api/auth/status') return Promise.resolve({{enabled: true}});
+              return Promise.resolve({{}});
+            }},
+            _captureModelDropdownSelection: () => ({{
+              model: elements.settingsModel.value,
+              model_provider: elements.settingsModel.provider,
+            }}),
+            _speechPreferencesPayloadFromUi: () => ({{}}),
+            _structuredCodeViewFromUi: () => ({{}}),
+            _composerControlVisibilityPayload: () => ({{}}),
+            _getComposerControlOrder: () => [],
+            _settingsPasswordAuthEnabled: true,
+            _settingsHermesDefaultModelOnOpen: 'old-model',
+            _settingsHermesDefaultModelProviderOnOpen: null,
+            _settingsLocalePostInFlight: null,
+            _settingsDirty: true,
+            _applySavedSettingsUi: async () => {{}} ,
+            _updateCurrentPasswordVisibility: () => {{}},
+            _renderSettingsAuthStatus: () => {{}},
+            _updateAuthWarningBadge: () => {{}},
+            _updateAuthDisabledWarning: () => {{}},
+            _resetSettingsPanelState: () => {{}},
+            showToast: () => {{}},
+            t: (key) => key,
+          }};
+          vm.createContext(ctx);
+          vm.runInContext({json.dumps(combined_sources)}, ctx);
+          const tick = () => new Promise((resolve) => setImmediate(resolve));
+          const settleBundle = (requested) => {{
+            const pending = activations.filter((entry) => entry.requested === requested && !entry.settled);
+            const current = pending.find((entry) => entry.generation === locale.generation);
+            if (current) {{
+              locale.active = requested;
+              locale.rendered.push(requested);
+            }}
+            for (const entry of pending) {{
+              entry.settled = true;
+              const currentEntry = entry.generation === locale.generation;
+              entry.resolve({{
+                status: currentEntry ? 'applied' : 'superseded',
+                requested,
+                active: locale.active,
+                generation: entry.generation,
+              }});
+            }}
+          }};
+
+          let saveSettled = false;
+          const save = vm.runInContext('saveSettings(false)', ctx).then(() => saveSettled = true);
+          await tick();
+          elements.settingsModel.value = 'model-after-click';
+          elements.settingsModel.provider = 'provider-after-click';
+          elements.settingsPassword.value = 'password-after-click';
+          selector.value = 'de';
+          const germanSelection = vm.runInContext("_settleSettingsLocale('de', $('settingsLanguage'))", ctx);
+          await tick();
+          settleBundle('fr');
+          await tick();
+          const afterStaleFrench = {{
+            savePending: !saveSettled,
+            settingsPosts: settingsPosts.length,
+            modelPosts: modelPosts.length,
+            active: locale.active,
+            selector: selector.value,
+            rendered: [...locale.rendered],
+          }};
+          settleBundle('de');
+          await Promise.all([save, germanSelection]);
+          process.stdout.write(JSON.stringify({{
+            afterStaleFrench,
+            settingsPosts,
+            modelPosts,
+            active: locale.active,
+            selector: selector.value,
+            rendered: locale.rendered,
+          }}));
+        }})()
+        """
+    )
+    proc = _run_node_script(script)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+    assert result["afterStaleFrench"] == {
+        "savePending": True,
+        "settingsPosts": 0,
+        "modelPosts": 0,
+        "active": "en",
+        "selector": "de",
+        "rendered": [],
+    }
+    assert result["settingsPosts"][0]["language"] == "de"
+    assert result["settingsPosts"][0]["theme"] == "light-at-click"
+    assert result["settingsPosts"][0]["_set_password"] == "password-at-click"
+    assert result["settingsPosts"][0]["_current_password"] == "current-at-click"
+    assert result["modelPosts"] == [{"model": "model-at-click", "provider": "provider-at-click"}]
+    assert result["active"] == result["selector"] == "de"
+    assert result["rendered"] == ["de"]
+
+
 def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
     sources = [
         _function_source(PANELS_JS, "_settleSettingsLocale"),

@@ -12934,12 +12934,13 @@ async function saveSettings(andClose){
   Object.assign(body,_structuredCodeViewFromUi());
   Object.assign(body,_composerControlVisibilityPayload());
   body.composer_control_order=_getComposerControlOrder();
-  const localeCommit=await _commitSettingsLocale(
-    (($('settingsLanguage')||{}).value)||((typeof getActiveLocale==='function')?getActiveLocale():language),
-    $('settingsLanguage'),
-    body
-  );
-  if(!localeCommit) return;
+  const languageSelector=$('settingsLanguage');
+  let localeCommit=null;
+  while(!localeCommit){
+    // A newer locale choice supersedes this attempt, not the captured Save.
+    const requestedLanguage=(languageSelector&&languageSelector.value)||((typeof getActiveLocale==='function')?getActiveLocale():language);
+    localeCommit=await _commitSettingsLocale(requestedLanguage,languageSelector,body);
+  }
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
   if(maxTokensField){
