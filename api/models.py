@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -253,9 +254,56 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
+_SESSION_SIDECAR_AUTHORITIES_LOCK = threading.Lock()
+_SESSION_SIDECAR_AUTHORITIES: "weakref.WeakValueDictionary[str, threading.RLock]" = weakref.WeakValueDictionary()
+_SESSION_LIFECYCLE_GENERATIONS_LOCK = threading.Lock()
+_SESSION_LIFECYCLE_GENERATIONS: dict[str, int] = {}
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
+
+
+def _session_sidecar_authority(session_id: str) -> threading.RLock:
+    """Return the process-wide sidecar mutation authority for one session ID.
+
+    This authority covers load reconciliation, save, backup recovery, workspace
+    binding and lifecycle retirement.  When a caller also needs
+    ``_get_session_agent_lock(sid)``, the global order is agent lock first,
+    sidecar authority second; this authority must never acquire an agent lock.
+    """
+    sid = str(session_id or "")
+    with _SESSION_SIDECAR_AUTHORITIES_LOCK:
+        authority = _SESSION_SIDECAR_AUTHORITIES.get(sid)
+        if authority is None:
+            authority = threading.RLock()
+            _SESSION_SIDECAR_AUTHORITIES[sid] = authority
+        return authority
+
+
+def _session_lifecycle_generation(session_id: str) -> int:
+    """Return the in-process lifecycle generation for one session ID.
+
+    A ``Session`` captures this value at construction. Ordinary deletion bumps
+    it while holding the sidecar authority, so a detached object created before
+    that delete can no longer recreate the sidecar or clear its tombstone.
+    """
+    sid = str(session_id or "")
+    with _SESSION_LIFECYCLE_GENERATIONS_LOCK:
+        return _SESSION_LIFECYCLE_GENERATIONS.get(sid, 0)
+
+
+def _invalidate_session_lifecycle_generation(session_id: str) -> int:
+    """Invalidate every pre-existing ``Session`` object for one session ID."""
+    sid = str(session_id or "")
+    with _SESSION_LIFECYCLE_GENERATIONS_LOCK:
+        generation = _SESSION_LIFECYCLE_GENERATIONS.get(sid, 0) + 1
+        _SESSION_LIFECYCLE_GENERATIONS[sid] = generation
+        return generation
+
+
+# Compatibility alias for downstream private imports. New sidecar mutation
+# paths use the broader name above so their shared coordination is explicit.
+_session_save_authority = _session_sidecar_authority
 
 # Serializes ``_record_webui_zero_message_orphan_tombstone`` /
 # ``_clear_webui_zero_message_orphan_tombstone`` so two concurrent sidebar
@@ -506,7 +554,15 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 raise ValueError("session index must be a list")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
-                updated_map = {s.session_id: s.compact() for s in updates}
+            # Callers may pass already-owned compact entries.  In particular,
+            # Session.save() does so to prevent the index writer from rereading
+            # mutable Session state after the matching sidecar was published.
+            updated_map = {}
+            for update in updates:
+                entry = update if isinstance(update, dict) else update.compact()
+                sid = entry.get('session_id') if isinstance(entry, dict) else None
+                if sid:
+                    updated_map[sid] = entry
 
             existing = [
                 e for e in existing
@@ -878,6 +934,61 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
             _webui_deleted_session_tombstone_file().unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to remove empty webui deleted-session tombstone", exc_info=True)
+
+
+def retire_session_sidecar(
+    session_id: str,
+    *,
+    sidecar_path: Path | str | None = None,
+    remove_backup: bool = True,
+    record_deleted_tombstone: bool = False,
+    invalidate_generation: bool = False,
+) -> bool:
+    """Retire one sidecar generation under the shared per-SID authority.
+
+    Callers holding the agent lock must acquire it before this helper.  Keeping
+    unlink and the durable deletion marker in one critical section prevents a
+    delayed repair load from republishing an old generation and clearing the
+    marker after retirement committed.
+    """
+    sid = str(session_id or "").strip()
+    if not is_safe_session_id(sid):
+        return False
+    path = Path(sidecar_path) if sidecar_path is not None else SESSION_DIR / f"{sid}.json"
+    if path.name != f"{sid}.json":
+        raise ValueError(f"Sidecar path does not match session ID {sid!r}")
+    with _session_sidecar_authority(sid):
+        # Publish and verify the durable retirement authority before removing
+        # the live generation. If marker persistence fails, leave the sidecar
+        # intact rather than creating a recoverable-but-unmarked delete window.
+        if record_deleted_tombstone:
+            _record_webui_deleted_session_tombstone(sid)
+            if sid not in _load_webui_deleted_session_tombstone():
+                raise OSError(f"Failed to persist deletion marker for {sid}")
+        path.unlink(missing_ok=True)
+        if remove_backup:
+            try:
+                path.with_suffix(".json.bak").unlink(missing_ok=True)
+            except OSError:
+                # The live generation is already retired (and its durable
+                # marker verified above), so the delete has committed. A
+                # leftover backup of a tombstoned session is classified by
+                # recovery as deleted, never restored; do not report the
+                # committed retirement as failed.
+                logger.warning(
+                    "Retired session %s but could not remove its backup %s",
+                    sid,
+                    path.with_suffix(".json.bak"),
+                    exc_info=True,
+                )
+        retired = not path.exists()
+        if retired and invalidate_generation:
+            # Still under the sidecar authority: no stale save can slip between
+            # the unlink and generation invalidation. New objects constructed
+            # after this point capture the new generation and may intentionally
+            # recreate the SID; pre-delete objects fail closed in save().
+            _invalidate_session_lifecycle_generation(sid)
+        return retired
 
 
 def _content_has_reasoning_only_parts(content) -> bool:
@@ -1253,6 +1364,7 @@ def _load_session_from_path(path: Path) -> "Session | None":
     except Exception:
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+    data['messages'], _collapsed_incomplete_ids = _collapse_duplicate_incomplete_message_ids(data.get('messages'))
     return Session(**data)
 
 
@@ -1408,6 +1520,9 @@ class Session:
                  intentional_shrink_generation=None,
                  transcript_generation: int=0,
                  transcript_generation_baseline: int=0,
+                 squash_projection_generation=None,
+                 squash_projection_cutoff=None,
+                 squash_projection_superseded_by=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1425,6 +1540,12 @@ class Session:
                  gateway_run=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
+        _captured_lifecycle_generation = kwargs.pop('_lifecycle_generation', None)
+        self._lifecycle_generation = (
+            _session_lifecycle_generation(self.session_id)
+            if _captured_lifecycle_generation is None
+            else _captured_lifecycle_generation
+        )
         self.title = title
         self.profile = profile
         self.workspace = str(_resolve_path(workspace, profile=profile))
@@ -1516,6 +1637,9 @@ class Session:
         self.transcript_generation_baseline = max(
             0, _parse_nonnegative_int(transcript_generation_baseline) or 0
         )
+        self.squash_projection_generation = squash_projection_generation
+        self.squash_projection_cutoff = squash_projection_cutoff
+        self.squash_projection_superseded_by = squash_projection_superseded_by
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1559,7 +1683,53 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        authorize_deleted_recreation: bool = False,
+    ) -> None:
+        # Distinct Session objects can represent the same durable sidecar.  One
+        # stable SID authority therefore spans snapshot creation, sidecar
+        # replacement, and publication of the matching compact index row.
+        # Keep the compatibility alias at this call boundary so focused tests
+        # and downstream private monkeypatches still observe save entry. The
+        # alias resolves to the same shared sidecar authority in production.
+        authority = _session_save_authority(self.session_id)
+        with authority:
+            current_generation = _session_lifecycle_generation(self.session_id)
+            if self._lifecycle_generation != current_generation:
+                raise RuntimeError(
+                    f"Refusing stale save for deleted session {self.session_id!r}: "
+                    "the session lifecycle generation has advanced"
+                )
+            deleted = self.session_id in _load_webui_deleted_session_tombstone()
+            if deleted and not authorize_deleted_recreation:
+                raise RuntimeError(
+                    f"Refusing to recreate deleted session {self.session_id!r} without "
+                    "explicit recreation authority"
+                )
+            if deleted:
+                # A user-authorized recreate is a new incarnation. Advance the
+                # fence before publishing so every other object from the deleted
+                # generation remains stale even after the tombstone is cleared.
+                self._lifecycle_generation = _invalidate_session_lifecycle_generation(
+                    self.session_id
+                )
+            self._save_owned_generation(
+                touch_updated_at=touch_updated_at,
+                skip_index=skip_index,
+                clear_deleted_tombstone=authorize_deleted_recreation,
+            )
+
+    def _save_owned_generation(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        clear_deleted_tombstone: bool = False,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1579,6 +1749,13 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        # Persist a collapsed snapshot without rebinding or mutating the live
+        # list.  Active workers can hold an alias to ``self.messages``; replacing
+        # it here would detach an append that lands while save() is preparing
+        # the payload.  A later save will include any concurrent append.
+        # Own the complete snapshot BEFORE duplicate selection.  Otherwise a
+        # nested mutation after selection but before deepcopy can invalidate the
+        # equality decision and leak into this save's payload (#6600).
         if touch_updated_at:
             self.updated_at = time.time()
         self._webui_pending_user_timestamp_identity = (
@@ -1586,6 +1763,49 @@ class Session:
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
             )
         )
+        if (
+            self.messages
+            and isinstance(self.messages[0], dict)
+            and self.messages[0].get('_squash_summary') is True
+            and self.squash_projection_superseded_by is None
+        ):
+            # Claim explicit persisted generation+cutoff authority for
+            # legacy/manual squash producers. A later intentional shrink
+            # supersedes this exact projection authority.
+            if self.squash_projection_generation is None:
+                self.squash_projection_generation = str(uuid.uuid4())
+            if self.squash_projection_cutoff is None:
+                raw_cutoff = self.truncation_watermark
+                if raw_cutoff is None:
+                    self.squash_projection_cutoff = _last_message_timestamp(self.messages)
+                else:
+                    try:
+                        self.squash_projection_cutoff = float(raw_cutoff)
+                    except (TypeError, ValueError):
+                        self.squash_projection_cutoff = _last_message_timestamp(self.messages)
+                # A legacy squash sidecar may be claimed only after an ordinary
+                # turn already advanced the watermark. The summary row carries
+                # the squash point, so never freeze a cutoff past it.
+                try:
+                    summary_ts = float(self.messages[0].get('timestamp'))
+                except (TypeError, ValueError):
+                    summary_ts = None
+                if (
+                    summary_ts is not None
+                    and -float('inf') < summary_ts < float('inf')
+                    and isinstance(self.squash_projection_cutoff, (int, float))
+                    and summary_ts < self.squash_projection_cutoff
+                ):
+                    self.squash_projection_cutoff = summary_ts
+        # Freeze every persisted/indexed field, not only messages.  The sidecar
+        # and compact row below are projections of this one immutable generation.
+        generation = copy.copy(self)
+        generation.__dict__ = {
+            key: copy.deepcopy(value)
+            for key, value in self.__dict__.items()
+        }
+        owned_messages = generation.messages
+        messages_to_persist, _ = _collapse_duplicate_incomplete_message_ids(owned_messages)
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1611,6 +1831,8 @@ class Session:
             'intentional_shrink_generation',
             'transcript_generation',
             'transcript_generation_baseline',
+            'squash_projection_generation', 'squash_projection_cutoff',
+            'squash_projection_superseded_by',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -1620,14 +1842,14 @@ class Session:
             'share_token', 'share_created_at',
             'gateway_run',
         ]
-        meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        meta = {k: getattr(generation, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
+        meta['message_count'] = len(messages_to_persist or [])
         # _mc_v marks this file as written by the current writer contract,
         # where `message_count` equals len(messages) by construction and both
         # keys land in the same atomic write. save()'s shrink guard takes the
@@ -1638,20 +1860,21 @@ class Session:
         # growth and skip the #1558 backup. One save re-marks the file, so the
         # fast path still covers steady state.
         meta['_mc_v'] = _MESSAGE_COUNT_MARKER
-        meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
+
+        meta['anchor_scene_index'] = _anchor_scene_index_from_records(generation.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
         # sees the current value rather than a stale load-time snapshot (#5854
         # defense-in-depth; the cached-side freshness check reads real records,
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
-        meta['messages'] = self.messages
-        meta['tool_calls'] = self.tool_calls
-        meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
+        meta['messages'] = messages_to_persist
+        meta['tool_calls'] = generation.tool_calls
+        meta['anchor_activity_scenes'] = generation.anchor_activity_scenes if isinstance(generation.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
         _placed = {'message_count', '_mc_v', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
-        extra = {k: v for k, v in self.__dict__.items()
+        extra = {k: v for k, v in generation.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
@@ -1670,6 +1893,7 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
+
                 # The on-disk count, without reading the body.
                 #
                 # The decision below is a function of ONE integer -- how many
@@ -1710,11 +1934,11 @@ class Session:
                         existing_msg_count = len(existing.get('messages') or [])
                     except (json.JSONDecodeError, ValueError):
                         existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                incoming_msg_count = len(messages_to_persist or [])
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
-                    and (self.active_stream_id or self.pending_user_message)
+                    and (generation.active_stream_id or generation.pending_user_message)
                 ):
                     logger.warning(
                         "refusing to overwrite session %s messages with empty active/pending snapshot "
@@ -1722,7 +1946,7 @@ class Session:
                         self.session_id,
                         existing_msg_count,
                         incoming_msg_count,
-                        self.active_stream_id,
+                        generation.active_stream_id,
                     )
                     return
                 if existing_msg_count > incoming_msg_count:
@@ -1771,12 +1995,23 @@ class Session:
                 pass
             raise
         if not skip_index:
-            _write_session_index(updates=[self])
+            # #6600: project the sidebar index from the SAME detached snapshot
+            # just serialized — never from the live list — so _index.json can
+            # neither record the uncollapsed message_count nor adopt a dropped
+            # duplicate row's later timestamp.
+            index_entry = generation.compact(projection_messages=messages_to_persist)
+            _write_session_index(updates=[index_entry])
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
-        # row is alive (the #4985 "zero-message orphan" only ever exists
-        # when ``len(self.messages) == 0``). Clear the tombstone so the
+        # zero-message-orphan row is alive (that tombstone only ever exists
+        # when the OWNED, persisted generation has no messages). The stronger
+        # deleted-session tombstone is cleared only by an explicitly authorized
+        # recreate transaction; ordinary saves must never resurrect a delete.
+        # Never re-read mutable ``self.messages`` here: a worker can append through a
+        # live alias after generation capture, and that later append is not proof
+        # that this save published a non-empty sidecar. Clear the zero-message
+        # marker (and, only for an authorized recreate, the deletion marker) so the
         # next ``/api/sessions`` poll does not need the prune helper to
         # run before the row re-appears — useful when the message-commit
         # happens on a poll that does not yet see state.db.messages rows
@@ -1786,10 +2021,11 @@ class Session:
         # save. The helper's self-healing branch in
         # ``_prune_orphaned_webui_zero_message_sessions`` is the primary
         # fix; this is the belt.
-        if self.messages:
+        if messages_to_persist:
             try:
                 _clear_webui_zero_message_orphan_tombstone(self.session_id)
-                _clear_webui_deleted_session_tombstone(self.session_id)
+                if clear_deleted_tombstone:
+                    _clear_webui_deleted_session_tombstone(self.session_id)
             except Exception:
                 logger.debug(
                     "Failed to clear webui tombstone for %s",
@@ -1804,6 +2040,14 @@ class Session:
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
         if not is_safe_session_id(sid):
             return None
+        # Loading may self-heal duplicate partial rows. Keep the sidecar read,
+        # collapse, and write-back in the same per-session save generation so a
+        # stale loader cannot overwrite a newer durable save.
+        with _session_sidecar_authority(sid):
+            return cls._load_under_save_authority(sid)
+
+    @classmethod
+    def _load_under_save_authority(cls, sid):
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
@@ -1811,17 +2055,32 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        source_payload = p.read_bytes()
+        data = json.loads(source_payload)
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        data['messages'], _collapsed_incomplete_ids = _collapse_duplicate_incomplete_message_ids(data.get('messages'))
         session = cls(**data)
-        if _collapsed_partials:
+        if _collapsed_partials or _collapsed_incomplete_ids:
             try:
+                # Revalidate the exact source generation immediately before
+                # repair. Cooperative mutators are serialized by the sidecar
+                # authority; this check also prevents a non-cooperating atomic
+                # replace observed during parsing from being overwritten by a
+                # stale self-heal generation.
+                if not p.exists():
+                    return cls._load_under_save_authority(sid)
+                try:
+                    current_payload = p.read_bytes()
+                except OSError:
+                    return cls._load_under_save_authority(sid)
+                if current_payload != source_payload:
+                    return cls._load_under_save_authority(sid)
                 # Self-heal bloated sessions on first full load without touching
                 # recency/index ordering; save() creates a .bak because this
                 # intentionally shrinks the transcript (#2592).
                 session.save(touch_updated_at=False, skip_index=True)
             except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+                logger.debug("Failed to persist collapsed duplicate assistant rows for %s", sid, exc_info=True)
         else:
             # #5854: for a LEGACY sidecar (no modern anchor_scene_index key), the
             # cheap metadata-prefix read cannot recover message_count/scenes when
@@ -1831,8 +2090,8 @@ class Session:
             # Keyed by stat signature, so any edit invalidates it; the next
             # save() rewrites the modern layout and the fallback stops firing.
             # expected_sig guards against an atomic replace during the read.
-            # (When _collapsed_partials fired, save() above already rewrote the
-            # modern layout, so no legacy caching is needed.)
+            # (When either duplicate-row repair fired, save() above already
+            # rewrote the modern layout, so no legacy caching is needed.)
             #
             # WHY STILL GATED, and not "obviously" broadened to modern files: the
             # cache is only READ from the two sites that reach it when the cheap
@@ -1987,18 +2246,29 @@ class Session:
         include_runtime=False,
         active_stream_ids=None,
         sidebar_metadata_only=False,
+        projection_messages=None,
     ) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
-        message_count = (
-            self._metadata_message_count
-            if self._metadata_message_count is not None
-            else len(self.messages)
-        )
-        if has_pending_user_message:
+        # #6600: during save()'s index update this is the detached, collapsed
+        # snapshot just written to the sidecar, keeping the index projection
+        # identical to the persisted payload.  Outside save() it is None and
+        # the live list is used as before.
+        has_index_projection = projection_messages is not None
+        if not has_index_projection:
+            projection_messages = self.messages
+        if has_index_projection:
+            message_count = len(projection_messages)
+        else:
+            message_count = (
+                self._metadata_message_count
+                if self._metadata_message_count is not None
+                else len(projection_messages)
+            )
+        if has_pending_user_message and not has_index_projection:
             message_count = max(message_count, 1)
-        last_message_at = _last_message_timestamp(self.messages) or self.updated_at
-        if has_pending_user_message and self.pending_started_at:
+        last_message_at = _last_message_timestamp(projection_messages) or self.updated_at
+        if has_pending_user_message and self.pending_started_at and not has_index_projection:
             last_message_at = self.pending_started_at
         compact = {
             'session_id': self.session_id,
@@ -2058,7 +2328,7 @@ class Session:
                 'worktree_repo_root': self.worktree_repo_root,
                 'worktree_created_at': self.worktree_created_at,
             } if self.worktree_path else {}),
-            'user_message_count': Session._compute_user_message_count(self.messages),
+            'user_message_count': Session._compute_user_message_count(projection_messages),
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,
@@ -2848,6 +3118,135 @@ def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
         else:
             previous_partial_sig = None
         collapsed.append(message)
+    return collapsed, changed
+
+
+def _strict_incomplete_message_id_key(message_id):
+    """Return a type-tagged deletion key for a persisted message id, or None.
+
+    Only exact ``str``/``int``/finite-``float`` scalars carry deletion
+    authority.  Booleans, containers, subclass instances (e.g. enum-like
+    ids), and non-finite floats are rejected so distinct typed ids such as
+    ``1`` vs ``"1"`` or ``True`` vs ``"True"`` can never collapse into the
+    same bucket — a genuinely distinct backup row must never be classified
+    as a duplicate-only replay (#6600 review).
+    """
+    if isinstance(message_id, bool):
+        return None
+    if type(message_id) is str:
+        return ('str', message_id) if message_id != '' else None
+    if type(message_id) is int:
+        return ('int', message_id)
+    if type(message_id) is float:
+        return ('float', message_id) if math.isfinite(message_id) else None
+    return None
+
+
+def _strip_thinking_markup_for_incomplete(text: str) -> str:
+    """Emptiness-equivalent mirror of api.streaming._strip_thinking_markup.
+
+    Keep the regexes in sync with api.streaming._strip_thinking_markup; the
+    durable incomplete-row predicate must consider exactly the same content
+    "blank" as the reconciliation layer.  Duplicated (rather than imported)
+    because api.streaming already imports api.models at module load, and the
+    .bak recovery path must not depend on the streaming import chain.
+    Parity is pinned by tests/test_issue2592_partial_dedupe.py.
+    """
+    if not text:
+        return ''
+    s = str(text)
+    s = re.sub(r'^\s*<think>.*?</think>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*<\|channel\|?>thought\n?.*?<channel\|>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*<\|turn\|>thinking\n.*?<turn\|>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)  # Gemma 4
+    s = re.sub(r'^\s*(the|ther)\s+user\s+is\s+asking[^\n]*(?:\n|$)', ' ', s, flags=re.IGNORECASE)
+    s = re.sub(
+        r"^\s*(?:here(?:'s| is) (?:a |my )?(?:thinking|thought) (?:process|trace|through)\b[^\n]*\n?"
+        r"|let me (?:think|work|reason|analyze|walk) (?:through|about|this|step)\b[^\n]*\n?"
+        r"|i(?:'ll| will) (?:think|work|reason|analyze|break this down)\b[^\n]*\n?"
+        r"|(?:okay|alright|sure|of course),?\s+let me\b[^\n]*\n?)",
+        ' ', s, flags=re.IGNORECASE
+    )
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def _incomplete_message_content_text(content) -> str:
+    """Extract visible text for the incomplete-row eligibility predicate.
+
+    Mirrors api.streaming._message_text (structured content parts +
+    thinking-markup stripping) so the persistence boundary empties exactly
+    the rows the reconciliation layer empties (#6600 review: one shared
+    eligibility semantics for both layers).
+    """
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get('type') or '').lower()
+            if part_type in ('', 'text', 'input_text', 'output_text'):
+                parts.append(str(
+                    part.get('text') or part.get('content') or part.get('input_text') or part.get('output_text') or ''
+                ))
+        return _strip_thinking_markup_for_incomplete('\n'.join(parts).strip())
+    return _strip_thinking_markup_for_incomplete(str(content or '').strip())
+
+
+def _incomplete_reasoning_message_id(message):
+    """Return the strict typed identity key of an empty incomplete assistant result.
+
+    This is the SINGLE eligibility predicate shared by the persistence
+    boundary (Session.save/load and .bak recovery) and the in-memory
+    reconciliation layer (api.streaming._message_identity): a row one layer
+    collapses is exactly a row the other layer collapses, so neither can
+    drop a row the other considers distinct.  Returns a hashable
+    type-tagged tuple, or None when the row is not an eligible empty
+    incomplete assistant result.
+    """
+    if not isinstance(message, dict) or message.get('role') != 'assistant':
+        return None
+    if str(message.get('finish_reason') or '').lower() != 'incomplete':
+        return None
+    if _incomplete_message_content_text(message.get('content')):
+        return None
+    if message.get('tool_call_id') or message.get('tool_calls'):
+        return None
+    return _strict_incomplete_message_id_key(message.get('id'))
+
+
+def _message_information_score(message) -> int:
+    """Prefer the richest replay when one stable incomplete id occurs repeatedly."""
+    if not isinstance(message, dict):
+        return 0
+    try:
+        return len(json.dumps(message, sort_keys=True, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return len(str(message))
+
+
+def _collapse_duplicate_incomplete_message_ids(messages) -> tuple[list, bool]:
+    """Collapse non-adjacent replays of empty incomplete assistant message ids."""
+    if not isinstance(messages, list):
+        return messages, False
+    collapsed = []
+    seen_indexes = {}
+    changed = False
+    for message in messages:
+        message_id = _incomplete_reasoning_message_id(message)
+        if message_id is None:
+            collapsed.append(message)
+            continue
+        existing_index = seen_indexes.get(message_id)
+        if existing_index is None:
+            seen_indexes[message_id] = len(collapsed)
+            collapsed.append(message)
+            continue
+        changed = True
+        existing = collapsed[existing_index]
+        if message == existing:
+            continue
+        if _message_information_score(message) > _message_information_score(existing):
+            collapsed[existing_index] = message
     return collapsed, changed
 
 
@@ -6313,7 +6712,8 @@ def persist_recovered_workspace_binding(
     expected = str(expected_value or "")
     path = SESSION_DIR / f"{sid}.json"
     lock = _get_session_agent_lock(sid)
-    with lock:
+    # Global order: agent lock first, then the per-SID sidecar authority.
+    with lock, _session_sidecar_authority(sid):
         if not path.exists():
             # Recovery only repairs an existing WebUI sidecar. Creating a new
             # sidecar here can resurrect a session that was deleted after the
@@ -7481,6 +7881,8 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    authorize_deleted_recreation: bool = False,
+    _lifecycle_generation: int | None = None,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
@@ -7498,6 +7900,7 @@ def import_cli_session(
         created_at=created_at,
         updated_at=updated_at,
         parent_session_id=parent_session_id,
+        _lifecycle_generation=_lifecycle_generation,
     )
     # #4985: import_cli_session uses an explicit sid (the CLI sidecar's id).
     # If that sid was previously tombstoned as a webui zero-message orphan,
@@ -7506,14 +7909,16 @@ def import_cli_session(
     # an import.
     try:
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
     except Exception:
         logger.debug(
             "Failed to clear webui tombstone for %s",
             s.session_id,
             exc_info=True,
         )
-    s.save(touch_updated_at=False)
+    s.save(
+        touch_updated_at=False,
+        authorize_deleted_recreation=authorize_deleted_recreation,
+    )
     return s
 
 
@@ -11928,6 +12333,7 @@ def merge_session_messages_append_only(
     truncation_watermark=None,
     truncation_boundary=None,
     incoming_provenance: Literal["unverified", "state_db"] = "unverified",
+    preserve_state_rows_after_watermark: bool = False,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -11942,6 +12348,7 @@ def merge_session_messages_append_only(
             truncation_watermark=truncation_watermark,
             truncation_boundary=truncation_boundary,
             incoming_provenance=incoming_provenance,
+            preserve_state_rows_after_watermark=preserve_state_rows_after_watermark,
         )
     finally:
         _STRUCTURED_IDENTITY_MEMO.reset(token)
@@ -12037,6 +12444,7 @@ def _merge_session_messages_append_only_impl(
     truncation_watermark=None,
     truncation_boundary=None,
     incoming_provenance=None,
+    preserve_state_rows_after_watermark: bool = False,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -12045,6 +12453,10 @@ def _merge_session_messages_append_only_impl(
     watermark is later advanced (new turn committed), this boundary is preserved
     so the empty-sidecar recovery can distinguish a legitimate prefix from a
     deleted suffix instead of guessing by dropping one turn pair.
+
+    ``preserve_state_rows_after_watermark`` is reserved for a caller that has
+    proved the sidecar is a squash projection.  Such rows are projected tail,
+    not a deleted edit suffix, and remain ordered even within the sidecar range.
     """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
@@ -12402,6 +12814,7 @@ def _merge_session_messages_append_only_impl(
             and timestamp is not None
             and timestamp > watermark_timestamp
             and not message_key_seen
+            and not preserve_state_rows_after_watermark
             and (
                 not sidecar_advanced_past_watermark
                 or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
@@ -12685,6 +13098,26 @@ def _merge_session_messages_append_only_impl(
                 skipped_state_visible_counts[matched_visible_key] = skipped_count + 1
                 _merge_session_display_metadata(merged_by_visible_key.get(matched_visible_key), msg)
                 continue
+        # A squash summary is an authoritative replacement for rows at/before
+        # its watermark, but distinct state.db rows after that watermark are
+        # part of the projected tail even when their timestamp falls inside the
+        # sidecar's range. The squash caller opts into this only after proving
+        # the first sidecar row is a squash summary.
+        if (
+            preserve_state_rows_after_watermark
+            and watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp > watermark_timestamp
+            and max_sidecar_timestamp is not None
+            and timestamp <= max_sidecar_timestamp
+        ):
+            if _insert_state_message_chronologically(merged_messages, msg):
+                seen_message_keys.add(key)
+                seen_dedup_keys.add(dedup_key)
+                seen_content_keys.add(content_key)
+                seen_visible_keys.add(visible_key)
+                _remember_merged_message(msg, source="state")
+            continue
         # State rows at or before the newest sidecar timestamp are normally
         # assumed to have already been observed by the sidecar. The <= gate
         # preserves sidecar-only ordering/metadata for equal timestamps and

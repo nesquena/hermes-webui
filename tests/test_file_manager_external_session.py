@@ -396,6 +396,78 @@ class _DeleteJSONHandler:
         pass
 
 
+class _LockCheckingWriter(BytesIO):
+    """Record whether response body I/O begins outside the SID authority."""
+
+    def __init__(self, session_lock):
+        super().__init__()
+        self._session_lock = session_lock
+        self.lock_was_free = None
+
+    def write(self, value):
+        if self.lock_was_free is None:
+            self.lock_was_free = self._session_lock.acquire(blocking=False)
+            if self.lock_was_free:
+                self._session_lock.release()
+        return super().write(value)
+
+
+def test_chat_start_404_writes_response_after_releasing_sid_lock(monkeypatch):
+    """The production chat fallback must not retain SID authority for HTTP I/O."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    sid = "chat-missing-response-lock"
+    session_lock = config_module._get_session_agent_lock(sid)
+
+    def missing_session(*_args, **_kwargs):
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes_module, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes_module, "_get_or_materialize_session", missing_session)
+    monkeypatch.setattr(routes_module, "get_session", missing_session)
+    monkeypatch.setattr(
+        routes_module,
+        "_claim_or_synthesize_cli_session",
+        lambda _sid: (None, "no_foreign_state"),
+    )
+
+    handler = _DeleteJSONHandler({})
+    handler.wfile = _LockCheckingWriter(session_lock)
+    routes_module._handle_chat_start(handler, {"session_id": sid})
+
+    assert handler.status == 404
+    assert json.loads(handler.wfile.getvalue()) == {"error": "Session not found"}
+    assert handler.wfile.lock_was_free is True
+
+
+def test_explicit_import_409_writes_response_after_releasing_sid_lock(
+    monkeypatch,
+):
+    """Generation-mismatch output starts only after import releases SID authority."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    sid = "import-generation-response-lock"
+    session_lock = config_module._get_session_agent_lock(sid)
+    generations = iter((0, 1))
+
+    monkeypatch.setattr(routes_module.Session, "load", staticmethod(lambda _sid: None))
+    monkeypatch.setattr(
+        routes_module,
+        "_session_lifecycle_generation",
+        lambda _sid: next(generations),
+    )
+
+    handler = _DeleteJSONHandler({})
+    handler.wfile = _LockCheckingWriter(session_lock)
+    routes_module._handle_session_import_cli(handler, {"session_id": sid})
+
+    assert handler.status == 409
+    assert json.loads(handler.wfile.getvalue()) == {
+        "error": "Session changed while importing; try again"
+    }
+    assert handler.wfile.lock_was_free is True
+
+
 def test_delete_serializes_with_workspace_recovery_and_sidecar_stays_deleted(
     models_module, monkeypatch, tmp_path
 ):
@@ -587,6 +659,678 @@ def test_delete_returns_503_without_mutation_when_session_lock_is_busy(
     assert payload == {"error": "Session busy, try again"}
     assert observed == {"acquire_timeouts": [5], "released": 0, "mutations": []}
     assert sidecar.exists()
+    assert routes_module.SESSIONS[sid] is cached_session
+
+
+def test_delete_refuses_active_writeback_owner_without_mutation(
+    models_module, monkeypatch, tmp_path
+):
+    routes_module = pytest.importorskip("api.routes")
+    sid = "delete-owned-session"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sidecar = session_dir / f"{sid}.json"
+    sidecar.write_text(json.dumps({"session_id": sid, "messages": []}), encoding="utf-8")
+    cached_session = SimpleNamespace(session_id=sid, profile=None)
+    mutations = []
+
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {sid: cached_session})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "get_session", lambda *_a, **_k: cached_session)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(routes_module, "session_writeback_owner", lambda _sid: "live-stream")
+    monkeypatch.setattr(
+        routes_module,
+        "retire_session_sidecar",
+        lambda *_a, **_k: mutations.append("retire") or True,
+    )
+
+    handler = _DeleteJSONHandler({"session_id": sid})
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+
+    assert handler.status == 503
+    assert json.loads(handler.wfile.getvalue()) == {"error": "Session busy, try again"}
+    assert mutations == []
+    assert sidecar.exists()
+    assert routes_module.SESSIONS[sid] is cached_session
+
+
+def test_delete_invalidates_detached_session_before_stale_save(
+    models_module, monkeypatch, tmp_path
+):
+    """A pre-delete Session object cannot republish or clear the tombstone."""
+    routes_module = pytest.importorskip("api.routes")
+    sid = "delete-stale-generation"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models_module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+
+    stale = models_module.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "must stay deleted", "timestamp": 1}],
+    )
+    stale.save()
+    monkeypatch.setattr(routes_module, "SESSIONS", {sid: stale})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "get_session", lambda *_a, **_k: stale)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(routes_module, "session_writeback_owner", lambda _sid: None)
+    monkeypatch.setattr(routes_module, "_publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(models_module, "delete_cli_session", lambda _sid: True)
+
+    handler = _DeleteJSONHandler({"session_id": sid})
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+
+    assert handler.status == 200
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid in models_module._load_webui_deleted_session_tombstone()
+
+    with pytest.raises(RuntimeError, match="lifecycle generation has advanced"):
+        stale.save()
+
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid in models_module._load_webui_deleted_session_tombstone()
+    index_rows = json.loads((session_dir / "_index.json").read_text(encoding="utf-8"))
+    assert all(row.get("session_id") != sid for row in index_rows)
+
+    fresh = models_module.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "intentional recreate", "timestamp": 2}],
+    )
+    with pytest.raises(RuntimeError, match="explicit recreation authority"):
+        fresh.save()
+    fresh.save(authorize_deleted_recreation=True)
+    assert (session_dir / f"{sid}.json").exists()
+    assert sid not in models_module._load_webui_deleted_session_tombstone()
+
+
+def test_delete_fences_state_backed_materializer_captured_before_retirement(
+    models_module, monkeypatch, tmp_path
+):
+    """A materializer paused on stale state cannot publish after delete commits."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    upload_module = pytest.importorskip("api.upload")
+    turn_journal_module = pytest.importorskip("api.turn_journal")
+    run_journal_module = pytest.importorskip("api.run_journal")
+    background_module = pytest.importorskip("api.background_process")
+    terminal_module = pytest.importorskip("api.terminal")
+
+    sid = "delete-stale-materializer"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    state = {
+        "present": True,
+        "messages": [{"role": "user", "content": "stale state", "timestamp": 1}],
+    }
+    state_captured = threading.Event()
+    resume_materializer = threading.Event()
+    materializer_result = {}
+
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models_module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+
+    def missing_session(*_args, **_kwargs):
+        raise KeyError(sid)
+
+    def lookup_metadata(_sid):
+        if not state["present"]:
+            return {}
+        return {
+            "session_id": sid,
+            "title": "stale materialization",
+            "model": "test-model",
+            "source_tag": "webui",
+        }
+
+    first_state_read = True
+
+    def get_state_messages(_sid, **_kwargs):
+        nonlocal first_state_read
+        captured = list(state["messages"]) if state["present"] else []
+        if first_state_read and threading.current_thread().name == "stale-materializer":
+            first_state_read = False
+            state_captured.set()
+            assert resume_materializer.wait(timeout=5)
+        return captured
+
+    def delete_state(_sid):
+        state["present"] = False
+        state["messages"] = []
+        return True
+
+    monkeypatch.setattr(routes_module, "get_session", missing_session)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lookup_metadata)
+    monkeypatch.setattr(routes_module, "get_cli_session_messages", get_state_messages)
+    monkeypatch.setattr(routes_module, "_state_db_session_source", lambda _sid: "webui" if state["present"] else "")
+    monkeypatch.setattr(routes_module, "_session_index_marks_was_webui", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_subagent_child_session_id", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "_publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(models_module, "delete_cli_session", delete_state)
+    monkeypatch.setattr(config_module, "_evict_session_agent", lambda _sid: None)
+    monkeypatch.setattr(upload_module, "_session_attachment_dir", lambda _sid: tmp_path / "uploads")
+    monkeypatch.setattr(turn_journal_module, "delete_turn_journal", lambda _sid: None)
+    monkeypatch.setattr(run_journal_module, "delete_run_journal", lambda _sid: None)
+    monkeypatch.setattr(background_module, "forget_bg_task_completion_dedup", lambda _sid: None)
+    monkeypatch.setattr(terminal_module, "close_terminal", lambda _sid: None)
+
+    def materialize():
+        try:
+            materializer_result["session"] = routes_module._get_or_materialize_session(sid)
+        except Exception as exc:
+            materializer_result["error"] = exc
+
+    worker = threading.Thread(target=materialize, name="stale-materializer")
+    worker.start()
+    assert state_captured.wait(timeout=5)
+
+    handler = _DeleteJSONHandler({"session_id": sid})
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+    assert handler.status == 200
+    assert not state["present"]
+
+    resume_materializer.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert isinstance(materializer_result.get("error"), KeyError)
+    assert "session" not in materializer_result
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid in models_module._load_webui_deleted_session_tombstone()
+    if (session_dir / "_index.json").exists():
+        index_rows = json.loads((session_dir / "_index.json").read_text(encoding="utf-8"))
+        assert all(row.get("session_id") != sid for row in index_rows)
+
+
+def test_delete_fences_explicit_import_captured_before_retirement(
+    models_module, monkeypatch, tmp_path
+):
+    """An import that already owns the SID lock commits before a queued delete."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    upload_module = pytest.importorskip("api.upload")
+    turn_journal_module = pytest.importorskip("api.turn_journal")
+    run_journal_module = pytest.importorskip("api.run_journal")
+    background_module = pytest.importorskip("api.background_process")
+    terminal_module = pytest.importorskip("api.terminal")
+
+    sid = "delete-stale-explicit-import"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    stale_messages = [{"role": "user", "content": "stale import", "timestamp": 1}]
+    state_present = {"value": True}
+    import_read = threading.Event()
+    resume_import = threading.Event()
+    import_result = {}
+
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models_module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models_module, "get_last_workspace", lambda **_kwargs: tmp_path)
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "_resolve_cli_import_metadata", lambda *_a, **_k: {
+        "session_id": sid,
+        "title": "stale explicit import",
+        "model": "test-model",
+        "source_tag": "cli",
+        "profile": None,
+    } if state_present["value"] else None)
+
+    def read_stale_messages(_sid, **_kwargs):
+        captured = list(stale_messages) if state_present["value"] else []
+        if threading.current_thread().name == "stale-explicit-import":
+            import_read.set()
+            assert resume_import.wait(timeout=5)
+        return captured
+
+    monkeypatch.setattr(routes_module, "get_cli_session_messages", read_stale_messages)
+    monkeypatch.setattr(routes_module, "_is_subagent_child_session_id", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "is_cron_session", lambda *_a, **_k: False)
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "_publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes_module, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes_module, "_queue_generated_title_for_imported_session", lambda *_a, **_k: None)
+    monkeypatch.setattr(config_module, "_evict_session_agent", lambda _sid: None)
+    monkeypatch.setattr(upload_module, "_session_attachment_dir", lambda _sid: tmp_path / "uploads")
+    monkeypatch.setattr(turn_journal_module, "delete_turn_journal", lambda _sid: None)
+    monkeypatch.setattr(run_journal_module, "delete_run_journal", lambda _sid: None)
+    monkeypatch.setattr(background_module, "forget_bg_task_completion_dedup", lambda _sid: None)
+    monkeypatch.setattr(terminal_module, "close_terminal", lambda _sid: None)
+
+    def delete_state(_sid):
+        state_present["value"] = False
+        return True
+
+    monkeypatch.setattr(models_module, "delete_cli_session", delete_state)
+
+    def run_import():
+        handler = _DeleteJSONHandler({})
+        routes_module._handle_session_import_cli(handler, {"session_id": sid})
+        import_result["status"] = handler.status
+        import_result["payload"] = json.loads(handler.wfile.getvalue())
+
+    worker = threading.Thread(target=run_import, name="stale-explicit-import")
+    worker.start()
+    assert import_read.wait(timeout=5)
+
+    delete_done = threading.Event()
+
+    def run_delete():
+        handler = _DeleteJSONHandler({"session_id": sid})
+        routes_module.handle_post(
+            handler, SimpleNamespace(path="/api/session/delete")
+        )
+        import_result["delete_status"] = handler.status
+        delete_done.set()
+
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    delete_worker = threading.Thread(target=run_delete, name="delete-after-import-read")
+    delete_worker.start()
+    assert not delete_done.wait(timeout=0.2), (
+        "delete must wait while import owns the SID publication lock"
+    )
+
+    resume_import.set()
+    worker.join(timeout=5)
+    delete_worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert not delete_worker.is_alive()
+    assert import_result["status"] == 200
+    assert import_result["payload"]["imported"] is True
+    assert import_result["delete_status"] == 200
+    assert not state_present["value"]
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid in models_module._load_webui_deleted_session_tombstone()
+    if (session_dir / "_index.json").exists():
+        index_rows = json.loads((session_dir / "_index.json").read_text(encoding="utf-8"))
+        assert all(row.get("session_id") != sid for row in index_rows)
+
+
+def test_explicit_import_rereads_state_after_inflight_delete_cleanup(
+    models_module, monkeypatch, tmp_path
+):
+    """An import starting after retirement must not publish pre-cleanup state."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    upload_module = pytest.importorskip("api.upload")
+    turn_journal_module = pytest.importorskip("api.turn_journal")
+    run_journal_module = pytest.importorskip("api.run_journal")
+    background_module = pytest.importorskip("api.background_process")
+    terminal_module = pytest.importorskip("api.terminal")
+
+    sid = "delete-import-after-retirement"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    state = {
+        "present": True,
+        "messages": [{"role": "user", "content": "retired transcript", "timestamp": 1}],
+    }
+    cleanup_entered = threading.Event()
+    permit_cleanup = threading.Event()
+    foreign_read = threading.Event()
+    import_result = {}
+
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models_module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models_module, "get_last_workspace", lambda **_kwargs: tmp_path)
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+
+    def resolve_metadata(*_args, **_kwargs):
+        if not state["present"]:
+            return {}
+        return {
+            "session_id": sid,
+            "title": "retired explicit import",
+            "model": "test-model",
+            "source_tag": "cli",
+            "profile": None,
+        }
+
+    def read_messages(_sid, **_kwargs):
+        foreign_read.set()
+        return list(state["messages"]) if state["present"] else []
+
+    def delete_state(_sid):
+        cleanup_entered.set()
+        assert permit_cleanup.wait(timeout=5)
+        state["present"] = False
+        state["messages"] = []
+        return True
+
+    monkeypatch.setattr(routes_module, "_resolve_cli_import_metadata", resolve_metadata)
+    monkeypatch.setattr(routes_module, "get_cli_session_messages", read_messages)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_is_subagent_child_session_id", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "is_cron_session", lambda *_a, **_k: False)
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "_publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes_module, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes_module, "_queue_generated_title_for_imported_session", lambda *_a, **_k: None)
+    monkeypatch.setattr(config_module, "_evict_session_agent", lambda _sid: None)
+    monkeypatch.setattr(upload_module, "_session_attachment_dir", lambda _sid: tmp_path / "uploads")
+    monkeypatch.setattr(turn_journal_module, "delete_turn_journal", lambda _sid: None)
+    monkeypatch.setattr(run_journal_module, "delete_run_journal", lambda _sid: None)
+    monkeypatch.setattr(background_module, "forget_bg_task_completion_dedup", lambda _sid: None)
+    monkeypatch.setattr(terminal_module, "close_terminal", lambda _sid: None)
+    monkeypatch.setattr(models_module, "delete_cli_session", delete_state)
+
+    live = models_module.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "delete me", "timestamp": 2}],
+    )
+    live.save()
+    routes_module.SESSIONS[sid] = live
+    monkeypatch.setattr(routes_module, "get_session", lambda *_a, **_k: live)
+
+    delete_handler = _DeleteJSONHandler({"session_id": sid})
+    delete_thread = threading.Thread(
+        target=routes_module.handle_post,
+        args=(delete_handler, SimpleNamespace(path="/api/session/delete")),
+        name="delete-before-import-read",
+    )
+    delete_thread.start()
+    assert cleanup_entered.wait(timeout=5)
+
+    def run_import():
+        handler = _DeleteJSONHandler({})
+        routes_module._handle_session_import_cli(handler, {"session_id": sid})
+        import_result["status"] = handler.status
+        import_result["payload"] = json.loads(handler.wfile.getvalue())
+
+    import_thread = threading.Thread(
+        target=run_import,
+        name="import-after-retirement",
+    )
+    import_thread.start()
+    read_while_delete_owned_lock = foreign_read.wait(timeout=0.2)
+    permit_cleanup.set()
+    delete_thread.join(timeout=5)
+    import_thread.join(timeout=5)
+
+    assert not read_while_delete_owned_lock, (
+        "foreign state must not be read for publication while delete owns the SID lock"
+    )
+    assert not delete_thread.is_alive()
+    assert not import_thread.is_alive()
+    assert delete_handler.status == 200
+    assert import_result == {
+        "status": 404,
+        "payload": {"error": "Session not found in CLI store"},
+    }
+    assert not state["present"]
+    assert sid not in routes_module.SESSIONS
+    assert not (session_dir / f"{sid}.json").exists()
+    assert not (session_dir / f"{sid}.json.bak").exists()
+    assert sid in models_module._load_webui_deleted_session_tombstone()
+    if (session_dir / "_index.json").exists():
+        index_rows = json.loads((session_dir / "_index.json").read_text(encoding="utf-8"))
+        assert all(row.get("session_id") != sid for row in index_rows)
+
+
+def test_chat_start_claim_rereads_state_after_inflight_delete_cleanup(
+    models_module, monkeypatch, tmp_path
+):
+    """Chat claim must enter the SID lock before synthesizing foreign state."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    upload_module = pytest.importorskip("api.upload")
+    turn_journal_module = pytest.importorskip("api.turn_journal")
+    run_journal_module = pytest.importorskip("api.run_journal")
+    background_module = pytest.importorskip("api.background_process")
+    terminal_module = pytest.importorskip("api.terminal")
+
+    sid = "delete-chat-claim-after-retirement"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    state = {
+        "present": True,
+        "messages": [{"role": "user", "content": "retired chat", "timestamp": 1}],
+    }
+    cleanup_entered = threading.Event()
+    permit_cleanup = threading.Event()
+    fallback_entered = threading.Event()
+    foreign_read = threading.Event()
+    chat_result = {}
+
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models_module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+
+    def missing_materializer(*_args, **_kwargs):
+        fallback_entered.set()
+        raise KeyError(sid)
+
+    def lookup_metadata(_sid):
+        if not state["present"]:
+            return {}
+        return {
+            "session_id": sid,
+            "title": "retired chat claim",
+            "model": "test-model",
+            "source_tag": "cli",
+        }
+
+    def read_messages(_sid, **_kwargs):
+        foreign_read.set()
+        return list(state["messages"]) if state["present"] else []
+
+    def delete_state(_sid):
+        cleanup_entered.set()
+        assert permit_cleanup.wait(timeout=5)
+        state["present"] = False
+        state["messages"] = []
+        return True
+
+    monkeypatch.setattr(routes_module, "_get_or_materialize_session", missing_materializer)
+    monkeypatch.setattr(routes_module, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lookup_metadata)
+    monkeypatch.setattr(routes_module, "get_cli_session_messages", read_messages)
+    monkeypatch.setattr(routes_module, "_state_db_session_source", lambda _sid: "cli" if state["present"] else "")
+    monkeypatch.setattr(routes_module, "_session_index_marks_was_webui", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_subagent_child_session_id", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "_publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(config_module, "_evict_session_agent", lambda _sid: None)
+    monkeypatch.setattr(upload_module, "_session_attachment_dir", lambda _sid: tmp_path / "uploads")
+    monkeypatch.setattr(turn_journal_module, "delete_turn_journal", lambda _sid: None)
+    monkeypatch.setattr(run_journal_module, "delete_run_journal", lambda _sid: None)
+    monkeypatch.setattr(background_module, "forget_bg_task_completion_dedup", lambda _sid: None)
+    monkeypatch.setattr(terminal_module, "close_terminal", lambda _sid: None)
+    monkeypatch.setattr(models_module, "delete_cli_session", delete_state)
+
+    live = models_module.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "delete me", "timestamp": 2}],
+    )
+    live.save()
+    routes_module.SESSIONS[sid] = live
+
+    def get_cached_session(_sid, **_kwargs):
+        try:
+            return routes_module.SESSIONS[_sid]
+        except KeyError:
+            raise KeyError(_sid) from None
+
+    monkeypatch.setattr(routes_module, "get_session", get_cached_session)
+
+    delete_handler = _DeleteJSONHandler({"session_id": sid})
+    delete_thread = threading.Thread(
+        target=routes_module.handle_post,
+        args=(delete_handler, SimpleNamespace(path="/api/session/delete")),
+        name="delete-before-chat-claim",
+    )
+    delete_thread.start()
+    assert cleanup_entered.wait(timeout=5)
+
+    def run_chat_start():
+        handler = _DeleteJSONHandler({})
+        routes_module._handle_chat_start(handler, {"session_id": sid})
+        chat_result["status"] = handler.status
+        chat_result["payload"] = json.loads(handler.wfile.getvalue())
+
+    chat_thread = threading.Thread(target=run_chat_start, name="chat-after-retirement")
+    chat_thread.start()
+    assert fallback_entered.wait(timeout=5)
+    read_while_delete_owned_lock = foreign_read.wait(timeout=0.2)
+    permit_cleanup.set()
+    delete_thread.join(timeout=5)
+    chat_thread.join(timeout=5)
+
+    assert not read_while_delete_owned_lock, (
+        "chat claim must not read materialization state while delete owns the SID lock"
+    )
+    assert not delete_thread.is_alive()
+    assert not chat_thread.is_alive()
+    assert delete_handler.status == 200
+    assert chat_result == {
+        "status": 404,
+        "payload": {"error": "Session not found"},
+    }
+    assert not state["present"]
+    assert sid not in routes_module.SESSIONS
+    assert not (session_dir / f"{sid}.json").exists()
+    assert not (session_dir / f"{sid}.json.bak").exists()
+    assert sid in models_module._load_webui_deleted_session_tombstone()
+    if (session_dir / "_index.json").exists():
+        index_rows = json.loads((session_dir / "_index.json").read_text(encoding="utf-8"))
+        assert all(row.get("session_id") != sid for row in index_rows)
+
+
+@pytest.mark.parametrize("fault", ["tombstone_not_durable", "retire_returns_false"])
+def test_delete_fails_closed_when_sidecar_retirement_does_not_commit(
+    fault, models_module, monkeypatch, tmp_path
+):
+    """#6600 review blocker 3: a retirement that raises (tombstone not durable)
+    or returns False must fail the delete with 5xx BEFORE pruning the index or
+    deleting cache/state.db/journals — never a torn delete reported as ok."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    upload_module = pytest.importorskip("api.upload")
+    turn_journal_module = pytest.importorskip("api.turn_journal")
+    run_journal_module = pytest.importorskip("api.run_journal")
+    background_module = pytest.importorskip("api.background_process")
+    terminal_module = pytest.importorskip("api.terminal")
+    sid = f"delete-torn-{fault.replace('_', '-')}"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sidecar = session_dir / f"{sid}.json"
+    sidecar_payload = {"session_id": sid, "messages": [{"role": "user", "content": "keep"}]}
+    sidecar.write_text(json.dumps(sidecar_payload), encoding="utf-8")
+    cached_session = SimpleNamespace(session_id=sid, profile=None)
+    mutations = []
+
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {sid: cached_session})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "get_session", lambda *_a, **_k: cached_session)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    if fault == "tombstone_not_durable":
+        # The marker write silently does not persist: the real helper must
+        # raise before unlinking the sidecar.
+        monkeypatch.setattr(
+            models_module, "_record_webui_deleted_session_tombstone", lambda _sid: None
+        )
+        monkeypatch.setattr(
+            models_module, "_load_webui_deleted_session_tombstone", lambda: set()
+        )
+    else:
+        monkeypatch.setattr(
+            routes_module, "retire_session_sidecar", lambda *_a, **_k: False
+        )
+    monkeypatch.setattr(
+        routes_module, "prune_session_from_index", lambda _sid: mutations.append("index")
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "_publish_session_list_changed",
+        lambda *_a, **_k: mutations.append("publish"),
+    )
+    monkeypatch.setattr(
+        config_module, "_evict_session_agent", lambda _sid: mutations.append("agent")
+    )
+    monkeypatch.setattr(
+        models_module, "delete_cli_session", lambda _sid: mutations.append("state-db")
+    )
+    monkeypatch.setattr(
+        upload_module,
+        "_session_attachment_dir",
+        lambda _sid: mutations.append("attachments") or tmp_path / "attachments" / _sid,
+    )
+    monkeypatch.setattr(
+        turn_journal_module, "delete_turn_journal", lambda _sid: mutations.append("turn-journal")
+    )
+    monkeypatch.setattr(
+        run_journal_module, "delete_run_journal", lambda _sid: mutations.append("run-journal")
+    )
+    monkeypatch.setattr(
+        background_module,
+        "forget_bg_task_completion_dedup",
+        lambda _sid: mutations.append("bg-dedup"),
+    )
+    monkeypatch.setattr(
+        terminal_module, "close_terminal", lambda _sid: mutations.append("terminal")
+    )
+
+    handler = _DeleteJSONHandler({"session_id": sid})
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+
+    payload = json.loads(handler.wfile.getvalue())
+    assert handler.status == 500
+    assert "ok" not in payload
+    assert payload["error"]
+    assert mutations == []
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == sidecar_payload
     assert routes_module.SESSIONS[sid] is cached_session
 
 

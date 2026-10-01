@@ -2938,6 +2938,7 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    session_writeback_owner,
     clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
     peek_stream,
@@ -5505,76 +5506,78 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     except KeyError:
         pass
 
-    # Fallback: try to materialize from CLI/agent session metadata
-    cli_meta = _lookup_cli_session_metadata(sid)
+    # Capture foreign state without holding the SID mutation lock, then re-read
+    # it under that lock before publication. A delete may complete while the
+    # first state.db read is in flight; only the second snapshot is allowed to
+    # acquire write authority for this SID.
+    materialization_generation = _session_lifecycle_generation(sid)
 
-    # Delegated subagent children (#5307) are view-only: their transcript lives
-    # in state.db and ownership belongs to the delegate runner, not WebUI. They
-    # must never be materialized as a writable sidecar here — this is the shared
-    # chokepoint reached by POST /api/chat/start (_get_or_materialize_session),
-    # so gating it closes the write path that bypasses the GET/import_cli guards.
-    # Checked via state.db source (independent of cli_meta, which is often empty
-    # for a server-side subagent child).
-    _mat_source_tag = (
-        (cli_meta or {}).get("source_tag") or (cli_meta or {}).get("raw_source") or ""
-    ).strip().lower()
-    if _mat_source_tag == "subagent" or _is_subagent_child_session_id(sid):
-        raise PermissionError("read-only subagent child session")
-
-    if not cli_meta:
-        raise KeyError(sid)
-
-    # Read-only guard: messaging sessions and Claude Code imports cannot be
-    # mutated. Reject BOTH an explicit read_only flag AND any messaging-source
-    # record — agent rows normalize messaging sources without setting read_only,
-    # and state.db (not a WebUI sidecar) is the source of truth for them, so
-    # materializing a writable sidecar would fork the title/state.
-    if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
-        raise PermissionError("read-only imported session")
-
-    # Preserve source metadata fields
-    def _apply_source_meta(s):
-        s.is_cli_session = is_cli_session_row(cli_meta)
-        s.source_tag = cli_meta.get("source_tag")
-        s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
-        s.session_source = cli_meta.get("session_source")
-        s.source_label = cli_meta.get("source_label")
-        s.user_id = cli_meta.get("user_id")
-        s.chat_id = cli_meta.get("chat_id")
-        s.chat_type = cli_meta.get("chat_type")
-        s.thread_id = cli_meta.get("thread_id")
-        s.session_key = cli_meta.get("session_key")
-        s.platform = cli_meta.get("platform")
-
-    if _is_messaging_session_record(cli_meta):
-        # Messaging sessions: lightweight Session with no messages (state.db is source of truth)
-        s = Session(
-            session_id=sid,
-            title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
-            workspace=get_last_workspace(),
-            model=cli_meta.get("model") or "unknown",
-            created_at=cli_meta.get("created_at"),
-            updated_at=cli_meta.get("updated_at"),
-        )
-        _apply_source_meta(s)
-        s.save(touch_updated_at=False)
-    else:
-        # Regular CLI/agent sessions: import full message history
-        msgs = get_cli_session_messages(sid)
-        if not msgs:
+    def _capture_materialization_state():
+        cli_meta = _lookup_cli_session_metadata(sid)
+        source_tag = (
+            (cli_meta or {}).get("source_tag")
+            or (cli_meta or {}).get("raw_source")
+            or ""
+        ).strip().lower()
+        if source_tag == "subagent" or _is_subagent_child_session_id(sid):
+            raise PermissionError("read-only subagent child session")
+        if not cli_meta:
             raise KeyError(sid)
-        s = import_cli_session(
+        if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
+            raise PermissionError("read-only imported session")
+        messages = get_cli_session_messages(sid)
+        if not messages:
+            raise KeyError(sid)
+        return cli_meta, messages
+
+    _capture_materialization_state()
+    with _get_session_agent_lock(sid):
+        try:
+            current = get_session(sid)
+        except KeyError:
+            current = None
+        if current is not None:
+            current = _ensure_full_session_before_mutation(sid, current)
+            if getattr(current, "read_only", False):
+                raise PermissionError("read-only imported session")
+            return current
+
+        if materialization_generation != _session_lifecycle_generation(sid):
+            raise KeyError(sid)
+        cli_meta, messages = _capture_materialization_state()
+        if sid in _load_webui_deleted_session_tombstone():
+            state_source = (
+                cli_meta.get("source_tag")
+                or cli_meta.get("raw_source")
+                or _state_db_session_source(sid)
+                or ""
+            ).strip().lower()
+            if state_source in {"", "webui", "fork"}:
+                raise KeyError(sid)
+
+        materialized = import_cli_session(
             sid,
-            cli_meta.get("title") or title_from(msgs, "CLI Session"),
-            msgs,
+            cli_meta.get("title") or title_from(messages, "CLI Session"),
+            messages,
             cli_meta.get("model") or "unknown",
             profile=cli_meta.get("profile"),
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
+            authorize_deleted_recreation=True,
+            _lifecycle_generation=materialization_generation,
         )
-        _apply_source_meta(s)
-
-    return s
+        materialized.is_cli_session = is_cli_session_row(cli_meta)
+        materialized.source_tag = cli_meta.get("source_tag")
+        materialized.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+        materialized.session_source = cli_meta.get("session_source")
+        materialized.source_label = cli_meta.get("source_label")
+        materialized.user_id = cli_meta.get("user_id")
+        materialized.chat_id = cli_meta.get("chat_id")
+        materialized.chat_type = cli_meta.get("chat_type")
+        materialized.thread_id = cli_meta.get("thread_id")
+        materialized.session_key = cli_meta.get("session_key")
+        materialized.platform = cli_meta.get("platform")
+        return materialized
 
 
 def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = None) -> list:
@@ -8616,10 +8619,15 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             # actually write; the GET stub always reflects whatever the
             # helper returns so the read-only banner stays accurate.
             read_only=read_only_flag,
+            _lifecycle_generation=materialization_generation,
         )
 
     if not is_safe_session_id(sid):
         return None, "invalid_sid"
+    # Capture the incarnation before reading state.db. Publication paths must
+    # compare this value again while holding the SID mutation lock; a delete
+    # that completes during the read advances it and invalidates this snapshot.
+    materialization_generation = _session_lifecycle_generation(sid)
     if (
         (
             _session_index_marks_was_webui(sid)
@@ -9412,9 +9420,8 @@ def _limited_webui_messages_for_display_with_sidecar(
     merged = merge_session_messages_append_only(
         sidecar_messages,
         state_db_messages,
-        truncation_watermark=getattr(session, "truncation_watermark", None),
-        truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
+        **_squash_aware_merge_kwargs(session, sidecar_messages),
     )
     merged = _project_native_image_payload_conflicts_for_display(
         sidecar_messages,
@@ -10078,6 +10085,97 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     return merged
 
 
+def _is_manual_squash_transcript(session, sidecar_messages: list) -> bool:
+    return (
+        bool(sidecar_messages)
+        and isinstance(sidecar_messages[0], dict)
+        and sidecar_messages[0].get("_squash_summary") is True
+        and getattr(session, "truncation_watermark", None) is not None
+    )
+
+
+def _finite_float_or_none(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not -float("inf") < parsed < float("inf"):
+        return None
+    return parsed
+
+
+def _active_squash_projection_cutoff(session, sidecar_messages: list):
+    """Return the immutable cutoff of a still-active squash projection, or None.
+
+    A persisted squash generation stays authoritative until an intentional
+    shrink records ``squash_projection_superseded_by``.  Ordinary turns advance
+    ``truncation_watermark`` but must NOT retire the projection: the cutoff
+    frozen by ``Session.save()`` remains the boundary between the replaced
+    pre-squash history and the projected state.db tail (#6600 review).
+    Malformed authority fails closed (``None``).
+    """
+    if not _is_manual_squash_transcript(session, sidecar_messages):
+        return None
+    if getattr(session, "squash_projection_superseded_by", None) is not None:
+        return None
+    watermark = _finite_float_or_none(getattr(session, "truncation_watermark", None))
+    if watermark is None:
+        return None
+    projection_generation = getattr(session, "squash_projection_generation", None)
+    projection_cutoff = getattr(session, "squash_projection_cutoff", None)
+    if projection_generation is None and projection_cutoff is None:
+        # Compatibility for manual squash sidecars created before generation
+        # authority was persisted. Their next save claims an explicit UUID.
+        # The squash summary row carries the squash point; fall back to the
+        # watermark when it has no usable timestamp.
+        summary_ts = _finite_float_or_none(sidecar_messages[0].get("timestamp"))
+        if summary_ts is not None and summary_ts <= watermark:
+            return summary_ts
+        return watermark
+    if projection_generation is None or projection_cutoff is None:
+        return None
+    try:
+        parsed_generation = uuid.UUID(str(projection_generation))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    cutoff = _finite_float_or_none(projection_cutoff)
+    if parsed_generation.version != 4 or cutoff is None:
+        return None
+    # The watermark only moves forward after a squash unless an intentional
+    # shrink superseded the projection (handled above), so a cutoff beyond the
+    # current watermark is incoherent. A cutoff before the squash summary row
+    # would let replaced pre-squash rows through. Either fails closed.
+    if cutoff > watermark:
+        return None
+    summary_ts = _finite_float_or_none(sidecar_messages[0].get("timestamp"))
+    if summary_ts is not None and cutoff < summary_ts:
+        return None
+    return cutoff
+
+
+def _manual_squash_projection_is_active(session, sidecar_messages: list) -> bool:
+    """Return whether this persisted squash generation still owns its state tail."""
+    return _active_squash_projection_cutoff(session, sidecar_messages) is not None
+
+
+def _squash_aware_merge_kwargs(session, sidecar_messages: list) -> dict:
+    """Merge kwargs shared by every sidecar/state.db display and branch path.
+
+    An active squash projection merges against its immutable cutoff and keeps
+    distinct state.db rows after it; every other transcript keeps the current
+    watermark contract unchanged.
+    """
+    kwargs = {
+        "truncation_watermark": getattr(session, "truncation_watermark", None),
+        "truncation_boundary": getattr(session, "truncation_boundary", None),
+    }
+    cutoff = _active_squash_projection_cutoff(session, list(sidecar_messages or []))
+    if cutoff is not None:
+        kwargs["truncation_watermark"] = cutoff
+        kwargs["preserve_state_rows_after_watermark"] = True
+    return kwargs
+
+
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """Return the message coordinate space exposed by ``GET /api/session``.
 
@@ -10089,7 +10187,14 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """
     cli_messages = list(cli_messages or [])
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    is_squashed_transcript = _is_manual_squash_transcript(session, sidecar_messages)
     if cli_messages:
+        if is_squashed_transcript:
+            return merge_session_messages_append_only(
+                sidecar_messages,
+                cli_messages,
+                **_squash_aware_merge_kwargs(session, sidecar_messages),
+            )
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
                 return merge_session_messages_append_only(
@@ -10815,7 +10920,9 @@ from api.models import (
     _record_webui_zero_message_orphan_tombstone,
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
-    _record_webui_deleted_session_tombstone,
+    _record_webui_deleted_session_tombstone,  # noqa: F401 - compatibility test seam
+    _session_lifecycle_generation,
+    retire_session_sidecar,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -13559,8 +13666,7 @@ def _handle_session_get(handler, parsed) -> bool:
                 _all_msgs = merge_session_messages_append_only(
                     sidecar_messages,
                     state_db_messages,
-                    truncation_watermark=getattr(s, "truncation_watermark", None),
-                    truncation_boundary=getattr(s, "truncation_boundary", None),
+                    **_squash_aware_merge_kwargs(s, sidecar_messages),
                 )
                 _all_msgs = _merged_webui_lineage_messages_for_display(
                     s,
@@ -16604,33 +16710,59 @@ def handle_post(handler, parsed) -> bool:
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
+        state_db_cleanup_failed = False
         try:
+            # A live worker owns periodic checkpoints and final writeback until
+            # its teardown clears this exact registry entry. Refuse deletion
+            # rather than unlinking beneath an admitted writer that could
+            # recreate the sidecar after this route returns success.
+            if session_writeback_owner(sid) is not None:
+                return bad(handler, "Session busy, try again", 503)
             with LOCK:
-                SESSIONS.pop(sid, None)
+                evicted_session = SESSIONS.pop(sid, None)
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
             try:
-                p.unlink(missing_ok=True)
+                # Agent lock is already held: acquire the shared sidecar
+                # authority second and commit unlink + durable marker together.
+                retired = retire_session_sidecar(
+                    sid,
+                    remove_backup=True,
+                    record_deleted_tombstone=not is_messaging_session,
+                    invalidate_generation=True,
+                )
             except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
+                logger.warning("Failed to retire session sidecar %s", p, exc_info=True)
+                retired = False
+            if not retired:
+                # The retirement transaction did not commit (tombstone not
+                # durable, or the sidecar survived unlink). Fail the delete
+                # BEFORE pruning the index or touching any other store so the
+                # client never sees success for a torn delete (#6600 review).
+                if evicted_session is not None:
+                    with LOCK:
+                        SESSIONS.setdefault(sid, evicted_session)
+                return bad(handler, "Failed to delete session; try again", 500)
+            # Revoke the state-backed materialization source before releasing
+            # the SID lock. Any request that captured old state outside this
+            # boundary must recheck after entry and will observe the advanced
+            # generation/tombstone or the removed row, never an old incarnation
+            # with fresh publication authority.
+            if not is_messaging_session:
+                try:
+                    from api.models import delete_cli_session
+
+                    state_db_cleanup_failed = not delete_cli_session(sid)
+                except Exception:
+                    state_db_cleanup_failed = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
             try:
                 prune_session_from_index(sid)
             except Exception:
                 logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
-                try:
-                    _record_webui_deleted_session_tombstone(sid)
-                except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
@@ -16676,17 +16808,6 @@ def handle_post(handler, parsed) -> bool:
             close_terminal(sid)
         except Exception:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
         return j(
             handler,
@@ -16889,11 +17010,11 @@ def handle_post(handler, parsed) -> bool:
             else:
                 # Match GET /api/session: a messaging session with no CLI
                 # transcript does not fall back to state.db rows.
+                _source_sidecar_messages = _webui_sidecar_lineage_messages_for_display(source)
                 source_messages = merge_session_messages_append_only(
-                    _webui_sidecar_lineage_messages_for_display(source),
+                    _source_sidecar_messages,
                     [],
-                    truncation_watermark=getattr(source, "truncation_watermark", None),
-                    truncation_boundary=getattr(source, "truncation_boundary", None),
+                    **_squash_aware_merge_kwargs(source, _source_sidecar_messages),
                 )
                 source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
         else:
@@ -16911,14 +17032,14 @@ def handle_post(handler, parsed) -> bool:
             _backstop = _state_db_backstop_limit_for_display(source, None)
             if _backstop is not None:
                 _state_db_reader_kwargs["limit"] = _backstop
+            _source_sidecar_messages = _webui_sidecar_lineage_messages_for_display(source)
             source_messages = merge_session_messages_append_only(
-                _webui_sidecar_lineage_messages_for_display(source),
+                _source_sidecar_messages,
                 get_state_db_session_messages(
                     source.session_id,
                     **_state_db_reader_kwargs,
                 ),
-                truncation_watermark=getattr(source, "truncation_watermark", None),
-                truncation_boundary=getattr(source, "truncation_boundary", None),
+                **_squash_aware_merge_kwargs(source, _source_sidecar_messages),
             )
             source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
         if keep_count is not None:
@@ -23258,7 +23379,7 @@ def _handle_background(handler, body):
             # clutter the sidebar or SESSION_DIR. The index is pruned on the
             # next rebuild via _index_entry_exists().
             try:
-                (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                retire_session_sidecar(bg_sid, record_deleted_tombstone=False)
             except Exception:
                 pass
         except Exception:
@@ -24913,66 +25034,95 @@ def _handle_chat_start(handler, body, diag=None):
                 refresh_cli_messages=body.get("regenerate") is not True,
             )
         except KeyError:
-            # No WebUI sidecar. If this is a foreign-origin session (CLI,
-            # TUI, Desktop) with recoverable state.db messages, claim it by
-            # materialising a WebUI-owned Session and persisting it as a
-            # sidecar. This closes the GET-vs-POST asymmetry where a
-            # TUI/Desktop session loads read-only via GET /api/session but
-            # 404s on the first POST /api/chat/start, making the typed
-            # message disappear into the empty state.
-            synth, reason = _claim_or_synthesize_cli_session(body["session_id"])
-            if synth is None:
-                # 'was_webui' (deleted WebUI session, client should self-heal
-                # via the existing 404 path), 'no_foreign_state' (sid has
-                # no recoverable state anywhere), or 'invalid_sid' (path
-                # safety violation). All collapse to 404 — the client only
-                # knows the right thing to do for "this session is gone".
-                return bad(handler, "Session not found", 404)
-            if reason == "not_claimable":
-                # Foreign store says this session is read-only / owned by
-                # a non-WebUI process (messaging, claude_code,
-                # external_agent, cron, gateway/unknown, or explicit
-                # read_only flag). The session is real and viewable, but
-                # the WebUI must not take write ownership of it — that
-                # would be an ownership-boundary violation (#4911 review).
-                # 403 (not 404) because 404 triggers the frontend's
-                # empty-state self-heal handler which strips the URL and
-                # clears localStorage; for a legitimately-listed read-only
-                # session the user should keep their URL and see a refusal,
-                # not have their session vanish.
-                return bad(
-                    handler,
-                    "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
-                    403,
-                )
-            try:
-                synth.save()
-            except Exception as _save_err:
-                # Persisting the sidecar failed: surface a generic 500 to
-                # the client (paths sanitised, see _sanitize_error) and log
-                # the full exception server-side. Returning the raw str(exc)
-                # would leak /root/.hermes/webui/sessions/<sid>.json or any
-                # other absolute filesystem path the OSError happened to
-                # carry — #4911 review feedback.
-                logger.exception(
-                    "failed to persist materialised sidecar for foreign session %s",
-                    body["session_id"],
-                )
-                return bad(
-                    handler,
-                    f"failed to claim session: {_sanitize_error(_save_err)}",
-                    500,
-                )
-            s = synth
-            try:
-                with LOCK:
-                    SESSIONS[s.session_id] = s
-                    SESSIONS.move_to_end(s.session_id)
-            except Exception:
-                # If the in-memory LRU refuses the new session, fall through
-                # with the just-persisted sidecar; _start_run will load it
-                # from disk if needed.
-                pass
+            # The ordinary materializer may fail after a concurrent lifecycle
+            # transition. Any fallback claim must resolve and publish under the
+            # same SID lock as deletion; otherwise it can read state after the
+            # generation bump but before delete_cli_session() removes that state,
+            # then recreate the retired sidecar with fresh authority.
+            fallback_response = None
+            with _get_session_agent_lock(body["session_id"]):
+                try:
+                    s = get_session(body["session_id"])
+                    s = _ensure_full_session_before_mutation(body["session_id"], s)
+                    if getattr(s, "read_only", False):
+                        fallback_response = (
+                            "Read-only imported sessions cannot be continued from WebUI",
+                            403,
+                        )
+                    elif (
+                        (getattr(s, "source_tag", "") or getattr(s, "raw_source", "") or "").strip().lower() == "subagent"
+                        or _is_subagent_child_session_id(body["session_id"])
+                    ):
+                        fallback_response = (
+                            "Read-only imported sessions cannot be continued from WebUI",
+                            403,
+                        )
+                except KeyError:
+                    # No WebUI sidecar. If this is a foreign-origin session (CLI,
+                    # TUI, Desktop) with recoverable state.db messages, claim it by
+                    # materialising a WebUI-owned Session and persisting it as a
+                    # sidecar. Both the canonical foreign read and save occur while
+                    # deletion is excluded by the SID lock.
+                    synth, reason = _claim_or_synthesize_cli_session(body["session_id"])
+                    if synth is None:
+                        # 'was_webui' (deleted WebUI session, client should self-heal
+                        # via the existing 404 path), 'no_foreign_state' (sid has
+                        # no recoverable state anywhere), or 'invalid_sid' (path
+                        # safety violation). All collapse to 404 — the client only
+                        # knows the right thing to do for "this session is gone".
+                        fallback_response = ("Session not found", 404)
+                    elif reason == "not_claimable":
+                        # Foreign store says this session is read-only / owned by
+                        # a non-WebUI process (messaging, claude_code,
+                        # external_agent, cron, gateway/unknown, or explicit
+                        # read_only flag). The session is real and viewable, but
+                        # the WebUI must not take write ownership of it — that
+                        # would be an ownership-boundary violation (#4911 review).
+                        # 403 (not 404) because 404 triggers the frontend's
+                        # empty-state self-heal handler which strips the URL and
+                        # clears localStorage; for a legitimately-listed read-only
+                        # session the user should keep their URL and see a refusal,
+                        # not have their session vanish.
+                        fallback_response = (
+                            "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
+                            403,
+                        )
+                    else:
+                        try:
+                            # Reaching this arm is an explicit user continuation of a
+                            # claimable foreign session. The synthesizer read the
+                            # canonical state under the SID lock, so authorization can
+                            # clear an older tombstone without granting stale work from
+                            # a concurrent delete a fresh generation.
+                            synth.save(authorize_deleted_recreation=True)
+                        except Exception as _save_err:
+                            # Persisting the sidecar failed: surface a generic 500 to
+                            # the client (paths sanitised, see _sanitize_error) and log
+                            # the full exception server-side. Returning the raw str(exc)
+                            # would leak /root/.hermes/webui/sessions/<sid>.json or any
+                            # other absolute filesystem path the OSError happened to
+                            # carry — #4911 review feedback.
+                            logger.exception(
+                                "failed to persist materialised sidecar for foreign session %s",
+                                body["session_id"],
+                            )
+                            fallback_response = (
+                                f"failed to claim session: {_sanitize_error(_save_err)}",
+                                500,
+                            )
+                        else:
+                            s = synth
+                            try:
+                                with LOCK:
+                                    SESSIONS[s.session_id] = s
+                                    SESSIONS.move_to_end(s.session_id)
+                            except Exception:
+                                # If the in-memory LRU refuses the new session, fall through
+                                # with the just-persisted sidecar; _start_run will load it
+                                # from disk if needed.
+                                pass
+            if fallback_response is not None:
+                return bad(handler, *fallback_response)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         diag.stage("validate_profile") if diag else None
@@ -29371,118 +29521,177 @@ def _handle_session_import_cli(handler, body):
             },
         )
 
-    # Fetch messages from CLI store
-    cli_meta = _resolve_cli_import_metadata(
-        sid,
-        requested_profile=requested_profile,
-        allow_all_profiles=allow_all_profiles,
-    )
-    profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
-    msgs = get_cli_session_messages(sid, profile=profile)
-    if not msgs:
-        return bad(handler, "Session not found in CLI store", 404)
+    # Capture the SID incarnation before entering the mutation boundary. An
+    # explicit import may intentionally recreate a SID that was already deleted
+    # when the request began, but it must not acquire fresh publication authority
+    # when a delete completes after this snapshot was taken.
+    import_generation = _session_lifecycle_generation(sid)
 
-    # Get profile, model, timestamps, and title from CLI session metadata
-    created_at = cli_meta.get("created_at") if cli_meta else None
-    updated_at = cli_meta.get("updated_at") if cli_meta else None
-    cli_title = cli_meta.get("title") if cli_meta else None
-    cli_source_tag = cli_meta.get("source_tag") if cli_meta else None
-    model = cli_meta.get("model", "unknown") if cli_meta else "unknown"
-    cli_raw_source = cli_meta.get("raw_source") if cli_meta else None
-    cli_session_source = cli_meta.get("session_source") if cli_meta else None
-    cli_source_label = cli_meta.get("source_label") if cli_meta else None
-    cli_user_id = cli_meta.get("user_id") if cli_meta else None
-    cli_chat_id = cli_meta.get("chat_id") if cli_meta else None
-    cli_chat_type = cli_meta.get("chat_type") if cli_meta else None
-    cli_thread_id = cli_meta.get("thread_id") if cli_meta else None
-    cli_session_key = cli_meta.get("session_key") if cli_meta else None
-    cli_platform = cli_meta.get("platform") if cli_meta else None
-    cli_parent_session_id = cli_meta.get("parent_session_id") if cli_meta else None
-    cli_read_only = bool((cli_meta or {}).get("read_only"))
-    # Delegated subagent children (#5307) are recovered VIEW-ONLY: they must
-    # never be materialized as a writable WebUI sidecar via this endpoint, or a
-    # subsequent chat-start/composer write would take ownership of a session
-    # that belongs to the delegate runner. Treat them like an explicitly
-    # read-only source (return the read-only stub payload, do not import), and
-    # keep them out of the _isExternalSession frontend gates (is_cli_session=False).
-    _sa_child = _is_subagent_child_session_id(sid)
-    # Also treat a resolved-metadata subagent source as view-only: with
-    # all_profiles=true, cli_meta is resolved from the requested (possibly
-    # non-active) profile, so the active-profile state.db check (_sa_child)
-    # can miss it (#5307 cross-profile edge).
-    _cli_sa = (cli_source_tag or cli_raw_source or "").strip().lower() == "subagent"
-    _sa_child = _sa_child or _cli_sa
-    _read_only_view = cli_read_only or _sa_child
+    def _prepare_import_result():
+        if import_generation != _session_lifecycle_generation(sid):
+            return (
+                "bad",
+                "Session changed while importing; try again",
+                409,
+            )
+        # The initial existence check precedes this lock. Do not overwrite a
+        # sidecar created by another request while the import was waiting.
+        if Session.load(sid) is not None:
+            return (
+                "bad",
+                "Session changed while importing; try again",
+                409,
+            )
 
-    # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
-    title = cli_title or title_from(msgs, "CLI Session")
+        # The SID lock is the publication authority boundary. Resolve metadata
+        # and read messages only after entering it so a request that starts after
+        # retirement but before state.db cleanup cannot publish the deleted
+        # incarnation's bytes with the new lifecycle generation.
+        cli_meta = _resolve_cli_import_metadata(
+            sid,
+            requested_profile=requested_profile,
+            allow_all_profiles=allow_all_profiles,
+        )
+        profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
+        msgs = get_cli_session_messages(sid, profile=profile)
+        if not msgs:
+            return ("bad", "Session not found in CLI store", 404)
 
-    # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079),
-    # gated on whether this profile has opted into project organization (#5379)
-    cron_project_id = None
-    if is_cron_session(sid, cli_source_tag):
-        cron_project_id = ensure_cron_project(create=_profile_has_user_projects())
+        # Get profile, model, timestamps, and title from the in-lock snapshot.
+        created_at = cli_meta.get("created_at") if cli_meta else None
+        updated_at = cli_meta.get("updated_at") if cli_meta else None
+        cli_title = cli_meta.get("title") if cli_meta else None
+        cli_source_tag = cli_meta.get("source_tag") if cli_meta else None
+        model = cli_meta.get("model", "unknown") if cli_meta else "unknown"
+        cli_raw_source = cli_meta.get("raw_source") if cli_meta else None
+        cli_session_source = cli_meta.get("session_source") if cli_meta else None
+        cli_source_label = cli_meta.get("source_label") if cli_meta else None
+        cli_user_id = cli_meta.get("user_id") if cli_meta else None
+        cli_chat_id = cli_meta.get("chat_id") if cli_meta else None
+        cli_chat_type = cli_meta.get("chat_type") if cli_meta else None
+        cli_thread_id = cli_meta.get("thread_id") if cli_meta else None
+        cli_session_key = cli_meta.get("session_key") if cli_meta else None
+        cli_platform = cli_meta.get("platform") if cli_meta else None
+        cli_parent_session_id = cli_meta.get("parent_session_id") if cli_meta else None
+        cli_read_only = bool((cli_meta or {}).get("read_only"))
+        # Delegated subagent children (#5307) are recovered VIEW-ONLY: they must
+        # never be materialized as a writable WebUI sidecar via this endpoint, or a
+        # subsequent chat-start/composer write would take ownership of a session
+        # that belongs to the delegate runner. Treat them like an explicitly
+        # read-only source (return the read-only stub payload, do not import), and
+        # keep them out of the _isExternalSession frontend gates (is_cli_session=False).
+        _sa_child = _is_subagent_child_session_id(sid)
+        # Also treat a resolved-metadata subagent source as view-only: with
+        # all_profiles=true, cli_meta is resolved from the requested (possibly
+        # non-active) profile, so the active-profile state.db check (_sa_child)
+        # can miss it (#5307 cross-profile edge).
+        _cli_sa = (cli_source_tag or cli_raw_source or "").strip().lower() == "subagent"
+        _sa_child = _sa_child or _cli_sa
+        _read_only_view = cli_read_only or _sa_child
 
-    if _read_only_view:
-        session_payload = {
-            "session_id": sid,
-            "title": title,
-            "workspace": str(get_last_workspace(profile=profile)),
-            "model": model,
-            "message_count": len(msgs),
-            "created_at": created_at,
-            "updated_at": updated_at,
-            "last_message_at": updated_at or created_at,
-            "pinned": False,
-            "archived": False,
-            "project_id": None,
-            "profile": profile,
-            # Subagent children (#5307) are recovered view-only and must NOT be
-            # CLI-classified (keeps them out of the frontend _isExternalSession
-            # gates); other explicitly-read-only sources keep is_cli_session=True.
-            "is_cli_session": (False if _sa_child else True),
-            "source_tag": cli_source_tag,
-            "raw_source": cli_raw_source or cli_source_tag,
-            "session_source": cli_session_source,
-            "source_label": cli_source_label,
-            "parent_session_id": cli_parent_session_id,
-            "read_only": True,
-            "messages": msgs,
-            "tool_calls": [],
-        }
-        return j(
-            handler,
-            {
-                "session": public_session_projection(session_payload),
-                "imported": False,
-            },
+        # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
+        title = cli_title or title_from(msgs, "CLI Session")
+
+        # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079),
+        # gated on whether this profile has opted into project organization (#5379)
+        cron_project_id = None
+        if is_cron_session(sid, cli_source_tag):
+            cron_project_id = ensure_cron_project(create=_profile_has_user_projects())
+
+        if _read_only_view:
+            session_payload = {
+                "session_id": sid,
+                "title": title,
+                "workspace": str(get_last_workspace(profile=profile)),
+                "model": model,
+                "message_count": len(msgs),
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "last_message_at": updated_at or created_at,
+                "pinned": False,
+                "archived": False,
+                "project_id": None,
+                "profile": profile,
+                # Subagent children (#5307) are recovered view-only and must NOT be
+                # CLI-classified (keeps them out of the frontend _isExternalSession
+                # gates); other explicitly-read-only sources keep is_cli_session=True.
+                "is_cli_session": (False if _sa_child else True),
+                "source_tag": cli_source_tag,
+                "raw_source": cli_raw_source or cli_source_tag,
+                "session_source": cli_session_source,
+                "source_label": cli_source_label,
+                "parent_session_id": cli_parent_session_id,
+                "read_only": True,
+                "messages": msgs,
+                "tool_calls": [],
+            }
+            return (
+                "json",
+                {
+                    "session": public_session_projection(session_payload),
+                    "imported": False,
+                },
+                200,
+            )
+
+        s = import_cli_session(
+            sid,
+            title,
+            msgs,
+            model,
+            profile=profile,
+            created_at=created_at,
+            updated_at=updated_at,
+            parent_session_id=cli_parent_session_id,
+            authorize_deleted_recreation=True,
+            _lifecycle_generation=import_generation,
+        )
+        if cron_project_id:
+            s.project_id = cron_project_id
+        s.is_cli_session = True
+        s.source_tag = cli_source_tag
+        s.raw_source = cli_raw_source or cli_source_tag
+        s.session_source = cli_session_source
+        s.source_label = cli_source_label
+        s.user_id = cli_user_id
+        s.chat_id = cli_chat_id
+        s.chat_type = cli_chat_type
+        s.thread_id = cli_thread_id
+        s.session_key = cli_session_key
+        s.platform = cli_platform
+        s._cli_origin = sid
+        s.save(touch_updated_at=False)
+        return (
+            "imported",
+            (
+                s,
+                msgs,
+                cli_title,
+                cli_source_tag,
+                cli_raw_source,
+                cli_session_source,
+                cli_source_label,
+                cli_read_only,
+            ),
+            200,
         )
 
-    s = import_cli_session(
-        sid,
-        title,
+    with _get_session_agent_lock(sid):
+        response_kind, response_payload, response_status = _prepare_import_result()
+    if response_kind == "bad":
+        return bad(handler, response_payload, response_status)
+    if response_kind == "json":
+        return j(handler, response_payload, status=response_status)
+    (
+        s,
         msgs,
-        model,
-        profile=profile,
-        created_at=created_at,
-        updated_at=updated_at,
-        parent_session_id=cli_parent_session_id,
-    )
-    if cron_project_id:
-        s.project_id = cron_project_id
-    s.is_cli_session = True
-    s.source_tag = cli_source_tag
-    s.raw_source = cli_raw_source or cli_source_tag
-    s.session_source = cli_session_source
-    s.source_label = cli_source_label
-    s.user_id = cli_user_id
-    s.chat_id = cli_chat_id
-    s.chat_type = cli_chat_type
-    s.thread_id = cli_thread_id
-    s.session_key = cli_session_key
-    s.platform = cli_platform
-    s._cli_origin = sid
-    s.save(touch_updated_at=False)
+        cli_title,
+        cli_source_tag,
+        cli_raw_source,
+        cli_session_source,
+        cli_source_label,
+        cli_read_only,
+    ) = response_payload
     publish_session_list_changed(
         "session_import_cli",
         profile=getattr(s, "profile", None),

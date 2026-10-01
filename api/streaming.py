@@ -78,9 +78,11 @@ from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
     _WEBUI_TRUSTED_AGENT_INPUT_FIELD,
+    _collapse_duplicate_incomplete_message_ids,
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
+    _strict_incomplete_message_id_key,
     _validated_webui_pending_user_timestamp_identity,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -2831,10 +2833,72 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_started_at = None
     session.pending_user_source = None
     try:
-        import pathlib
-        pathlib.Path(session.path).unlink(missing_ok=True)
+        from api.models import prune_session_from_index, retire_session_sidecar
+        sidecar_path = Path(session.path)
+        retired = retire_session_sidecar(
+            getattr(session, "session_id", None) or sidecar_path.stem,
+            sidecar_path=sidecar_path,
+            record_deleted_tombstone=False,
+        )
+        if retired:
+            prune_session_from_index(
+                getattr(session, "session_id", None) or sidecar_path.stem
+            )
     except Exception:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+
+
+def _stop_checkpoint_thread(stop_event, checkpoint_thread) -> None:
+    """Stop and fully quiesce a checkpoint writer before lifecycle mutation."""
+    if stop_event is not None:
+        stop_event.set()
+    if (
+        checkpoint_thread is not None
+        and checkpoint_thread is not threading.current_thread()
+    ):
+        # No timeout: retirement must not proceed while an admitted checkpoint
+        # can still publish. The checkpoint never waits for the worker thread;
+        # callers invoke this before taking the agent lock, avoiding deadlock.
+        checkpoint_thread.join()
+
+
+def _run_periodic_checkpoint_loop(
+    session,
+    checkpoint_activity,
+    stop_event,
+    agent_lock,
+    *,
+    interval_seconds: float = 15,
+) -> None:
+    """Persist active-turn checkpoints until teardown revokes admission."""
+    last_saved_activity = 0
+    last_fingerprint = None
+    last_write_at = 0.0
+    while not stop_event.wait(interval_seconds):
+        try:
+            cur = checkpoint_activity[0]
+            if cur > last_saved_activity:
+                with agent_lock:
+                    # The wait admitted this iteration before teardown may have
+                    # set the stop event. Recheck after acquiring the mutation
+                    # lock so an admitted-but-blocked checkpoint cannot publish
+                    # after ephemeral retirement.
+                    if stop_event.is_set():
+                        return
+                    fingerprint = _streaming_checkpoint_fingerprint(session)
+                    now = time.time()
+                    stale = (now - last_write_at) >= _CHECKPOINT_IDLE_REFRESH_SECONDS
+                    if (
+                        fingerprint is None
+                        or fingerprint != last_fingerprint
+                        or stale
+                    ):
+                        _save_streaming_checkpoint(session)
+                        last_fingerprint = fingerprint
+                        last_write_at = now
+                last_saved_activity = cur
+        except Exception as exc:
+            logger.debug("Periodic checkpoint save failed: %s", exc)
 
 
 def _resolve_current_session_for_write(session):
@@ -6879,6 +6943,30 @@ def _message_identity(msg):
         # Now, _partial messages with empty text get a stable identity
         # keyed on their role + _partial flag + reasoning/tool metadata,
         # so the merge can dedup identical empty partials.
+        # Codex can persist a reasoning-only assistant result with an empty
+        # visible body and finish_reason=incomplete without the legacy
+        # ``_partial`` flag. Those rows still carry the stable core message id.
+        # Returning None here made every reconcile treat the same result as a
+        # fresh context-only row, which amplified alternating replays such as
+        # FD05 message ids 1701/1702 on every subsequent turn.
+        # #6600: share the persistence boundary's strict typed scalar identity
+        # (api.models._strict_incomplete_message_id_key) so str/int/float ids
+        # never collapse across types and bools/containers/subclasses/non-finite
+        # floats are rejected in BOTH layers.
+        if (
+            role == 'assistant'
+            and str(msg.get('finish_reason') or '').lower() == 'incomplete'
+        ):
+            typed_id_key = _strict_incomplete_message_id_key(msg.get('id'))
+            if typed_id_key is not None:
+                return (
+                    role,
+                    '',
+                    '',
+                    '__incomplete_message_id__' + repr(typed_id_key),
+                )
+        # Canonical incomplete identity must win over the legacy partial arm:
+        # persistence keys `_partial + incomplete` rows by typed message id too.
         if msg.get('_partial'):
             reasoning_key = " ".join(str(msg.get('reasoning') or '').split())[:200]
             return (
@@ -7682,6 +7770,7 @@ def _merge_display_messages_after_agent_result(
     # three inputs consistently so prefix/delta detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
+    previous_display, _ = _collapse_duplicate_incomplete_message_ids(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -7732,6 +7821,8 @@ def _merge_display_messages_after_agent_result(
     # would otherwise slip into the merged transcript as a real delta. (#5334)
     previous_context = _drop_synthetic_control_messages(previous_context)
     result_messages = _drop_synthetic_control_messages(result_messages)
+    previous_context, _ = _collapse_duplicate_incomplete_message_ids(previous_context)
+    result_messages, _ = _collapse_duplicate_incomplete_message_ids(result_messages)
     if not result_messages:
         return previous_display
     active_turn_row_index = _find_active_turn_checkpoint_index(
@@ -11967,37 +12058,12 @@ def _run_agent_streaming(
             # (_checkpoint_activity is already initialised before on_tool().)
 
             def _periodic_checkpoint():
-                last_saved_activity = 0
-                last_fingerprint = None
-                last_write_at = 0.0
-                while not _checkpoint_stop.wait(15):
-                    try:
-                        cur = _checkpoint_activity[0]
-                        if cur > last_saved_activity:
-                            with _agent_lock:
-                                fingerprint = _streaming_checkpoint_fingerprint(s)
-                                # A completed tool call is the trigger, but not
-                                # proof that anything the checkpoint persists
-                                # actually changed. Rewriting a multi-megabyte
-                                # sidecar to re-persist identical bytes stalls
-                                # every concurrent HTTP request behind the GIL,
-                                # so only write when the persisted state moved.
-                                # Fail closed: an unreadable fingerprint (None)
-                                # always writes, and a periodic refresh keeps
-                                # updated_at from going stale on a long turn.
-                                now = time.time()
-                                stale = (now - last_write_at) >= _CHECKPOINT_IDLE_REFRESH_SECONDS
-                                if (
-                                    fingerprint is None
-                                    or fingerprint != last_fingerprint
-                                    or stale
-                                ):
-                                    _save_streaming_checkpoint(s)
-                                    last_fingerprint = fingerprint
-                                    last_write_at = now
-                            last_saved_activity = cur
-                    except Exception as e:
-                        logger.debug("Periodic checkpoint save failed: %s", e)
+                _run_periodic_checkpoint_loop(
+                    s,
+                    _checkpoint_activity,
+                    _checkpoint_stop,
+                    _agent_lock,
+                )
 
             _checkpoint_stop = threading.Event()
             # Persist the user message BEFORE streaming starts so it's durable even if
@@ -12090,6 +12156,12 @@ def _run_agent_streaming(
             _active_turn_identity['trusted_agent_input_text'] = _agent_msg_text
             _result_partial_pre_call_context = list(_previous_context_messages)
             if not _agent_can_invoke(agent):
+                if ephemeral:
+                    # Checkpointing is already live at this admission boundary.
+                    # Quiesce it before ephemeral finalization can unlink the
+                    # sidecar; otherwise an admitted writer can republish after
+                    # _cleanup_ephemeral_cancelled_turn() returns.
+                    _stop_checkpoint_thread(_checkpoint_stop, _ckpt_thread)
                 with _agent_lock:
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
@@ -12107,10 +12179,7 @@ def _run_agent_streaming(
             # sub-100ms window reaches the live Thinking view before the terminal done event.
             _flush_reasoning_buffer()
             if cancel_event.is_set():
-                if _checkpoint_stop is not None:
-                    _checkpoint_stop.set()
-                if _ckpt_thread is not None:
-                    _ckpt_thread.join(timeout=15)
+                _stop_checkpoint_thread(_checkpoint_stop, _ckpt_thread)
                 if ephemeral:
                     with _agent_lock:
                         _finalize_cancelled_turn(s, ephemeral=True, stream_id=stream_id)
@@ -12156,13 +12225,18 @@ def _run_agent_streaming(
                     'ephemeral': True,
                     'answer': _answer,
                 })
-                if _checkpoint_stop is not None:
-                    _checkpoint_stop.set()
-                try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                # Join BEFORE taking the agent lock: an admitted checkpoint may
+                # already be waiting there. Its post-lock stop check makes it
+                # exit without saving; verified thread termination then makes
+                # sidecar retirement final for this ephemeral run.
+                _stop_checkpoint_thread(_checkpoint_stop, _ckpt_thread)
+                with _agent_lock:
+                    # Clear pending runtime ownership before retiring. The outer
+                    # finally block runs after this return and performs a
+                    # last-resort pending sync; leaving these fields populated
+                    # would let that recovery save recreate the ephemeral
+                    # sidecar after successful retirement.
+                    _cleanup_ephemeral_cancelled_turn(s)
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
@@ -14292,10 +14366,7 @@ def _run_agent_streaming(
         # Stop the periodic checkpoint thread before the final recovery path.
         # The checkpoint thread also uses the per-session lock; joining it first
         # avoids contending with checkpoint writes during stale-pending repair.
-        if _checkpoint_stop is not None:
-            _checkpoint_stop.set()
-        if _ckpt_thread is not None:
-            _ckpt_thread.join(timeout=15)
+        _stop_checkpoint_thread(_checkpoint_stop, _ckpt_thread)
         if (s is not None
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):
