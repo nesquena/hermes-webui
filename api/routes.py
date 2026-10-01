@@ -24639,6 +24639,7 @@ def _start_chat_stream_for_session(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    goal_continuation_id: str = "",
 ):
     """Persist pending state, register an SSE channel, and start an agent turn.
 
@@ -24686,19 +24687,26 @@ def _start_chat_stream_for_session(
 
     def consume_continuation_markers() -> None:
         nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
+        # #1932 / #7862: consume a pending goal continuation, but ONLY when
+        # this turn actually IS the recorded continuation. The marker used
+        # to be spent by session id alone, which was safe only while it
+        # lived for the few seconds between goal_continue firing and the
+        # browser's automatic send. #7862 makes it durable, so it can come
+        # back at startup long after that browser is gone; retiring on the
+        # next message of any kind would swallow an unrelated turn and
+        # queue another automatic continuation on top of it. A non-matching
+        # send stays an ordinary turn and leaves the intent pending
+        # (bounded by sweep_expired_goal_continuations).
+        #
+        # Identity first: the browser carries the ``goal_continue`` token
+        # through the queued automatic continuation, so a `/use` skill
+        # directive wrapping the queued text can no longer break the match
+        # (round-3 core finding).
         if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-            # #1932 / #7862: consume a pending goal continuation, but ONLY when
-            # this turn actually IS the recorded continuation. The marker used
-            # to be spent by session id alone, which was safe only while it
-            # lived for the few seconds between goal_continue firing and the
-            # browser's automatic send. #7862 makes it durable, so it can come
-            # back at startup long after that browser is gone; retiring on the
-            # next message of any kind would swallow an unrelated turn and
-            # queue another automatic continuation on top of it. A non-matching
-            # send stays an ordinary turn and leaves the intent pending
-            # (bounded by sweep_expired_goal_continuations).
             try:
-                if consume_pending_goal_continuation(s.session_id, msg):
+                if consume_pending_goal_continuation(
+                    s.session_id, msg, goal_continuation_id
+                ):
                     goal_related = True
                     consumed_goal_continuation = True
             except Exception:
@@ -25113,6 +25121,7 @@ def _start_run(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    goal_continuation_id: str = "",
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -25197,10 +25206,10 @@ def _start_run(
                 goal_related=goal_related,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
-                process_id=process_id,
-                retry_attempt=retry_attempt,
-                rearm_deferred_wakeup=rearm_deferred_wakeup,
-            )
+    process_id=process_id,
+    retry_attempt=retry_attempt,
+    rearm_deferred_wakeup=rearm_deferred_wakeup,
+    goal_continuation_id=goal_continuation_id,            )
 
         def _legacy_adapter_factory():
             return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
@@ -25248,10 +25257,10 @@ def _start_run(
         goal_related=goal_related,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
-        process_id=process_id,
-        retry_attempt=retry_attempt,
-        rearm_deferred_wakeup=rearm_deferred_wakeup,
-    )
+    process_id=process_id,
+    retry_attempt=retry_attempt,
+    rearm_deferred_wakeup=rearm_deferred_wakeup,
+    goal_continuation_id=goal_continuation_id,    )
 
 
 def _process_wakeup_revalidation_provider(model, provider) -> str:
@@ -26324,6 +26333,10 @@ def _handle_chat_start(handler, body, diag=None):
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
             "regeneration": regeneration,
+            # #7862: the goal_continue token the browser echoes on the queued
+            # automatic continuation. Carried so a `/use` skill directive
+            # wrapping the queued text cannot break the intent match.
+            "goal_continuation_id": str(body.get("goal_continuation_id") or "").strip()[:128],
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config

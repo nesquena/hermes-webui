@@ -1750,14 +1750,23 @@ def _run_gateway_chat_streaming(
                     continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
                     if continuation_prompt:
                         PENDING_GOAL_CONTINUATION.add(session_id)
+                        # #7862: mint the continuation token so the browser's
+                        # queued automatic send can be matched by IDENTITY
+                        # instead of text — a `/use` skill directive can wrap
+                        # the queued text and break a text-only comparison.
+                        continuation_id = (
+                            f"gc-{session_id[:8]}-{uuid.uuid4().hex[:12]}"
+                        )
                         arm_pending_goal_continuation(
                             session_id,
                             continuation_prompt,
                             reason="goal_continue",
+                            continuation_id=continuation_id,
                         )
                         put_gateway_event("goal_continue", {
                             "session_id": session_id,
                             "continuation_prompt": continuation_prompt,
+                            "continuation_id": continuation_id,
                             "text": continuation_prompt,
                             "message": goal_message,
                             "message_key": decision.get("message_key") or "goal_continuing",

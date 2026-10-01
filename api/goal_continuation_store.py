@@ -26,6 +26,7 @@ Review round 2 (#7862) addresses the maintainer's correctness blockers:
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -146,6 +147,7 @@ def _load_file_raw() -> dict:
                 "generation": int(rec.get("generation") or file_generation),
                 "created_at": float(rec.get("created_at") or time.time()),
                 "reason": str(rec.get("reason") or "goal_continue"),
+                "continuation_id": str(rec.get("continuation_id") or ""),
             }
         return out
     if isinstance(data, list):
@@ -158,6 +160,7 @@ def _load_file_raw() -> dict:
                 "generation": 0,
                 "created_at": time.time(),
                 "reason": "goal_continue",
+                "continuation_id": "",
             }
             for sid in data
             if isinstance(sid, str) and sid
@@ -176,6 +179,7 @@ def arm_pending_goal_continuation(
     session_id: str,
     continuation_prompt: str = "",
     reason: str = "goal_continue",
+    continuation_id: str = "",
 ) -> None:
     """Arm durable intent for one session: mutate + snapshot under ONE lock.
 
@@ -183,6 +187,11 @@ def arm_pending_goal_continuation(
     continuation prompt + generation in ``PENDING_GOAL_CONTINUATION_RECORDS``,
     then persists. Never raises into the chat path; write failures are
     observable via ``durability_diagnostics()``.
+
+    ``continuation_id`` is the opaque token the ``goal_continue`` SSE event
+    hands the browser so the queued automatic continuation can be matched by
+    identity instead of by text (#7862 core finding): text identity breaks
+    when a ``/use <skill>`` directive wraps the queued send.
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
@@ -198,6 +207,7 @@ def arm_pending_goal_continuation(
             "generation": generation,
             "created_at": time.time(),
             "reason": reason,
+            "continuation_id": str(continuation_id or ""),
         }
         _write_registry_unlocked(
             PENDING_GOAL_CONTINUATION_RECORDS,
@@ -245,9 +255,61 @@ def normalize_continuation_text(value: str) -> str:
     return " ".join(str(value or "").split())
 
 
+# The browser can PREPEND a known skill-directive envelope to the queued
+# continuation text before it is sent (#7862 core finding): a `/use <skill>`
+# typed while a `/goal` turn runs converts the automatic continuation send
+# into `[USER OVERRIDE] …\n\n[FORCED SKILL CONTEXT: …]\n…\n[/FORCED SKILL CONTEXT]\n\n<continuation prompt>`.
+# Text identity alone then never matches, so the intent stays pending and the
+# goal loop dies after its first automatic continuation. These anchored
+# patterns mirror static/messages.js (the ONLY producer of the envelope);
+# user-authored lookalike text is never stripped by the frontend either, so
+# stripping only the exact envelope keeps the admission contract intact.
+_SILL_DIRECTIVE_RE = re.compile(
+    r"^\[USER OVERRIDE\]\s+You MUST follow the skill '[^']*'[^\n]*(?:\n\n\[FORCED SKILL CONTEXT:[^\n]*\n.*?\n\[/FORCED SKILL CONTEXT\])?\s*",
+    re.DOTALL,
+)
+
+
+def strip_known_skill_envelope(value: str) -> str:
+    """Return ``value`` with a leading forced-skill directive envelope removed.
+
+    Only the exact ``[USER OVERRIDE]`` + optional ``[FORCED SKILL CONTEXT]``
+    envelope produced by ``/use`` is stripped; anything else (including a
+    user's own text) is returned unchanged, so the comparison stays a
+    "recorded prompt, optionally wrapped by a known skill directive" match
+    instead of a fuzzy substring search.
+    """
+    text = str(value or "")
+    stripped = _SILL_DIRECTIVE_RE.sub("", text, count=1)
+    return stripped if stripped != text else text
+
+
+def _continuation_text_matches(recorded_prompt: str, incoming_text: str) -> bool:
+    """True when the incoming turn IS the recorded continuation.
+
+    Two accepted shapes, mirroring what the browser actually sends:
+
+    1. the recorded prompt verbatim (normalised) — the plain automatic
+       continuation the ``goal_continue`` SSE event queues;
+    2. the recorded prompt wrapped by the forced-skill directive envelope a
+       pending ``/use`` skill prepends to that same queued send.
+
+    An unrelated human message matches neither and leaves the intent pending.
+    """
+    recorded = normalize_continuation_text(recorded_prompt)
+    if not recorded:
+        return False
+    candidates = {
+        normalize_continuation_text(incoming_text),
+        normalize_continuation_text(strip_known_skill_envelope(incoming_text)),
+    }
+    return recorded in candidates
+
+
 def consume_pending_goal_continuation(
     session_id: str,
     incoming_text: str = "",
+    continuation_id: str = "",
 ) -> bool:
     """Consume this session's durable intent ONLY if the turn is the continuation.
 
@@ -263,6 +325,15 @@ def consume_pending_goal_continuation(
     an ordinary turn and leaves the pending intent in place (expiry still
     bounds it via ``sweep_expired_goal_continuations``).
 
+    ``continuation_id`` is the preferred match: when the request carries the
+    token the ``goal_continue`` SSE event handed the browser, the turn must
+    still present the recorded prompt — verbatim, or wrapped by the known
+    forced-skill envelope a pending ``/use`` skill prepends to the queued
+    send (which is exactly where text identity alone broke the goal loop in
+    round 3). A token belonging to a different generation is rejected, a
+    request with no token falls back to the text comparison, and unrelated
+    text is never swallowed under any combination.
+
     Returns True when the intent was consumed. Never raises into the chat path.
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
@@ -270,7 +341,6 @@ def consume_pending_goal_continuation(
     sid = str(session_id or "").strip()
     if not sid:
         return False
-    incoming = normalize_continuation_text(incoming_text)
     with _LOCK:
         record = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
         if record is None:
@@ -280,8 +350,18 @@ def consume_pending_goal_continuation(
             # expiry bounds it, and swallowing an unrelated turn is the exact
             # data-loss bug this function exists to prevent.
             return False
-        recorded = normalize_continuation_text(record.get("prompt") or "")
-        if not recorded or recorded != incoming:
+        recorded_id = str(record.get("continuation_id") or "")
+        request_id = str(continuation_id or "")
+        if recorded_id and request_id and recorded_id != request_id:
+            # A token was carried, but not THIS continuation's token: another
+            # (already consumed or restarted) generation. Treat it like any
+            # other non-matching turn.
+            return False
+        # Identity narrows the candidate set to this exact continuation; the
+        # recorded prompt still has to be present (verbatim or wrapped by the
+        # known forced-skill envelope), so a replayed token carrying unrelated
+        # text is never swallowed.
+        if not _continuation_text_matches(record.get("prompt") or "", incoming_text):
             return False
         _next_generation_unlocked()
         PENDING_GOAL_CONTINUATION.discard(sid)

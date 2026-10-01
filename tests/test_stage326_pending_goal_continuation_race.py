@@ -71,7 +71,8 @@ def test_routes_consumer_discards_atomically_on_read():
     # Find the consumption check.
     m = re.search(
         r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?"
-        r"consume_pending_goal_continuation\(\s*s\.session_id,\s*msg\s*\)",
+        r"consume_pending_goal_continuation\(\s*"
+        r"s\.session_id,\s*msg,\s*goal_continuation_id\s*,?\s*\)",
         src,
         re.DOTALL,
     )
@@ -133,8 +134,9 @@ def test_goal_continue_set_marker_before_emitting_event():
     after_add = src[add_idx:]
     event_idx = after_add.find("goal_continue")
     assert event_idx != -1, "no goal_continue emission after marker add"
-    # Must be within ~500 chars (close to the add).
-    assert event_idx < 500, (
+    # Must be within ~900 chars (close to the add). The window also covers the
+    # #7862 round-3 token mint between the marker add and the SSE emission.
+    assert event_idx < 900, (
         "PENDING_GOAL_CONTINUATION.add must immediately precede the "
         "goal_continue SSE emission"
     )

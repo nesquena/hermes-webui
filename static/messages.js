@@ -1842,7 +1842,10 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      // #7862: identity token for a drained goal continuation (survives a
+      // `/use` skill directive wrapping the queued text on the wire).
+      goal_continuation_id:(options&&options.goal_continuation_id)||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;
@@ -6227,6 +6230,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _pendingGoalContinuation={
           sid,
           text:continuation_prompt,
+          // #7862: carry the continuation token so this queued automatic
+          // send is matched by identity, not by text — a `/use` skill
+          // directive wraps the queued text and breaks a text-only match.
+          continuation_id:String(d.continuation_id||''),
           model:_modelState.model,
           model_provider:_modelState.model_provider,
           profile:S.activeProfile||'default',
@@ -6545,6 +6552,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             model:_goalNext.model,
             model_provider:_goalNext.model_provider,
             profile:_goalNext.profile,
+            // #7862: keep the continuation token on the queue entry so the
+            // drained send can prove it is the goal continuation.
+            goal_continuation_id:_goalNext.continuation_id||'',
           });
           if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
         }

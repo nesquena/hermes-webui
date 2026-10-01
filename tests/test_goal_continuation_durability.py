@@ -471,15 +471,21 @@ class TestSourceShapes:
         src = Path("api/streaming.py").read_text(encoding="utf-8")
         m = re.search(r"PENDING_GOAL_CONTINUATION\.add\(session_id\)", src)
         assert m is not None
-        tail = src[m.end():m.end() + 400]
+        tail = src[m.end():m.end() + 700]
         assert "arm_pending_goal_continuation" in tail
+        # #7862 round 3: the minted token must reach both the store and the
+        # SSE payload in the same window.
+        assert "continuation_id" in tail
 
     def test_gateway_arms_via_locked_mutator(self):
         src = Path("api/gateway_chat.py").read_text(encoding="utf-8")
         m = re.search(r"PENDING_GOAL_CONTINUATION\.add\(session_id\)", src)
         assert m is not None
-        tail = src[m.end():m.end() + 400]
+        tail = src[m.end():m.end() + 700]
         assert "arm_pending_goal_continuation" in tail
+        # #7862 round 3: the minted token must reach both the store and the
+        # SSE payload in the same window.
+        assert "continuation_id" in tail
 
     def test_routes_consumes_via_match_gated_mutator(self):
         """#7862: routes must consume through the match-gated mutator.
@@ -491,7 +497,10 @@ class TestSourceShapes:
         """
         src = Path("api/routes.py").read_text(encoding="utf-8")
         m = re.search(
-            r"consume_pending_goal_continuation\(\s*s\.session_id,\s*msg\s*\)", src
+            r"consume_pending_goal_continuation\(\s*"
+            r"s\.session_id,\s*msg,\s*goal_continuation_id\s*"
+            r",?\s*\)",
+            src,
         )
         assert m is not None
         tail = src[m.end():m.end() + 200]
