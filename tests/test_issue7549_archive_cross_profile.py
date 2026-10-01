@@ -338,3 +338,267 @@ def test_archive_handler_passes_all_profiles_on_retry():
         f"the KeyError fallback must retry with all_profiles=True (#7549): {retry}")
     assert 'session_profile_mismatch' in block, (
         "archive handler must emit the structured 409 envelope (#7710 contract)")
+
+
+# --- #7826 root fix: request-scoped `profile` field --------------------------
+
+
+def test_profile_scoped_archive_of_foreign_session_succeeds(
+    routes_module, archive_env, monkeypatch
+):
+    """#7826 root fix: a foreign-profile session archives with a 200 when the
+    request carries the owner profile — and the ACTIVE profile is never
+    consulted: ``_get_active_profile_name`` must not be called at all, so
+    neither the active profile nor its cookie can change."""
+    lookup_calls = []
+    active_calls = []
+
+    def fake_lookup(sid, *, all_profiles=False):
+        lookup_calls.append(all_profiles)
+        return CLI_META_OTHER if all_profiles else {}
+
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", fake_lookup)
+    monkeypatch.setattr(routes_module, "_get_active_profile_name",
+                        lambda: active_calls.append("get") or "default")
+    messages = [{"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"}]
+    monkeypatch.setattr(routes_module, "get_cli_session_messages",
+                        lambda _sid: messages)
+    fake_session = SimpleNamespace(
+        session_id="20260925_otherprof_abcd", archived=False,
+        profile="work", messages=[], title="x",
+        compact=lambda: {"session_id": "20260925_otherprof_abcd",
+                         "archived": True, "profile": "work"},
+        save=lambda **kw: saved.append(kw))
+    saved = []
+
+    def fake_import(*args, **kwargs):
+        fake_session.is_cli_session = True
+        with routes_module.LOCK:
+            routes_module.SESSIONS[fake_session.session_id] = fake_session
+            routes_module.SESSIONS.move_to_end(fake_session.session_id)
+        return fake_session
+    monkeypatch.setattr(routes_module, "import_cli_session", fake_import)
+    monkeypatch.setattr(routes_module, "is_cli_session_row", lambda _m: True)
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: None)
+
+    status, payload = _post_archive(routes_module, {
+        "session_id": "20260925_otherprof_abcd", "archived": True,
+        "profile": "work"})
+
+    assert status == 200, f"profile-scoped archive must succeed: {payload}"
+    assert fake_session.archived is True
+    assert saved and saved[-1].get("touch_updated_at") is False
+    assert active_calls == [], (
+        "a profile-scoped archive must never consult the active profile: "
+        f"{active_calls}")
+
+
+def test_profile_field_wrong_owner_409s_with_real_owner(
+    routes_module, archive_env, monkeypatch
+):
+    """#7826 security boundary: the `profile` field is a CLAIM, not an
+    override. Asking for a profile the session does not belong to must 409
+    with the REAL owner (so the client can re-aim) and materialize nothing."""
+    active_calls = []
+
+    def fake_lookup(sid, *, all_profiles=False):
+        return CLI_META_OTHER if all_profiles else {}
+
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", fake_lookup)
+    monkeypatch.setattr(routes_module, "_get_active_profile_name",
+                        lambda: active_calls.append("get") or "default")
+    side_effects = []
+
+    class _SpySession:
+        def __init__(self, *a, **k):
+            side_effects.append("Session-ctor")
+
+        def save(self, *a, **k):
+            side_effects.append("save")
+
+    monkeypatch.setattr(routes_module, "Session", _SpySession)
+    monkeypatch.setattr(routes_module, "import_cli_session",
+                        lambda *a, **k: side_effects.append("import"))
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: side_effects.append("publish"))
+
+    status, payload = _post_archive(routes_module, {
+        "session_id": "20260925_otherprof_abcd", "archived": True,
+        "profile": "home"})
+
+    assert status == 409, f"wrong owner profile must 409, got {status}: {payload}"
+    assert payload["code"] == "session_profile_mismatch"
+    assert payload["profile"] == "work", (
+        f"the 409 must name the session's REAL owner, not the request: {payload}")
+    assert payload["session_id"] == "20260925_otherprof_abcd"
+    assert side_effects == [], (
+        f"mismatched profile must not construct/save/import/publish: "
+        f"{side_effects}")
+    assert active_calls == [], (
+        f"the wrong-profile check must not consult the active profile: "
+        f"{active_calls}")
+
+
+def test_profile_field_does_not_rescue_profile_less_row(
+    routes_module, archive_env, monkeypatch
+):
+    """#7826: the profile-scoped request must not resurrect the bare-404
+    contract — a profile-less metadata row stays 404 even when a profile
+    field is supplied, with zero materialization side effects."""
+    legacy_meta = dict(CLI_META_OTHER, profile=None)
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid, *, all_profiles=False: legacy_meta if all_profiles else {})
+    side_effects = []
+
+    class _SpySession:
+        def __init__(self, *a, **k):
+            side_effects.append("Session-ctor")
+
+        def save(self, *a, **k):
+            side_effects.append("save")
+
+    monkeypatch.setattr(routes_module, "Session", _SpySession)
+    monkeypatch.setattr(routes_module, "import_cli_session",
+                        lambda *a, **k: side_effects.append("import"))
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: side_effects.append("publish"))
+
+    status, _ = _post_archive(routes_module, {
+        "session_id": "legacy-sid-no-profile", "archived": True,
+        "profile": "work"})
+
+    assert status == 404, "profile-less row must stay 404 even with a profile field"
+    assert side_effects == [], (
+        f"profile-less rejection must not construct/save/import/publish: "
+        f"{side_effects}")
+
+
+def _register_sidecar(routes_module, session):
+    with routes_module.LOCK:
+        routes_module.SESSIONS[session.session_id] = session
+        routes_module.SESSIONS.move_to_end(session.session_id)
+
+
+def test_sidecar_archive_with_matching_requested_profile_succeeds(
+    routes_module, archive_env, monkeypatch
+):
+    """#7826: the sidecar (get_session) path is profile-agnostic, but a
+    profile-scoped request must still validate against the sidecar's own
+    profile. A matching profile archives fine and the active profile is never
+    consulted."""
+    active_calls = []
+    fake_sidecar = SimpleNamespace(
+        session_id="webui-work-sidecar", archived=False, profile="work",
+        messages=[], _loaded_metadata_only=False,
+        compact=lambda: {"session_id": "webui-work-sidecar", "archived": True},
+        save=lambda **kw: saved.append(kw))
+    saved = []
+    _register_sidecar(routes_module, fake_sidecar)
+
+    def fake_get_session(sid, *a, **k):
+        if sid == "webui-work-sidecar":
+            return fake_sidecar
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes_module, "get_session", fake_get_session)
+    monkeypatch.setattr(routes_module, "_get_active_profile_name",
+                        lambda: active_calls.append("get") or "default")
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
+                        lambda _sid, *, all_profiles=False: {})
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: None)
+
+    status, payload = _post_archive(routes_module, {
+        "session_id": "webui-work-sidecar", "archived": True,
+        "profile": "work"})
+
+    assert status == 200, f"matching sidecar profile must archive: {payload}"
+    assert fake_sidecar.archived is True
+    assert saved and saved[-1].get("touch_updated_at") is False
+    assert active_calls == [], (
+        f"sidecar archive must not consult the active profile: {active_calls}")
+
+
+def test_sidecar_archive_with_wrong_requested_profile_409s(
+    routes_module, archive_env, monkeypatch
+):
+    """#7826: a profile-scoped request naming the wrong owner must 409 on the
+    sidecar path too (the field cannot bypass the ownership check by hitting
+    get_session), naming the sidecar's real profile, and mutate nothing."""
+    active_calls = []
+    fake_sidecar = SimpleNamespace(
+        session_id="webui-work-sidecar", archived=False, profile="work",
+        messages=[], _loaded_metadata_only=False,
+        compact=lambda: {"session_id": "webui-work-sidecar", "archived": False})
+    saved = []
+    _register_sidecar(routes_module, fake_sidecar)
+
+    def fake_get_session(sid, *a, **k):
+        if sid == "webui-work-sidecar":
+            return fake_sidecar
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes_module, "get_session", fake_get_session)
+    monkeypatch.setattr(routes_module, "_get_active_profile_name",
+                        lambda: active_calls.append("get") or "default")
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
+                        lambda _sid, *, all_profiles=False: {})
+    published = []
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: published.append(a))
+
+    status, payload = _post_archive(routes_module, {
+        "session_id": "webui-work-sidecar", "archived": True,
+        "profile": "default"})
+
+    assert status == 409, f"wrong sidecar profile must 409: {payload}"
+    assert payload["code"] == "session_profile_mismatch"
+    assert payload["profile"] == "work", (
+        f"the 409 must name the sidecar's real owner: {payload}")
+    assert fake_sidecar.archived is False, "the sidecar must not be mutated"
+    assert saved == [], f"no save may fire on the 409: {saved}"
+    assert published == [], f"no publish may fire on the 409: {published}"
+    assert active_calls == [], (
+        f"sidecar mismatch must not consult the active profile: {active_calls}")
+
+
+def test_sidecar_wrong_profile_409s_even_without_predispatch_guard(
+    routes_module, archive_env, monkeypatch
+):
+    """#7826 revert-pin: the archive route's OWN sidecar ownership check must
+    fire even when the pre-dispatch visibility guard is bypassed (defense in
+    depth — the `profile` field is a claim, never an override). Removing the
+    route-side check lets this archive through, so this test goes RED."""
+    monkeypatch.setattr(routes_module, "_guard_request_session_visibility",
+                        lambda *a, **k: True)
+    fake_sidecar = SimpleNamespace(
+        session_id="webui-work-sidecar", archived=False, profile="work",
+        messages=[], _loaded_metadata_only=False,
+        compact=lambda: {"session_id": "webui-work-sidecar", "archived": False})
+    saved = []
+    _register_sidecar(routes_module, fake_sidecar)
+
+    def fake_get_session(sid, *a, **k):
+        if sid == "webui-work-sidecar":
+            return fake_sidecar
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes_module, "get_session", fake_get_session)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
+                        lambda _sid, *, all_profiles=False: {})
+    published = []
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: published.append(a))
+
+    status, payload = _post_archive(routes_module, {
+        "session_id": "webui-work-sidecar", "archived": True,
+        "profile": "default"})
+
+    assert status == 409, (
+        f"route-side sidecar check must 409 without the guard: {payload}")
+    assert payload["profile"] == "work", payload
+    assert saved == [], f"no save may fire on the 409: {saved}"
+    assert published == [], f"no publish may fire on the 409: {published}"
