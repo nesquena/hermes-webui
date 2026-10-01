@@ -2161,33 +2161,6 @@ async function newSession(flash, options={}){
   }
 }
 
-/**
- * Self-heal: clear the stuck session ID from localStorage and URL when a
- * loadSession() call failed during boot (no currentSid). This prevents the
- * browser from retrying the same dead session on every refresh.
- *
- * Called from loadSession() after 401 redirect (undefined data) or any
- * non-404 error (400, 403, 500, network). The 404 path has its own
- * inline self-heal; this helper consolidates the non-404 cases.
- *
- * Only clears when !currentSid — no session is active on screen, so
- * the stored ID is definitely stale. When currentSid is set (already
- * viewing a session), a non-404 failure could be a transient server error
- * and the session may still exist on the server; wiping localStorage in
- * that case is unnecessarily destructive (#4028 follow-up).
- *
- * A click into a *different* dead session (currentSid && currentSid!==sid)
- * must not run it: localStorage and the URL still point at the live session
- * (both are only updated on a successful load), so wiping them would log
- * the user out of a healthy session (#2782).
- */
-function _clearStuckSessionOnBoot(sid, currentSid){
-  if(!currentSid){
-    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-    try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-  }
-}
-
 // #2971 (Greptile P1 r3377162160): loadSession() tears down the live
 // per-session SSE at the top via stopSessionStream() (line ~754), but only the
 // success path re-arms it via startSessionStream() (line ~875). Every
@@ -2263,13 +2236,17 @@ async function _switchProfileForSessionLoad(profile){
 }
 
 async function loadSession(sid){
-  const opts = arguments[1] || {};
+  let opts = arguments[1] || {};
+  const requestedSid=sid;
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
-    if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+    if(resolvedSid&&resolvedSid!==sid){
+      if(!opts._continuationParentSid) opts={...opts,_continuationParentSid:sid};
+      sid=resolvedSid;
+    }
   }
   // Extension pre-open hook — fires once per sidebar click, not on every call.
   // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
@@ -2430,6 +2407,7 @@ async function loadSession(sid){
   try {
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
+    const metadataErrorStatus=e.status;
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
       if (!_isCurrentLoad()) {
@@ -2452,6 +2430,7 @@ async function loadSession(sid){
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
+        if(e&&metadataErrorStatus!==undefined) e.status=metadataErrorStatus;
       }
     }
     const _msgInner = $('msgInner');
@@ -2466,36 +2445,49 @@ async function loadSession(sid){
       _rearmActiveSessionStream();
       return;
     }
+    // A continuation retry (including one after a profile switch) still owns
+    // the original parent navigation. If that child is definitively missing,
+    // load the parent once with hint resolution disabled.
+    if(e.status===404&&opts._continuationParentSid){
+      const parentSid=opts._continuationParentSid;
+      _clearSameSessionForceReloadHint(sid);
+      if(_isCurrentLoad()) _loadingSessionId=null;
+      return loadSession(parentSid,{
+        ...opts,
+        _continuationParentSid:null,
+        skipLineageResolve:true,
+        skipContinuationResolve:true,
+        skipProfileResolve:false,
+        force:true,
+        _preloadNotified:true
+      });
+    }
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
-        // Self-heal (clear saved id + strip /session/<id> URL) only when the
-        // 404'd id is the one we are activating: a boot-time restore
-        // (!currentSid, #2798) or a mid-session reload of the *current* session
-        // whose sidecar was deleted server-side (#2782). A click into a
-        // *different* dead session (currentSid && currentSid!==sid) must not run
-        // it: localStorage and the URL still point at the live session (both are
-        // only updated on a successful load), so wiping them would log the user
-        // out of a healthy session. The URL strip is needed in the self-heal
-        // case because _sessionIdFromLocation() re-injects the id on reload.
-        // Only the rethrow stays gated on !currentSid: boot rethrows to fall
-        // through to empty-state; mid-session there is no boot path to reach.
-        if(!currentSid || currentSid===sid){
-          try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-          try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-          if (_isCurrentLoad()) _loadingSessionId = null;
-          if(!currentSid){
-            throw e;
+        // Self-heal only the route/localStorage component that still names the
+        // missing requested ID. A route can override a different valid saved
+        // session during boot, which must remain available for the next load.
+        // The current-load guard above owns this cleanup; each component is
+        // checked independently so unrelated saved or routed sessions survive.
+        try{
+          if(localStorage.getItem('hermes-webui-session')===requestedSid){
+            localStorage.removeItem('hermes-webui-session');
           }
+        }catch(_){ }
+        try{
+          if(typeof _sessionIdFromLocation==='function'&&_sessionIdFromLocation()===requestedSid){
+            history.replaceState(null,'',_appRootPath());
+          }
+        }catch(_){ }
+        if (_isCurrentLoad()) _loadingSessionId = null;
+        if(!currentSid){
+          throw e;
         }
       } else {
-        // Non-404, non-401 failure (400, 403, 500, network): 401 is handled
-        // via the if(!data) guard below since api() returns undefined on 401
-        // rather than throwing. Clear the stuck session ID only during boot
-        // (!currentSid) so the next boot doesn't retry the same dead session.
-        // When currentSid is set, a 500/network error may be transient — the
-        // session might still exist on the server (#4028 follow-up).
-        _clearStuckSessionOnBoot(sid, currentSid);
+        // Non-404, non-401 failures (400, 403, 500, network) do not establish
+        // that the session is gone. Preserve route and localStorage so boot can
+        // retry; 401 returns undefined and is handled below.
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
@@ -2556,12 +2548,12 @@ async function loadSession(sid){
   // follow the backend's continuation hint to the visible continuation so a
   // mobile reload mid-compression doesn't strand the user on a hidden snapshot.
   // Do NOT write URL/localStorage here — let the re-entrant loadSession update
-  // them only once the continuation actually loads, so a rejected/deleted/
-  // cross-profile continuation can't poison restore state with an unusable id.
+  // them only once the continuation actually loads. If the hint is definitively
+  // missing, retry this valid parent once without following the hint.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
     _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
+    return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
@@ -8157,6 +8149,13 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
+// Nesting under the parent already marks a delegated run, so the nested label drops the
+// agent's "Subagent: " prefix. Display only: rename and search keep _sessionDisplayTitle().
+function _nestedChildTitle(s){
+  const title=_sessionDisplayTitle(s);
+  return _isDelegatedSubagentRow(s)?title.replace(/^Subagent:\s*/i,''):title;
+}
+
 function _isDelegatedSubagentRow(s){
   if(!_isChildSession(s)) return false;
   const role=[s.raw_source,s.source_tag,s.source].map(v=>String(v||'').trim().toLowerCase()).find(Boolean)||'';
@@ -8993,7 +8992,7 @@ function renderSessionListFromCache(){
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
-        const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
+        const childTitle=_nestedChildTitle(child)||'Untitled child session';
         const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
         return `-> ${childTitle}${parentNote} - ${childTime}`;

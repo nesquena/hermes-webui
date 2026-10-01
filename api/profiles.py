@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-import yaml
+from api import yaml_compat as yaml
 
 from api.paths import _atomic_write_text
 from api.session_events import publish_session_list_changed
@@ -894,7 +894,7 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     env: dict[str, str] = {}
 
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
 
         cfg_path = home / 'config.yaml'
         cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
@@ -1754,7 +1754,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     else:
         # Direct disk read — does not touch _cfg_cache
         try:
-            import yaml as _yaml
+            from api import yaml_compat as _yaml
             cfg_path = home / 'config.yaml'
             cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
             if not isinstance(cfg, dict):
@@ -1920,7 +1920,7 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     config_path = profile_dir / "config.yaml"
     if config_path.exists():
         try:
-            import yaml as _yaml
+            from api import yaml_compat as _yaml
             cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
             if isinstance(cfg, dict):
                 skills_cfg = cfg.get("skills")
@@ -2447,7 +2447,7 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
         return
     config_path = profile_dir / 'config.yaml'
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return
     cfg = {}
@@ -2605,7 +2605,7 @@ def _write_model_defaults_to_config(
         return
     config_path = profile_dir / 'config.yaml'
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return
     cfg = {}
