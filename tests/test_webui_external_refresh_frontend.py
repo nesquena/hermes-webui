@@ -429,12 +429,20 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
     # The width hint is applied only when it stays within the server msg_limit
     # ceiling; an over-ceiling hint would be clamped by the backend and could
-    # silently shrink an already-loaded transcript, so it falls back to the bare
-    # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
+    # silently shrink an already-loaded transcript, so it used to fall back to
+    # the bare full-transcript path (#6152/#6154 ceiling; Codex gate silent
+    # row-loss fix).
     # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
     # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
-    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
-    assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
+    # #7899: the over-ceiling fallback is GONE on purpose. A bare
+    # full-transcript GET turned every focus/SSE reconciliation on a >500-row
+    # session into a multi-MB re-download, so the reload window is now clamped
+    # to the server ceiling and the returned tail is stitched onto the
+    # already-rendered prefix (_stitchBoundedReloadTail) — bounded request, no
+    # dropped rows. The unconditional msg_limit param below is the guard that
+    # keeps every reload on the bounded tail path.
+    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : _msgLimitMax;" in SESSIONS_JS
+    assert "const reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;" in SESSIONS_JS
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function loadSession(sid)")
