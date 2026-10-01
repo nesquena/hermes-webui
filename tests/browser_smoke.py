@@ -374,7 +374,20 @@ def _check_middle_click_from_deep_url(browser):
         # comes back with its draft.
         page.close()
         time.sleep(0.6)
-        popup.locator("#msg").fill("Popup draft survives reload")
+        # The page is already boot-ready and owns the new session, but a native
+        # middle-click popup can keep Playwright's initial navigation tracker
+        # pending after the document is interactive. Locator.fill() then waits
+        # for that unrelated load bookkeeping and flakes without exercising the
+        # draft contract. Dispatch the same input event directly; the assertion
+        # below still proves the production autosave and hard-reload behavior.
+        popup.evaluate(
+            """value => {
+                const msg = document.querySelector('#msg');
+                msg.value = value;
+                msg.dispatchEvent(new Event('input', {bubbles: true}));
+            }""",
+            "Popup draft survives reload",
+        )
         assert _wait_draft(popup_id, "Popup draft survives reload"), (
             "the popup draft did not persist"
         )
