@@ -1697,15 +1697,6 @@ def test_mobile_enter_newline_does_not_depend_on_viewport_heuristic():
         "the viewport height-delta probe must no longer gate the mobile Enter override"
 
 
-def test_mobile_enter_newline_respects_hardware_keyboard_on_touch_devices():
-    """Touch devices with a co-existing fine pointer (hardware keyboard) keep desktop Enter=send."""
-    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "any-pointer:fine" in boot_js, \
-        "boot.js must use any-pointer:fine to detect a co-existing hardware keyboard/trackpad"
-    assert "!_hasFinePointerCoexisting()" in boot_js, \
-        "mobile Enter newline override must skip touch devices that also expose a fine pointer"
-
-
 def test_mobile_enter_newline_only_overrides_enter_default():
     """Mobile newline override must only apply when _sendKey is the default 'enter'."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")

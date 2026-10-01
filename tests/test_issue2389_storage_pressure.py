@@ -48,7 +48,10 @@ def test_deleted_sessions_prune_all_session_tracking_maps():
 
 
 def test_session_viewed_count_prune_is_best_effort_and_persists_when_changed():
-    viewed_block = _function_block(SESSIONS_SRC, "_clearSessionViewedCount")
+    # The window is a source slice, not a semantic bound: keep it wide enough to
+    # cover the whole function so unrelated edits to the clear path do not fail
+    # this assertion by pushing its last statement out of range.
+    viewed_block = _function_block(SESSIONS_SRC, "_clearSessionViewedCount", window=2200)
     assert "Object.prototype.hasOwnProperty.call(counts, sid)" in viewed_block
     assert "delete counts[sid]" in viewed_block
     assert "_saveSessionViewedCounts()" in viewed_block
