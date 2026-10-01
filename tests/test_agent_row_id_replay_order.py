@@ -88,3 +88,26 @@ def test_imported_row_id_is_not_trusted_as_state_identity():
     identity, valid = _state_db_row_identity_details(imported_msg)
     assert valid is True
     assert identity is None
+
+
+def test_imported_run_journal_provenance_is_not_trusted_as_turn_identity():
+    """JSON import must not retain caller-supplied journal recovery ownership."""
+    from api.helpers import strip_public_internal_fields
+
+    imported = strip_public_internal_fields(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "_recovered_from_run_journal": True,
+                    "_recovered_stream_id": "forged-stream",
+                }
+            ]
+        },
+        message_records=True,
+    )
+    imported_msg = imported["messages"][0]
+    assert isinstance(imported_msg, dict)
+    assert "_recovered_from_run_journal" not in imported_msg
+    assert "_recovered_stream_id" not in imported_msg

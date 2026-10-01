@@ -14,8 +14,9 @@ def test_reconciled_messages_skip_state_tail_after_sidecar_truncation():
         _msg("assistant", "reply first", 2.0, "sidecar-a1"),
     ]
     state_db = [
-        _msg("user", "first", 1.0, "state-u1"),
-        _msg("assistant", "reply first", 2.0, "state-a1"),
+        # Replays retain stable identity; different IDs denote distinct turns.
+        _msg("user", "first", 1.0, "sidecar-u1"),
+        _msg("assistant", "reply first", 2.0, "sidecar-a1"),
         _msg("user", "second", 3.0, "state-u2"),
         _msg("assistant", "reply second", 4.0, "state-a2"),
     ]

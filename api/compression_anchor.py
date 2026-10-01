@@ -33,13 +33,20 @@ an automatic/compression-aware pipeline, and ``False`` (default) for manual
 compression contexts.
 """
 
+import re
+
+_RECENT_SUMMARY_MARKER_RE = re.compile(r"^\[recent summary \(d\d+, node \d+\)\](?:\s|$)")
+_PRESERVED_OBJECTIVE_MARKER_RE = re.compile(
+    r"^\[current user objective preserved from compacted history\](?:\s|$)"
+)
+
 
 def _content_text(content, *, part_types):
     if isinstance(content, list):
         return "\n".join(
-            str(part.get("text") or part.get("content") or "")
+            str(part.get("text") or part.get("content") or part.get("input_text") or part.get("output_text") or "")
             for part in content
-            if isinstance(part, dict) and part.get("type") in part_types
+            if isinstance(part, dict) and isinstance(part.get("type"), str) and part.get("type") in part_types
         ).strip()
     return str(content or "").strip()
 
@@ -48,8 +55,32 @@ def _content_has_part_type(content, part_types):
     if not isinstance(content, list):
         return False
     return any(
-        isinstance(part, dict) and part.get("type") in part_types
+        isinstance(part, dict) and isinstance(part.get("type"), str) and part.get("type") in part_types
         for part in content
+    )
+
+
+def _normalized_marker_text(message):
+    return _content_text(
+        message.get("content", ""),
+        part_types={"text", "input_text", "output_text"},
+    ).lower().lstrip()
+
+
+def is_lcm_context_recovery_marker(message):
+    """Return true for role-preserving LCM context-recovery envelopes."""
+    if not isinstance(message, dict):
+        return False
+    role = message.get("role")
+    if not isinstance(role, str) or role not in ("user", "assistant"):
+        return False
+    active_turn_token = message.get("_active_turn_token")
+    if isinstance(active_turn_token, str) and active_turn_token.strip():
+        return False
+    text = _normalized_marker_text(message)
+    return (
+        _RECENT_SUMMARY_MARKER_RE.match(text) is not None
+        or _PRESERVED_OBJECTIVE_MARKER_RE.match(text) is not None
     )
 
 
@@ -60,15 +91,13 @@ def is_context_compression_marker(message):
     role = message.get("role")
     if not role or role == "tool":
         return False
-    text = _content_text(
-        message.get("content", ""),
-        part_types={"text", "input_text", "output_text"},
-    ).lower().lstrip()
+    text = _normalized_marker_text(message)
     synthetic_unbracketed_marker = bool(message.get("_compressed_summary"))
     return (
         text.startswith("[context compaction")
         or (synthetic_unbracketed_marker and text.startswith("context compaction"))
         or text.startswith("[your active task list was preserved across context compression]")
+        or is_lcm_context_recovery_marker(message)
         or text.startswith("[session arc summary")
     )
 

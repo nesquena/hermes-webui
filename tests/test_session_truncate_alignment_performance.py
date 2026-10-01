@@ -153,6 +153,46 @@ def test_alignment_accepts_unhashable_metadata_and_malformed_rows():
     assert session_ops.truncate_context_for_display_keep(context, display, 1) == context[:2]
 
 
+def test_alignment_active_token_still_requires_same_signature():
+    token = "turn-T"
+    display = [
+        {"role": "user", "content": "user prompt", "_active_turn_token": token},
+        {"role": "assistant", "content": "assistant partial", "_active_turn_token": token},
+        {"role": "user", "content": "user later", "_active_turn_token": "turn-U"},
+    ]
+    context = [
+        {"role": "assistant", "content": "summary"},
+        {"role": "assistant", "content": "assistant partial", "_active_turn_token": token},
+    ]
+    assert session_ops.truncate_context_for_display_keep(context, display, 1) == context[:1]
+
+
+def test_alignment_accepts_same_signature_active_token():
+    token = "turn-T"
+    display = [
+        {"role": "user", "content": "prompt", "_active_turn_token": token},
+        {"role": "assistant", "content": "partial", "_active_turn_token": token},
+    ]
+    context = [
+        {"role": "system", "content": "summary"},
+        {"role": "user", "content": "prompt", "_active_turn_token": token},
+        {"role": "assistant", "content": "partial", "_active_turn_token": token},
+    ]
+    assert session_ops.truncate_context_for_display_keep(context, display, 1) == context[:2]
+
+
+def test_alignment_active_token_keeps_durable_id_fallback():
+    display = [
+        {"role": "user", "content": "prompt", "id": "row-1", "_active_turn_token": "turn-T"},
+        {"role": "assistant", "content": "later"},
+    ]
+    context = [
+        {"role": "system", "content": "summary"},
+        {"role": "user", "content": "prompt", "id": "row-1"},
+    ]
+    assert session_ops.truncate_context_for_display_keep(context, display, 1) == context
+
+
 class _HashableValue:
     def __init__(self, value):
         self.value = value

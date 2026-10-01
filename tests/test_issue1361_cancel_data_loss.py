@@ -141,6 +141,24 @@ class TestCancelPreservesReasoningText:
         assert has_reasoning, \
             f"Expected reasoning field on partial assistant msg after cancel. Got messages: {assistant_msgs}"
 
+    def test_cancel_stamps_current_partial_and_error_with_active_turn_token(self):
+        sid = "test_1361_cancel_token"
+        stream_id = "stream_cancel_token"
+        session = _make_session(session_id=sid)
+        _setup_cancel_state(sid, stream_id)
+        session.pending_started_at = 100.25
+        session.save()
+        config.STREAM_PARTIAL_TEXT[stream_id] = "Partial output before stop"
+
+        cancel_stream(stream_id)
+
+        token = streaming.build_active_turn_token(stream_id, 100.25)
+        reloaded = Session.load(sid)
+        partial = next(row for row in reloaded.messages if row.get('_partial'))
+        error = next(row for row in reloaded.messages if row.get('_error'))
+        assert partial['_active_turn_token'] == token
+        assert error['_active_turn_token'] == token
+
     def test_cancel_with_reasoning_and_partial_tokens_preserves_both(self):
         """Cancel mid-stream with both reasoning and some visible tokens."""
         sid = "test_1361_a2"
@@ -390,6 +408,66 @@ def test_stream_error_materializes_pending_user_turn_before_clearing_runtime_sta
     assert s.pending_user_message == "please restart the WebUI"
 
 
+def test_current_turn_partial_upsert_stamps_only_available_exact_token():
+    token = streaming.build_active_turn_token('stream_1361', 1778098700.25)
+    identity = {'token': token}
+    messages = [{'role': 'user', 'content': 'current', '_active_turn_token': token}]
+
+    row = streaming._upsert_current_turn_partial(
+        messages,
+        {'role': 'assistant', 'content': 'partial', '_partial': True},
+        active_turn_identity=identity,
+    )
+    assert row['_active_turn_token'] == token
+
+    foreign = streaming._upsert_current_turn_partial(
+        messages,
+        {
+            'role': 'assistant', 'content': 'other partial', '_partial': True,
+            '_active_turn_token': 'foreign:1',
+        },
+        active_turn_identity=identity,
+    )
+    assert foreign['_active_turn_token'] == 'foreign:1'
+
+    unstamped = streaming._upsert_current_turn_partial(
+        [{'role': 'user', 'content': 'current'}],
+        {'role': 'assistant', 'content': 'unowned partial', '_partial': True},
+        active_turn_identity={},
+    )
+    assert '_active_turn_token' not in unstamped
+
+
+@pytest.mark.parametrize('result_token', [None, 'active', 'foreign'])
+def test_result_partial_accepts_only_current_or_unowned_token(result_token):
+    token = streaming.build_active_turn_token('stream_1361', 1778098700.25)
+    result_user = {'role': 'user', 'content': 'current', '_active_turn_token': token}
+    assistant = {'role': 'assistant', 'content': 'partial response'}
+    if result_token == 'active':
+        assistant['_active_turn_token'] = token
+    elif result_token == 'foreign':
+        assistant['_active_turn_token'] = 'foreign:1'
+    session = Session(
+        session_id=f'result_partial_{result_token}',
+        messages=[dict(result_user)],
+    )
+
+    row = streaming._append_result_partial_on_error(
+        session,
+        {'partial': True, 'messages': [result_user, assistant]},
+        [],
+        'current',
+        active_turn_identity={'token': token},
+    )
+
+    if result_token == 'foreign':
+        assert row is None
+        assert session.messages == [result_user]
+    else:
+        assert row is not None
+        assert row['_active_turn_token'] == token
+
+
 def test_stream_error_pending_materialization_does_not_duplicate_eager_checkpoint():
     """Eager session-save mode may already have checkpointed the current user turn;
     the error materializer must not append the same user message again.
@@ -412,6 +490,9 @@ def test_stream_error_pending_materialization_does_not_duplicate_eager_checkpoin
     )
     s.pending_started_at = 1778098700.0
     s.pending_attachments = [{"name": "screen.png"}]
+    s.messages[-1]["_active_turn_token"] = models.build_active_turn_token(
+        s.active_stream_id, s.pending_started_at,
+    )
 
     appended = _materialize_pending_user_turn_before_error(s)
 
@@ -502,44 +583,22 @@ def test_stale_stream_cleanup_recovers_journaled_visible_output():
 # ── Structural guard: pin call sites of the materialize helper at error branches ──
 
 def test_materialize_helper_called_immediately_before_error_path_clears():
-    """Pin call sites of _materialize_pending_user_turn_before_error.
-
-    Catches a future refactor that drops the call from the apperror-no-response
-    or outer-Exception paths in api/streaming.py while leaving the
-    `pending_user_message = None` clearing in place — which is exactly the
-    user-turn-data-loss regression #1361 was filed for.
-
-    Strategy: count how many `pending_user_message = None` clearings have the
-    helper call within the preceding 4 lines. Currently 2 (apperror at 2610,
-    outer-Exception at 3072). The success path (2716) and cancel path (3375)
-    legitimately don't need the helper. If a future refactor drops the helper
-    call from one of the error sites, this assertion fires.
-    """
+    """Pin each streaming error settlement independently before its own clear."""
     from pathlib import Path
     src = Path(__file__).parent.parent.joinpath('api', 'streaming.py').read_text(encoding='utf-8')
-    lines = src.splitlines()
-
-    helper_name = '_materialize_pending_user_turn_before_error('
-    clear_sites = [(i + 1, line) for i, line in enumerate(lines)
-                   if 'pending_user_message = None' in line]
-    assert len(clear_sites) >= 4, (
-        f"Expected ≥4 sites that clear pending_user_message; found {len(clear_sites)}. "
-        f"If api/streaming.py was refactored, re-audit this test."
-    )
-
-    sites_with_helper = []
-    for lineno, _ in clear_sites:
-        prev_block = '\n'.join(lines[max(0, lineno - 5):lineno - 1])
-        if helper_name in prev_block:
-            sites_with_helper.append(lineno)
-
-    # Concretely, PR #1760 wired up the helper at the apperror-no-response
-    # path and the outer-Exception path. Both must remain wired.
-    assert len(sites_with_helper) >= 2, (
-        f"Expected ≥2 clear sites preceded by {helper_name} within 4 lines; "
-        f"found {sites_with_helper}. PR #1760 / #1361 regression — re-wire the "
-        f"helper at the error-branch clear sites in api/streaming.py."
-    )
+    paths = {
+        'provider-error/apperror': "_result_public_error = _err_str or f'{_err_label}.'",
+        'outer-exception': '_error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)',
+    }
+    for path, marker in paths.items():
+        start = src.index(marker)
+        clear = src.index('s.pending_user_message = None', start)
+        branch = src[start:clear]
+        assert re.search(
+            r"_materialize_pending_user_turn_before_error\(\s*"
+            r"s,\s*active_turn_identity=_active_turn_identity\s*\)",
+            branch,
+        ), f"{path} must materialize the pending user with captured turn identity before clearing it"
 
 
 
@@ -590,13 +649,16 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
     def test_cancel_stream_does_not_duplicate_existing_worker_cancel_marker(self):
         sid = "test_1361_idempotent"
         stream_id = "stream_idempotent"
-        _make_session(
+        s = _make_session(
             session_id=sid,
             messages=[
                 {'role': 'user', 'content': 'Help me debug this', 'timestamp': 100},
                 {'role': 'assistant', 'content': '**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Hermes finished. No provider failure occurred.*', '_error': True, 'timestamp': 101},
             ],
         )
+        s.pending_started_at = 100.0
+        s.save()
+        models.SESSIONS[s.session_id] = s
         _setup_cancel_state(sid, stream_id)
         config.STREAM_PARTIAL_TEXT[stream_id] = "partial text before cancel"
 
@@ -653,3 +715,57 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
             {'role': 'assistant', 'content': 'done normally', 'timestamp': 101},
         ]
         assert q.empty(), "late cancel must not emit a terminal cancel event after done"
+
+
+@pytest.mark.parametrize('marker', [False, True])
+@pytest.mark.parametrize('current', [False, True])
+def test_cancel_stream_respects_pending_owner_token(marker, current):
+    text = '[Recent Summary (d0, node 418)]' if marker else 'Continue'
+    token = 'stream_1361:100.75'
+    owner = dict(role='user', content=text, timestamp=100 if current else 100.75,
+                 _active_turn_token=token if current else 'old:100')
+    session = _make_session(pending_msg=text, messages=[owner])
+    session.pending_started_at = 100.75
+    session.context_messages = [dict(owner)]
+    session.save()
+    stream_id, _ = _setup_cancel_state(session.session_id)
+    assert cancel_stream(stream_id)
+    for saved in (session, Session.load(session.session_id)):
+        users = [row for row in saved.messages if row['role'] == 'user']
+        assert [row['_active_turn_token'] for row in users] == ([token] if current else ['old:100', token])
+        assert [row for row in saved.context_messages if row['role'] == 'user'] == users
+        assert saved.pending_user_message is None
+        assert saved.pending_started_at is None
+
+
+@pytest.mark.parametrize('marker', [False, True])
+@pytest.mark.parametrize('provenance,timestamp', [(None, 100), (None, 100.9), (None, '100'), (None, '100.9'), ('current', 100), ('old', 100.9)])
+def test_cancel_tokenless_checkpoint_requires_precise_time(monkeypatch, marker, provenance, timestamp):
+    text = '[Recent Summary (d0, node 418)]' if marker else 'Continue'
+    from api.process_event_utils import build_active_turn_token
+
+    token = build_active_turn_token('stream_1361', 100.9)
+    row = dict(role='user', content=text, timestamp=timestamp)
+    if provenance:
+        row['_active_turn_token'] = token if provenance == 'current' else 'old:100'
+    answer = dict(role='assistant', content='Historical answer', timestamp=100.5)
+    session = _make_session(pending_msg=text, messages=[row, answer])
+    session.pending_started_at = 100.9
+    session.context_messages = [dict(row), dict(answer)]
+    session.save()
+    stream_id, _ = _setup_cancel_state(session.session_id)
+    monkeypatch.setattr('api.streaming.get_session', lambda *a, **k: session)
+    assert cancel_stream(stream_id)
+    recovered = provenance != 'current' and (provenance == 'old' or marker or float(timestamp) < 100.9)
+    for saved in (session, Session.load(session.session_id)):
+        assert saved.context_messages[:2] == [row, answer]
+        owners = [
+            m for m in saved.messages
+            if m.get('role') == 'user' and m.get('_active_turn_token') == token
+        ]
+        assert len(owners) == int(recovered or provenance == 'current'), saved.messages
+        if recovered:
+            assert saved.messages.index(owners[0]) > saved.messages.index(answer)
+            assert owners[0] in saved.context_messages
+        assert saved.pending_user_message is None
+        assert saved.pending_started_at is None

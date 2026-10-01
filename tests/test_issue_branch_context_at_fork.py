@@ -2,6 +2,8 @@
 
 import copy
 
+import pytest
+
 from api.session_ops import truncate_context_for_display_keep
 
 
@@ -253,3 +255,21 @@ def test_truncate_context_for_display_keep_keeps_tool_tail_before_ambiguous_unke
     ]
     out = truncate_context_for_display_keep(ctx, msgs, 2)
     assert [row["content"] for row in out] == ["u1", "a1", "kept-tool-result"]
+
+
+@pytest.mark.parametrize('identity_field', ['id', '_row_id'])
+@pytest.mark.parametrize('kind', ['mirror', 'envelope', 'conflict'])
+def test_owned_display_aligns_only_to_safe_tokenless_identity(identity_field, kind):
+    from api.session_ops import truncate_context_for_display_keep
+
+    text = '[Recent Summary (d0, node 418)]' if kind == 'envelope' else 'Continue'
+    user = dict(role='user', content=text, **{identity_field: 7})
+    if kind == 'conflict':
+        user['_active_turn_token'] = 'old:100'
+    owner = dict(user, _active_turn_token='current:100')
+    summary = dict(role='assistant', content='[Recent Summary (d0, node 417)]')
+    answer = dict(role='assistant', content='Answer', id=8)
+    context = [summary, user, dict(role='assistant', content='', tool_calls=[{'id': 'call'}]),
+               dict(role='tool', content='Result', tool_call_id='call'), answer]
+    result = truncate_context_for_display_keep(context, [owner, answer], 1)
+    assert result == (context[:2] if kind == 'mirror' else context[:-1])

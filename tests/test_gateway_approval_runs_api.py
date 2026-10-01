@@ -2021,8 +2021,8 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
         (
             False,
             502,
-            {"ok": False, "cancelled": False, "stream_id": "stream-cancel-worker-pending", "error": "Gateway stop failed"},
-            False,
+            {"ok": False, "cancelled": True, "stream_id": "stream-cancel-worker-pending", "error": "Gateway stop failed"},
+            True,
         ),
         (
             True,
@@ -2100,7 +2100,10 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
     monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: called.__setitem__("cancel", True) or True)
-    monkeypatch.setattr("api.gateway_chat.stop_gateway_run", lambda run_id: called.__setitem__("stop", run_id) or stop_result)
+    monkeypatch.setattr(
+        "api.gateway_chat.stop_gateway_run",
+        lambda run_id, *, endpoint=None: called.__setitem__("stop", run_id) or stop_result,
+    )
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
     request_thread = threading.Thread(target=routes.handle_get, args=(object(), parsed), daemon=True)
@@ -2137,7 +2140,7 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
             request_thread.start()
             time.sleep(0.05)
             assert request_thread.is_alive()
-            assert called["cancel"] is False
+            assert called["cancel"] is True
             assert called["stop"] is None
             release_support.set()
             request_thread.join(timeout=5)
@@ -2397,11 +2400,11 @@ def test_chat_cancel_surfaces_redirected_gateway_stop(monkeypatch):
         assert captured["status"] == 502
         assert captured["payload"] == {
             "ok": False,
-            "cancelled": False,
+            "cancelled": True,
             "stream_id": stream_id,
             "error": "Gateway stop failed",
         }
-        assert called["cancel"] is False
+        assert called["cancel"] is True
         assert sid in approvals._pending
     finally:
         _STREAM_RUN_IDS.pop(stream_id, None)
@@ -2450,12 +2453,12 @@ def test_chat_cancel_surfaces_gateway_stop_failure(monkeypatch):
     import urllib.parse
 
     from api import routes
-    from api.gateway_chat import _STREAM_RUN_IDS
+    from api import gateway_chat
     import api.route_approvals as approvals
 
     sid = "sess-cancel-stop-fail"
     stream_id = "stream-cancel-stop-fail"
-    _STREAM_RUN_IDS[stream_id] = "run-stop"
+    gateway_chat._publish_gateway_run_id(stream_id, "run-stop")
     approvals._pending.pop(sid, None)
     approvals.submit_gateway_pending_mirror(sid, {"run_id": "run-stop", "command": "first"})
     captured = {}
@@ -2479,14 +2482,14 @@ def test_chat_cancel_surfaces_gateway_stop_failure(monkeypatch):
         assert captured["status"] == 502
         assert captured["payload"] == {
             "ok": False,
-            "cancelled": False,
+            "cancelled": True,
             "stream_id": stream_id,
             "error": "Gateway stop failed",
         }
-        assert called["cancel"] is False
+        assert called["cancel"] is True
         assert sid in approvals._pending
     finally:
-        _STREAM_RUN_IDS.pop(stream_id, None)
+        _reset_gateway_run_start_state(stream_id)
         approvals._pending.pop(sid, None)
 
 
@@ -2498,9 +2501,18 @@ def test_chat_cancel_without_gateway_readiness_uses_local_cancel(monkeypatch):
     stream_id = "stream-cancel-local-only"
     captured = {}
     called = {"cancel": False, "stop": False}
+    observed_cancel_event = []
 
     monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
-    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: called.__setitem__("cancel", True) or True)
+    monkeypatch.setattr(
+        routes,
+        "cancel_stream",
+        lambda _stream_id: (
+            observed_cancel_event.append(routes.CANCEL_FLAGS[_stream_id].is_set())
+            or called.__setitem__("cancel", True)
+            or True
+        ),
+    )
     monkeypatch.setattr("api.gateway_chat.stop_gateway_run", lambda _run_id: called.__setitem__("stop", True))
 
     def fake_j(handler, data, status=200, extra_headers=None):
@@ -2511,7 +2523,12 @@ def test_chat_cancel_without_gateway_readiness_uses_local_cancel(monkeypatch):
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
 
-    routes.handle_get(object(), parsed)
+    routes.STREAMS[stream_id] = object()
+    try:
+        routes.handle_get(object(), parsed)
+    finally:
+        routes.STREAMS.pop(stream_id, None)
+        routes.CANCEL_FLAGS.pop(stream_id, None)
 
     assert captured["status"] == 200
     assert captured["payload"] == {
@@ -2521,9 +2538,12 @@ def test_chat_cancel_without_gateway_readiness_uses_local_cancel(monkeypatch):
     }
     assert called["cancel"] is True
     assert called["stop"] is False
+    assert observed_cancel_event == [True]
+    routes.CANCEL_FLAGS.pop(stream_id, None)
 
 
-def test_chat_cancel_times_out_while_gateway_run_id_is_pending(monkeypatch):
+@pytest.mark.parametrize("gateway_phase", ["pending", "failed"])
+def test_chat_cancel_recognizes_pending_or_failed_gateway_lifecycle(monkeypatch, gateway_phase):
     import urllib.parse
 
     from api import routes
@@ -2547,16 +2567,19 @@ def test_chat_cancel_times_out_while_gateway_run_id_is_pending(monkeypatch):
     monkeypatch.setattr(routes, "j", fake_j)
     parsed = urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}")
     try:
-        mark_starting(stream_id)
+        if gateway_phase == "pending":
+            mark_starting(stream_id)
+        else:
+            gateway_chat._finish_gateway_run_starting(stream_id)
         routes.handle_get(object(), parsed)
         assert captured["status"] == 502
         assert captured["payload"] == {
             "ok": False,
-            "cancelled": False,
+            "cancelled": True,
             "stream_id": stream_id,
             "error": "Gateway stop failed",
         }
-        assert called["cancel"] is False
+        assert called["cancel"] is True
         assert called["stop"] is False
     finally:
         _reset_gateway_run_start_state(stream_id)

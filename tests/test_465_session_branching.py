@@ -507,8 +507,8 @@ def test_branch_route_slices_merged_display_view_not_raw_sidecar(monkeypatch):
     monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *a, **k: [])
     monkeypatch.setattr(
         routes,
-        "merge_session_messages_append_only",
-        lambda side, state, **k: list(merged_view),
+        "reconciled_state_db_messages_for_session",
+        lambda session, **k: list(merged_view),
     )
     monkeypatch.setattr(
         routes,

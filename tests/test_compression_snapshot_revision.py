@@ -98,24 +98,29 @@ def test_build_run_conversation_kwargs_omits_revision_for_strict_legacy_agent():
     }
 
 
-def _make_state_db(path, sid, rows):
+def _make_state_db(path, sid, rows, *, include_api_content=False):
     conn = sqlite3.connect(path)
     try:
+        api_content_column = ",\n                api_content TEXT" if include_api_content else ""
         conn.execute(
-            """
+            f"""
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 role TEXT,
                 content TEXT,
                 timestamp REAL,
-                active INTEGER
+                active INTEGER{api_content_column}
             )
             """
         )
+        columns = "session_id, role, content, timestamp, active"
+        placeholders = "?, ?, ?, ?, ?"
+        if include_api_content:
+            columns += ", api_content"
+            placeholders += ", ?"
         conn.executemany(
-            "INSERT INTO messages (session_id, role, content, timestamp, active) "
-            "VALUES (?, ?, ?, ?, ?)",
+            f"INSERT INTO messages ({columns}) VALUES ({placeholders})",
             [
                 (
                     sid,
@@ -124,6 +129,7 @@ def _make_state_db(path, sid, rows):
                     row.get("timestamp"),
                     row.get("active", 1),
                 )
+                + ((row.get("api_content"),) if include_api_content else ())
                 for row in rows
             ],
         )
@@ -132,15 +138,34 @@ def _make_state_db(path, sid, rows):
         conn.close()
 
 
-def _append_state_row(path, sid, *, role, content, timestamp, active=1):
+def _append_state_row(
+    path,
+    sid,
+    *,
+    role,
+    content,
+    timestamp,
+    active=1,
+    api_content=None,
+    include_api_content=False,
+    return_row_id=False,
+):
     conn = sqlite3.connect(path)
     try:
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, active) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (sid, role, content, timestamp, active),
-        )
+        if include_api_content:
+            cursor = conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, active, api_content) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, role, content, timestamp, active, api_content),
+            )
+        else:
+            cursor = conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, active) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (sid, role, content, timestamp, active),
+            )
         conn.commit()
+        return cursor.lastrowid if return_row_id else None
     finally:
         conn.close()
 
@@ -426,6 +451,304 @@ def test_stale_partial_requires_authoritative_current_turn_boundary():
     )
 
     assert not any(message.get("_partial") for message in session.messages)
+
+
+def test_append_only_partial_skips_one_current_user_echo_and_stops_at_next_user():
+    session = Session(session_id="append-only-partial-boundary", messages=[], context_messages=[])
+    baseline = [{"role": "user", "content": "current prompt"}]
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": " current\n prompt "},
+            {"role": "assistant", "content": "current partial"},
+            {"role": "user", "content": "later turn"},
+            {"role": "assistant", "content": "later answer"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt"
+    )
+
+    assert appended is not None
+    assert appended["content"] == "current partial"
+    assert [message["content"] for message in session.messages] == ["current partial"]
+
+
+def test_append_only_partial_skips_current_token_prompt_echo():
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t1"}]
+    session = Session(session_id="append-only-token-echo", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": "current prompt", "_active_turn_token": "t1"},
+            {"role": "assistant", "content": "current partial", "_active_turn_token": "t1"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity=identity
+    )
+
+    assert appended is not None
+    assert appended["content"] == "current partial"
+
+
+def test_append_only_partial_keeps_token_owned_assistant_lcm_text():
+    token = "t1"
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": token}]
+    partial_text = "[Recent Summary (d0, node 418)]\npartial output"
+    session = Session(session_id="owned-lcm-partial", messages=[], context_messages=[])
+
+    appended = streaming._append_result_partial_on_error(
+        session,
+        {"partial": True, "messages": baseline + [{
+            "role": "assistant", "content": partial_text, "_active_turn_token": token,
+        }]},
+        baseline,
+        "current prompt",
+        active_turn_identity={"token": token},
+    )
+
+    assert appended is not None
+    assert appended["content"] == partial_text
+    assert appended["_active_turn_token"] == token
+
+
+def test_append_only_partial_does_not_skip_lcm_marker_prompt_echo():
+    marker = "[Recent Summary (d0, node 418)]"
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": marker, "_active_turn_token": "t1"}]
+    session = Session(session_id="append-only-lcm-echo", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": marker},
+            {"role": "assistant", "content": "stale partial"},
+        ],
+    }
+    assert streaming.is_lcm_context_recovery_marker(result["messages"][1])
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, marker, active_turn_identity=identity
+    )
+
+    assert appended is None
+    assert session.messages == []
+
+
+def test_append_only_partial_skips_workspace_multimodal_prompt_echo():
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t1"}]
+    echo = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "[Workspace::v1: /fixture]\ncurrent prompt"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+    }
+    session = Session(session_id="append-only-workspace-image-echo", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            echo,
+            {"role": "assistant", "content": "current partial", "_active_turn_token": "t1"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity=identity
+    )
+
+    assert appended is not None
+    assert appended["content"] == "current partial"
+
+
+def test_append_only_partial_rejects_foreign_token_baseline_with_same_prompt():
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t2"}]
+    session = Session(
+        session_id="append-only-foreign-baseline-partial",
+        messages=list(baseline),
+        context_messages=[],
+    )
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "assistant", "content": "foreign partial", "_active_turn_token": "t2"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity=identity
+    )
+
+    assert appended is None
+    assert session.messages == baseline
+
+
+def test_append_only_partial_rejects_lcm_marker_baseline_matching_prompt():
+    marker = "[Recent Summary (d0, node 418)]"
+    baseline = [{"role": "user", "content": marker}]
+    assert streaming.is_lcm_context_recovery_marker(baseline[-1])
+    session = Session(
+        session_id="append-only-lcm-baseline-partial",
+        messages=list(baseline),
+        context_messages=[],
+    )
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "assistant", "content": "stale partial", "_active_turn_token": "t1"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session,
+        result,
+        baseline,
+        marker,
+        active_turn_identity={"token": "t1"},
+    )
+
+    assert appended is None
+    assert session.messages == baseline
+
+
+def test_append_only_partial_rejects_foreign_token_assistant_after_current_user():
+    baseline = [{"role": "user", "content": "earlier request"}]
+    current_user = {"role": "user", "content": "current prompt", "_active_turn_token": "t1"}
+    session = Session(
+        session_id="append-only-foreign-assistant-partial",
+        messages=baseline + [current_user],
+        context_messages=[],
+    )
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            current_user,
+            {"role": "assistant", "content": "foreign partial", "_active_turn_token": "t2"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session,
+        result,
+        baseline,
+        "current prompt",
+        active_turn_identity={"token": "t1"},
+    )
+
+    assert appended is None
+    assert session.messages == baseline + [current_user]
+
+
+def test_append_only_partial_does_not_select_assistant_lcm_marker():
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t1"}]
+    marker = {
+        "role": "assistant",
+        "content": "[Recent Summary (d0, node 418)] old context",
+    }
+    session = Session(session_id="append-only-assistant-lcm", messages=[], context_messages=[])
+    result = {"partial": True, "messages": baseline + [marker]}
+
+    assert streaming.is_lcm_context_recovery_marker(marker)
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity=identity
+    )
+
+    assert appended is None
+    assert session.messages == []
+
+
+def test_append_only_partial_does_not_skip_foreign_same_text_user_turn():
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t1"}]
+    session = Session(
+        session_id="append-only-foreign-partial-boundary",
+        messages=list(baseline),
+        context_messages=[],
+    )
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": " current\n prompt ", "_active_turn_token": "t2"},
+            {"role": "assistant", "content": "foreign partial", "_active_turn_token": "t2"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session,
+        result,
+        baseline,
+        "current prompt",
+        active_turn_identity=identity,
+    )
+
+    assert appended is None
+    assert session.messages == baseline
+
+
+def test_append_only_partial_rejects_foreign_same_text_user_after_baseline():
+    baseline = [{"role": "user", "content": "earlier request"}]
+    session = Session(session_id="append-only-foreign-partial", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": "current prompt", "_active_turn_token": "t2"},
+            {"role": "assistant", "content": "historical answer", "_active_turn_token": "t2"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity={"token": "t1"}
+    )
+
+    assert appended is None
+    assert session.messages == []
+
+
+def test_append_only_partial_rejects_lcm_marker_after_baseline():
+    baseline = [{"role": "user", "content": "earlier request"}]
+    marker = "[Recent Summary (d0, node 418)]"
+    session = Session(session_id="append-only-lcm-partial", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": marker},
+            {"role": "assistant", "content": "historical answer"},
+        ],
+    }
+    assert streaming.is_lcm_context_recovery_marker(result["messages"][1])
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, marker, active_turn_identity={"token": "t1"}
+    )
+
+    assert appended is None
+    assert session.messages == []
+
+
+def test_append_only_partial_accepts_current_token_user_after_baseline():
+    baseline = [{"role": "user", "content": "earlier request"}]
+    session = Session(session_id="append-only-current-partial", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": "current prompt", "_active_turn_token": "t1"},
+            {"role": "assistant", "content": "current partial", "_active_turn_token": "t1"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity={"token": "t1"}
+    )
+
+    assert appended is not None
+    assert appended["content"] == "current partial"
+    assert session.messages[-1]["_active_turn_token"] == "t1"
 
 
 def test_stale_non_prefix_partial_uses_token_and_stops_at_next_user():
@@ -1344,7 +1667,7 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
         {"role": "user", "content": prompt, "timestamp": 1.0},
         {"role": "assistant", "content": "historical answer", "timestamp": 2.0},
     ]
-    _make_state_db(db_path, sid, prior_messages)
+    _make_state_db(db_path, sid, prior_messages, include_api_content=True)
     session, event_queue = _install_streaming_session(
         monkeypatch,
         tmp_path,
@@ -1354,6 +1677,23 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
         context_messages=prior_messages,
     )
     session.pending_user_message = prompt
+    current_state_row_id = None
+    current_turn_token = streaming.build_active_turn_token(stream_id, 10.0)
+    original_save = Session.save
+
+    def save_with_shared_state_row_id(saved_session, *args, **kwargs):
+        if saved_session is session and current_state_row_id is not None:
+            for message in session.messages:
+                if (
+                    isinstance(message, dict)
+                    and message.get("role") == "user"
+                    and message.get("_active_turn_token") == current_turn_token
+                ):
+                    message["_state_db_row_id"] = current_state_row_id
+                    message["api_content"] = "durable current user payload"
+        return original_save(saved_session, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "save", save_with_shared_state_row_id)
 
     class RepeatedPromptAgent:
         runs = 0
@@ -1366,15 +1706,19 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
             self.stream_delta_callback = _kwargs.get("stream_delta_callback")
 
         def run_conversation(self, **kwargs):
+            nonlocal current_state_row_id
             type(self).runs += 1
             history = list(kwargs.get("conversation_history") or [])
             if type(self).runs == 1:
-                _append_state_row(
+                current_state_row_id = _append_state_row(
                     db_path,
                     sid,
                     role="user",
                     content=kwargs["persist_user_message"],
                     timestamp=3.0,
+                    api_content="durable current user payload",
+                    include_api_content=True,
+                    return_row_id=True,
                 )
                 if terminal == "raised":
                     raise RuntimeError("401 unauthorized")
@@ -1388,17 +1732,18 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
                 }
             # Heal retry: the 2-row refreshed baseline makes the legacy
             # shifted probe (3 - 2 = 1) collide with the historical user row.
+            heal_messages = _repeated_prompt_collision_result_messages(
+                prompt,
+                current_answer=(
+                    "healed current answer"
+                    if collision == "current_output_after_exact_row"
+                    else None
+                ),
+            )
             heal = {
                 "turn_id": "agent-heal-turn",
                 "current_turn_user_idx": 3,
-                "messages": _repeated_prompt_collision_result_messages(
-                    prompt,
-                    current_answer=(
-                        "healed current answer"
-                        if collision == "current_output_after_exact_row"
-                        else None
-                    ),
-                ),
+                "messages": heal_messages,
             }
             if collision == "current_output_after_exact_row":
                 heal.update(
@@ -1501,3 +1846,89 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
         for message in reloaded.messages
         if isinstance(message, dict) and message.get("role") == "assistant"
     ].count("historical answer") == 1
+
+
+@pytest.mark.parametrize('extra_role', [None, 'user', 'assistant', 'real_user', 'owned_user'])
+def test_self_heal_accepts_authoritative_lcm_envelope_then_settles_owner(extra_role):
+    from types import SimpleNamespace
+
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]'}
+    owned = dict(marker, _active_turn_token='stream_1:100.25', timestamp=100.25)
+    previous = [{'role': 'user', 'content': 'Previous prompt'}, owned]
+    answer = {'role': 'assistant', 'content': 'Recovered answer'}
+    result = {'completed': True, 'turn_id': 'retry-turn', 'current_turn_user_idx': 1,
+              'messages': [{'role': 'assistant', 'content': 'Compacted summary'}, marker, answer]}
+    if extra_role == 'user':
+        result['messages'].insert(2, dict(marker))
+    elif extra_role == 'assistant':
+        result['messages'][-1] = dict(marker, role='assistant')
+    elif extra_role == 'real_user':
+        result['messages'].insert(2, {'role': 'user', 'content': 'A different request'})
+    elif extra_role == 'owned_user':
+        result['messages'].insert(2, dict(marker, _active_turn_token='next-stream:101'))
+    identity = streaming._resolve_active_turn_authority(
+        {'token': owned['_active_turn_token'], 'checkpoint': owned, 'text': marker['content']},
+        result=result,
+    )
+    if extra_role in ('assistant', 'real_user', 'owned_user'):
+        assert not streaming._self_heal_result_succeeded(result, previous, identity, marker['content'])
+        return
+    assert streaming._self_heal_result_succeeded(result, previous, identity, marker['content'])
+    assert streaming._find_active_turn_checkpoint_index(result['messages'], previous, identity, marker['content']) is None
+    session = SimpleNamespace(messages=list(previous), context_messages=previous)
+    streaming._settle_result_messages(session, list(previous), previous, result['messages'], marker['content'], 'webui', identity)
+    assert session.messages == [*previous, answer]
+    assert '_active_turn_token' not in marker
+    assert marker in session.context_messages
+    owners = [i for i, row in enumerate(session.context_messages)
+              if row.get('_active_turn_token') == owned['_active_turn_token']]
+    assert len(owners) == 1
+    assert owners[0] < session.context_messages.index(answer)
+
+
+@pytest.mark.parametrize('part_type', ['input_text', 'output_text'])
+@pytest.mark.parametrize('payload_key', ['text', 'typed'])
+def test_self_heal_type_named_marker_is_not_answer(part_type, payload_key):
+    heading = '[Recent Summary (d0, node 418)]'
+    key = part_type if payload_key == 'typed' else payload_key
+    owner = {'role': 'user', 'content': 'Request', '_active_turn_token': 'stream:100'}
+    marker = {'role': 'assistant', 'content': [{'type': part_type, key: heading}]}
+    result = {'completed': True, 'turn_id': 'retry', 'current_turn_user_idx': 0,
+              'messages': [owner, marker]}
+    identity = streaming._resolve_active_turn_authority(
+        {'token': 'stream:100', 'checkpoint': owner, 'text': 'Request'}, result=result,
+    )
+    assert not streaming._self_heal_result_succeeded(result, [], identity, 'Request')
+
+
+@pytest.mark.parametrize('has_answer', [False, True])
+def test_self_heal_direct_boundary_precedes_prefix_heuristic(has_answer):
+    heading = '[Recent Summary (d0, node 418)]'
+    summary = {'role': 'assistant', 'content': 'Summary'}
+    old = {'role': 'user', 'content': heading, '_active_turn_token': 'old:100'}
+    envelope = {'role': 'user', 'content': heading}
+    messages = [summary, old, {'role': 'assistant', 'content': 'Historical answer'}, envelope]
+    if has_answer:
+        messages.append({'role': 'assistant', 'content': 'Current answer'})
+    result = {'completed': True, 'turn_id': 'retry', 'current_turn_user_idx': 3, 'messages': messages}
+    identity = streaming._resolve_active_turn_authority(
+        {'token': 'new:101', 'text': heading}, result=result,
+    )
+    assert streaming._self_heal_result_succeeded(result, [summary], identity, heading) is has_answer
+
+
+def test_settlement_direct_index_precedes_summary_prefix():
+    heading = '[Recent Summary (d0, node 418)]'
+    summary = {'role': 'assistant', 'content': 'Summary'}
+    old = {'role': 'user', 'content': heading, '_active_turn_token': 'old:100'}
+    old_answer = {'role': 'assistant', 'content': 'Historical answer'}
+    envelope = {'role': 'user', 'content': heading}
+    answer = {'role': 'assistant', 'content': 'Current answer'}
+    rows = [summary, old, old_answer, envelope, answer]
+    result = {'turn_id': 'current', 'current_turn_user_idx': 3, 'messages': rows}
+    identity = streaming._resolve_active_turn_authority({'token': 'new:101', 'text': heading}, result=result)
+    settled = streaming._settle_current_turn_boundary([summary], rows, identity, heading, 'webui')
+    assert settled[:3] == [summary, old, old_answer]
+    assert settled[3]['_active_turn_token'] == 'new:101'
+    assert settled[4:] == [envelope, answer]
+    assert '_active_turn_token' not in envelope

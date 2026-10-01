@@ -330,6 +330,27 @@ def test_materialize_skips_mirror_when_context_messages_empty():
     assert s.messages[-1].get("_recovered") is True
 
 
+def test_materialize_does_not_treat_tokenless_same_second_row_as_current_turn():
+    s = _DummySession(
+        messages=[{
+            "role": "user",
+            "content": "same prompt",
+            "timestamp": 100.25,
+            "_source": "webui",
+            "attachments": [],
+        }],
+        context_messages=None,
+        pending_msg="same prompt",
+    )
+    s.pending_started_at = 100.75
+
+    assert _materialize_pending_user_turn_before_error(
+        s, active_turn_identity={"token": "active:100.75"}
+    ) is True
+    assert s.messages[-1]["timestamp"] == 100
+    assert s.messages[-1]["_active_turn_token"] == "active:100.75"
+
+
 def test_sanitize_strips_recovered_user_from_context_messages():
     """End-to-end: recovered user mirrored to context_messages with
     _recovered flag → _sanitize_messages_for_api strips it (pure cancel).
@@ -367,3 +388,31 @@ def test_no_recovered_marker_in_output():
     pos_result = _api_safe_message_positions(messages)
     for idx, msg in pos_result:
         assert "_recovered" not in msg, f"_recovered leaked into positions output: {msg}"
+
+
+def test_materialize_does_not_reuse_matching_lcm_context_checkpoint():
+    from api.compression_anchor import is_lcm_context_recovery_marker
+    from api.process_event_utils import build_active_turn_token
+
+    marker = "[Recent Summary (d0, node 418)]"
+    s = _DummySession(
+        messages=[{"role": "assistant", "content": "A1"}],
+        context_messages=[
+            {"role": "user", "content": marker, "timestamp": 1778098700},
+        ],
+        pending_msg=marker,
+    )
+
+    assert _materialize_pending_user_turn_before_error(s) is True
+
+    expected_token = build_active_turn_token(s.active_stream_id, s.pending_started_at)
+    recovered = next(message for message in s.messages if message.get("content") == marker)
+    assert recovered["_active_turn_token"] == expected_token
+    assert not is_lcm_context_recovery_marker(recovered)
+    context_rows = [message for message in s.context_messages if message.get("content") == marker]
+    assert any(message.get("_active_turn_token") == expected_token for message in context_rows)
+    assert any(
+        not message.get("_active_turn_token")
+        and is_lcm_context_recovery_marker(message)
+        for message in context_rows
+    )

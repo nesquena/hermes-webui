@@ -8,6 +8,7 @@ foreign-profile sessions directly: duplicate, file reads, and chat/start.
 from __future__ import annotations
 
 import io
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -472,6 +473,53 @@ def test_chat_cancel_same_profile_stream_still_passes_through(monkeypatch):
 
     assert calls["cancel"] == 1
     assert cap["ok"]["cancelled"] is True
+
+
+def test_chat_cancel_only_creates_flags_for_live_or_active_streams(monkeypatch):
+    from api import config, runtime_adapter
+
+    stream_id = "cancel-flag-ownership-regression"
+    handler = _FakeHandler()
+    responses = []
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_: True)
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
+    cancelled = []
+    monkeypatch.setattr(routes, "cancel_stream", lambda sid: cancelled.append(sid) or False)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kw: responses.append((status, payload)) or payload)
+    monkeypatch.setattr(
+        "api.gateway_chat.wait_for_gateway_run_owner", lambda *_: (False, None, None),
+    )
+
+    with config.STREAMS_LOCK:
+        config.STREAMS.pop(stream_id, None)
+        config.CANCEL_FLAGS.pop(stream_id, None)
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.pop(stream_id, None)
+
+    routes.handle_get(handler, urlparse(f"/api/chat/cancel?stream_id={stream_id}"))
+    assert stream_id not in config.CANCEL_FLAGS
+    assert cancelled == []
+    assert responses[-1] == (200, {"ok": True, "cancelled": False, "stream_id": stream_id})
+
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS[stream_id] = {"session_id": "visible_session", "phase": "starting"}
+    try:
+        routes.handle_get(handler, urlparse(f"/api/chat/cancel?stream_id={stream_id}"))
+        assert config.CANCEL_FLAGS[stream_id].is_set()
+        assert cancelled == [stream_id]
+    finally:
+        with config.STREAMS_LOCK:
+            config.CANCEL_FLAGS.pop(stream_id, None)
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.pop(stream_id, None)
+
+    orphan = threading.Event()
+    with config.STREAMS_LOCK:
+        config.CANCEL_FLAGS[stream_id] = orphan
+    routes.handle_get(handler, urlparse(f"/api/chat/cancel?stream_id={stream_id}"))
+    assert config.CANCEL_FLAGS[stream_id] is orphan
+    assert cancelled == [stream_id]
+    assert responses[-1] == (200, {"ok": True, "cancelled": False, "stream_id": stream_id})
 
 
 def test_chat_stream_blocks_foreign_owned_dead_stream_before_replay(monkeypatch):

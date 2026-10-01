@@ -32,7 +32,7 @@ def test_gateway_terminal_error_save_failure_is_marked_unsaved(monkeypatch, tmp_
     session.save = fail_save
     monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
     monkeypatch.setattr(gateway_chat, "_stream_writeback_is_current", lambda *_args: True)
-    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args: None)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args, **_kwargs: None)
 
     payload = gateway_chat._settle_gateway_terminal_error(
         session.session_id,
@@ -63,7 +63,7 @@ def test_gateway_terminal_error_successful_save_is_marked_persisted(monkeypatch,
     session.active_stream_id = "gateway_terminal_error_stream"
     monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
     monkeypatch.setattr(gateway_chat, "_stream_writeback_is_current", lambda *_args: True)
-    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args: None)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args, **_kwargs: None)
 
     payload = gateway_chat._settle_gateway_terminal_error(
         session.session_id,
@@ -76,6 +76,201 @@ def test_gateway_terminal_error_successful_save_is_marked_persisted(monkeypatch,
 
     assert payload["terminal_session_persisted"] is True
     assert payload["terminal_session_persisted_session_id"] == session.session_id
+
+
+def test_chat_cancel_intent_fences_gateway_error_before_local_cancel(monkeypatch, tmp_path):
+    import threading
+
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.routes as routes
+    from api import config
+
+    stream_id = "gateway_cancel_error_race"
+    session = models.Session(
+        session_id="gateway_cancel_error_race_session",
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        messages=[{"role": "user", "content": "prompt"}],
+        context_messages=[],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "prompt"
+    session.pending_started_at = 123.0
+    session.save = lambda: None
+    cancel_event = threading.Event()
+    config.CANCEL_FLAGS[stream_id] = cancel_event
+    config.STREAMS[stream_id] = queue.Queue()
+    config.ACTIVE_RUNS[stream_id] = {"session_id": session.session_id, "phase": "running"}
+    config.register_stream_owner(stream_id, session.session_id)
+    previous_session = models.SESSIONS.get(session.session_id)
+    models.SESSIONS[session.session_id] = session
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
+    emitted = []
+    wait_entered = threading.Event()
+    release_stop = threading.Event()
+
+    def stop_then_raise(_run_id):
+        wait_entered.set()
+        assert release_stop.wait(5)
+        payload = gateway_chat._settle_gateway_terminal_error(
+            session.session_id,
+            stream_id,
+            str(tmp_path),
+            "test-model",
+            "test-provider",
+            "gateway exploded",
+            cancel_event=cancel_event,
+        )
+        if payload is not None:
+            emitted.append(("apperror", payload))
+        # Model the worker's finally cleanup racing after its terminal attempt.
+        with config.STREAMS_LOCK:
+            config.STREAM_PARTIAL_TEXT.pop(stream_id, None)
+            config.STREAM_REASONING_TEXT.pop(stream_id, None)
+            config.STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+        return False
+
+    monkeypatch.setattr(
+        gateway_chat, "wait_for_gateway_run_owner",
+        lambda *_args: (True, "gateway-run", None),
+    )
+    monkeypatch.setattr(gateway_chat, "stop_gateway_run", stop_then_raise)
+    monkeypatch.setattr(gateway_chat, "GATEWAY_RUN_ID_WAIT_TIMEOUT", 0)
+    config.STREAM_PARTIAL_TEXT[stream_id] = "buffered partial"
+    monkeypatch.setattr(routes, "j", lambda _h, data, status=200, **_kw: (status, data))
+    result = []
+    request = threading.Thread(target=lambda: result.append(routes.handle_get(
+        object(), urlparse(f"/api/chat/cancel?stream_id={stream_id}")
+    )))
+    try:
+        request.start()
+        assert wait_entered.wait(5)
+        assert cancel_event.is_set()
+        assert stream_id not in config.CANCEL_FLAGS
+        assert sum(row.get("content") == "buffered partial" for row in session.messages) == 1
+        release_stop.set()
+        request.join(timeout=5)
+        assert not request.is_alive()
+        assert result[0][0] == 502
+        assert result[0][1]["cancelled"] is True
+        assert not emitted
+        assert not any("gateway exploded" in row.get("content", "") for row in session.messages)
+        assert sum(row.get("content") == "buffered partial" for row in session.messages) == 1
+        assert any("Task cancelled" in row.get("content", "") for row in session.messages)
+        assert session.active_stream_id is None
+        assert cancel_event.is_set()
+    finally:
+        release_stop.set()
+        request.join(timeout=5)
+        config.CANCEL_FLAGS.pop(stream_id, None)
+        config.STREAMS.pop(stream_id, None)
+        config.STREAM_PARTIAL_TEXT.pop(stream_id, None)
+        config.STREAM_REASONING_TEXT.pop(stream_id, None)
+        config.STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+        config.ACTIVE_RUNS.pop(stream_id, None)
+        config.unregister_stream_owner(stream_id)
+        if previous_session is None:
+            models.SESSIONS.pop(session.session_id, None)
+        else:
+            models.SESSIONS[session.session_id] = previous_session
+
+
+def test_chat_cancel_uses_gateway_owner_snapshot_after_local_teardown(monkeypatch):
+    import api.gateway_chat as gateway_chat
+    import api.routes as routes
+    from api import config, runtime_adapter
+
+    stream_id = "reattached-owner-cancel"
+    run_id = "owner-run-id"
+    endpoint = ("http://other-profile-gateway:8765", "private-test-key")
+    config.STREAMS[stream_id] = queue.Queue()
+    config.ACTIVE_RUNS[stream_id] = {"session_id": "owner-session", "phase": "running"}
+    config.register_stream_owner(stream_id, "owner-session")
+    with gateway_chat._STREAM_RUN_STARTING_CONDITION:
+        gateway_chat._STREAM_RUN_IDS[stream_id] = run_id
+        gateway_chat._STREAM_ENDPOINTS[stream_id] = endpoint
+    stopped = []
+
+    def local_cancel(_stream_id):
+        with gateway_chat._STREAM_RUN_STARTING_CONDITION:
+            gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+            gateway_chat._STREAM_ENDPOINTS.pop(stream_id, None)
+        return True
+
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_: True)
+    monkeypatch.setattr(routes, "cancel_stream", local_cancel)
+    monkeypatch.setattr(routes, "j", lambda _handler, data, status=200, **_kw: (status, data))
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(
+        gateway_chat, "stop_gateway_run",
+        lambda rid, *, endpoint=None: stopped.append((rid, endpoint)) or True,
+    )
+    monkeypatch.setattr(
+        gateway_chat, "wait_for_gateway_run_owner",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("captured owner should avoid wait")),
+    )
+
+    try:
+        path = f"/api/chat/cancel?stream_id={stream_id}"
+        response = routes.handle_get(SimpleNamespace(headers={}), urlparse(path))
+
+        assert response[0] == 200
+        assert stopped == [(run_id, endpoint)]
+        assert "private-test-key" not in str(response)
+    finally:
+        config.STREAMS.pop(stream_id, None)
+        config.ACTIVE_RUNS.pop(stream_id, None)
+        config.unregister_stream_owner(stream_id)
+        with gateway_chat._STREAM_RUN_STARTING_CONDITION:
+            gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+            gateway_chat._STREAM_ENDPOINTS.pop(stream_id, None)
+
+
+def test_pending_cancel_retains_run_owner_until_waiter_captures_endpoint():
+    import threading
+
+    import api.gateway_chat as gateway_chat
+
+    stream_id = "pending-owner-endpoint"
+    run_id = "run-owner-endpoint"
+    endpoint = ("http://owner-gateway:8642", "owner-key")
+    gateway_chat._mark_gateway_run_starting(stream_id)
+    with gateway_chat._STREAM_RUN_STARTING_CONDITION:
+        gateway_chat._STREAM_ENDPOINTS[stream_id] = endpoint
+
+    entered = threading.Event()
+    original_wait = gateway_chat._STREAM_RUN_STARTING_CONDITION.wait
+
+    def wait_once(timeout):
+        entered.set()
+        return original_wait(timeout)
+
+    gateway_chat._STREAM_RUN_STARTING_CONDITION.wait = wait_once
+    result = []
+    waiter = threading.Thread(
+        target=lambda: result.append(
+            gateway_chat.wait_for_gateway_run_owner(stream_id, 5)
+        ),
+    )
+    try:
+        waiter.start()
+        assert entered.wait(5)
+        gateway_chat._publish_gateway_run_id(stream_id, run_id)
+        gateway_chat._clear_gateway_run_starting(stream_id)
+        waiter.join(timeout=5)
+        assert not waiter.is_alive()
+        assert result == [(True, run_id, endpoint)]
+        assert stream_id not in gateway_chat._STREAM_ENDPOINTS
+    finally:
+        gateway_chat._clear_gateway_run_starting(stream_id)
+        waiter.join(timeout=5)
+        with gateway_chat._STREAM_RUN_STARTING_CONDITION:
+            gateway_chat._STREAM_RUN_LIFECYCLE.pop(stream_id, None)
+            gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+            gateway_chat._STREAM_ENDPOINTS.pop(stream_id, None)
 
 
 def test_stream_status_exposes_replay_summary():

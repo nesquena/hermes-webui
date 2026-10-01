@@ -8,6 +8,7 @@ import pytest
 import api.models as models
 from api.models import (
     Session,
+    _append_recovered_pending_turn,
     _append_journaled_partial_output,
     _apply_core_sync_or_error_marker,
 )
@@ -808,3 +809,38 @@ def test_identical_content_segments_claim_distinct_rows_on_replay():
         "First Thinking segment.",
         "Second Thinking segment.",
     ]
+
+
+@pytest.mark.parametrize("shared_identity, expected_before_answer", [(False, False), (True, True)])
+def test_lcm_recovery_requires_anchor_or_durable_answer_identity(
+    shared_identity, expected_before_answer,
+):
+    pending = "[Recent Summary (d1, node 1)]\nRecover this turn"
+    historical = {"role": "assistant", "content": "same answer", "timestamp": 200}
+    context_answer = dict(historical)
+    if shared_identity:
+        historical["_state_db_row_id"] = 17
+        context_answer["_state_db_row_id"] = 17
+    session = Session(
+        session_id=f"lcm-recovery-{shared_identity}",
+        messages=[{"role": "user", "content": "different historical anchor"}, historical],
+        context_messages=[
+            {"role": "user", "content": "different context anchor"},
+            {"role": "user", "content": pending},
+            context_answer,
+        ],
+        pending_user_message=pending,
+        pending_started_at=100,
+    )
+
+    _append_recovered_pending_turn(session, timestamp=101, before_lcm_output=True)
+
+    recovered_index = next(
+        index for index, message in enumerate(session.messages)
+        if message.get("_recovered")
+    )
+    answer_index = next(
+        index for index, message in enumerate(session.messages)
+        if message.get("content") == "same answer"
+    )
+    assert (recovered_index < answer_index) is expected_before_answer

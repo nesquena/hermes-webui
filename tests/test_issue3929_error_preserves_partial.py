@@ -47,6 +47,9 @@ def _isolate_stream_state():
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.ACTIVE_RUNS.clear()
+    config.STREAM_SESSION_OWNERS.clear()
+    config.SESSION_WRITEBACK_OWNERS.clear()
     config.STREAM_PARTIAL_TEXT.clear()
     if hasattr(config, 'STREAM_REASONING_TEXT'):
         config.STREAM_REASONING_TEXT.clear()
@@ -56,6 +59,9 @@ def _isolate_stream_state():
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.ACTIVE_RUNS.clear()
+    config.STREAM_SESSION_OWNERS.clear()
+    config.SESSION_WRITEBACK_OWNERS.clear()
     config.STREAM_PARTIAL_TEXT.clear()
     if hasattr(config, 'STREAM_REASONING_TEXT'):
         config.STREAM_REASONING_TEXT.clear()
@@ -274,6 +280,53 @@ def test_exception_preserves_partials(tmp_path):
     assert err_msg.get("_error") is True
     assert "Fake provider crash!" in err_msg.get("content", "")
     assert err_msg.get("_turnDuration", 0) >= 9
+
+
+def test_exception_uses_captured_turn_identity_after_pending_time_is_cleared(tmp_path):
+    """Outer exception settlement uses the worker token after pending metadata clears."""
+    session = Session(session_id="test_sess_exc_turn_identity", title="Test Session")
+    session.pending_user_message = "Exception test"
+    session.pending_started_at = 1234567890.25
+    session.active_stream_id = "test_stream_exc_turn_identity"
+    session.save()
+    models.SESSIONS[session.session_id] = session
+
+    class ExceptionAfterPendingCleanupAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            if self.stream_delta_callback:
+                self.stream_delta_callback("Stream before cleanup and crash.")
+            # Simulate eager cancellation clearing the timestamp after the
+            # worker captured its active-turn identity.
+            session.pending_started_at = None
+            raise RuntimeError("Fake provider crash after pending cleanup!")
+
+    stream_id = "test_stream_exc_turn_identity"
+    fake_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = fake_queue
+    config.STREAM_PARTIAL_TEXT[stream_id] = ""
+
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=ExceptionAfterPendingCleanupAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text=session.pending_user_message,
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+
+    saved = Session.load(session.session_id)
+    assert saved is not None
+    expected_token = streaming.build_active_turn_token(stream_id, 1234567890.25)
+    user = next(row for row in saved.messages if row.get("role") == "user")
+    partial = next(row for row in saved.messages if row.get("_partial"))
+    error = next(row for row in saved.messages if row.get("_error"))
+    assert user["_active_turn_token"] == expected_token
+    assert partial["_active_turn_token"] == expected_token
+    assert error["_active_turn_token"] == expected_token
 
 
 @pytest.mark.parametrize("started_at", [None, "future"])

@@ -4,7 +4,13 @@ Regression coverage for shared compression-anchor visibility helpers (#2028).
 
 from pathlib import Path
 
-from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
+import pytest
+
+from api.compression_anchor import (
+    is_context_compression_marker,
+    is_lcm_context_recovery_marker,
+    visible_messages_for_anchor,
+)
 from api.streaming import _compression_summary_from_messages, _is_context_compression_marker
 
 
@@ -97,6 +103,50 @@ def test_compression_summary_ignores_tool_output_that_mentions_compression():
 
     assert _compression_summary_from_messages([marker, skill_tool_output]) == marker["content"]
     assert _compression_summary_from_messages([skill_tool_output]) is None
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+@pytest.mark.parametrize("as_list", [False, True])
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "[Recent Summary (d0, node 418)]",
+        "[Current user objective preserved from compacted history]",
+    ],
+)
+@pytest.mark.parametrize(
+    "actual_marker",
+    [
+        None,
+        "[CONTEXT COMPACTION — REFERENCE ONLY] actual compacted history",
+        "[SESSION ARC SUMMARY — REFERENCE ONLY] actual session arc",
+    ],
+)
+def test_compression_summary_skips_lcm_envelopes(role, as_list, heading, actual_marker):
+    envelope_text = f"{heading}\nPrivate recovered context"
+    envelope_content = (
+        [{"type": "input_text", "text": envelope_text}]
+        if as_list
+        else envelope_text
+    )
+    messages = [
+        {"role": "user", "content": "Regular user message"},
+        {"role": role, "content": envelope_content},
+        {"role": "assistant", "content": "Regular assistant message"},
+    ]
+
+    expected = None
+    if actual_marker:
+        messages.append({"role": "assistant", "content": actual_marker})
+        expected = actual_marker
+
+    summary = _compression_summary_from_messages(messages)
+
+    assert summary == expected
+    assert summary not in {
+        "[Recent Summary (d0, node 418)]",
+        "[Current user objective preserved from compacted history]",
+    }
 
 
 def test_marker_based_anchor_calculation():
@@ -195,3 +245,145 @@ def test_marker_based_anchor_fallback_when_no_marker():
     # Should fall through (not crash) - verified by the old path
     visible_after = visible_messages_for_anchor(messages, auto_compression=True)
     assert len(visible_after) > 0
+
+
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "[Recent Summary (d0, node 418)]\n...",
+        "[Current user objective preserved from compacted history]\n...",
+    ],
+)
+def test_lcm_recovery_markers_are_detected_for_non_tool_roles(role, marker):
+    message = {"role": role, "content": marker}
+
+    assert is_context_compression_marker(message)
+    assert is_lcm_context_recovery_marker(message)
+    assert _is_context_compression_marker(message)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "[Recent Summary (d0, node 418)]",
+        "[Current user objective preserved from compacted history]",
+    ],
+)
+def test_lcm_recovery_marker_active_turn_token_is_not_classified(marker):
+    token = "stream-01f4c8d2:1779348286.3954952"
+    current_user = {
+        "role": "user",
+        "content": marker,
+        "_active_turn_token": token,
+    }
+    recovery_envelope = {"role": "user", "content": marker}
+
+    assert not is_lcm_context_recovery_marker(current_user)
+    assert not is_context_compression_marker(current_user)
+    assert is_lcm_context_recovery_marker(recovery_envelope)
+    assert is_context_compression_marker(recovery_envelope)
+
+
+def test_token_owned_assistant_lcm_text_survives_display_projection():
+    from types import SimpleNamespace
+    from api.models import reconciled_state_db_messages_for_session
+
+    partial = {
+        "role": "assistant",
+        "content": "[Recent Summary (d0, node 418)]\npartial output",
+        "_active_turn_token": "stream:123",
+    }
+    session = SimpleNamespace(messages=[partial], context_messages=[partial])
+
+    assert not is_lcm_context_recovery_marker(partial)
+    assert reconciled_state_db_messages_for_session(session, state_messages=[]) == [partial]
+    assert is_lcm_context_recovery_marker({"role": "assistant", "content": partial["content"]})
+
+
+@pytest.mark.parametrize("role", ["system", "custom", None, ["user"]])
+def test_lcm_recovery_marker_requires_hashable_provider_role(role):
+    from api.streaming import _deduplicate_context_messages
+
+    message = {
+        "role": role,
+        "content": "[Recent Summary (d0, node 418)]",
+    }
+
+    assert not is_lcm_context_recovery_marker(message)
+    assert _deduplicate_context_messages([message, dict(message)]) == [message]
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "[Recent Summary (d0, node 418)]",
+        "[Current user objective preserved from compacted history]",
+    ],
+)
+def test_lcm_recovery_marker_requires_heading_boundary(heading):
+    assert not is_lcm_context_recovery_marker({
+        "role": "user",
+        "content": f"{heading}suffix",
+    })
+    assert is_lcm_context_recovery_marker({
+        "role": "user",
+        "content": f"{heading}\nsummary text",
+    })
+    assert is_lcm_context_recovery_marker({
+        "role": "user",
+        "content": f"{heading} summary text",
+    })
+
+
+def test_lcm_recovery_markers_keep_conservative_and_list_content_rules():
+    markers = [
+        "[Recent Summary (d0, node 418)]\n...",
+        "[Current user objective preserved from compacted history]\n...",
+    ]
+
+    assert not is_context_compression_marker({
+        "role": "user",
+        "content": "[Recent Summary (Q1 meeting notes)]",
+    })
+
+    for marker in markers:
+        tool_message = {"role": "tool", "content": marker}
+        assert not is_context_compression_marker(tool_message)
+        assert not is_lcm_context_recovery_marker(tool_message)
+
+        for part_type in ("text", "input_text", "output_text"):
+            assert is_context_compression_marker({
+                "role": "user",
+                "content": [{"type": part_type, "text": marker}],
+            })
+
+
+@pytest.mark.parametrize('part_type', ['input_text', 'output_text'])
+@pytest.mark.parametrize('payload_key', ['text', 'typed'])
+@pytest.mark.parametrize('role', ['user', 'assistant'])
+def test_lcm_type_named_payload_detection_and_display(part_type, payload_key, role):
+    from types import SimpleNamespace
+    from api.models import reconciled_state_db_messages_for_session
+
+    heading = '[Recent Summary (d0, node 418)]'
+    key = part_type if payload_key == 'typed' else payload_key
+    marker = {'role': role, 'content': [{'type': part_type, key: heading}]}
+    answer = {'role': 'assistant', 'content': 'Answer'}
+    session = SimpleNamespace(messages=[marker, answer], context_messages=[marker, answer])
+    assert is_lcm_context_recovery_marker(marker)
+    assert reconciled_state_db_messages_for_session(session, state_messages=[]) == [answer]
+    assert reconciled_state_db_messages_for_session(session, prefer_context=True, state_messages=[]) == [marker, answer]
+    assert not is_lcm_context_recovery_marker({
+        'role': role, 'content': [{'type': 'image', key: heading}],
+    })
+
+
+@pytest.mark.parametrize('part_type', [[], {}, 1, None])
+def test_malformed_marker_part_keeps_answer_retrievable(part_type):
+    malformed = dict(role='assistant', content=[dict(type=part_type, text='[Recent Summary (d0, node 418)]')])
+    answer = dict(role='assistant', content='Actual answer')
+    assert not is_lcm_context_recovery_marker(malformed)
+    assert answer in visible_messages_for_anchor([malformed, answer], auto_compression=True)

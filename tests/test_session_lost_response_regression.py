@@ -1152,6 +1152,70 @@ def test_sync_persists_recovered_state_db_tail_when_stream_dead(monkeypatch):
     assert reloaded.messages[-1]["content"] == "recovered tail"
 
 
+@pytest.mark.parametrize(
+    ('state_tail_role', 'state_tail_content', 'expected_sync'),
+    [
+        ('assistant', 'Current answer', True),
+        ('user', '[Recent Summary (d0, node 418)]', False),
+    ],
+)
+def test_state_sync_compares_lcm_filtered_display_projection(
+    tmp_path, monkeypatch, state_tail_role, state_tail_content, expected_sync,
+):
+    import sqlite3
+
+    sid = f"lcm_display_sync_{'answer' if expected_sync else 'marker'}"
+    stream_id = 'lcm_display_sync_stream'
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': 99}
+    owner = {
+        'role': 'user', 'content': 'Continue', 'timestamp': 100,
+        '_active_turn_token': models.build_active_turn_token(stream_id, 100),
+    }
+    session = Session(
+        session_id=sid,
+        title='LCM display sync',
+        messages=[marker, owner],
+        context_messages=[marker, owner],
+        active_stream_id=stream_id,
+        pending_user_message='Continue',
+        pending_started_at=100,
+    )
+    session.save()
+    models.SESSIONS.pop(sid, None)
+    loaded = Session.load(sid)
+
+    state_db = tmp_path / 'state.db'
+    with sqlite3.connect(state_db) as conn:
+        conn.execute(
+            'CREATE TABLE messages '
+            '(id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL)'
+        )
+        conn.execute(
+            'INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)',
+            (sid, state_tail_role, state_tail_content, 103),
+        )
+    monkeypatch.setattr(models, '_active_state_db_path', lambda: state_db)
+
+    result = models._sync_sidecar_from_state_db_if_newer(loaded)
+
+    assert result is expected_sync
+    snapshots = (loaded, Session.load(sid))
+    if expected_sync:
+        expected = [('user', 'Continue'), ('assistant', 'Current answer')]
+        for snapshot in snapshots:
+            assert [(row['role'], row['content']) for row in snapshot.messages] == expected
+            assert [(row['role'], row['content']) for row in snapshot.context_messages] == [
+                ('user', marker['content']), *expected,
+            ]
+            assert snapshot.pending_user_message is None
+            assert snapshot.active_stream_id is None
+    else:
+        for snapshot in snapshots:
+            assert snapshot.messages == [marker, owner]
+            assert snapshot.pending_user_message == 'Continue'
+            assert snapshot.active_stream_id == stream_id
+
+
 def test_sync_skips_during_registration_window_recent_pending(monkeypatch):
     """Registration-window race: a just-submitted, not-yet-registered stream
     must NOT be cleared by the self-heal.
@@ -1330,3 +1394,48 @@ def test_sync_revalidates_against_concurrent_disk_write_under_lock(monkeypatch):
     # On-disk record keeps the concurrent writer's value — not overwritten.
     reloaded = Session.load(sid)
     assert reloaded.active_stream_id == "rotated_stream_after_compression"
+
+
+@pytest.mark.parametrize('save_fails', [False, True])
+@pytest.mark.parametrize('part_type', [None, 'text', 'input_text', 'output_text'])
+@pytest.mark.parametrize('marker_timestamp', [10, 100, 100.1])
+def test_lcm_state_sync_materializes_pending_owner_before_answer(monkeypatch, save_fails, part_type, marker_timestamp):
+    prior = [{'role': 'user', 'content': 'Old prompt', 'timestamp': 1},
+             {'role': 'assistant', 'content': 'Old answer', 'timestamp': 2}]
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': marker_timestamp}
+    answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': marker_timestamp + 1}
+    session = Session(session_id='lcm_pending_sync', messages=prior,
+                      pending_user_message=marker['content'], active_stream_id='stream_1',
+                      pending_started_at=100.25)
+    session.save()
+    pending_text = marker['content']
+    if part_type:
+        marker['content'] = [{'type': part_type, 'text': pending_text}]
+    rows = [*prior, marker, answer]
+    monkeypatch.setattr(models, 'get_state_db_session_summary', lambda *a, **k: {
+        'message_count': len(rows), 'last_message_at': marker_timestamp + 1,
+    })
+    monkeypatch.setattr(models, 'get_state_db_session_messages', lambda *a, **k: rows)
+
+    if save_fails:
+        def fail_save(self, **kwargs):
+            raise OSError('disk full')
+
+        monkeypatch.setattr(Session, 'save', fail_save)
+        assert not models._sync_sidecar_from_state_db_if_newer(session)
+        for snapshot in (session, Session.load(session.session_id)):
+            assert snapshot.messages == prior
+            assert snapshot.pending_user_message == pending_text
+            assert snapshot.active_stream_id == 'stream_1'
+        return
+
+    assert models._sync_sidecar_from_state_db_if_newer(session)
+    for snapshot in (session, Session.load(session.session_id)):
+        assert len(snapshot.messages) == 4
+        owned = next(row for row in snapshot.messages if row.get('_active_turn_token'))
+        assert owned['_active_turn_token'] == models.build_active_turn_token('stream_1', 100.25)
+        expected = [answer, owned] if marker_timestamp == 10 else [owned, answer]
+        assert snapshot.messages == [*prior, *expected]
+        assert snapshot.context_messages == [*prior, marker, *expected]
+        assert snapshot.pending_user_message is None
+        assert snapshot.active_stream_id is None
