@@ -475,3 +475,89 @@ def test_list_dir_escape_symlink_read_still_blocked(tmp_path):
     # But reading through it is still blocked
     with pytest.raises(ValueError, match="Path traversal blocked"):
         read_file_content(workspace, "escape.txt")
+
+
+def test_open_anchored_fd_no_dir_fd_fallback_preserves_o_binary(tmp_path, monkeypatch):
+    """#6988 round 3: the no-dir_fd portability fallback (Windows path) must
+    pass O_BINARY on the leaf open so the returned fd reads raw bytes — text
+    mode would CRLF-translate media bytes, ETag digests and Content-Lengths."""
+    import os
+    from unittest import mock
+
+    import api.workspace as w
+
+    monkeypatch.setattr(w, "_DIR_FD_OK", False)
+    # 0x8000 is the Windows O_BINARY bit; on POSIX the constant is 0, so patch
+    # it to a sentinel and assert it reaches os.open's flags.
+    monkeypatch.setattr(w, "_O_BINARY", 0x8000)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.bin").write_bytes(b"\x00\x01\x02")
+
+    real_open = os.open
+    seen = {}
+
+    def capture_open(path, *args, **kwargs):
+        seen["flags"] = args[0] if args else kwargs.get("flags")
+        return real_open(path, *args, **kwargs)
+
+    with mock.patch.object(w.os, "open", autospec=True, side_effect=capture_open):
+        fd = w.open_anchored_fd(workspace, (workspace / "a.bin").resolve(), want_dir=False)
+        try:
+            assert seen.get("flags") is not None, "fallback os.open must have run"
+            assert seen["flags"] & 0x8000, \
+                "no-dir_fd fallback must preserve O_BINARY on the leaf open"
+            assert os.read(fd, 3) == b"\x00\x01\x02"
+        finally:
+            os.close(fd)
+
+
+def test_open_anchored_fd_from_root_handoff_closes_nfd_when_prior_close_fails(tmp_path):
+    """#6988 round 3: if closing the prior per-component fd raises during the
+    anchored walk, the freshly-opened nfd must be closed before the exception
+    propagates — the old code assigned ``fd = nfd`` only AFTER ``os.close(fd)``,
+    so a close failure orphaned the new descriptor."""
+    import os
+    from unittest import mock
+
+    import api.workspace as w
+
+    if not w._DIR_FD_OK:
+        pytest.skip("anchored walk requires dir_fd support")
+
+    root = tmp_path / "root"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    (sub / "f.txt").write_text("x", encoding="utf-8")
+
+    root_fd = os.open(str(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        real_close = os.close
+        real_open = os.open
+        closed = []
+        nfd_seen = []
+
+        def flaky_close(fd):
+            closed.append(fd)
+            # Fail ONLY when closing the root fd — the first per-component
+            # handoff, exactly the window where the old code orphaned nfd.
+            if fd == root_fd:
+                raise OSError("injected close failure")
+            return real_close(fd)
+
+        def capture_open(*args, **kwargs):
+            nfd = real_open(*args, **kwargs)
+            nfd_seen.append(nfd)
+            return nfd
+
+        with mock.patch.object(w.os, "open", autospec=True, side_effect=capture_open), \
+             mock.patch.object(w.os, "close", autospec=True, side_effect=flaky_close):
+            with pytest.raises(OSError, match="injected close failure"):
+                w.open_anchored_fd_from_root(root_fd, ("sub", "f.txt"), want_dir=False)
+    finally:
+        real_close(root_fd)
+
+    assert nfd_seen, "the walk must have opened the sub component"
+    assert nfd_seen[0] in closed, \
+        "nfd must be closed when closing the prior fd fails (no fd leak)"
