@@ -195,6 +195,12 @@ globalThis.fetch = (url, opts) => {
   if (_fetchThrows) return Promise.reject(new Error('simulated network error'));
   return Promise.resolve(_fetchResponse);
 };
+// cancelStream() (boot.js) sends its cancel request through _tabContextFetch()
+// (#6559), the workspace.js primitive that attaches this tab's profile
+// context. This harness has no tab-context machinery loaded, so it falls back
+// to the local fetch() stub above exactly as the real _tabContextFetch() does
+// when no context helpers are available.
+globalThis._tabContextFetch = (url, opts) => globalThis.fetch(url, opts);
 
 // Stub browser globals the unfixed function may touch in its fetch URL.
 globalThis.document = { baseURI: 'http://localhost:8787/' };

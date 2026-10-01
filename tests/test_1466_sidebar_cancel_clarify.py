@@ -45,7 +45,7 @@ class TestSidebarCancelAction:
         body = _function_body(BOOT_JS, "cancelSessionStream")
         assert "session&&session.active_stream_id" in body or "session && session.active_stream_id" in body
         assert "stream_id=${encodeURIComponent(streamId)}" in body
-        assert "S.activeStreamId" not in body.split("const streamId", 1)[1].split("fetch", 1)[0], (
+        assert "S.activeStreamId" not in body.split("const streamId", 1)[1].split("_tabContextFetch", 1)[0], (
             "sidebar cancel must not derive the stream id from the active pane global"
         )
 

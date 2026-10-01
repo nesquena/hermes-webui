@@ -82,6 +82,35 @@ def _extract_js_function(src: str, name: str) -> str:
     raise AssertionError(f"could not extract {name}() body")
 
 
+def _api_with_deps(src: str) -> str:
+    """api() plus the per-tab profile context helpers it calls (#6559).
+
+    api() re-resolves the tab context on every attempt and recovers from a
+    ``tab_context_invalid`` rejection, so the extracted function cannot run
+    standalone. The helpers sit in the block immediately above it.
+    """
+    module_start = src.index("// \u2500\u2500 Per-tab profile context (#6559)")
+    api_fn = _extract_js_function(src, "api")
+    return src[module_start:src.index(api_fn)] + api_fn
+
+
+# The tab-context module's parse-time IIFE (round 3) binds a context before
+# any profile-sensitive request is allowed through, including api()'s own
+# fetch. It issues that binding with the same global.fetch these tests stub
+# to hang forever — so without a pre-existing token, api()'s call would wait
+# on the boot binding rather than on the timeout path under test. A
+# sessionStorage that already holds a token makes the parse-time IIFE resolve
+# synchronously (an already-bound tab), matching what api() sees on every
+# call after the first in production, and isolates these tests to api()'s own
+# per-request timeout — the thing they're regression coverage for.
+_SESSION_STORAGE_STUB = (
+    "global.sessionStorage={_v:{'hermes-tab-profile-ctx':'seeded-token',"
+    "'hermes-tab-profile-ctx-profile':'default'},"
+    "getItem(k){return Object.prototype.hasOwnProperty.call(this._v,k)?this._v[k]:null;},"
+    "setItem(k,v){this._v[k]=String(v);},removeItem(k){delete this._v[k];}};"
+)
+
+
 def _node_eval(script: str, timeout: float = 2.0) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["node", "-e", script],
@@ -95,13 +124,14 @@ def _node_eval(script: str, timeout: float = 2.0) -> subprocess.CompletedProcess
 
 def test_api_rejects_hung_fetch_with_timeout_and_toast():
     """A hung fetch must reject quickly and surface a recognizable timeout toast."""
-    api_fn = _extract_js_function(_source(WORKSPACE_JS), "api")
+    api_fn = _api_with_deps(_source(WORKSPACE_JS))
     script = textwrap.dedent(
         f"""
         const events=[];
         global.document={{baseURI:'http://example.test/hermes/'}};
         global.location={{href:'http://example.test/hermes/',pathname:'/hermes/',search:''}};
         global.window={{location:global.location}};
+        {_SESSION_STORAGE_STUB}
         global.showToast=(msg,ms,type)=>events.push({{msg:String(msg),ms,type}});
         global.fetch=(url,opts)=>new Promise(()=>{{
           if(opts&&opts.signal)opts.signal.addEventListener('abort',()=>events.push({{aborted:true}}));
@@ -127,13 +157,14 @@ def test_api_rejects_hung_fetch_with_timeout_and_toast():
 
 def test_api_rejects_stalled_response_body_with_timeout():
     """The timeout must stay active through JSON/text body consumption, not only headers."""
-    api_fn = _extract_js_function(_source(WORKSPACE_JS), "api")
+    api_fn = _api_with_deps(_source(WORKSPACE_JS))
     script = textwrap.dedent(
         f"""
         const events=[];
         global.document={{baseURI:'http://example.test/hermes/'}};
         global.location={{href:'http://example.test/hermes/',pathname:'/hermes/',search:''}};
         global.window={{location:global.location}};
+        {_SESSION_STORAGE_STUB}
         global.showToast=(msg,ms,type)=>events.push({{msg:String(msg),ms,type}});
         global.fetch=(url,opts)=>Promise.resolve({{
           ok:true,
@@ -162,13 +193,14 @@ def test_api_rejects_stalled_response_body_with_timeout():
 
 def test_api_can_suppress_timeout_toast_for_background_pollers():
     """Passive pollers need abort/reject cleanup without a user-visible toast."""
-    api_fn = _extract_js_function(_source(WORKSPACE_JS), "api")
+    api_fn = _api_with_deps(_source(WORKSPACE_JS))
     script = textwrap.dedent(
         f"""
         const events=[];
         global.document={{baseURI:'http://example.test/hermes/'}};
         global.location={{href:'http://example.test/hermes/',pathname:'/hermes/',search:''}};
         global.window={{location:global.location}};
+        {_SESSION_STORAGE_STUB}
         global.showToast=(msg,ms,type)=>events.push({{msg:String(msg),ms,type}});
         global.fetch=(url,opts)=>new Promise(()=>{{
           if(opts&&opts.signal)opts.signal.addEventListener('abort',()=>events.push({{aborted:true}}));
@@ -202,7 +234,9 @@ def test_api_has_default_timeout_and_per_call_override_contract():
     assert "delete fetchOpts.timeoutMs" in body, "api() must strip timeoutMs before calling fetch()"
     assert "delete fetchOpts.timeoutToast" in body, "api() must strip timeoutToast before calling fetch()"
 
-    fetch_call = re.search(r"fetch\(url\.href,\{.*?\.\.\.fetchOpts.*?\}\)", body, re.DOTALL)
+    # `requestUrl` is re-resolved per attempt so a tab-context retry carries the
+    # new token (#6559); it is still the sanitized URL passed to fetch().
+    fetch_call = re.search(r"fetch\(requestUrl,\{.*?\.\.\.fetchOpts.*?\}\)", body, re.DOTALL)
     assert fetch_call, "api() must call fetch() with sanitized fetchOpts"
     assert "...opts" not in fetch_call.group(0), "api() must not spread raw opts into fetch()"
     assert "timeoutMs" not in fetch_call.group(0), "api() must not forward timeoutMs to fetch()"

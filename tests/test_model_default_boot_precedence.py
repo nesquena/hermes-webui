@@ -145,6 +145,11 @@ fetch = async function(url) {
   }
   throw new Error('unexpected fetch ' + href);
 };
+// populateModelDropdown() (ui.js) requests through _profileFetch() (#6559),
+// the delegator that routes to workspace.js's tab-context transport when it
+// is loaded. This harness has none, so it falls back to the local fetch()
+// stub above exactly as the real _profileFetch() does.
+function _profileFetch(url, opts) { return fetch(url, opts); }
 
 populateModelDropdown(args.opts || {}).then(() => {
   process.stdout.write(JSON.stringify({

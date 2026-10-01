@@ -130,6 +130,16 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
             this.onclick = null;
             this.textContent = '';
             this._innerHTML = '';
+            this._listeners = {{}};
+          }}
+          addEventListener(type, handler) {{
+            if (!this._listeners[type]) this._listeners[type] = [];
+            this._listeners[type].push(handler);
+          }}
+          dispatchEvent(event) {{
+            const handlers = this._listeners[event.type] || [];
+            for (const h of handlers) h(event);
+            if (typeof this.onclick === 'function' && !event._preventedDefault) this.onclick(event);
           }}
           set innerHTML(value) {{
             this._innerHTML = String(value || '');
@@ -167,6 +177,10 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
         globalThis.showToast = () => {{}};
         let switchedTo = null;
         globalThis.switchToProfile = async (name) => {{ switchedTo = name; S.activeProfile = name; }};
+        // renderProfileDropdown builds a real <a href> per row (#6559). The href
+        // itself is covered by tests/test_5682_profile_query_switch.py; here it only
+        // needs to resolve, or every row render throws and the dropdown looks empty.
+        globalThis._profileTabUrl = (name) => '/?profile=' + encodeURIComponent(name);
         const multiProfileResponse = {{
           active: 'default',
           single_profile_mode: false,
@@ -218,7 +232,13 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
           const profileOptions = dd.children.filter((child) => String(child.className).includes('profile-opt'));
           const other = profileOptions.find((child) => child.innerHTML.includes('other'));
           assert(other, 'fresh refresh should render the valid profile option');
-          await other.onclick();
+          other.dispatchEvent({{
+            type:'click', button:0, ctrlKey:false, shiftKey:false, metaKey:false, altKey:false,
+            _preventedDefault:false,
+            preventDefault() {{ this._preventedDefault = true; }},
+          }});
+          // Give the async switchToProfile handler time to settle
+          await new Promise((resolve) => setImmediate(resolve));
           assert.strictEqual(__profileTest.switchedTo(), 'other');
         }}
 
