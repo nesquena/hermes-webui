@@ -308,9 +308,16 @@ def _normalize_cron_job_ids(job_ids) -> list[str]:
 
 
 def _latest_cron_session_info_for_jobs(
-    job_ids, completed_job_ids=None
+    job_ids, completed_job_ids=None, deadline_s: float | None = None
 ) -> dict[str, dict[str, int | str | None]]:
-    """Return newest persisted cron session info keyed by completed cron job id."""
+    """Return newest persisted cron session info keyed by completed cron job id.
+
+    Pure read of the agent ``state.db``. When ``deadline_s`` is supplied the
+    connection carries a wall-clock deadline that bounds the whole scan, and a
+    bounded failure re-raises instead of degrading to an empty result so the
+    caller can report ``session_lookup_failed`` and retry. Without it the call
+    keeps its original best-effort shape and returns empty info on error.
+    """
     normalized = _normalize_cron_job_ids(job_ids)
     requested = _normalize_cron_job_ids(completed_job_ids if completed_job_ids is not None else job_ids)
     if not requested:
@@ -320,8 +327,34 @@ def _latest_cron_session_info_for_jobs(
     db_path = _active_state_db_path()
     if not db_path or not Path(db_path).exists():
         return {jid: {"session_id": "", "message_count": None} for jid in requested}
+    # No global row cap. A LIMIT over all cron sessions can exclude a requested
+    # job whose session sits behind newer rows from OTHER jobs, and the caller
+    # would then report that omission as a successful empty result.
+    #
+    # Restrict the read to the requested job ids up front: the previous shape
+    # scanned and sorted every cron session before filtering, and on a large
+    # state.db that pushed the read past its deadline, so after a few failed
+    # attempts the page dropped the completion's unread marker for good. The id
+    # restriction is an index range, so the read stays inside the budget whatever
+    # the number of other jobs' sessions. The wall-clock deadline below remains
+    # the backstop: a read that still outruns it aborts and re-raises, so the
+    # caller reports session_lookup_failed and the page retries.
+    bounds = []
+    for jid in requested:
+        lo = f"cron_{jid}_"
+        bounds.append((lo, lo + chr(0x10FFFF)))
+    id_clause = (
+        "(" + " OR ".join("(s.id >= ? AND s.id < ?)" for _ in bounds) + ")"
+    )
+    id_params = [v for lo, hi in bounds for v in (lo, hi)]
     try:
-        with closing(open_state_db_readonly(db_path)) as conn:
+        if deadline_s is None:
+            conn = open_state_db_readonly(db_path)
+        else:
+            conn = open_state_db_readonly(
+                db_path, timeout=deadline_s, deadline_s=deadline_s
+            )
+        with closing(conn):
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -339,6 +372,7 @@ def _latest_cron_session_info_for_jobs(
                            {select_message_count}
                     FROM sessions s
                     WHERE LOWER(COALESCE(s.source, '')) = 'cron'
+                      AND {id_clause}
                     ORDER BY COALESCE(s.started_at, 0) DESC, s.id DESC  -- newest start, not last activity
                 """
             else:
@@ -347,9 +381,10 @@ def _latest_cron_session_info_for_jobs(
                            {select_message_count}
                     FROM sessions s
                     WHERE LOWER(COALESCE(s.source, '')) = 'cron'
+                      AND {id_clause}
                     ORDER BY s.id DESC
                 """
-            cur.execute(query)
+            cur.execute(query, id_params)
             results = {
                 jid: {"session_id": "", "message_count": None} for jid in requested
             }
@@ -380,6 +415,8 @@ def _latest_cron_session_info_for_jobs(
                     break
             return results
     except sqlite3.Error:
+        if deadline_s is not None:
+            raise
         return {jid: {"session_id": "", "message_count": None} for jid in requested}
 
 
@@ -23132,18 +23169,39 @@ def _handle_cron_recent(handler, parsed):
                         "toast_notifications": job.get("toast_notifications") is not False,
                     }
                 )
-        latest_session_info = _latest_cron_session_info_for_jobs(
-            [job.get("id", "") for job in jobs],
-            [c["job_id"] for c in completions],
-        )
+        session_lookup_failed = False
+        try:
+            # Completions are the payload that matters; session info only lets a
+            # toast link to a session. The deadline bounds the read by wall clock
+            # (a lock-wait timeout alone does not bound the scan), and the flag
+            # lets the client remember the un-enriched completion and re-fetch
+            # its detail separately instead of discarding it.
+            latest_session_info = _latest_cron_session_info_for_jobs(
+                [job.get("id", "") for job in jobs],
+                [c["job_id"] for c in completions],
+                deadline_s=0.25,
+            )
+        except Exception:
+            latest_session_info = {}
+            session_lookup_failed = True
         for completion in completions:
             info = latest_session_info.get(str(completion.get("job_id", "") or ""), {})
             completion["session_id"] = str(info.get("session_id", "") or "")
             if info.get("message_count") is not None:
                 completion["message_count"] = int(info["message_count"])
-        return j(handler, {"completions": completions, "since": since})
+        return j(
+            handler,
+            {
+                "completions": completions,
+                "since": since,
+                "session_lookup_failed": session_lookup_failed,
+            },
+        )
     except ImportError:
-        return j(handler, {"completions": [], "since": since})
+        return j(
+            handler,
+            {"completions": [], "since": since, "session_lookup_failed": False},
+        )
 
 
 _PROJECT_CONTEXT_HERMES_NAMES = (".hermes.md", "HERMES.md")

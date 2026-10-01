@@ -4,6 +4,7 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from contextlib import closing
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, quote_from_bytes
@@ -71,7 +72,29 @@ def state_db_readonly_uri(db_path, platform: str | None = None) -> str:
     return state_db_file_uri(db_path, platform=platform) + "?mode=ro"
 
 
-def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
+def _install_read_deadline(conn: sqlite3.Connection, deadline_s: float) -> None:
+    """Abort a statement that outruns its wall-clock budget.
+
+    ``timeout`` only bounds how long SQLite *waits for a lock*. It does not
+    bound the statement itself, so a large scan still runs long past the
+    caller's deadline. SQLite calls the progress handler every N VM steps and
+    aborts the statement with ``sqlite3.OperationalError`` when the handler
+    returns non-zero, so the read is bounded whatever the table size.
+    """
+    deadline = time.monotonic() + max(0.0, float(deadline_s))
+
+    def _expired() -> int:
+        return 1 if time.monotonic() > deadline else 0
+
+    conn.set_progress_handler(_expired, 1000)
+
+
+def open_state_db_readonly(
+    db_path: Path,
+    log: logging.Logger | None = None,
+    timeout: float | None = None,
+    deadline_s: float | None = None,
+) -> sqlite3.Connection:
     """Open the live agent ``state.db`` read-only for a pure-read projection.
 
     Same rationale as the session-listing path (#5455): a write-capable handle
@@ -82,11 +105,24 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
     The caller must ensure ``db_path`` exists — this raises ``FileNotFoundError``
     for a missing path rather than creating a ghost database.
 
+    ``timeout`` bounds how long SQLite waits for a lock. ``deadline_s`` installs
+    a wall-clock deadline on the whole connection via :func:`_install_read_deadline`,
+    so a statement that outruns it is aborted even when no lock is contended.
+    Both are opt-in; a plain call behaves exactly as before.
+
     Callers own the returned connection (wrap it in ``contextlib.closing``).
     """
     if not db_path.exists():
         raise FileNotFoundError(f"agent state.db not found: {db_path}")
-    return sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True)
+    uri = state_db_readonly_uri(db_path.resolve())
+    conn = (
+        sqlite3.connect(uri, uri=True, timeout=timeout)
+        if timeout is not None
+        else sqlite3.connect(uri, uri=True)
+    )
+    if deadline_s is not None:
+        _install_read_deadline(conn, deadline_s)
+    return conn
 
 
 MESSAGING_SOURCES = {

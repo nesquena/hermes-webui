@@ -888,6 +888,19 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
     if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
     return false;
   }
+  // A completion can be resolved late - a cron retry lands several polls after
+  // the job finished - by which point the user may already have opened and read
+  // the session. Marking then would restore a dot they cleared. Skip when the
+  // session's viewed count already acknowledges this many messages in the same
+  // transcript generation (#7830).
+  const viewedCounts = _getSessionViewedCounts();
+  if (Object.prototype.hasOwnProperty.call(viewedCounts, sid)) {
+    const viewed = _sessionViewedCountRecord(viewedCounts[sid]);
+    const generation = _sessionTranscriptGenerationForUnread(sid);
+    if (generation === viewed.transcript_generation && count <= viewed.message_count) {
+      return false;
+    }
+  }
   _markSessionCompletionUnread(sid, count, meta);
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   return true;
