@@ -30,7 +30,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sqlite3
 import threading
 from contextlib import closing
@@ -65,7 +64,7 @@ def _is_valid_intentional_shrink_generation(value) -> bool:
 
 
 def _msg_count(p: Path) -> int:
-    """Return the number of messages in a session JSON file, or -1 on read/parse error.
+    """Return the effective message count, or -1 on read/parse error.
 
     Returns -1 for any non-session-shape file:
     - File can't be read (OSError)
@@ -82,7 +81,21 @@ def _msg_count(p: Path) -> int:
     if not isinstance(data, dict):
         return -1
     msgs = data.get('messages')
-    return len(msgs) if isinstance(msgs, list) else -1
+    if not isinstance(msgs, list):
+        return -1
+    # A shrink caused only by collapsing replayed empty ``incomplete`` rows is
+    # an intentional repair, not data loss.  Compare live and backup using the
+    # same narrow identity rule as Session.save() so startup recovery does not
+    # resurrect the amplification.  Unique backup messages still increase the
+    # effective count and remain recoverable.
+    try:
+        from api.models import _collapse_replayed_assistant_rows
+
+        msgs, _ = _collapse_replayed_assistant_rows(msgs)
+    except Exception:
+        logger.debug("Failed to compute effective recovery message count for %s", p, exc_info=True)
+        return -1
+    return len(msgs)
 
 
 def _rebuild_recovery_session_index(session_dir: Path) -> None:
@@ -408,13 +421,28 @@ def recover_session(session_path: Path) -> dict:
     if status["recommend"] != "restore":
         return {**status, "restored": False}
     bak_path = session_path.with_suffix('.json.bak')
-    # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
-    # cannot leave a half-written session.json.
+    # Stage the recovery via a tmp write + atomic replace so a crash
+    # mid-restore cannot leave a half-written session.json.
     tmp_path = session_path.with_suffix('.json.recover.tmp')
     try:
-        shutil.copyfile(bak_path, tmp_path)
+        # #6600: restore the SAME effective payload that _msg_count()
+        # evaluated — collapse replayed empty ``incomplete`` rows and
+        # recompute message_count from the collapsed list — so recovery never
+        # resurrects the duplicate amplification it just decided to repair.
+        bak_data = json.loads(bak_path.read_text(encoding='utf-8'))
+        if not isinstance(bak_data, dict):
+            raise ValueError("backup payload is not a session object")
+        from api.models import _repair_session_message_projections
+
+        bak_data, _, _ = _repair_session_message_projections(bak_data)
+        bak_messages = bak_data.get('messages')
+        if isinstance(bak_messages, list):
+            bak_data['message_count'] = len(bak_messages)
+        tmp_path.write_text(
+            json.dumps(bak_data, ensure_ascii=False, indent=2), encoding='utf-8'
+        )
         tmp_path.replace(session_path)
-    except OSError as exc:
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
         try:
             tmp_path.unlink(missing_ok=True)
@@ -551,13 +579,24 @@ def _read_state_db_missing_sidecar_rows(
                 if {'session_id', 'role', 'content'}.issubset(message_cols):
                     order = "timestamp, id" if 'timestamp' in message_cols and 'id' in message_cols else "rowid"
                     ts_expr = 'timestamp' if 'timestamp' in message_cols else 'NULL AS timestamp'
+                    # A recovered sidecar needs durable per-row provenance before
+                    # the normal Session.load/save replay reducers run. Without
+                    # it, two legitimate state.db rows with identical role,
+                    # content, and timestamp collapse irreversibly on first load.
+                    row_id_expr = (
+                        'id AS _state_db_row_id'
+                        if 'id' in message_cols
+                        else 'rowid AS _state_db_row_id'
+                    )
                     for msg in conn.execute(
-                        f"SELECT role, content, {ts_expr} FROM messages WHERE session_id = ? ORDER BY {order}",
+                        f"SELECT role, content, {ts_expr}, {row_id_expr} "
+                        f"FROM messages WHERE session_id = ? ORDER BY {order}",
                         (sid,),
                     ).fetchall():
                         message = {
                             'role': msg['role'],
                             'content': msg['content'] or '',
+                            '_state_db_row_id': msg['_state_db_row_id'],
                         }
                         if msg['timestamp'] is not None:
                             message['timestamp'] = msg['timestamp']

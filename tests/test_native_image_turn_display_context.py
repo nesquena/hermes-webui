@@ -18,6 +18,7 @@ from api.streaming import (
     _new_turn_context_from_messages,
     _active_turn_authority,
     _find_active_turn_checkpoint_index,
+    _record_agent_history_replay_authority,
     _sanitize_messages_for_agent,
     _settle_result_messages,
 )
@@ -1288,6 +1289,7 @@ def test_settlement_reload_and_next_turn_keep_one_clean_bubble_and_rich_context(
         "turn_id": "agent-turn-second",
         "agent_turn_boundary_resolved": True,
     })
+    _record_agent_history_replay_authority(second_identity, model_history)
     checkpoint = _materialize_active_turn_user(second_identity, second_text, "webui")
     second_identity["checkpoint"] = checkpoint
     previous_display = [*display_rows, checkpoint]
@@ -2054,6 +2056,101 @@ def test_untrusted_native_image_row_identity_deduplicates_stably(
             assert replay == first_replay
         session.messages = display
         session.context_messages = context
+
+
+def test_untrusted_native_image_row_identity_deduplicates_only_complete_payloads(
+    monkeypatch, tmp_path,
+):
+    import api.models as models
+
+    timestamp = 881.0
+    session, identity, api_content = _settle_image_turn(
+        timestamp=timestamp,
+        agent_row_id=41,
+    )
+    context_user = next(
+        message for message in session.context_messages
+        if message.get("_active_turn_token") == identity["token"]
+    )
+    mirror = _durable_agent_content(context_user["content"])
+    base_row = {
+        "role": "user",
+        "content": mirror,
+        "timestamp": timestamp,
+        "api_content": api_content,
+        "reasoning": "first reasoning payload",
+        "provider_metadata": {"variant": "first"},
+    }
+    state_rows = [
+        {**base_row, "_state_db_row_id": "malformed-a"},
+        {**base_row, "_state_db_row_id": "malformed-b"},
+        {
+            **base_row,
+            "_state_db_row_id": "malformed-c",
+            "reasoning": "second reasoning payload",
+        },
+        {
+            **base_row,
+            "_state_db_row_id": "malformed-d",
+            "provider_metadata": {"variant": "second"},
+        },
+        {
+            **base_row,
+            "_state_db_row_id": "malformed-e",
+            "api_content": f"{api_content} ",
+        },
+    ]
+    expected_payloads = {
+        (api_content, "first reasoning payload", "first"),
+        (api_content, "second reasoning payload", "first"),
+        (api_content, "first reasoning payload", "second"),
+        (f"{api_content} ", "first reasoning payload", "first"),
+    }
+
+    def payloads(messages):
+        return {
+            (
+                message["api_content"],
+                message["reasoning"],
+                message["provider_metadata"]["variant"],
+            )
+            for message in messages
+        }
+
+    context = session.context_messages
+    for _ in range(3):
+        context = models.reconciled_state_db_messages_for_session(
+            session,
+            prefer_context=True,
+            state_messages=state_rows,
+        )
+        mirrored_rows = [
+            message for message in context
+            if message.get("content") == mirror
+            and message.get("timestamp") == timestamp
+        ]
+        assert payloads(mirrored_rows) == expected_payloads
+        session.context_messages = context
+
+    session_dir = tmp_path / "webui-sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.Session(
+        session_id=session.session_id,
+        workspace="/fixture",
+        model="fixture-model",
+        context_length=128_000,
+        messages=session.messages,
+        context_messages=context,
+    ).save(skip_index=True)
+    reloaded = models.Session.load(session.session_id)
+    assert reloaded is not None
+    saved_mirrors = [
+        message for message in reloaded.context_messages
+        if message.get("content") == mirror
+        and message.get("timestamp") == timestamp
+    ]
+    assert payloads(saved_mirrors) == expected_payloads
 
 
 def test_unlinked_state_db_image_projection_uses_existing_reconciliation():
