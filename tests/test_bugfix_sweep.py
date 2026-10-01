@@ -1,4 +1,4 @@
-from tests.i18n_locale_loader import locale_source_text
+from tests.i18n_locale_loader import locale_key_names, locale_source_text
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,10 +90,7 @@ def test_auth_sessions_have_lock_and_success_can_clear_login_attempts(monkeypatc
 
 
 def _english_i18n_keys():
-    text = locale_source_text()
-    match = re.search(r"en:\s*\{([\s\S]*?)\n\s*\},\n\s*[a-z]{2}:", text)
-    assert match, "could not find English locale block"
-    return set(re.findall(r"^\s*([A-Za-z0-9_]+):", match.group(1), re.M))
+    return locale_key_names("en")
 
 
 def _literal_i18n_refs():

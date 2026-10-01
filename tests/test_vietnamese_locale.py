@@ -1,4 +1,4 @@
-from tests.i18n_locale_loader import locale_source_text
+from tests.i18n_locale_loader import locale_source_text, locale_string_value
 from collections import Counter
 from pathlib import Path
 import re
@@ -84,20 +84,18 @@ def extract_locale_block(src: str, locale_key: str) -> str:
 
 
 def test_vietnamese_locale_includes_representative_translations():
-    src = locale_source_text()
-    vi_block = extract_locale_block(src, "vi")
-    expected = [
-        "settings_heading_title: 'Trung tâm điều khiển'",
-        "settings_heading_subtitle: 'Tùy chọn, công cụ hội thoại và điều khiển hệ thống.'",
-        "approval_skip_all: 'Bỏ qua tất cả trong phiên này'",
-        "checkpoint_title: 'Checkpoint'",
-        "composer_send: 'Gửi tin nhắn'",
-        "gateway_restart: 'Khởi động lại'",
-        "wiki_browse: 'Duyệt wiki'",
-        "yolo_pill_title_active: 'Chế độ YOLO đang bật — bấm để tắt'",
-    ]
-    for entry in expected:
-        assert entry in vi_block
+    expected = {
+        "settings_heading_title": "Trung tâm điều khiển",
+        "settings_heading_subtitle": "Tùy chọn, công cụ hội thoại và điều khiển hệ thống.",
+        "approval_skip_all": "Bỏ qua tất cả trong phiên này",
+        "checkpoint_title": "Checkpoint",
+        "composer_send": "Gửi tin nhắn",
+        "gateway_restart": "Khởi động lại",
+        "wiki_browse": "Duyệt wiki",
+        "yolo_pill_title_active": "Chế độ YOLO đang bật — bấm để tắt",
+    }
+    for key, value in expected.items():
+        assert locale_string_value("vi", key) == value
 
 
 def test_vietnamese_locale_covers_english_keys():
