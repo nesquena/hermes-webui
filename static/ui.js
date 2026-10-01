@@ -3348,6 +3348,65 @@ function _mdImageHtml(alt, url){
   return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
 }
 
+function _mediaTokenParts(source, matchOffset, rawRef){
+  let ref=String(rawRef||'');
+  let suffix='';
+  const before=String(source||'').slice(0,Number(matchOffset)||0);
+  // Quotes are valid path/URL bytes, so detach one only when the prose has the
+  // same opener immediately before MEDIA:. The entity forms are what the real
+  // streaming parser passes after escaping text nodes.
+  for(const family of [
+    {value:'"', forms:['"','&quot;']},
+    {value:"'", forms:["'",'&#39;']},
+  ]){
+    if(!family.forms.some(form=>before.endsWith(form))) continue;
+    let quote='', closeAt=-1;
+    for(const form of family.forms){
+      const index=ref.lastIndexOf(form);
+      if(index>closeAt){ quote=form; closeAt=index; }
+    }
+    if(closeAt<=0) continue;
+    const afterQuote=ref.slice(closeAt+quote.length);
+    if(!/^[.,;:!?]*$/.test(afterQuote)) continue;
+    ref=ref.slice(0,closeAt);
+    suffix=family.value+afterQuote;
+    break;
+  }
+  let punctuationStart=ref.length;
+  while(punctuationStart>0&&'.,;:!?'.includes(ref.charAt(punctuationStart-1))){
+    punctuationStart-=1;
+  }
+  const trailingPunctuation=ref.slice(punctuationStart);
+  for(const delimiter of ['***','___','**','__','*','_','`']){
+    if(!before.endsWith(delimiter)) continue;
+    const openerStart=before.length-delimiter.length;
+    if(openerStart>0&&before.charAt(openerStart-1)===delimiter.charAt(0)) continue;
+    let candidate=ref;
+    let afterDelimiter='';
+    if(trailingPunctuation&&candidate.slice(0,-trailingPunctuation.length).endsWith(delimiter)){
+      candidate=candidate.slice(0,-trailingPunctuation.length);
+      afterDelimiter=trailingPunctuation;
+    }
+    if(candidate===delimiter) return null;
+    if(candidate.endsWith(delimiter)&&candidate.length>delimiter.length){
+      const closerStart=candidate.length-delimiter.length;
+      if(candidate.charAt(closerStart-1)===delimiter.charAt(0)) continue;
+      ref=candidate.slice(0,-delimiter.length);
+      // The matching closer proves only its own bytes are outside the
+      // reference. Punctuation immediately before it may be a legal
+      // filename or URL byte and must remain bound to the ref.
+      suffix=delimiter+afterDelimiter;
+      break;
+    }
+  }
+  // A bare trailing punctuation byte is ambiguous: it may be prose, but it
+  // may also be part of a real local filename or remote URL. Only the quote
+  // and delimiter branches above have evidence from a matching opener that a
+  // closer is outside the MEDIA ref, so preserve every other byte verbatim.
+  if(!ref) return null;
+  return [ref,suffix];
+}
+
 function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(ref==null) return '';
   // data:image/* → inline <img>; any other data: scheme renders as inert
@@ -8404,19 +8463,11 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  // #7680 re-gate (9/22): two-pass scan.
-  //   1. `` `MEDIA:path` `` (backtick-wrapped, inline-code form) → strip
-  //      the wrapping backticks so the bare-token pass below sees a
-  //      plain ``MEDIA:path`` and the closing backtick is not consumed
-  //      as part of the path.
-  //   2. ``MEDIA:[^\s\)\]]+`` (bare, no backtick in the exclusion
-  //      class) so a filename that legally contains a backtick
-  //      (``report`final.png``) is captured in full instead of being
-  //      truncated at the first backtick.
-  s=s.replace(/`MEDIA:([^`\s]+)`/g,'MEDIA:$1');
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
-    media_stash.push(raw_ref);
-    return '\x00D'+(media_stash.length-1)+'\x00';
+  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(token,raw_ref,offset)=>{
+    const parts=_mediaTokenParts(s,offset,raw_ref);
+    if(!parts) return token;
+    media_stash.push(parts[0]);
+    return '\x00D'+(media_stash.length-1)+'\x00'+parts[1];
   });
   // ── End MEDIA stash ─────────────────────────────────────────────────────────
   // Pre-pass: decode HTML entities first so markdown processing works correctly.

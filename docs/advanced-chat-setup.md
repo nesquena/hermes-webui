@@ -93,6 +93,113 @@ The WebUI's `auto_title_refresh_every` setting remains a separate control for
 periodic refreshes of already-generated titles; it does not re-enable
 automatic generation when the auxiliary flag is off.
 
+### Pinning the title language
+
+`auxiliary.title_generation.language` pins the language generated titles are
+written in, whatever language the conversation itself is in:
+
+```yaml
+auxiliary:
+  title_generation:
+    language: Japanese
+```
+
+A nonblank value is read once per generation attempt and drives both halves of
+that attempt. The prompt instruction becomes `Write the title in <language>.`
+in place of the default "match the language of the user question" rule, and the
+post-generation drift check is retargeted to agree with it. Both title routes
+honour the pin: the auxiliary-client route and the active-agent route.
+
+Retargeting the validator is the point. The drift check exists to reject a
+title whose language wandered away from the conversation (issue #3293), and on
+a pinned install that same check would reject the pinned title the prompt had
+just asked for. How a generated title is validated therefore depends on the
+pin:
+
+- **A pin the script map recognises** (`Japanese`, `Russian`, `Amharic`,
+  `Bengali`, `Brazilian Portuguese`, `pt-BR`) is checked against that
+  language's script. The map covers the Latin, Cyrillic, CJK, Arabic, Hebrew,
+  Greek, Devanagari, Thai, Georgian, Armenian and Ethiopic scripts, and the
+  major Indic and South-East Asian ones.
+  A title substantially outside it is still rejected, so an English pin
+  rejects a CJK title and a Japanese pin rejects a Cyrillic one. A CJK pin
+  keeps borrowed Latin terms (`Python`, `WeChat Pay`) as long as the title
+  also holds at least two CJK characters, the same exemption the
+  conversation-based check applies. "Substantially outside" means more than
+  a third of the title's letters, summed across every other script. Styled
+  alphabets such as mathematical bold, circled, enclosed or fullwidth letters
+  count as the plain letters they decompose to; Roman numerals and circled
+  digits are not letters and are left out of the count.
+- **A pin the script map cannot resolve**, and **no pin**, both keep the
+  original behaviour: the title is checked against the language of the
+  conversation's opening message. A pin outside the map therefore still
+  changes the prompt, and a title that follows it into a script the
+  conversation does not use is rejected as drift. Pin a language the map
+  knows to get cross-script titles.
+
+A language written in two scripts in majority use accepts either by default:
+`Punjabi` accepts Gurmukhi and Shahmukhi (Arabic script), and `Mongolian`
+accepts Cyrillic and the traditional Mongolian script. `Serbian`, `Bosnian` and
+`Uzbek` have no default, because Cyrillic and Latin are both in wide use, so a
+bare pin naming one of them keeps the conversation check.
+
+A script qualifier narrows a recognised language to one script. It can be an
+ISO 15924 code in a BCP 47 tag (`pa-Arab`, `pa-Guru`, `mn-Mong`, `kk-Latn`,
+`sr-Latn`, `zh-Hant`) or an English script name beside the language
+(`Punjabi (Arabic)`, `Malay (Jawi)`, `Mongolian (Traditional)`,
+`Serbian (Cyrillic)`). A qualifier is also how a minority script opts in: bare
+`Kazakh` accepts Cyrillic only, and `kk-Latn` accepts Latin.
+
+Anything ambiguous fails closed to the conversation check instead of widening
+what is accepted:
+
+- a qualifier on a language the map does not know (`Klingon-Latn`, `xx-Latn`,
+  `Klingon (Arabic)`);
+- a language named only inside brackets after a word the map does not know
+  (`Klingon (English)`, `Русский (Russian)`);
+- a pin longer than 256 characters once surrounding whitespace is trimmed,
+  or 64 after normalisation;
+- two different qualifiers (`English-Latn-Cyrl`, `pa-Arab-Guru`), including
+  two scripts validated the same way (`ja-Hira-Kana`,
+  `Chinese (Simplified, Traditional)`), or `Latin` beside
+  another script (`Cyrillic Latin`); equivalent ones collapse
+  (`pa-Arab-Aran`, `Japanese (Kanji, Hani)`);
+- a script code in a tag that the table does not know (`ja-Zyyy`);
+- two languages (`English French`);
+- a two-letter code outside a BCP 47 tag (`pt (Brazil)`, `No preference`),
+  because such codes collide with region codes and ordinary words. Write the
+  language name or a tag instead: `Portuguese (Brazil)` or `pt-BR`.
+
+Language lookup is diacritic-insensitive. In a BCP 47 tag the language is the
+first subtag. A POSIX locale's encoding and modifier are ignored
+(`en_US.UTF-8`), except that every script named in the modifier qualifies
+(`be_BY@latin`, `sr_RS@latin`; `pa_IN@arabic-gurmukhi` conflicts), and so does
+a piece of the encoding that is exactly a script code (`en-Latn.Cyrl`
+conflicts). Otherwise a
+language name counts anywhere outside brackets, so `Francais`, `Français`,
+`Traditional Chinese` and `Brazilian Portuguese` resolve. The same rule
+applies to languages whose names are also script names (Arabic, Greek, Thai,
+Latin and others), so `Egyptian Arabic` and `Modern Greek` resolve, and so do
+`Klingon Arabic` and `Klingon-Latin`: the unknown word is read as a modifier of
+the named language. `Klingon (Arabic)` stays unresolved, because a bracketed
+word only qualifies. A word in brackets only
+qualifies: `Tamil (Arabic)` is Tamil in Arabic script, and `mn (Mongolian)` is
+Mongolian because the code and the name agree. A language's own name for itself
+is mostly not recognised, and a bracketed English name beside it does not
+rescue it: `Русский (Russian)` and `Klingon (English)` are unresolved. Write the
+English name or a tag instead: `Russian` or `ru`.
+
+A pin longer than 256 characters once surrounding whitespace is trimmed, or
+64 characters after
+normalisation (lowercasing, diacritic folding, punctuation to spaces), is not
+parsed; it is unresolved, so the conversation check applies, and the title
+prompt leaves it out.
+
+The pin affects session titles only. It does not change the language the
+assistant replies in, and it has no effect when
+`auxiliary.title_generation.enabled` is `false`, since no LLM title is
+generated at all in that case.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced

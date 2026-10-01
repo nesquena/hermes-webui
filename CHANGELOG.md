@@ -44,6 +44,85 @@
 
 ### Fixed
 
+- **`MEDIA:` links work when the model wraps them in Markdown emphasis or quotes.** A reply like
+  `**MEDIA:/path/chart.png**`, `_MEDIA:/path/chart.png_` or `"MEDIA:/path/chart.png".` used to build a link that
+  included the closing `**`, `_` or quote, so the download 404ed. A closing delimiter or quote is now detached only
+  when it exactly matches the opener in front of `MEDIA:` (same characters, same length); everything else stays part of
+  the path, so filenames ending in `_`, `*`, `!` or `.` and URLs ending in `!` keep those bytes. The chat renderer, media
+  authorization, snapshots and public shares all use the same rule. Reported by @ned-kelly. Thanks @pxxD1998.
+  (#6923, closes #6890)
+- **Model aliases route to the provider they name.** A canonical `model_aliases` entry or a provider-qualified
+  legacy alias (`sol: openai-codex/gpt-5.6-sol`) now selects that provider, even when a same-named model exists
+  on another provider; an unqualified legacy alias keeps the old active-provider-then-fuzzy lookup. Sessions
+  keep the alias's target model. Aliases with their own `base_url`/`api_key`/`key_env` are resolved server-side
+  and never sent to the browser. On Gateway and runner chat, a provider-only alias is sent as its resolved model
+  and provider, and an endpoint/credential alias is refused with HTTP 400
+  (`model_alias_requires_in_process_backend`) before anything is dispatched. Thanks @snoyberg. (#7567)
+
+- **Reloading a session keeps each thinking block's identity, and your formatting.** When a reply had no
+  tool calls (or its tool metadata was missing), reload rebuilt thinking blocks from the transcript and dropped
+  the identity of the saved Thinking event, so a distinct saved thought could be merged away. Saved thinking
+  now keeps its identity on reload. When saved prose matches transcript prose, only the identity is carried
+  over; the transcript's exact Markdown (code blocks, indentation, lists) is what renders. Thanks
+  @franksong2702. (#7825)
+- **A chat start that fails before the agent runs no longer leaves a phantom message behind.** With eager
+  session saving on, the submitted prompt was written to disk before setup finished. If the start was then
+  rejected, that prompt stayed in the transcript as a turn that never ran, and a retry showed it twice. A
+  rejected start now restores the session as it was before the attempt, keeps any recovery backup that
+  already existed, and puts back pending wake-up markers it had consumed. (#7193, #7249 by @rodboev)
+- **Renaming, moving or archiving a session no longer overwrites a newer save.** These three actions looked the
+  session up before taking its lock. If the in-memory cache evicted it in between and something else (a draft
+  autosave, for example) saved a newer copy, the action then saved its stale copy over it, silently undoing the
+  newer change (#7738). The session is now resolved again inside the lock, and the move check runs against that
+  copy. CLI/TUI sessions keep their source identity through the reload, and a WebUI fork stays a fork. Thanks
+  @happy5318. (#7776)
+- **Background workers for the default profile keep their own profile.** A detached worker (a model-catalog
+  rebuild, the process-wakeup credential check) entered for the default/root profile used to skip binding the
+  request profile entirely, so it ran with whatever profile the thread last had or the process default. It now
+  binds the default profile explicitly (without copying a named profile's environment), and on exit restores
+  the exact profile that was active before, rather than clearing it. Nested scopes, exceptions and reused
+  executor threads all end with the outer profile intact. Part of #6326. Thanks @webtecnica for the original
+  diagnosis.
+- **Replayed copies of a saved message no longer pile up in the session file.** When a stream reconnect or
+  re-persist wrote the same stored message again (same `id`, same `timestamp`, identical content), each save
+  appended another copy, so a session could grow without bound (#6568). Saving now drops only those exact
+  duplicates. A row whose content changed, rows without a stable `id`/`timestamp`, and repeated turns with
+  the same text but different ids are all kept. The message count, `.bak` backup and sidebar index row are
+  computed from the same cleaned copy, and a same-session save publishes the file and its sidebar row
+  together so an older overlapping save can't overwrite a newer one. If the duplicate check fails while
+  restoring from a backup, the restore stops and leaves the live file untouched. Thanks @stefanpieter, with
+  a fix from @pxxD1998. (#6569)
+- **Pinned title language is honoured.** `auxiliary.title_generation.language` now pins the language of
+  WebUI-generated titles, as it already does in Hermes Agent. The title prompt asks for that language,
+  and the drift check that rejects a title in the wrong language (#3293) is retargeted to the pin, so
+  it no longer throws away the title the pin asked for. Both title routes (the auxiliary client and the
+  active agent) honour it. Leaving it unset keeps the old behaviour of matching the user's language.
+  `docs/advanced-chat-setup.md` describes how pins map to scripts. Thanks @djennewe. (#6566)
+- **Turns adopted by a deferred save keep their provenance.** When a turn row was adopted on the
+  deferred-save path rather than by an eager checkpoint, its `_source` stamp was never written, so a
+  process-wakeup or delegation turn could later render as an ordinary user message. The stamp now
+  happens on both paths. Thanks @happy5318. (#7828)
+
+- **Background subagent results that were pending at a restart are delivered again.** Current Hermes
+  Agent no longer reloads undelivered async-delegation completions from its durable ledger when it is
+  imported; it waits for the first consumer to ask. The WebUI reads the completion queue directly
+  rather than through the Agent's own drain, so it never asked, and a subagent result that finished
+  while the WebUI was restarting stayed in the ledger without reaching the parent chat. Both WebUI
+  drain paths now ask the Agent to restore the ledger first. Older Agent builds, which restore on
+  import, are unaffected. Thanks @franksong2702. (#7927)
+
+- **The clarify tool works again with current Hermes Agent.** Hermes Agent changed its clarify
+  callback to pass one list of questions and expect the answers back as a structured reply. The WebUI
+  still registered the older two-argument callback, so every clarify call in a WebUI chat failed with
+  "missing 1 required positional argument: 'choices'" before the card could appear. The bridge now
+  accepts both shapes. With current Agent builds it shows the questions one card at a time and returns
+  each answer keyed by question; a timeout, a Stop, or a missing clarify surface ends the batch and is
+  reported as such, so the agent can tell an unanswered question from a cancelled one. Older Agent
+  builds keep the previous behaviour. Thanks @shentonyan. (#7923, closes #7922)
+- **The Nix package starts again.** Since `managed_agent_startup.py` was added, `server.py` imports it
+  at startup, but the Nix derivation didn't copy it into the package, so the packaged binary exited
+  with `ModuleNotFoundError` and crash-looped under a supervisor. It is now packaged with the other
+  startup modules. Thanks @erikcw. (#7928, closes #7929)
 - **A phone that drops off the network no longer turns a live stream into a server error.** When a
   client vanished at the network layer (left the Wi-Fi, a Tailscale peer dropped), the next write on
   a long-lived stream (chat, gateway events, terminal output, approvals, clarify) failed with a

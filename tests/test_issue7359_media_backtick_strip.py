@@ -53,12 +53,12 @@ PY_SITES: dict[str, str] = {
 # so the closing backtick of an inline-code form is consumed before the
 # bare scan.
 JS_BACKTICK_PREPASS: dict[str, str] = {
-    "static/ui.js": r"/`MEDIA:([^`\s]+)`/g",
-    "static/messages.js": r"/`MEDIA:([^`\s]+)`/g",
+    "static/ui.js": "function _mediaTokenParts(",
+    "static/messages.js": "_smdMediaTokenParts(",
 }
 PY_BACKTICK_PREPASS: dict[str, str] = {
-    "api/routes.py": r"`MEDIA:([^`\s]+)`",
-    "api/media_snapshots.py": r"`MEDIA:([^`\s]+)`",
+    "api/routes.py": "split_media_token_ref(text, match)",
+    "api/media_snapshots.py": "split_media_token_ref(text, match)",
 }
 
 
@@ -94,10 +94,10 @@ def test_js_site_carries_bare_token_class(relpath: str, needle: str) -> None:
         for relpath in JS_BACKTICK_PREPASS
     ],
 )
-def test_js_site_carries_wrapped_prepass(relpath: str, needle: str) -> None:
+def test_js_site_uses_wrapper_aware_splitter(relpath: str, needle: str) -> None:
     """#7680 re-gate: every JS site that scans bare MEDIA: tokens also
-    runs the wrapped-form pre-pass so the inline-code closing backtick
-    is eaten before the bare scan."""
+    uses the shared wrapper-aware splitter so the inline-code closing backtick
+    does not enter the reference. Executable cross-consumer cases pin the result."""
     src = _read(relpath)
     assert needle in src, (
         f"{relpath} is missing the wrapped-form pre-pass literal: {needle!r}"
