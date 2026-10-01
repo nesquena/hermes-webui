@@ -123,6 +123,102 @@ def _fixture_script() -> str:
     )
 
 
+def _picker_handoff_fixture_script() -> str:
+    """Exercise picker-to-menu handoff with real browser DOM replacement."""
+    return "\n".join(
+        [
+            "let _sessionActionMenu = null;",
+            "let _sessionActionAnchor = null;",
+            "let _sessionActionSessionId = null;",
+            "let _sessionActionPreviousFocus = null;",
+            "let _sessionActionMenuId = 0;",
+            "let _projectPickerTeardown = null;",
+            "let _sessionListRepaintDeferredByPicker = false;",
+            "const esc = value => String(value);",
+            "const ICONS = new Proxy({}, {get: () => ''});",
+            "const S = {session: null};",
+            "const _allSessions = [{session_id: 'parent', _child_sessions: [{session_id: 'picker-child'}]}, {session_id: 'other-row', pinned: true}];",
+            "const t = key => ({session_unpin: 'Unpin conversation', session_pin: 'Pin conversation'}[key] || key);",
+            "const showToast = () => {};",
+            "const setStatus = () => {};",
+            "const syncTopbar = () => {};",
+            "const renderSessionList = async () => {};",
+            "const _isReadOnlySession = () => false;",
+            "const _isMessagingSession = () => false;",
+            "const _isCliSession = () => false;",
+            "const _appendSessionCopyLinkAction = () => {};",
+            "const _appendSessionShareActions = () => {};",
+            "const _appendSessionDuplicateAction = () => {};",
+            "const _appendSessionExportHtmlAction = () => {};",
+            "const _sessionArchiveDescription = () => '';",
+            "const _sessionDeleteDescription = () => '';",
+            "const _manualTitleRegenerateTimeoutMs = async () => 0;",
+            "const _showProjectPicker = () => {};",
+            "const _archiveSession = async () => {};",
+            "const deleteSession = async () => {};",
+            "const removeWorktree = async () => {};",
+            "const cancelSessionStream = async () => true;",
+            "function _positionSessionActionMenu(){}",
+            "function _playSessionActionMenuEntrance(){}",
+            "let persistedPinned = null;",
+            "const api = async (path, options) => { if(path === '/api/session/pin') persistedPinned = JSON.parse(options.body).pinned; return {}; };",
+            "let repaintCount = 0;",
+            "let currentOtherAnchor = null;",
+            "function paintRows(){",
+            "  const host = document.getElementById('sessionList');",
+            "  const parent = document.createElement('div'); parent.className = 'session-item'; parent.dataset.sid = 'parent';",
+            "  const child = document.createElement('div'); child.className = 'session-child-session'; child.dataset.sid = 'picker-child';",
+            "  const picker = document.createElement('div'); picker.className = 'project-picker'; child.appendChild(picker); parent.appendChild(child);",
+            "  const other = document.createElement('div'); other.className = 'session-item'; other.dataset.sid = 'other-row';",
+            "  const trigger = document.createElement('button'); trigger.className = 'session-actions-trigger'; trigger.textContent = 'Actions'; trigger.setAttribute('aria-expanded', 'false'); other.appendChild(trigger);",
+            "  host.replaceChildren(parent, other); currentOtherAnchor = trigger;",
+            "  return {picker, trigger};",
+            "}",
+            "function renderSessionListFromCache(){ repaintCount += 1; paintRows(); }",
+            _function_source("_focusSessionActionMenuRestoreTarget"),
+            _function_source("closeSessionActionMenu"),
+            _function_source("_buildSessionAction"),
+            _function_source("_mountSessionActionMenu"),
+            _function_source("_findSessionRenameRow"),
+            _function_source("_projectPickerSessionActionHandoff"),
+            _function_source("_openSessionActionMenu"),
+            """
+            window.__pickerMenuHandoffResult = async () => {
+              const first = paintRows();
+              const staleOtherSession = {session_id: 'other-row', pinned: false};
+              first.trigger.focus();
+              _projectPickerTeardown = () => first.picker.remove();
+              _sessionListRepaintDeferredByPicker = true;
+              _openSessionActionMenu(staleOtherSession, first.trigger);
+
+              const menu = document.querySelector('.session-action-menu');
+              const unpin = [...menu.querySelectorAll('.session-action-opt')]
+                .find(button => button.textContent.includes('Unpin conversation'));
+              const result = {
+                repaintBeforeMenu: repaintCount === 1,
+                staleAnchorReplaced: !first.trigger.isConnected && _sessionActionAnchor === currentOtherAnchor,
+                currentStateAction: Boolean(unpin),
+              };
+              unpin.click();
+              await new Promise(resolve => setTimeout(resolve, 0));
+              result.persistedUnpin = persistedPinned === false;
+
+              _allSessions[1].pinned = true;
+              const second = paintRows();
+              _projectPickerTeardown = () => second.picker.remove();
+              _sessionListRepaintDeferredByPicker = true;
+              _openSessionActionMenu(staleOtherSession, second.trigger);
+              const replacementAnchor = _sessionActionAnchor;
+              _sessionActionMenu.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+              result.escapeFocusesReplacement = document.activeElement === replacementAnchor && replacementAnchor.isConnected;
+              result.parentAndNestedChildRemain = Boolean(document.querySelector('.session-item[data-sid="parent"] .session-child-session[data-sid="picker-child"]'));
+              return result;
+            };
+            """,
+        ]
+    )
+
+
 def test_session_action_menu_focus_lifecycle_in_browser():
     try:
         from playwright.sync_api import sync_playwright
@@ -175,4 +271,31 @@ def test_session_action_menu_returns_to_prior_focus_for_nonfocusable_opener_in_b
     assert result == {
         "menuRemovedOnEscape": True,
         "focusReturnedToPreviousControl": True,
+    }
+
+
+def test_picker_handoff_rebuilds_other_row_menu_and_escape_focus_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page()
+        page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
+        page.add_script_tag(content=_picker_handoff_fixture_script())
+        result = page.evaluate("window.__pickerMenuHandoffResult()")
+        browser.close()
+
+    assert result == {
+        "repaintBeforeMenu": True,
+        "staleAnchorReplaced": True,
+        "currentStateAction": True,
+        "persistedUnpin": True,
+        "escapeFocusesReplacement": True,
+        "parentAndNestedChildRemain": True,
     }

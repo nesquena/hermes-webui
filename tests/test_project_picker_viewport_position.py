@@ -125,6 +125,7 @@ const documentBody = {
 
 const document = {
   querySelectorAll() { return []; },
+  querySelector() { return currentSessionRow; },
   createElement(tag) { return new FakeElement(tag); },
   addEventListener: docEmitter.addEventListener,
   removeEventListener: docEmitter.removeEventListener,
@@ -155,16 +156,19 @@ const _allProjects = Array.from({length: 12}, (_, i) => ({
   color: '#7cb9ff',
 }));
 const _allSessions = [];
+let currentSessionRow = null;
 const api = async () => ({});
 const showToast = () => {};
 const showPromptDialog = async () => null;
 const renderSessionList = async () => {};
 let repaints = 0;
+let onRepaint = null;
 let cachedLabels = {parent: 'old parent', child: 'old child'};
 let paintedLabels = {...cachedLabels};
 const renderSessionListFromCache = () => {
   repaints += 1;
   paintedLabels = {...cachedLabels};
+  if (onRepaint) onRepaint();
 };
 const t = key => key;
 let nextTask = 0;
@@ -778,6 +782,14 @@ def _open_session_action_menu_source() -> str:
     return SESSIONS_JS[start:end]
 
 
+def _project_picker_session_action_handoff_source() -> str:
+    start = SESSIONS_JS.find("function _projectPickerSessionActionHandoff(")
+    assert start >= 0, "_projectPickerSessionActionHandoff not found in static/sessions.js"
+    end = SESSIONS_JS.find("\nfunction _openSessionActionMenu(", start)
+    assert end > start
+    return SESSIONS_JS[start:end]
+
+
 def test_closing_the_action_menu_drains_a_picker_deferred_repaint():
     assert NODE is not None
     script = r"""
@@ -817,7 +829,7 @@ console.log(JSON.stringify({drained, repaintsAfterNoop: repaints,
 
 
 def test_another_rows_real_action_menu_retires_picker_and_repaints_nested_rows():
-    """The ⋮ click owns the popover handoff even though it stops bubbling."""
+    """The ⋮ handoff paints canonical nested-row state before menu creation."""
     assert NODE is not None
     script = _DRIVER_PREFIX + _show_project_picker_source() + r"""
 let _sessionListRepaintDeferredByPicker = false;
@@ -832,14 +844,17 @@ function _isMessagingSession() { return false; }
 function _isCliSession() { return false; }
 function _appendSessionCopyLinkAction() {}
 function _appendSessionExportHtmlAction() {}
+function _findSessionRenameRow() { return currentSessionRow; }
 function _mountSessionActionMenu(menu, nextSession, nextAnchor) {
   _sessionActionMenu = menu;
   _sessionActionSessionId = nextSession.session_id;
   _sessionActionAnchor = nextAnchor;
+  mountedSessionPinned = nextSession.pinned;
+  mountedWithNewAnchor = nextAnchor === replacementMenuButton;
 }
 FakeElement.prototype.setAttribute = function(name, value) { this[name] = value; };
 FakeElement.prototype.removeAttribute = function(name) { delete this[name]; };
-""" + _close_session_action_menu_source() + _open_session_action_menu_source() + r"""
+""" + _close_session_action_menu_source() + _project_picker_session_action_handoff_source() + _open_session_action_menu_source() + r"""
 const row = {classList: {remove() {}}};
 const otherRowMenuButton = {
   isConnected: true,
@@ -852,6 +867,18 @@ const otherRowMenuButton = {
     this.onclick({stopPropagation() {}});
   },
 };
+let mountedSessionPinned = null;
+let mountedWithNewAnchor = false;
+const replacementMenuButton = {
+  isConnected: true,
+  classList: {contains: () => true, remove() {}, add() {}},
+  setAttribute() {},
+  removeAttribute() {},
+  closest: () => row,
+};
+const replacementRow = {
+  querySelector: selector => selector === '.session-actions-trigger' ? replacementMenuButton : null,
+};
 otherRowMenuButton.onclick = event => {
   event.stopPropagation();
   _openSessionActionMenu({session_id: 'nested-child'}, otherRowMenuButton);
@@ -859,6 +886,14 @@ otherRowMenuButton.onclick = event => {
 
 openPicker(260);
 cachedLabels = {parent: 'renamed parent', child: 'renamed child'};
+_allSessions.push({
+  session_id: 'parent',
+  _child_sessions: [{session_id: 'nested-child', pinned: true}],
+});
+onRepaint = () => {
+  otherRowMenuButton.isConnected = false;
+  currentSessionRow = replacementRow;
+};
 // The production list guard records the skipped repaint while the picker owns
 // its row; exercise the popover handoff through the real action-menu function.
 _sessionListRepaintDeferredByPicker = true;
@@ -868,6 +903,9 @@ const whileMenuOpen = {
   pickerRetired: _projectPickerTeardown === null,
   repaints,
   labels: {...paintedLabels},
+  flagCleared: _sessionListRepaintDeferredByPicker === false,
+  mountedSessionPinned,
+  mountedWithNewAnchor,
 };
 closeSessionActionMenu();
 flushTimers();
@@ -891,8 +929,11 @@ console.log(JSON.stringify({
     data = json.loads(result.stdout)
     assert data["whileMenuOpen"] == {
         "pickerRetired": True,
-        "repaints": 0,
-        "labels": {"parent": "old parent", "child": "old child"},
+        "repaints": 1,
+        "labels": {"parent": "renamed parent", "child": "renamed child"},
+        "flagCleared": True,
+        "mountedSessionPinned": True,
+        "mountedWithNewAnchor": True,
     }
     assert data["afterClose"] == {
         "repaints": 1,

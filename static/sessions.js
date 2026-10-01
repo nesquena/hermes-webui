@@ -5448,12 +5448,46 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
 }
 
-function _openSessionActionMenu(session, anchorEl){
-  if(_projectPickerTeardown){
-    const retireProjectPicker=_projectPickerTeardown;
-    _projectPickerTeardown=null;
-    retireProjectPicker();
+function _projectPickerSessionActionHandoff(session, anchorEl){
+  if(!_projectPickerTeardown) return {session,anchorEl};
+  const retireProjectPicker=_projectPickerTeardown;
+  _projectPickerTeardown=null;
+  retireProjectPicker();
+  if(!_sessionListRepaintDeferredByPicker) return {session,anchorEl};
+
+  // A list refresh may have already replaced this session's canonical fields
+  // while the picker kept the old row DOM alive. Paint that state before the
+  // action menu captures either the row closure or its focus-return anchor.
+  _sessionListRepaintDeferredByPicker=false;
+  try{
+    renderSessionListFromCache();
+  }catch(_){
+    _sessionListRepaintDeferredByPicker=true;
+    return null;
   }
+  const sid=session&&session.session_id;
+  let currentSession=(_allSessions||[]).find(item=>item&&item.session_id===sid)||null;
+  if(!currentSession){
+    for(const parent of (_allSessions||[])){
+      currentSession=parent&&Array.isArray(parent._child_sessions)
+        ? parent._child_sessions.find(child=>child&&child.session_id===sid)||null
+        : null;
+      if(currentSession) break;
+    }
+  }
+  const currentRow=_findSessionRenameRow(sid);
+  const currentAnchor=currentRow&&currentRow.querySelector
+    ? currentRow.querySelector('.session-actions-trigger')
+    : null;
+  if(!currentSession||!currentAnchor||!currentAnchor.isConnected||currentAnchor===anchorEl) return null;
+  return {session:currentSession,anchorEl:currentAnchor};
+}
+
+function _openSessionActionMenu(session, anchorEl){
+  const handoff=_projectPickerSessionActionHandoff(session,anchorEl);
+  if(!handoff) return;
+  session=handoff.session;
+  anchorEl=handoff.anchorEl;
   const isReadOnly = _isReadOnlySession(session);
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
     closeSessionActionMenu();
