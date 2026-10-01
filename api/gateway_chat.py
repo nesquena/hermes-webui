@@ -23,6 +23,7 @@ from api.config import (
     STREAM_LIVE_TOOL_CALLS,
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
+    RunAdmissionDrainingError,
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
@@ -1178,25 +1179,60 @@ def _run_gateway_chat_streaming(
         # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
         # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        # cancel_stream() can pop STREAMS[stream_id] between the route's
+        # is_alive() observation and this worker's registration: retire the
+        # route's concrete starting row here too (alive-to-cancel race,
+        # gate review 221beca7 #3). Registration below never happened on
+        # this path, so this pop cannot retire a live run.
+        from api.config import unregister_active_run as _unregister_active_run
+        _unregister_active_run(stream_id)
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="gateway-starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        backend="gateway",
-    )
+    cancelled_before_registration = False
+    try:
+        with STREAMS_LOCK:
+            if stream_id not in STREAMS or (CANCEL_FLAGS.get(stream_id) and CANCEL_FLAGS[stream_id].is_set()):
+                cancelled_before_registration = True
+            else:
+                register_active_run(
+                    stream_id,
+                    session_id=session_id,
+                    started_at=time.time(),
+                    phase="gateway-starting",
+                    workspace=str(workspace),
+                    model=model,
+                    provider=model_provider,
+                    backend="gateway",
+                )
+                cancel_event = CANCEL_FLAGS.setdefault(stream_id, threading.Event())
+    except RunAdmissionDrainingError:
+        q.put_nowait((
+            "apperror",
+            {
+                "type": "restart_draining",
+                "retryable": True,
+                "message": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                "session_id": session_id,
+            },
+        ))
+        _finish_gateway_run_starting(stream_id)
+        _clear_gateway_run_starting(stream_id)
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        unregister_active_run(stream_id)
+        return
+    if cancelled_before_registration:
+        _finish_gateway_run_starting(stream_id, result="fallback")
+        _clear_gateway_run_starting(stream_id)
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        unregister_active_run(stream_id)
+        return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
-    cancel_event = threading.Event()
     with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = ""
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []

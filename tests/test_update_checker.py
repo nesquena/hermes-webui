@@ -9,10 +9,26 @@ Tests cover the four new branches in _apply_update_inner():
   4. pull fails + generic fallback  → raw git output truncated at 300 chars
 """
 from pathlib import Path
-from unittest.mock import patch, call
+from unittest.mock import patch, MagicMock
 import subprocess
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _prevent_test_process_restart(monkeypatch):
+    """Keep update tests in-process (mirrors tests/test_updates.py).
+
+    The successful-update path calls the real _schedule_restart(), which since
+    the supervised-restart drain enters a PID-keyed drain marker and holds it
+    from a daemon thread for the whole restart window. Without this boundary
+    the marker lands in the real state home and any test that starts an agent
+    run in the following seconds (register_active_run) is refused with
+    RunAdmissionDrainingError — an ordering-dependent cross-test leak (shard
+    failures in test_webui_gateway_chat_backend / state_db reconciliation).
+    """
+    import api.updates as updates
+    monkeypatch.setattr(updates, '_schedule_restart', MagicMock())
 
 
 # ---------------------------------------------------------------------------

@@ -621,6 +621,12 @@ def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_pat
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *args, **kwargs: True)
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: SimpleNamespace(hex="goal-stream-id"))
+    # The fake thread cannot retire the real route's stream/goal registrations.
+    # Seed through monkeypatch so teardown removes only these owned keys.
+    monkeypatch.setitem(routes.STREAMS, "goal-stream-id", None)
+    monkeypatch.setitem(routes.STREAM_GOAL_RELATED, "goal-stream-id", None)
+    monkeypatch.setattr(routes, "register_stream_owner", lambda *args: None)
+    monkeypatch.setattr('api.gateway_chat._mark_gateway_run_starting', lambda *args: None)
 
     response = routes._start_chat_stream_for_session(
         FakeSession(),

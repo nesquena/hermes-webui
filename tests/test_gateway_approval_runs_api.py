@@ -1893,7 +1893,27 @@ def test_gateway_worker_marks_run_pending_before_runs_api_prelude():
     assert stream_id not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
 
 
-def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeypatch):
+@pytest.fixture
+def isolated_route_streams():
+    """Fake workers never run their outer finalizer; retire their registrations."""
+    from api import gateway_chat, routes
+
+    with routes.STREAMS_LOCK:
+        before = set(routes.STREAMS)
+    try:
+        yield
+    finally:
+        with routes.STREAMS_LOCK:
+            owned = set(routes.STREAMS) - before
+            for stream_id in owned:
+                routes.STREAMS.pop(stream_id, None)
+        for stream_id in owned:
+            routes.unregister_stream_owner(stream_id)
+            gateway_chat._finish_gateway_run_starting(stream_id)
+            gateway_chat._clear_gateway_run_starting(stream_id)
+
+
+def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeypatch, isolated_route_streams):
     from api import gateway_chat, routes
 
     recorded = {}
@@ -1954,7 +1974,25 @@ def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeyp
     assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
 
 
-def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monkeypatch):
+@pytest.mark.parametrize('fails', [False, True])
+def test_route_start_fakes_leave_no_restart_blockers(monkeypatch, fails):
+    from api import updates
+
+    before = updates._restart_blocker_snapshot()
+    guard = isolated_route_streams.__wrapped__()
+    next(guard)
+    try:
+        with monkeypatch.context() as patcher:
+            producer = (test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails
+                        if fails else test_start_chat_stream_marks_gateway_run_pending_before_thread_start)
+            producer(patcher, None)
+    finally:
+        with pytest.raises(StopIteration):
+            next(guard)
+    assert updates._restart_blocker_snapshot() == before
+
+
+def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monkeypatch, isolated_route_streams):
     from api import gateway_chat, routes
 
     recorded = {}

@@ -4900,7 +4900,15 @@ async function clearConversation() {
   try {
     const data = await api('/api/session/clear', {method:'POST',
       body: JSON.stringify({session_id: S.session.session_id})});
-    S.session = data.session;
+    if(data&&data.session&&typeof _installCanonicalSession==='function'){
+      // Canonical install (gate review 221beca7 #1): clear empties the
+      // transcript under a new clear generation; the pre-clear artifact
+      // projection owned removed rows and must retire/rebuild atomically.
+      _installCanonicalSession(data.session);
+    }else if(data&&data.session){
+      S.session=data.session;
+      if(S.session) delete S.session._artifactProjection;
+    }
     S.messages = [];
     S.toolCalls = [];
     syncTopbar();

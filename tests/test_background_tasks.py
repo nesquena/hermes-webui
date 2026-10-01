@@ -123,12 +123,16 @@ class TestBackgroundCompletionHookWiring(unittest.TestCase):
         """_handle_background must wrap _run_agent_streaming in a function
         that subsequently invokes complete_background(parent_sid, task_id, answer)."""
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-        # Locate the _handle_background function
+        # Locate the _handle_background function. The admission wrapper splits
+        # the surface into _handle_background (reservation) and
+        # _handle_background_admitted (body); the worker lives in the admitted
+        # half, so scan both.
         idx = routes_src.find("def _handle_background(")
         self.assertGreater(idx, -1, "_handle_background() not found in routes.py")
-        # Take a generous window around the function body
-        end = routes_src.find("\ndef ", idx + 1)
-        body = routes_src[idx:end if end > 0 else idx + 3000]
+        end = routes_src.find("def _handle_background_admitted(", idx + 1)
+        self.assertGreater(end, -1, "_handle_background_admitted() not found in routes.py")
+        end2 = routes_src.find("\ndef ", end + 1)
+        body = routes_src[idx:end2 if end2 > 0 else end + 3000]
 
         self.assertIn("complete_background", body, (
             "_handle_background worker must call complete_background() after "

@@ -193,7 +193,7 @@ def test_recovery_paths_restore_truncation_signal():
     """preflight/retry/undo must NOT hardcode _messagesTruncated=false — they
     read the server's truncation signal instead."""
     assert "!!(live.session._messages_truncated)" in _COMMANDS_JS
-    assert "!!(data.session._messages_truncated)" in _COMMANDS_JS
+    assert "_messagesTruncated=!!data.session._messages_truncated" in _COMMANDS_JS
 
 
 def test_jump_to_start_requests_explicit_full_transcript():

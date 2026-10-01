@@ -61,7 +61,9 @@ def _run_restart(monkeypatch, *, argv, frozen=False, pythonw=False, spawn=None, 
 
     monkeypatch.setattr(updates, "_windows_restart_spawn", record_spawn)
     monkeypatch.setattr(updates, "_windows_restart_exit", record_exit)
-    updates._schedule_restart(delay=0)
+    worker = updates._schedule_restart(delay=0)
+    worker.join(timeout=2)
+    assert not worker.is_alive()
     deadline = time.monotonic() + 2
     while not any(event[0] == "spawn" for event in events if isinstance(event, tuple)):
         if time.monotonic() >= deadline:
@@ -146,10 +148,12 @@ def test_posix_restart_keeps_execv_shape(monkeypatch, frozen):
     monkeypatch.setattr(sys, "argv", ["wrapper", "--profile", "default"])
     monkeypatch.setattr(sys, "frozen", frozen, raising=False)
     monkeypatch.setattr(updates, "_AGENT_DIR", None)
-    monkeypatch.setattr(updates, "_wait_until_restart_safe", lambda: {})
+    monkeypatch.setattr(updates, "_wait_until_restart_safe", lambda: {"restart_blocked": False})
     monkeypatch.setattr(updates, "_purge_agent_pycache", lambda _path: None)
     monkeypatch.setattr(os, "execv", lambda exe, argv: events.append((exe, argv)))
-    updates._schedule_restart(delay=0)
+    worker = updates._schedule_restart(delay=0)
+    worker.join(timeout=2)
+    assert not worker.is_alive()
     deadline = time.monotonic() + 2
     while not events and time.monotonic() < deadline:
         time.sleep(0.01)

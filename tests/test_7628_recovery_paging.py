@@ -109,6 +109,7 @@ function runtimeStubs() {
   globalThis._INITIAL_MSG_LIMIT = 50;
   globalThis._EPHEMERAL_TURN_FIELDS = ['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
   globalThis._isActiveSession = () => scenario.isActiveSession !== false;
+  globalThis._bailOutOfTerminalEventsFromStaleStream = () => false;
   globalThis._isSessionCurrentPane = () => scenario.isSessionCurrentPane !== false;
   globalThis._isSessionActivelyViewed = () => !!scenario.isSessionActivelyViewed;
   globalThis._closeSource = () => calls.push('closeSource');

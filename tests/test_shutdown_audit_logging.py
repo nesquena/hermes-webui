@@ -31,9 +31,11 @@ def test_server_shutdown_audit_logs_active_stream_context(monkeypatch, caplog):
     assert "session-2" not in logged
 
 
-def test_shutdown_route_logs_request_context_without_starting_real_shutdown(monkeypatch, caplog):
+def test_shutdown_route_logs_request_context_without_starting_real_shutdown(monkeypatch, caplog, tmp_path):
     from api import routes
 
+    # FakeThread never runs its cleanup; keep this marker local to the test.
+    monkeypatch.setenv("HERMES_WEBUI_RESTART_DRAIN_DIR", str(tmp_path / "drain"))
     responses = []
     monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append(payload) or True)
 
