@@ -678,7 +678,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     mutates its input) pass _copy=False to skip the redundant copy on the hot path.
     """
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return {}
 
@@ -814,7 +814,7 @@ def _config_for_yaml_save(config_data: dict) -> dict:
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
@@ -1789,26 +1789,21 @@ _PROVIDER_MODELS = {
     ],
     "openai": [
         {"id": "gpt-5.5",      "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-api": [
         {"id": "gpt-5.5",      "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-codex": [
-        {"id": "gpt-5.5", "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
-        {"id": "gpt-5.4", "label": "GPT-5.4"},
-        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
-        {"id": "gpt-5.3-codex", "label": "GPT-5.3 Codex"},
-        {"id": "gpt-5.2-codex", "label": "GPT-5.2 Codex"},
-        {"id": "gpt-5.1-codex-max", "label": "GPT-5.1 Codex Max"},
-        {"id": "gpt-5.1-codex-mini", "label": "GPT-5.1 Codex Mini"},
-        {"id": "codex-mini-latest", "label": "Codex Mini (latest)"},
+        {"id": "gpt-6-sol",      "label": "GPT-6 Sol"},
+        {"id": "gpt-6-luna",     "label": "GPT-6 Luna"},
+        {"id": "gpt-5.6-sol",    "label": "GPT-5.6 Sol"},
+        {"id": "gpt-5.6-terra",  "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.6-luna",   "label": "GPT-5.6 Luna"},
+        {"id": "gpt-5.5",        "label": "GPT-5.5"},
     ],
     "google": [
         {"id": "gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
@@ -2028,11 +2023,12 @@ def _seed_provider_models_from_core() -> None:
     """Enrich existing provider model lists with missing IDs from hermes_cli.
 
     The core's _PROVIDER_MODELS is the authoritative curated list of agent-capable
-    models per provider.  The WebUI's static dict above is a display-oriented copy
-    (with {id, label} entries) that can go stale when new models are added to the
-    core without a matching WebUI update.  This function bridges the gap by
-    injecting any missing model IDs from the core into **existing** WebUI provider
-    entries.
+    models for ordinary providers.  The WebUI's static dict above is a
+    display-oriented copy (with {id, label} entries) that can go stale when new
+    models are added to the core without a matching WebUI update.  This function
+    bridges the gap by injecting any missing model IDs from the core into
+    **existing** WebUI provider entries.  OpenAI Codex is excluded because its
+    account-entitlement-aware live/cache path owns catalog freshness.
 
     Constrains seeding to providers already in the WebUI catalog — does NOT add
     brand-new providers.  Adding new vendors is a maintainer curation decision.
@@ -2063,6 +2059,8 @@ def _seed_provider_models_from_core() -> None:
             _webui_key_by_canonical[_canon] = _wk
 
     for provider_id, core_models in _core_pm.items():
+        if provider_id == "openai-codex":
+            continue
         if not isinstance(core_models, list):
             continue
 
@@ -4855,6 +4853,11 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     # would be sent to the wrong backend. Emit the explicit hint so it stays
     # routable to the plugin that surfaced it. (#5909 gate finding)
     if _is_plugin_model_provider(provider):
+        return f"@{provider}:{model}"
+
+    # Codex live/cache models are intentionally absent from the static catalog,
+    # so bare same-provider IDs can be claimed by overlapping providers.* entries.
+    if provider == "openai-codex":
         return f"@{provider}:{model}"
 
     # If the selected provider is already the configured provider, leaving the
@@ -7962,7 +7965,7 @@ def _declares_model_provider_kind(plugin_dir: Path) -> bool:
         except Exception:
             return False
         try:
-            import yaml as _yaml
+            from api import yaml_compat as _yaml
 
             data = _yaml.safe_load(text)
             if isinstance(data, dict):
@@ -8576,9 +8579,9 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     """Return visible model slugs from Codex's local models_cache.json.
 
     The agent's provider_model_ids('openai-codex') intentionally filters IDs
-    with ``supported_in_api: false``. Codex CLI still lists some of those models
-    in its picker (notably ``gpt-5.3-codex-spark`` from #1680), so the WebUI
-    merges this visible local catalog to stay in sync with Codex itself.
+    with ``supported_in_api: false``. Codex's visible catalog may still include
+    some of those models, so the WebUI merges this local catalog with live
+    discovery.
     """
     codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
     cache_path = codex_home / "models_cache.json"
@@ -9748,12 +9751,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if raw_models:
                         _append_picker_group(provider_name, pid, raw_models)
                 elif pid == "openai-codex":
-                    # Codex account catalogs drift faster than WebUI releases
-                    # (for example gpt-5.3-codex-spark in #1680). Ask the
-                    # agent's Codex resolver first so /api/models inherits the
-                    # live Codex API / local ~/.codex cache / static fallback
-                    # chain instead of freezing the picker to WebUI's curated
-                    # _PROVIDER_MODELS snapshot.
+                    # Codex account catalogs drift independently from WebUI
+                    # releases, so ask the agent's resolver first and merge the
+                    # visible local cache below before falling back to WebUI's
+                    # static _PROVIDER_MODELS snapshot.
                     raw_models = []
                     codex_ids = []
                     try:

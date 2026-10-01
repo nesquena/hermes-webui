@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -629,6 +630,17 @@ def _expand_settled_worklog(page) -> None:
     )
 
 
+_RENDERED_TIMESTAMP_RE = re.compile(
+    r"(?:\r?\n)[ \t]*\d{1,2}:\d{2}(?::\d{2})?[ \t]*(?:AM|PM)?[ \t]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_rendered_timestamp(text: str) -> str:
+    """Strip trailing rendered clock timestamp from a row's innerText, preserving all internal whitespace."""
+    return _RENDERED_TIMESTAMP_RE.sub("", text or "")
+
+
 def _terminal_rows(snapshot: dict) -> list[dict]:
     return [row for row in snapshot["rows"] if row["role"] == "terminal"]
 
@@ -1196,7 +1208,7 @@ def main() -> int:
                 "settled_process": settled_process,
                 "reloaded_process": reloaded_process,
             }
-            assert settled_process[0]["text"] == reloaded_process[0]["text"], {
+            assert _strip_rendered_timestamp(settled_process[0]["text"]) == _strip_rendered_timestamp(reloaded_process[0]["text"]), {
                 "settled_process": settled_process,
                 "reloaded_process": reloaded_process,
             }
@@ -1204,7 +1216,7 @@ def main() -> int:
                 "settled_terminal": settled_terminal,
                 "reloaded_terminal": reloaded_terminal,
             }
-            assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
+            assert _strip_rendered_timestamp(settled_terminal[0]["text"]) == _strip_rendered_timestamp(reloaded_terminal[0]["text"]), {
                 "settled_terminal": settled_terminal[0],
                 "reloaded_terminal": reloaded_terminal[0],
             }
