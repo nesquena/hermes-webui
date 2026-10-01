@@ -120,6 +120,17 @@ def _post_draft(sid, text):
         return None
 
 
+def _flush_page_draft(page):
+    """Await the production immediate-save path for deterministic E2E setup."""
+    page.evaluate(
+        """() => _saveComposerDraftNow(
+            S.session.session_id,
+            document.querySelector('#msg').value,
+            S.pendingFiles ? [...S.pendingFiles] : []
+        )"""
+    )
+
+
 def _check_new_chat_middle_click(browser):
     """The + conversation control, end to end (#7824).
 
@@ -147,6 +158,7 @@ def _check_new_chat_middle_click(browser):
         original_url = page.url
         original_id = original_url.split("/session/", 1)[1].split("?", 1)[0]
         page.locator("#msg").fill("Draft stays in the original tab")
+        _flush_page_draft(page)
         # Server-persist the draft before any tab juggling: the restore path
         # validates drafts server-side, so the assertion target must exist.
         assert _wait_draft(original_id, "Draft stays in the original tab"), (
@@ -256,6 +268,7 @@ def _check_new_chat_middle_click(browser):
             arg=new_id, timeout=25000,
         )
         bg.locator("#msg").fill("Draft in the background tab")
+        _flush_page_draft(bg)
         bg.wait_for_function(
             "(sid) => localStorage.getItem('hermes-new-chat-draft-session') === sid",
             arg=new_id, timeout=5000,
@@ -388,6 +401,7 @@ def _check_middle_click_from_deep_url(browser):
             }""",
             "Popup draft survives reload",
         )
+        _flush_page_draft(popup)
         assert _wait_draft(popup_id, "Popup draft survives reload"), (
             "the popup draft did not persist"
         )
