@@ -23,6 +23,35 @@ The authoritative `event:` names on `/api/chat/stream` are listed in the
 **Authoritative emitted events** table of
 [`docs/rfcs/session-sse-contract-v1.md`](rfcs/session-sse-contract-v1.md).
 
+### Runtime attribution on chat streams
+
+`run_meta` is a journaled observation for the current stream owner. Its payload
+may contain `session_id`, `model`, `provider`, and `reasoning_effort` (`off`, an
+effort level, or `null` when the effective effort is unknown). Repeated events
+replace the live footer metadata for that stream; they do not change the
+session's selected route.
+
+For the in-process runtime, WebUI can emit `run_meta` after the Agent is
+registered because the Agent's model, provider, and frozen `reasoning_config`
+are the effective values. A successful fallback emits a replacement only after
+the Agent's post-activation lifecycle notice. Pre-activation retry notices do
+not replace runtime metadata.
+
+For Gateway Runs and legacy chat-completions streams, request `model`,
+`provider`, and `model_options` are intent rather than execution evidence.
+WebUI emits `run_meta` and persists `_usedModel`, `_reasoningEffort`, and
+`_gatewayRouting` only from explicit Gateway runtime/routing metadata. Missing
+terminal metadata therefore leaves runtime attribution absent. If Gateway
+reports an answering model/provider but omits effective reasoning effort, the
+model/provider are retained while the effort remains unknown; WebUI never
+copies the requested effort into the observed field. Completed-run reattach
+uses the same terminal-status metadata before settlement.
+
+The terminal `done.usage.used_model`, `used_provider`, and `reasoning_effort`
+fields follow that same observed-only rule. `Session.model` and
+`Session.model_provider` remain the user's requested selection for the next
+turn, independent of any observed fallback runtime.
+
 ## Gateway probe scope (important for non-browser clients)
 
 `GET /api/sessions/gateway/stream?probe=1` returns a JSON capability payload

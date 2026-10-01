@@ -4,6 +4,7 @@ from api.compression_anchor import visible_messages_for_anchor
 from api.models import Session
 from api.streaming import (
     _POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG,
+    _bridge_fallback_lifecycle_status,
     _compressed_context_tool_result_summary,
     _is_agent_compression_start_status,
     _is_fallback_lifecycle_message,
@@ -456,9 +457,41 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
     assert "or 'compressing' in _lower" not in block
     assert "or 'preflight compression' in _lower" not in block
 
-    # warning events with type:fallback for rate-limit/fallback lifecycle notices
-    assert "put('warning'" in block
-    assert "'type': 'fallback'" in block
+    # warning events with type:fallback for rate-limit/fallback lifecycle
+    # notices. The callback delegates to the module-level bridge helper so the
+    # exact same code path is unit-testable; anchor on the delegation plus the
+    # bridge's real behavior instead of an inline put('warning' source window.
+    assert "_bridge_fallback_lifecycle_status(" in block
+    warning_events = []
+    handled = _bridge_fallback_lifecycle_status(
+        "lifecycle",
+        "⚠️ Rate limited — trying fallback model...",
+        agent=None,
+        session_id="warn-bridge",
+        put=lambda event, data: warning_events.append((event, data)),
+    )
+    assert handled is True
+    assert warning_events == [
+        (
+            "warning",
+            {
+                "type": "fallback",
+                "message": "⚠️ Rate limited — trying fallback model...",
+            },
+        ),
+    ]
+    ignored_events = []
+    assert (
+        _bridge_fallback_lifecycle_status(
+            "lifecycle",
+            "unrelated lifecycle chatter",
+            agent=None,
+            session_id="warn-bridge",
+            put=lambda event, data: ignored_events.append((event, data)),
+        )
+        is False
+    )
+    assert ignored_events == []
     assert "'rate limited'" in src
     assert "'switching to fallback'" in src
     assert "'falling back'" in src
