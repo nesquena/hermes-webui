@@ -13631,6 +13631,7 @@ async function saveSettings(andClose){
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
+  const currentPw=($('settingsCurrentPassword')||{}).value||'';
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';
   const fontSize=($('settingsFontSize')||{}).value||localStorage.getItem('hermes-font-size')||'default';
@@ -13659,13 +13660,6 @@ async function saveSettings(andClose){
   Object.assign(body,_structuredCodeViewFromUi());
   Object.assign(body,_composerControlVisibilityPayload());
   body.composer_control_order=_getComposerControlOrder();
-  const languageSelector=$('settingsLanguage');
-  let localeCommit=null;
-  while(!localeCommit){
-    // A newer locale choice supersedes this attempt, not the captured Save.
-    const requestedLanguage=(languageSelector&&languageSelector.value)||((typeof getActiveLocale==='function')?getActiveLocale():language);
-    localeCommit=await _commitSettingsLocale(requestedLanguage,languageSelector,body);
-  }
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
   if(maxTokensField){
@@ -13706,10 +13700,16 @@ async function saveSettings(andClose){
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
+  const languageSelector=$('settingsLanguage');
+  let localeCommit=null;
+  while(!localeCommit){
+    // A newer locale choice supersedes this attempt, not the captured Save.
+    const requestedLanguage=(languageSelector&&languageSelector.value)||((typeof getActiveLocale==='function')?getActiveLocale():language);
+    localeCommit=await _commitSettingsLocale(requestedLanguage,languageSelector,body);
+  }
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     const currentPwField=$('settingsCurrentPassword');
-    const currentPw=(currentPwField||{}).value||'';
     if(_settingsPasswordAuthEnabled && !currentPw.trim()){
       if(currentPwField) currentPwField.focus();
       showToast(t('current_password_required'));
