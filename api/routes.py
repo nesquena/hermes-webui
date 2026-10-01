@@ -31,7 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing
+from contextlib import ExitStack, closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -43,11 +43,13 @@ from api.agent_runtime import (
 )
 from api.agent_sessions import (
     MESSAGING_SOURCES,
+    _is_continuation_session,
     _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
     open_state_db_readonly,
     read_session_lineage_report,
+    read_session_lineage_ids,
 )
 from api.compression_anchor import visible_messages_for_anchor
 from api.compression_recovery import (
@@ -5457,7 +5459,12 @@ def _handle_session_anchor_scene(handler, body):
     return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
 
 
-def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
+def _get_or_materialize_session(
+    sid: str,
+    *,
+    refresh_cli_messages: bool = False,
+    persist: bool = True,
+):
     """Get a session, materializing from CLI/agent metadata if not in WebUI store.
 
     Mirrors the fallback logic in /api/session/archive (routes.py:~8530).
@@ -5571,6 +5578,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
             profile=cli_meta.get("profile"),
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
+            **({"persist": False} if not persist else {}),
         )
         _apply_source_meta(s)
 
@@ -10827,6 +10835,11 @@ from api.models import (
     process_wakeup_credential_state_fingerprint,
     process_wakeup_pause_credential_state_changed,
     suppress_process_wakeup_for_provider_pause,
+)
+from api.session_batch_transaction import (
+    SessionBatchTransactionError,
+    commit_session_archive_batch,
+    session_store_transaction_lock,
 )
 
 
@@ -16585,9 +16598,7 @@ def handle_post(handler, parsed) -> bool:
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
-        # A delegated subagent child (#5307) is view-only and owned by the
-        # delegate runner. Deleting it here would call delete_cli_session() and
-        # erase the child's state.db transcript — refuse it.
+        # Delegated subagent state is view-only and owned by the runner (#5307).
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
@@ -16599,38 +16610,38 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
-        # Serialize with recovery, but bound contention so a browser timeout
-        # cannot be followed by a delayed server-side delete.
+        # Bound contention so a browser timeout cannot trigger a delayed delete.
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
-            try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
-            try:
-                prune_session_from_index(sid)
-            except Exception:
-                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
+            with session_store_transaction_lock(SESSION_DIR):
+                with LOCK:
+                    SESSIONS.pop(sid, None)
                 try:
-                    _record_webui_deleted_session_tombstone(sid)
+                    p = (SESSION_DIR / f"{sid}.json").resolve()
+                    p.relative_to(SESSION_DIR.resolve())
                 except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    return bad(handler, "Invalid session_id", 400)
+                sidecar_deleted = False
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
+                sidecar_deleted = not p.exists()
+                try:
+                    p.with_suffix('.json.bak').unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+                try:
+                    prune_session_from_index(sid)
+                except Exception:
+                    logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+                if sidecar_deleted and not is_messaging_session:
+                    try:
+                        _record_webui_deleted_session_tombstone(sid)
+                    except Exception:
+                        logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
@@ -17709,6 +17720,179 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        if body.get("lineage"):
+            state_db_path = _active_state_db_path()
+            request_profile = _get_active_profile_name()
+
+            def _local_lineage_row(payload):
+                source = payload.get("raw_source") or payload.get("source_tag")
+                is_snapshot = bool(payload.get("pre_compression_snapshot"))
+                return {
+                    "id": payload.get("session_id"),
+                    "parent_session_id": payload.get("parent_session_id"),
+                    "end_reason": payload.get("end_reason") or ("compression" if is_snapshot else None),
+                    "started_at": payload.get("started_at", payload.get("created_at")),
+                    "ended_at": payload.get("ended_at", payload.get("updated_at") if is_snapshot else None),
+                    "source": source,
+                    "session_source": payload.get("session_source"),
+                    "model_config": payload.get("model_config"),
+                }
+
+            def _explicit_independent_child(row, parent_id):
+                if str(row.get("session_source") or "").strip().lower() == "fork":
+                    return True
+                raw_config = row.get("model_config")
+                if isinstance(raw_config, str):
+                    try:
+                        raw_config = json.loads(raw_config)
+                    except (TypeError, ValueError):
+                        raw_config = {}
+                config = raw_config if isinstance(raw_config, dict) else {}
+                return (
+                    config.get("_branched_from") == parent_id
+                    or config.get("_delegate_from") == parent_id
+                )
+
+            def _has_ambiguous_local_continuation(local_session):
+                session_dir = local_session.path.parent
+                try:
+                    target_payload = json.loads(local_session.path.read_bytes())
+                except (OSError, ValueError, TypeError):
+                    return True
+                if not isinstance(target_payload, dict):
+                    return True
+                target = _local_lineage_row(target_payload)
+                if target_payload.get("pre_compression_snapshot"):
+                    return True
+
+                parent_id = target.get("parent_session_id")
+                if parent_id:
+                    if not is_safe_session_id(str(parent_id)):
+                        return True
+                    parent_path = session_dir / f"{parent_id}.json"
+                    try:
+                        parent_payload = json.loads(parent_path.read_bytes())
+                    except FileNotFoundError:
+                        # Fork/branch/delegate provenance is self-authenticating;
+                        # an untyped parent link without its parent remains
+                        # indistinguishable from a missing compression segment.
+                        if not _explicit_independent_child(target, parent_id):
+                            return True
+                    except (OSError, ValueError, TypeError):
+                        return True
+                    else:
+                        if not isinstance(parent_payload, dict):
+                            return True
+                        if _is_continuation_session(
+                            _local_lineage_row(parent_payload),
+                            target,
+                        ):
+                            return True
+
+                for child_path in session_dir.glob("*.json"):
+                    if child_path.name.startswith("_") or child_path == local_session.path:
+                        continue
+                    try:
+                        child_payload = json.loads(child_path.read_bytes())
+                    except (OSError, ValueError, TypeError):
+                        continue
+                    if not isinstance(child_payload, dict):
+                        continue
+                    child = _local_lineage_row(child_payload)
+                    if child.get("parent_session_id") != sid:
+                        continue
+                    if _is_continuation_session(target, child):
+                        return True
+                return False
+
+            def resolve_archive_scope():
+                resolution = read_session_lineage_ids(
+                    state_db_path,
+                    sid,
+                    request_profile,
+                )
+                if resolution.status == "found":
+                    return list(resolution.session_ids)
+                if resolution.reason == "profile_mismatch":
+                    raise KeyError(sid)
+                # The singleton compatibility path is only for a durable local
+                # sidecar, never for an in-memory CLI/state.db materialization.
+                session = Session.load(sid)
+                if session is None:
+                    raise KeyError(sid)
+                if getattr(session, "read_only", False):
+                    raise PermissionError("read-only imported session")
+                if not _session_visible_to_active_profile(
+                    getattr(session, "profile", None),
+                    handler,
+                ):
+                    raise KeyError(sid)
+                if _has_ambiguous_local_continuation(session):
+                    raise RuntimeError("Session lineage authority is incomplete")
+                return [sid]
+
+            try:
+                lineage_ids = resolve_archive_scope()
+            except KeyError:
+                return bad(handler, "Session lineage not found", 404)
+            except PermissionError as exc:
+                return bad(handler, str(exc), 400)
+            except RuntimeError as exc:
+                return bad(handler, str(exc), 409)
+            archived = bool(body.get("archived", True))
+            # Hold every target lock in a stable order, then resolve, materialize,
+            # and publish while owning the cross-process store authority. The
+            # store lock is same-thread reentrant, so the batch commit can retain
+            # its own fail-closed boundary without reopening a stale-write gap.
+            import api.models as session_models
+
+            for _attempt in range(3):
+                with ExitStack() as locks:
+                    for lineage_sid in sorted(lineage_ids):
+                        locks.enter_context(_get_session_agent_lock(lineage_sid))
+                    with session_store_transaction_lock(session_models.SESSION_DIR):
+                        try:
+                            current_ids = resolve_archive_scope()
+                        except KeyError:
+                            return bad(handler, "Session lineage not found", 404)
+                        except PermissionError as exc:
+                            return bad(handler, str(exc), 400)
+                        except RuntimeError as exc:
+                            return bad(handler, str(exc), 409)
+                        if set(current_ids) != set(lineage_ids):
+                            lineage_ids = current_ids
+                            continue
+                        sessions = []
+                        try:
+                            for lineage_sid in lineage_ids:
+                                if _session_is_subagent_view_only(lineage_sid):
+                                    raise PermissionError("Subagent sessions are view-only")
+                                # Reload durable local bytes while the store lock
+                                # is held; a cache entry may predate a sibling
+                                # process save. Missing CLI sidecars are staged
+                                # without publishing during prevalidation.
+                                session = Session.load(lineage_sid)
+                                if session is None:
+                                    session = _get_or_materialize_session(lineage_sid, persist=False)
+                                elif getattr(session, "read_only", False):
+                                    raise PermissionError("read-only imported session")
+                                else:
+                                    with LOCK:
+                                        SESSIONS[lineage_sid] = session
+                                if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+                                    raise PermissionError("Session not found")
+                                sessions.append(session)
+                        except (KeyError, PermissionError) as exc:
+                            return bad(handler, str(exc), 400)
+                        try:
+                            commit_session_archive_batch(sessions, archived)
+                        except SessionBatchTransactionError as exc:
+                            return j(handler, exc.response(), status=503)
+                        break
+            else:
+                return bad(handler, "Session lineage changed during archive; retry", 409)
+            publish_session_list_changed("session_archive", profile=getattr(sessions[0], "profile", None), session_id=sid)
+            return j(handler, {"ok": True, "session": sessions[0].compact(), "session_ids": lineage_ids})
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
         try:
@@ -23019,17 +23203,19 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            with _get_session_agent_lock(p.stem):
+                with session_store_transaction_lock(SESSION_DIR):
+                    s = Session.load(p.stem)
+                    if zero_only:
+                        should_delete = s and len(s.messages) == 0
+                    else:
+                        should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                    if should_delete:
+                        with LOCK:
+                            SESSIONS.pop(p.stem, None)
+                        p.unlink(missing_ok=True)
+                        cleaned += 1
+                        phase1_removed_ids.add(p.stem)
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
 
@@ -23051,7 +23237,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         try:
             from api.models import _INDEX_WRITE_LOCK, _safe_replace
 
-            with _INDEX_WRITE_LOCK:
+            with session_store_transaction_lock(SESSION_DIR), _INDEX_WRITE_LOCK:
                 index_file_data = json.loads(
                     SESSION_INDEX_FILE.read_bytes()
                 )

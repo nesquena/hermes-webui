@@ -5,8 +5,11 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, quote_from_bytes
+
+from api.profiles import _profiles_match
 
 logger = logging.getLogger(__name__)
 
@@ -879,20 +882,52 @@ def read_importable_agent_session_rows(
                 if wanted == 'assigned':
                     return _result([])
             elif {'parent_session_id', 'end_reason'} <= session_cols:
-                continuation_checks = [
-                    "parent.end_reason IN ('compression', 'cli_close')",
-                    "(parent.source IS NULL OR child.source IS NULL "
-                    "OR LOWER(TRIM(parent.source)) = LOWER(TRIM(child.source)))",
-                ]
-                if 'ended_at' in session_cols:
-                    continuation_checks.append(
-                        "(parent.ended_at IS NULL OR child.started_at >= parent.ended_at)"
-                    )
-                if 'session_source' in session_cols:
-                    continuation_checks.append(
-                        "LOWER(TRIM(COALESCE(child.session_source, ''))) != 'fork'"
-                    )
-                continuation_where = " AND ".join(continuation_checks)
+                def _sql_is_continuation(
+                    parent_id,
+                    parent_source,
+                    parent_end_reason,
+                    parent_ended_at,
+                    child_source,
+                    child_started_at,
+                    child_session_source,
+                    child_model_config,
+                ):
+                    return int(_is_continuation_session(
+                        {
+                            'id': parent_id,
+                            'source': parent_source,
+                            'end_reason': parent_end_reason,
+                            'ended_at': parent_ended_at,
+                        },
+                        {
+                            'source': child_source,
+                            'started_at': child_started_at,
+                            'session_source': child_session_source,
+                            'model_config': child_model_config,
+                        },
+                    ))
+
+                # Keep project membership on the exact same continuation
+                # predicate as sidebar projection. Registering a read-only UDF
+                # avoids a second SQL approximation drifting on overlap,
+                # branch/delegate/reset markers, forks, or tool children.
+                conn.create_function(
+                    'webui_is_continuation_session',
+                    8,
+                    _sql_is_continuation,
+                )
+
+                def _lineage_col(alias: str, name: str) -> str:
+                    return f"{alias}.{name}" if name in session_cols else "NULL"
+
+                continuation_where = (
+                    "webui_is_continuation_session("
+                    "parent.id, parent.source, parent.end_reason, "
+                    f"{_lineage_col('parent', 'ended_at')}, child.source, child.started_at, "
+                    f"{_lineage_col('child', 'session_source')}, "
+                    f"{_lineage_col('child', 'model_config')}"
+                    ") = 1"
+                )
                 # An assignment anywhere in a compression lineage assigns the
                 # whole logical conversation, so both filters must key on the
                 # lineage, not the individual row: 'unassigned' is the exact
@@ -1372,6 +1407,104 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
         'children': [_lineage_report_row(row, 'child_session') for row in child_rows],
         'manual_review': manual_review,
     }
+
+
+@dataclass(frozen=True)
+class SessionLineageResolution:
+    """Outcome of consulting state.db for an archive/restore lineage."""
+
+    status: str
+    session_ids: tuple[str, ...] = ()
+    reason: str | None = None
+
+
+def read_session_lineage_ids(
+    db_path: Path,
+    session_id: str | None,
+    profile: str | None = None,
+) -> SessionLineageResolution:
+    """Resolve a lineage without conflating absence with unusable authority."""
+    sid = str(session_id or '').strip()
+    db_path = Path(db_path)
+    if not sid:
+        return SessionLineageResolution("incompatible", reason="invalid_session_id")
+    if not db_path.exists():
+        return SessionLineageResolution("incompatible", reason="missing_database")
+    lineage_columns = {
+        "parent_session_id",
+        "end_reason",
+        "started_at",
+        "ended_at",
+        "source",
+        "session_source",
+    }
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if "id" not in session_cols:
+                return SessionLineageResolution("incompatible", reason="missing_sessions_schema")
+            projections = ["s.id"]
+            projections.extend(
+                _optional_col(name, session_cols)
+                for name in sorted(lineage_columns)
+            )
+            projections.append(_optional_col("profile", session_cols))
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT {', '.join(projections)} FROM sessions s"
+                )
+            ]
+    except (OSError, sqlite3.Error):
+        return SessionLineageResolution("incompatible", reason="unreadable_database")
+
+    rows_by_id = {row['id']: row for row in rows}
+    target = rows_by_id.get(sid)
+    schema_complete = lineage_columns.issubset(session_cols)
+    if target is None:
+        status = "absent" if schema_complete else "incompatible"
+        reason = None if schema_complete else "incomplete_sessions_schema"
+        return SessionLineageResolution(status, reason=reason)
+    # Canonical profile equivalence (_profiles_match): missing/'default' rows
+    # and a renamed root profile are the same identity. A profile-local
+    # state.db may predate the optional sessions.profile column entirely; its
+    # rows all belong to the requesting profile, so no row-level filter can
+    # apply — the route's per-materialized-session visibility prevalidation
+    # remains the authority there.
+    if profile is not None and "profile" in session_cols:
+        requested_profile = str(profile or "default").strip() or "default"
+        if not _profiles_match(
+            (str(target.get("profile") or "").strip() or None),
+            requested_profile,
+        ):
+            return SessionLineageResolution("incompatible", reason="profile_mismatch")
+        rows = [
+            row for row in rows
+            if _profiles_match(
+                (str(row.get("profile") or "").strip() or None),
+                requested_profile,
+            )
+        ]
+    if not schema_complete:
+        return SessionLineageResolution("incompatible", reason="incomplete_sessions_schema")
+    rows_by_id = {row['id']: row for row in rows}
+    root_id = _continuation_root_id(rows_by_id, sid) or sid
+    children: dict[str, list[dict]] = {}
+    for row in rows:
+        if row.get('parent_session_id'):
+            children.setdefault(row['parent_session_id'], []).append(row)
+    result: list[str] = []
+    stack = [rows_by_id[root_id]]
+    seen: set[str] = set()
+    while stack:
+        row = stack.pop()
+        if row['id'] in seen:
+            continue
+        seen.add(row['id'])
+        result.append(row['id'])
+        stack.extend(child for child in children.get(row['id'], []) if _is_continuation_session(row, child))
+    return SessionLineageResolution("found", tuple(result))
 
 
 def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[str]) -> dict[str, dict]:

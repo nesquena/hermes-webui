@@ -278,30 +278,42 @@ class TestIssue765FollowupHardening:
     """
 
     def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
-        """Two concurrent saves of the same session must not collide on one tmp path.
+        """Concurrent saves serialize publication and retain distinct temp paths.
 
-        The key regression guard here is that each save call should reach os.replace()
-        with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
-        threads would target the same path and the second replace would deterministically
-        fail once the first consume/remove happened.
+        The store transaction lock now intentionally prevents both replacements
+        from overlapping with an archive batch.  Distinct temp paths remain a
+        defence in depth guarantee for concurrent callers preparing the same
+        session.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
+        start_barrier = threading.Barrier(3)
+        observation_lock = threading.Lock()
         replace_sources = []
+        active_replaces = 0
+        max_active_replaces = 0
         errors = []
 
-        def _replace_with_barrier(src, dst):
-            replace_sources.append(str(src))
-            barrier.wait(timeout=5)
-            return original_replace(src, dst)
+        def _observe_replace(src, dst):
+            nonlocal active_replaces, max_active_replaces
+            with observation_lock:
+                replace_sources.append(str(src))
+                active_replaces += 1
+                max_active_replaces = max(max_active_replaces, active_replaces)
+            try:
+                time.sleep(0.05)
+                return original_replace(src, dst)
+            finally:
+                with observation_lock:
+                    active_replaces -= 1
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _observe_replace)
 
         def _save_worker():
             try:
+                start_barrier.wait(timeout=5)
                 s.save(skip_index=True)
             except Exception as e:
                 errors.append(e)
@@ -310,10 +322,13 @@ class TestIssue765FollowupHardening:
         t2 = threading.Thread(target=_save_worker)
         t1.start()
         t2.start()
+        start_barrier.wait(timeout=5)
         t1.join(timeout=5)
         t2.join(timeout=5)
 
+        assert not t1.is_alive() and not t2.is_alive()
         assert not errors, f"Concurrent same-session saves should not fail: {errors}"
+        assert max_active_replaces == 1, "Session.save replacements must hold store authority"
         assert len(replace_sources) >= 2, f"Expected replace calls, got {replace_sources}"
         assert len(set(replace_sources)) == 2, (
             "Concurrent same-session saves must use distinct temp files even if Windows-safe "

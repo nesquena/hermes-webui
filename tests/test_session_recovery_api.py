@@ -21,7 +21,22 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     bak.write_text(live.read_text(encoding="utf-8"), encoding="utf-8")
     live.unlink()
     index = tmp_path / "_index.json"
-    index.write_text(json.dumps([]), encoding="utf-8")
+    index.write_text(
+        json.dumps([
+            {
+                "session_id": sid,
+                "title": sid,
+                "workspace": "",
+                "model": "unknown",
+                "created_at": 0,
+                "updated_at": 0,
+                "archived": False,
+                "project_id": None,
+                "profile": None,
+            }
+        ]),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(_m, "SESSION_INDEX_FILE", index)
     stale = _m.Session(
