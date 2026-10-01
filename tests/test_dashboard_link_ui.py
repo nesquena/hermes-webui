@@ -220,14 +220,17 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     }
 
     function recordButtons() {
-      result.buttonStates = buttons.map((btn) => ({
-        id: btn.id,
-        classes: Array.from(btn.classList._set || []),
-        display: btn.style.display || '',
-        dashboardUrl: btn._attrs['data-dashboard-url'] || '',
-        tooltip: btn._attrs['data-tooltip'] || '',
-        ariaLabel: btn._attrs['aria-label'] || '',
-      }));
+      result.buttonStates = buttons.map((btn) => {
+        const rawUrl = btn.dataset.dashboardUrl;
+        return {
+          id: btn.id,
+          classes: Array.from(btn.classList._set || []),
+          display: btn.style.display || '',
+          dashboardUrl: typeof rawUrl === 'string' ? rawUrl : (btn._attrs['data-dashboard-url'] || ''),
+          tooltip: btn._attrs['data-tooltip'] || '',
+          ariaLabel: btn._attrs['aria-label'] || '',
+        };
+      });
     }
 
     (async () => {
@@ -999,3 +1002,34 @@ def test_loopback_webui_origin_has_no_remote_browser_warning(origin_hostname):
     for state in out["buttonStates"]:
         assert state["tooltip"] == "Dashboard"
         assert state["ariaLabel"] == "Dashboard"
+
+
+@requires_node
+@pytest.mark.parametrize(
+    "browser_url,expected_link",
+    [
+        ("https://host.example.test/dashboard", "https://host.example.test/dashboard"),
+        ("https://host.example.test/dashboard/", "https://host.example.test/dashboard/"),
+        ("https://host.example.test/nested/sub/path", "https://host.example.test/nested/sub/path"),
+        ("https://host.example.test/nested/sub/path/", "https://host.example.test/nested/sub/path/"),
+        ("https://host.example.test", "https://host.example.test"),
+        ("https://host.example.test/", "https://host.example.test"),
+        ("http://127.0.0.1:1234/dashboard/", "http://127.0.0.1:1234/dashboard/"),
+    ],
+)
+def test_dashboard_status_to_browser_link_preserves_subpath_trailing_slash(browser_url, expected_link):
+    # SILENT regression (#7845): the client previously stripped a sub-path's
+    # trailing slash via `.replace(/\/$/,'')`; only the root path (pathname "/")
+    # should be slash-normalized, so reverse-proxy prefix routing keeps its slash.
+    out = _run_dashboard_link_driver(
+        "status-apply",
+        mode="always",
+        env={
+            "DASH_WINDOW_HOSTNAME": "webui.example.test",
+            "DASH_STATUS_RUNNING": "1",
+            "DASH_STATUS_BROWSER_URL": browser_url,
+        },
+    )
+    assert out["buttonStates"]
+    for state in out["buttonStates"]:
+        assert state["dashboardUrl"] == expected_link

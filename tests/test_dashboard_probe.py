@@ -226,6 +226,8 @@ def test_dashboard_config_roundtrip_writes_profile_config_yaml(tmp_path, monkeyp
         "https://example.com/../path",
         "https://example.com/%2e%2e/path",
         "https://example.com/foo%2fbar",
+        "https://example.com/foo%5cbar",
+        "https://example.com/foo\\bar",
         "https://example.com//evil.com",
         "https://user:pass@example.com",
         "javascript:alert(1)",
@@ -272,4 +274,10 @@ def test_normalize_dashboard_browser_url_subpaths():
         normalize_dashboard_browser_url("https://hermes.example.com/foo%2fbar")
     with pytest.raises(ValueError, match="invalid dashboard URL path"):
         normalize_dashboard_browser_url("https://hermes.example.com//evil.com")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/dashboard\\..\\admin")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/dashboard%5c..%5cadmin")
+    with pytest.raises(ValueError, match="invalid dashboard URL path"):
+        normalize_dashboard_browser_url("https://hermes.example.com/dashboard%5C..%5Cadmin")
 

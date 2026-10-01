@@ -87,7 +87,7 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
     if path:
         if not path.startswith("/") or path.startswith("//") or "//" in path:
             raise ValueError("invalid dashboard URL path")
-        if "%2f" in path.lower() or "%2e" in path.lower():
+        if "\\" in path or "%2f" in path.lower() or "%2e" in path.lower() or "%5c" in path.lower():
             raise ValueError("invalid dashboard URL path")
         if path not in ("", "/") and posixpath.normpath(path) != path.rstrip("/"):
             raise ValueError("invalid dashboard URL path")
