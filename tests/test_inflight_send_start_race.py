@@ -27,11 +27,11 @@ def test_send_preserves_optimistic_messages_across_chat_start_await():
     setup_idx = body.index("optimisticMessages=[...S.messages];")
     inflight_idx = body.index("INFLIGHT[activeSid]={messages:optimisticMessages")
     await_idx = body.index("const startData=await api('/api/chat/start'")
-    save_idx = body.index("saveInflightState(activeSid,{streamId", await_idx)
+    save_idx = body.index("saveInflightState(runSid,{streamId", await_idx)
 
     assert setup_idx < inflight_idx < await_idx < save_idx
     post_await = body[await_idx:save_idx]
-    assert "if(!INFLIGHT[activeSid])" in post_await, (
+    assert "if(!INFLIGHT[runSid])" in post_await, (
         "send() should recreate the INFLIGHT entry if a session-list refresh pruned it"
     )
     assert "messages:INFLIGHT[activeSid].messages" not in body[save_idx : save_idx + 220], (
@@ -152,7 +152,7 @@ def test_post_start_bookkeeping_errors_cannot_block_live_attach():
     catch_idx = body.index("}catch(e){", chat_start_idx)
     optional_idx = body.index("_runOptionalPostStartUiStep('post-start ui/bookkeeping'", catch_idx)
     stream_id_idx = body.index("streamId = postStartData ? postStartData.stream_id : null;", catch_idx)
-    attach_idx = body.index("attachLiveStream(activeSid, streamId, uploadedNames);")
+    attach_idx = body.index("attachLiveStream(runSid, streamId, uploadedNames);")
     assert catch_idx < stream_id_idx < optional_idx < attach_idx, (
         "stream-id setup, post-start UI/bookkeeping, and attach must run after successful API catch"
     )
