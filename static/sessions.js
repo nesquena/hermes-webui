@@ -4265,10 +4265,25 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
     const compactPersisted=_compactTranscriptText(persistedText);
     const compactLive=_compactTranscriptText(liveText);
     if(!liveText || persistedText.startsWith(liveText)){
+      // Persisted carries text the live row does not have yet (empty live, or
+      // live is an exact prefix): backfill so the drop-and-replace in
+      // loadSession keeps the fuller copy.
       live.content=persistedText;
     }else if(liveText.startsWith(persistedText)){
+      // The live text is a STRICT EXTENSION of the persisted copy: the Agent
+      // persists the assistant tool-call row eagerly while the turn keeps
+      // streaming, so the persisted text can legitimately be a prefix of the
+      // live text ("Preparing export" -> "Preparing export\n\nExport is
+      // ready"). That is progress, never a staleness signal — keep the live
+      // content. Falling through to the superseded-block below would roll the
+      // user-visible text back to the older prefix and then drop the live row
+      // (#6649 maintainer review 2026-10-01: live text rolls back on a
+      // running tool turn).
       const extra=liveText.slice(persistedText.length).trim();
       if(extra&&compactPersisted.includes(_compactTranscriptText(extra))){
+        // The extra text is already covered inside the persisted copy (the
+        // stream merely re-emitted it after the persisted snapshot): the
+        // persisted copy remains authoritative.
         live.content=persistedText;
       }
     }else if(compactPersisted===compactLive){
@@ -4298,6 +4313,18 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
   // persistedText describes a PREVIOUS turn: never touch the live content,
   // never drop base rows, and let the merge append the live turn as-is.
   if(persistedText && settledBelongsToCurrentTurn && _messageComparableText(live) !== persistedText){
+    // A strict live extension of the same turn's persisted text is progress,
+    // not staleness: the Agent persists the assistant tool-call row eagerly
+    // while the turn keeps streaming, so the persisted text can be a prefix
+    // of the live text. Keep the live content, mark the covered persisted
+    // row for replacement (never mark the LIVE row superseded), and let the
+    // caller's drop-and-replace keep the fuller copy (#6649 maintainer review
+    // 2026-10-01: without this the visible text rolled back to the older
+    // prefix and the merge dropped the live row entirely).
+    if(liveText.startsWith(persistedText)){
+      live._progressBeyondPersisted=true;
+      return true;
+    }
     live.content = persistedText;
     live._supersededBySettled = true;
     return false;

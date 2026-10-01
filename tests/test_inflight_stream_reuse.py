@@ -2865,3 +2865,126 @@ assert.strictEqual(merged.filter(m => m.role === 'user').length, 1,
 """
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_prepare_live_tail_keeps_strict_extension_of_persisted_text():
+    """Maintainer review (2026-10-01): returning to a running tool turn must
+    not roll the live text back to an older prefix.
+
+    The Agent persists an assistant tool-call row while the turn keeps
+    streaming, so the persisted text can legitimately be a PREFIX of the live
+    text: persisted "Preparing export", live "Preparing export\n\nExport is
+    ready". The strict-extension branch used to let that fall through to the
+    superseded block, which overwrote live.content with the older prefix and
+    flagged it _supersededBySettled, so the merge dropped the live row and the
+    user saw only "Preparing export".
+
+    A strict extension of the SAME turn's persisted text is progress: keep the
+    live content, let the caller's drop-and-replace replace the covered
+    persisted row, and append the live row.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// Running tool turn: the persisted assistant row is an eager prefix of the
+// still-streaming live text, and the base carries the current turn's user.
+let base = [
+  {{role:'user', content:'export the data', timestamp:100}},
+  {{role:'assistant', content:'Preparing export', timestamp:101}},
+];
+let inflight = [
+  {{role:'user', content:'export the data', timestamp:100, _ts:100}},
+  {{role:'assistant', _live:true, content:'Preparing export\\n\\nExport is ready'}},
+];
+let live = inflight[1];
+let prepared = _prepareRunningLiveTail(base, inflight);
+assert.strictEqual(prepared, true,
+  'Strict live extension of the persisted text is progress: the live row may take over');
+assert.strictEqual(live.content, 'Preparing export\\n\\nExport is ready',
+  'Live text must NOT roll back to the older persisted prefix: got ' +
+  JSON.stringify(live.content));
+assert.ok(!live._supersededBySettled,
+  'A progressing live row must never be flagged as superseded by the stale prefix');
+
+// loadSession drop-and-replace: the covered persisted row goes, the live row stays.
+if(prepared){{
+  base = _dropCurrentTurnAssistantMessages(base);
+}}
+let merged = _mergeInflightTailMessages(base, inflight);
+let rows = merged.map(m => m.role + ':' + m.content);
+assert.strictEqual(rows.length, 2,
+  'Expected exactly one user and one live assistant row, got ' + JSON.stringify(rows));
+assert.strictEqual(rows[1], 'assistant:Preparing export\\n\\nExport is ready',
+  'The full live text must survive the merge: ' + JSON.stringify(rows));
+assert.strictEqual(merged[1]._live, true,
+  'The surviving assistant must be the live row');
+
+// Longer multiple-extension shape: the persisted transcript carries several
+// flushes, so _currentTurnAssistantText JOINs them — build it so the joined
+// form is still a strict prefix of the live tail.
+base = [
+  {{role:'user', content:'go'}},
+  {{role:'assistant', content:'Step 1'}},
+  {{role:'assistant', content:'Step 2'}},
+];
+inflight = [
+  {{role:'user', content:'go'}},
+  {{role:'assistant', _live:true, content:'Step 1\\n\\nStep 2\\n\\nStep 3'}},
+];
+prepared = _prepareRunningLiveTail(base, inflight);
+assert.strictEqual(prepared, true, 'Multi-flush extension is progress too');
+assert.strictEqual(inflight[1].content, 'Step 1\\n\\nStep 2\\n\\nStep 3',
+  'Live extension across multiple persisted flushes must stay intact');
+if(prepared){{
+  base = _dropCurrentTurnAssistantMessages(base);
+}}
+merged = _mergeInflightTailMessages(base, inflight);
+rows = merged.map(m => m.role + ':' + m.content);
+assert.strictEqual(rows.length, 2, 'Expected user + single live assistant: ' + JSON.stringify(rows));
+assert.strictEqual(rows[1], 'assistant:Step 1\\n\\nStep 2\\n\\nStep 3',
+  'The longest live text must win: ' + JSON.stringify(rows));
+
+// Negative control: a genuinely divergent same-turn partial is still
+// reconciled away (settled answer wins), so the extension allowance does not
+// weaken the staleness handling.
+base = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'authoritative settled answer'}},
+];
+inflight = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:'stale divergent partial'}},
+];
+prepared = _prepareRunningLiveTail(base, inflight);
+assert.strictEqual(prepared, false,
+  'A divergent partial is still stale: drop must stay unsafe');
+assert.strictEqual(inflight[1].content, 'authoritative settled answer',
+  'Divergent partial must still be reconciled to the settled answer');
+assert.ok(inflight[1]._supersededBySettled,
+  'Divergent partial must still be flagged for merge removal');
+
+// Negative control: the stream merely RE-EMITTED text already covered inside
+// the persisted copy — the persisted copy stays authoritative.
+base = [
+  {{role:'user', content:'status'}},
+  {{role:'assistant', content:'Working on the export, hold tight.'}},
+];
+inflight = [
+  {{role:'user', content:'status'}},
+  {{role:'assistant', _live:true, content:'Working on the export, hold tight.\\n\\nhold tight.'}},
+];
+prepared = _prepareRunningLiveTail(base, inflight);
+assert.strictEqual(prepared, true,
+  'Re-emitted covered text keeps the persisted copy authoritative');
+assert.strictEqual(inflight[1].content, 'Working on the export, hold tight.',
+  'Covered re-emission must fall back to the persisted copy: got ' +
+  JSON.stringify(inflight[1].content));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
