@@ -1505,11 +1505,13 @@ def _cron_job_for_api(job: dict) -> dict:
 
     ``toast_notifications`` is a WebUI preference for completion toasts. Legacy
     jobs default to enabled so existing behavior is preserved unless a job is
-    explicitly muted.
+    explicitly muted. ``badge_notifications`` mirrors it for the Tasks badge /
+    new-run marker.
     """
     payload = dict(job or {})
     payload.setdefault("profile", None)
     payload["toast_notifications"] = payload.get("toast_notifications") is not False
+    payload["badge_notifications"] = payload.get("badge_notifications") is not False
     return payload
 
 
@@ -21331,12 +21333,10 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
     for message in getattr(session, "messages", []) or []:
         if not isinstance(message, dict):
             continue
-        # Only honor MEDIA: tokens that the assistant/tool emitted. User-authored
-        # content cannot mint allow-list entries even if it contains a MEDIA:
-        # token — keeps the implicit threat model (assistant-emitted artifacts
-        # only) explicit.
+        # Only assistant/tool messages can grant artifact access. Other or
+        # missing roles cannot mint grants, even with an exact MEDIA: token.
         role = str(message.get("role") or "").strip().lower()
-        if role == "user":
+        if role not in {"assistant", "tool"}:
             continue
         # #7565: also inspect typed public assistant commentary carried in
         # ``codex_message_items`` (Agent phase: "commentary"). The
@@ -21668,8 +21668,17 @@ def _handle_media(handler, parsed):
     # Archives are download-only: never added to the inline-preview sets below,
     # so they always get Content-Disposition: attachment.
     _ARCHIVE_TYPES = {"application/zip"}
+    _SESSION_TEXT_ARTIFACT_TYPES = {
+        "text/csv",
+        "text/x-diff",
+        "application/vnd.excalidraw+json",
+    }
     _SESSION_MEDIA_TOKEN_TYPES = (
-        _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | _ARCHIVE_TYPES | {"text/html"}
+        _INLINE_IMAGE_TYPES
+        | _AUDIO_VIDEO_PDF_TYPES
+        | _ARCHIVE_TYPES
+        | _SESSION_TEXT_ARTIFACT_TYPES
+        | {"text/html"}
     )
     session_media_allowed = _session_media_token_allows_path(
         qs.get("session_id", [""])[0],
@@ -23130,6 +23139,7 @@ def _handle_cron_recent(handler, parsed):
                         "status": job.get("last_status", "unknown"),
                         "completed_at": ts,
                         "toast_notifications": job.get("toast_notifications") is not False,
+                        "badge_notifications": job.get("badge_notifications") is not False,
                     }
                 )
         latest_session_info = _latest_cron_session_info_for_jobs(
@@ -23545,23 +23555,36 @@ def _handle_btw(handler, body):
     ephemeral.messages = list(s.messages or [])
     ephemeral.title = f"btw: {question[:60]}"
     ephemeral.save()
+    from api.session_ops import snapshot_session_state
+
+    # Snapshot BEFORE the launch mutations so the abort cleanup can restore the
+    # session to its pre-launch shape (no active_stream_id / pending fields).
+    snapshot = snapshot_session_state(ephemeral)
     stream_id = uuid.uuid4().hex
     ephemeral.active_stream_id = stream_id
     register_session_writeback_owner(ephemeral.session_id, stream_id)
-    ephemeral.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, ephemeral.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    from api.background import track_btw
-    track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
-    thr = threading.Thread(
-        target=_run_agent_streaming,
-        args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
-        kwargs={"ephemeral": True, "model_provider": model_provider},
-        daemon=True,
-    )
-    thr.start()
+    # #6869 re-gate: every step after the writeback-owner registration — the
+    # second save, the channel registration, task tracking, thread construction
+    # and thread start — is now guarded. A throw in any of them used to orphan
+    # the registries and leave the ephemeral session pointing at a dead stream.
+    try:
+        ephemeral.save()
+        stream = create_stream_channel()
+        register_stream_owner(stream_id, ephemeral.session_id)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        from api.background import track_btw
+        track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
+        thr = threading.Thread(
+            target=_run_agent_streaming,
+            args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
+            kwargs={"ephemeral": True, "model_provider": model_provider},
+            daemon=True,
+        )
+        thr.start()
+    except Exception:
+        _cleanup_chat_start_launch_failure(ephemeral, stream_id, snapshot)
+        raise
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
@@ -23596,19 +23619,17 @@ def _handle_background(handler, body):
     )
     bg.title = f"bg: {prompt[:60]}"
     bg.save()
+    from api.session_ops import snapshot_session_state
+
+    # Snapshot BEFORE the launch mutations (see _handle_btw).
+    snapshot = snapshot_session_state(bg)
     stream_id = uuid.uuid4().hex
     bg.active_stream_id = stream_id
     register_session_writeback_owner(bg.session_id, stream_id)
-    bg.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, bg.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
     task_id = uuid.uuid4().hex[:8]
     from api.background import track_background, complete_background
     parent_sid = body["session_id"]
     bg_sid = bg.session_id
-    track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
 
     def _run_bg_and_notify():
         """Run the background agent, then mark the tracked task `done` with the
@@ -23656,8 +23677,27 @@ def _handle_background(handler, body):
             except Exception:
                 pass
 
-    thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
-    thr.start()
+    # #6869 re-gate: the second save, the channel registration, task tracking
+    # and the thread construction/start all run after the writeback owner was
+    # registered. A throw in any of them used to orphan the registries, leave
+    # the hidden bg session pointing at a dead stream, and strand the tracked
+    # task in status="running" forever — the frontend poll never saw a result.
+    try:
+        bg.save()
+        stream = create_stream_channel()
+        register_stream_owner(stream_id, bg.session_id)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
+        thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
+        thr.start()
+    except Exception:
+        _cleanup_chat_start_launch_failure(bg, stream_id, snapshot)
+        try:
+            complete_background(parent_sid, task_id, "(background task failed)")
+        except Exception:
+            pass
+        raise
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
@@ -23718,6 +23758,194 @@ def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> s
 
 
 _RETAINED_CONTEXT_USER_UNSET = object()
+
+
+# One-shot bounded retry for a deferred process-wakeup whose worker never
+# started (#7680 finding 3). Maps sid → the live threading.Timer so repeated
+# aborts for one session coalesce into a single pending retry.
+_DEFERRED_WAKEUP_RETRY_TIMERS: dict = {}
+_DEFERRED_WAKEUP_RETRY_TIMERS_LOCK = threading.Lock()
+_DEFERRED_WAKEUP_RETRY_DELAY_SECS = 2.0
+
+
+def _schedule_deferred_wakeup_retry(sid: str, *, retry_attempt: int = 0) -> None:
+    """Schedule ONE bounded drain retry for a launch-aborted wakeup (#7680).
+
+    The recording call site (``_rearm_process_wakeup_after_launch_failure``)
+    runs on a request thread; the retry must not block it. A short-delay
+    daemon ``threading.Timer`` fires ``drain_deferred_wakeups_for_session``
+    once — the drain itself is the bounded operation: it no-ops while the
+    session has an active turn, claims atomically (so a racing real next
+    turn cannot double-deliver), and on its own launch failure re-defers the
+    prompt without rescheduling. One-shot, no loop.
+
+    ``retry_attempt`` is the per-delivery attempt marker that makes the
+    "one-shot" claim real. The first abort (attempt 0) schedules the retry;
+    the retry's own launch runs with attempt 1, and a failure there goes
+    through ``_rearm_process_wakeup_after_launch_failure(retry_attempt=1)``
+    which keeps the prompt queued but never schedules again. Without the
+    marker the timer popped its own handle *before* draining, so the
+    "already scheduled" coalesce guard could not fire on the retry's own
+    failure and the drain rescheduled every 2s forever under a persistent
+    launch failure (#7680 CORE, maintainer 2026-10-01).
+
+    Coalescing: if a retry is already pending for this session, keep it —
+    one drain delivers one wakeup, and the prompt is queued either way.
+    """
+    if not sid:
+        return
+    try:
+        with _DEFERRED_WAKEUP_RETRY_TIMERS_LOCK:
+            existing = _DEFERRED_WAKEUP_RETRY_TIMERS.get(sid)
+            if existing is not None and existing.is_alive():
+                return  # one pending retry is enough — the prompt is queued
+            timer = threading.Timer(
+                _DEFERRED_WAKEUP_RETRY_DELAY_SECS,
+                _run_deferred_wakeup_retry,
+                args=(sid, retry_attempt + 1),
+            )
+            timer.daemon = True
+            _DEFERRED_WAKEUP_RETRY_TIMERS[sid] = timer
+        # ``start()`` is deliberately OUTSIDE the registry lock (a Timer that
+        # blocks in start() must not hold the lock other sessions need), but
+        # that means a start() failure leaves a dead entry in
+        # ``_DEFERRED_WAKEUP_RETRY_TIMERS``: the callback that would pop it
+        # never runs. Thread exhaustion on the launch-failure path is exactly
+        # when this fires, and every leaked entry is a session that can never
+        # schedule a retry again. Remove the entry on failure, but ONLY if it
+        # still refers to this timer — a racing session may have installed a
+        # newer one (P2 finding, api/routes.py ~23401).
+        try:
+            timer.start()
+        except Exception:
+            with _DEFERRED_WAKEUP_RETRY_TIMERS_LOCK:
+                if _DEFERRED_WAKEUP_RETRY_TIMERS.get(sid) is timer:
+                    _DEFERRED_WAKEUP_RETRY_TIMERS.pop(sid, None)
+            raise
+    except Exception:
+        logger.debug(
+            "Failed to schedule deferred-wakeup retry for session %s", sid,
+            exc_info=True,
+        )
+
+
+def _run_deferred_wakeup_retry(sid: str, retry_attempt: int = 0) -> None:
+    """Timer body: drain once, then drop the timer handle (#7680).
+
+    ``retry_attempt`` is threaded into the drain's launch so a launch failure
+    during this attempt reaches the abort cleanup as an already-retried
+    delivery: the prompt is preserved, no new timer is scheduled.
+    """
+    # Pop our own handle BEFORE draining. The coalesce guard above cannot be
+    # relied on for this (the entry is already gone), which is exactly why
+    # the attempt marker — not the registry state — is what bounds the
+    # retry.
+    try:
+        with _DEFERRED_WAKEUP_RETRY_TIMERS_LOCK:
+            _DEFERRED_WAKEUP_RETRY_TIMERS.pop(sid, None)
+        from api.background_process import drain_deferred_wakeups_for_session
+
+        drain_deferred_wakeups_for_session(
+            sid, retry_attempt=retry_attempt
+        )
+    except Exception:
+        logger.debug(
+            "Deferred-wakeup retry drain failed for session %s", sid, exc_info=True,
+        )
+
+
+def _rearm_process_wakeup_after_launch_failure(
+    sid: str,
+    stream_id: str,
+    *,
+    wakeup_prompt,
+    process_id: str = "",
+    retry_attempt: int = 0,
+) -> None:
+    """Re-arm the process-wakeup drain after a launch-failure abort (#7680).
+
+    Opt-in from the process-completion path ONLY. The caller sets
+    ``rearm_deferred_wakeup=True`` on ``_start_chat_stream_for_session``, which
+    today only ``api.background_process._start_server_side_wakeup_turn`` does.
+    Async-delegation completions start their turn with the same
+    ``source="process_wakeup"`` but already own a durable claim/retry
+    (``release_async_delegation_delivery(..., retryable=True)`` →
+    ``_retry_unclaimed_async_delegation_event``), so re-arming here as well
+    delivered one completion through two independent retry paths: the durable
+    retry AND a deferred prompt AND a retry timer. Gating on ``source`` alone
+    could not tell the two callers apart (maintainer 2026-10-01 CORE).
+
+    The process-wakeup path consumes ``PENDING_BG_TASK_COMPLETIONS[sid]`` and
+    the deferred entry BEFORE the worker actually starts. If preparation,
+    thread construction or ``start()`` then fails, the abort otherwise leaves
+    the marker consumed and the prompt gone with no retry. Re-arm = persist the
+    prompt via ``record_deferred_wakeup`` (the bare PENDING marker is a
+    telemetry flag with no payload, so re-marking alone is a no-op), then
+    schedule ONE bounded retry off the request thread.
+
+    ``retry_attempt`` is the per-delivery attempt marker. >= 1 means this
+    delivery was already retried once: the prompt is preserved but no further
+    timer is scheduled. The retry timer pops its own handle *before* draining,
+    so by the time a failure inside that drain reaches here the registry is
+    already empty and the coalesce guard cannot fire — without this marker a
+    persistent launch failure spun a new timer every 2s forever.
+    """
+    wakeup_prompt = str(wakeup_prompt or "").strip()
+    if not wakeup_prompt:
+        # Nothing to retry — leave the marker state alone.
+        return
+    try:
+        from api.background_process import record_deferred_wakeup
+    except Exception:
+        record_deferred_wakeup = None
+    if record_deferred_wakeup is not None:
+        # Prefer the authoritative process_id threaded down from the dispatch
+        # boundary (``_process_one`` has the real registry id in scope when it
+        # fires the wakeup). Parsing the display text back into an identity is
+        # the fragile fallback: a multi-line heredoc command fails the pinned
+        # single-line grammar, so parsing yields "" even though a real id
+        # exists. When the threaded id IS provided, both this rearm and the
+        # real handler's re-defer append with the SAME id, so
+        # ``record_deferred_wakeup``'s dedup collapses them into one entry.
+        _process_id = str(process_id or "").strip()
+        if not _process_id:
+            try:
+                from api.process_event_utils import wakeup_display_meta
+
+                _meta = wakeup_display_meta(wakeup_prompt) or {}
+                _process_id = str(_meta.get("task_id") or "").strip()
+            except Exception:
+                _process_id = ""
+        try:
+            record_deferred_wakeup(sid, _process_id, wakeup_prompt)
+        except Exception:
+            logger.debug(
+                "Failed to record deferred wakeup for session %s", sid, exc_info=True,
+            )
+        # Schedule the delivery half. Recording the prompt only fixes the LOSS
+        # half: nothing delivers it, because ``drain_deferred_wakeups_for_session``
+        # has exactly one caller — the turn-teardown hook — and a worker that
+        # never started has no teardown. With an autonomous agent there is no
+        # next user turn either, so the wakeup would sit in the in-memory queue
+        # until the user types something (or be lost on restart).
+        if retry_attempt <= 0:
+            _schedule_deferred_wakeup_retry(sid)
+        else:
+            logger.debug(
+                "deferred-wakeup retry attempt %d failed for session %s; "
+                "prompt kept queued, no further retry scheduled",
+                retry_attempt,
+                sid,
+            )
+    # Re-arm the bare PENDING_BG_TASK_COMPLETIONS marker too (preserved
+    # behaviour for any drain path that does not consult
+    # DEFERRED_PROCESS_WAKEUPS).
+    try:
+        PENDING_BG_TASK_COMPLETIONS.add(sid)
+    except Exception:
+        logger.debug(
+            "Failed to re-arm process-wakeup marker for session %s", sid, exc_info=True,
+        )
 
 
 def _prepare_chat_start_session_for_stream(
@@ -24397,8 +24625,20 @@ def _start_chat_stream_for_session(
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
+    process_id: str = "",
+    retry_attempt: int = 0,
+    rearm_deferred_wakeup: bool = False,
 ):
-    """Persist pending state, register an SSE channel, and start an agent turn."""
+    """Persist pending state, register an SSE channel, and start an agent turn.
+
+    ``process_id``/``retry_attempt``/``rearm_deferred_wakeup`` are the
+    process-wakeup delivery identity threaded down from
+    ``start_session_turn``. ``rearm_deferred_wakeup`` is opt-in from the
+    process-completion path ONLY (``_start_server_side_wakeup_turn``):
+    async-delegation completions share ``source="process_wakeup"`` but own a
+    durable retry, so re-arming for them double-delivered one completion
+    (#7680 CORE, maintainer 2026-10-01).
+    """
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
     backend_is_gateway = bool(external_runtime_owned)
@@ -24659,6 +24899,21 @@ def _start_chat_stream_for_session(
                                 "Failed to close compensated turn journal event",
                                 exc_info=True,
                             )
+                    if rearm_deferred_wakeup:
+                        # Opt-in process-completion re-arm (#7680 CORE). Runs
+                        # AFTER the launch-abort cleanup so the registries are
+                        # unwound, and after the journal close so the turn is
+                        # not left in-flight. The prompt is passed explicitly:
+                        # the cleanup restored the session from its pre-launch
+                        # snapshot, so ``s.pending_user_message`` no longer
+                        # holds it.
+                        _rearm_process_wakeup_after_launch_failure(
+                            s.session_id,
+                            stream_id,
+                            wakeup_prompt=msg,
+                            process_id=process_id,
+                            retry_attempt=retry_attempt,
+                        )
                     raise
                 break
         if needs_stale_cleanup:
@@ -24827,6 +25082,9 @@ def _start_run(
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
     goal_related: bool = False,
+    process_id: str = "",
+    retry_attempt: int = 0,
+    rearm_deferred_wakeup: bool = False,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -24911,6 +25169,9 @@ def _start_run(
                 goal_related=goal_related,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                process_id=process_id,
+                retry_attempt=retry_attempt,
+                rearm_deferred_wakeup=rearm_deferred_wakeup,
             )
 
         def _legacy_adapter_factory():
@@ -24959,6 +25220,9 @@ def _start_run(
         goal_related=goal_related,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        process_id=process_id,
+        retry_attempt=retry_attempt,
+        rearm_deferred_wakeup=rearm_deferred_wakeup,
     )
 
 
@@ -25018,6 +25282,9 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    process_id: str = "",
+    retry_attempt: int = 0,
+    rearm_deferred_wakeup: bool = False,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -25215,6 +25482,9 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        process_id=process_id,
+        retry_attempt=retry_attempt,
+        rearm_deferred_wakeup=rearm_deferred_wakeup,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -26512,6 +26782,7 @@ def _handle_cron_create(handler, body):
 
         profile = _normalize_cron_profile_value(body.get("profile"))
         toast_notifications = body.get("toast_notifications") is not False
+        badge_notifications = body.get("badge_notifications") is not False
         requested_model = body.get("model") or None
         requested_provider = body.get("provider") or None
         job = create_job(
@@ -26535,6 +26806,8 @@ def _handle_cron_create(handler, body):
             )
         if not toast_notifications:
             post_create_updates["toast_notifications"] = False
+        if not badge_notifications:
+            post_create_updates["badge_notifications"] = False
         if post_create_updates:
             job = update_job(job["id"], post_create_updates) or job
         return j(handler, {"ok": True, "job": _cron_job_for_api(job)})

@@ -1541,8 +1541,30 @@ def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str)
     try:
         with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
             entries = _cfg.DEFERRED_PROCESS_WAKEUPS.setdefault(session_id, [])
-            if process_id and any(
-                e.get("process_id") == process_id for e in entries
+            # Idempotent per (process_id, wakeup_prompt).
+            #
+            # A non-empty ``process_id`` is the authoritative, immutable
+            # identity of its background completion — assigned once by the
+            # registry and already deduped upstream by
+            # ``BG_TASK_COMPLETE_EVENTS_SEEN`` / the ``_completion_consumed``
+            # marker — so two deferred entries for the SAME non-empty id can
+            # never represent two DIFFERENT wakeups: collapsing on the id is
+            # exact, not over-broad.
+            #
+            # An EMPTY process_id is NOT "no identity": it is what a
+            # multi-line (heredoc) command's display text parses to, and there
+            # are genuine callers that must still dedup (the launch-abort
+            # re-arm, whose best-effort id recovery yields ""). Such entries
+            # key on the prompt text instead: two DIFFERENT id-less wakeups
+            # necessarily differ in ``wakeup_prompt``, so both survive, while
+            # an exact duplicate recorded twice by a race collapses.
+            if any(
+                e.get("process_id") == process_id
+                and (
+                    bool(process_id)
+                    or str(e.get("wakeup_prompt") or "") == wakeup_prompt
+                )
+                for e in entries
             ):
                 return True
             entries.append(
@@ -1581,7 +1603,47 @@ def claim_deferred_wakeups(session_id: str) -> list[dict]:
         return []
 
 
-def drain_deferred_wakeups_for_session(session_id: str) -> int:
+def discard_deferred_wakeups_for_session(session_id: str) -> None:
+    """Drop any queued process-wakeup state for *session_id* (terminal path).
+
+    Used when a wakeup resolves a session that was DELETED (``start_session_turn``
+    returns 404). Treating the missing session as TERMINAL rather than
+    retryable means any prompt recorded for it — whether already in
+    ``DEFERRED_PROCESS_WAKEUPS`` before the in-flight wakeup resolved, or left
+    over from a prior failed re-queue — is removed, so a deleted session never
+    retains wakeup state until process restart. The bare
+    ``PENDING_BG_TASK_COMPLETIONS`` telemetry marker is dropped too, so no
+    drain / next-turn path can re-fire a wakeup for the removed session.
+
+    Terminal-side effect only (pop / discard) — never re-queues; idempotent.
+    """
+    if not session_id:
+        return
+    from api import config as _cfg
+
+    try:
+        with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            _cfg.DEFERRED_PROCESS_WAKEUPS.pop(session_id, None)
+    except Exception:
+        logger.debug(
+            "discard_deferred_wakeups_for_session failed for %s",
+            session_id,
+            exc_info=True,
+        )
+        return
+    try:
+        _cfg.PENDING_BG_TASK_COMPLETIONS.discard(session_id)
+    except Exception:
+        logger.debug(
+            "PENDING_BG_TASK_COMPLETIONS discard failed for %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def drain_deferred_wakeups_for_session(
+    session_id: str, *, retry_attempt: int = 0
+) -> int:
     """Turn-teardown idle-hook: redeliver deferred wakeups once idle.
 
     Called from ``api/streaming`` right AFTER ``unregister_active_run`` so
@@ -1589,6 +1651,14 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
     makes the active-at-completion case symmetric with the idle-at-completion
     case: idle now → fire now (Option Z idle branch); busy now → fire here
     when the turn ends and the session goes idle.
+
+    ``retry_attempt`` is the per-delivery attempt marker threaded in by the
+    bounded retry timer (``api.routes._run_deferred_wakeup_retry``). A value
+    >= 1 means this drain IS the retry, so a launch failure during it must be
+    treated as final by the abort cleanup: the prompt stays queued, no new
+    retry is scheduled. Without it the retry reschedules itself every
+    ``_DEFERRED_WAKEUP_RETRY_DELAY_SECS`` forever under a persistent launch
+    failure (#7680 CORE).
 
     Multi-stream / cancel-reconnect guard: if ANY other ACTIVE_RUNS row still
     exists for this session (a second stream from cancel/reconnect), the
@@ -1654,14 +1724,16 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 session_id,
                 str((first or {}).get("wakeup_prompt") or "").strip(),
                 process_id=str((first or {}).get("process_id") or ""),
+                retry_attempt=retry_attempt,
             )
             started = 1
         if started:
             logger.info(
                 "turn-teardown idle-hook redelivered %d deferred wakeup(s) "
-                "for session %s",
+                "for session %s (retry_attempt=%d)",
                 started,
                 session_id,
+                retry_attempt,
             )
         return started
     except Exception:
@@ -1722,7 +1794,11 @@ def _session_has_active_turn(session_id: str) -> bool:
 
 
 def _start_server_side_wakeup_turn(
-    session_id: str, wakeup_prompt: str, *, process_id: str = ""
+    session_id: str,
+    wakeup_prompt: str,
+    *,
+    process_id: str = "",
+    retry_attempt: int = 0,
 ) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
 
@@ -1730,6 +1806,18 @@ def _start_server_side_wakeup_turn(
     ``start_session_turn`` itself spawns the agent worker thread, but does
     synchronous session-load / workspace / model resolution first, which must
     not stall the single drain thread shared by every WebUI session.
+
+    ``retry_attempt`` is the per-delivery attempt marker from the bounded
+    retry timer. It is forwarded to ``start_session_turn`` and from there into
+    the launch-abort cleanup, so a launch failure on this already-retried
+    attempt keeps the prompt queued WITHOUT scheduling another retry
+    (#7680 CORE).
+
+    This is the ONLY caller that opts into the deferred-wakeup re-arm
+    (``rearm_deferred_wakeup=True``): an async-delegation completion starts its
+    turn with the same ``source="process_wakeup"`` but owns a durable
+    claim/retry, so re-arming for it too would deliver one completion twice
+    (#7680 CORE, maintainer 2026-10-01).
 
     Concurrency + idempotency are enforced by the layers below, not here:
       - ``start_session_turn`` → ``_start_chat_stream_for_session`` serializes
@@ -1758,14 +1846,36 @@ def _start_server_side_wakeup_turn(
             from api.routes import start_session_turn
 
             resp = start_session_turn(
-                session_id, wakeup_prompt, source="process_wakeup"
+                session_id,
+                wakeup_prompt,
+                source="process_wakeup",
+                process_id=process_id,
+                retry_attempt=retry_attempt,
+                rearm_deferred_wakeup=True,
             )
             status = int((resp or {}).get("_status", 200) or 200)
-            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+            if status == 404 and (resp or {}).get("error") == "Session not found":
+                # Terminal, NOT retryable: the session was deleted while this
+                # wakeup was in flight. Re-queuing the prompt here would
+                # recreate DEFERRED_PROCESS_WAKEUPS[sid] with no expiry for a
+                # session that no longer exists — an orphaned prompt that
+                # survives until process restart. Drop any queued wakeup state
+                # for the removed session (including a pre-existing entry from
+                # before the deletion) and do NOT re-queue.
+                discard_deferred_wakeups_for_session(session_id)
+                logger.info(
+                    "server-side wakeup dropped for deleted session %s "
+                    "(404 session-not-found): queued wakeup state cleared",
+                    session_id,
+                )
+            elif status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
                     session_id,
                 )
+                # Deliberate suppression: re-queuing here would recreate the
+                # same provider-unavailable 409 on every subsequent teardown,
+                # so the prompt is intentionally dropped.
             elif status == 409:
                 # Raced an active turn (e.g. a human /api/chat/start, or a
                 # sibling deferred-wakeup thread). Re-defer this prompt so it
@@ -1782,8 +1892,19 @@ def _start_server_side_wakeup_turn(
                     session_id,
                 )
             elif status >= 400:
+                # The turn never started, and whoever called us
+                # (``drain_deferred_wakeups_for_session``) already popped this
+                # prompt from DEFERRED_PROCESS_WAKEUPS — so dropping it here
+                # loses the wakeup permanently. Keep it queued so a later turn
+                # teardown (or the next-turn drain) still delivers it. This is
+                # the "launch-abort retry's own launch failed" case: the prompt
+                # must survive, and it must NOT loop — the retry timer is
+                # one-shot and nothing here reschedules it.
+                if wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.warning(
-                    "server-side wakeup failed for session %s: status=%s err=%r",
+                    "server-side wakeup failed for session %s: status=%s err=%r; "
+                    "prompt kept queued for later delivery",
                     session_id,
                     status,
                     (resp or {}).get("error"),
@@ -1795,8 +1916,19 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
+            # A launch that RAISED (worker-thread construction/``start()``
+            # failure, session-load throw, model-resolution blow-up, …) is the
+            # same loss case as a 5xx: the entry was already claimed, so
+            # without a re-defer the prompt is gone with no retry. Re-defer it
+            # — idempotent per process_id, atomic claim, no reschedule. (The
+            # launch-abort re-arm inside ``start_session_turn`` handles the
+            # narrower worker-start failure; this covers everything that
+            # escapes before/around it.)
+            if wakeup_prompt:
+                record_deferred_wakeup(session_id, process_id, wakeup_prompt)
             logger.warning(
-                "server-side wakeup turn raised for session %s",
+                "server-side wakeup turn raised for session %s; prompt kept "
+                "queued for later delivery",
                 session_id,
                 exc_info=True,
             )

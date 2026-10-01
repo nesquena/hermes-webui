@@ -71,6 +71,15 @@ def _run_node(script: str) -> dict:
     return json.loads(result.stdout)
 
 
+def _media_url_helpers() -> list[str]:
+    return [
+        _section_source("_mediaSessionQuery", "_mediaSnapQuery"),
+        _section_source("_mediaSnapQuery", "_mediaPreviewUrl"),
+        _section_source("_mediaPreviewUrl", "_csvMediaUrl"),
+        _section_source("_csvMediaUrl", "buildCsvTablePreview"),
+    ]
+
+
 def _downloadable_preview_harness(function_name: str) -> tuple[list[str], str]:
     next_functions = {
         "loadCsvInline": "loadExcalidrawInline",
@@ -81,14 +90,13 @@ def _downloadable_preview_harness(function_name: str) -> tuple[list[str], str]:
         _function_source("_requireMediaResponse"),
         _function_source("_mediaPreviewErrorKey"),
         _function_source("_mediaPreviewAllowsDownload"),
-        _section_source("_mediaSnapQuery", "_csvMediaUrl"),
+        *_media_url_helpers(),
     ]
     setup = ""
     if function_name == "loadCsvInline":
         helpers.extend(
             [
-                _section_source("_mediaSessionQuery", "_mediaSnapQuery"),
-                _section_source("_csvMediaUrl", "buildCsvTablePreview"),
+                _section_source("buildCsvTablePreview", "_csvPreviewErrorHtml"),
                 _section_source("_csvPreviewErrorHtml", "loadCsvInline"),
             ]
         )
@@ -116,6 +124,7 @@ def test_diff_preview_explains_forbidden_access_instead_of_calling_patch_broken(
     """The reported 403 shape must provide accurate recovery options."""
     require_response = _function_source("_requireMediaResponse")
     error_key = _function_source("_mediaPreviewErrorKey")
+    media_url_helpers = "".join(_media_url_helpers())
     load_diff = _function_source("loadDiffInline")
     script = f"""
 const el={{dataset:{{path:'/outside/report.patch'}},setAttribute(){{}},outerHTML:''}};
@@ -127,9 +136,9 @@ const translations={{
 const t=(key)=>translations[key]||key;
 const esc=(value)=>String(value);
 const fetch=()=>Promise.resolve({{ok:false,status:403}});
-const _mediaSnapQuery=()=>'';
 {require_response}
 {error_key}
+{media_url_helpers}
 {load_diff}
 loadDiffInline(root);
 setTimeout(()=>process.stdout.write(JSON.stringify({{html:el.outerHTML}})),0);
@@ -207,15 +216,14 @@ def test_all_lazy_media_fetchers_render_the_shared_http_error_contract(
         _function_source("_requireMediaResponse"),
         _function_source("_mediaPreviewErrorKey"),
         _function_source("_mediaPreviewAllowsDownload"),
-        _section_source("_mediaSnapQuery", "_csvMediaUrl"),
+        *_media_url_helpers(),
     ]
     setup = ""
     if function_name == "loadCsvInline":
         helpers.extend(
             [
-                _section_source("_mediaSessionQuery", "_mediaSnapQuery"),
-                _section_source("_csvMediaUrl", "buildCsvTablePreview"),
-                _section_source("_csvPreviewErrorHtml", "loadCsvInline"),
+                    _section_source("buildCsvTablePreview", "_csvPreviewErrorHtml"),
+                    _section_source("_csvPreviewErrorHtml", "loadCsvInline"),
             ]
         )
     elif function_name == "loadPdfInline":

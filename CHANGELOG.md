@@ -5,6 +5,12 @@
 
 ### Added
 
+- **Per-job "Tasks badge" toggle for scheduled jobs.** A new checkbox in the cron edit form (default on) controls
+  whether that job's completions count toward the Tasks unread badge and new-run marker, so a high-frequency
+  silent job (a sync or heartbeat) no longer keeps the badge lit. It mirrors the existing per-job "Completion
+  toasts" flag: the detail view shows it, the cron APIs (`/api/crons`, `/recent`, `/create`, `/update`) carry
+  `badge_notifications`, and jobs saved without the key keep counting. The toast hint no longer claims the badge
+  still updates when toasts are off. Thanks @BruceAi66. (#7375)
 - **The settings file can live outside the state directory.** `HERMES_WEBUI_SETTINGS_FILE` points one
   instance at its own `settings.json`, while sessions, workspaces and projects stay in the state
   directory. It is read once at startup, so restart after changing it. (#6433 by @futureworld678-create)
@@ -42,8 +48,41 @@
   budget now resets only when the window reaches a position it hasn't just visited. (#6654, #6717 by
   @webtecnica)
 
+### Security
+
+- **Only assistant and tool messages can grant access to a file outside the allowed folders.** `/api/media` serves a
+  file outside the allowed roots only when the requested session contains an exact `MEDIA:` reference to it. That
+  check excluded only user messages, so a system message, or a message with no role, also granted access. It is now
+  an allow-list: only `assistant` and `tool` messages can grant, and the hard-deny list still wins. Thanks
+  @laitekin. (#7297, fixes #7294)
+
 ### Fixed
 
+- **CSV, diff/patch and Excalidraw previews open from chat.** These files were served as
+  `application/octet-stream`, which the `MEDIA:` preview path rejects, so their previews failed. They now have their own
+  types (`text/csv`, `text/x-diff`, `application/vnd.excalidraw+json`), still behind the same exact assistant/tool
+  reference. Preview and download URLs also keep the session they were opened from, so switching sessions while a
+  preview loads can't reuse another session's URL. Thanks @laitekin. (#7297)
+
+- **The "Configured" group in the model picker shows model names, not raw ids.** Rows at the top of the picker
+  (composer and Settings → Default model) used the routing id as their title, e.g.
+  `@anthropic:claude-sonnet-4-6`. They now show the catalog name like every other group, with the raw id still
+  on the second line and in the badge. Thanks @webtecnica. (#7796)
+- **Four menus follow the interface language.** The Send key options in Settings, the Insights period picker, the
+  default-voice option in the voice settings and the screen-reader label of the Kanban bulk-status menu had English
+  text hard-coded, so they stayed English on a translated page. They now come from the translation table: Traditional
+  Chinese gets real translations, every other language shows the same English text as before. Thanks @happy5318, and
+  @Yularzhi for the report. (#7650, closes #7582)
+- **Scheduled-job "Next" and "Last" times match the job's own timezone.** The Tasks detail view converted those
+  timestamps to the browser's timezone, so a job scheduled "daily at 09:00" in America/Sao_Paulo could show 12:00 PM
+  and look misconfigured. Timestamps that carry a UTC offset are now shown in that offset, so the clock time matches
+  the schedule; a timestamp without an offset is shown as before. Thanks @happy5318. (#7740, fixes #7140)
+- **A background-process wake-up is no longer lost when its chat turn fails to start.** When a finished process
+  wakes its session, the WebUI consumes the pending completion before starting the turn. If preparing or starting that
+  turn then failed, the completion was gone with nothing left to retry. It is now saved again and retried once, two
+  seconds later, off the request thread; a failure on that retry keeps the prompt queued instead of scheduling more
+  timers. Only the process-completion path re-arms this way: an async-delegation completion keeps its own durable
+  retry, so one failed start can't deliver the same completion twice. Thanks @happy5318. (#7680)
 - **`MEDIA:` links work when the model wraps them in Markdown emphasis or quotes.** A reply like
   `**MEDIA:/path/chart.png**`, `_MEDIA:/path/chart.png_` or `"MEDIA:/path/chart.png".` used to build a link that
   included the closing `**`, `_` or quote, so the download 404ed. A closing delimiter or quote is now detached only
