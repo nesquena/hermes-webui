@@ -46,3 +46,49 @@ def test_cli_sessions_cache_default_max_reclaims_constant():
     """Verify default _CLI_SESSIONS_CACHE_MAX_RECLAIMS constant is defined and positive (#4966)."""
     assert hasattr(models, "_CLI_SESSIONS_CACHE_MAX_RECLAIMS")
     assert models._CLI_SESSIONS_CACHE_MAX_RECLAIMS > 0
+
+
+def test_cli_sessions_cache_fallback_preserves_newer_rows_published_during_load():
+    """The capped fallback's choose-and-publish is atomic under the cache lock: if a
+    rebuilder publishes fresher rows (newer expiry, same stamp) while the fallback's
+    load is running, both the returned AND the cached rows are the newer snapshot,
+    not the fallback's older one (#4966)."""
+    models.clear_cli_sessions_cache()
+    cache_key = ("test_fallback_preserve_newer",)
+    ttl = 10.0
+    stamp = models._cli_sessions_cache_invalidation_stamp()
+    newer_rows = [{"session_id": "newer-owner-session"}]
+    older_rows = [{"session_id": "older-fallback-session"}]
+
+    # While _load_and_cache_cli_sessions is "loading" (running this callback), a
+    # concurrent rebuilder publishes fresher rows under the SAME stamp with a newer
+    # expiry. The load itself returns the older rows, as the capped fallback would.
+    def _load_sessions_with_concurrent_publish():
+        models._cache_cli_sessions_if_current(
+            cache_key,
+            ttl + 10_000.0,  # much newer expiry, same stamp
+            stamp,
+            newer_rows,
+        )
+        return older_rows
+
+    result = models._load_and_cache_cli_sessions(
+        cache_key=cache_key,
+        ttl=ttl,
+        invalidation_stamp=stamp,
+        load_sessions=_load_sessions_with_concurrent_publish,
+        stale_sessions=None,
+        stale_stamp=None,
+        all_profiles=False,
+        db_path=":memory:",
+    )
+
+    # The returned rows must be the newer snapshot (don't clobber with older load).
+    assert result == newer_rows
+    # The cached rows must also be the newer snapshot.
+    with models._CLI_SESSIONS_CACHE_LOCK:
+        entry = models._CLI_SESSIONS_CACHE.get(cache_key)
+    assert entry is not None
+    assert entry[2] == newer_rows
+
+    models.clear_cli_sessions_cache()
