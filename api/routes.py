@@ -2975,6 +2975,7 @@ from api.config import (
 from api import config as api_config
 from api.goal_continuation_store import (
     consume_pending_goal_continuation,
+    discard_goal_continuation_rollback_receipt,
     pop_goal_continuation_rollback_receipt,
     restore_pending_goal_continuation,
     retire_pending_goal_continuation,
@@ -24686,6 +24687,10 @@ def _start_chat_stream_for_session(
 
     consumed_goal_continuation = False
     consumed_bg_task_completion = False
+    # #7862 round 5: identify THIS start attempt so its rollback receipt is
+    # claimed (and discarded) by exactly this call, never by a neighbouring
+    # attempt for the same session.
+    goal_continuation_attempt_id = uuid.uuid4().hex
 
     def consume_continuation_markers() -> None:
         nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
@@ -24707,7 +24712,10 @@ def _start_chat_stream_for_session(
         if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
             try:
                 if consume_pending_goal_continuation(
-                    s.session_id, msg, goal_continuation_id
+                    s.session_id,
+                    msg,
+                    goal_continuation_id,
+                    goal_continuation_attempt_id,
                 ):
                     goal_related = True
                     consumed_goal_continuation = True
@@ -24731,7 +24739,9 @@ def _start_chat_stream_for_session(
         # matching consume left behind; the store compares generations so a
         # newer intent armed in the meantime is never clobbered.
         if consumed_goal_continuation:
-            receipt = pop_goal_continuation_rollback_receipt(s.session_id)
+            receipt = pop_goal_continuation_rollback_receipt(
+                s.session_id, goal_continuation_attempt_id
+            )
             if receipt is not None:
                 restore_pending_goal_continuation(s.session_id, receipt)
             else:
@@ -24796,6 +24806,13 @@ def _start_chat_stream_for_session(
                         and int(regeneration_response.get("_status", 200) or 200) >= 400
                     ):
                         restore_consumed_continuation_markers()
+                    else:
+                        # #7862 round 5: regeneration launched, so this
+                        # attempt's receipt has no consumer -- same discard as
+                        # the worker-thread start path.
+                        discard_goal_continuation_rollback_receipt(
+                            s.session_id, goal_continuation_attempt_id
+                        )
                     return regeneration_response
                 stream_id = uuid.uuid4().hex
                 from api.session_ops import snapshot_session_state
@@ -24904,6 +24921,17 @@ def _start_chat_stream_for_session(
                         daemon=True,
                     )
                     thr.start()
+                    # #7862 round 5: the launch SUCCEEDED, so this attempt can
+                    # no longer be rolled back and its receipt has no consumer.
+                    # Leaving it behind was the root cause of the maintainer's
+                    # eviction probe: every successful goal start leaked a
+                    # slot until unrelated traffic pushed an IN-FLIGHT
+                    # receipt out of the registry, whose rejected-start
+                    # rollback then degraded to a bare marker the store
+                    # refuses to match.
+                    discard_goal_continuation_rollback_receipt(
+                        s.session_id, goal_continuation_attempt_id
+                    )
                 except Exception as exc:
                     if backend_is_gateway and stream_id:
                         try:

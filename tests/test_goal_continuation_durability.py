@@ -38,6 +38,7 @@ def clean_registry():
         store._LAST_WRITE_ERROR = None
         store._RETIRED_LOG.clear()
         store._ROLLBACK_RECEIPTS.clear()
+        store._RETIRED_GENERATIONS.clear()
     store._PENDING_GOAL_FILE.unlink(missing_ok=True)
     for tmp in store._PENDING_GOAL_FILE.parent.glob("pending_goal_continuations.*.tmp"):
         tmp.unlink(missing_ok=True)
@@ -46,6 +47,7 @@ def clean_registry():
         PENDING_GOAL_CONTINUATION.clear()
         PENDING_GOAL_CONTINUATION_RECORDS.clear()
         store._ROLLBACK_RECEIPTS.clear()
+        store._RETIRED_GENERATIONS.clear()
     store._PENDING_GOAL_FILE.unlink(missing_ok=True)
 
 
@@ -501,7 +503,7 @@ class TestSourceShapes:
         m = re.search(
             r"consume_pending_goal_continuation\(\s*"
             r"s\.session_id,\s*msg,\s*goal_continuation_id\s*"
-            r",?\s*\)",
+            r",\s*goal_continuation_attempt_id\s*,?\s*\)",
             src,
         )
         assert m is not None

@@ -72,7 +72,8 @@ def test_routes_consumer_discards_atomically_on_read():
     m = re.search(
         r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?"
         r"consume_pending_goal_continuation\(\s*"
-        r"s\.session_id,\s*msg,\s*goal_continuation_id\s*,?\s*\)",
+        r"s\.session_id,\s*msg,\s*goal_continuation_id\s*"
+        r",\s*goal_continuation_attempt_id\s*,?\s*\)",
         src,
         re.DOTALL,
     )

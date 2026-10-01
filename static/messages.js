@@ -1412,7 +1412,14 @@ async function send(){
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
-  _flushSelectionBlocksToComposer();
+  // #7862: a tokenized automatic goal continuation is NOT a human send, so a
+  // pending selected-text reply must not be flushed into its composer. The
+  // queued prompt is the recorded continuation verbatim; prepending the
+  // selection blocks made the store's text match reject it even though the
+  // continuation token was correct, and the intent then stayed pending until
+  // expiry -- the goal loop died on a legitimate automatic turn. Leave the
+  // pending selections alone; they belong to the user's next real message.
+  if(!(options&&options.goal_continuation_id)) _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
