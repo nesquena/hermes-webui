@@ -471,6 +471,13 @@ function _profileMatchesActiveProfile(profile, activeProfile){{
   return eventName === 'default' && !!S.activeProfileIsDefault;
 }}
 
+async function _restoreProfileAfterArchive(originalProfile, originalIsDefault, archivedIds, outcome){{
+  events.push('restore:' + originalProfile);
+  S.activeProfile=originalProfile;
+  S.activeProfileIsDefault=originalIsDefault;
+  return outcome;
+}}
+
 {owner_row_body}
 
 {match_body}
@@ -565,11 +572,8 @@ def test_batch_mixed_webui_profiles_archive_group_by_group():
     Round 3's head rejected the whole selection with reason:'mixed' and
     archived nothing.
 
-    The grouping lives in the EXECUTOR (_archiveBatchSessions), so this test
-    drives it directly — the onclick preflight gate still (correctly) refuses
-    a mixed selection with reason:'mixed', which is why the preflight
-    assertion below expects that rejection. What changed is that the executor
-    no longer requires a uniform owner: it groups and archives every row."""
+    The preflight now proves that EVERY row has a resolvable owner without
+    requiring one shared owner; the executor then groups and archives all rows."""
     if NODE is None:
         return
     rows = [
@@ -578,8 +582,7 @@ def test_batch_mixed_webui_profiles_archive_group_by_group():
         {"id": "h1", "profile": "home"},
     ]
     data = _run_batch("switch-then-ok", rows)
-    assert data["preflight"]["owner"] is None, data
-    assert data["preflight"]["reason"] == "mixed", data
+    assert data["preflight"]["owners"] == ["work", "home"], data
     # The executor archives everything despite the mixed selection.
     assert data["outcome"]["ok"] is True, f"mixed WebUI selection must archive everything: {data}"
     assert data["outcome"]["archivedCount"] == 3, data
@@ -675,3 +678,85 @@ def test_batch_one_group_failure_does_not_block_other_groups():
     assert data["outcome"]["archivedCount"] == 2, (
         f"the healthy group's row plus the work group's pre-failure row both landed: {data}")
     assert data["outcome"]["totalCount"] == 3, data
+
+
+def test_batch_archive_button_handler_allows_mixed_profiles():
+    """The real archive button handler must pass mixed rows to the executor."""
+    if NODE is None:
+        return
+    render_body = _extract_function(SESSIONS_JS, "_renderBatchActionBar")
+    owners_body = _extract_function(SESSIONS_JS, "_archiveBatchOwners")
+    owner_row_body = _extract_function(SESSIONS_JS, "_archiveBatchOwnerForRow")
+    match_body = _extract_function(SESSIONS_JS, "_archiveBatchOwnersMatch")
+    batch_body = _extract_async_function(SESSIONS_JS, "_archiveBatchSessions")
+    restore_bodies = _restore_bodies()
+    script = f"""
+const events=[]; const archivedSids=[];
+const rows=[{{session_id:'w1',profile:'work',session_source:'webui'}},{{session_id:'h1',profile:'home',session_source:'webui'}}];
+const sessionsById=new Map(rows.map(r=>[r.session_id,r]));
+const _allSessions=rows; const _selectedSessions=new Set(['w1','h1']);
+const S={{session:{{session_id:'root-chat'}},activeProfile:'default',activeProfileIsDefault:true}};
+const window={{_defaultModel:'root-model',_activeProvider:'root-provider'}};
+const _showArchived=false; const _sessionSwipeReturnOffsets={{set(){{}}}};
+let _pendingSessionReflowPositions=null;
+const bar={{style:{{}},children:[],appendChild(node){{this.children.push(node);}}}};
+function $(id){{return id==='batchActionBar'?bar:null;}}
+const document={{createElement(tag){{return {{tag,style:{{}},className:'',textContent:'',appendChild(){{}},onclick:null}};}}}};
+function t(key){{return key;}} function _worktreeSessionCount(){{return 0;}}
+function _sessionSnapshotById(sid){{return sessionsById.get(sid)||null;}}
+function showConfirmDialog(){{events.push('confirm');return Promise.resolve(true);}}
+function exitSessionSelectMode(){{events.push('exit');}} function showToast(msg){{events.push('toast:'+msg);}}
+function renderSessionList(){{}} function _sessionPrefersReducedMotion(){{return false;}}
+function _sessionResponseRetainsWorktree(){{return false;}}
+function refreshProfileTransitionReasoningChip(model,provider){{events.push('chip:'+model+':'+provider);}}
+function _profileMatchesActiveProfile(profile,active){{return profile===active;}}
+{restore_bodies}
+let switchCalls=0;
+async function _switchProfileForSessionLoad(profile){{switchCalls++;S.activeProfile=profile;S.activeProfileIsDefault=false;window._defaultModel=profile+'-model';window._activeProvider=profile+'-provider';}}
+async function api(path,opts){{
+  if(path==='/api/profile/switch'){{const name=JSON.parse(opts.body).name;S.activeProfile=name;S.activeProfileIsDefault=name==='default';return {{active:name,is_default:S.activeProfileIsDefault,default_model:name==='default'?'root-model':name+'-model',default_model_provider:name==='default'?'root-provider':name+'-provider'}};}}
+  archivedSids.push(JSON.parse(opts.body).session_id);return {{worktree_retained:false}};
+}}
+{owners_body}
+{owner_row_body}
+{match_body}
+{batch_body}
+{render_body}
+_renderBatchActionBar();
+(async()=>{{const button=bar.children.find(node=>node.textContent==='session_batch_archive');if(!button)throw new Error('no archive button');await button.onclick();console.log(JSON.stringify({{events,archivedSids,switchCalls,activeProfile:S.activeProfile,defaultModel:window._defaultModel,activeProvider:window._activeProvider}}));}})();
+"""
+    data = json.loads(_run_node(script))
+    assert data["archivedSids"] == ["w1", "h1"], data
+    assert "confirm" in data["events"], data
+    assert "exit" in data["events"], data
+    assert data["activeProfile"] == "default", data
+    assert data["defaultModel"] == "root-model", data
+    assert data["activeProvider"] == "root-provider", data
+    assert data["switchCalls"] == 2, data
+
+
+def test_lean_profile_restore_refreshes_default_model_and_provider():
+    """A lean archive restore must consume the profile switch defaults."""
+    if NODE is None:
+        return
+    body = _extract_async_function(SESSIONS_JS, "_switchProfileForActiveProfile")
+    script = f"""
+const S={{session:{{session_id:'root-chat'}},activeProfile:'work',activeProfileIsDefault:false}};
+const window={{_defaultModel:'work-model',_activeProvider:'work-provider'}};
+const events=[];
+async function api(path,opts){{return {{active:'default',is_default:true,default_model:'root-model',default_model_provider:'root-provider'}};}}
+function startGatewaySSE(){{}}
+function syncTopbar(){{}}
+function renderSessionList(){{}}
+function refreshProfileTransitionReasoningChip(model,provider){{events.push([model,provider]);}}
+{body}
+(async()=>{{
+  await _switchProfileForActiveProfile('default',true);
+  console.log(JSON.stringify({{active:S.activeProfile,model:window._defaultModel,provider:window._activeProvider,chip:events}}));
+}})();
+"""
+    data = json.loads(_run_node(script))
+    assert data["active"] == "default", data
+    assert data["model"] == "root-model", data
+    assert data["provider"] == "root-provider", data
+    assert data["chip"] == [["root-model", "root-provider"]], data
