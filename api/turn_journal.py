@@ -13,6 +13,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from api.session_persistence import SessionPersistenceHandle, SessionPersistenceRevoked
 from typing import Iterable
 
 try:  # pragma: no cover - fcntl is unavailable on Windows.
@@ -20,6 +21,7 @@ try:  # pragma: no cover - fcntl is unavailable on Windows.
 except ImportError:  # pragma: no cover
     _fcntl = None
 
+_PERSISTENCE_UNSET = object()
 TURN_JOURNAL_DIR_NAME = "_turn_journal"
 _TERMINAL_EVENTS = {"completed", "interrupted"}
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -68,7 +70,8 @@ def append_turn_journal_event(
     event: dict,
     *,
     session_dir: Path | None = None,
-) -> dict:
+    _persistence: SessionPersistenceHandle | None = None,
+) -> dict | None:
     """Append one turn journal event and fsync it before returning.
 
     The returned event is the exact payload written, with default ``version``,
@@ -88,25 +91,32 @@ def append_turn_journal_event(
         payload.setdefault("terminal", True)
 
     path = _journal_path(session_id, session_dir=session_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
-    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        with _journal_file_lock(fh):
-            fh.write(line)
-            fh.flush()
-            os.fsync(fh.fileno())
-    o_directory = getattr(os, "O_DIRECTORY", None)
-    if o_directory is not None:
-        try:
-            dir_fd = os.open(path.parent, o_directory)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
-    return payload
+    persistence = _persistence or SessionPersistenceHandle(session_id, path.parent.parent)
+    if not persistence.matches(session_id, path.parent.parent):
+        raise ValueError("Mismatched turn-journal persistence identity")
+    try:
+        with persistence.writing():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+            fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                with _journal_file_lock(fh):
+                    fh.write(line)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            o_directory = getattr(os, "O_DIRECTORY", None)
+            if o_directory is not None:
+                try:
+                    dir_fd = os.open(path.parent, o_directory)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except OSError:
+                    pass
+            return payload
+    except SessionPersistenceRevoked:
+        return None
 
 
 def read_turn_journal(session_id: str, *, session_dir: Path | None = None) -> dict:
@@ -213,8 +223,16 @@ def append_turn_journal_event_for_stream(
     event: dict,
     *,
     session_dir: Path | None = None,
-) -> dict:
+    _persistence=_PERSISTENCE_UNSET,
+) -> dict | None:
     """Append a lifecycle event for the turn associated with ``stream_id``."""
+    # Worker callers explicitly supply their captured handle. Failure to obtain
+    # it is not permission to borrow a newer lifetime. Legacy direct callers
+    # that omit the argument still capture the current session lifetime below.
+    if _persistence is None:
+        return None
+    if _persistence is _PERSISTENCE_UNSET:
+        _persistence = None
     payload = dict(event)
     payload["stream_id"] = str(stream_id)
     if not payload.get("turn_id"):
@@ -222,7 +240,9 @@ def append_turn_journal_event_for_stream(
         turn_id = _latest_turn_id_for_stream(journal.get("events") or [], stream_id)
         if turn_id:
             payload["turn_id"] = turn_id
-    return append_turn_journal_event(session_id, payload, session_dir=session_dir)
+    return append_turn_journal_event(
+        session_id, payload, session_dir=session_dir, _persistence=_persistence
+    )
 
 
 def iter_turn_journal_session_ids(session_dir: Path) -> list[str]:

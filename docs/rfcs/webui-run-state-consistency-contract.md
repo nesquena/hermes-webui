@@ -74,6 +74,41 @@ individually valid rows can reach disk out of order and the session replay
 reader must reject them as noncontiguous. This does not change caller-supplied
 sequence semantics, cross-process ownership, or failed-write recovery.
 
+## Deletion and captured persistence lifetimes
+
+Within one WebUI process, deleting a session revokes the persistence lifetime
+captured by its Session objects and run-journal writers. Revocation is separate
+from Stop: it does not interrupt external Agent/provider execution and does not
+wait on provider callbacks. The source of truth for a local write is its
+captured store/session lifetime, not membership in an LRU cache or a transient
+stream registry. Cache replacement and worker cleanup cannot restore permission.
+
+Sidecar commits, run/turn journal appends and deletion share a per-store/session
+persistence fence. A write already inside the fence finishes before deletion
+removes it; a write arriving after revocation is refused. The delete route bounds
+lock contention before mutation. Index updates are serialized separately and
+filter stale Session handles, so delayed index work cannot undo deletion. Index
+locks must never be acquired while holding the persistence fence.
+
+Explicit CLI import may create a new lifetime for the same session id, but old
+Session/run-writer handles remain invalid. Runtime turn-journal writes carry the
+same captured lifetime as their run writer. Ordinary save is not an explicit
+restore and cannot clear a user-deletion marker. The weak fence registry is
+reclaimed after all handles disappear; the existing durable deletion marker
+then blocks fresh holders while that marker remains within the existing retention
+policy. Corrupt
+or unreadable deletion metadata does not grant write permission.
+
+This boundary protects WebUI-owned sidecars, backups, indexes and journals. It
+does not claim cancellation of external tools, cross-process write fencing,
+Agent-owned state.db durability, or interruption of asynchronous delegations.
+Those require their own runtime/Agent contracts. Existing filesystem-cleanup
+error handling and retention policy are not redefined by this lifetime fix.
+
+Persistence handles are process-local capabilities, not conversation data.
+They must stay out of `Session.__dict__` JSON exports, while shallow/deep copies
+retain the original captured lifetime and remain revoked after deletion.
+
 ## Inactive compression continuation recovery
 
 The Agent profile's SQLite compression lineage owns the canonical continuation,

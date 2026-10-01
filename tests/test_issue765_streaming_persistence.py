@@ -295,13 +295,15 @@ class TestIssue765FollowupHardening:
 
         def _replace_with_barrier(src, dst):
             replace_sources.append(str(src))
-            barrier.wait(timeout=5)
             return original_replace(src, dst)
 
         monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
 
         def _save_worker():
             try:
+                # Synchronize attempts before entering the persistence fence;
+                # waiting in os.replace deadlocks deliberately serialized commits.
+                barrier.wait(timeout=5)
                 s.save(skip_index=True)
             except Exception as e:
                 errors.append(e)
@@ -313,6 +315,7 @@ class TestIssue765FollowupHardening:
         t1.join(timeout=5)
         t2.join(timeout=5)
 
+        assert not t1.is_alive() and not t2.is_alive(), "save workers did not finish"
         assert not errors, f"Concurrent same-session saves should not fail: {errors}"
         assert len(replace_sources) >= 2, f"Expected replace calls, got {replace_sources}"
         assert len(set(replace_sources)) == 2, (

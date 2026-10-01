@@ -9850,6 +9850,7 @@ def _run_agent_streaming(
                 session_id,
                 stream_id,
                 {"event": "worker_started", "created_at": time.time()},
+                _persistence=getattr(run_journal, "_persistence", None),
             )
         except Exception:
             logger.debug("Failed to append worker_started turn journal event", exc_info=True)
@@ -12126,6 +12127,7 @@ def _run_agent_streaming(
                                     "created_at": time.time(),
                                     "reason": "cancelled",
                                 },
+                                _persistence=getattr(run_journal, "_persistence", None),
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -12180,6 +12182,7 @@ def _run_agent_streaming(
                                 "created_at": time.time(),
                                 "reason": "cancelled",
                             },
+                            _persistence=getattr(run_journal, "_persistence", None),
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -12241,6 +12244,7 @@ def _run_agent_streaming(
                                     "created_at": time.time(),
                                     "reason": "cancelled",
                                 },
+                                _persistence=getattr(run_journal, "_persistence", None),
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -12495,6 +12499,7 @@ def _run_agent_streaming(
                                         "created_at": time.time(),
                                         "reason": "cancelled",
                                     },
+                                    _persistence=getattr(run_journal, "_persistence", None),
                                 )
                             except Exception:
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -13252,6 +13257,7 @@ def _run_agent_streaming(
                                     "created_at": float(_latest_assistant.get('timestamp') or time.time()),
                                     "assistant_message_index": _latest_assistant_idx,
                                 },
+                                _persistence=getattr(run_journal, "_persistence", None),
                             )
                         except Exception:
                             logger.debug("Failed to append assistant_started turn journal event", exc_info=True)
@@ -13266,6 +13272,7 @@ def _run_agent_streaming(
                                 "created_at": time.time(),
                                 "reason": "cancelled",
                             },
+                            _persistence=getattr(run_journal, "_persistence", None),
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -13284,6 +13291,7 @@ def _run_agent_streaming(
                                 "created_at": time.time(),
                                 "reason": "cancelled",
                             },
+                            _persistence=getattr(run_journal, "_persistence", None),
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -13303,6 +13311,7 @@ def _run_agent_streaming(
                                     None,
                                 ),
                             },
+                            _persistence=getattr(run_journal, "_persistence", None),
                         )
                     except Exception:
                         logger.debug("Failed to append completed turn journal event", exc_info=True)
@@ -13388,6 +13397,7 @@ def _run_agent_streaming(
                                 "created_at": time.time(),
                                 "reason": "cancelled",
                             },
+                            _persistence=getattr(run_journal, "_persistence", None),
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -13420,6 +13430,7 @@ def _run_agent_streaming(
                                     "created_at": time.time(),
                                     "reason": "cancelled",
                                 },
+                                _persistence=getattr(run_journal, "_persistence", None),
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -13443,6 +13454,7 @@ def _run_agent_streaming(
                                     "created_at": time.time(),
                                     "reason": "cancelled",
                                 },
+                                _persistence=getattr(run_journal, "_persistence", None),
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -13806,6 +13818,7 @@ def _run_agent_streaming(
                                     "created_at": time.time(),
                                     "reason": "cancelled",
                                 },
+                                _persistence=getattr(run_journal, "_persistence", None),
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
@@ -14264,6 +14277,7 @@ def _run_agent_streaming(
                                 "created_at": time.time(),
                                 "reason": _exc_type,
                             },
+                            _persistence=getattr(run_journal, "_persistence", None),
                         )
                     except Exception:
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)

@@ -13,6 +13,7 @@ import time
 from copy import deepcopy
 from collections import OrderedDict
 from pathlib import Path
+from api.session_persistence import SessionPersistenceHandle, SessionPersistenceRevoked
 from typing import Any, Iterable
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
@@ -403,46 +404,54 @@ def append_run_event(
     session_dir: Path | None = None,
     seq: int | None = None,
     created_at: float | None = None,
-) -> dict:
+    _persistence: SessionPersistenceHandle | None = None,
+) -> dict | None:
     """Append one durable run event and fsync it according to the journal policy."""
     path = _run_path(session_id, run_id, session_dir=session_dir)
     payload = payload if payload is not None else {}
     event_name = str(event_name or "").strip()
     if not event_name:
         raise ValueError("event_name is required")
-    with _lock_for(path):
-        if seq is not None:
-            assigned_seq = int(seq)
-            _note_assigned_seq(path, assigned_seq)
-        else:
-            assigned_seq = _reserve_next_seq(path)
-        terminal_state = _terminal_state_for_event(event_name, payload)
-        event = {
-            "version": 1,
-            "event_id": f"{run_id}:{assigned_seq}",
-            "seq": assigned_seq,
-            "run_id": str(run_id),
-            "session_id": str(session_id),
-            "event": event_name,
-            "type": event_name,
-            "created_at": float(created_at if created_at is not None else time.time()),
-            "terminal": bool(terminal_state),
-            "terminal_state": terminal_state,
-            "payload": payload,
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        created_file = not path.exists()
-        line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-            if _should_fsync_event(terminal_state):
-                os.fsync(fh.fileno())
-        _discard_cached_summary(path)
-        if created_file:
-            _fsync_parent_dir(path)
-        return event
+    persistence = _persistence or SessionPersistenceHandle(session_id, path.parent.parent.parent)
+    if not persistence.matches(session_id, path.parent.parent.parent):
+        raise ValueError("Mismatched run-journal persistence identity")
+    try:
+        with persistence.writing():
+            with _lock_for(path):
+                if seq is not None:
+                    assigned_seq = int(seq)
+                    _note_assigned_seq(path, assigned_seq)
+                else:
+                    assigned_seq = _reserve_next_seq(path)
+                terminal_state = _terminal_state_for_event(event_name, payload)
+                event = {
+                    "version": 1,
+                    "event_id": f"{run_id}:{assigned_seq}",
+                    "seq": assigned_seq,
+                    "run_id": str(run_id),
+                    "session_id": str(session_id),
+                    "event": event_name,
+                    "type": event_name,
+                    "created_at": float(created_at if created_at is not None else time.time()),
+                    "terminal": bool(terminal_state),
+                    "terminal_state": terminal_state,
+                    "payload": payload,
+                }
+                path.parent.mkdir(parents=True, exist_ok=True)
+                created_file = not path.exists()
+                line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+                fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                    fh.write(line)
+                    fh.flush()
+                    if _should_fsync_event(terminal_state):
+                        os.fsync(fh.fileno())
+                _discard_cached_summary(path)
+                if created_file:
+                    _fsync_parent_dir(path)
+                return event
+    except SessionPersistenceRevoked:
+        return None
 
 
 class RunJournalWriter:
@@ -452,6 +461,9 @@ class RunJournalWriter:
         self.session_id = _validate_id(session_id, "session_id")
         self.run_id = _validate_id(run_id, "run_id")
         self.session_dir = Path(session_dir) if session_dir is not None else None
+        self._persistence = SessionPersistenceHandle(
+            self.session_id, self.session_dir if self.session_dir is not None else _default_session_dir()
+        )
 
     def append_sse_event(self, event_name: str, payload=None) -> dict | None:
         # Live-UI-only telemetry (metering) has no recovery value in the journal:
@@ -472,6 +484,7 @@ class RunJournalWriter:
             event_name,
             payload or {},
             session_dir=self.session_dir,
+            _persistence=self._persistence,
         )
 
 
