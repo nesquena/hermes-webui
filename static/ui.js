@@ -19644,8 +19644,31 @@ function renderMessages(options){
       // #7358 round 5 (re-gate 9/22): cold-reload fallback to the
       // persisted per-tid map when the live mirror is empty (the
       // common case on a hard browser reload). Same one-way rule.
-      if(tid&&_persistedIsErrorByTid&&_persistedIsErrorByTid[tid]===true&&next.is_error!==true){
+      // #7358 round 9 (re-gate 10/01 finding 2): a reused tool id (llama.cpp's
+      // constant id, or per-turn ``call_0``) must not resurrect an earlier
+      // successful card red. The persisted entry is flat ``true`` only for a
+      // genuinely unique id; a reused id is scoped to its owning
+      // assistant_msg_idx (plus an ``occurrences`` set when several failed
+      // calls share it). Honour the row's own index so a successful call_0
+      // stays green; a row carrying no index can safely apply a flat ``true``
+      // but never a reused-id occurrence it can't prove it owns.
+      const _persistedEntry=tid&&_persistedIsErrorByTid?_persistedIsErrorByTid[tid]:null;
+      if(_persistedEntry===true&&next.is_error!==true){
+        // Flat ``true`` = a genuinely unique failed id — no occurrence scope
+        // to consult, apply tid-wide (rounds 3-8 behaviour unchanged).
         next.is_error=true;
+      }else if(_persistedEntry&&typeof _persistedEntry==='object'&&_persistedEntry.is_error===true&&next.is_error!==true){
+        // Reused id: only honour the row's own owning assistant message index
+        // (or an explicit failed occurrence) so a successful sibling isn't
+        // resurrected red. A row that can't identify its occurrence must not
+        // absorb a reused-id failure it can't prove it owns.
+        const _rowAIdx=next.assistant_msg_idx;
+        const _rowIdx=(_rowAIdx!=null&&_rowAIdx!==''&&Number.isFinite(Number(_rowAIdx)))?Number(_rowAIdx):null;
+        const _occOwned=(_rowIdx!=null)&&(
+          (_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||
+          (!!_persistedEntry.occurrences&&_persistedEntry.occurrences[_rowIdx]===true)
+        );
+        if(_occOwned) next.is_error=true;
       }
       return next;
     };

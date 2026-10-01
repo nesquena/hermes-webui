@@ -3508,7 +3508,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     ).trim();
     const _liveTid=String((live&&(live.tid||live.id||live.tool_call_id||live.tool_use_id||live.call_id))||'').trim();
     const _matchedById=!!_rowTid&&!!_liveTid&&_rowTid===_liveTid;
-    const _persistedIsError=(_rowTid&&S&&S._settledToolIsErrorByTid&&S._settledToolIsErrorByTid[_rowTid])===true;
+    const _persistedEntry=S&&S._settledToolIsErrorByTid&&_rowTid?S._settledToolIsErrorByTid[_rowTid]:null;
+    // #7358 round 9 (re-gate 10/01 finding 2): a reused id (``call_0``) must
+    // not let one failed occurrence repaint an earlier successful row red.
+    // Flat ``true`` (genuinely unique id) still applies tid-wide; a reused-id
+    // object is honoured only when the row can name its owning assistant
+    // message index and that index matches the recorded failure.
+    let _persistedIsError=false;
+    if(_persistedEntry===true) _persistedIsError=true;
+    else if(_persistedEntry&&typeof _persistedEntry==='object'&&_persistedEntry.is_error===true){
+      const _rowAIdx=row?row.assistant_msg_idx:null;
+      const _rowIdx=(_rowAIdx!=null&&_rowAIdx!==''&&Number.isFinite(Number(_rowAIdx)))?Number(_rowAIdx):null;
+      if(_rowIdx!=null){
+        _persistedIsError=(_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||
+          (!!_persistedEntry.occurrences&&_persistedEntry.occurrences[_rowIdx]===true);
+      }
+    }
     const _liveIsError=_matchedById&&Boolean(live&&live.is_error===true);
     if((_liveIsError||_persistedIsError)&&tool.is_error!==true&&payload.is_error!==true){
       tool.is_error = true;
