@@ -3517,7 +3517,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     let _persistedIsError=false;
     if(_persistedEntry===true) _persistedIsError=true;
     else if(_persistedEntry&&typeof _persistedEntry==='object'&&_persistedEntry.is_error===true){
-      const _rowAIdx=row?row.assistant_msg_idx:null;
+      // #7358 round 10 (re-gate finding 3): a cold-reloaded scene row stores
+      // its owning assistant message index on ``row.group.assistant_msg_idx``
+      // and ``row.payload.assistant_msg_idx`` — the top level has no
+      // ``assistant_msg_idx`` field (see ``_anchorSceneRowBase``), so a
+      // reused-id failure never matched its row and the card reverted to
+      // "Completed". Resolve the owner through the same fallback chain the
+      // ``sessions.js`` producer and the ``ui.js`` consumer use.
+      const _rowAIdx=(row&&row.assistant_msg_idx!=null&&row.assistant_msg_idx!=='')?row.assistant_msg_idx
+        :(row&&row.group&&row.group.assistant_msg_idx!=null&&row.group.assistant_msg_idx!=='')?row.group.assistant_msg_idx
+        :(row&&row.payload&&row.payload.assistant_msg_idx!=null&&row.payload.assistant_msg_idx!=='')?row.payload.assistant_msg_idx
+        :null;
       const _rowIdx=(_rowAIdx!=null&&_rowAIdx!==''&&Number.isFinite(Number(_rowAIdx)))?Number(_rowAIdx):null;
       if(_rowIdx!=null){
         _persistedIsError=(_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||

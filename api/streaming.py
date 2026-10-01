@@ -10397,18 +10397,24 @@ def _extract_tool_call_occurrences(messages):
     ``agent/conversation_compression_reply_anchor._reused_tool_call_ids``).
     A verdict keyed on ``tid`` alone therefore cannot be attributed to a
     specific call. This pre-pass mirrors the id normalisation the main
-    settlement loop uses (``id`` before ``call_id`` for ``tool_calls``,
-    ``id`` for a ``tool_use`` content part) and returns, per tid:
+    settlement loop uses (``call_id`` before ``id`` for ``tool_calls`` —
+    matching the Agent's pairing order in
+    ``message_sanitization.coalesce_tool_call_id`` — and ``call_id``
+    before ``id`` for a ``tool_use`` content part) and returns, per tid:
 
     - ``counts`` — how many distinct assistant messages emit the id;
     - ``last_owner`` — the largest assistant ``msg_idx`` emitting it
       (the "last" occurrence, which is the one the current turn's live
-      mirror still owns).
+      mirror still owns);
+    - ``owners`` — every assistant ``msg_idx`` emitting it (the set of
+      occurrences a prior verdict's ``assistant_msg_idx`` must name to be
+      attributable to THIS history — round 10).
 
-    Returns ``(counts, last_owner_of_by_tid)``.
+    Returns ``(counts, last_owner_of_by_tid, owners_of_by_tid)``.
     """
     counts: dict = {}
     last_owner: dict = {}
+    owners: dict = {}
     for m_idx, m in enumerate(messages or []):
         if not isinstance(m, dict) or m.get('role') != 'assistant':
             continue
@@ -10417,19 +10423,25 @@ def _extract_tool_call_occurrences(messages):
         if isinstance(content, list):
             for part in content:
                 if isinstance(part, dict) and part.get('type') == 'tool_use':
-                    _part_tid = part.get('id', '')
+                    # #7358 round 10 (re-gate 10/01, reviewer Finding 1,
+                    # SILENT): call_id-first like the tool_calls loop —
+                    # a content part carrying both fields must key on
+                    # call_id (the Agent's pairing key), never the
+                    # display id.
+                    _part_tid = part.get('call_id', '') or part.get('id', '')
                     if _part_tid:
                         tids.add(str(_part_tid))
         for tc in m.get('tool_calls') or []:
             if not isinstance(tc, dict):
                 continue
-            _tc_tid = tc.get('id', '') or tc.get('call_id', '')
+            _tc_tid = tc.get('call_id', '') or tc.get('id', '')  # round 10: call_id-first, see main loop
             if _tc_tid:
                 tids.add(str(_tc_tid))
         for _tid in tids:
             counts[_tid] = counts.get(_tid, 0) + 1
             last_owner[_tid] = m_idx
-    return counts, last_owner
+            owners.setdefault(_tid, set()).add(m_idx)
+    return counts, last_owner, owners
 
 
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool_calls=None):
@@ -10469,29 +10481,47 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
     # live/prior verdict looked up by tid leaks onto every other
     # occurrence of the same id. Scope the lookups below with the
     # occurrence counts + last-owner of each tid in THIS history.
-    _occ_counts, _occ_last_owner = _extract_tool_call_occurrences(messages)
-    # #7358 round 6: index prior verdicts by tid so the merge step
-    # below can fall back to them when the new turn's live mirror
-    # has lost the call (the cause of the two-turn regression).
-    # #7358 round 9: track tids that the prior summary carries more than
-    # once (reused id in prior) and the owner assistant_msg_idx of the
-    # first prior row — both are needed to refuse a prior verdict that
-    # can't be attributed to the occurrence being settled.
+    _occ_counts, _occ_last_owner, _occ_owners = _extract_tool_call_occurrences(messages)
+    # #7358 round 10 (re-gate 10/01, reviewer Finding 2, SILENT): index
+    # the prior verdicts PER OCCURRENCE (assistant_msg_idx, tid) as well
+    # as by tid. Round 9's reused-tid blanket refusal discarded the
+    # prior verdict of the occurrence it actually matched — with turn-1
+    # ``call_0`` success (owner (1, call_0)) + turn-2 ``call_0`` failure
+    # (owner (4, call_0)), the prior pair [(1,false),(4,true)] was
+    # rewritten [(1,false),(4,false)] and a historical failure flipped
+    # back to success. A per-occurrence lookup only finds the verdicts
+    # that name THIS occurrence's owning assistant row, so the reused-id
+    # cross-leak still cannot happen without the blanket refusal.
+    # Two guards keep the untrusted rows out:
+    # - ``stale_prior_tids``: the prior summary names an owner assistant
+    #   row that emits NOTHING in this history (compression shifted the
+    #   indices out of this coordinate space), so no row of that tid can
+    #   be attributed here;
+    # - a prior row that names NO owner index keeps the round-6 tid-keyed
+    #   fallback (pinned by the round-6 regression) and is only applied
+    #   when the tid is NOT reused in this history, otherwise it could
+    #   leak onto the wrong occurrence.
     prior_by_tid = {}
-    prior_reused = set()
-    prior_owner = {}
+    prior_by_occurrence = {}
+    stale_prior_tids = set()
     for _ptc in (prior_tool_calls or []):
         if not isinstance(_ptc, dict):
             continue
         _ptid = _ptc.get('tid') or ''
-        if _ptid:
-            if _ptid in prior_by_tid:
-                prior_reused.add(_ptid)
-            else:
-                prior_by_tid.setdefault(_ptid, _ptc)
-                _po = _ptc.get('assistant_msg_idx')
-                if isinstance(_po, int):
-                    prior_owner[_ptid] = _po
+        if not _ptid:
+            continue
+        prior_by_tid.setdefault(_ptid, []).append(_ptc)
+        _po = _ptc.get('assistant_msg_idx')
+        if not isinstance(_po, int):
+            continue
+        if _po not in (_occ_owners.get(_ptid) or set()):
+            # Round 10: the named owner does not emit this tid in this
+            # history — the prior summary was recorded against a
+            # different coordinate space, so nothing of this tid is
+            # attributable to the occurrences settled here.
+            stale_prior_tids.add(_ptid)
+            continue
+        prior_by_occurrence.setdefault((_po, _ptid), []).append(_ptc)
 
     for msg_idx, m in enumerate(messages or []):
         if not isinstance(m, dict):
@@ -10502,7 +10532,12 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get('type') == 'tool_use':
-                        tid = part.get('id', '')
+                        # #7358 round 10 (re-gate 10/01, reviewer Finding 1,
+                        # SILENT): call_id-first like the tool_calls loop —
+                        # a content part carrying both fields must key on
+                        # call_id (the Agent's pairing key), never the
+                        # display id.
+                        tid = part.get('call_id', '') or part.get('id', '')
                         if tid:
                             pending_names[tid] = part.get('name', '')
                             pending_args[tid] = part.get('input', {})
@@ -10510,7 +10545,18 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
             for tc in m.get('tool_calls') or []:
                 if not isinstance(tc, dict):
                     continue
-                tid = tc.get('id', '') or tc.get('call_id', '')
+                # #7358 round 10 (re-gate 10/01, reviewer Finding 1,
+                # SILENT): derive the call id with call_id BEFORE id — the
+                # Agent's own pairing order (``coalesce_tool_call_id``,
+                # ``_tc_get(tc, "call_id") or _tc_get(tc, "id")``). A row
+                # carrying both fields with different values (Codex /
+                # Responses style) must be keyed on call_id, which is what
+                # the tool result references via ``tool_call_id`` and what
+                # the live mirror already stores (``record_live_tool_complete``
+                # writes ``'tid': tool_call_id``). Keying on ``id`` instead
+                # makes the result miss the pending map and drops the live
+                # verdict onto the wrong (first unresolved) call.
+                tid = tc.get('call_id', '') or tc.get('id', '')
                 fn = tc.get('function', {})
                 name = fn.get('name', '')
                 try:
@@ -10568,19 +10614,61 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                     # determined-False one if it chooses to.
                     _is_error = live_tc.get('is_error') if live_tc else None
                     if _is_error is None:
-                        # #7358 round 9 (reviewer Finding 1, SILENT): the
-                        # prior verdict is a fallback for the SAME call
-                        # occurrence only. Refuse it when the prior summary
-                        # reuses the id (cannot be attributed to one slot)
-                        # or names a different owning assistant row than
-                        # this one — otherwise a later turn's prior failure
-                        # leaks onto an earlier successful occurrence.
+                        # #7358 round 9/10 (re-gate 10/01, reviewer
+                        # Findings 1+2, SILENT): the prior verdict is a
+                        # fallback for the SAME call occurrence only.
+                        # Round 9 refused a reused tid outright, which also
+                        # threw away the prior verdict of the occurrence it
+                        # DID match — with turn-1 call_0 success (owner
+                        # (1, call_0)) + turn-2 call_0 failure (owner
+                        # (4, call_0)), the prior pair [(1,false),
+                        # (4,true)] was rewritten [(1,false),(4,false)]
+                        # and a historical failure flipped back to
+                        # success. Round 10 merges per OCCURRENCE
+                        # instead: a prior row only applies when it names
+                        # THIS occurrence's owning assistant row, so the
+                        # reused-id cross-leak round 9 was guarding
+                        # against still cannot happen.
                         _prior_tc = None
-                        if tid not in prior_reused:
-                            _prior_tc = prior_by_tid.get(tid)
-                            _po = prior_owner.get(tid)
-                            if _po is not None and _po != _owner_idx:
-                                _prior_tc = None
+                        if tid in stale_prior_tids:
+                            # Round 10: the prior summary names an owner
+                            # assistant row that does not emit this tid in
+                            # THIS history, so it was recorded in a
+                            # coordinate space this settlement no longer
+                            # shares (e.g. after compression) — no prior
+                            # verdict of that tid is attributable here,
+                            # including the ones whose owner happens to
+                            # line up.
+                            _prior_rows = None
+                        else:
+                            _prior_rows = prior_by_occurrence.get((_owner_idx, tid))
+                        if _prior_rows is None and tid not in stale_prior_tids:
+                            # Round 6 fallback: a prior row that names no
+                            # owner index cannot be scoped to an
+                            # occurrence, so it stays available by tid
+                            # (pinned by the round-6 regression). It is
+                            # only ambiguous when the tid itself is reused
+                            # in THIS history — then it could leak onto
+                            # the wrong occurrence, so drop it
+                            # conservatively (round 10).
+                            if not (
+                                tid in stale_prior_tids
+                                or _occ_counts.get(tid, 0) > 1
+                            ):
+                                _prior_rows = prior_by_tid.get(tid)
+                        if _prior_rows:
+                            # Same occurrence carrying several prior rows:
+                            # conservative merge — any is_error=True wins
+                            # (only upgrade, never downgrade a recorded
+                            # failure); rows with unknown is_error (None)
+                            # are ignored.
+                            _prior_errs = [
+                                r.get('is_error')
+                                for r in _prior_rows
+                                if r.get('is_error') is not None
+                            ]
+                            if _prior_errs:
+                                _prior_tc = {'is_error': any(_prior_errs)}
                         if _prior_tc is not None:
                             _is_error = _prior_tc.get('is_error')
                         if _is_error is None:

@@ -19662,7 +19662,17 @@ function renderMessages(options){
         // (or an explicit failed occurrence) so a successful sibling isn't
         // resurrected red. A row that can't identify its occurrence must not
         // absorb a reused-id failure it can't prove it owns.
-        const _rowAIdx=next.assistant_msg_idx;
+        // #7358 round 10 (re-gate finding 3): same fallback chain as the
+        // ``messages.js`` consumer — a scene row carries its owning assistant
+        // message index on ``next.group.assistant_msg_idx`` /
+        // ``next.payload.assistant_msg_idx`` (the top level has no
+        // ``assistant_msg_idx`` field on a cold-reloaded row), so without the
+        // fallback a reused-id failure never matched and reverted to
+        // "Completed".
+        const _rowAIdx=(next&&next.assistant_msg_idx!=null&&next.assistant_msg_idx!=='')?next.assistant_msg_idx
+          :(next&&next.group&&next.group.assistant_msg_idx!=null&&next.group.assistant_msg_idx!=='')?next.group.assistant_msg_idx
+          :(next&&next.payload&&next.payload.assistant_msg_idx!=null&&next.payload.assistant_msg_idx!=='')?next.payload.assistant_msg_idx
+          :null;
         const _rowIdx=(_rowAIdx!=null&&_rowAIdx!==''&&Number.isFinite(Number(_rowAIdx)))?Number(_rowAIdx):null;
         const _occOwned=(_rowIdx!=null)&&(
           (_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||

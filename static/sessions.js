@@ -2039,6 +2039,12 @@ async function newSession(flash, options={}){
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     updateQueueBadge();
     S.toolCalls=[];
+    // #7358 round 10 (re-gate finding 4): the per-session persisted error map
+    // must not leak into a brand-new chat. This path replaces S.session
+    // directly without going through loadSession()/_syncToolCallsForLoadedMessages,
+    // which is the only place the map gets rebuilt, so an old session's
+    // reused-id failure verdict would otherwise paint the new session's cards.
+    S._settledToolIsErrorByTid=null;
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
@@ -2884,6 +2890,12 @@ async function loadSession(sid){
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
     const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
     S.toolCalls=[];
+    // #7358 round 10 (re-gate finding 4): the INFLIGHT restore path bypasses
+    // _syncToolCallsForLoadedMessages (the _ensureMessagesLoaded guard skips it
+    // when INFLIGHT[sid] exists), so without an explicit reset here the
+    // previous session's persisted error map would leak into this session's
+    // render. Same one-way cleanup as the New Chat path.
+    S._settledToolIsErrorByTid=null;
     // Switching between active sessions should rebuild the live worklog from
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
