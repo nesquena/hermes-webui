@@ -6746,7 +6746,14 @@ async function _archiveBatchSessions(ids, sessionsById){
       archivedCount++;
       if(_sessionResponseRetainsWorktree(response,session)) retainedCount++;
     }catch(e){
+      // #7826 round-3 contract (maintainer-gated): a mid-batch failure STOPS
+      // the loop. Do not keep firing archive requests after a row failed —
+      // the round-3 executor abandoned the rest of the group, and silently
+      // archiving a different subset than the user selected is worse than
+      // reporting the partial outcome. The failed sid is still reported
+      // precisely so the caller can tell WHICH row did not land.
       failedSids.push(sid);
+      break;
     }
   }
   if(failedSids.length){
