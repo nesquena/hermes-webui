@@ -5826,7 +5826,9 @@ function _renderBatchActionBar(){
     // now archive group-by-group inside _archiveBatchSessions instead of
     // being rejected whole.
     const preflight=_archiveBatchOwners(ids,sessionsById);
-    if(!preflight.owner){
+    // #7826 re-gate: preflight only rejects rows whose owner cannot be
+    // resolved. Mixed owners are valid and are archived group-by-group below.
+    if(!preflight.owners.length){
       showToast(t('session_batch_archive_mixed_profiles'),3500);
       exitSessionSelectMode();
       return;
@@ -6509,7 +6511,8 @@ async function _restoreProfileAfterArchive(originalProfile, originalIsDefault, a
   // profile we switched away from. Archiving a foreign sidebar row while a
   // session from the TARGET profile is on screen must leave the switch in
   // place.
-  if(!displayed||displayed===archivedSessionId) return outcome;
+  const archivedIds=Array.isArray(archivedSessionId)?archivedSessionId:[archivedSessionId];
+  if(!displayed||archivedIds.includes(displayed)) return outcome;
   if(_profileMatchesActiveProfile(originalProfile,currentActive)) return outcome;
   try{
     await _switchProfileForActiveProfile(originalProfile,originalIsDefault);
@@ -6530,9 +6533,17 @@ async function _switchProfileForActiveProfile(name, isDefault){
     ?S.activeProfile.trim()
     :'default';
   if(profile===current) return {active:profile};
+  const applyProfileDefaults=(data)=>{
+    if(data.default_model) window._defaultModel=data.default_model;
+    if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+    if(typeof refreshProfileTransitionReasoningChip==='function'){
+      refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
+    }
+  };
   const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name:profile}),timeoutToast:false});
   S.activeProfile=data.active||profile;
   S.activeProfileIsDefault=!!data.is_default;
+  applyProfileDefaults(data);
   if(typeof startGatewaySSE==='function') startGatewaySSE();
   if(typeof syncTopbar==='function') syncTopbar();
   void renderSessionList();
@@ -6728,16 +6739,21 @@ function _archiveBatchOwnerForRow(sid, sessionsById){
 // server 404s profile-less metadata rows by contract, and a raw
 // Promise.all would let earlier requests mutate the store before the
 // 404 lands, leaving a partial archive behind a generic failure toast.
-// Requires exactly one resolvable owner across the whole selection.
+// Returns {owners} when every row is resolvable. `owner` remains populated for
+// uniform selections so older callers retain their simple fast-path signal.
 function _archiveBatchOwners(ids, sessionsById){
+  const owners=[];
   let owner=null;
+  let mixed=false;
   for(const sid of ids){
     const resolved=_archiveBatchOwnerForRow(sid,sessionsById);
-    if(!resolved.owner) return {owner:null, reason:resolved.reason};
-    if(owner && !_archiveBatchOwnersMatch(owner,resolved.owner)) return {owner:null, reason:'mixed'};
-    owner=resolved.owner;
+    if(!resolved.owner) return {owner:null, owners:[], reason:resolved.reason};
+    if(!owners.some(existing=>_archiveBatchOwnersMatch(existing,resolved.owner))) owners.push(resolved.owner);
+    if(owner && !_archiveBatchOwnersMatch(owner,resolved.owner)) mixed=true;
+    if(!owner) owner=resolved.owner;
   }
-  return owner?{owner}:{owner:null, reason:'empty'};
+  if(!owner) return {owner:null, owners:[], reason:'empty'};
+  return mixed?{owner:null,owners,reason:'mixed'}:{owner,owners};
 }
 
 // Two owner names describe the same group when either direction matches the
@@ -6761,12 +6777,17 @@ function _archiveBatchOwnersMatch(a,b){
 // {ok:true, retainedCount} when every selected row archived.
 async function _archiveBatchSessions(ids, sessionsById){
   if(!Array.isArray(ids)||!ids.length) return {ok:false,error:'empty-selection'};
+  const originalProfile=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+    ?S.activeProfile.trim()
+    :'default';
+  const originalIsDefault=!!(S&&S.activeProfileIsDefault);
+  const finish=outcome=>_restoreProfileAfterArchive(originalProfile,originalIsDefault,ids,outcome);
   // Group the selection by resolved owner, preserving first-seen order so the
   // reported progress matches the order the user selected.
   const groups=new Map();
   for(const sid of ids){
     const resolved=_archiveBatchOwnerForRow(sid,sessionsById);
-    if(!resolved.owner) return {ok:false,error:resolved.reason||'unowned-row'};
+    if(!resolved.owner) return finish({ok:false,error:resolved.reason||'unowned-row'});
     let group=groups.get(resolved.owner);
     if(!group){ group=[]; groups.set(resolved.owner,group); }
     group.push(sid);
@@ -6777,7 +6798,7 @@ async function _archiveBatchSessions(ids, sessionsById){
   for(const [owner,groupIds] of groups){
     // Fail closed inside the executor too: an unowned row that somehow
     // reaches a later caller must never fire an archive request.
-    if(!(typeof owner==='string'&&owner.trim())) return {ok:false,error:'missing-owner'};
+    if(!(typeof owner==='string'&&owner.trim())) return finish({ok:false,error:'missing-owner'});
     const activeProfile=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
       ?S.activeProfile.trim()
       :'default';
@@ -6810,14 +6831,14 @@ async function _archiveBatchSessions(ids, sessionsById){
     if(groupFailed) failedGroups.push(owner);
   }
   if(failedGroups.length){
-    return {
+    return finish({
       ok:false,
       error:'batch-partial-failure:'+failedGroups.join(','),
       archivedCount,
       totalCount:ids.length,
-    };
+    });
   }
-  return {ok:true,retainedCount,archivedCount};
+  return finish({ok:true,retainedCount,archivedCount});
 }
 
 function _openSessionActionMenu(session, anchorEl){
