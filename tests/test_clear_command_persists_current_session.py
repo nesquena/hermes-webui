@@ -245,26 +245,55 @@ def test_slash_clear_holds_send_lock_until_durable_clear_finishes(cleanup_test_s
             result = page.evaluate(
                 """async () => {
                     const realApi = window.api.bind(window);
+                    let clearReleased = false;
+                    let chatStartsBeforeClearReleased = 0;
+                    let chatStartCalls = 0;
                     window.api = (path, options) => {
-                      if (path !== '/api/session/clear') return realApi(path, options);
-                      return new Promise((resolve, reject) => {
-                        window.__releaseDelayedClear = () => realApi(path, options).then(resolve, reject);
-                      });
+                      if (path === '/api/session/clear') {
+                        return new Promise((resolve, reject) => {
+                          window.__releaseDelayedClear = () => realApi(path, options).then(resolve, reject);
+                        });
+                      }
+                      if (path === '/api/chat/start') {
+                        chatStartCalls += 1;
+                        if (!clearReleased) chatStartsBeforeClearReleased += 1;
+                        // Exercise send() through its real API dispatch without
+                        // starting a provider-backed run in this browser test.
+                        return Promise.reject(new Error('test follow-up dispatch'));
+                      }
+                      return realApi(path, options);
                     };
                     document.getElementById('msg').value = '/clear';
                     const clearing = send();
                     await new Promise(resolve => requestAnimationFrame(resolve));
                     const inputWasCleared = document.getElementById('msg').value === '';
                     document.getElementById('msg').value = 'follow-up after clear';
+                    // This call is deliberately attempted while /clear is held.
+                    // It must be rejected by the send lock before /api/chat/start.
                     await send();
                     const lockHeld = _sendInProgress === true;
                     await window.__releaseDelayedClear();
+                    clearReleased = true;
                     await clearing;
-                    return {inputWasCleared, lockHeld, lockReleased: _sendInProgress === false};
+                    document.getElementById('msg').value = 'real follow-up after clear';
+                    await send();
+                    return {
+                      inputWasCleared,
+                      lockHeld,
+                      lockReleased: _sendInProgress === false,
+                      chatStartsBeforeClearReleased,
+                      chatStartCalls,
+                    };
                 }"""
             )
         finally:
             browser.close()
 
-    assert result == {"inputWasCleared": True, "lockHeld": True, "lockReleased": True}
+    assert result == {
+        "inputWasCleared": True,
+        "lockHeld": True,
+        "lockReleased": True,
+        "chatStartsBeforeClearReleased": 0,
+        "chatStartCalls": 1,
+    }
     assert _server_session(session_id)["messages"] == []

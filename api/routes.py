@@ -16832,30 +16832,25 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
-        old_ws = getattr(s, "workspace", "")
-        old_model = getattr(s, "model", None)
-        old_provider = getattr(s, "model_provider", None)
-        try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace), profile=getattr(s, "profile", None)))
-        except ValueError as e:
-            return bad(handler, str(e))
         with _get_session_agent_lock(body["session_id"]):
-            s.workspace = new_ws
-            # A delayed metadata update can have loaded a session immediately
-            # before /clear. Preserve a durable clear stamped by the other
-            # request instead of writing that stale transcript back on save.
+            # This request may have loaded ``s`` before /clear acquired the
+            # session lock. Rebase on the persisted session while holding that
+            # same lock so save() cannot restore any pre-clear lifecycle field
+            # (pending turn state, title flags, or compression lineage).
+            s = Session.load(body["session_id"])
+            if s is None:
+                return bad(handler, "Session not found", 404)
+            old_ws = getattr(s, "workspace", "")
+            old_model = getattr(s, "model", None)
+            old_provider = getattr(s, "model_provider", None)
             try:
-                persisted = json.loads(s.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
-                persisted = {}
-            persisted_clear_generation = persisted.get("clear_generation")
-            if persisted_clear_generation and persisted_clear_generation != getattr(s, "clear_generation", None):
-                s.messages = []
-                s.context_messages = []
-                s.tool_calls = []
-                s.truncation_watermark = persisted.get("truncation_watermark")
-                s.truncation_boundary = persisted.get("truncation_boundary")
-                s.clear_generation = persisted_clear_generation
+                new_ws = str(resolve_trusted_workspace(
+                    body.get("workspace", s.workspace),
+                    profile=getattr(s, "profile", None),
+                ))
+            except ValueError as e:
+                return bad(handler, str(e))
+            s.workspace = new_ws
             if "model" in body or "model_provider" in body:
                 model, provider = _session_model_state_from_request(
                     body.get("model", s.model),
@@ -16879,6 +16874,16 @@ def handle_post(handler, parsed) -> bool:
 
                     _evict_session_agent(body["session_id"])
             s.save()
+            # ``get_session()`` intentionally does not replace a cache entry
+            # merely because disk has fewer messages: normally that can discard
+            # an unsaved in-memory tail. This update explicitly rebased from a
+            # durable session under the same lock, however, so publish that
+            # authoritative instance before a following GET can serve the
+            # pre-clear cached object.
+            with LOCK:
+                SESSIONS[s.session_id] = s
+                SESSIONS.move_to_end(s.session_id)
+                _evict_sessions_over_cap()
         if str(old_ws or "") != str(new_ws or ""):
             try:
                 from api.terminal import close_terminal
@@ -17113,6 +17118,14 @@ def handle_post(handler, parsed) -> bool:
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, "Untitled")
             s.save()
+            # Full clear is an authoritative shrink. Publish this exact object
+            # to the cache so the normal cache guard (which intentionally does
+            # not reload merely because disk has fewer messages) cannot serve a
+            # pre-clear resident instance to the next GET.
+            with LOCK:
+                SESSIONS[s.session_id] = s
+                SESSIONS.move_to_end(s.session_id)
+                _evict_sessions_over_cap()
             persisted_clear = False
             try:
                 persisted = json.loads(s.path.read_text(encoding="utf-8"))

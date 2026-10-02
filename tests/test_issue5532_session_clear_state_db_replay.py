@@ -60,6 +60,29 @@ def _post_clear(monkeypatch, sid: str):
     return captured
 
 
+def _post_session_update(monkeypatch, body: dict):
+    """Run the real update route and capture its JSON response."""
+    import api.routes as routes
+
+    raw_body = json.dumps(body).encode("utf-8")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+
+    captured = {}
+
+    def fake_j(_handler, payload, status=200, extra_headers=None):
+        captured["payload"] = payload
+        captured["status"] = status
+        captured["extra_headers"] = extra_headers
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    handler = SimpleNamespace(
+        headers={"Content-Length": str(len(raw_body))},
+        rfile=BytesIO(raw_body),
+    )
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/update"))
+    return captured
+
+
 def test_session_clear_persists_empty_context_and_blocks_state_db_replay(monkeypatch, tmp_path):
     import api.models as models
     from api.models import Session, merge_session_messages_append_only
@@ -157,6 +180,96 @@ def test_session_clear_persists_empty_context_and_blocks_state_db_replay(monkeyp
     recovered = recover_session(loaded.path)
     assert recovered["restored"] is False
     assert Session.load(sid).messages == []
+
+
+def test_stale_session_update_cannot_resurrect_clear_lifecycle_state(monkeypatch, tmp_path):
+    """A pre-clear update object must rebase on the durable full-clear state."""
+    import api.routes as routes
+    from api.models import LOCK, SESSIONS, Session, get_session
+
+    _install_isolated_session_env(monkeypatch, tmp_path)
+
+    parent_sid = "clear_update_stale_parent"
+    sid = "clear_update_stale_child"
+    parent = Session(
+        session_id=parent_sid,
+        title="Compression snapshot",
+        workspace=str(tmp_path),
+        pre_compression_snapshot=True,
+    )
+    parent.save(touch_updated_at=False)
+
+    messages = [
+        _msg("user", "pre-clear prompt", 1.0, "stale-u1"),
+        _msg("assistant", "pre-clear reply", 2.0, "stale-a1"),
+    ]
+    session = Session(
+        session_id=sid,
+        title="Manual pre-clear title",
+        workspace=str(tmp_path),
+        messages=messages,
+        context_messages=list(messages),
+        tool_calls=[{"id": "stale-tool", "function": {"name": "terminal"}}],
+        active_stream_id="stale-stream",
+        pending_user_message="stale pending prompt",
+        pending_attachments=[{"name": "stale.txt"}],
+        pending_started_at=1234.0,
+        pending_user_source="webui",
+        parent_session_id=parent_sid,
+        compression_anchor_visible_idx=3,
+        compression_anchor_message_key="stale-anchor",
+        llm_title_generated=True,
+        manual_title=True,
+    )
+    session.truncation_watermark = 9.0
+    session.truncation_boundary = 8.0
+    session.save(touch_updated_at=False)
+
+    # This is the delayed /api/session/update request's object: it was loaded
+    # before /clear acquired the same session lock and must not be saved again.
+    stale_update_session = Session.load(sid)
+    assert stale_update_session is not None
+
+    cleared = _post_clear(monkeypatch, sid)
+    assert cleared["status"] == 200
+    assert cleared["payload"]["ok"] is True
+
+    # A delayed update can still have its pre-clear object retained in the
+    # process cache even though /clear persisted a separate, cleared instance.
+    with LOCK:
+        SESSIONS[sid] = stale_update_session
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda _sid: stale_update_session)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
+    updated = _post_session_update(
+        monkeypatch,
+        {"session_id": sid, "workspace": str(tmp_path)},
+    )
+
+    assert updated["status"] == 200
+    reloaded = Session.load(sid)
+    assert reloaded is not None
+    assert reloaded.messages == []
+    assert reloaded.context_messages == []
+    assert reloaded.tool_calls == []
+    assert reloaded.truncation_watermark == 0.0
+    assert reloaded.truncation_boundary == 0.0
+    assert reloaded.active_stream_id is None
+    assert reloaded.pending_user_message is None
+    assert reloaded.pending_attachments == []
+    assert reloaded.pending_started_at is None
+    assert reloaded.pending_user_source is None
+    assert reloaded.clear_generation
+    assert reloaded.title == "Untitled"
+    assert reloaded.manual_title is False
+    assert reloaded.llm_title_generated is False
+    assert reloaded.parent_session_id is None
+    assert reloaded.compression_anchor_visible_idx is None
+    assert reloaded.compression_anchor_message_key is None
+
+    cached = get_session(sid)
+    assert cached.messages == []
+    assert cached.active_stream_id is None
+    assert cached.title == "Untitled"
 
 
 def test_empty_sidecar_without_watermark_still_recovers_state_db_rows():
