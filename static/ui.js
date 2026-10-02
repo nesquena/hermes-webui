@@ -3790,7 +3790,17 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
 function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  const requestedProvider=String(preferredProviderId||_providerFromModelValue(modelId)||'').trim();
+  // (#6657 re-gate) An ambiguous `@custom:` id must not pick up a
+  // shape-guessed provider here. Without real authority — an explicit
+  // preferredProviderId, a configured badge, or a hydrated catalog hit — the
+  // temporary option keeps provider null and the FULL qualified id as its
+  // value, so the backend's config-aware resolver splits it. The gate lives
+  // on requestedProvider (it feeds _applyModelToDropdown and the data-model
+  // stamp), not only on the final dataset.provider line, or the guess leaks
+  // back through both and hydration never revisits it.
+  const shapeProvider=_providerFromModelValue(modelId);
+  const ambiguous=_qualifiedCustomIdNeedsBackendAuthority(modelId);
+  const requestedProvider=String(preferredProviderId||(ambiguous?'':shapeProvider)||'').trim();
   const applied=_applyModelToDropdown(modelId,sel,requestedProvider||null);
   if(applied){
     const appliedState=typeof _modelStateForSelect==='function'
@@ -3813,7 +3823,22 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(badge&&badge.provider) opt.dataset.provider=badge.provider;
   if(rawBadge&&rawBadge.provider) opt.dataset.provider=rawBadge.provider;
   if(requestedProvider) opt.dataset.model=bareModel;
-  const provider=requestedProvider||(badge&&badge.provider)||(rawBadge&&rawBadge.provider)||_providerFromModelValue(value)||'';
+  // Authority gate for the temporary option's provider stamp (#6657 re-gate):
+  // hydration never revisits these dataset fields, and
+  // _clientProviderAuthorityForModel reads them back as authority for BOTH
+  // the persisted state and the outgoing payload — a stamped shape guess here
+  // sent `custom:gw:8080` as model_provider for a `custom:gw` + `8080:free`
+  // pick, and the backend resolved the same id the other way. Stamp only real
+  // authority: an explicit preferredProviderId (requestedProvider), a
+  // configured badge, a hydrated _dynamicProviderIds hit (mirroring the
+  // catalog is agreement, not a guess), or a shape parse with no
+  // endpoint-vs-named ambiguity (_qualifiedCustomIdNeedsBackendAuthority is
+  // exactly that ambiguity question). The ambiguous leftover keeps provider
+  // null and the FULL qualified id as the model half so the backend's
+  // config-aware resolver splits it.
+  const provider=requestedProvider||(badge&&badge.provider)||(rawBadge&&rawBadge.provider)
+    ||_dynamicProviderAuthorityForQualifiedCustomId(value)
+    ||(_qualifiedCustomIdNeedsBackendAuthority(value)?'':_providerFromModelValue(value)||'');
   if(provider) opt.dataset.provider=provider;
   sel.appendChild(opt);
   sel.value=value;
