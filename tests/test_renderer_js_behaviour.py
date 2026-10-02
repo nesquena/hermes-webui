@@ -48,6 +48,7 @@ const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
 // reachable from a standalone renderMd() invocation.
 function _inlineMediaHtmlForRef(ref){
   const r = String(ref || '');
+  if (/\.pdf$/i.test(r)) return `<div class="pdf-preview-load" data-path="${esc(r)}">PDF</div>`;
   if (/^https?:\/\//.test(r)) return `<img class="msg-media-img" src="${esc(r)}" alt="image" loading="lazy">`;
   if (/^file:\/\//.test(r)){
     const m = r.replace(/^file:\/\//i, '');
@@ -215,6 +216,12 @@ class TestRendererSanitization:
         assert '<img' in out and 'msg-media-img' in out
         assert 'onclick' not in out
         assert '_openimglightbox' not in out
+
+    def test_bold_wrapped_media_pdf_excludes_markdown_delimiters(self, driver_path):
+        out = _render(driver_path, "PDF generated: **MEDIA:C:/tmp/REPORT.pdf**")
+        assert 'class="pdf-preview-load"' in out
+        assert 'data-path="C:/tmp/REPORT.pdf"' in out
+        assert "REPORT.pdf**" not in out
 
     def test_incomplete_raw_html_tag_is_escaped_before_paragraph_wrapping(self, driver_path):
         out = _render(driver_path, '<img src=x onerror=alert(1)//').lower()

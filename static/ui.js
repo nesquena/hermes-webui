@@ -7914,6 +7914,9 @@ function renderMd(raw){
   //      (``report`final.png``) is captured in full instead of being
   //      truncated at the first backtick.
   s=s.replace(/`MEDIA:([^`\s]+)`/g,'MEDIA:$1');
+  // Some models wrap the complete token in Markdown bold. Remove only that
+  // exact paired wrapper so the existing MEDIA renderer receives the same ref.
+  s=s.replace(/\*\*MEDIA:([^\s\)\]]+?)\*\*(?=$|[\s\)\],.!?:;])/g,'MEDIA:$1');
   s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
@@ -20757,12 +20760,13 @@ function loadPdfInline(container){
     const snapQuery=_mediaSnapQuery(el);
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
+    const downloadMediaUrl=mediaUrl+'&download=1';
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
+            const dlUrl=downloadMediaUrl;
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
@@ -20770,7 +20774,7 @@ function loadPdfInline(container){
         })
         .then(pdf=>{
           if(!pdf) return;
-          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
+          const dlUrl=downloadMediaUrl;
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
           const wrap=document.createElement('div');
@@ -20809,7 +20813,7 @@ function loadPdfInline(container){
           renderPage(1);
         })
         .catch(()=>{
-          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
+          const dlUrl=downloadMediaUrl;
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
         });
     };
@@ -20829,7 +20833,7 @@ function loadPdfInline(container){
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
         if(!_pdfjsReady){
-          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
+          const dlUrl=downloadMediaUrl;
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }

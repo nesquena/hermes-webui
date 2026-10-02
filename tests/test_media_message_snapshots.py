@@ -251,6 +251,19 @@ def test_annotate_stamps_assistant_messages_with_snapshots(snap_dir, tmp_path):
     assert len(stamped[str(target)]) == 64
 
 
+def test_annotate_bold_wrapped_media_excludes_markdown_delimiters(snap_dir, tmp_path):
+    from api.media_snapshots import annotate_media_snapshots
+
+    target = tmp_path / "REPORT.pdf"
+    target.write_bytes(b"%PDF-1.7\n")
+    messages = [
+        {"role": "assistant", "content": f"PDF generated: **MEDIA:{target}**"}
+    ]
+
+    assert annotate_media_snapshots(messages) == 1
+    assert set(messages[0]["_media_snapshots"]) == {str(target)}
+
+
 def test_annotate_is_idempotent_across_settles(snap_dir, tmp_path):
     from api.media_snapshots import annotate_media_snapshots
 

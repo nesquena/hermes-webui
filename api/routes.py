@@ -20904,6 +20904,9 @@ _MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
 #      (``report`final.png``) is captured in full instead of being
 #      truncated at the first backtick.
 _BACKTICK_MEDIA_RE = re.compile(r"`MEDIA:([^`\s]+)`")
+_BOLD_MEDIA_RE = re.compile(
+    r"\*\*MEDIA:([^\s\)\]]+?)\*\*(?=$|[\s\)\],.!?:;])"
+)
 
 
 def _message_content_text(content) -> str:
@@ -20967,6 +20970,7 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
         # class below captures the full path even when the filename
         # itself contains a backtick.
         text = _BACKTICK_MEDIA_RE.sub(lambda m: f"MEDIA:{m.group(1)}", text)
+        text = _BOLD_MEDIA_RE.sub(lambda m: f"MEDIA:{m.group(1)}", text)
         for ref in _MEDIA_TOKEN_RE.findall(text):
             if "://" in ref:
                 continue

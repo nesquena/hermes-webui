@@ -614,6 +614,24 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     )
                 )
 
+    def test_session_media_token_allows_bold_wrapped_pdf_path(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            pdf = pathlib.Path(tmpd) / "REPORT.pdf"
+            pdf.write_bytes(b"%PDF-1.7\n")
+            session = SimpleNamespace(
+                messages=[
+                    {"role": "assistant", "content": f"PDF: **MEDIA:{pdf}**"}
+                ]
+            )
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertTrue(
+                    routes._session_media_token_allows_path(
+                        "s-media", pdf, {"application/pdf"}
+                    )
+                )
+
     def test_session_media_token_rejects_unmentioned_image_path(self):
         from api import routes
 

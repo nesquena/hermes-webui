@@ -143,6 +143,20 @@ class TestLoadPdfInlineFunction:
         assert '_pdfjsReady' in ui, '_pdfjsReady state variable must exist'
         assert '_pdfjsLoading' in ui, '_pdfjsLoading state variable must exist'
 
+    def test_download_links_reuse_authorized_preview_url(self):
+        ui = _read_js('ui.js')
+        idx = ui.find('function loadPdfInline')
+        end = ui.find('function loadHtmlInline', idx)
+        body = ui[idx:end]
+        assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
+        assert 'const snapQuery=_mediaSnapQuery(el);' in body
+        assert "const downloadMediaUrl=mediaUrl+'&download=1';" in body, (
+            "PDF downloads must retain the preview URL's session and snapshot"
+        )
+        assert body.count("const dlUrl=downloadMediaUrl;") == 4, (
+            "preview and every fallback must use the authorized download URL"
+        )
+
 
 class TestLoadHtmlInlineFunction:
     """loadHtmlInline() must exist and render HTML in a sandboxed iframe."""
@@ -205,20 +219,6 @@ class TestLoadHtmlInlineFunction:
         assert "const openUrl=publicMediaUrl+'&inline=1'+snapQuery;" in body, (
             "HTML 'open full page' / fallback links must carry the message's "
             "snapshot digest (snapQuery) so they open the frozen bytes, not the "
-            "current live file"
-        )
-
-    def test_pdf_fetch_url_includes_session_id_for_session_media_artifacts(self):
-        ui = _read_js('ui.js')
-        idx = ui.find('function loadPdfInline')
-        body = ui[idx:idx + 1200]
-        assert 'const mediaSessionId=' in body
-        assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
-        assert 'fetch(mediaUrl)' in body
-        assert "const publicMediaUrl='api/media?path='+encodeURIComponent(path);" in body
-        assert "const dlUrl=publicMediaUrl+'&download=1'+snapQuery;" in body, (
-            "PDF download/fallback links must carry the message's snapshot "
-            "digest (snapQuery) so they download the frozen bytes, not the "
             "current live file"
         )
 

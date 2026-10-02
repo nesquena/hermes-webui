@@ -197,9 +197,11 @@ def _run_real_smd_media_cases() -> dict:
         "const refSplit=renderModes(['MEDIA:C:/tmp/li', 've.png ']);\n"
         "const finalExtensionless=renderModes(['MEDIA:https://fal.media/generated']);\n"
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
+        "const boldPdf=renderModes(['**MEDIA:C:/tmp/report.pdf** ']);\n"
+        "const boldPdfSplit=renderModes(['**MEDIA:C:/tmp/re', 'port.pdf', '** ']);\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, boldPdf, boldPdfSplit, falsePrefix, crossParent}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -562,6 +564,15 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                 self.assertIn('data-path="C:/tmp/report.pdf"', result["html"])
                 self.assertGreaterEqual(result["postProcessCalls"], 1)
                 self.assertGreaterEqual(result["playbackCalls"], 1)
+
+    def test_real_smd_parser_bold_pdf_excludes_markdown_delimiters(self):
+        for case in ("boldPdf", "boldPdfSplit"):
+            for mode, result in self.cases[case].items():
+                with self.subTest(case=case, mode=mode):
+                    self.assertIn('class="pdf-preview-load"', result["html"])
+                    self.assertIn('data-path="C:/tmp/report.pdf"', result["html"])
+                    self.assertNotIn('data-path="C:/tmp/report.pdf**"', result["html"])
+                    self.assertNotIn("MEDIA:", result["text"])
 
     def test_real_smd_parser_false_prefix_plain_prose_keeps_fade(self):
         result = self.cases["falsePrefix"]["fade"]

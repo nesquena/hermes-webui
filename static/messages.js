@@ -4857,7 +4857,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // match below sees a plain ``MEDIA:path`` and the bare class
     // (no backtick in the exclusion set) captures the full filename
     // even when the path itself contains a backtick.
-    const normalized = String(chunk).replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1');
+    const normalized = String(chunk)
+      .replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1')
+      .replace(/\*\*MEDIA:([^\s\)\]]+?)\*\*(?=$|[\s\)\],.!?:;])/g, 'MEDIA:$1');
     const m=/^MEDIA:([^\s\)\]]+)$/.exec(normalized);
     const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
     if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
@@ -4911,7 +4913,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // filename even when the path itself contains a backtick.
     // The pre-pass replaces `` `MEDIA:path` `` with ``MEDIA:path``
     // so the wrapped form is consumed before the bare scan.
-    const normalized = combined.replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1');
+    // Strip supported wrappers before the existing bare-token scan. The bold
+    // pass is deliberately limited to an exact paired **MEDIA:...** token.
+    const normalized = combined
+      .replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1')
+      .replace(/\*\*MEDIA:([^\s\)\]]+?)\*\*(?=$|[\s\)\],.!?:;])/g, 'MEDIA:$1');
     const re=/MEDIA:([^\s\)\]]+)/g;
     let last=0, m;
     let unmatchedTail=null;
