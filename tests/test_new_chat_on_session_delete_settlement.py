@@ -87,7 +87,8 @@ globalThis._appRootPath = () => '/';
 
 let releaseCreate = null;
 let releaseDraft = null;
-globalThis.api = async url => {
+const createWorkspaces = [];
+globalThis.api = async (url, options = {}) => {
   if (url.startsWith('/api/session?')) {
     return await new Promise(resolve => {
       releaseDraft = () => resolve({session:{
@@ -98,6 +99,8 @@ globalThis.api = async url => {
     });
   }
   if (url !== '/api/session/new') throw new Error('unexpected API: ' + url);
+  const body = JSON.parse(options.body || '{}');
+  createWorkspaces.push(body.workspace || null);
   if (scenario === 'failure') throw new Error('create failed');
   if (scenario.startsWith('new-chat-during-draft-')) return {session:{
     session_id:'created-B', messages:[], model:'test-model', model_provider:'test-provider',
@@ -105,8 +108,8 @@ globalThis.api = async url => {
   }};
   return await new Promise(resolve => {
     releaseCreate = () => resolve({session:{
-      session_id:'created-A', messages:[], model:'test-model', model_provider:'test-provider',
-      workspace:'/ws/A', message_count:0, last_usage:{},
+      session_id:body.workspace === '/ws/B' ? 'created-B' : 'created-A', messages:[], model:'test-model', model_provider:'test-provider',
+      workspace:body.workspace || null, message_count:0, last_usage:{},
     }});
   });
 };
@@ -127,6 +130,12 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
   if (scenario.startsWith('new-chat-during-draft-')) {
     localStorage.setItem(NEW_CHAT_DRAFT_SESSION_KEY, 'remembered');
   }
+  let ordinary = null;
+  if (scenario === 'ordinary-b-pending-during-delete-a') {
+    S._profileSwitchWorkspace = '/ws/B';
+    ordinary = newSession(false);
+    while (!releaseCreate) await new Promise(resolve => setTimeout(resolve, 0));
+  }
   const owner = _deleteNewChatOwnerSnapshot();
   const pending = _startNewChatAfterDeletingCurrentSession('/ws/A', owner);
   if (scenario === 'superseded' || scenario === 'superseded-profile') {
@@ -144,6 +153,9 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
     S._profileSwitchWorkspace = '/ws/B';
     await newSession(false);
     releaseDraft();
+  } else if (scenario === 'ordinary-b-pending-during-delete-a') {
+    releaseCreate();
+    await ordinary;
   }
   const result = await pending;
   process.stdout.write(JSON.stringify({
@@ -156,6 +168,7 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
     busy:S.busy,
     activeStreamId:S.activeStreamId,
     sendButtonUpdates,
+    createWorkspaces,
   }));
 })().catch(error => {
   process.stderr.write(String(error && error.stack || error));
@@ -209,6 +222,15 @@ def test_failed_post_leaves_blank_root_instead_of_deleted_session_route(driver):
     assert result["busy"] is False
     assert result["activeStreamId"] is None
     assert result["sendButtonUpdates"] > 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_delete_continuation_joins_pending_workspace_without_leaking_override(driver):
+    result = _run(driver, "ordinary-b-pending-during-delete-a")
+    assert result["activeSid"] == "created-B"
+    assert result["createWorkspaces"] == ["/ws/B"]
+    assert result["profileWorkspace"] is None
+    assert result["superseded"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

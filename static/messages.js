@@ -1646,6 +1646,10 @@ async function send(){
     }
   }
   if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session){
+    _restoreComposerDraftAfterFailedSend(text,[...S.pendingFiles],null,null);
+    return;
+  }
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;

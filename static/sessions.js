@@ -1951,17 +1951,17 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
-  // Count every New Chat intent before joining an in-flight request. Delete-
-  // owned continuations use this identity to yield to a newer explicit click,
-  // even when that click ultimately joins their pending POST.
-  const newSessionIntentGeneration=(Number.isSafeInteger(S._newSessionIntentGeneration)
-    ? S._newSessionIntentGeneration
-    : 0)+1;
-  S._newSessionIntentGeneration=newSessionIntentGeneration;
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
   }
+  // Only the caller that owns a new POST creates an intent generation. A caller
+  // joining that POST must share its ownership; otherwise it can invalidate the
+  // response both callers are waiting for and leave the composer sessionless.
+  const newSessionIntentGeneration=(Number.isSafeInteger(S._newSessionIntentGeneration)
+    ? S._newSessionIntentGeneration
+    : 0)+1;
+  S._newSessionIntentGeneration=newSessionIntentGeneration;
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
     const stillOwnsPane=(options&&typeof options.stillOwnsPane==='function')?options.stillOwnsPane:null;
@@ -9888,6 +9888,17 @@ async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=
   if(!stillOwnsPane()) return {superseded:true};
   let rememberedDraftSid='';
   try{rememberedDraftSid=localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY)||'';}catch(_){}
+  // An ordinary New Chat may already own a POST (and its workspace). Join it
+  // without installing the deleted session's one-shot workspace override.
+  if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+    try{
+      const pendingResult=await _newSessionInFlight;
+      if(S.session||pendingResult&&pendingResult.superseded) return {superseded:true};
+    }catch(error){
+      if(stillOwnsPane()) _showEmptyConversationAfterDelete();
+      return {error};
+    }
+  }
   if(deletedWorkspace) S._profileSwitchWorkspace=deletedWorkspace;
   try{
     const result=await newSession(false,{
@@ -9897,10 +9908,13 @@ async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=
     return result&&result.superseded?{superseded:true}:{created:true};
   }catch(error){
     if(stillOwnsPane()){
-      S._profileSwitchWorkspace=null;
       _showEmptyConversationAfterDelete();
     }
     return {error};
+  }finally{
+    if(deletedWorkspace&&S._profileSwitchWorkspace===deletedWorkspace){
+      S._profileSwitchWorkspace=null;
+    }
   }
 }
 
