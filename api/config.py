@@ -9706,6 +9706,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _named_custom_errors: dict[str, dict] = {}
         if isinstance(_custom_providers_cfg, list):
             _seen_custom_ids = set()
+            # Phase 1 — resolve every entry (name / slug / base_url / api_key) on
+            # THIS thread. The api_key may come from a thread-local env var or the
+            # credential pool, neither of which is readable from a probe worker.
+            # Resolution stays in stable entry order.
+            _cp_resolved: list[dict] = []
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
                     continue
@@ -9738,6 +9743,68 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     except ImportError:
                         pass
 
+                _cp_resolved.append({
+                    "entry": _cp,
+                    "name": _cp_name,
+                    "slug": _slug,
+                    "base_url": _cp_base_url,
+                    "api_key": _cp_api_key,
+                })
+
+            # Phase 2 — probe every endpoint that needs a live /v1/models fetch
+            # CONCURRENTLY. These probes used to run serially inside the loop
+            # below, so one dead or hanging upstream added its full per-call
+            # timeout before every healthy provider behind it, and a couple of
+            # dead endpoints could stall the whole models-cache rebuild. Results
+            # are re-attached in stable entry order by the loop below.
+            _probe_targets = []
+            for _r in _cp_resolved:
+                if not (_r["slug"] and _r["base_url"]):
+                    continue
+                _r_models = _r["entry"].get("models")
+                if isinstance(_r_models, (dict, list)) and len(_r_models) > 0:
+                    continue  # curated allowlist wins — no live probe
+                if auto_detected_models_by_provider.get(_r["slug"]) is not None:
+                    continue  # already pre-warmed — keep the cheap result
+                _probe_targets.append(_r)
+
+            _custom_probe_results: dict[str, tuple[list[dict], dict | None]] = {}
+            if _probe_targets:
+                def _probe_one_custom_endpoint(_r):
+                    return _read_custom_endpoint_models(
+                        _r["base_url"],
+                        _r["slug"],
+                        api_key=_r["api_key"],
+                        trusted_base_urls=(_r["base_url"],),
+                    )
+
+                if len(_probe_targets) == 1:
+                    _r = _probe_targets[0]
+                    _custom_probe_results[_r["slug"]] = _probe_one_custom_endpoint(_r)
+                else:
+                    from concurrent.futures import ThreadPoolExecutor
+                    with ThreadPoolExecutor(
+                        max_workers=min(4, len(_probe_targets)),
+                        thread_name_prefix="models-probe",
+                    ) as _probe_pool:
+                        _probe_futures = [
+                            (_probe_pool.submit(_probe_one_custom_endpoint, _r), _r["slug"])
+                            for _r in _probe_targets
+                        ]
+                        for _probe_future, _probe_slug in _probe_futures:
+                            try:
+                                _custom_probe_results[_probe_slug] = _probe_future.result()
+                            except Exception as _probe_exc:  # noqa: BLE001
+                                _custom_probe_results[_probe_slug] = (
+                                    [], _custom_endpoint_error(_probe_slug, _probe_exc))
+
+            for _r in _cp_resolved:
+                _cp = _r["entry"]
+                _cp_name = _r["name"]
+                _slug = _r["slug"]
+                _cp_base_url = _r["base_url"]
+                _cp_api_key = _r["api_key"]
+
                 if _slug and _cp_base_url:
                     # Check if user has configured models in config.yaml —
                     # configured models take priority over live /v1/models
@@ -9762,12 +9829,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         if _live_models is None:
                             _live_models = []
                     elif _live_models is None:
-                        _live_models, _live_error = _read_custom_endpoint_models(
-                            _cp_base_url,
-                            _slug,
-                            api_key=_cp_api_key,
-                            trusted_base_urls=(_cp_base_url,),
-                        )
+                        if _slug in _custom_probe_results:
+                            _live_models, _live_error = _custom_probe_results.pop(_slug)
+                        else:
+                            _live_models, _live_error = _read_custom_endpoint_models(
+                                _cp_base_url,
+                                _slug,
+                                api_key=_cp_api_key,
+                                trusted_base_urls=(_cp_base_url,),
+                            )
                     if _live_error:
                         _named_custom_errors[_slug] = _live_error
                         detected_providers.add(_slug)
@@ -10519,18 +10589,26 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
         if should_wait:
             wait_timeout = 60.0
-            if force_refresh and force_refresh_started_at is not None:
-                if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
-                    # The legacy synchronous path is explicitly unbounded. A
-                    # forced refresh follower should keep coalescing behind
-                    # that live rebuild instead of giving up after 60s and
-                    # duplicating it.
-                    wait_timeout = None
-                else:
+            if _LIVE_REBUILD_BUDGET_SECONDS > 0:
+                # No follower may block longer than the foreground rebuild
+                # budget. The rebuild probes custom endpoints serially-ish and a
+                # dead or hanging upstream can hold this gate far past the
+                # frontend's own request timeout (the picker clears its options
+                # before the call), so cap the wait and serve the stale-disk or
+                # static catalog instead — without starting a duplicate rebuild.
+                if force_refresh and force_refresh_started_at is not None:
                     wait_timeout = max(
                         0.0,
                         _LIVE_REBUILD_BUDGET_SECONDS - (time.monotonic() - force_refresh_started_at),
                     )
+                else:
+                    wait_timeout = _LIVE_REBUILD_BUDGET_SECONDS
+            elif force_refresh and force_refresh_started_at is not None:
+                # The legacy synchronous path is explicitly unbounded. A
+                # forced refresh follower should keep coalescing behind
+                # that live rebuild instead of giving up after 60s and
+                # duplicating it.
+                wait_timeout = None
             _cache_build_cv.wait_for(
                 lambda: not _cache_build_in_progress,
                 timeout=wait_timeout
@@ -10547,10 +10625,25 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
             ):
                 return cached
-            if force_refresh and _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
-                if stale_disk_groups is not None:
-                    return copy.deepcopy(stale_disk_groups)
-                return copy.deepcopy(_static_models_catalog_without_live_probes())
+            if _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
+                # A forced refresh may fall back to the shape-only stale cache
+                # or the static catalog. An ordinary follower gets the
+                # fingerprint-validated disk catalog when one exists — it is
+                # exactly what the cold path would have served, so the blocked
+                # wait bought nothing. With no such catalog the follower falls
+                # through and coalesces on the in-flight rebuild instead of
+                # being answered with a superseded shape (a profile switch or
+                # source change must still land the fresh catalog).
+                if force_refresh:
+                    if stale_disk_groups is not None:
+                        return copy.deepcopy(stale_disk_groups)
+                    return copy.deepcopy(_static_models_catalog_without_live_probes())
+                if disk_groups is not None and not _cfg_changed:
+                    _available_models_cache = disk_groups
+                    _available_models_cache_ts = time.monotonic()
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _sync_models_cache_provenance()
+                    return copy.deepcopy(disk_groups)
 
         # Reload config if changed
         if _cfg_changed:
