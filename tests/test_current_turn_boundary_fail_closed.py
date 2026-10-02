@@ -973,7 +973,7 @@ def test_self_heal_update_required_never_masks_the_retrys_own_error(tmp_path, mo
 # ── 2026-09-25 re-gate at 32b61313b: sync path + producer-owned output evidence ─
 
 
-def _run_chat_sync(tmp_path, monkeypatch, context, agent_run, *, contract=None, turn_id=TURN_ID):
+def _run_chat_sync(tmp_path, monkeypatch, context, agent_run, *, contract=None, turn_id=TURN_ID, strict=False):
     import sys
     from types import SimpleNamespace
 
@@ -1006,6 +1006,14 @@ def _run_chat_sync(tmp_path, monkeypatch, context, agent_run, *, contract=None, 
 
     if contract is not None:
         FakeAgent.TURN_BOUNDARY_CONTRACT = contract
+    if strict:  # pre-#6935 signature: the shim omits persist_user_timestamp
+        def _strict_run(self, user_message, system_message=None, conversation_history=None,
+                        task_id=None, persist_user_message=None):
+            return agent_run(user_message=user_message, system_message=system_message,
+                             conversation_history=conversation_history, task_id=task_id,
+                             persist_user_message=persist_user_message)
+
+        FakeAgent.run_conversation = _strict_run
 
     monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=FakeAgent))
     handler = _FakePostHandler()
@@ -1131,3 +1139,100 @@ def test_sync_unproven_rewrite_keeps_the_producers_own_error(tmp_path, monkeypat
     assert body.get("status") == "error" and body.get("error_type") == expected_type, body
     assert body.get("error_payload", {}).get("type") == expected_type
     assert reloaded.messages[-1].get("_error") is True
+
+
+# ── 2026-10-02 re-gate: no text-plus-index ownership on a rewritten result ──
+#
+# A timestamp-less legacy Agent returns a compacted history whose only copy of the
+# re-sent prompt is the OLD row, followed by the OLD answer. Text plus the legacy
+# index cannot tell that row from this turn's, so the turn must fail closed with
+# agent_update_required on every lane (the reviewed text fallback marked it done
+# with the old answer).
+
+
+def _compacted_old_prompt_only():
+    return [{"role": "user", "content": "[summary of earlier work]"}, {"role": "assistant", "content": "Noted."},
+            {"role": "user", "content": PROMPT}, {"role": "assistant", "content": OLD_ANSWER}]
+
+
+def _old_prompt_agent(**kwargs):
+    assert "persist_user_timestamp" not in kwargs
+    return {"messages": _compacted_old_prompt_only(), "completed": True, "final_response": OLD_ANSWER,
+            "turn_id": TURN_ID, "current_turn_user_idx": 2}
+
+
+def test_legacy_lookup_never_binds_a_surviving_old_prompt_after_compaction():
+    identity = {**_legacy_unstamped_identity(), "turn_id": TURN_ID, "current_turn_user_idx": 2,
+                "agent_turn_boundary_resolved": True}
+    assert streaming._find_active_turn_checkpoint_index(_compacted_old_prompt_only(), _history(), identity, PROMPT) is None
+
+
+def _assert_failed_closed_with_update_error(events, payload):
+    assert not any(event == "done" for event, _p in events)
+    apperrors = [p for event, p in events if event == "apperror"]
+    assert apperrors and apperrors[-1].get("type") == "agent_update_required", apperrors[-1] if apperrors else None
+    assert _assistant_texts(payload["messages"]).count(OLD_ANSWER) == 1
+    last_old = max(i for i, m in enumerate(payload["messages"]) if m.get("content") == OLD_ANSWER)
+    pending = [i for i, m in enumerate(payload["messages"]) if m.get("role") == "user" and m.get("content") == PROMPT]
+    assert pending and pending[-1] > last_old, "the pending ask must survive after the history"
+
+
+def test_streaming_compacted_old_prompt_only_fails_closed(tmp_path, monkeypatch):
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path, monkeypatch, _old_prompt_agent, prior_messages=_history(), prior_context_messages=_history(),
+        msg_text=PROMPT, pending_started_at=TURN_STAMP, current_turn_user_idx=2,
+        agent_contract=None, agent_run_signature="strict",
+    )
+    _assert_failed_closed_with_update_error(events, payload)
+
+
+@pytest.mark.parametrize("lane", _lanes())
+def test_streaming_self_heal_compacted_old_prompt_only_fails_closed(tmp_path, monkeypatch, lane):
+    first = RuntimeError("401 unauthorized") if lane == "exception" else _auth_failure()
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path, monkeypatch, _old_prompt_agent, agent_results=[first, _old_prompt_agent], enable_auth_retry=True,
+        prior_messages=_history(), prior_context_messages=_history(), msg_text=PROMPT,
+        pending_started_at=TURN_STAMP, current_turn_user_idx=2, agent_contract=None, agent_run_signature="strict",
+    )
+    _assert_failed_closed_with_update_error(events, payload)
+
+
+def test_sync_compacted_old_prompt_only_fails_closed(tmp_path, monkeypatch):
+    handler, reloaded, _ = _run_chat_sync(tmp_path, monkeypatch, _history(), _old_prompt_agent, strict=True)
+    body = _sync_body(handler)
+    assert handler.status != 200 and body.get("status") != "done", body
+    assert body.get("error_type") == "agent_update_required", body
+    assert body.get("answer") in ("", None)
+    assert [m.get("content") for m in reloaded.messages if m.get("role") == "assistant"].count(OLD_ANSWER) == 1
+
+
+# ── 2026-10-02 re-gate: the sync path's identity handoff to the context dedupe ──
+
+
+def test_sync_dedupe_uses_the_resolved_identity_for_the_repaired_boundary(tmp_path, monkeypatch):
+    # The sent history ends with an unanswered prompt U. The Agent returns U's row
+    # stale-merged with this turn's text ("U\n\nPROMPT": the stale-merge heuristic calls
+    # it the current turn) and, after it, this invocation's own row stamped with the
+    # persist_user_timestamp it was passed, plus the reply. Only the identity handed to
+    # _dedupe_replayed_context_messages proves the boundary row is NOT this turn's;
+    # without it the deduper cleans that row into a second current prompt and
+    # resurrects U from the sent history.
+    unanswered = "Also update the docs."
+    context = [{"role": "user", "content": "earlier", "timestamp": 1.0}, {"role": "assistant", "content": OLD_ANSWER},
+               {"role": "user", "content": unanswered, "timestamp": 1.5}]
+    merged = unanswered + "\n\n" + PROMPT
+
+    def agent(**kwargs):
+        return {"messages": [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": OLD_ANSWER},
+                             {"role": "user", "content": merged},
+                             {"role": "user", "content": PROMPT, "timestamp": kwargs["persist_user_timestamp"]},
+                             {"role": "assistant", "content": NEW_ANSWER}],
+                "final_response": NEW_ANSWER, "completed": True}
+
+    handler, reloaded, _ = _run_chat_sync(tmp_path, monkeypatch, context, agent)
+    assert handler.status == 200 and _sync_body(handler).get("status") == "done", _sync_body(handler)
+    rows = [(m.get("role"), m.get("content")) for m in reloaded.context_messages]
+    assert rows == [("user", "earlier"), ("assistant", OLD_ANSWER), ("user", merged),
+                    ("user", PROMPT), ("assistant", NEW_ANSWER)], rows
+    assert rows.count(("user", PROMPT)) == 1 and rows.count(("assistant", NEW_ANSWER)) == 1
+    assert ("user", unanswered) not in rows  # no resurrected historical boundary
