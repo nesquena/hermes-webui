@@ -1870,6 +1870,28 @@ def _skills_stats_lock_for(profile_dir: Path) -> threading.Lock:
         return lock
 
 
+# The active org each cached count was computed under, beside
+# _SKILLS_STATS_CACHE and keyed the same way. agent.skill_utils walks only the
+# org named by skills/_org/.active_org, and rewriting that marker moves no
+# directory or SKILL.md mtime, so the mtime probe alone cannot see it (#7940).
+_SKILLS_STATS_ACTIVE_ORG: dict[Path, str | None] = {}
+
+
+def _active_org_marker(skills_dir: Path) -> str | None:
+    """The org whose mirror counts, read the way the agent's index walk reads it.
+
+    None when there is no marker, or no agent to gate on it.
+    """
+    try:
+        from agent.skill_utils import read_active_org_id
+    except Exception:
+        return None
+    try:
+        return read_active_org_id(skills_dir)
+    except Exception:
+        return None
+
+
 def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
     """Return the max st_mtime_ns across config.yaml, skill dirs, and SKILL.md files."""
     max_ns = 0
@@ -2006,6 +2028,7 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     # Always run the cheap stat-only probe first — this is what catches an
     # out-of-band create/edit/delete within the same request (not after the TTL).
     current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    current_org = _active_org_marker(skills_dir)
 
     # Read via .get() (not membership-check + index) so a concurrent
     # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
@@ -2019,10 +2042,14 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # of the TTL. On TTL expiry we deliberately fall through to a full
         # recompute (the TTL is a safety net for mtime-preserving changes that
         # the probe can't see — e.g. a git checkout that restores the old mtime).
-        if current_mtime_ns == cached_mtime_ns and now < expiry:
+        if (
+            current_mtime_ns == cached_mtime_ns
+            and now < expiry
+            and _SKILLS_STATS_ACTIVE_ORG.get(profile_dir) == current_org
+        ):
             return enabled, compat
 
-    # Cache miss, mtime changed, or TTL expired — serialize per-profile so a
+    # Cache miss, mtime changed, active org changed, or TTL expired — serialize per-profile so a
     # burst of concurrent misses (cold startup) collapses to ONE compute instead
     # of a thundering herd of simultaneous os.walk + SKILL.md parses (#5364).
     lock = _skills_stats_lock_for(profile_dir)
@@ -2033,14 +2060,20 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         cached = _SKILLS_STATS_CACHE.get(profile_dir)
         if cached is not None:
             enabled, compat, cached_mtime_ns, expiry = cached
-            if current_mtime_ns == cached_mtime_ns and time.time() < expiry:
+            if (
+                current_mtime_ns == cached_mtime_ns
+                and time.time() < expiry
+                and _SKILLS_STATS_ACTIVE_ORG.get(profile_dir) == current_org
+            ):
                 return enabled, compat
 
         # Snapshot mtime BEFORE compute so any concurrent SKILL.md write during
         # the compute window causes a mismatch on the next probe instead of
         # silently serving stale data (TOCTOU).
         new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+        new_org = _active_org_marker(skills_dir)
         res = _compute_profile_skills_stats(profile_dir)
+        _SKILLS_STATS_ACTIVE_ORG[profile_dir] = new_org
         _SKILLS_STATS_CACHE[profile_dir] = (
             res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL
         )

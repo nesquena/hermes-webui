@@ -89,3 +89,57 @@ def test_a_real_change_after_a_switch_recomputes_only_that_profile(profile_tree)
     _warm(profiles, default_home, writer_home)
 
     assert computed == [default_home, writer_home, writer_home]
+
+
+def _skill(skills_dir, rel, name):
+    skill_dir = skills_dir / rel
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: issue 7940 fixture\n---\nbody\n", encoding="utf-8"
+    )
+
+
+def test_changing_the_active_org_recounts_after_a_switch(tmp_path, monkeypatch):
+    """The agent's index walk descends only into the org named by
+    ``skills/_org/.active_org``, so rewriting that marker changes the count
+    while every directory and SKILL.md mtime stays the same. The switch-time
+    clear used to hide that the mtime probe cannot see it.
+
+    Runs the real compute against the real agent package; a stub would count
+    the same files whichever org is active.
+    """
+    skill_utils = pytest.importorskip("agent.skill_utils")
+    if not getattr(skill_utils, "__file__", None):
+        pytest.skip("agent.skill_utils is a test stub, not the real agent package")
+    import api.profiles as profiles
+
+    default_home = tmp_path / ".hermes"
+    writer_home = default_home / "profiles" / "writer"
+    writer_home.mkdir(parents=True)
+    skills = default_home / "skills"
+    _skill(skills, "plain", "plain")
+    _skill(skills, "_org/org_a/one", "a-one")
+    for name in ("b-one", "b-two", "b-three"):
+        _skill(skills, f"_org/org_b/{name}", name)
+    marker = skills / "_org" / ".active_org"
+    marker.write_text("org_a\n", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", default_home)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+    monkeypatch.setattr(profiles, "_SKILLS_STATS_CACHE", {})
+    monkeypatch.setattr(
+        profiles, "list_profiles_api", lambda: [{"name": "default"}, {"name": "writer"}]
+    )
+    profiles._tls.profile = None
+    try:
+        assert profiles._get_profile_skills_stats(default_home) == (2, 2)
+
+        # Same length and the old mtime back, so nothing but the content differs.
+        before = marker.stat()
+        marker.write_text("org_b\n", encoding="utf-8")
+        os.utime(marker, ns=(before.st_atime_ns, before.st_mtime_ns))
+        profiles.switch_profile("writer", process_wide=False)
+
+        assert profiles._get_profile_skills_stats(default_home) == (4, 4)
+    finally:
+        profiles._tls.profile = None
