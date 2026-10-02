@@ -575,7 +575,7 @@ const visibleRow = {
   isConnected: true,
   getBoundingClientRect: () => rowRect,
 };
-anchorEl.closest = selector => selector === '.session-item'
+anchorEl.closest = selector => selector === '.session-child-session-fork,.session-item'
   ? visibleRow
   : (selector === '.session-list' ? sessionList : null);
 // Touch-primary CSS hides `.session-actions`; the real row context-menu path
@@ -602,7 +602,7 @@ const expandedRow = {
   rect: {top: -208, bottom: 902, left: 16, right: 374, width: 358, height: 1110},
   getBoundingClientRect() { return this.rect; },
 };
-anchorEl.closest = selector => selector === '.session-item'
+anchorEl.closest = selector => selector === '.session-child-session-fork,.session-item'
   ? expandedRow
   : (selector === '.session-list' ? sessionList : null);
 // The hidden actions element remembers the real mouse context-menu point.
@@ -622,6 +622,41 @@ console.log(JSON.stringify({opened, afterRowLeaves: placement()}));
     assert data["opened"]["top"] >= 8
     assert data["opened"]["bottom"] <= 612
     assert data["afterRowLeaves"]["removed"] is True
+
+
+def test_coarse_pointer_fork_child_uses_nearest_child_before_tall_parent():
+    data = _run_picker_cases("""
+const forkChild = {
+  isConnected: true,
+  rect: {top: 329, bottom: 357, left: 28, right: 374, width: 346, height: 28},
+  getBoundingClientRect() { return this.rect; },
+};
+const expandedParent = {
+  isConnected: true,
+  getBoundingClientRect: () => ({
+    top: -260, bottom: 1009, left: 16, right: 374, width: 358, height: 1269,
+  }),
+};
+anchorEl.closest = selector => {
+  if (selector === '.session-child-session-fork,.session-item') return forkChild;
+  if (selector === '.session-item') return expandedParent;
+  if (selector === '.session-list') return sessionList;
+  return null;
+};
+anchorEl._projectPickerContextPoint = {clientX: 310, clientY: 356};
+setViewport(620, 390);
+setAnchor({top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0});
+openPicker(260);
+const opened = placement();
+forkChild.rect = {top: -80, bottom: -52, left: 28, right: 374, width: 346, height: 28};
+sessionList.scroll();
+flushFrames();
+console.log(JSON.stringify({opened, afterChildLeaves: placement()}));
+""")
+    assert data["opened"]["removed"] is False
+    assert data["opened"]["top"] >= 8
+    assert data["opened"]["bottom"] <= 612
+    assert data["afterChildLeaves"]["removed"] is True
 
 
 def test_session_list_scroll_repositions_then_closes_at_container_edge():

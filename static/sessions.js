@@ -9359,6 +9359,12 @@ function renderSessionListFromCache(){
             e.preventDefault();
             if(e.pointerType==='touch'||e.pointerType==='pen') return;
             e.stopPropagation();
+            // Coarse-pointer CSS hides the semantic actions anchor. Preserve
+            // the trusted mouse point so an expanded parent's oversized rect
+            // cannot swallow the fork child's project picker placement.
+            if(actions&&Number.isFinite(e.clientX)&&Number.isFinite(e.clientY)){
+              actions._projectPickerContextPoint={clientX:e.clientX,clientY:e.clientY};
+            }
             _openSessionActionMenu(child, actions||row);
           };
           childList.appendChild(row);
@@ -10135,7 +10141,10 @@ function _showProjectPicker(session, anchorEl){
     // through "Move to project". Keep the semantic anchor for teardown/click
     // ownership, while borrowing geometry from its visible owning row.
     if(rect&&(!rect.width||!rect.height)){
-      const row=anchorEl?.closest?.('.session-item');
+      // Fork children are independently actionable rows nested inside a
+      // potentially viewport-spanning parent. Prefer the nearest visible child
+      // owner before falling back to the ancestor session item.
+      const row=anchorEl?.closest?.('.session-child-session-fork,.session-item');
       if(row&&row.isConnected!==false){
         const rowRect=row.getBoundingClientRect();
         const point=anchorEl._projectPickerContextPoint;
