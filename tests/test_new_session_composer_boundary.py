@@ -306,8 +306,10 @@ def _run_pending_file_ownership_harness() -> dict:
     helper_source = _composer_draft_helpers()
     script = textwrap.dedent(
         f"""
+        {_composer_authority_helpers()}
         let _loadingSessionId = null;
         let trayRenders = 0;
+        const apiCalls = [];
         const oldFile = {{
           name:'private.pdf', size:42, type:'application/pdf', lastModified:1, slice(){{}}
         }};
@@ -320,7 +322,10 @@ def _run_pending_file_ownership_harness() -> dict:
         }};
         const $ = id => id === 'msg' ? msg : null;
         const localStorage = {{getItem(){{return null;}}, setItem(){{}}, removeItem(){{}}}};
-        function api() {{ return Promise.resolve({{}}); }}
+        function api(path) {{ apiCalls.push(path); return Promise.resolve({{}}); }}
+        function _isReadOnlySession(session) {{
+          return !!(session && (session.read_only || session.is_read_only));
+        }}
         function autoResize() {{}}
         function updateSendBtn() {{}}
         function renderTray() {{ trayRenders += 1; }}
@@ -363,8 +368,29 @@ def _run_pending_file_ownership_harness() -> dict:
           _restoreComposerDraft(S.session.composer_draft, 'old-session');
           const afterForget = S.pendingFiles.map(file => file.name);
 
+          S.session = {{
+            session_id:'read-only-session', profile:'default', read_only:true,
+            composer_draft:{{text:'', files:[]}}
+          }};
+          _rememberComposerOwnerState('read-only-session','default',{{
+            text:'browser-only draft',files:[oldFile],revision:1,
+          }},1);
+          S.pendingFiles = [];
+          _restoreComposerDraft(S.session.composer_draft, 'read-only-session');
+          const readOnlyRestored = {{
+            text:msg.value,
+            files:S.pendingFiles.map(file => file.name),
+            exactFile:S.pendingFiles[0] === oldFile,
+          }};
+          const callsBeforeDebounce = apiCalls.length;
+          _saveComposerDraft('read-only-session','edited browser-only draft',[oldFile]);
+          await new Promise(resolve => setTimeout(resolve, _DRAFT_SAVE_DELAY_MS + 20));
+          const readOnlyDraftPosts = apiCalls.slice(callsBeforeDebounce)
+            .filter(path => path === '/api/session/draft').length;
+
           process.stdout.write(JSON.stringify({{
-            fresh, restored, otherProfile, backgroundRestored, afterForget, trayRenders
+            fresh, restored, otherProfile, backgroundRestored, afterForget,
+            readOnlyRestored,readOnlyDraftPosts,trayRenders
           }}));
         }})().catch(err => {{console.error(err); process.exit(1);}});
         """
@@ -1641,7 +1667,8 @@ def test_voice_mode_send_preserves_buffered_transcript_across_new_session_handof
 
 
 def _run_profile_switch_settlement_harness(
-    *, reject_pending: bool, reject_replacement: bool = False
+    *, reject_pending: bool, reject_replacement: bool = False,
+    supersede_pane: bool = False, reject_rollback: bool = False,
 ) -> dict:
     """Run real switchToProfile through success/failure settlement to completion."""
     node = shutil.which("node")
@@ -1676,6 +1703,7 @@ def _run_profile_switch_settlement_harness(
         const apiCalls=[];
         const toasts=[];
         let newSessionCalls=0;
+        let serverProfile='default';
         const S={{
           session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},
           messages:[{{role:'user',content:'A'}}],activeProfile:'default',
@@ -1711,7 +1739,10 @@ def _run_profile_switch_settlement_harness(
         function renderSessionListFromCache(){{}}
         async function newSession(){{
           newSessionCalls+=1;
-          if({str(reject_replacement).lower()})throw new Error('replacement failed');
+          if({str(reject_replacement).lower()}){{
+            if({str(supersede_pane).lower()})_claimPaneNavigation();
+            throw new Error('replacement failed');
+          }}
           S.session={{
             session_id:'profile-session',profile:S.activeProfile,
             workspace:'/workspace-a',messages:[],message_count:0,
@@ -1723,6 +1754,10 @@ def _run_profile_switch_settlement_harness(
           apiCalls.push(path);
           if(path==='/api/profile/switch'){{
             const requested=JSON.parse(options.body).name;
+            if(requested==='default'&&{str(reject_rollback).lower()}){{
+              return Promise.reject(new Error('rollback failed'));
+            }}
+            serverProfile=requested;
             return Promise.resolve({{
               active:requested,is_default:requested==='default',
               default_model:null,default_workspace:null,
@@ -1752,6 +1787,7 @@ def _run_profile_switch_settlement_harness(
             before,switched,apiCalls,generation:_profileSwitchGeneration,
             activeProfile:S.activeProfile,sessionProfile:S.session&&S.session.profile,
             activeSid:S.session&&S.session.session_id,
+            serverProfile,paneGeneration:_paneNavigationGeneration,
             newSessionInFlight:_newSessionInFlight!==null,toasts,newSessionCalls,
           }}));
         }})().catch(error=>{{console.error(error);process.exit(1);}});
@@ -1802,8 +1838,36 @@ def test_failed_profile_replacement_rolls_server_and_client_profile_back():
     assert result["newSessionCalls"] == 1
 
 
+def test_failed_profile_replacement_rolls_back_after_newer_pane_claim():
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=False,
+        reject_replacement=True,
+        supersede_pane=True,
+    )
+
+    assert result["switched"] is False
+    assert result["paneGeneration"] == 2
+    assert result["serverProfile"] == "default"
+    assert result["activeProfile"] == "default"
+    assert result["sessionProfile"] == "default"
+
+
+def test_failed_profile_rollback_keeps_committed_authority_and_surfaces_error():
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=False,
+        reject_replacement=True,
+        reject_rollback=True,
+    )
+
+    assert result["switched"] is False
+    assert result["serverProfile"] == "beta"
+    assert result["activeProfile"] == "beta"
+    assert any("rollback failed" in toast for toast in result["toasts"])
+
+
 def _run_new_session_load_interleave_harness(
-    *, fail_create: bool, clarify_block: bool = False
+    *, fail_create: bool, clarify_block: bool = False,
+    revisit_read_only_source: bool = False,
 ) -> dict:
     """Run production newSession/loadSession with a controllable create promise."""
     node = shutil.which("node")
@@ -1856,6 +1920,7 @@ def _run_new_session_load_interleave_harness(
         const focusEvents = [];
         const sidebarProfileCalls = [];
         const sourceFile = {{name:'source-a.txt',size:1,type:'text/plain'}};
+        const targetSid = {json.dumps('session-a' if revisit_read_only_source else 'session-b')};
         const controls = {{}};
         const msg = controls.msg = {{
           value:'draft A', disabled:false,
@@ -1886,7 +1951,8 @@ def _run_new_session_load_interleave_harness(
         const S = {{
           session:{{
             session_id:'session-a',profile:'default',workspace:'/workspace-a',
-            message_count:1,composer_draft:{{text:'draft A',files:[]}}
+            message_count:1,read_only:{str(revisit_read_only_source).lower()},
+            composer_draft:{{text:'draft A',files:[]}}
           }},
           messages:[{{role:'user',content:'A'}}],pendingFiles:[sourceFile],toolCalls:[],
           activeProfile:'default',activeProfileIsDefault:true,
@@ -1900,10 +1966,10 @@ def _run_new_session_load_interleave_harness(
         function api(path) {{
           apiCalls.push(String(path));
           if(path==='/api/session/new') return create.promise;
-          if(path==='/api/session?session_id=session-b&messages=0&resolve_model=0'){{
+          if(path===`/api/session?session_id=${{targetSid}}&messages=0&resolve_model=0`){{
             return metadata.promise;
           }}
-          if(path==='/controlled/messages/session-b') return messages.promise;
+          if(path===`/controlled/messages/${{targetSid}}`) return messages.promise;
           throw new Error(`unexpected API call: ${{path}}`);
         }}
         function _saveComposerDraftNow(sid,text,files,profile){{
@@ -1916,6 +1982,7 @@ def _run_new_session_load_interleave_harness(
           S.toolCalls=data.session.tool_calls||[];
         }}
         function _composerDraftHasPayload(text,files){{return !!(text||(files&&files.length));}}
+        function _isReadOnlySession(session){{return !!(session&&(session.read_only||session.is_read_only));}}
         function _isComposerDraftRestoreSuppressed(){{return false;}}
         function _clearComposerDraftRestoreSuppression(){{}}
         function _restoreComposerPendingFiles(){{S.pendingFiles=[];}}
@@ -1974,8 +2041,9 @@ def _run_new_session_load_interleave_harness(
           messages:[],composer_draft:{{text:'',files:[]}},message_count:0,
         }};
         const sessionB={{
-          session_id:'session-b',profile:'default',workspace:'/workspace-b',
-          messages:[],composer_draft:{{text:'draft B',files:[]}},message_count:1,
+          session_id:targetSid,profile:'default',workspace:'/workspace-b',
+          read_only:{str(revisit_read_only_source).lower()},messages:[],
+          composer_draft:{'{text:"",files:[]}' if revisit_read_only_source else '{text:"draft B",files:[]}'},message_count:1,
           active_stream_id:null,
         }};
 
@@ -1983,16 +2051,16 @@ def _run_new_session_load_interleave_harness(
           let newError=null;
           const creating=newSession().catch(error=>{{newError=error.message;}});
           await spinUntil(()=>apiCalls.includes('/api/session/new'));
-          const loading=_openSidebarSession(sessionB);
+          let loading={str(revisit_read_only_source).lower()}?null:_openSidebarSession(sessionB);
           for(let i=0;i<12;i++) await Promise.resolve();
           const loadStartedBeforeCreateSettled=apiCalls.includes(
-            '/api/session?session_id=session-b&messages=0&resolve_model=0'
+            `/api/session?session_id=${{targetSid}}&messages=0&resolve_model=0`
           );
           const sidebarProfileStartedBeforeCreateSettled=sidebarProfileCalls.length>0;
 
           if(loadStartedBeforeCreateSettled){{
             metadata.resolve({{session:sessionB}});
-            await spinUntil(()=>apiCalls.includes('/controlled/messages/session-b'));
+            await spinUntil(()=>apiCalls.includes(`/controlled/messages/${{targetSid}}`));
             messages.resolve({{session:{{...sessionB,messages:[{{role:'assistant',content:'B'}}]}}}});
             await loading;
           }}
@@ -2004,12 +2072,16 @@ def _run_new_session_load_interleave_harness(
           else create.resolve({{session:createdSession}});
           await creating;
 
+          if({str(revisit_read_only_source).lower()}){{
+            loading=_openSidebarSession(sessionB);
+          }}
+
           if(!loadStartedBeforeCreateSettled){{
             await spinUntil(()=>apiCalls.includes(
-              '/api/session?session_id=session-b&messages=0&resolve_model=0'
+              `/api/session?session_id=${{targetSid}}&messages=0&resolve_model=0`
             ));
             metadata.resolve({{session:sessionB}});
-            await spinUntil(()=>apiCalls.includes('/controlled/messages/session-b'));
+            await spinUntil(()=>apiCalls.includes(`/controlled/messages/${{targetSid}}`));
             messages.resolve({{session:{{...sessionB,messages:[{{role:'assistant',content:'B'}}]}}}});
             await loading;
           }}
@@ -2048,6 +2120,20 @@ def test_sidebar_navigation_waits_for_new_session_settlement(fail_create):
     assert result["newError"] == ("create failed" if fail_create else None)
 
 
+def test_read_only_source_revisit_restores_exact_browser_owned_composer():
+    result = _run_new_session_load_interleave_harness(
+        fail_create=False,
+        revisit_read_only_source=True,
+    )
+
+    assert result["activeSid"] == "session-a"
+    assert result["text"] == "draft A"
+    assert result["files"] == ["source-a.txt"]
+    assert not any(
+        save["sid"] == "session-a" for save in result["saves"]
+    ), "a read-only source must remain browser-owned across New Chat and revisit"
+
+
 def test_failed_create_focuses_restored_owner_after_new_session_reason_is_released():
     result = _run_new_session_load_interleave_harness(fail_create=True)
 
@@ -2077,6 +2163,12 @@ def test_pending_files_follow_their_session_owner_across_new_session_boundary():
     assert result["otherProfile"] == []
     assert result["backgroundRestored"] == ["private.pdf"]
     assert result["afterForget"] == []
+    assert result["readOnlyRestored"] == {
+        "text": "browser-only draft",
+        "files": ["private.pdf"],
+        "exactFile": True,
+    }
+    assert result["readOnlyDraftPosts"] == 0
     assert result["trayRenders"] >= 3
 
 

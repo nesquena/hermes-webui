@@ -7126,6 +7126,7 @@ async function switchToProfile(name) {
   const _prevProfileIsDefault = !!S.activeProfileIsDefault;
   let _serverProfileSwitched = false;
   let _replacementSessionPending = false;
+  let _profileRollbackFailed = false;
   const _switchGen = ++_profileSwitchGeneration;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
@@ -7405,30 +7406,43 @@ async function switchToProfile(name) {
   } catch (e) {
     // A replacement New Chat can fail after the profile cookie was committed
     // (for example, a source-draft precondition). Restore the server profile
-    // before releasing this serialized context intent. Only project the
-    // rollback into client state while this switch still owns the pane; a newer
-    // navigation keeps authority over its own eventual profile/session state.
+    // before releasing this serialized context intent. A newer pane navigation
+    // keeps authority over its eventual visible session, but profile identity
+    // is different: the cookie and S.activeProfile are one
+    // serialized authority, so a successful rollback must update both even if
+    // a newer pane navigation is waiting to run next.
     if (_serverProfileSwitched && _replacementSessionPending) {
       try {
         const rollback = await api('/api/profile/switch', {
           method:'POST', body:JSON.stringify({name:_prevProfileName}), timeoutToast:false,
         });
-        if (_switchGen === _profileSwitchGeneration && ownsPane()) {
-          S.activeProfile = rollback.active || _prevProfileName;
-          S.activeProfileIsDefault = typeof rollback.is_default === 'boolean'
-            ? rollback.is_default : _prevProfileIsDefault;
+        S.activeProfile = rollback.active || _prevProfileName;
+        S.activeProfileIsDefault = typeof rollback.is_default === 'boolean'
+          ? rollback.is_default : _prevProfileIsDefault;
+        if (_switchGen === _profileSwitchGeneration) {
           if (typeof startGatewaySSE === 'function') startGatewaySSE();
           if (typeof applyBotName === 'function') applyBotName();
         }
-      } catch (_) {}
+      } catch (rollbackError) {
+        // The original switch already committed. If rollback fails, retain the
+        // committed target in both client and server authority and surface the
+        // additional failure instead of silently pretending the previous
+        // profile was restored.
+        _profileRollbackFailed = true;
+        if (_switchGen === _profileSwitchGeneration) {
+          showToast(t('switch_failed') + (rollbackError.message || String(rollbackError)));
+        }
+      }
     }
     // Revert the optimistic name update on error
-    if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
+    const _failureProfileName = _profileRollbackFailed
+      ? (S.activeProfile || name) : _prevProfileName;
+    if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _failureProfileName;
+    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _failureProfileName;
     if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
-    // The switch failed, so we're still on the previous profile and its caches
-    // are intact — restore the real list/tree so the loading skeletons we showed
-    // up front don't strand. (#4662)
+    // Restore the real list/tree so the loading skeletons we showed up front
+    // don't strand. A failed rollback keeps the committed target profile; its
+    // next authoritative fetch replaces any cached rows rendered here. (#4662)
     if (_switchGen === _profileSwitchGeneration) {
       // The switch failed; _allSessions still holds the (still-current) previous
       // profile, so clear the skeleton flag and re-render to restore the real list
@@ -7436,8 +7450,13 @@ async function switchToProfile(name) {
       // restore render (and subsequent normal renders) can paint.
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       _sessionListSkeletonActive = false;
-      if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
-      if (_workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
+      if (_profileRollbackFailed && typeof renderSessionList === 'function') {
+        await renderSessionList();
+      } else if (typeof renderSessionListFromCache === 'function') {
+        renderSessionListFromCache();
+      }
+      if (!_profileRollbackFailed && _workspaceVisibleAtStart
+          && S.session && S.session.workspace && typeof loadDir === 'function') {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
         // No workspace to restore on the (still-current) previous profile —

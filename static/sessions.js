@@ -297,6 +297,11 @@ function _saveComposerDraft(sid, text, files) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
   }
+  // Imported/CLI sessions are intentionally browser-owned: the draft endpoint
+  // rejects writes for them. Keep their latest text/live File objects in the
+  // owner snapshot above, but do not leave a debounced rejected request behind.
+  if (S.session && S.session.session_id === sid
+      && typeof _isReadOnlySession === 'function' && _isReadOnlySession(S.session)) return;
   const timer=setTimeout(() => {
     if(_draftSaveTimerByOwner.get(ownerKey)!==timer)return;
     _draftSaveTimerByOwner.delete(ownerKey);
@@ -375,6 +380,10 @@ function _saveComposerDraftNow(sid, text, files) {
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
   }
+  if (S.session && S.session.session_id === sid
+      && typeof _isReadOnlySession === 'function' && _isReadOnlySession(S.session)) {
+    return Promise.resolve();
+  }
   // Most chat switches leave an empty composer. Avoid putting the switch path
   // behind a network POST unless there is new local draft content or an existing
   // server draft that must be cleared.
@@ -405,11 +414,27 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // targetSid is the session that was requested — if it no longer matches
   // _loadingSessionId, a newer session switch has already begun, so skip.
   if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
-  const text = (draft && typeof draft.text === 'string') ? draft.text : '';
-  const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
+  let text = (draft && typeof draft.text === 'string') ? draft.text : '';
+  let files = (draft && Array.isArray(draft.files)) ? draft.files : [];
   const current = ta.value || '';
   const preserveActiveInput = !!(opts && opts.preserveActiveInput);
   const restoreSid = targetSid || (S.session && S.session.session_id);
+  const restoreSession = S.session && S.session.session_id === restoreSid ? S.session : null;
+  const restoreProfile = String(
+    (restoreSession && restoreSession.profile) || S.activeProfile || 'default'
+  ).trim() || 'default';
+  // Read-only sessions cannot persist composer drafts on the server. During a
+  // page lifetime their remembered owner snapshot is therefore the canonical
+  // source for both exact text and live File identity when the user revisits.
+  const remembered = restoreSession && typeof _isReadOnlySession === 'function'
+    && _isReadOnlySession(restoreSession)
+    && typeof _composerRememberedOwnerSnapshot === 'function'
+    ? _composerRememberedOwnerSnapshot(restoreSid, restoreProfile)
+    : null;
+  if (remembered) {
+    text = String(remembered.text || '');
+    files = Array.isArray(remembered.files) ? remembered.files.filter(Boolean) : [];
+  }
   const hasServerDraftPayload = _composerDraftHasPayload(text, files);
 
   if (restoreSid && hasServerDraftPayload && _isComposerDraftRestoreSuppressed(restoreSid, text, files)) return;
@@ -426,7 +451,17 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // reload. Within this page lifetime, keep the live objects scoped by
   // profile+session and update the staged-file tray at the same ownership
   // boundary as the textarea. A session with no live files clears stale chips.
-  _restoreComposerPendingFiles(restoreSid);
+  if (remembered) {
+    const currentFiles = Array.isArray(S.pendingFiles) ? S.pendingFiles : [];
+    const unchangedFiles = currentFiles.length === files.length
+      && currentFiles.every((file, index) => file === files[index]);
+    if (!unchangedFiles) {
+      S.pendingFiles = [...files];
+      if (typeof renderTray === 'function') renderTray();
+    }
+  } else {
+    _restoreComposerPendingFiles(restoreSid);
+  }
 
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
@@ -3451,8 +3486,8 @@ async function loadSession(sid){
   // Pass sid so _restoreComposerDraft can skip if this session is mid-load (guards
   // against stale writes from slow responses racing to restore the previous draft).
   const _draft = S.session && S.session.composer_draft;
-  if (_draft && (typeof _restoreComposerDraft === 'function')) {
-    _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
+  if (S.session && (typeof _restoreComposerDraft === 'function')) {
+    _restoreComposerDraft(_draft || {}, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
