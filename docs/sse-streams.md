@@ -56,6 +56,21 @@ infer it from the status code. Clients that only need session updates should
 use `/api/session/stream` directly; the gateway probe is only relevant for
 clients that display CLI/TUI/messaging sessions.
 
+## Gateway watcher projection lifecycle
+
+The optional gateway stream's watcher owns a cheap database fingerprint and a
+timestamp for its last full session projection. While clients are subscribed,
+an unchanged fingerprint can skip the expensive read until the bounded parity
+interval. With no subscribers the poll loop parks instead of reading the DB.
+When the final subscriber leaves (including eviction of a full or failed
+consumer queue), the watcher invalidates both cache fields. A reconnect must
+therefore trigger a fresh projection even when the database fingerprint has not
+changed and the parity interval has not elapsed. Final removal also advances a
+subscriber epoch: an older in-flight DB read cannot restore the invalidated
+cache or publish its result to a later subscriber cohort. The subscriber lock
+protects removal, epoch checks and cache commits, but is not held during DB
+reads, so disconnect is not blocked by a slow projection.
+
 ## Heartbeats and proxy behavior
 
 - All long-lived streams emit SSE keepalive comment lines on the

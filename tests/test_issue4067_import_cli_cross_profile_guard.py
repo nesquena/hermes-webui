@@ -41,7 +41,17 @@ class _FakeHandler:
 
 def _capture(monkeypatch):
     cap = {}
-    monkeypatch.setattr(routes, "j", lambda h, o: (cap.__setitem__("ok", o), True)[1])
+    # #7710: the real ``j`` signature is ``j(handler, payload, status=200,
+    # extra_headers=None, *, pretty=True)``; the mock has to accept the
+    # status keyword so the helper's 409 ``session_profile_mismatch``
+    # payload can be captured here. Capture the STATUS too — swallowing it
+    # into ``*_`` would let a wrong status (200/404) pass this test.
+    def _fake_j(h, o, status=200, *_, **__):
+        cap["ok"] = o
+        cap["ok_status"] = status
+        return True
+
+    monkeypatch.setattr(routes, "j", _fake_j)
     monkeypatch.setattr(
         routes,
         "bad",
@@ -72,7 +82,10 @@ class _FakeSession:
 
 def test_import_cli_existing_foreign_profile_unqualified_request_404(monkeypatch):
     """Unqualified request (active profile=default) for a session stored under a
-    foreign profile must 404 — not read or refresh the foreign session."""
+    foreign profile must yield 409 ``session_profile_mismatch`` (so the client
+    can offer to switch to it per #5419) — not 404, which would mask a
+    legitimate owned-by-other-profile session as missing and trigger a
+    destructive self-heal in the frontend (#7710)."""
     foreign = _FakeSession("foreign_existing_001", "other")
     monkeypatch.setattr(routes.Session, "load", staticmethod(lambda sid: foreign))
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
@@ -88,8 +101,14 @@ def test_import_cli_existing_foreign_profile_unqualified_request_404(monkeypatch
         {"session_id": "foreign_existing_001"},
     )
 
-    assert "bad" in cap, f"expected 404, got {cap}"
-    assert cap["bad"][1] == 404
+    assert "ok" in cap, f"expected 409 session_profile_mismatch, got {cap}"
+    assert cap["ok_status"] == 409, f"expected status 409, got {cap.get('ok_status')}"
+    assert cap["ok"] == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": "foreign_existing_001",
+        "profile": "other",
+    }
 
 
 def test_import_cli_existing_same_profile_still_refreshes(monkeypatch):

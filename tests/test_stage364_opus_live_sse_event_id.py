@@ -57,7 +57,7 @@ def test_stream_channel_queue_item_carries_per_event_id_with_legacy_fallback():
     """StreamChannel queue items need per-frame ids; legacy queues stay 2-tuples."""
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
         "StreamChannel events must carry their own event_id while legacy queue "
         "consumers retain the 2-tuple shape"
     )
@@ -69,7 +69,7 @@ def test_gateway_queue_item_carries_per_event_id_with_legacy_fallback():
     put_def_idx = GATEWAY_CHAT_PY.find("def put_gateway_event(event, data):")
     assert put_def_idx != -1, "put_gateway_event(event, data) not found"
     put_body = GATEWAY_CHAT_PY[put_def_idx:put_def_idx + 1800]
-    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
         "Gateway live events must carry their own event_id for StreamChannel "
         "subscribers while preserving legacy queue compatibility"
     )
