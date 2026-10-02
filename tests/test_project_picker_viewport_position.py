@@ -949,6 +949,7 @@ FakeElement.prototype.removeAttribute = function(name) { delete this[name]; };
 const row = {classList: {remove() {}}};
 const otherRowMenuButton = {
   isConnected: true,
+  _projectPickerContextPoint: {clientX: 310, clientY: 420},
   classList: {contains: () => true, remove() {}, add() {}},
   setAttribute() {},
   removeAttribute() {},
@@ -997,6 +998,7 @@ const whileMenuOpen = {
   flagCleared: _sessionListRepaintDeferredByPicker === false,
   mountedSessionPinned,
   mountedWithNewAnchor,
+  handedOffContextPoint: replacementMenuButton._projectPickerContextPoint,
 };
 closeSessionActionMenu();
 flushTimers();
@@ -1025,6 +1027,7 @@ console.log(JSON.stringify({
         "flagCleared": True,
         "mountedSessionPinned": True,
         "mountedWithNewAnchor": True,
+        "handedOffContextPoint": {"clientX": 310, "clientY": 420},
     }
     assert data["afterClose"] == {
         "repaints": 1,

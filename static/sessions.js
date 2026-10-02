@@ -5450,6 +5450,7 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
 
 function _projectPickerSessionActionHandoff(session, anchorEl){
   if(!_projectPickerTeardown) return {session,anchorEl};
+  const contextPoint=anchorEl&&anchorEl._projectPickerContextPoint;
   const retireProjectPicker=_projectPickerTeardown;
   _projectPickerTeardown=null;
   retireProjectPicker();
@@ -5480,6 +5481,7 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
     ? currentRow.querySelector('.session-actions-trigger')
     : null;
   if(!currentSession||!currentAnchor||!currentAnchor.isConnected||currentAnchor===anchorEl) return null;
+  if(contextPoint) currentAnchor._projectPickerContextPoint=contextPoint;
   return {session:currentSession,anchorEl:currentAnchor};
 }
 
