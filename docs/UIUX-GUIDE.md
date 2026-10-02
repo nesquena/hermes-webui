@@ -179,6 +179,12 @@ Mobile is not an afterthought. The repository documents a responsive layout with
 a hamburger sidebar, mobile-accessible top tabs, a right-edge file slide-over,
 full-height chat/composer behavior on phones, and touch-friendly controls.
 
+On phones (<=640px) the workspace/artifact right panel is a slide-over with a
+dim scrim behind it; tapping the scrim (or the chat) dismisses it back to chat.
+The scrim and the panel's `mobile-open` state are synced in
+`syncWorkspacePanelUI()` so they stay consistent across resize, preview
+show/hide, and session changes.
+
 For UI changes, verify the relevant states:
 
 - wide desktop,

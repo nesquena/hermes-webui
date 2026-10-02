@@ -120,3 +120,7 @@ jobs:
       - name: Run browser smoke
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_smoke.py
+
+      - name: Run overlay behavior smoke
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_smoke_overlay.py
