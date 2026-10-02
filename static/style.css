@@ -6435,6 +6435,8 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .skill-file-back{font-size:12px;color:var(--accent-text);text-decoration:none;font-weight:500;}
 .skill-file-back:hover{text-decoration:underline;}
 .skill-file-path{font-size:12px;color:var(--muted);font-family:var(--font-mono);}
+.truncated-output-notice{margin:8px 0 0;padding:6px 10px;border-radius:var(--radius-md,6px);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--muted);font-size:12px;line-height:1.45;}
+#skillDetailBody>.truncated-output-notice{max-width:960px;margin:0 auto 10px;box-sizing:border-box;}
 .skill-file-code{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:12px;overflow:auto;max-width:960px;margin:0 auto;}
 
 @media(max-width:700px){

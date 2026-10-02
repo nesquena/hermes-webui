@@ -1461,7 +1461,9 @@ async function _loadRunContent(jobId, filename, runId){
     }
     // When the server capped the output (truncated flag), surface a notice so the
     // user knows the displayed content is a bounded preview, not the whole file.
-    if (data.truncated) _appendCronTruncatedNotice(body);
+    // Collapsed snippets skip it: the "View full output" CTA sits right there,
+    // and the expanded view (below and in the CTA handler) carries the notice.
+    if (data.truncated && expanded) _appendCronTruncatedNotice(body);
   } catch(e) {
     body.textContent = 'Error: ' + e.message;
   }
@@ -2003,13 +2005,18 @@ function _cronOutputSnippet(content) {
 // Append a visible "output truncated" notice when the server capped a file
 // read at _FILE_READ_MAX_BYTES (512 KiB). Used by cron run output and skill
 // linked-file views so a bounded preview is not presented as the whole file.
-function _appendTruncatedNotice(body, labelKey, fallbackText) {
-  if (!body) return;
+function _appendTruncatedNotice(body, labelKey, fallbackText, opts) {
+  if (!body) return null;
   const notice = document.createElement('div');
   notice.className = 'truncated-output-notice';
-  notice.style.cssText = 'margin-top:8px;padding:6px 10px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);font-size:12px';
+  notice.setAttribute('role', 'note');
   notice.textContent = (typeof t === 'function' && t(labelKey)) || fallbackText;
-  body.appendChild(notice);
+  // Large-file views announce the cap up front (GitHub/VS Code convention);
+  // cron output keeps it inline after the content it qualifies.
+  const before = opts && opts.before;
+  if (before && before.parentNode === body) body.insertBefore(notice, before);
+  else body.appendChild(notice);
+  return notice;
 }
 
 function _appendCronTruncatedNotice(body) {
@@ -5130,8 +5137,10 @@ async function openSkillFile(skillName, filePath) {
     // Surface a truncation notice when the server capped the linked-file read
     // (512 KiB) so a bounded preview is not presented as the whole file.
     if (data && data.truncated) {
+      const crumb = body.querySelector('.skill-file-breadcrumb');
       _appendTruncatedNotice(body, 'skill_file_truncated_hint',
-        'File is large; showing the first 512 KiB only.');
+        'File is large; showing the first 512 KiB only.',
+        { before: crumb ? crumb.nextSibling : body.firstChild });
     }
     const empty = $('skillDetailEmpty');
     if (empty) empty.style.display = 'none';
