@@ -16832,24 +16832,30 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
+        try:
+            new_ws = str(resolve_trusted_workspace(
+                body.get("workspace", s.workspace),
+                profile=getattr(s, "profile", None),
+            ))
+        except ValueError as e:
+            return bad(handler, str(e))
         with _get_session_agent_lock(body["session_id"]):
-            # This request may have loaded ``s`` before /clear acquired the
-            # session lock. Rebase on the persisted session while holding that
-            # same lock so save() cannot restore any pre-clear lifecycle field
-            # (pending turn state, title flags, or compression lineage).
-            s = Session.load(body["session_id"])
-            if s is None:
-                return bad(handler, "Session not found", 404)
+            # A delayed request may have loaded ``s`` before /clear acquired
+            # the same lock. Only then rebase on the durable object: normal
+            # updates can legitimately target an unsaved in-memory session,
+            # whose sidecar has not been written yet. Comparing the durable
+            # clear marker keeps that normal path intact while ensuring save()
+            # cannot restore a pre-clear lifecycle, title, or compression field.
+            persisted = Session.load(body["session_id"])
+            if (
+                persisted is not None
+                and getattr(persisted, "clear_generation", None)
+                != getattr(s, "clear_generation", None)
+            ):
+                s = persisted
             old_ws = getattr(s, "workspace", "")
             old_model = getattr(s, "model", None)
             old_provider = getattr(s, "model_provider", None)
-            try:
-                new_ws = str(resolve_trusted_workspace(
-                    body.get("workspace", s.workspace),
-                    profile=getattr(s, "profile", None),
-                ))
-            except ValueError as e:
-                return bad(handler, str(e))
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
                 model, provider = _session_model_state_from_request(
@@ -16876,10 +16882,9 @@ def handle_post(handler, parsed) -> bool:
             s.save()
             # ``get_session()`` intentionally does not replace a cache entry
             # merely because disk has fewer messages: normally that can discard
-            # an unsaved in-memory tail. This update explicitly rebased from a
-            # durable session under the same lock, however, so publish that
-            # authoritative instance before a following GET can serve the
-            # pre-clear cached object.
+            # an unsaved in-memory tail. This update held the session lock while
+            # reconciling any clear marker, so publish the saved instance before
+            # a following GET can serve a stale resident object.
             with LOCK:
                 SESSIONS[s.session_id] = s
                 SESSIONS.move_to_end(s.session_id)

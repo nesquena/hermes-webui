@@ -239,6 +239,11 @@ def test_stale_session_update_cannot_resurrect_clear_lifecycle_state(monkeypatch
     with LOCK:
         SESSIONS[sid] = stale_update_session
     monkeypatch.setattr(routes, "_get_or_materialize_session", lambda _sid: stale_update_session)
+    monkeypatch.setattr(
+        routes,
+        "resolve_trusted_workspace",
+        lambda workspace, profile=None: workspace,
+    )
     monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
     updated = _post_session_update(
         monkeypatch,
