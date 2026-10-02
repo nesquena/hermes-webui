@@ -595,6 +595,35 @@ console.log(JSON.stringify({...state, rowGap}));
     assert data["bottom"] <= 612
 
 
+def test_coarse_pointer_expanded_parent_uses_context_point_and_tracks_row():
+    data = _run_picker_cases("""
+const expandedRow = {
+  isConnected: true,
+  rect: {top: -208, bottom: 902, left: 16, right: 374, width: 358, height: 1110},
+  getBoundingClientRect() { return this.rect; },
+};
+anchorEl.closest = selector => selector === '.session-item'
+  ? expandedRow
+  : (selector === '.session-list' ? sessionList : null);
+// The hidden actions element remembers the real mouse context-menu point.
+anchorEl._projectPickerContextPoint = {clientX: 310, clientY: 420};
+setViewport(620, 390);
+setAnchor({top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0});
+openPicker(260);
+const opened = placement();
+// Once the owning expanded row leaves the list, the stored point must not keep
+// the picker alive at stale viewport coordinates.
+expandedRow.rect = {top: -1200, bottom: -90, left: 16, right: 374, width: 358, height: 1110};
+sessionList.scroll();
+flushFrames();
+console.log(JSON.stringify({opened, afterRowLeaves: placement()}));
+""")
+    assert data["opened"]["removed"] is False
+    assert data["opened"]["top"] >= 8
+    assert data["opened"]["bottom"] <= 612
+    assert data["afterRowLeaves"]["removed"] is True
+
+
 def test_session_list_scroll_repositions_then_closes_at_container_edge():
     data = _run_picker_cases("""
 listRect = {top: 200, bottom: 650, left: 0, right: 500};

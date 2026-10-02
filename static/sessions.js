@@ -9457,6 +9457,13 @@ function renderSessionListFromCache(){
       _tapTimer=null;
       _lastTapTime=0;
       _clearPointerDragState();
+      // Coarse-pointer CSS hides the actions element used as the semantic menu
+      // anchor. Remember the real mouse point so a project picker opened from
+      // this menu is not positioned from the expanded parent row's full rect.
+      // That rect can be taller than the session list when children are open.
+      if(actions&&Number.isFinite(e.clientX)&&Number.isFinite(e.clientY)){
+        actions._projectPickerContextPoint={clientX:e.clientX,clientY:e.clientY};
+      }
       _openSessionActionMenu(s, actions||el);
     };
 
@@ -10129,7 +10136,23 @@ function _showProjectPicker(session, anchorEl){
     // ownership, while borrowing geometry from its visible owning row.
     if(rect&&(!rect.width||!rect.height)){
       const row=anchorEl?.closest?.('.session-item');
-      if(row&&row.isConnected!==false) rect=row.getBoundingClientRect();
+      if(row&&row.isConnected!==false){
+        const rowRect=row.getBoundingClientRect();
+        const point=anchorEl._projectPickerContextPoint;
+        // A context-menu click inside an expanded child list belongs to the
+        // parent row, whose aggregate rect may span both viewport edges. Use
+        // the actual click point while the owning row still intersects the
+        // list; once the row leaves, fall back to its rect so teardown wins.
+        if(point&&Number.isFinite(point.clientX)&&Number.isFinite(point.clientY)&&!_anchorGone(rowRect,bounds)){
+          rect={
+            top:point.clientY,bottom:point.clientY+1,
+            left:point.clientX,right:point.clientX+1,
+            width:1,height:1,
+          };
+        }else{
+          rect=rowRect;
+        }
+      }
     }
     if(_anchorGone(rect,bounds)){teardown();return;}
     // Apply the horizontal cap BEFORE measuring height, since narrow menus
