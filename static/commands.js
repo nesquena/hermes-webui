@@ -630,7 +630,7 @@ function cmdHelp(){
 }
 
 async function cmdClear(){
-  if(!S.session||!S.session.session_id)return;
+  if(!S.session||!S.session.session_id)return false;
   const sid=S.session.session_id;
   try{
     // The server owns durable transcript state.  Do not only clear S.messages:
@@ -659,8 +659,10 @@ async function cmdClear(){
     // changed even if the user moved to a different active pane while waiting.
     if(typeof renderSessionList==='function') await renderSessionList();
     showToast(t('conversation_cleared'));
+    return true;
   }catch(e){
     showToast(t('clear_failed')+(e&&e.message?e.message:String(e||'')),4000,'error');
+    return false;
   }
 }
 

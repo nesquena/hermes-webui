@@ -356,3 +356,113 @@ def test_slash_clear_holds_send_lock_until_durable_clear_finishes(cleanup_test_s
         "chatStartCalls": 1,
     }
     assert _server_session(session_id)["messages"] == []
+
+
+def test_clear_queues_and_drains_follow_up_for_newly_viewed_session(cleanup_test_sessions):
+    """A send in B while clear A is pending stays owned by and drains into B."""
+    suffix = uuid.uuid4().hex
+    session_a = f"clear_queue_owner_a_{suffix}"
+    session_b = f"clear_queue_owner_b_{suffix}"
+    cleanup_test_sessions.extend([session_a, session_b])
+    _seed_session(session_a, "session A history")
+    _seed_session(session_b, "session B history")
+
+    pw = _browser_or_skip()
+    with pw.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            page = browser.new_page()
+            _open_session(page, session_a)
+            result = page.evaluate(
+                """async ({sessionA, sessionB}) => {
+                    const realApi = window.api.bind(window);
+                    const chatStarts = [];
+                    window.api = (path, options) => {
+                      if (path === '/api/session/clear') {
+                        return new Promise((resolve, reject) => {
+                          window.__releaseDelayedClear = () => realApi(path, options).then(resolve, reject);
+                        });
+                      }
+                      if (path === '/api/chat/start') {
+                        chatStarts.push(JSON.parse(options.body).session_id);
+                        return Promise.reject(new Error('test queued dispatch'));
+                      }
+                      return realApi(path, options);
+                    };
+                    document.getElementById('msg').value = '/clear';
+                    const clearing = send();
+                    await new Promise(resolve => requestAnimationFrame(resolve));
+                    await loadSession(sessionB);
+                    document.getElementById('msg').value = 'message for B';
+                    await send();
+                    const queuedForB = getQueuedSessionCount(sessionB);
+                    const queuedForA = getQueuedSessionCount(sessionA);
+                    await window.__releaseDelayedClear();
+                    await clearing;
+                    await new Promise((resolve, reject) => {
+                      const deadline = performance.now() + 2000;
+                      const waitForDispatch = () => {
+                        if (chatStarts.length === 1) return resolve();
+                        if (performance.now() >= deadline) return reject(new Error('B queue did not drain'));
+                        requestAnimationFrame(waitForDispatch);
+                      };
+                      waitForDispatch();
+                    });
+                    return {queuedForA, queuedForB, chatStarts, activeSid: S.session.session_id};
+                }""",
+                {"sessionA": session_a, "sessionB": session_b},
+            )
+        finally:
+            browser.close()
+
+    assert result == {
+        "queuedForA": 0,
+        "queuedForB": 1,
+        "chatStarts": [session_b],
+        "activeSid": session_b,
+    }
+
+
+def test_failed_clear_keeps_queued_follow_up_without_dispatch(cleanup_test_sessions):
+    """A failed clear leaves its queued successor pending rather than sending it."""
+    session_id = f"clear_failed_queue_{uuid.uuid4().hex}"
+    cleanup_test_sessions.append(session_id)
+    _seed_session(session_id, "history remains after failed clear")
+
+    pw = _browser_or_skip()
+    with pw.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            page = browser.new_page()
+            _open_session(page, session_id)
+            result = page.evaluate(
+                """async () => {
+                    const realApi = window.api.bind(window);
+                    let chatStarts = 0;
+                    window.api = (path, options) => {
+                      if (path === '/api/session/clear') {
+                        return new Promise((resolve, reject) => {
+                          window.__failDelayedClear = () => reject(new Error('test clear failure'));
+                        });
+                      }
+                      if (path === '/api/chat/start') {
+                        chatStarts += 1;
+                        return Promise.reject(new Error('must not dispatch after clear failure'));
+                      }
+                      return realApi(path, options);
+                    };
+                    document.getElementById('msg').value = '/clear';
+                    const clearing = send();
+                    await new Promise(resolve => requestAnimationFrame(resolve));
+                    document.getElementById('msg').value = 'must remain queued';
+                    await send();
+                    await window.__failDelayedClear();
+                    await clearing;
+                    await new Promise(resolve => setTimeout(resolve, 250));
+                    return {chatStarts, queued: getQueuedSessionCount(S.session.session_id)};
+                }"""
+            )
+        finally:
+            browser.close()
+
+    assert result == {"chatStarts": 0, "queued": 1}

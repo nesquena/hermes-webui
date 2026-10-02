@@ -277,6 +277,51 @@ def test_stale_session_update_cannot_resurrect_clear_lifecycle_state(monkeypatch
     assert cached.title == "Untitled"
 
 
+def test_stale_update_after_second_clear_cannot_resurrect_renamed_metadata(monkeypatch, tmp_path):
+    """Every clear advances the fence, including one on an empty transcript."""
+    import api.routes as routes
+    from api.models import LOCK, SESSIONS, Session
+
+    _install_isolated_session_env(monkeypatch, tmp_path)
+    sid = "second_clear_stale_update"
+    messages = [_msg("user", "first prompt", 1.0, "second-clear-u1")]
+    Session(
+        session_id=sid,
+        title="Before first clear",
+        workspace=str(tmp_path),
+        messages=messages,
+        context_messages=list(messages),
+    ).save(touch_updated_at=False)
+
+    first = _post_clear(monkeypatch, sid)
+    first_marker = first["payload"]["session"]["clear_generation"]
+    renamed = Session.load(sid)
+    assert renamed is not None
+    renamed.title = "Named after first clear"
+    renamed.manual_title = True
+    renamed.save(touch_updated_at=False)
+
+    stale_update_session = Session.load(sid)
+    assert stale_update_session is not None
+    second = _post_clear(monkeypatch, sid)
+    second_marker = second["payload"]["session"]["clear_generation"]
+    assert second_marker != first_marker
+
+    with LOCK:
+        SESSIONS[sid] = stale_update_session
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda _sid: stale_update_session)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, profile=None: workspace)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
+    updated = _post_session_update(monkeypatch, {"session_id": sid, "workspace": str(tmp_path)})
+
+    assert updated["status"] == 200
+    reloaded = Session.load(sid)
+    assert reloaded is not None
+    assert reloaded.clear_generation == second_marker
+    assert reloaded.title == "Untitled"
+    assert reloaded.manual_title is False
+
+
 def test_empty_sidecar_without_watermark_still_recovers_state_db_rows():
     from api.models import Session, merge_session_messages_append_only
 

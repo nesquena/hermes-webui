@@ -228,8 +228,8 @@ def test_session_clear_preserves_imported_messaging_transcript_and_blocks_state_
     assert merged == []
 
 
-def test_repeat_clear_retains_durable_clear_marker(monkeypatch, tmp_path):
-    """A second clear must not turn a deliberately empty session into scratch."""
+def test_repeat_clear_advances_durable_clear_marker(monkeypatch, tmp_path):
+    """A second clear stays deliberate and fences stale pre-second-clear saves."""
     from api.models import Session
 
     _install_isolated_session_env(monkeypatch, tmp_path)
@@ -252,5 +252,6 @@ def test_repeat_clear_retains_durable_clear_marker(monkeypatch, tmp_path):
     second_marker = second["payload"]["session"]["clear_generation"]
 
     assert first_marker
-    assert second_marker == first_marker
-    assert Session.load(sid).clear_generation == first_marker
+    assert second_marker
+    assert second_marker != first_marker
+    assert Session.load(sid).clear_generation == second_marker

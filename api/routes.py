@@ -17111,10 +17111,11 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
-            # Preserve a previous clear marker on an idempotent repeat clear.
-            # Boot uses this durable marker to distinguish a deliberately empty
-            # session from a never-started scratch session.
-            if had_sidecar_messages:
+            # A never-started empty scratch session remains unmarked. Every
+            # clear of a session that has ever been cleared advances the marker,
+            # even when no transcript remains, so stale objects loaded before a
+            # repeated clear cannot save reset metadata back over it.
+            if had_sidecar_messages or s.clear_generation:
                 s.clear_generation = uuid.uuid4().hex
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the

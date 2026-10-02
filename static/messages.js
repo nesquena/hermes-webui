@@ -1390,9 +1390,13 @@ async function send(){
   // instead of silently dropping it.
   if (_sendInProgress) {
     const _text=_composerTextWithPendingSelections().trim();
-    // Use the in-flight session's sid, not the currently viewed session,
-    // so the queued message goes to the chat that owns the active stream.
-    const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
+    // A send lock for the viewed chat owns its queued successor. A clear can
+    // remain locked while the user switches chats, however; in that case the
+    // visible composer belongs to the newly viewed session, not the clear's.
+    const _viewedSid=S.session&&S.session.session_id;
+    const _targetSid=(_sendInProgressSid&&_sendInProgressSid===_viewedSid)
+      ?_sendInProgressSid
+      :_viewedSid;
     if(_text && _targetSid){
       const _modelState=_chatPayloadModelState();
       queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
@@ -1538,9 +1542,11 @@ async function send(){
         // command such as /clear has finished its durable server mutation.
         $('msg').value='';autoResize();hideCmdDropdown();
         if(_cmd.name==='clear'&&_commandSid) _sendInProgressSid=_commandSid;
-        await _commandResult;
-        if(_cmd.name==='clear'&&S.session&&S.session.session_id===_commandSid){
-          _queuedDrainAfterClearSid=_commandSid;
+        const _commandSucceeded=await _commandResult;
+        if(_cmd.name==='clear'&&_commandSucceeded&&S.session){
+          // A queue entered after the user switched during clear belongs to
+          // that viewed session, so drain its session-scoped queue instead.
+          _queuedDrainAfterClearSid=S.session.session_id;
         }
         return;
       }
