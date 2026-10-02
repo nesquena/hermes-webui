@@ -37,6 +37,7 @@ import api.config as cfg_mod
 from api.config import model_with_provider_context, resolve_model_provider
 
 OLLAMA_URL = 'http://127.0.0.1:11434/v1'
+LOCAL_URL = 'http://127.0.0.1:1234/v1'
 LAB_URL = 'http://10.0.0.8:8000/v1'
 LAB_MODELS = ['mistral-7b', 'qwen3.8:27b']
 
@@ -113,18 +114,36 @@ def test_named_custom_session_under_ollama_default(ollama_default, monkeypatch):
     assert resolve_model_provider(wrapped) == ('mistral-7b', 'custom:lab', LAB_URL)
 
 
-def test_local_alias_custom_session_stays_bare(monkeypatch):
-    """Legacy ``provider: local`` is healed to bare ``custom`` by
-    resolve_model_provider(), so a ``custom`` session is the same lane and
-    takes the bare passthrough. Uses the WebUI's own alias table, unpatched."""
-    monkeypatch.setitem(cfg_mod.cfg, 'model', {'provider': 'local', 'base_url': 'http://127.0.0.1:1234/v1'})
+@pytest.fixture
+def local_default(monkeypatch):
+    """Legacy ``model.provider: local`` + base_url, on the WebUI's own alias
+    table, unpatched."""
+    monkeypatch.setitem(cfg_mod.cfg, 'model', {'provider': 'local', 'base_url': LOCAL_URL})
     monkeypatch.delitem(cfg_mod.cfg, 'custom_providers', raising=False)
     monkeypatch.delitem(cfg_mod.cfg, 'providers', raising=False)
+
+
+def test_local_alias_custom_session_routes_to_configured_endpoint(local_default):
+    """Legacy ``local`` takes the configured-provider hint, and
+    resolve_model_provider() heals it to ``custom`` (#1384) while keeping the
+    local base_url."""
     wrapped = model_with_provider_context('llama-3.4:8b', 'custom')
-    assert wrapped == 'llama-3.4:8b'
-    model, provider, _ = resolve_model_provider(wrapped)
-    assert model == 'llama-3.4:8b'
-    assert provider == 'custom'
+    assert wrapped == '@local:llama-3.4:8b'
+    assert resolve_model_provider(wrapped) == ('llama-3.4:8b', 'custom', LOCAL_URL)
+
+
+@pytest.mark.parametrize('shape', ['custom_providers', 'providers'])
+@pytest.mark.parametrize('model', ['mistral-7b', 'qwen3.8:27b'])
+def test_local_duplicate_id_keeps_configured_endpoint(local_default, monkeypatch, shape, model):
+    """Another endpoint listing the same id must not take a ``custom``-lane
+    legacy ``local`` request, and ``local`` itself must never be returned."""
+    _add_lab(monkeypatch, shape)
+    wrapped = model_with_provider_context(model, 'custom')
+    resolved = resolve_model_provider(wrapped)
+    assert resolved == (model, 'custom', LOCAL_URL), (
+        f'{model!r} picked from the legacy local lane resolved to {resolved!r}; '
+        f'it must not move to the duplicate {shape} entry at {LAB_URL}.'
+    )
 
 
 def test_non_custom_alias_keeps_named_hint(monkeypatch):

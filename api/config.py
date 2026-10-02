@@ -3138,6 +3138,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 base_url = _get_provider_base_url(provider_hint)
         else:
             base_url = _get_provider_base_url(provider_hint)
+        if provider_hint.lower() == "local":
+            provider_hint = "custom"
         return _finalize(bare_model, provider_hint, base_url)
 
     if "/" in model_id:
@@ -4886,9 +4888,9 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     # away from the endpoint the user picked. Emit the CONFIGURED provider as
     # the hint instead: the encoded id skips the ownership scans, the parser
     # keeps the whole tagged id as the model, and _get_provider_base_url()
-    # returns model.base_url for the configured provider. Legacy ``local`` is
-    # healed to bare ``custom`` by resolve_model_provider(), which makes it the
-    # same lane as the session, so it takes the passthrough contract above.
+    # returns model.base_url for the configured provider. Legacy ``local``
+    # takes the same hint, and resolve_model_provider() heals ``@local:`` to
+    # ``custom`` after the base_url lookup (#1384).
     # Scoped to ``provider == "custom"`` so the named-custom path
     # (``custom:<slug>``) keeps minting its ``@custom:<slug>:`` hint.
     if (
@@ -4896,8 +4898,6 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
         and config_provider
         and str(_resolve_provider_alias(config_provider) or "").strip().lower() == "custom"
     ):
-        if config_provider == "local":
-            return model
         return f"@{config_provider}:{model}"
 
     # OpenRouter selections with slash IDs are explicit provider/model paths.
