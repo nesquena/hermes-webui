@@ -3230,11 +3230,26 @@ function _qualifiedCustomIdNeedsBackendAuthority(value){
   const raw=String(value||'');
   if(!raw.startsWith('@custom:')) return false;
   const rest=raw.slice('@custom:'.length);
-  const last=rest.lastIndexOf(':');
-  if(last<0) return false;
-  const providerHint='custom:'+rest.slice(0,last);
-  if(providerHint.split(':').length-1<2) return false;
-  return _customSlugIsEndpointAuthority(providerHint.slice('custom:'.length));
+  if(rest.indexOf(':')<0) return false;
+  // An id is ambiguous when ANY @custom:<host>:<port> prefix can claim the
+  // provider half while leaving a nonempty model remainder — not just the
+  // one immediately before the last colon. `@custom:gw:8080:free:32b` has
+  // `gw:8080` (an endpoint authority) leaving `free:32b` as the model, so it
+  // is exactly as undecidable pre-hydration as `@custom:gw:8080:free`, even
+  // though the final-colon hint `gw:8080:free` is not a host:port (#6657).
+  // Longest-viable-prefix order: the backend's resolver tries named slugs
+  // first, then endpoint slugs, over every cut, and only the config knows
+  // which tier exists — so any viable endpoint cut means "ask the backend".
+  const inner='custom:'+rest;
+  const segs=inner.split(':');
+  if(segs.length<4) return false;  // needs >= 4: custom + >=2 provider + >=1 model
+  for(let cut=2;cut<=segs.length-1;cut++){
+    const prefix=segs.slice(0,cut).join(':');
+    const tail=segs.slice(cut).join(':');
+    if(tail && prefix.startsWith('custom:')
+        && _customSlugIsEndpointAuthority(prefix.slice('custom:'.length))) return true;
+  }
+  return false;
 }
 function _getOptionProviderId(opt){
   if(!opt) return '';
