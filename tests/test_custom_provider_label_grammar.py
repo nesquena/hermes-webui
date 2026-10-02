@@ -206,6 +206,36 @@ def test_configured_named_provider_beats_endpoint_alias_for_same_shape():
     assert model == "8080:free"
 
 
+def test_multi_colon_model_resolves_named_first_not_endpoint_guess():
+    """2026-10-02 re-gate, backend half: with named provider `custom:gw`
+    advertising model `8080:free:32b`, the qualified value
+    `@custom:gw:8080:free:32b` is also shape-compatible with endpoint
+    `custom:gw:8080` + model `free:32b`. The named-slug tier runs FIRST, so
+    the server resolves it to the named reading even though the final-colon
+    hint `gw:8080:free` is not a host:port."""
+    model, provider, _ = _resolve_with_cfg(
+        "@custom:gw:8080:free:32b",
+        provider="custom:gw",
+        base_url="http://gw:8080/v1",
+        custom_providers=[{"name": "gw", "base_url": "http://gw:8080/v1"}],
+    )
+    assert provider == "custom:gw"
+    assert model == "8080:free:32b"
+
+
+def test_multi_colon_model_endpoint_only_config_keeps_endpoint_reading():
+    """Same id, endpoint-only config (no name): no named slug matches, so the
+    endpoint-derived alias `custom:gw:8080` routes with model `free:32b`."""
+    model, provider, _ = _resolve_with_cfg(
+        "@custom:gw:8080:free:32b",
+        provider="custom",
+        base_url="http://gw:8080/v1",
+        custom_providers=[{"base_url": "http://gw:8080/v1"}],
+    )
+    assert provider == "custom:gw:8080"
+    assert model == "free:32b"
+
+
 # ── Hostile config: a malformed base_url must not break routing ──────────────
 
 # Two unguarded `urlparse` sites sit on the resolve path and raise for these:

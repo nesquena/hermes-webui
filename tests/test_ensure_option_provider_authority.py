@@ -128,8 +128,10 @@ var S = {session: null};
 
 // Run the full chain for one ensure call: temporary option -> state ->
 // persistence -> fresh read -> chat payload provider.
-function drive(id, preferredProviderId, badges){
+function drive(id, preferredProviderId, badges, dynamicIds){
   window._configuredModelBadges = badges || {};
+  for(const k of Object.keys(_dynamicProviderIds)) delete _dynamicProviderIds[k];
+  Object.assign(_dynamicProviderIds, dynamicIds || {});
   const sel = new Node('select');
   sel.id = 'modelSelect';
   // No matching option: _applyModelToDropdown misses, forcing the temporary
@@ -141,9 +143,11 @@ function drive(id, preferredProviderId, badges){
   _writePersistedModelState(state.model, state.model_provider);
   const reread = _readPersistedModelState();
   const sendProvider = _modelProviderForSend(state.model);
+  const lastOpt = sel.options.length ? sel.options[sel.options.length-1] : null;
   return {
     value,
-    stampedProvider: sel.options.length ? (sel.options[sel.options.length-1].dataset.provider || null) : null,
+    stampedProvider: lastOpt ? (lastOpt.dataset.provider || null) : null,
+    stampedModel: lastOpt ? (lastOpt.dataset.model || null) : null,
     state,
     persisted: reread,
     sendProvider,
@@ -151,6 +155,7 @@ function drive(id, preferredProviderId, badges){
 }
 
 const AMBIG = '@custom:gw:8080:free';
+const MULTI = '@custom:gw:8080:free:32b';
 const out = {};
 // THE BUG: named `gw` case, no authority yet (catalog not hydrated, no hint,
 // no badge). Must defer: full id as model, null provider everywhere.
@@ -160,15 +165,30 @@ out.explicitHint = drive(AMBIG, 'custom:gw', {});
 // Configured badge authority still routes.
 out.badgeAuthority = drive(AMBIG, null, {[AMBIG]: {provider: 'custom:gw'}});
 // Hydrated catalog authority still routes (catalog lists named `custom:gw`).
-_dynamicProviderIds['custom:gw'] = true;
-out.hydratedAuthority = drive(AMBIG, null, {});
-delete _dynamicProviderIds['custom:gw'];
+out.hydratedAuthority = drive(AMBIG, null, {}, {'custom:gw': true});
 // True endpoint provider, no authority: same defer (backend resolves it to
 // the endpoint route) — review's second row, also correct.
 out.endpointNoAuthority = drive('@custom:llm:8080:free', null, {});
 // Unambiguous named-slug parse (model contains a colon, slug is not an
 // endpoint): shape authority alone is definitive and still stamps.
 out.unambiguousNamed = drive('@custom:backup:model-a:free', null, {});
+
+// ── 2026-10-02 re-gate: a SECOND valid colon in the model name. With named
+// provider `custom:gw` advertising model `8080:free:32b`, the qualified value
+// `@custom:gw:8080:free:32b` is also shape-compatible with endpoint
+// `custom:gw:8080` + model `free:32b`. The pre-final-colon hint
+// `gw:8080:free` is NOT a host:port, so a gate that only inspects it misses
+// the ambiguity and the shape guess `custom:gw:8080` stamps and sends.
+out.multiNoAuthority = drive(MULTI, null, {});
+// Named authority (badge) must win for BOTH halves; the shape guess must not
+// override it.
+out.multiNamedBadge = drive(MULTI, null, {[MULTI]: {provider: 'custom:gw'}});
+// Named authority (explicit hint) routes both halves.
+out.multiNamedHint = drive(MULTI, 'custom:gw', {});
+// Named authority (hydrated catalog) routes both halves.
+out.multiNamedCatalog = drive(MULTI, null, {}, {'custom:gw': true});
+// Endpoint-only catalog authority routes the endpoint reading.
+out.multiEndpointCatalog = drive(MULTI, null, {}, {'custom:gw:8080': true});
 
 process.stdout.write(JSON.stringify(out));
 """
@@ -222,3 +242,49 @@ def test_unambiguous_shape_parse_still_stamps():
     row = _run()["unambiguousNamed"]
     assert row["state"] == {"model": "model-a:free", "model_provider": "custom:backup"}
     assert row["sendProvider"] == "custom:backup"
+
+
+# ── 2026-10-02 re-gate: multi-colon model names (second valid colon) ─────────
+
+def test_multi_colon_model_without_authority_defers_to_backend_everywhere():
+    """`@custom:gw:8080:free:32b`: the final-colon hint `gw:8080:free` is not a
+    host:port, so the pre-2026-10-02 gate called it unambiguous and the shape
+    guess `custom:gw:8080` / `free:32b` stamped, persisted and sent. The id is
+    ambiguous because the `gw:8080` prefix IS a viable endpoint authority with
+    a nonempty `free:32b` remainder — no authority, nothing stamps."""
+    row = _run()["multiNoAuthority"]
+    assert row["value"] == "@custom:gw:8080:free:32b"
+    assert row["stampedProvider"] is None
+    assert row["stampedModel"] is None
+    assert row["state"] == {"model": "@custom:gw:8080:free:32b", "model_provider": None}
+    assert row["persisted"] == {"model": "@custom:gw:8080:free:32b", "model_provider": None}
+    assert row["sendProvider"] is None
+
+
+def test_multi_colon_named_badge_wins_for_both_halves():
+    """A configured badge declaring named `custom:gw` routes BOTH halves and is
+    not overridden by the shape guess (`requestedProvider || badge.provider`
+    used to swallow it). The dataset.model stamp is produced only for an
+    explicit requestedProvider (pre-existing contract); the badge's model half
+    routes through the provider stamp via _modelStateForSelect."""
+    row = _run()["multiNamedBadge"]
+    assert row["state"] == {"model": "8080:free:32b", "model_provider": "custom:gw"}
+    assert row["stampedProvider"] == "custom:gw"
+    assert row["persisted"] == {"model": "8080:free:32b", "model_provider": "custom:gw"}
+    assert row["sendProvider"] == "custom:gw"
+
+
+def test_multi_colon_named_hint_and_catalog_route_both_halves():
+    for key in ("multiNamedHint", "multiNamedCatalog"):
+        row = _run()[key]
+        assert row["state"] == {"model": "8080:free:32b", "model_provider": "custom:gw"}, key
+        assert row["sendProvider"] == "custom:gw", key
+    assert _run()["multiNamedHint"]["stampedModel"] == "8080:free:32b"
+
+
+def test_multi_colon_endpoint_catalog_routes_endpoint_reading():
+    """Endpoint-only config: the hydrated catalog hit `custom:gw:8080` is real
+    authority and routes provider `custom:gw:8080` + model `free:32b`."""
+    row = _run()["multiEndpointCatalog"]
+    assert row["state"] == {"model": "free:32b", "model_provider": "custom:gw:8080"}
+    assert row["sendProvider"] == "custom:gw:8080"
