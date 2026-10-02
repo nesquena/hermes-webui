@@ -194,6 +194,7 @@ const out = {
   renderListCalls: 0,
   rememberedKeyAfter: null,
   newSessionOptions: null,
+  sendButtonUpdates: 0,
 };
 
 // ---- stubs the extracted deleteSession references ----
@@ -207,6 +208,7 @@ const showToast = m => { out.toasts.push(String(m)); };
 const setStatus = () => {};
 const assistantDisplayName = () => 'Hermes';
 const syncAppTitlebar = () => {};
+const updateSendBtn = () => { out.sendButtonUpdates += 1; };
 const _appRootPath = () => '/';
 const $ = id => (id === 'batchActionBar' ? _bar : null);
 const renderSessionListFromCache = () => {};
@@ -279,6 +281,7 @@ async function newSession(flash, options = {}) {
 const S = {
   session: { session_id: 'A', workspace: '/ws/A' },
   messages: [], entries: [], activeProfile: 'default',
+  busy: true, activeStreamId: 'stream-of-A',
   _profileSwitchWorkspace: null, _profileDefaultWorkspace: null,
 };
 
@@ -355,6 +358,8 @@ if (isBatch) eval(extractFunc('_renderBatchActionBar'));
     await deleteSession(deleteTarget);
   }
   out.rememberedKeyAfter = _store.has(NEW_CHAT_DRAFT_SESSION_KEY) ? _store.get(NEW_CHAT_DRAFT_SESSION_KEY) : null;
+  out.busyAfter = S.busy;
+  out.activeStreamIdAfter = S.activeStreamId;
   process.stdout.write(JSON.stringify(out));
 })().catch(e => {
   process.stderr.write(String((e && e.stack) || e));
@@ -409,6 +414,9 @@ class TestDeleteFlowBehaviour:
         assert any("session_deleted" in m for m in out["toasts"]), (
             "the delete confirmation toast must still fire"
         )
+        assert out["busyAfter"] is False
+        assert out["activeStreamIdAfter"] is None
+        assert out["sendButtonUpdates"] > 0
 
     def test_delete_open_session_reuses_remembered_draft_when_present(self, driver_path):
         out = _run_scenario(driver_path, "flag_on_draft_restored")
@@ -483,6 +491,9 @@ class TestDraftWorkspaceAwareness:
         assert out["newSessionCalls"] == 1
         assert out["workspaceFlagAtNewSession"] == "/ws/A"
         assert out["rememberedKeyAfter"] == "remembered-1"
+        assert out["busyAfter"] is False
+        assert out["activeStreamIdAfter"] is None
+        assert out["sendButtonUpdates"] > 0
 
     def test_batch_delete_restores_draft_from_same_workspace(self, driver_path):
         out = _run_scenario(driver_path, "batch_flag_on_draft_same_ws")

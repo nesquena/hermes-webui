@@ -55,6 +55,8 @@ globalThis.S = {
   _pendingSessionToolsets: null,
   _profileSwitchWorkspace: null,
   _profileDefaultWorkspace: null,
+  busy: scenario === 'failure',
+  activeStreamId: scenario === 'failure' ? 'stream-of-deleted-A' : null,
 };
 globalThis._loadSessionGeneration = 0;
 globalThis._profileSwitchGeneration = 0;
@@ -68,17 +70,39 @@ globalThis._defaultModel = 'test-model';
 globalThis._activeProvider = 'test-provider';
 globalThis.NEW_CHAT_DRAFT_SESSION_KEY = (src.match(/NEW_CHAT_DRAFT_SESSION_KEY = '([^']+)'/) || [])[1];
 
+let sendButtonUpdates = 0;
 for (const name of [
   '_setNewSessionPending', 'updateQueueBadge', 'clearLiveToolCards', 'showToast',
   'assistantDisplayName', 'syncAppTitlebar', 'setComposerStatus', 'setStatus',
 ]) globalThis[name] = () => {};
+globalThis.updateSendBtn = () => { sendButtonUpdates += 1; };
+globalThis.syncTopbar = () => {};
+globalThis.renderMessages = () => {};
+globalThis.loadDir = async () => {};
+globalThis._setActiveSessionUrl = () => {};
+globalThis.startSessionStream = () => {};
+globalThis._setSessionViewedCount = () => {};
 window._clearPendingSelections = () => {};
 globalThis._appRootPath = () => '/';
 
 let releaseCreate = null;
+let releaseDraft = null;
 globalThis.api = async url => {
+  if (url.startsWith('/api/session?')) {
+    return await new Promise(resolve => {
+      releaseDraft = () => resolve({session:{
+        session_id:'remembered', message_count:0, title:'New Chat', profile:'default',
+        composer_draft:{text:'draft',files:[]},
+        workspace:scenario === 'new-chat-during-draft-matching' ? '/ws/A' : '/ws/C',
+      }});
+    });
+  }
   if (url !== '/api/session/new') throw new Error('unexpected API: ' + url);
   if (scenario === 'failure') throw new Error('create failed');
+  if (scenario.startsWith('new-chat-during-draft-')) return {session:{
+    session_id:'created-B', messages:[], model:'test-model', model_provider:'test-provider',
+    workspace:'/ws/B', message_count:0, last_usage:{},
+  }};
   return await new Promise(resolve => {
     releaseCreate = () => resolve({session:{
       session_id:'created-A', messages:[], model:'test-model', model_provider:'test-provider',
@@ -87,6 +111,10 @@ globalThis.api = async url => {
   });
 };
 
+eval(extract('_profileMatchesActiveProfile'));
+eval(extract('_isRestorableNewChatDraftSession'));
+eval(extract('_rememberNewChatDraftSession'));
+eval(extract('_clearRememberedNewChatDraftSession'));
 eval(extract('_restoreRememberedNewChatDraftSession'));
 eval(extract('_deleteNewChatProfileGeneration'));
 eval(extract('_deleteNewChatOwnerSnapshot'));
@@ -96,6 +124,9 @@ eval(extract('newSession'));
 eval(extract('_startNewChatAfterDeletingCurrentSession'));
 
 (async () => {
+  if (scenario.startsWith('new-chat-during-draft-')) {
+    localStorage.setItem(NEW_CHAT_DRAFT_SESSION_KEY, 'remembered');
+  }
   const owner = _deleteNewChatOwnerSnapshot();
   const pending = _startNewChatAfterDeletingCurrentSession('/ws/A', owner);
   if (scenario === 'superseded' || scenario === 'superseded-profile') {
@@ -108,6 +139,11 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
       S.activeProfile = 'beta';
     }
     releaseCreate();
+  } else if (scenario.startsWith('new-chat-during-draft-')) {
+    while (!releaseDraft) await new Promise(resolve => setTimeout(resolve, 0));
+    S._profileSwitchWorkspace = '/ws/B';
+    await newSession(false);
+    releaseDraft();
   }
   const result = await pending;
   process.stdout.write(JSON.stringify({
@@ -117,6 +153,9 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
     replacedUrl,
     superseded:!!(result && result.superseded),
     failed:!!(result && result.error),
+    busy:S.busy,
+    activeStreamId:S.activeStreamId,
+    sendButtonUpdates,
   }));
 })().catch(error => {
   process.stderr.write(String(error && error.stack || error));
@@ -167,3 +206,18 @@ def test_failed_post_leaves_blank_root_instead_of_deleted_session_route(driver):
     assert result["profileWorkspace"] is None
     assert result["replacedUrl"] == "/"
     assert result["failed"] is True
+    assert result["busy"] is False
+    assert result["activeStreamId"] is None
+    assert result["sendButtonUpdates"] > 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    "scenario",
+    ["new-chat-during-draft-matching", "new-chat-during-draft-mismatched"],
+)
+def test_explicit_new_chat_wins_while_delete_draft_lookup_is_pending(driver, scenario):
+    result = _run(driver, scenario)
+    assert result["activeSid"] == "created-B"
+    assert result["profileWorkspace"] is None
+    assert result["superseded"] is True

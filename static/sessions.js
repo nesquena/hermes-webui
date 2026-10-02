@@ -1951,6 +1951,13 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
+  // Count every New Chat intent before joining an in-flight request. Delete-
+  // owned continuations use this identity to yield to a newer explicit click,
+  // even when that click ultimately joins their pending POST.
+  const newSessionIntentGeneration=(Number.isSafeInteger(S._newSessionIntentGeneration)
+    ? S._newSessionIntentGeneration
+    : 0)+1;
+  S._newSessionIntentGeneration=newSessionIntentGeneration;
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
@@ -1958,7 +1965,7 @@ async function newSession(flash, options={}){
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
     const stillOwnsPane=(options&&typeof options.stillOwnsPane==='function')?options.stillOwnsPane:null;
-    if(stillOwnsPane&&!stillOwnsPane()) return {superseded:true};
+    if(stillOwnsPane&&!stillOwnsPane(newSessionIntentGeneration)) return {superseded:true};
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -2065,7 +2072,7 @@ async function newSession(flash, options={}){
     // A delete-owned New Chat can settle after the user has already opened a
     // different session/profile. Keep the server-created empty session off
     // screen instead of letting an older POST response reclaim the pane/URL.
-    if(stillOwnsPane&&!stillOwnsPane()) return {superseded:true,session:data&&data.session};
+    if(stillOwnsPane&&!stillOwnsPane(newSessionIntentGeneration)) return {superseded:true,session:data&&data.session};
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -4939,7 +4946,9 @@ function _renderBatchActionBar(){
       if(S.session&&ids.includes(S.session.session_id)){
         const _deletedWorkspace=(S.session&&S.session.workspace)||null;
         const _deleteNewChatOwner=_deleteNewChatOwnerSnapshot();
-        S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+        S.session=null;S.messages=[];S.entries=[];S.busy=false;S.activeStreamId=null;
+        if(typeof updateSendBtn==='function') updateSendBtn();
+        localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         if(window._newChatOnSessionDelete===true){
           newChatAfterDeleteResult=await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace,_deleteNewChatOwner);
@@ -9832,20 +9841,29 @@ function _deleteNewChatOwnerSnapshot(){
   return {
     loadGeneration:_loadSessionGeneration,
     profileGeneration:_deleteNewChatProfileGeneration(),
+    newSessionGeneration:Number.isSafeInteger(S._newSessionIntentGeneration)
+      ? S._newSessionIntentGeneration
+      : 0,
     activeProfile:(S.activeProfile||'default'),
   };
 }
 
-function _deleteNewChatOwnerIsCurrent(owner){
+function _deleteNewChatOwnerIsCurrent(owner,newSessionGeneration=null){
   if(!owner) return true;
+  const expectedNewSessionGeneration=newSessionGeneration===null
+    ? owner.newSessionGeneration
+    : newSessionGeneration;
   return !S.session
     && _loadSessionGeneration===owner.loadGeneration
     && _deleteNewChatProfileGeneration()===owner.profileGeneration
+    && (Number.isSafeInteger(S._newSessionIntentGeneration)?S._newSessionIntentGeneration:0)===expectedNewSessionGeneration
     && (S.activeProfile||'default')===owner.activeProfile;
 }
 
 function _showEmptyConversationAfterDelete(){
   S.session=null;S.messages=[];S.entries=[];
+  S.busy=false;S.activeStreamId=null;
+  if(typeof updateSendBtn==='function') updateSendBtn();
   try{localStorage.removeItem('hermes-webui-session');}catch(_){}
   try{if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());}catch(_){}
   const title=$('topbarTitle');if(title)title.textContent=assistantDisplayName();
@@ -9857,7 +9875,14 @@ function _showEmptyConversationAfterDelete(){
 }
 
 async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=null){
-  const stillOwnsPane=()=>_deleteNewChatOwnerIsCurrent(owner);
+  let ownedNewSessionGeneration=null;
+  const stillOwnsPane=(newSessionGeneration=null)=>{
+    if(newSessionGeneration!==null) ownedNewSessionGeneration=newSessionGeneration;
+    return _deleteNewChatOwnerIsCurrent(
+      owner,
+      ownedNewSessionGeneration===null?null:ownedNewSessionGeneration,
+    );
+  };
   if(typeof _restoreRememberedNewChatDraftSession==='function'
      && await _restoreRememberedNewChatDraftSession(deletedWorkspace,stillOwnsPane)) return {restored:true};
   if(!stillOwnsPane()) return {superseded:true};
@@ -9927,7 +9952,8 @@ async function deleteSession(sid, beforeDelete=null){
     // stays where the user was working.
     const _deletedWorkspace=(S.session&&S.session.workspace)||(session&&session.workspace)||null;
     const _deleteNewChatOwner=_deleteNewChatOwnerSnapshot();
-    S.session=null;S.messages=[];S.entries=[];
+    S.session=null;S.messages=[];S.entries=[];S.busy=false;S.activeStreamId=null;
+    if(typeof updateSendBtn==='function') updateSendBtn();
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
     if(window._newChatOnSessionDelete===true){
