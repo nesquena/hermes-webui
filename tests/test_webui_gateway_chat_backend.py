@@ -488,6 +488,73 @@ def test_gateway_chat_worker_records_turn_journal_completion(tmp_path, monkeypat
     ), "the gateway success writeback must record a completed turn journal event"
 
 
+def test_gateway_chat_worker_uses_session_profile_endpoint_not_process_profile(tmp_path, monkeypatch):
+    """A fresh gateway turn must target the session's profile gateway endpoint.
+
+    With one WebUI serving several profiles against a multiplexing gateway, each
+    profile's turns belong on its own ``/p/<profile>`` route with its own key. The
+    process-wide URL/key describe whichever profile the process loaded, so using
+    them sends every profile's turns to that one profile.
+    """
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    # Process-active profile's endpoint: must NOT be used for a 'coder' session.
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "process-profile-key")
+    resolved_for = []
+
+    def fake_endpoint_for_profile(profile_name):
+        resolved_for.append(profile_name)
+        return "http://gateway.local/p/coder", "coder-key"
+
+    monkeypatch.setattr(gateway_chat, "_gateway_endpoint_for_profile", fake_endpoint_for_profile)
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    def fake_urlopen(req, timeout=0):
+        requests.append(req)
+        return FakeResponse()
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    channel = MagicMock()
+    channel.put_nowait = lambda item: None
+    s = new_session()
+    s.profile = "coder"
+    stream_id = "stream-gateway-session-profile-endpoint-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hi"
+    s.pending_started_at = 333
+    s.save()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(s.session_id, "Say hi", "m", str(tmp_path), stream_id, [])
+
+    assert resolved_for == ["coder"]
+    assert requests, "the worker made no gateway request"
+    assert requests[0].full_url.startswith("http://gateway.local/p/coder/v1/")
+    assert requests[0].get_header("Authorization") == "Bearer coder-key"
+
+
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
     """Gateway terminal errors must survive an empty assistant stream."""
     from unittest.mock import MagicMock
