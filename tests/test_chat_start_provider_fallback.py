@@ -123,7 +123,13 @@ for (const name of [
 const args = JSON.parse(process.argv[3]);
 modelSelect = makeSelect(args.options || [], args.initialValue || '');
 if (args.persisted) localStorage.setItem(MODEL_STATE_KEY, JSON.stringify(args.persisted));
-var S = {session: {session_id: args.sessionId || 's1', model_provider: args.sessionProvider || null}};
+var S = {session: {session_id: args.sessionId || 's1', model: args.sessionModel || '', model_provider: args.sessionProvider || null}};
+// #7865 round-2: seed the picker's session-scoped explicit-pick evidence when
+// the scenario declares one (the gate in _modelProviderForSend requires it).
+if (args.explicitPick) {
+  _rememberExplicitPickerPick(args.sessionId || 's1',
+    args.explicitPick.value, args.explicitPick.model_provider);
+}
 
 if (args.mode === 'modelState') {
   process.stdout.write(JSON.stringify(_modelStateForSelect(modelSelect, args.model)));
@@ -210,6 +216,7 @@ def test_restored_session_without_pick_keeps_its_own_provider(driver_path):
     """
     provider = _run_helper(driver_path, {
         "model": "grok-4.3",
+        "sessionModel": "grok-4.3",
         "sessionProvider": "session-provider",
         "initialValue": "grok-4.3",
         "options": [{"provider": "xai-oauth", "value": "grok-4.3"}],

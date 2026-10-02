@@ -5306,16 +5306,26 @@ function _modelProviderForSend(modelId){
   const model=String(modelId||'').trim();
   if(!model) return null;
   const sel=typeof $==='function' ? $('modelSelect') : null;
-  // Browser-held identity is authoritative before any raw-id inference. This
-  // preserves a configured named slug during boot, when endpoint shape alone
-  // cannot distinguish `custom:gw` + `8080:free` from `custom:gw:8080` + `free`.
-  const clientAuthority=_clientProviderAuthorityForModel(model,sel,false,true)
-    ||_dynamicProviderAuthorityForQualifiedCustomId(model)
-    ||_persistedProviderAuthorityForModel(model);
-  if(clientAuthority) return clientAuthority;
-  if(_qualifiedCustomIdNeedsBackendAuthority(model)) return null;
-  const explicitProvider=_providerFromModelValue(model);
-  if(explicitProvider) return explicitProvider;
+  // With explicit-pick evidence the #7865 gate below owns the decision (the
+  // picker outranks the session) — the browser-held authority chain here only
+  // arbitrates when the user has NOT just picked. It still runs first without
+  // a pick: it preserves a configured named slug during boot, when endpoint
+  // shape alone cannot distinguish `custom:gw` + `8080:free` from
+  // `custom:gw:8080` + `free`.
+  const _pick=(typeof _readExplicitPickerPick==='function')
+    ?_readExplicitPickerPick((S&&S.session&&S.session.session_id)||null):null;
+  if(!_pick || String(_pick.value||'').trim()!==model){
+    const clientAuthority=_clientProviderAuthorityForModel(model,sel,false,true)
+      ||_dynamicProviderAuthorityForQualifiedCustomId(model)
+      ||_persistedProviderAuthorityForModel(model);
+    if(clientAuthority) return clientAuthority;
+    if(_qualifiedCustomIdNeedsBackendAuthority(model)) return null;
+    // Same fence for this path: with a matching pick the #7865 gate below owns
+    // the decision, and _providerFromModelValue consults the session/persisted
+    // state the pick just superseded.
+    const explicitProvider=_providerFromModelValue(model);
+    if(explicitProvider) return explicitProvider;
+  }
   // The dropdown's option provider may win over a loaded session's provider
   // ONLY with evidence the user picked in the dropdown for THIS session —
   // the session-scoped explicit-pick marker written by the picker's change

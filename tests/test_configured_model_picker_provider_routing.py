@@ -59,7 +59,11 @@ eval([
   '_persistedProviderAuthorityForModel',
   '_dynamicProviderAuthorityForQualifiedCustomId',
   '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_getOptionProviderId',
+  '_parseQualifiedCustomId',
   '_providerFromModelValue',
   '_modelPickerOptionIdentity',
   '_deduplicateModelPickerOptions',
@@ -68,6 +72,7 @@ eval([
   '_applyModelToDropdown',
   '_ensureModelOptionInDropdown',
   '_readModelOverflowData',
+].map(name => {
   if (name === '_dynamicProviderIds') {
     const re = new RegExp('^let ' + name + '=.*$', 'm');
     const m = uiSrc.match(re);
@@ -320,7 +325,11 @@ eval([
   '_persistedProviderAuthorityForModel',
   '_dynamicProviderAuthorityForQualifiedCustomId',
   '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_getOptionProviderId',
+  '_parseQualifiedCustomId',
   '_providerFromModelValue',
   '_modelStateForSelect',
   '_modelProviderForSend',
@@ -755,11 +764,19 @@ for (const name of [
   '_persistedProviderAuthorityForModel',
   '_dynamicProviderAuthorityForQualifiedCustomId',
   '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_modelPickerOptionIdentity',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
+  '_parseQualifiedCustomId',
   '_providerFromModelValue',
   '_modelStateForSelect',
   '_findModelInDropdown',
@@ -769,6 +786,9 @@ for (const name of [
 ]) {
   eval(extractFunc(name));
 }
+
+// ui.js state (a `let`, not a function) the extracted chain reads.
+globalThis._dynamicProviderIds = {};
 
 // Send path: the picked state carries the bare, intact model id.
 const sent = _modelStateForSelect(modelSelect, '@custom:hetmer.net:model-a:free');
@@ -1112,10 +1132,14 @@ for (const name of [
   '_persistedProviderAuthorityForModel',
   '_dynamicProviderAuthorityForQualifiedCustomId',
   '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
+  '_parseQualifiedCustomId',
   '_providerFromModelValue',
   '_modelStateForSelect',
   '_findModelInDropdown',
@@ -1125,6 +1149,9 @@ for (const name of [
 ]) {
   eval(extractFunc(name));
 }
+
+// ui.js state (a `let`, not a function) the extracted chain reads.
+globalThis._dynamicProviderIds = {};
 
 const initialSelection=_modelStateForSelect(modelSelect,modelSelect.value);
 renderModelDropdown();
@@ -1445,9 +1472,43 @@ async function selectModelFromDropdown(value, provider) {
   window.__picked = _modelStateForSelect(modelSelect, modelSelect.value);
 }
 
+const _CUSTOM_SLUG_TRIM_RE = /^[\u0009-\u000D\u0020]+|[\u0009-\u000D\u0020]+$/g;
+const _CUSTOM_SLUG_HOST_REJECT_RE = /[\s\/@?#\[\]\\]/;
+var S = {session: null};
+const store = new Map();
+const localStorage = { getItem(k){return store.has(k)?store.get(k):null;}, setItem(k,v){store.set(k,String(v));}, removeItem(k){store.delete(k);} };
+const sessionStore = new Map();
+const sessionStorage = { getItem(k){return sessionStore.has(k)?sessionStore.get(k):null;}, setItem(k,v){sessionStore.set(k,String(v));}, removeItem(k){sessionStore.delete(k);} };
+const MODEL_STATE_KEY = 'hermes-webui-model-state';
 for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_compareModelPickerEntries',
+  '_customModelFromQualifiedId',
+  '_customSlugIsEndpointAuthority',
+  '_getOptionProviderId',
+  '_modelPickerCompareContract',
+  '_modelPickerCompareRuns',
+  '_modelPickerContractRuns',
+  '_modelPickerOptionIdentity',
+  '_modelPickerSortableId',
+  '_optionDeclaredProviderId',
+  '_parseQualifiedCustomId',
+  '_providerFromModelValue',
+  '_sortModelPickerEntries',
+  '_storedModelProvider',
+  '_readPersistedModelState',
+  '_pickerExplicitPickKey',
+  '_readExplicitPickerPick',
+  '_rememberExplicitPickerPick',
+  '_clearExplicitPickerPick',
+  '_customSlugIsEndpointAuthority',
+  '_optionDeclaredProviderId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_parseQualifiedCustomId',
   '_providerFromModelValue',
   '_modelPickerOptionIdentity',
   '_isEquivalentConfiguredModelEntry',
@@ -1460,6 +1521,13 @@ for (const name of [
 ]) {
   eval(extractFunc(name));
 }
+
+// ui.js state (a `let`, not a function) the extracted chain reads.
+globalThis._dynamicProviderIds = {};
+
+// The fork's dynamic-provider registry is ui.js state, not a function the
+// extractor can lift; the dedup path only reads it.
+globalThis._dynamicProviderIds = {};
 
 // Ensure the backup fallback is present before rendering
 _ensureModelOptionInDropdown('@custom:backup:model-a', modelSelect, 'custom:backup');
