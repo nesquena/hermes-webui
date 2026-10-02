@@ -383,6 +383,7 @@ def _run_new_session_harness(
     late_file: bool = False,
     has_session: bool = True,
     fail_save_on_call: int | None = None,
+    read_only_source: bool = False,
 ) -> dict:
     node = shutil.which("node")
     if not node:
@@ -392,7 +393,12 @@ def _run_new_session_harness(
     authority_source = _composer_authority_helpers()
     add_files_source = _add_files_function()
     initial_session = json.dumps(
-        {"session_id": "old-session", "workspace": "/workspace", "message_count": 2}
+        {
+            "session_id": "old-session",
+            "workspace": "/workspace",
+            "message_count": 2,
+            "read_only": read_only_source,
+        }
         if has_session
         else None
     )
@@ -449,6 +455,9 @@ def _run_new_session_harness(
         function setComposerStatus() {{}}
         function updateQueueBadge() {{}}
         function clearLiveToolCards() {{}}
+        function _isReadOnlySession(session) {{
+          return !!(session && (session.read_only || session.is_read_only));
+        }}
         function _saveComposerDraftNow(sid, text, files, _profile, opts) {{
           saves.push({{ sid, text, files }});
           if(saves.length === {json.dumps(fail_save_on_call)}) {{
@@ -510,6 +519,7 @@ def _run_new_session_harness(
             autoResizeCalls,
             createCalls,
             saves,
+            rememberedSource: _composerRememberedOwnerSnapshot('old-session','default'),
           }}));
         }})().catch(err => {{ console.error(err); process.exit(1); }});
         """
@@ -624,6 +634,22 @@ def _run_blank_page_settlement_harness(entry: str, *, reject_pending: bool) -> d
     )
     assert proc.returncode == 0, proc.stderr or proc.stdout
     return json.loads(proc.stdout)
+
+
+def test_read_only_source_new_chat_keeps_browser_draft_without_server_post():
+    result = _run_new_session_harness(
+        fail_create=False,
+        read_only_source=True,
+    )
+
+    assert result["error"] is None
+    assert result["createCalls"] == 1
+    assert result["activeSid"] == "new-session"
+    assert result["saves"] == []
+    assert result["rememberedSource"]["text"] == "draft owned by the old session"
+    assert [file["name"] for file in result["rememberedSource"]["files"]] == [
+        "private.pdf"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -945,6 +971,12 @@ def _run_profile_double_context_harness() -> dict:
         function syncTopbar(){{}} function clearWorkspaceTreeSkeleton(){{}}
         function showToast(){{}} function _profileSwitchPanelLoad(){{return Promise.resolve();}}
         function _refreshProfileSwitchBackground(){{}} function renderSessionListFromCache(){{}}
+        function _newSessionResultWasSuperseded(){{return false;}}
+        async function newSession(){{
+          S.session={{session_id:'replacement',profile:S.activeProfile,workspace:null}};
+          S.messages=[];
+          return {{status:'committed',session:S.session}};
+        }}
         (async()=>{{
           const first=switchToProfile('beta');
           await spinUntil(()=>switches.length===1);
@@ -1608,7 +1640,9 @@ def test_voice_mode_send_preserves_buffered_transcript_across_new_session_handof
 
 
 
-def _run_profile_switch_settlement_harness(*, reject_pending: bool) -> dict:
+def _run_profile_switch_settlement_harness(
+    *, reject_pending: bool, reject_replacement: bool = False
+) -> dict:
     """Run real switchToProfile through success/failure settlement to completion."""
     node = shutil.which("node")
     if not node:
@@ -1677,6 +1711,7 @@ def _run_profile_switch_settlement_harness(*, reject_pending: bool) -> dict:
         function renderSessionListFromCache(){{}}
         async function newSession(){{
           newSessionCalls+=1;
+          if({str(reject_replacement).lower()})throw new Error('replacement failed');
           S.session={{
             session_id:'profile-session',profile:S.activeProfile,
             workspace:'/workspace-a',messages:[],message_count:0,
@@ -1684,11 +1719,15 @@ def _run_profile_switch_settlement_harness(*, reject_pending: bool) -> dict:
           S.messages=[];
           return S.session;
         }}
-        function api(path){{
+        function api(path,options){{
           apiCalls.push(path);
-          if(path==='/api/profile/switch')return Promise.resolve({{
-            active:'beta',is_default:false,default_model:null,default_workspace:null,
-          }});
+          if(path==='/api/profile/switch'){{
+            const requested=JSON.parse(options.body).name;
+            return Promise.resolve({{
+              active:requested,is_default:requested==='default',
+              default_model:null,default_workspace:null,
+            }});
+          }}
           throw new Error(`unexpected API call: ${{path}}`);
         }}
 
@@ -1744,6 +1783,23 @@ def test_profile_switch_resumes_with_consistent_profile_session_ownership(
     assert result["newSessionCalls"] == 1
     assert result["toasts"] == ["profile_switched_new_conversation"]
     assert result["newSessionInFlight"] is False
+
+
+def test_failed_profile_replacement_rolls_server_and_client_profile_back():
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=False,
+        reject_replacement=True,
+    )
+
+    assert result["switched"] is False
+    assert result["apiCalls"] == [
+        "/api/profile/switch",
+        "/api/profile/switch",
+    ]
+    assert result["activeProfile"] == "default"
+    assert result["sessionProfile"] == "default"
+    assert result["activeSid"] == "settled-session"
+    assert result["newSessionCalls"] == 1
 
 
 def _run_new_session_load_interleave_harness(

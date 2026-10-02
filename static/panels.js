@@ -7088,6 +7088,9 @@ async function switchToProfile(name) {
   const _titlebarBtn = $('titlebarProfileBtn');
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
+  const _prevProfileIsDefault = !!S.activeProfileIsDefault;
+  let _serverProfileSwitched = false;
+  let _replacementSessionPending = false;
   const _switchGen = ++_profileSwitchGeneration;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
@@ -7155,6 +7158,7 @@ async function switchToProfile(name) {
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
+    _serverProfileSwitched = true;
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
@@ -7295,10 +7299,12 @@ async function switchToProfile(name) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+      _replacementSessionPending = true;
       const newSessionResult=await newSession(false, {
         awaitWorkspaceLoad: workspaceVisible, worktree:false, contextTransition:intent,
         _paneNavigationGeneration:paneNavigationGeneration,
       });
+      _replacementSessionPending = false;
       if(_newSessionResultWasSuperseded(newSessionResult)
         ||_switchGen!==_profileSwitchGeneration||!ownsPane()) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
@@ -7362,6 +7368,25 @@ async function switchToProfile(name) {
     return true;
 
   } catch (e) {
+    // A replacement New Chat can fail after the profile cookie was committed
+    // (for example, a source-draft precondition). Restore the server profile
+    // before releasing this serialized context intent. Only project the
+    // rollback into client state while this switch still owns the pane; a newer
+    // navigation keeps authority over its own eventual profile/session state.
+    if (_serverProfileSwitched && _replacementSessionPending) {
+      try {
+        const rollback = await api('/api/profile/switch', {
+          method:'POST', body:JSON.stringify({name:_prevProfileName}), timeoutToast:false,
+        });
+        if (_switchGen === _profileSwitchGeneration && ownsPane()) {
+          S.activeProfile = rollback.active || _prevProfileName;
+          S.activeProfileIsDefault = typeof rollback.is_default === 'boolean'
+            ? rollback.is_default : _prevProfileIsDefault;
+          if (typeof startGatewaySSE === 'function') startGatewaySSE();
+          if (typeof applyBotName === 'function') applyBotName();
+        }
+      } catch (_) {}
+    }
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;

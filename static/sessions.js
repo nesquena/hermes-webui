@@ -2372,8 +2372,15 @@ async function newSession(flash, options={}){
     ).trim()||'default';
     const sourceComposerText=($('msg')||{}).value||'';
     const sourceComposerFiles=S.pendingFiles?[...S.pendingFiles]:[];
+    // Imported/subagent sessions are view-only on the server, including their
+    // draft endpoint. Keep their staged composer state in the browser owner map
+    // so New Chat can leave the view without a guaranteed 400 draft POST.
+    const sourceDraftServerWritable=!(S.session
+      &&typeof _isReadOnlySession==='function'&&_isReadOnlySession(S.session));
     const composerTransition=typeof _beginComposerOwnershipTransition==='function'
-      ? _beginComposerOwnershipTransition(previousSid,previousProfile)
+      ? _beginComposerOwnershipTransition(previousSid,previousProfile,{
+          persistSourceDraft:sourceDraftServerWritable,
+        })
       : null;
     // With no previous owner (the first Send on an empty app), the existing
     // composer already belongs to the destination that is being created.
@@ -2382,7 +2389,7 @@ async function newSession(flash, options={}){
       if(sourceComposerFiles.length&&typeof _composerAddFiles==='function')_composerAddFiles(sourceComposerFiles);
     }
     try{
-      if(previousSid&&typeof _saveComposerDraftNow==='function'){
+      if(previousSid&&sourceDraftServerWritable&&typeof _saveComposerDraftNow==='function'){
         await _saveComposerDraftNow(
           previousSid,
           sourceComposerText,

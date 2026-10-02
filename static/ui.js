@@ -234,13 +234,14 @@ function _composerControlSetDisabledReason(control,reason,active){
   }
 }
 
-function _beginComposerOwnershipTransition(sourceSid,sourceProfile){
+function _beginComposerOwnershipTransition(sourceSid,sourceProfile,options={}){
   const profile=String(sourceProfile||'default').trim()||'default';
   const input=$('msg');
   const token={
     generation:++_composerOwnershipGeneration,
     sourceSid:sourceSid||null,
     sourceProfile:profile,
+    persistSourceDraft:options.persistSourceDraft!==false,
     destinationSid:null,
     destinationProfile:profile,
     revision:0,
@@ -435,7 +436,7 @@ function _composerRemoveFile(file,ownerSid,producerToken,ownerProfile){
 }
 function _persistComposerTransitionSource(token){
   const state=token&&token.sourceState;
-  if(!token||!token.sourceSid||!state||!state.dirty)return;
+  if(!token||!token.sourceSid||!state||!state.dirty||token.persistSourceDraft===false)return;
   if(typeof _saveComposerDraftNow==='function'){
     try{
       Promise.resolve(_saveComposerDraftNow(
@@ -446,7 +447,7 @@ function _persistComposerTransitionSource(token){
 }
 function _persistComposerTransitionAbort(token){
   const state=token&&token.abortState;
-  if(!token||!token.sourceSid||!state||!state.revision)return;
+  if(!token||!token.sourceSid||!state||!state.revision||token.persistSourceDraft===false)return;
   if(typeof _saveComposerDraftNow==='function'){
     try{
       Promise.resolve(_saveComposerDraftNow(
