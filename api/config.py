@@ -116,10 +116,12 @@ PROJECTS_FILE = STATE_DIR / "projects.json"
 
 logger = logging.getLogger(__name__)
 
-# Keep custom provider /v1/models probes below the frontend's generic request
-# timeout even when one upstream is slow or unreachable. The models cache rebuild
-# path probes configured custom endpoints serially, so each provider needs a
-# short hard cap and graceful degradation.
+# Hard cap for custom provider /v1/models probes. The models cache rebuild path
+# probes configured custom endpoints serially, so a dead or hanging provider must
+# not stall the whole rebuild — but the cap also has to clear a healthy catalog
+# that is merely cold: a large catalog can take tens of seconds to enumerate on
+# first fetch while returning in well under a second once warm. 5s tripped those
+# healthy-but-slow responses and surfaced a spurious `models_endpoint_error`.
 CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 30.0
 
 
@@ -10224,7 +10226,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             try:
                                 import urllib.request as _urlreq
                                 req = _urlreq.Request(endpoint, method="GET", headers=headers)
-                                with _urlreq.urlopen(req, timeout=5) as resp:
+                                with _urlreq.urlopen(req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as resp:
                                     lm_data = json.loads(resp.read().decode())
                                 for m in (lm_data.get("data") or []):
                                     if isinstance(m, dict):

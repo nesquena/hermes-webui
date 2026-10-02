@@ -143,7 +143,7 @@ def test_named_custom_provider_models_endpoint_network_error_uses_short_timeout(
     assert group["models"] == []
     assert group["models_endpoint_error"]["kind"] == "network"
     assert observed_timeouts == [config.CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS]
-    assert max(observed_timeouts) <= 5.0
+    assert max(observed_timeouts) <= config.CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
 
 
 def test_frontend_model_picker_renders_provider_endpoint_hint():
