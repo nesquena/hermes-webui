@@ -1420,7 +1420,7 @@ function cmdSkills(args){
       let failedDraftKept=false;
       if(failure&&typeof _stashApprovalTransportFailure==='function'){
         failedDraftKept=!!_stashApprovalTransportFailure(
-          ownerProfile,ownerSid,draftText,draftFiles,commandId
+          ownerProfile,ownerSid,draftText,draftFiles,commandId,String(commandText).trim()
         );
       }
       if(!ownerLifecycleStillValid()){

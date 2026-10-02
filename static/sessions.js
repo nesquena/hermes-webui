@@ -495,10 +495,12 @@ function _rememberApprovalCommandRetry(record){
   if(!record||!record.sid||!record.command_id)return false;
   const normalized={
     profile:String(record.profile||'default'),sid:String(record.sid),
-    text:String(record.text||''),command_id:String(record.command_id),created_at:Date.now(),
+    text:String(record.text||''),command:String(record.command||record.text||''),
+    command_id:String(record.command_id),created_at:Date.now(),
   };
   const records=_readApprovalCommandRetries().filter((item)=>!(
-    item.sid===normalized.sid&&item.profile===normalized.profile&&item.text===normalized.text
+    item.sid===normalized.sid&&item.profile===normalized.profile
+    &&String(item.command||item.text||'')===normalized.command
   ));
   records.push(normalized);
   return _writeApprovalCommandRetries(records);
@@ -509,7 +511,7 @@ function _approvalCommandRetryId(profile,sid,text){
   const commandText=String(text||'');
   const candidates=[..._readApprovalTransportFailures(),..._readApprovalCommandRetries()];
   const record=candidates.slice().reverse().find((item)=>
-    item&&item.sid===String(sid)&&String(item.text||'')===commandText
+    item&&item.sid===String(sid)&&String(item.command||item.text||'')===commandText
     &&_profileMatchesActiveProfile(item.profile,activeProfile)&&item.command_id
   );
   return record?String(record.command_id):null;
@@ -519,15 +521,16 @@ function _clearApprovalCommandRetry(profile,sid,text,commandId){
   const activeProfile=profile||S&&S.activeProfile||'default';
   const matches=(record)=>record&&record.sid===String(sid)
     &&_profileMatchesActiveProfile(record.profile,activeProfile)
-    &&String(record.text||'')===String(text||'')
+    &&String(record.command||record.text||'')===String(text||'')
     &&(!commandId||String(record.command_id||'')===String(commandId));
   _writeApprovalTransportFailures(_readApprovalTransportFailures().filter((record)=>!matches(record)));
   _writeApprovalCommandRetries(_readApprovalCommandRetries().filter((record)=>!matches(record)));
 }
-function _stashApprovalTransportFailure(profile,sid,text,files,commandId){
+function _stashApprovalTransportFailure(profile,sid,text,files,commandId,command){
   if(!sid)return false;
   const record={
     profile:String(profile||'default'),sid:String(sid),text:String(text||''),
+    command:String(command||text||'').trim(),
     files:Array.isArray(files)?files:[],command_id:String(commandId||''),created_at:Date.now(),
   };
   // Keep independent failed commands for the same session. Approval commands
@@ -537,7 +540,7 @@ function _stashApprovalTransportFailure(profile,sid,text,files,commandId){
     item.sid===record.sid&&item.profile===record.profile
     &&(record.command_id
       ? String(item.command_id||'')===record.command_id
-      : !item.command_id&&String(item.text||'')===record.text)
+      : !item.command_id&&String(item.command||item.text||'')===record.command)
   ));
   records.push(record);
   return _writeApprovalTransportFailures(records);
