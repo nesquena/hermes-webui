@@ -568,6 +568,33 @@ console.log(JSON.stringify(placement()));
     assert data["observers"] == 0
 
 
+def test_coarse_pointer_context_menu_uses_visible_row_for_zero_size_anchor():
+    data = _run_picker_cases("""
+const rowRect = {top: 500, bottom: 548, left: 16, right: 374, width: 358, height: 48};
+const visibleRow = {
+  isConnected: true,
+  getBoundingClientRect: () => rowRect,
+};
+anchorEl.closest = selector => selector === '.session-item'
+  ? visibleRow
+  : (selector === '.session-list' ? sessionList : null);
+// Touch-primary CSS hides `.session-actions`; the real row context-menu path
+// still passes it as the project-picker anchor.
+setViewport(620, 390);
+setAnchor({top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0});
+openPicker(260);
+const state = placement();
+const rowGap = state.top >= rowRect.bottom
+  ? state.top - rowRect.bottom
+  : rowRect.top - state.bottom;
+console.log(JSON.stringify({...state, rowGap}));
+""")
+    assert data["removed"] is False
+    assert data["rowGap"] == 4
+    assert data["top"] >= 8
+    assert data["bottom"] <= 612
+
+
 def test_session_list_scroll_repositions_then_closes_at_container_edge():
     data = _run_picker_cases("""
 listRect = {top: 200, bottom: 650, left: 0, right: 500};

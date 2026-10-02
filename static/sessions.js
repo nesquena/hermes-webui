@@ -10122,7 +10122,15 @@ function _showProjectPicker(session, anchorEl){
   // window, opens the on-screen keyboard, or collapses the URL bar.
   const positionPicker=()=>{
     const bounds=viewportBounds();
-    const rect=anchorEl?.getBoundingClientRect();
+    let rect=anchorEl?.getBoundingClientRect();
+    // On touch-primary layouts `.session-actions` is display:none, but a mouse
+    // right-click can still open the row menu and pass that hidden 0x0 element
+    // through "Move to project". Keep the semantic anchor for teardown/click
+    // ownership, while borrowing geometry from its visible owning row.
+    if(rect&&(!rect.width||!rect.height)){
+      const row=anchorEl?.closest?.('.session-item');
+      if(row&&row.isConnected!==false) rect=row.getBoundingClientRect();
+    }
     if(_anchorGone(rect,bounds)){teardown();return;}
     // Apply the horizontal cap BEFORE measuring height, since narrow menus
     // can wrap. Override the CSS minimum as well when zoom leaves <160px.
