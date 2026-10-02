@@ -26,6 +26,11 @@
 
 ### Performance
 
+- **The all-profiles session list no longer computes every profile's skill counts.** Listing
+  sessions across all profiles (`/api/sessions?all_profiles=1`) called the profile-picker builder
+  only to learn the profile names, which also counted every profile's skills. It now adds the
+  active profile, the root profile and one entry per directory under the profiles root directly.
+  The scanned profiles, their labels and the cache key are unchanged. (#7973 by @ybai08, part of #7940)
 - **Reconnect, settle, cancel and undo no longer re-download the whole transcript.** Six recovery
   paths (offline/bfcache refresh, stream-end settle, cancel sync, `/compress` preflight, `/retry` and
   `/undo`) sent a bare `GET /api/session` that re-walked, re-redacted and re-serialized every row. The
@@ -69,6 +74,12 @@
 
 ### Fixed
 
+- **Hermes Desktop files WebUI sessions under their workspace instead of "Home".** The Agent creates the
+  `state.db` row for a WebUI turn but only stamps `cwd` for CLI sources. WebUI now writes the session's
+  workspace into `sessions.cwd` through the Agent's `update_session_cwd` when the workspace changes and at
+  the end of every turn. It only updates an existing row whose source is `webui` (never a CLI-owned row),
+  runs off the request path so a busy `state.db` never delays a turn, and is skipped on Agents without
+  `update_session_cwd`. It does not depend on the `sync_to_insights` setting. (#7918 by @AndreaB321)
 - **Foldables, tablets and narrow windows (641-900px) get a usable layout.** In that band the workspace files toggle
   did nothing (the panel stayed hidden), tapping the toggle while the panel was open could leave it stuck open, and the
   conversation sidebar squeezed the chat. The files panel now opens as a slide-over from the right (300px, the pattern

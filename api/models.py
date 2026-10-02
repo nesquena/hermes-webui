@@ -8375,7 +8375,6 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
             _profiles_root,
             get_active_profile_name,
             get_hermes_home_for_profile,
-            list_profiles_api,
         )
     except Exception:
         return [], ()
@@ -8402,15 +8401,12 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
         _add_context(get_active_profile_name())
     except Exception:
         pass
+    # The root profile, then one home per directory under the named-profile
+    # root. Deliberately not list_profiles_api(): that builds the picker's rows,
+    # skill counts included, and this scan needs only the homes (#7940).
+    _add_context('default')
     try:
-        for row in list_profiles_api():
-            if not isinstance(row, dict):
-                continue
-            _add_context(row.get('name'))
-    except Exception:
-        logger.debug("All-profiles CLI context enumeration failed", exc_info=True)
-    try:
-        for entry in _profiles_root().iterdir():
+        for entry in sorted(_profiles_root().iterdir()):
             if not entry.is_dir():
                 continue
             _add_context(entry.name)
