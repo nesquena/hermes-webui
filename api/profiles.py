@@ -1734,8 +1734,10 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         if not home.is_dir():
             raise ValueError(f"Profile '{name}' does not exist.")
 
+    # The skill-stats cache is deliberately left alone here (#7940). A profile's
+    # counts come from its own config.yaml and SKILL.md files, so which profile
+    # is active changes none of them, and the mtime probe catches real changes.
     with _profile_lock:
-        _SKILLS_STATS_CACHE.clear()
         if process_wide:
             global _active_profile
             _active_profile = name
