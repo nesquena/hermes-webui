@@ -119,6 +119,54 @@ def test_slash_clear_persists_empty_session_after_reload(
     assert persisted["pinned"] is pinned
 
 
+def test_new_chat_after_slash_clear_creates_distinct_session(cleanup_test_sessions):
+    """A durable clear is not reusable as an initial scratch session."""
+    session_id = f"clear_new_chat_{uuid.uuid4().hex}"
+    cleanup_test_sessions.append(session_id)
+    _seed_session(session_id, "history before requesting a new chat")
+
+    pw = _browser_or_skip()
+    with pw.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            page = browser.new_page()
+            _open_session(page, session_id)
+            with page.expect_response(
+                lambda response: response.url.endswith("/api/session/clear")
+                and response.request.method == "POST"
+            ) as clear_response:
+                page.evaluate("executeCommand('/clear')")
+            assert clear_response.value.ok
+            page.wait_for_function(
+                """sid => S.session && S.session.session_id === sid &&
+                S.messages.length === 0""",
+                arg=session_id,
+                timeout=10_000,
+            )
+
+            # Invoke the production New Chat control's DOM handler. The test
+            # server may show onboarding above the sidebar, but that overlay is
+            # unrelated to the session-reuse decision under test.
+            with page.expect_response(
+                lambda response: response.url.endswith("/api/session/new")
+                and response.request.method == "POST"
+            ) as new_session_response:
+                page.evaluate("document.getElementById('btnNewChat').click()")
+            assert new_session_response.value.ok
+            page.wait_for_function(
+                "sid => S.session && S.session.session_id !== sid",
+                arg=session_id,
+                timeout=10_000,
+            )
+            new_session_id = page.evaluate("S.session.session_id")
+        finally:
+            browser.close()
+
+    cleanup_test_sessions.append(new_session_id)
+    assert new_session_id != session_id
+    assert _server_session(session_id)["messages"] == []
+
+
 def test_slash_clear_api_failure_keeps_visible_and_durable_history(cleanup_test_sessions):
     """A failed clear must not make the transcript disappear only locally."""
     session_id = f"clear_browser_failure_{uuid.uuid4().hex}"
@@ -275,8 +323,19 @@ def test_slash_clear_holds_send_lock_until_durable_clear_finishes(cleanup_test_s
                     await window.__releaseDelayedClear();
                     clearReleased = true;
                     await clearing;
-                    document.getElementById('msg').value = 'real follow-up after clear';
-                    await send();
+                    await new Promise((resolve, reject) => {
+                      const deadline = performance.now() + 2000;
+                      const waitForQueuedFollowUp = () => {
+                        if (chatStartCalls === 1) return resolve();
+                        if (performance.now() >= deadline) {
+                          reject(new Error('queued follow-up was not dispatched'));
+                          return;
+                        }
+                        requestAnimationFrame(waitForQueuedFollowUp);
+                      };
+                      waitForQueuedFollowUp();
+                    });
+                    await new Promise(resolve => requestAnimationFrame(resolve));
                     return {
                       inputWasCleared,
                       lockHeld,

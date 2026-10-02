@@ -271,6 +271,34 @@ function shiftQueuedSessionMessage(sid){
 function getQueuedSessionCount(sid){
   return _getSessionQueue(sid,false).length;
 }
+function drainQueuedSessionMessageIfViewed(sid){
+  if(!sid||!S.session||S.session.session_id!==sid) return false;
+  const next=shiftQueuedSessionMessage(sid);
+  if(!next) return false;
+  updateQueueBadge(sid);
+  setTimeout(()=>{
+    // Keep the intent with its owner if the view changed while the UI settled.
+    if(!S.session||S.session.session_id!==sid){
+      queueSessionMessage(sid,next);
+      updateQueueBadge(sid);
+      return;
+    }
+    $('msg').value=next.text||'';
+    S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
+    if(next.model&&S.session&&next.model!==S.session.model){
+      S.session.model=next.model;
+    }
+    if(next.model_provider&&S.session) S.session.model_provider=next.model_provider;
+    if(next.model&&S.session){
+      if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'),S.session.model_provider||null);
+      if(typeof syncModelChip==='function') syncModelChip();
+    }
+    autoResize();
+    renderTray();
+    send();
+  },120);
+  return true;
+}
 function _compressionSessionLock(){
   return window._compressionLockSid||null;
 }
@@ -8811,38 +8839,7 @@ function setBusy(v){
     _queueDrainSid=null;
     updateQueueBadge(sid);
     // Drain one queued message for the finished session after UI settles
-    const _isViewedSid=!S.session||sid===S.session.session_id;
-    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
-    if(next){
-      updateQueueBadge(sid);
-      setTimeout(()=>{
-        // Guard: if the user switched away from the drain session during
-        // the 120ms settle window, the queued message must NOT go to the
-        // wrong chat.  Put it back into the original session's queue and
-        // skip sending — it will drain when the user returns to that session
-        // or when its next stream completes while it is the active view.
-        if(S.session&&S.session.session_id!==sid){
-          queueSessionMessage(sid,next);
-          updateQueueBadge(sid);
-          return;
-        }
-        $('msg').value=next.text||'';
-        S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
-        // Restore model from queued item (sent in /api/chat/start payload)
-        // Note: profile is NOT restored — full profile switch requires server interaction
-        if(next.model&&S.session&&next.model!==S.session.model){
-          S.session.model=next.model;
-        }
-        if(next.model_provider&&S.session) S.session.model_provider=next.model_provider;
-        if(next.model&&S.session){
-          if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'),S.session.model_provider||null);
-          if(typeof syncModelChip==='function') syncModelChip();
-        }
-        autoResize();
-        renderTray();
-        send();
-      },120);
-    }
+    if(sid) drainQueuedSessionMessageIfViewed(sid);
   }
 }
 

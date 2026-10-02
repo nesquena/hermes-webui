@@ -2134,6 +2134,9 @@ window.renderTranscript=function(container, messages, opts){
 })();
 function _currentSessionIsReusableEmptyChat(){
   if(!S.session) return false;
+  // A session made empty by /clear had prior turns and must remain distinct
+  // from a never-used scratch chat when the user explicitly selects New Chat.
+  if(S.session.clear_generation) return false;
   const hasVisibleMessages=Array.isArray(S.messages)
     && S.messages.some(m=>m&&m.role&&m.role!=='tool');
   return (S.session.message_count||0)===0

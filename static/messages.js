@@ -1405,6 +1405,7 @@ async function send(){
     return;
   }
   _sendInProgress = true;
+  let _queuedDrainAfterClearSid=null;
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
@@ -1516,6 +1517,7 @@ async function send(){
     const _parsedCmd=parseCommand(text);
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
+      const _commandSid=S.session&&S.session.session_id;
       let _pushedUser=false;
       if(!_cmd.noEcho){
         if(!S.session){await newSession();await renderSessionList();}
@@ -1535,7 +1537,11 @@ async function send(){
         // Clear immediately, but retain the send lock until an asynchronous
         // command such as /clear has finished its durable server mutation.
         $('msg').value='';autoResize();hideCmdDropdown();
+        if(_cmd.name==='clear'&&_commandSid) _sendInProgressSid=_commandSid;
         await _commandResult;
+        if(_cmd.name==='clear'&&S.session&&S.session.session_id===_commandSid){
+          _queuedDrainAfterClearSid=_commandSid;
+        }
         return;
       }
     }
@@ -1992,7 +1998,13 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{
+    _sendInProgress=false;
+    _sendInProgressSid=null;
+    if(_queuedDrainAfterClearSid&&typeof drainQueuedSessionMessageIfViewed==='function'){
+      drainQueuedSessionMessageIfViewed(_queuedDrainAfterClearSid);
+    }
+  }
 }
 
 async function startRegeneration(sessionId, regenerationRevision){
