@@ -145,7 +145,7 @@ class TestDeleteFlowSource:
         assert '_restoreRememberedNewChatDraftSession' in fn, (
             "the helper must reuse the remembered empty New Chat draft when one exists"
         )
-        assert 'newSession(false)' in fn, (
+        assert 'newSession(false,{' in fn, (
             "the helper must start a fresh session when no draft is remembered"
         )
         assert '_profileSwitchWorkspace' in fn, (
@@ -172,6 +172,7 @@ global.sessionStorage = {
   removeItem: k => { _store.delete('s:' + k); },
 };
 global.window = {};
+global.history = { replaceState() {} };
 
 // minimal DOM + batch-action-bar doubles for the batch-delete route
 const _barChildren = [];
@@ -192,10 +193,13 @@ const out = {
   toasts: [],
   renderListCalls: 0,
   rememberedKeyAfter: null,
+  newSessionOptions: null,
 };
 
 // ---- stubs the extracted deleteSession references ----
 var _pendingSessionReflowPositions = null;
+var _loadSessionGeneration = 0;
+var _profileSwitchGeneration = 0;
 var _allSessions = [];
 const _optimisticallyRemovedSessionIds = new Set();
 const t = k => k;
@@ -203,6 +207,7 @@ const showToast = m => { out.toasts.push(String(m)); };
 const setStatus = () => {};
 const assistantDisplayName = () => 'Hermes';
 const syncAppTitlebar = () => {};
+const _appRootPath = () => '/';
 const $ = id => (id === 'batchActionBar' ? _bar : null);
 const renderSessionListFromCache = () => {};
 const renderSessionList = async () => { out.renderListCalls += 1; };
@@ -220,9 +225,15 @@ const _worktreeSessionCount = () => 0;
 const _worktreeResponseCount = () => 0;
 const exitSessionSelectMode = () => {};
 
+let releaseDraft = null;
 async function api(url) {
   if (url === '/api/session/delete') { out.deleteCalls += 1; return {}; }
-  if (url.indexOf('/api/session?') === 0) { return { session: global.__draftSession }; }
+  if (url.indexOf('/api/session?') === 0) {
+    if (scenario === 'flag_on_delayed_draft_navigate_b' || scenario === 'flag_on_delayed_draft_switch_profile') {
+      return await new Promise(resolve => { releaseDraft = () => resolve({session: global.__draftSession}); });
+    }
+    return { session: global.__draftSession };
+  }
   if (url.indexOf('/api/sessions') === 0) {
     out.sessionsFetchCalls += 1;
     return { sessions: [{ session_id: 'remaining-1' }] };
@@ -237,6 +248,8 @@ const DRAFT_SCEN = {
   flag_on_draft_same_ws: '/ws/A',
   batch_flag_on_draft_other_ws: '/ws/B',
   batch_flag_on_draft_same_ws: '/ws/A',
+  flag_on_delayed_draft_navigate_b: '/ws/A',
+  flag_on_delayed_draft_switch_profile: '/ws/A',
 };
 var _draftRestorable = { value: scenario === 'flag_on_draft_restored' };
 var _restoreRememberedNewChatDraftSession;
@@ -249,9 +262,17 @@ if (DRAFT_SCEN[scenario]) {
     return _draftRestorable.value;
   };
 }
-async function newSession(flash) {
+async function newSession(flash, options = {}) {
   out.newSessionCalls += 1;
   out.workspaceFlagAtNewSession = S._profileSwitchWorkspace || null;
+  out.newSessionOptions = {
+    preserveRememberedDraftPointer: !!options.preserveRememberedDraftPointer,
+    hasOwnerGuard: typeof options.stillOwnsPane === 'function',
+  };
+  if (scenario === 'flag_on_new_session_failure') throw new Error('create failed');
+  if (!options.preserveRememberedDraftPointer) {
+    _store.set(NEW_CHAT_DRAFT_SESSION_KEY, 'created-in-A');
+  }
 }
 
 // ---- state ----
@@ -271,6 +292,9 @@ const FLAGS = {
   flag_on_draft_same_ws: true,
   batch_flag_on_draft_other_ws: true,
   batch_flag_on_draft_same_ws: true,
+  flag_on_delayed_draft_navigate_b: true,
+  flag_on_delayed_draft_switch_profile: true,
+  flag_on_new_session_failure: true,
 };
 window._newChatOnSessionDelete = FLAGS[scenario];
 const deleteTarget = scenario === 'flag_on_other_deleted' ? 'B' : 'A';
@@ -292,7 +316,13 @@ function extractFunc(name) {
 }
 // The shared new-chat helper only exists after the feature lands; DELETE against
 // the pre-feature source must fail on the scenario ASSERTIONS, not extraction.
-try { eval(extractFunc('_startNewChatAfterDeletingCurrentSession')); } catch (e) {}
+try {
+  eval(extractFunc('_deleteNewChatProfileGeneration'));
+  eval(extractFunc('_deleteNewChatOwnerSnapshot'));
+  eval(extractFunc('_deleteNewChatOwnerIsCurrent'));
+  eval(extractFunc('_showEmptyConversationAfterDelete'));
+  eval(extractFunc('_startNewChatAfterDeletingCurrentSession'));
+} catch (e) {}
 eval(extractFunc('deleteSession'));
 if (DRAFT_SCEN[scenario]) {
   eval(extractFunc('_profileMatchesActiveProfile'));
@@ -303,7 +333,19 @@ if (DRAFT_SCEN[scenario]) {
 if (isBatch) eval(extractFunc('_renderBatchActionBar'));
 
 (async () => {
-  if (isBatch) {
+  if (scenario === 'flag_on_delayed_draft_navigate_b' || scenario === 'flag_on_delayed_draft_switch_profile') {
+    const pending = deleteSession(deleteTarget);
+    while (!releaseDraft) await new Promise(resolve => setTimeout(resolve, 0));
+    if (scenario === 'flag_on_delayed_draft_navigate_b') {
+      _loadSessionGeneration += 1;
+      S.session = {session_id: 'B', workspace: '/ws/B'};
+    } else {
+      _profileSwitchGeneration += 1;
+      S.activeProfile = 'beta';
+    }
+    releaseDraft();
+    await pending;
+  } else if (isBatch) {
     _selectedSessions.add('A');
     _renderBatchActionBar();
     const deleteBtn = _barChildren.filter(c => c.className && c.className.indexOf('batch-action-btn-danger') !== -1)[0];
@@ -421,6 +463,10 @@ class TestDraftWorkspaceAwareness:
         assert out["rememberedKeyAfter"] == "remembered-1", (
             "the workspace-mismatched draft must stay remembered for the ordinary New Chat flow"
         )
+        assert out["newSessionOptions"] == {
+            "preserveRememberedDraftPointer": True,
+            "hasOwnerGuard": True,
+        }
 
     def test_delete_open_session_restores_draft_from_same_workspace(self, driver_path):
         out = _run_scenario(driver_path, "flag_on_draft_same_ws")
@@ -442,3 +488,23 @@ class TestDraftWorkspaceAwareness:
         out = _run_scenario(driver_path, "batch_flag_on_draft_same_ws")
         assert out["loadSessionArgs"] == ["remembered-1"]
         assert out["newSessionCalls"] == 0
+
+    def test_pending_draft_lookup_cannot_steal_newer_navigation(self, driver_path):
+        out = _run_scenario(driver_path, "flag_on_delayed_draft_navigate_b")
+        assert out["loadSessionArgs"] == []
+        assert out["newSessionCalls"] == 0
+        assert out["rememberedKeyAfter"] == "remembered-1"
+
+    def test_pending_draft_lookup_cannot_steal_newer_profile_switch(self, driver_path):
+        out = _run_scenario(driver_path, "flag_on_delayed_draft_switch_profile")
+        assert out["loadSessionArgs"] == []
+        assert out["newSessionCalls"] == 0
+        assert out["rememberedKeyAfter"] == "remembered-1"
+
+    def test_new_session_failure_does_not_report_delete_as_failed(self, driver_path):
+        out = _run_scenario(driver_path, "flag_on_new_session_failure")
+        assert out["deleteCalls"] == 1
+        assert out["newSessionCalls"] == 1
+        assert any("session_deleted" in item for item in out["toasts"])
+        assert any("starting a new chat failed" in item for item in out["toasts"])
+        assert not any(item == "Delete failed: create failed" for item in out["toasts"])

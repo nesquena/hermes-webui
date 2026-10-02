@@ -198,12 +198,13 @@ function _adoptRegenerationRevision(sessionPayload){
   }
 }
 
-async function _restoreRememberedNewChatDraftSession(requiredWorkspace=null) {
+async function _restoreRememberedNewChatDraftSession(requiredWorkspace=null, stillOwnsPane=null) {
   let sid = '';
   try { sid = localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) || ''; } catch (_) { sid = ''; }
   if (!sid || (S.session && S.session.session_id === sid)) return false;
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    if (stillOwnsPane && !stillOwnsPane()) return false;
     const session = data && data.session;
     if (!_isRestorableNewChatDraftSession(session, true)) {
       _clearRememberedNewChatDraftSession(sid);
@@ -215,9 +216,11 @@ async function _restoreRememberedNewChatDraftSession(requiredWorkspace=null) {
     // the ordinary New Chat flow, and the caller continues on its own (e.g.
     // starts a fresh chat in the deleted workspace).
     if (requiredWorkspace && session.workspace !== requiredWorkspace) return false;
+    if (stillOwnsPane && !stillOwnsPane()) return false;
     await loadSession(sid, {skipLineageResolve:true});
     return !!(S.session && S.session.session_id === sid);
   } catch (_) {
+    if (stillOwnsPane && !stillOwnsPane()) return false;
     _clearRememberedNewChatDraftSession(sid);
     return false;
   }
@@ -1954,6 +1957,8 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    const stillOwnsPane=(options&&typeof options.stillOwnsPane==='function')?options.stillOwnsPane:null;
+    if(stillOwnsPane&&!stillOwnsPane()) return {superseded:true};
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -2057,6 +2062,10 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    // A delete-owned New Chat can settle after the user has already opened a
+    // different session/profile. Keep the server-created empty session off
+    // screen instead of letting an older POST response reclaim the pane/URL.
+    if(stillOwnsPane&&!stillOwnsPane()) return {superseded:true,session:data&&data.session};
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -2065,7 +2074,7 @@ async function newSession(flash, options={}){
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
-    if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
+    if(!(options&&options.worktree)&&!(options&&options.preserveRememberedDraftPointer)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
@@ -4919,6 +4928,7 @@ function _renderBatchActionBar(){
     });
     if(!ok)return;
     try{
+      let newChatAfterDeleteResult=null;
       const results=await Promise.all(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
         return {response,session:sessionsById.get(sid)||null};
@@ -4928,10 +4938,11 @@ function _renderBatchActionBar(){
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         const _deletedWorkspace=(S.session&&S.session.workspace)||null;
+        const _deleteNewChatOwner=_deleteNewChatOwnerSnapshot();
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         if(window._newChatOnSessionDelete===true){
-          await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace);
+          newChatAfterDeleteResult=await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace,_deleteNewChatOwner);
         }else{
           const remaining=await api('/api/sessions'+_sessionListQueryString());
           if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
@@ -4940,6 +4951,10 @@ function _renderBatchActionBar(){
       }
       if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+      if(newChatAfterDeleteResult&&newChatAfterDeleteResult.error){
+        const error=newChatAfterDeleteResult.error;
+        showToast('Conversations deleted, but starting a new chat failed: '+(error&&error.message||error),0,'error');
+      }
       exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
@@ -9808,11 +9823,60 @@ async function removeWorktree(session){
 // but only when that draft belongs to the deleted conversation's workspace;
 // otherwise ask newSession() for a fresh chat in that workspace so the user
 // stays where they were working.
-async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace){
+function _deleteNewChatProfileGeneration(){
+  try{return typeof _profileSwitchGeneration==='number'?_profileSwitchGeneration:0;}
+  catch(_){return 0;}
+}
+
+function _deleteNewChatOwnerSnapshot(){
+  return {
+    loadGeneration:_loadSessionGeneration,
+    profileGeneration:_deleteNewChatProfileGeneration(),
+    activeProfile:(S.activeProfile||'default'),
+  };
+}
+
+function _deleteNewChatOwnerIsCurrent(owner){
+  if(!owner) return true;
+  return !S.session
+    && _loadSessionGeneration===owner.loadGeneration
+    && _deleteNewChatProfileGeneration()===owner.profileGeneration
+    && (S.activeProfile||'default')===owner.activeProfile;
+}
+
+function _showEmptyConversationAfterDelete(){
+  S.session=null;S.messages=[];S.entries=[];
+  try{localStorage.removeItem('hermes-webui-session');}catch(_){}
+  try{if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());}catch(_){}
+  const title=$('topbarTitle');if(title)title.textContent=assistantDisplayName();
+  const meta=$('topbarMeta');if(meta)meta.textContent='Start a new conversation';
+  const messages=$('msgInner');if(messages)messages.innerHTML='';
+  const empty=$('emptyState');if(empty)empty.style.display='';
+  const tree=$('fileTree');if(tree)tree.innerHTML='';
+  if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+}
+
+async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=null){
+  const stillOwnsPane=()=>_deleteNewChatOwnerIsCurrent(owner);
   if(typeof _restoreRememberedNewChatDraftSession==='function'
-     && await _restoreRememberedNewChatDraftSession(deletedWorkspace)) return;
+     && await _restoreRememberedNewChatDraftSession(deletedWorkspace,stillOwnsPane)) return {restored:true};
+  if(!stillOwnsPane()) return {superseded:true};
+  let rememberedDraftSid='';
+  try{rememberedDraftSid=localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY)||'';}catch(_){}
   if(deletedWorkspace) S._profileSwitchWorkspace=deletedWorkspace;
-  await newSession(false);
+  try{
+    const result=await newSession(false,{
+      stillOwnsPane,
+      preserveRememberedDraftPointer:!!rememberedDraftSid,
+    });
+    return result&&result.superseded?{superseded:true}:{created:true};
+  }catch(error){
+    if(stillOwnsPane()){
+      S._profileSwitchWorkspace=null;
+      _showEmptyConversationAfterDelete();
+    }
+    return {error};
+  }
 }
 
 async function deleteSession(sid, beforeDelete=null){
@@ -9852,6 +9916,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   const response=deleteResult&&deleteResult.response;
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
+  let newChatAfterDeleteResult=null;
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
@@ -9861,13 +9926,14 @@ async function deleteSession(sid, beforeDelete=null){
     // Keep the deleted conversation's workspace so the opt-in new chat below
     // stays where the user was working.
     const _deletedWorkspace=(S.session&&S.session.workspace)||(session&&session.workspace)||null;
+    const _deleteNewChatOwner=_deleteNewChatOwnerSnapshot();
     S.session=null;S.messages=[];S.entries=[];
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
     if(window._newChatOnSessionDelete===true){
       // Opt-in (default off): start a new chat instead of loading the most
       // recent remaining session.
-      await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace);
+      newChatAfterDeleteResult=await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace,_deleteNewChatOwner);
     }else{
       // load the most recent remaining session, or show blank if none left
       const remaining=await api('/api/sessions'+_sessionListQueryString());
@@ -9886,6 +9952,10 @@ async function deleteSession(sid, beforeDelete=null){
   }
   if(cleanupFailed) showToast(t('delete_failed'),0,'error');
   else showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
+  if(newChatAfterDeleteResult&&newChatAfterDeleteResult.error){
+    const error=newChatAfterDeleteResult.error;
+    showToast('Conversation deleted, but starting a new chat failed: '+(error&&error.message||error),0,'error');
+  }
   if(optimisticRendered) void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(sid));
   else await renderSessionList();
   return !cleanupFailed;
