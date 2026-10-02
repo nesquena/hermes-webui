@@ -58,15 +58,16 @@ function extractFunc(src, name){
   while (depth > 0 && i < src.length){ if(src[i]==='{')depth++; else if(src[i]==='}')depth--; i++; }
   return src.slice(start, i);
 }
-function _getOptionProviderId(opt){
-  if(!opt) return '';
-  if(opt.dataset && opt.dataset.provider) return opt.dataset.provider;
-  const group = opt.parentElement;
-  if(group && group.tagName==='OPTGROUP' && group.dataset && group.dataset.provider) return group.dataset.provider;
-  const value = String(opt.value||'');
-  if(value.startsWith('@') && value.includes(':')) return value.slice(1, value.lastIndexOf(':'));
-  return '';
+function extractConst(src, name){
+  const m = src.match(new RegExp('^(?:const|let)\\s+' + name + '=.*$', 'm'));
+  if (!m) throw new Error(name + ' not found');
+  return m[0].replace(/^(?:const|let)\s+/, 'var ');
 }
+eval(extractConst(ui, '_PY_WS_CLASS'));
+eval(extractConst(ui, '_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConst(ui, '_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval('var _dynamicProviderIds={}');
+for(const name of ['_customSlugIsEndpointAuthority','_parseQualifiedCustomId','_optionDeclaredProviderId','_getOptionProviderId']) eval(extractFunc(ui, name));
 eval(extractFunc(ui, '_findModelInDropdown'));
 const args = JSON.parse(process.argv[3]);
 const sel = { options: args.options.map(v => ({value: v})) };
@@ -181,9 +182,33 @@ for(const name of [
   '_buildModelCandidates', '_resolveModelAliasTarget', '_looksLikeVersionedModel',
   '_bestModelMatch', '_nearestModelSuggestion'
 ]) eval(extractFunc(cmds, name));
+// The REAL production dependency chain of the picker identity helpers (see
+// test_issue1228/test_model_alias_routes for the settled list).
+// _getOptionProviderId delegates to _optionDeclaredProviderId and, for
+// @custom: values, to _parseQualifiedCustomId (slug regex consts +
+// _dynamicProviderIds); _modelStateForSelect/_ensureModelOptionInDropdown
+// traverse the authority chain and persistence. Extracting only the four
+// entry functions made this harness ReferenceError on every CI shard once
+// ui.js carried no typeof accommodations. _applyModelToDropdown stays the
+// driver's null stub on purpose: it forces the temporary-option path.
+function extractConst(src, name){
+  const m = src.match(new RegExp('^(?:const|let)\\s+' + name + '=.*$', 'm'));
+  if (!m) throw new Error(name + ' not found');
+  return m[0].replace(/^(?:const|let)\s+/, 'var ');
+}
+eval(extractConst(ui, '_PY_WS_CLASS'));
+eval(extractConst(ui, '_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConst(ui, '_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval('var _dynamicProviderIds={}');
+const MODEL_STATE_KEY='hermes-webui-model-state';
+const _stateStore=new Map();
+const localStorage={getItem(k){return _stateStore.has(k)?_stateStore.get(k):null;},setItem(k,v){_stateStore.set(k,String(v));},removeItem(k){_stateStore.delete(k);}};
 for(const name of [
-  '_providerFromModelValue', '_getOptionProviderId', '_modelStateForSelect',
-  '_ensureModelOptionInDropdown'
+  '_customSlugIsEndpointAuthority', '_parseQualifiedCustomId', '_optionDeclaredProviderId',
+  '_dynamicProviderAuthorityForQualifiedCustomId', '_qualifiedCustomIdNeedsBackendAuthority',
+  '_getOptionProviderId', '_providerFromModelValue', '_storedModelProvider',
+  '_clientProviderAuthorityForModel', '_readPersistedModelState', '_persistedProviderAuthorityForModel',
+  '_modelStateForSelect', '_ensureModelOptionInDropdown'
 ]) eval(extractFunc(ui, name));
 eval('async '+extractFunc(cmds, 'cmdModel'));
 const args = JSON.parse(process.argv[4]);
