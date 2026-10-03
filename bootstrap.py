@@ -18,7 +18,18 @@ import venv
 import webbrowser
 from pathlib import Path
 
+# Single definition of the Agent's lazy-install bridge variable. bootstrap.py
+# never exports it to the server it launches: the Agent import boundaries own
+# that override (managed_agent_startup.agent_import_boundary), so a launched
+# server keeps the operator's own environment.
+from managed_agent_startup import LAZY_INSTALL_GUARD
 
+# hermes-agent's hermes_bootstrap.py intercepts the process when a lazy
+# install/update is pending and os.execv's it into an isolated Python 3.14
+# sandbox via venv_sync.relaunch_command. That sandbox lacks the Web UI
+# dependencies (e.g. yaml), so a capability probe run inside it would report
+# the interpreter as unusable. Guard the probe interpreter only -- the value is
+# passed to that child and never lands in os.environ.
 INSTALLER_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -256,6 +267,7 @@ def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = No
         "try:\n    import yaml\nexcept ImportError:\n    import ruamel.yaml\n"
     )
     env = os.environ.copy()
+    env[LAZY_INSTALL_GUARD] = "1"
     if agent_dir:
         # PREPEND agent_dir to PYTHONPATH so an `agent_dir/run_agent.py` wins
         # over any stale `run_agent` package in system site-packages (sys.path

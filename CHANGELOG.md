@@ -84,6 +84,15 @@
 
 ### Fixed
 
+- **The lazy-install escape hatch no longer outlives WebUI startup.** `HERMES_DISABLE_LAZY_INSTALLS`
+  used to be set process-wide by `bootstrap.py`, so the long-lived server kept the Agent's
+  lazy-install interception disabled and `security.allow_lazy_installs` was ignored for every later
+  request. The override is now scoped to the two Agent import boundaries that must not relaunch the
+  process (startup `activate_managed_agent()` and the first-chat `run_agent` import), and the
+  operator's own value -- set, unset or `0` -- is restored as soon as the import returns.
+  `bootstrap.py` no longer exports it to the server it launches; its capability probe still passes
+  it to the probe interpreter only. (#7982)
+
 - **Clarify questions work with Agents that pass the batch as `questions=`.** Some Hermes Agent builds call the
   WebUI clarify callback as `callback("", None, questions=[...])` instead of `callback([...])`. The adapter only
   recognised the positional form, so it showed an empty single question and returned a plain string the Agent

@@ -26,6 +26,7 @@ from api.config import (
     _DEFAULT_STATE_HOME,
 )
 from api.subprocess_utils import windows_hide_flags
+from managed_agent_startup import agent_import_boundary
 
 _RESTART_REQUIRED_MESSAGE = (
     "Hermes Agent was updated while Hermes WebUI was running. "
@@ -425,7 +426,12 @@ def ensure_agent_runtime_current() -> None:
 def require_ai_agent_class():
     """Import ``AIAgent`` after proving the loaded source revision is current."""
     ensure_agent_runtime_current()
-    from run_agent import AIAgent  # noqa: PLC0415
+    # First-chat boundary: run_agent imports hermes_bootstrap, whose launch
+    # layer would relaunch this long-lived server into its sandbox (no WebUI
+    # dependencies -> ModuleNotFoundError). The override covers the import
+    # only, so the running app still honours security.allow_lazy_installs.
+    with agent_import_boundary():
+        from run_agent import AIAgent  # noqa: PLC0415
 
     _capture_loaded_agent_revision()
     return AIAgent
