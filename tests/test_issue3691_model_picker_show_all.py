@@ -259,11 +259,40 @@ function makeNode(tag) {
     _listeners: {},
     _innerHTML: '',
     appendChild(child) {
+      const previousParent = child.parentElement;
+      if (previousParent && previousParent !== this) {
+        previousParent.children = previousParent.children.filter(item => item !== child);
+      }
       child.parentElement = this;
+      child.parentNode = this;
       this.children.push(child);
       if (this.tagName === 'OPTGROUP' && this._ownerSelect && child.tagName === 'OPTION') {
-        this._ownerSelect.options.push(child);
+        if (!this._ownerSelect.options.includes(child)) this._ownerSelect.options.push(child);
+        child._ownerSelect = this._ownerSelect;
+        if (!Object.getOwnPropertyDescriptor(child, 'selected')) {
+          Object.defineProperty(child, 'selected', {
+            get() { return this._ownerSelect._selectedOption === this; },
+            set(value) { if (value) this._ownerSelect._selectedOption = this; },
+          });
+        }
+      } else if (this.tagName === 'SELECT' && child.tagName === 'OPTION') {
+        if (!this.options.includes(child)) this.options.push(child);
+        child._ownerSelect = this;
+        if (!Object.getOwnPropertyDescriptor(child, 'selected')) {
+          Object.defineProperty(child, 'selected', {
+            get() { return this._ownerSelect._selectedOption === this; },
+            set(value) { if (value) this._ownerSelect._selectedOption = this; },
+          });
+        }
       }
+      return child;
+    },
+    removeChild(child) {
+      this.children = this.children.filter(item => item !== child);
+      const owner = this.tagName === 'OPTGROUP' ? this._ownerSelect : this;
+      if (owner && owner.options) owner.options = owner.options.filter(item => item !== child);
+      child.parentElement = null;
+      child.parentNode = null;
       return child;
     },
     addEventListener(type, handler) { this._listeners[type] = handler; },
@@ -308,7 +337,19 @@ function makeOption(value, label, parent) {
 }
 
 function makeSelect(groups, selectedValue) {
-  const sel = { id: 'modelSelect', children: [], options: [], value: selectedValue || '' };
+  const sel = makeNode('select');
+  sel.id = 'modelSelect';
+  sel.options = [];
+  sel.querySelectorAll = selector => selector === 'optgroup'
+    ? sel.children.filter(child => child.tagName === 'OPTGROUP')
+    : selector === 'option' ? sel.options : [];
+  Object.defineProperty(sel, 'value', {
+    get() { return sel._selectedOption ? sel._selectedOption.value : ''; },
+    set(value) { sel._selectedOption = sel.options.find(option => option.value === String(value || '')) || null; },
+  });
+  Object.defineProperty(sel, 'selectedOptions', {
+    get() { return sel._selectedOption ? [sel._selectedOption] : []; },
+  });
   for (const group of groups || []) {
     const og = makeNode('optgroup');
     og.label = group.provider || '';
@@ -318,9 +359,9 @@ function makeSelect(groups, selectedValue) {
     for (const model of group.models || []) {
       og.appendChild(makeOption(model.id, model.label || model.id, og));
     }
-    sel.children.push(og);
-    sel.options.push(...og.children);
+    sel.appendChild(og);
   }
+  sel.value = selectedValue || '';
   return sel;
 }
 
@@ -329,14 +370,18 @@ function snapshot(dd) {
   // now live inside `.model-group-body` wrappers rather than as direct children
   // of the dropdown, so a flat children map would miss them.
   const out = [];
-  const walk = (node) => {
+  const walk = (node, groupKey = '') => {
     for (const child of (node.children || [])) {
+      const childGroupKey = child.classList && child.classList.contains('model-group-body')
+        ? String(child.dataset.group || '')
+        : (!groupKey && child.classList && child.classList.contains('model-opt') ? '__ungrouped__' : groupKey);
       out.push({
         className: child.className,
         textContent: child.textContent,
         html: child._innerHTML || '',
+        groupKey: childGroupKey,
       });
-      if (child.children && child.children.length) walk(child);
+      if (child.children && child.children.length) walk(child, childGroupKey);
     }
   };
   walk(dd);
@@ -364,32 +409,75 @@ function $(id) {
   if (id === 'modelSelect') return modelSelect;
   return null;
 }
-const window = { _configuredModelBadges: payload.configuredBadges || {} };
+const window = { _configuredModelBadges: payload.configuredBadges || {}, _activeProvider: payload.activeProvider || '' };
 const document = { createElement(tag) { return makeNode(tag); } };
+const _dynamicModelLabels = {};
+const S = { session: null };
 function esc(v) { return String(v || ''); }
 function t(key, ...args) {
   if (key === 'model_show_all_models') return `Show all ${args[0]} models`;
   return key;
 }
 function li() { return 'x'; }
-function getModelLabel(v) { return String(v || ''); }
-function _providerFromModelValue(v) {
+function getModelLabel(v) {
   const value = String(v || '');
-  if (value.startsWith('@') && value.includes(':')) return value.slice(1, value.lastIndexOf(':'));
-  return '';
+  for (const group of payload.groups || []) {
+    const prefix = `@${group.provider_id}:`;
+    const modelId = value.toLowerCase().startsWith(prefix.toLowerCase()) ? value.slice(prefix.length) : value;
+    const model = [...(group.models || []), ...(group.extra_models || [])].find(item => item.id === modelId);
+    if (model) return model.label || value;
+  }
+  return value;
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
+function syncModelChip() {}
+function _refreshOpenModelDropdown() {}
 
 for (const name of [
+  '_getOptionProviderId',
+  '_providerFromModelValue',
+  '_modelPickerOptionIdentity',
+  '_deduplicateModelPickerOptions',
+  '_modelStateForSelect',
+  '_findModelInDropdown',
+  '_applyModelToDropdown',
+  '_ensureModelOptionInDropdown',
+  '_addLiveModelsToSelect',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {
   eval(extractFunc(name));
+}
+
+let restoration = null;
+if (payload.restoreModel) {
+  const firstRestore = _ensureModelOptionInDropdown(payload.restoreModel, modelSelect, payload.restoreProvider);
+  const secondRestore = _ensureModelOptionInDropdown(payload.restoreModel, modelSelect, payload.restoreProvider);
+  restoration = {
+    firstRestore,
+    secondRestore,
+    selectedValue: modelSelect.value,
+    selectedState: _modelStateForSelect(modelSelect, modelSelect.value),
+    selectedProvider: _getOptionProviderId(modelSelect.selectedOptions[0]),
+    options: modelSelect.options.map(option => ({value: option.value, provider: _getOptionProviderId(option)})),
+  };
+}
+let liveMerge = null;
+if (Array.isArray(payload.liveModels)) {
+  const provider = payload.liveProvider || payload.restoreProvider || 'openrouter';
+  const firstAdded = _addLiveModelsToSelect(provider, payload.liveModels, modelSelect);
+  const secondAdded = _addLiveModelsToSelect(provider, payload.liveModels, modelSelect);
+  liveMerge = {
+    firstAdded,
+    secondAdded,
+    selectedValue: modelSelect.value,
+    options: modelSelect.options.map(option => ({value: option.value, provider: _getOptionProviderId(option)})),
+  };
 }
 
 renderModelDropdown();
@@ -406,11 +494,18 @@ const searchInputAfterExpand = dropdown.children[1].querySelector('.model-search
 searchInputAfterExpand.value = '';
 searchInputAfterExpand._listeners.input();
 const expanded = snapshot(dropdown);
+const expandedSearchInput = dropdown.children[1].querySelector('.model-search-input');
+expandedSearchInput.value = payload.searchTerm;
+expandedSearchInput._listeners.input();
+const searchedAfterExpand = snapshot(dropdown);
 
 process.stdout.write(JSON.stringify({
   initial,
   searched,
   expanded,
+  searchedAfterExpand,
+  restoration,
+  liveMerge,
   optionCountAfterExpand: modelSelect.children[0].children.length,
   hiddenDatasetAfterExpand: modelSelect.children[0].dataset.extraModels || '',
 }));
@@ -1431,6 +1526,198 @@ def test_runtime_picker_shows_generic_expander_and_searches_hidden_overflow(_dro
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    "selected_model,sibling_model",
+    [
+        ("nex-agi/nex-n2.5-pro:free", "nex.agi/nex.n2.5.pro:free"),
+        ("nex.agi/nex.n2.5.pro:free", "nex-agi/nex-n2.5-pro:free"),
+    ],
+)
+def test_repeated_openrouter_colon_overflow_restoration_renders_one_routed_row(
+    _dropdown_driver_path, selected_model, sibling_model,
+):
+    payload = {
+        "groups": [
+            {
+                "provider": "OpenRouter",
+                "provider_id": "openrouter",
+                "models": [{"id": "openrouter/visible", "label": "Visible"}],
+                "extra_models": [
+                    {"id": "nex-agi/nex-n2.5-pro:free", "label": "Nex N2.5 Pro Free"},
+                    {"id": "nex.agi/nex.n2.5.pro:free", "label": "Nex dotted N2.5 Pro Free"},
+                    {"id": "nex-agi/nex-n2.5-pro:thinking", "label": "Nex N2.5 Pro Thinking"},
+                ],
+            },
+            {
+                "provider": "Backup",
+                "provider_id": "custom:backup",
+                "models": [{"id": selected_model, "label": "Backup Nex N2.5 Pro Free"}],
+            },
+        ],
+        "selectedValue": "openrouter/visible",
+        "restoreModel": f"@openrouter:{selected_model}",
+        "restoreProvider": "openrouter",
+        "searchTerm": "nex",
+    }
+    out = _run_dropdown_driver(_dropdown_driver_path, payload)
+
+    assert out["restoration"]["firstRestore"] == selected_model, (
+        f"First restoration must prefer exact overflow ID {selected_model}; got {out['restoration']['firstRestore']!r}."
+    )
+    assert out["restoration"]["secondRestore"] == selected_model, (
+        f"Repeated restoration must keep exact overflow ID {selected_model}; got {out['restoration']['secondRestore']!r}."
+    )
+    assert out["restoration"]["selectedState"] == {
+        "model": selected_model,
+        "model_provider": "openrouter",
+    }
+    assert out["restoration"]["selectedProvider"] == "openrouter"
+    assert out["restoration"]["selectedValue"] == selected_model
+    for value, provider in ((selected_model, "openrouter"), (selected_model, "custom:backup")):
+        assert out["restoration"]["options"].count({"value": value, "provider": provider}) == 1
+
+    for phase in ("searched", "searchedAfterExpand"):
+        rows = [
+            row for row in out[phase]
+            if "model-opt" in row["className"].split() and selected_model in row["html"]
+            and row["groupKey"] in {"openrouter", "__ungrouped__"}
+        ]
+        assert len(rows) == 1, (
+            f"{phase} should render one selectable row for the restored OpenRouter model; "
+            f"rendered {len(rows)} rows: {[row['groupKey'] for row in rows]}"
+        )
+        assert rows[0]["groupKey"] == "openrouter"
+        assert "active" in rows[0]["className"].split()
+        assert "model-opt-badge--selected" in rows[0]["html"]
+        sibling_rows = [
+            row for row in out[phase]
+            if "model-opt" in row["className"].split() and sibling_model in row["html"]
+            and row["groupKey"] == "openrouter"
+        ]
+        assert len(sibling_rows) == 1, "The punctuation-distinct model is distinct and must remain selectable."
+        assert "active" not in sibling_rows[0]["className"].split(), (
+            f"{phase} must not mark OpenRouter sibling {sibling_model!r} active when "
+            f"{selected_model!r} is selected; got {sibling_rows[0]['className']!r}."
+        )
+        assert "model-opt-badge--selected" not in sibling_rows[0]["html"]
+        backup_rows = [
+            row for row in out[phase]
+            if "model-opt" in row["className"].split() and selected_model in row["html"]
+            and row["groupKey"] == "custom:backup"
+        ]
+        assert len(backup_rows) == 1, "The same ID from another provider must remain selectable."
+        assert "active" not in backup_rows[0]["className"].split()
+        assert "model-opt-badge--selected" not in backup_rows[0]["html"]
+
+    initial_html = "\n".join(row["html"] for row in out["initial"])
+    assert "Show all 2 models" in initial_html, (
+        "Restoration should consume only the selected entry and retain the punctuation-distinct and :thinking siblings."
+    )
+    expanded_openrouter_rows = [
+        row for row in out["expanded"]
+        if "model-opt" in row["className"].split() and row["groupKey"] == "openrouter"
+        and "nex-agi/nex-n2.5-pro:thinking" in row["html"]
+    ]
+    assert len(expanded_openrouter_rows) == 1, (
+        "Expanding overflow must preserve the distinct :thinking model."
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_openrouter_missing_exact_spelling_does_not_restore_dotted_sibling(_dropdown_driver_path):
+    model = "nex-agi/nex-n2.5-pro:free"
+    dotted = "nex.agi/nex.n2.5.pro:free"
+    payload = {
+        "groups": [
+            {
+                "provider": "OpenRouter",
+                "provider_id": "openrouter",
+                "models": [{"id": dotted, "label": "Nex dotted N2.5 Pro Free"}],
+                "extra_models": [
+                    {"id": "nex-agi/nex-n2.5-pro:thinking", "label": "Nex N2.5 Pro Thinking"},
+                ],
+            }
+        ],
+        "selectedValue": dotted,
+        "restoreModel": model,
+        "restoreProvider": "openrouter",
+        "searchTerm": model,
+    }
+    out = _run_dropdown_driver(_dropdown_driver_path, payload)
+    routed_value = f"@openrouter:{model}"
+
+    assert out["restoration"]["firstRestore"] == routed_value, (
+        f"An absent exact OpenRouter ID must remain routable as {routed_value}; "
+        f"got {out['restoration']['firstRestore']!r}."
+    )
+    assert out["restoration"]["secondRestore"] == routed_value
+    assert out["restoration"]["selectedState"] == {"model": model, "model_provider": "openrouter"}
+    assert out["restoration"]["selectedProvider"] == "openrouter"
+    assert out["restoration"]["options"].count({"value": dotted, "provider": "openrouter"}) == 1
+    assert out["restoration"]["options"].count({"value": routed_value, "provider": "openrouter"}) == 1
+
+    for phase in ("searched", "searchedAfterExpand"):
+        rows = [
+            row for row in out[phase]
+            if "model-opt" in row["className"].split() and model in row["html"]
+            and row["groupKey"] == "__ungrouped__"
+        ]
+        assert len(rows) == 1, f"{phase} must keep exactly one row for the uncatalogued hyphenated ID."
+        assert "active" in rows[0]["className"].split()
+        assert "model-opt-badge--selected" in rows[0]["html"]
+        dotted_rows = [
+            row for row in out[phase]
+            if "model-opt" in row["className"].split() and dotted in row["html"]
+            and row["groupKey"] == "openrouter"
+        ]
+        assert len(dotted_rows) == 1, f"{phase} must preserve the distinct dotted catalog ID."
+        assert "active" not in dotted_rows[0]["className"].split()
+        assert "model-opt-badge--selected" not in dotted_rows[0]["html"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_openrouter_live_merge_keeps_dotted_overflow_sibling_selectable(_dropdown_driver_path):
+    model = "nex-agi/nex-n2.5-pro:free"
+    dotted = "nex.agi/nex.n2.5.pro:free"
+    payload = {
+        "groups": [
+            {
+                "provider": "OpenRouter",
+                "provider_id": "openrouter",
+                "models": [{"id": "openrouter/visible", "label": "Visible"}],
+                "extra_models": [
+                    {"id": model, "label": "Nex N2.5 Pro Free"},
+                    {"id": "openrouter/overflow-tail", "label": "Overflow Tail"},
+                ],
+            }
+        ],
+        "selectedValue": "openrouter/visible",
+        "restoreModel": model,
+        "restoreProvider": "openrouter",
+        "activeProvider": "openrouter",
+        "liveModels": [{"id": dotted, "label": "Nex dotted N2.5 Pro Free"}],
+        "searchTerm": "nex",
+    }
+    out = _run_dropdown_driver(_dropdown_driver_path, payload)
+
+    assert out["restoration"]["selectedValue"] == model
+    assert out["liveMerge"]["selectedValue"] == model
+    assert out["liveMerge"]["firstAdded"] == 1
+    assert out["liveMerge"]["secondAdded"] == 0
+    assert out["liveMerge"]["options"].count({"value": model, "provider": "openrouter"}) == 1
+    assert out["liveMerge"]["options"].count({"value": dotted, "provider": "openrouter"}) == 1
+
+    rows = [
+        row for row in out["searched"]
+        if "model-opt" in row["className"].split() and row["groupKey"] == "openrouter"
+    ]
+    for value in (model, dotted):
+        assert len([row for row in rows if value in row["html"]]) == 1, (
+            f"The promoted {model!r} and live sibling {dotted!r} must each render once as selectable rows."
+        )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_runtime_picker_preserves_backend_decorated_nous_heading_without_double_count(
     _dropdown_driver_path,
 ):
@@ -1679,3 +1966,59 @@ def test_runtime_inplace_expand_with_preexisting_options_reveals_them(_driver_pa
     assert out["showAllGone"], (
         "After expansion, the 'Show all' row should be gone even when some overflow options pre-existed"
     )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_restored_overflow_row_updates_collapsed_decorated_heading_count(
+    _dropdown_driver_path,
+):
+    """Restoring an OpenRouter overflow model moves it into the group, so the
+    collapsed "(a of b)" heading must count it as shown, not keep the load-time a."""
+    model = "nex-agi/nex-n2.5-pro:free"
+    payload = {
+        "groups": [
+            {
+                "provider": "OpenRouter (1 of 3)",
+                "provider_id": "openrouter",
+                "models": [{"id": "openrouter/visible", "label": "Visible"}],
+                "extra_models": [
+                    {"id": model, "label": "Nex N2.5 Pro Free"},
+                    {"id": "nex-agi/nex-n2.5-pro:thinking", "label": "Nex N2.5 Pro Thinking"},
+                ],
+            },
+        ],
+        "selectedValue": "openrouter/visible",
+        "restoreModel": f"@openrouter:{model}",
+        "restoreProvider": "openrouter",
+        "searchTerm": "",
+    }
+    out = _run_dropdown_driver(_dropdown_driver_path, payload)
+    heading_text = "\n".join(item["textContent"] for item in out["initial"])
+
+    assert out["restoration"]["firstRestore"] == model
+    assert "OpenRouter (2 of 3)" in heading_text, (
+        f"Collapsed heading must count the restored row as shown; got {heading_text!r}."
+    )
+    assert "OpenRouter (1 of 3)" not in heading_text
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_unrestored_decorated_heading_is_left_verbatim(_dropdown_driver_path):
+    payload = {
+        "groups": [
+            {
+                "provider": "OpenRouter (1 of 3)",
+                "provider_id": "openrouter",
+                "models": [{"id": "openrouter/visible", "label": "Visible"}],
+                "extra_models": [
+                    {"id": "nex-agi/nex-n2.5-pro:free", "label": "Nex N2.5 Pro Free"},
+                    {"id": "nex-agi/nex-n2.5-pro:thinking", "label": "Nex N2.5 Pro Thinking"},
+                ],
+            },
+        ],
+        "selectedValue": "openrouter/visible",
+        "searchTerm": "",
+    }
+    out = _run_dropdown_driver(_dropdown_driver_path, payload)
+    heading_text = "\n".join(item["textContent"] for item in out["initial"])
+    assert "OpenRouter (1 of 3)" in heading_text, heading_text
