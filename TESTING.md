@@ -127,6 +127,11 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+The same job then runs `tests/browser_new_chat_focus.py`, on the same agent-free
+setup: with every `/api/sessions` response held, New Chat and Cmd/Ctrl+K must
+focus the composer, read the session list once, and show the new row once the
+list is released (#7936). Run it locally with `python tests/browser_new_chat_focus.py`.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
