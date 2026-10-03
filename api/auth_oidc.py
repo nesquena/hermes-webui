@@ -195,6 +195,9 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "scopes": scopes,
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
+        "allow_private_hosts": _normalize_text_list(
+            pick("allow_private_hosts", "HERMES_WEBUI_OIDC_ALLOW_PRIVATE_HOSTS")
+        ),
     }
 
 
@@ -440,7 +443,20 @@ def _validate_outbound_oidc_url(url: str) -> None:
         )
 
 
+def _normalize_oidc_hostname(value: str) -> str:
+    return str(value or "").strip().rstrip(".").lower()
+
+
 def _is_disallowed_oidc_host(hostname: str) -> bool:
+    # Hosts the operator lists in webui_oidc.allow_private_hosts may resolve to a
+    # private address (an identity provider on a split-horizon or VPN-only
+    # domain). Exact match only; every other host stays guarded.
+    allowed = {
+        _normalize_oidc_hostname(host)
+        for host in _resolve_oidc_config().get("allow_private_hosts", [])
+    }
+    if _normalize_oidc_hostname(hostname) in allowed:
+        return False
     literal_ip = _parse_ip_address(hostname)
     if literal_ip is not None:
         return _is_disallowed_oidc_ip(literal_ip)
