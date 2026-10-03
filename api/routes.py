@@ -24236,6 +24236,35 @@ def _restore_chat_start_entry_sidecar(provenance) -> None:
         _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
 
 
+def _chat_start_entry_sidecar_revision(session, provenance):
+    """Return the exact revision represented by captured entry-sidecar bytes."""
+    from api.models import SidecarRevision, _sidecar_revision_from_bytes
+
+    sidecar_bytes = provenance[1]
+    if sidecar_bytes is None:
+        return SidecarRevision.absent(session.session_id)
+    return _sidecar_revision_from_bytes(session.session_id, sidecar_bytes)
+
+
+def _adopt_expected_chat_start_sidecar_revision(session, expected_revision) -> None:
+    """Adopt only the exact revision already owned or restored by this start."""
+    from api.models import (
+        StaleSessionGenerationError,
+        _read_sidecar_revision,
+        _sidecar_revision_record,
+    )
+
+    sid = session.session_id
+    if _read_sidecar_revision(Path(session.path), sid) != expected_revision:
+        raise StaleSessionGenerationError(
+            f"Chat-start compensation lost sidecar ownership for {sid!r}"
+        )
+    revisions = getattr(session, "_sidecar_revisions", None)
+    if not isinstance(revisions, dict):
+        raise RuntimeError(f"Session {sid!r} has no sidecar revision owner map")
+    revisions[sid] = _sidecar_revision_record(expected_revision)
+
+
 def _cleanup_chat_start_launch_failure(
     session,
     stream_id: str,
@@ -24276,7 +24305,17 @@ def _cleanup_chat_start_launch_failure(
             return
         if getattr(canonical, "active_stream_id", None) != stream_id:
             return
+        from api.models import _coerce_sidecar_revision
         from api.session_ops import restore_session_state
+
+        compensation_revision = _coerce_sidecar_revision(
+            getattr(canonical, "_sidecar_revisions", {}).get(
+                canonical.session_id
+            ),
+            canonical.session_id,
+        )
+        if compensation_revision is None:
+            return
 
         restore_session_state(canonical, snapshot)
         compensation_succeeded = False
@@ -24291,7 +24330,15 @@ def _cleanup_chat_start_launch_failure(
                     exc_info=True,
                 )
                 return
+            compensation_revision = _chat_start_entry_sidecar_revision(
+                canonical,
+                backup_provenance,
+            )
         try:
+            _adopt_expected_chat_start_sidecar_revision(
+                canonical,
+                compensation_revision,
+            )
             canonical.save(touch_updated_at=False)
             compensation_succeeded = True
             cleanup_result["sidecar_restored"] = True
@@ -26097,10 +26144,12 @@ def _restore_chat_start_compression_recovery(session, recovery, cleanup_result=N
     session.compression_recovery = recovery
     session.recommended_recovery_action = recovery.get("recommended_action")
     if cleanup_result and cleanup_result.get("backup_provenance") is not None:
+        restored_entry_sidecar = False
         if not cleanup_result.get("sidecar_restored"):
             try:
                 _restore_chat_start_entry_sidecar(cleanup_result["backup_provenance"])
                 cleanup_result["sidecar_restored"] = True
+                restored_entry_sidecar = True
             except Exception:
                 logger.debug(
                     "Skipped compression recovery save because sidecar restore failed for %s",
@@ -26108,7 +26157,17 @@ def _restore_chat_start_compression_recovery(session, recovery, cleanup_result=N
                     exc_info=True,
                 )
                 return None
-        return _save_chat_start_compression_recovery(session)
+        return _save_chat_start_compression_recovery(
+            session,
+            expected_revision=(
+                _chat_start_entry_sidecar_revision(
+                    session,
+                    cleanup_result["backup_provenance"],
+                )
+                if restored_entry_sidecar
+                else None
+            ),
+        )
     backup_path = Path(session.path).with_suffix(".json.bak")
     try:
         backup_path.read_bytes()
@@ -26124,8 +26183,17 @@ def _restore_chat_start_compression_recovery(session, recovery, cleanup_result=N
     return _save_chat_start_compression_recovery(session)
 
 
-def _save_chat_start_compression_recovery(session):
+def _save_chat_start_compression_recovery(
+    session,
+    *,
+    expected_revision=None,
+):
     try:
+        if expected_revision is not None:
+            _adopt_expected_chat_start_sidecar_revision(
+                session,
+                expected_revision,
+            )
         session.save()
     except Exception as restore_err:
         logger.exception(
