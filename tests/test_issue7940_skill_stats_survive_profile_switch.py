@@ -11,6 +11,7 @@ of every profile.
 """
 
 import os
+import time
 
 import pytest
 
@@ -74,9 +75,19 @@ def test_a_switch_keeps_every_profiles_skill_stats(profile_tree, process_wide):
     assert computed == [default_home, writer_home]
 
 
-def test_a_real_change_after_a_switch_recomputes_only_that_profile(profile_tree):
-    """The mtime probe, not the switch, is what notices a change."""
+def test_a_real_change_after_a_switch_recomputes_only_that_profile(profile_tree, monkeypatch):
+    """The revalidate probe, not the switch, is what notices a change.
+
+    Since the #7940 stale-while-revalidate rework a fresh-window hit does no
+    I/O at all; a real out-of-band change is noticed when a stale-window hit
+    spawns the background revalidate worker (driven inline here via the spawn
+    seam so the assertion stays deterministic).
+    """
     profiles, default_home, writer_home, computed = profile_tree
+    monkeypatch.setattr(
+        profiles, "_start_skills_stats_revalidate_thread",
+        lambda pd: profiles._revalidate_skills_stats_worker(pd),
+    )
     _warm(profiles, default_home, writer_home)
     profiles.switch_profile("writer", process_wide=False)
 
@@ -85,6 +96,14 @@ def test_a_real_change_after_a_switch_recomputes_only_that_profile(profile_tree)
     (new_skill / "SKILL.md").write_text("---\nname: outline\n---\n", encoding="utf-8")
     later = os.stat(new_skill).st_mtime_ns + 5_000_000_000
     os.utime(new_skill / "SKILL.md", ns=(later, later))
+
+    # Age writer's cache entry past the revalidate window so its next read
+    # triggers the worker; the still-fresh "default" entry serves zero-I/O.
+    stale = time.time() - profiles._SKILLS_STATS_REVALIDATE_AFTER - 1.0
+    enabled, compat, mtime_ns, expiry, org, _ = profiles._SKILLS_STATS_CACHE[writer_home]
+    profiles._SKILLS_STATS_CACHE[writer_home] = (
+        enabled, compat, mtime_ns, expiry, org, stale,
+    )
 
     _warm(profiles, default_home, writer_home)
 
@@ -103,7 +122,9 @@ def test_changing_the_active_org_recounts_after_a_switch(tmp_path, monkeypatch):
     """The agent's index walk descends only into the org named by
     ``skills/_org/.active_org``, so rewriting that marker changes the count
     while every directory and SKILL.md mtime stays the same. The switch-time
-    clear used to hide that the mtime probe cannot see it.
+    clear used to hide that the mtime probe cannot see it; since #7940 a
+    fresh-window hit does no I/O either, so the recount lands on the
+    background revalidate the next stale hit triggers.
 
     Runs the real compute against the real agent package; a stub would count
     the same files whichever org is active.
@@ -140,6 +161,19 @@ def test_changing_the_active_org_recounts_after_a_switch(tmp_path, monkeypatch):
         os.utime(marker, ns=(before.st_atime_ns, before.st_mtime_ns))
         profiles.switch_profile("writer", process_wide=False)
 
-        assert profiles._get_profile_skills_stats(default_home) == (4, 4)
+        # The fresh-window hit still serves the old counts zero-I/O; aging the
+        # entry to stale makes the next hit spawn the revalidate worker (run
+        # inline via the seam), which reads the new org marker and republishes.
+        monkeypatch.setattr(
+            profiles, "_start_skills_stats_revalidate_thread",
+            lambda pd: profiles._revalidate_skills_stats_worker(pd),
+        )
+        resolved = default_home.resolve()
+        e, c, m, x, o, _v = profiles._SKILLS_STATS_CACHE[resolved]
+        profiles._SKILLS_STATS_CACHE[resolved] = (
+            e, c, m, x, o, time.time() - profiles._SKILLS_STATS_REVALIDATE_AFTER - 1.0,
+        )
+        assert profiles._get_profile_skills_stats(default_home) == (2, 2)  # stale hit
+        assert profiles._get_profile_skills_stats(default_home) == (4, 4)  # republished
     finally:
         profiles._tls.profile = None
