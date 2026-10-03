@@ -61,6 +61,9 @@ contributor guidance; it does not change runtime behavior or CI gates.
   current audit of WebUI dependencies on the hermes-agent source checkout and
   the replacement API/client surfaces needed before source mounts can be removed.
   Start here for issue #2491 and Docker/source-boundary migration slices.
+- [`docs/architecture/cli-sessions-cache.md`](architecture/cli-sessions-cache.md):
+  caching, singleflight coordination, and max-reclaims iteration bounds for CLI
+  session listings (#4966).
 - [`docs/rfcs/turn-journal.md`](rfcs/turn-journal.md): proposed crash-safe
   write-ahead journal for browser-originated chat turns.
 - [`docs/rfcs/webui-pending-intent-controls.md`](rfcs/webui-pending-intent-controls.md):

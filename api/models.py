@@ -151,6 +151,8 @@ _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
 _CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
+# Hard cap on singleflight re-claim loop iterations before falling back to own rebuild (#4966).
+_CLI_SESSIONS_CACHE_MAX_RECLAIMS = 5
 
 # Per-file parse cache for Claude Code JSONL transcripts (#4718/#4662 phase 4).
 # ``~/.claude/projects`` is a GLOBAL, profile-independent directory, but the
@@ -8070,6 +8072,7 @@ def _load_and_cache_cli_sessions(
     all_profiles: bool,
     db_path,
 ) -> list:
+    loaded_at = time.monotonic()
     try:
         sessions = load_sessions()
     except Exception as _cli_err:
@@ -8080,12 +8083,35 @@ def _load_and_cache_cli_sessions(
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
         return []
-    _cache_cli_sessions_if_current(
-        cache_key,
-        ttl,
-        invalidation_stamp,
-        sessions,
-    )
+    # Atomic choose-and-publish under _CLI_SESSIONS_CACHE_LOCK: if a fresh entry
+    # for cache_key was published DURING our load (newer expiry, same
+    # invalidation stamp) — e.g. the real owner published fresher rows while the
+    # capped fallback was still reading — prefer that entry and do not clobber it
+    # with our older snapshot (#4966).
+    with _CLI_SESSIONS_CACHE_LOCK:
+        if _CLI_SESSIONS_CACHE_INVALIDATION_VERSION != invalidation_stamp:
+            # Stamp changed mid-load: don't cache, but still return what we read.
+            return _copy_cli_sessions(sessions)
+        cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
+        if cached_entry is not None:
+            if len(cached_entry) == 3:
+                cached_expires_at, cached_stamp, cached_sessions = cached_entry
+            else:
+                cached_expires_at, cached_sessions = cached_entry
+                cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+            # A same-stamp entry with an expiry newer than our load start means a
+            # concurrent rebuilder published fresher rows while we were reading.
+            if cached_stamp == invalidation_stamp and cached_expires_at >= loaded_at + ttl:
+                _CLI_SESSIONS_CACHE.move_to_end(cache_key)
+                return _copy_cli_sessions(cached_sessions)
+        _CLI_SESSIONS_CACHE[cache_key] = (
+            time.monotonic() + ttl,
+            invalidation_stamp,
+            _copy_cli_sessions(sessions),
+        )
+        _CLI_SESSIONS_CACHE.move_to_end(cache_key)
+        while len(_CLI_SESSIONS_CACHE) > _CLI_SESSIONS_CACHE_MAX_ENTRIES:
+            _CLI_SESSIONS_CACHE.popitem(last=False)
     return _copy_cli_sessions(sessions)
 
 
@@ -8098,7 +8124,18 @@ def _reload_cli_sessions_after_inflight(
     load_sessions,
     all_profiles: bool,
     db_path: str,
+    max_reclaims=None,
 ) -> list:
+    """Wait for an in-flight CLI session cache rebuild and return the fresh or stale result.
+
+    If multiple callers wait and detect an invalidation/clear storm before a cached entry
+    is published, the waiter re-attempts the claim loop up to ``max_reclaims`` times
+    (defaulting to ``_CLI_SESSIONS_CACHE_MAX_RECLAIMS`` = 5) before falling back to
+    rebuilding the sessions directly to prevent unbounded contention (#4966).
+    """
+    if max_reclaims is None:
+        max_reclaims = _CLI_SESSIONS_CACHE_MAX_RECLAIMS
+    reclaims = 0
     while True:
         event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
         if is_owner:
@@ -8119,7 +8156,8 @@ def _reload_cli_sessions_after_inflight(
             return cached_sessions
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
-        if not wait_finished:
+        reclaims += 1
+        if not wait_finished or (max_reclaims is not None and reclaims >= max_reclaims):
             fallback_invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
             return _load_and_cache_cli_sessions(
                 cache_key=cache_key,
