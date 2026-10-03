@@ -16989,6 +16989,15 @@ def handle_post(handler, parsed) -> bool:
             forget_bg_task_completion_dedup(sid)
         except Exception:
             logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
+        # #6885 round 2 lifecycle: session retirement is a terminal path — a
+        # deleted session's pending continuation record (marker + prompt +
+        # expiry) must not survive the session itself.
+        try:
+            from api.goals import clear_pending_goal_continuation
+
+            clear_pending_goal_continuation(sid)
+        except Exception:
+            logger.debug("Failed to clear pending goal continuation for deleted session %s", sid, exc_info=True)
         try:
             from api.terminal import close_terminal
             close_terminal(sid)
@@ -24620,6 +24629,53 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _normalize_goal_continuation_id(raw) -> str:
+    """Coerce a client-supplied continuation ID to a safe token (#7855).
+
+    Rejects anything that is not a compact hex string so a malformed or
+    hostile value can never reach the matcher: returns "" (the "no ID"
+    signal, which keeps the turn a genuine user turn) for None, non-strings,
+    empty/whitespace, wrong length or non-hex characters.
+    """
+    if raw is None:
+        return ""
+    token = str(raw).strip().lower()
+    if not token:
+        return ""
+    if len(token) != 32 or any(c not in "0123456789abcdef" for c in token):
+        return ""
+    return token
+
+
+def _consume_pending_goal_continuation(session_id: str, msg: str) -> str | dict | bool | None:
+    """#7855 admission: consume the goal-continuation record only when the
+    incoming turn carries the matching continuation ID.
+
+    The marker is session-scoped (#1932) and set when goal_continue fires;
+    the ID is issued at the same moment and travels with the browser's queued
+    continuation. Without the ID match, a genuine user/queued turn arriving
+    before the browser's auto-dispatch would be misclassified as goal-related
+    and would inherit goal-continuation semantics. When the ID differs (or is
+    absent), the user turn keeps priority and the record is left in place for
+    the browser's actual continuation dispatch.
+
+    Admission is by ID, not text (#7855): the queue UI lets the user edit or
+    combine a queued entry, and there is no wall-clock expiry, so a late or
+    edited continuation is still admitted. Marker, prompt and ID are one
+    record in api.goals; the admission check delegates there so check + drop
+    stay atomic.
+
+    On a match the return value is the **rollback receipt**: the popped
+    record itself (marker + prompt + ID together). A rejected chat start must
+    restore both halves (#7249 rolls back rejected starts), so callers keep
+    the receipt rather than re-deriving what was consumed — restoring the
+    marker alone left the retry unmatchable (maintainer's #7862 repro).
+    """
+    from api.goals import consume_pending_goal_continuation
+
+    return consume_pending_goal_continuation(session_id, msg)
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -24633,6 +24689,7 @@ def _start_chat_stream_for_session(
     normalized_model: bool = False,
     diag=None,
     goal_related: bool = False,
+    goal_continuation_id: str = "",
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
@@ -24684,20 +24741,43 @@ def _start_chat_stream_for_session(
 
     consumed_goal_continuation = False
     consumed_bg_task_completion = False
+    # #1932: this session may have a pending goal continuation. The streaming
+    # hook sets PENDING_GOAL_CONTINUATION when goal_continue fires, so the next
+    # chat/start for this session is automatically treated as goal-related.
+    # #6885 + #7855: the marker is consumed ONLY when the request carries the
+    # continuation ID the server issued at goal_continue time — a genuine
+    # user/queued turn (no ID) keeps priority and leaves the marker for the
+    # browser's auto-dispatch, while an edited / combined / late-sent
+    # continuation still carries its ID and keeps the goal.
+    #
+    # #7855 rebase compat (#7249): the admission runs INSIDE the session lock
+    # via consume_continuation_markers(), not up front. Admission pops BOTH
+    # halves (marker + prompt record, api/goals.py), so a rejected start must
+    # restore both; rolling back the marker alone left the retry unmatchable
+    # (maintainer's #7862 repro: consume -> rollback -> retry consume False).
+    # The popped record therefore travels as a rollback receipt and
+    # restore_consumed_continuation_markers() re-arms the pair — unless a
+    # newer continuation was armed for this session meanwhile.
+    consumed_goal_continuation_receipt = None
 
     def consume_continuation_markers() -> None:
         nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
-        if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-            goal_related = True
-            PENDING_GOAL_CONTINUATION.discard(s.session_id)
-            consumed_goal_continuation = True
+        nonlocal consumed_goal_continuation_receipt
+        if not goal_related and goal_continuation_id:
+            receipt = _consume_pending_goal_continuation(s.session_id, goal_continuation_id)
+            if receipt:
+                goal_related = True
+                consumed_goal_continuation = True
+                consumed_goal_continuation_receipt = receipt
         if s.session_id in PENDING_BG_TASK_COMPLETIONS:
             PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
             consumed_bg_task_completion = True
 
     def restore_consumed_continuation_markers() -> None:
         if consumed_goal_continuation:
-            PENDING_GOAL_CONTINUATION.add(s.session_id)
+            from api.goals import restore_pending_goal_continuation
+
+            restore_pending_goal_continuation(s.session_id, consumed_goal_continuation_receipt)
         if consumed_bg_task_completion:
             PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
 
@@ -25094,6 +25174,7 @@ def _start_run(
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
     goal_related: bool = False,
+    goal_continuation_id: str = "",
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
@@ -25181,6 +25262,7 @@ def _start_run(
                 goal_related=goal_related,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                goal_continuation_id=goal_continuation_id,
                 process_id=process_id,
                 retry_attempt=retry_attempt,
                 rearm_deferred_wakeup=rearm_deferred_wakeup,
@@ -25232,6 +25314,7 @@ def _start_run(
         goal_related=goal_related,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        goal_continuation_id=goal_continuation_id,
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
@@ -25887,6 +25970,33 @@ def _handle_goal_command(handler, body):
             status = 409 if payload.get("error") == "agent_running" else 400
         return j(handler, payload, status=status)
 
+    # #6885 round 2 lifecycle: the /goal command is the natural traffic hook
+    # for record upkeep. A cleared/paused goal has no continuation coming, so
+    # any pending record for this session must not outlive it (an abandoned
+    # browser dispatch would otherwise keep the pair resident until expiry);
+    # sweeping expired/orphaned records here bounds the rest without a
+    # background timer.
+    # #7855 rebase compat (#7249): this hook must not fire for runner-owned
+    # goals. The runner does not drive the browser's queued continuation, so
+    # there is no record to clear, and the sweep below runs on the runner's
+    # traffic for goals it owns locally.
+    if not runner_goal_owned:
+        if goal_adapter_action in ("clear", "pause"):
+            from api.goals import clear_pending_goal_continuation
+
+            try:
+                clear_pending_goal_continuation(s.session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to clear pending goal continuation for %s", s.session_id, exc_info=True
+                )
+        from api.goals import sweep_expired_goal_continuations
+
+        try:
+            sweep_expired_goal_continuations()
+        except Exception:
+            logger.debug("Failed to sweep expired goal continuations", exc_info=True)
+
     def _rollback_goal_after_failed_kickoff() -> None:
         restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
 
@@ -26308,6 +26418,12 @@ def _handle_chat_start(handler, body, diag=None):
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
             "regeneration": regeneration,
+            # #7855: the server-issued continuation ID travels with the browser's
+            # queued continuation through inline edits and combines; admission
+            # is by ID, never by text, so an edited/late/combined continuation
+            # keeps its goal semantics and a genuine user message (no ID) does
+            # not. Rejected as malformed here rather than by the matcher.
+            "goal_continuation_id": _normalize_goal_continuation_id(body.get("goal_continuation_id")),
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config

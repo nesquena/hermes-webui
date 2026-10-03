@@ -11397,6 +11397,24 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+# #6885 admission correction (round 2, maintainer review): marker and prompt
+# are ONE record so the two collections cannot drift apart. Value shape:
+#   {"prompt": str, "continuation_id": str}
+# #7855: the routes.py consumer admits the turn by "continuation_id" — the
+# token the server issues here and carries on the goal_continue SSE event,
+# which the browser keeps on the queued entry through inline edits and
+# combines. A genuine user/queued turn carries no ID, so it keeps user
+# priority and the record stays for the real continuation dispatch.
+# Written atomically next to the set add in streaming/gateway goal_continue
+# paths; consumed together with the marker by
+# _consume_pending_goal_continuation.
+# There is deliberately no wall-clock expiry: the browser keeps a queued
+# continuation across refreshes and restores it into the composer for a
+# later send, so a TTL retired perfectly usable records (#7855 blocker 1).
+# A record lives until it is consumed or explicitly retired (goal clear /
+# pause / session retirement, plus an orphan sweep for broken halves).
+PENDING_GOAL_CONTINUATION_PROMPTS: dict = {}
+PENDING_GOAL_CONTINUATION_LOCK = threading.Lock()
 
 
 def register_stream_owner(stream_id: str, session_id: str) -> None:

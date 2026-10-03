@@ -2055,6 +2055,8 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    // #7855: a brand-new session starts with no restored-continuation draft.
+    if(typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -2543,6 +2545,10 @@ async function loadSession(sid){
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // #7855: a session switch is a hard context boundary — drop any restored
+  // goal-continuation draft left over from the previous session (restored but
+  // never sent, or abandoned mid-settle) so it cannot attach to the next send.
+  if(typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
@@ -2839,6 +2845,15 @@ async function loadSession(sid){
             const _msg=$&&$('msg');
             if(_msg&&_first.text&&!_msg.value){
               _msg.value=_first.text||'';
+              // #7855 (round 5): mark the restored text as an identifiable
+              // CONTINUATION DRAFT — the ID rides on the composer element
+              // together with the exact text it was restored for, and send()
+              // consumes it only while that text is still what is sent. If the
+              // user replaces or abandons the draft, the ID dies with it
+              // instead of attaching to their own message.
+              if(typeof _setRestoredGoalContinuationDraft==='function'){
+                _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_first.text||'');
+              }
               if(typeof autoResize==='function') autoResize();
               if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
             }
