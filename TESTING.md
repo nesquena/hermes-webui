@@ -126,7 +126,8 @@ python tests/browser_smoke.py
 companion gate. It injects same-source and cross-surface nested-subagent fixtures
 through the real browser search/render path and checks row reachability, clipping,
 horizontal overflow, and mobile touch-target size at 1440x900, 768x900, and
-390x844 (with the mobile drawer open). Set `RESPONSIVE_SCREENSHOT_DIR` to save
+390x844 (with the collapsed sidebar expanded at 768px and the mobile drawer open
+at 390px). Set `RESPONSIVE_SCREENSHOT_DIR` to save
 sidebar screenshots:
 
 ```bash

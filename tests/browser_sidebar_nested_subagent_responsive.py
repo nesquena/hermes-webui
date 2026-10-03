@@ -26,9 +26,9 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_IDS = ["nested_subagent_child", "cross_surface_child"]
 VIEWPORTS = [
-    ("desktop", 1440, 900, False),
-    ("narrow", 768, 900, False),
-    ("mobile", 390, 844, True),
+    ("desktop", 1440, 900, "column", False),
+    ("narrow", 768, 900, "collapsed", False),
+    ("mobile", 390, 844, "drawer", True),
 ]
 SCREENSHOT_DIR = os.environ.get("RESPONSIVE_SCREENSHOT_DIR")
 
@@ -135,7 +135,7 @@ def _measure(page) -> dict:
     )
 
 
-def _assert_geometry(state: str, data: dict, mobile: bool) -> None:
+def _assert_geometry(state: str, data: dict, sidebar_mode: str, touch: bool) -> None:
     assert data["ids"] == EXPECTED_IDS, f"{state}: rendered {data['ids']}, expected {EXPECTED_IDS}"
     assert data["list"]["scrollWidth"] <= data["list"]["clientWidth"], f"{state}: session list overflows horizontally"
     assert data["search"]["x"] >= data["sidebar"]["x"], f"{state}: search escapes sidebar left edge"
@@ -144,12 +144,13 @@ def _assert_geometry(state: str, data: dict, mobile: bool) -> None:
         assert row["x"] >= data["list"]["x"], f"{state}: {row['sid']} escapes list left edge"
         assert row["right"] <= data["list"]["right"] + 1, f"{state}: {row['sid']} escapes list right edge"
         assert row["scrollWidth"] <= row["clientWidth"], f"{state}: {row['sid']} overflows horizontally"
-        if mobile:
+        if touch:
             assert row["height"] >= 44, f"{state}: {row['sid']} touch target is under 44px"
-    if mobile:
-        assert data["mobileOpen"], "mobile: sidebar drawer did not open"
-        assert abs(data["sidebar"]["x"]) <= 1, f"mobile: drawer is off-screen at x={data['sidebar']['x']}"
-        assert data["bodyScrollWidth"] == data["viewport"]["width"], "mobile: page has horizontal overflow"
+    if sidebar_mode == "drawer":
+        assert data["mobileOpen"], f"{state}: sidebar drawer did not open"
+        assert abs(data["sidebar"]["x"]) <= 1, f"{state}: drawer is off-screen at x={data['sidebar']['x']}"
+    if sidebar_mode != "column":
+        assert data["bodyScrollWidth"] == data["viewport"]["width"], f"{state}: page has horizontal overflow"
 
 
 def main() -> int:
@@ -178,24 +179,32 @@ def main() -> int:
                     headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
                 )
                 try:
-                    for state, width, height, mobile in VIEWPORTS:
+                    for state, width, height, sidebar_mode, touch in VIEWPORTS:
                         context = browser.new_context(viewport={"width": width, "height": height})
                         page = context.new_page()
                         page_errors = []
                         page.on("pageerror", lambda error, errors=page_errors: errors.append(str(error)))
                         page.goto(base_url + "/", wait_until="domcontentloaded")
-                        page.wait_for_selector("#sessionSearch", timeout=15000)
+                        page.wait_for_selector("#sessionSearch", state="attached", timeout=15000)
                         page.wait_for_function("typeof renderSessionListFromCache === 'function'")
                         page.wait_for_timeout(1200)
-                        if mobile:
+                        if sidebar_mode == "collapsed":
+                            assert page.locator(".layout").evaluate("el => el.classList.contains('sidebar-collapsed')"), (
+                                f"{state}: sidebar should start collapsed"
+                            )
+                            page.locator("#btnHamburger").click()
+                            page.wait_for_function("!document.querySelector('.layout').classList.contains('sidebar-collapsed')")
+                            page.wait_for_selector("#sessionSearch", state="visible")
+                            page.wait_for_timeout(300)
+                        elif sidebar_mode == "drawer":
                             sidebar_before = page.locator(".sidebar").bounding_box()
-                            assert sidebar_before and sidebar_before["x"] < 0, "mobile: drawer should start closed"
+                            assert sidebar_before and sidebar_before["x"] < 0, f"{state}: drawer should start closed"
                             page.locator("#btnHamburger").click()
                             page.wait_for_selector(".sidebar.mobile-open")
                             page.wait_for_timeout(300)
                         _render_search_fixture(page)
                         data = _measure(page)
-                        _assert_geometry(state, data, mobile)
+                        _assert_geometry(state, data, sidebar_mode, touch)
                         assert not page_errors, f"{state}: uncaught browser errors: {page_errors}"
                         if SCREENSHOT_DIR:
                             output = Path(SCREENSHOT_DIR)
