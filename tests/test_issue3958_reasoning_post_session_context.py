@@ -56,7 +56,12 @@ def test_ui_posts_reasoning_context_with_effort():
     src = read("static/ui.js")
     assert "function _reasoningEffortContext()" in src
     assert "new URLSearchParams(_reasoningEffortContext())" in src
-    assert "Object.assign({effort:effort},_reasoningEffortContext())" in src
+    # #7381: the UI now also posts the session id so the per-chat override
+    # reaches the right session's stream worker.
+    assert (
+        "Object.assign({effort:effort, session_id:S.session&&S.session.session_id},"
+        "_reasoningEffortContext())" in src
+    )
 
 
 def test_reasoning_post_route_threads_model_context():
