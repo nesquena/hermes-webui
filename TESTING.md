@@ -2075,6 +2075,12 @@ Bridged CLI sessions:
 *Run: ./scripts/test.sh*
 *Source: <repo>/*
 
+### Media preview access errors (#7254)
+
+Verify CSV, PDF and HTML previews at desktop and 390px widths, including light
+theme. HTTP 401/403/404 must show the escaped filename and localized error in
+`diff-inline-error` without a download link. Network/format failures keep their
+format-specific fallback and download link. A 401 directs the user to reload.
 
 ### MEDIA boundary regression checks (#6923)
 
