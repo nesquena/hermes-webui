@@ -18,6 +18,7 @@ import io
 import json
 import re
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -131,19 +132,19 @@ def test_chat_start_no_longer_bare_404_on_keyerror():
     arm = m.group(1)
     # Must NOT be the old one-liner anymore.
     assert 'return bad(handler, "Session not found", 404)' not in arm.split(
-        "_claim_or_synthesize_cli_session"
+        "_claim_and_publish_cli_session_for_chat_start"
     )[0], (
         "the bare 404-on-KeyError branch is still in place before the new "
         "synthesiser is consulted — a TUI/Desktop session would still 404"
     )
     # Must call the new helper.
-    assert "_claim_or_synthesize_cli_session" in arm, (
-        "_handle_chat_start must delegate to _claim_or_synthesize_cli_session "
+    assert "_claim_and_publish_cli_session_for_chat_start" in arm, (
+        "_handle_chat_start must delegate to the fenced claim publisher "
         "on KeyError so a foreign session can be claimed writeable"
     )
     # Must persist the sidecar so subsequent GETs find it.
-    assert "synth.save()" in arm, (
-        "materialised session must be persisted to disk via save() so the "
+    assert "_claim_and_publish_cli_session_for_chat_start" in arm, (
+        "materialised session must be persisted by the fenced helper so the "
         "next request (and the next server restart) sees a WebUI sidecar"
     )
 
@@ -730,11 +731,11 @@ def test_post_chat_start_returns_403_for_not_claimable(
     the frontend's empty-state self-heal which is the wrong UX for a
     legitimately-listed read-only session."""
     src = ROUTES_PY.read_text(encoding="utf-8")
-    # The new arm sits between the bare-404 collapse and the synth.save()
-    # call.  Locate it via the "not_claimable" string and the 403 marker.
+    # Locate the reason arm inside the chat-start handler.
+    body = _route_handler_block(src, "_handle_chat_start")
     m = re.search(
-        r'if reason == "not_claimable":(.*?)(?=\n\s*try:\s*\n\s*synth\.save)',
-        src, re.DOTALL,
+        r'if reason == "not_claimable":(.*?)(?=\n\s*s = synth)',
+        body, re.DOTALL,
     )
     assert m, "could not find the 'not_claimable' arm in _handle_chat_start"
     arm = m.group(1)
@@ -1170,6 +1171,95 @@ def test_chat_start_still_refuses_cron_state_db_source(
     payload = _response_json(handler)
     assert "read-only" in payload["error"].lower()
     assert not (isolated_state_db["sessions_dir"] / f"{SID}.json").exists()
+
+
+def test_paused_claim_aba_cannot_recreate_sidecar_or_stream(
+    routes_module, monkeypatch, isolated_state_db
+):
+    """ABSENT -> create -> delete -> ABSENT never authorizes the stale claim."""
+    from api import models
+
+    sid = "paused-claim-aba"
+    _make_state_db(
+        isolated_state_db["db"],
+        sid,
+        message_count=1,
+        title="Paused claim",
+        source="tui",
+        cwd="/root",
+    )
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    real_synthesize = routes_module._claim_or_synthesize_cli_session
+    claim_paused = threading.Event()
+    resume_claim = threading.Event()
+    delete_attempting = threading.Event()
+    claim_result = []
+    claim_errors = []
+
+    def paused_synthesize(*args, **kwargs):
+        claim_paused.set()
+        assert resume_claim.wait(5), "claim was not resumed"
+        return real_synthesize(*args, **kwargs)
+
+    monkeypatch.setattr(
+        routes_module,
+        "_claim_or_synthesize_cli_session",
+        paused_synthesize,
+    )
+
+    def claim():
+        try:
+            claim_result.append(
+                routes_module._claim_and_publish_cli_session_for_chat_start(sid)
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            claim_errors.append(exc)
+
+    def create_delete_aba():
+        delete_attempting.set()
+        with routes_module._get_session_agent_lock(sid):
+            with models._session_sidecar_authority(sid):
+                # Once the claim's canonical authority is released, its create
+                # is visible. Delete it and return the durable state to ABSENT.
+                assert (isolated_state_db["sessions_dir"] / f"{sid}.json").exists()
+                assert models._delete_session_sidecar_artifacts_locked(sid) is True
+
+    claim_thread = threading.Thread(target=claim, daemon=True)
+    claim_thread.start()
+    assert claim_paused.wait(5), "claim did not reach the paused reread"
+    delete_thread = threading.Thread(target=create_delete_aba, daemon=True)
+    delete_thread.start()
+    assert delete_attempting.wait(5), "ABA delete did not attempt authority"
+    resume_claim.set()
+    claim_thread.join(5)
+    delete_thread.join(5)
+
+    assert not claim_thread.is_alive()
+    assert not delete_thread.is_alive()
+    assert claim_errors == []
+    claimed, reason = claim_result[0]
+    assert reason == "materialized"
+    assert claimed is not None
+    sidecar = isolated_state_db["sessions_dir"] / f"{sid}.json"
+    assert not sidecar.exists()
+    assert sid in models._load_webui_deleted_session_tombstone()
+
+    # The stale post-claim object cannot treat the second ABSENT as its original
+    # ABSENT generation. Pending-state persistence fails before stream creation,
+    # and compensation must not recreate the sidecar.
+    monkeypatch.setattr(routes_module, "_agent_runtime_barrier_response", lambda **_kw: None)
+    stream_ids_before = set(routes_module.STREAMS)
+    with pytest.raises(models.StaleSessionGenerationError):
+        routes_module._start_chat_stream_for_session(
+            claimed,
+            msg="must not run",
+            workspace=str(isolated_state_db["state_dir"]),
+            model="test-model",
+            model_provider="test-provider",
+            external_runtime_owned=False,
+        )
+    assert set(routes_module.STREAMS) == stream_ids_before
+    assert not sidecar.exists()
 
 
 def test_branch_refuses_subagent_view_only_source(
