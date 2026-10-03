@@ -606,45 +606,61 @@ def _make_meta_session(sid, count, updated_at=123.0):
     return s
 
 
-def test_persisted_message_count_uses_metadata_only(monkeypatch):
-    """The companion lookup must return the persisted count via a metadata-only
-    load (never parsing the full transcript) and None when unknown."""
+def test_persisted_message_count_uses_fresh_sidecar_metadata(monkeypatch):
+    """The SSE companion count must come from the current on-disk sidecar.
+
+    ``get_session(..., metadata_only=True)`` may legally return an older cached
+    count after a gateway-backed turn rewrites the sidecar.  Comparing that
+    stale value with the frontend's fresh ``/api/session`` count creates an
+    endless ``session-updated`` reload loop.
+    """
     from api import background_process as bp
     import api.models as models
 
     sid = "sess-persisted-count"
 
-    # Normal: metadata stub carries _metadata_message_count.
-    monkeypatch.setattr(models, "get_session", lambda _sid, metadata_only=False: _make_meta_session(_sid, 7), raising=True)
+    # A stale generic session cache must not participate in this comparison.
+    monkeypatch.setattr(
+        models,
+        "get_session",
+        lambda _sid, metadata_only=False: _make_meta_session(_sid, 99),
+        raising=True,
+    )
+
+    # Normal: the fresh metadata-only sidecar carries the current count.
+    monkeypatch.setattr(
+        models.Session,
+        "load_metadata_only",
+        lambda _sid: _make_meta_session(_sid, 7),
+        raising=True,
+    )
     assert bp.persisted_message_count_for_session(sid) == 7
+
+    # Missing sidecar metadata is unknown, not a zero-message signal.
+    monkeypatch.setattr(
+        models.Session,
+        "load_metadata_only",
+        lambda _sid: None,
+        raising=True,
+    )
+    assert bp.persisted_message_count_for_session(sid) is None
 
     # Unknown count (legacy sidecar, no persisted count, empty messages) → None
     # so the caller treats it as "cannot tell", never a spurious trigger.
-    monkeypatch.setattr(models, "get_session", lambda _sid, metadata_only=False: _make_meta_session(_sid, None), raising=True)
+    monkeypatch.setattr(
+        models.Session,
+        "load_metadata_only",
+        lambda _sid: _make_meta_session(_sid, None),
+        raising=True,
+    )
     assert bp.persisted_message_count_for_session(sid) is None
 
     # Lookup failure (e.g. corrupt sidecar) is swallowed → None, never raises.
-    def _boom(_sid, metadata_only=False):
+    def _boom(_sid):
         raise RuntimeError("decode error")
-    monkeypatch.setattr(models, "get_session", _boom, raising=True)
+
+    monkeypatch.setattr(models.Session, "load_metadata_only", _boom, raising=True)
     assert bp.persisted_message_count_for_session(sid) is None
-
-
-def test_persisted_message_count_requests_metadata_only(monkeypatch):
-    """Guard the perf contract: the lookup MUST pass metadata_only=True so it
-    never parses a 400KB+ transcript on every per-session SSE (re)connect."""
-    from api import background_process as bp
-    import api.models as models
-
-    seen = {}
-
-    def _spy(_sid, metadata_only=False):
-        seen["metadata_only"] = metadata_only
-        return _make_meta_session(_sid, 3)
-
-    monkeypatch.setattr(models, "get_session", _spy, raising=True)
-    assert bp.persisted_message_count_for_session("sess-spy") == 3
-    assert seen.get("metadata_only") is True
 
 
 def test_session_sse_handler_wires_finished_during_gap_self_heal():
