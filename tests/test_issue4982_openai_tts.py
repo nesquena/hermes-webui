@@ -535,7 +535,9 @@ def test_openai_voice_placeholder_in_panels():
 def test_play_openai_tts_exists_in_ui_js():
     src = (STATIC_DIR / "ui.js").read_text(encoding="utf-8")
     assert 'function _playOpenaiTts(text, btn)' in src
-    assert "body:JSON.stringify({text:text, engine:'openai'})" in src
+    # Chunked streaming playback: requests are sent per chunk, not as one blob.
+    assert "body:JSON.stringify({text:chunks[i], engine:'openai'})" in src
+    assert "function _splitForTTS(text, maxChars)" in src
 
 
 def test_boot_js_handles_openai_engine():
