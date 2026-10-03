@@ -6523,21 +6523,24 @@ def _ip_is_loopback_or_private(raw: str):
     return (True, bool(addr.is_loopback or addr.is_private))
 
 
-def _trusted_proxy_networks():
+def _trusted_proxy_networks(include_loopback: bool = True):
     """Networks whose socket peer is allowed to assert a forwarded client IP.
 
-    Loopback is ALWAYS trusted implicitly (the common same-host reverse-proxy
-    deployment). Operators fronting the WebUI with a LAN/remote proxy add its
-    address(es) via HERMES_WEBUI_TRUSTED_PROXY_CIDRS (comma-separated CIDRs or
-    bare IPs). Malformed entries are skipped, never widening trust.
+    Loopback is trusted implicitly (the common same-host reverse-proxy
+    deployment) unless ``include_loopback`` is False. Operators fronting the
+    WebUI with a LAN/remote proxy add its address(es) via
+    HERMES_WEBUI_TRUSTED_PROXY_CIDRS (comma-separated CIDRs or bare IPs).
+    Malformed entries are skipped, never widening trust.
     """
     import ipaddress
 
-    nets = [
-        ipaddress.ip_network("127.0.0.0/8"),
-        ipaddress.ip_network("::1/128"),
-        ipaddress.ip_network("::ffff:127.0.0.0/104"),
-    ]
+    nets = []
+    if include_loopback:
+        nets = [
+            ipaddress.ip_network("127.0.0.0/8"),
+            ipaddress.ip_network("::1/128"),
+            ipaddress.ip_network("::ffff:127.0.0.0/104"),
+        ]
     raw = os.getenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "") or ""
     for token in raw.replace(";", ",").split(","):
         token = token.strip()
@@ -6653,6 +6656,40 @@ def _forwarded_client_ip_from_trusted_proxy(handler):
         return real_ip
     # No forwarded header at all → the trusted proxy is speaking for itself.
     return _request_client_ip(handler)
+
+
+def _login_client_ip(handler) -> str:
+    """Client IP that the login rate limiter keys on.
+
+    Behind a reverse proxy the raw socket peer is the proxy, so every user
+    would share one bucket. Consult the forwarded chain only when
+    HERMES_WEBUI_TRUST_FORWARDED_FOR=1 and the raw peer is listed in
+    HERMES_WEBUI_TRUSTED_PROXY_CIDRS. Implicit loopback trust is not enough:
+    a direct loopback or SSH-tunnel client could otherwise send a new
+    X-Forwarded-For on every attempt. Listing a loopback address in
+    HERMES_WEBUI_TRUSTED_PROXY_CIDRS trusts every local client (an SSH tunnel,
+    another local process) exactly like the proxy, because the address cannot
+    tell a same-host proxy from a same-host client.
+
+    When both X-Forwarded-For and X-Real-IP are present they must resolve to the
+    same address. Otherwise the proxy is passing the client's own
+    X-Forwarded-For through and the client could pick its bucket. Fall back to
+    the raw peer whenever they differ or a value is not an IP address.
+    """
+    import ipaddress
+
+    if _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR"):
+        try:
+            peer = ipaddress.ip_address(_request_client_ip(handler))
+            if _ip_in_networks(peer, _trusted_proxy_networks(include_loopback=False)):
+                client = ipaddress.ip_address(_forwarded_client_ip_from_trusted_proxy(handler))
+                xff = handler.headers.get("X-Forwarded-For")
+                real_ip = handler.headers.get("X-Real-IP", "").strip()
+                if not (xff and real_ip) or client == ipaddress.ip_address(real_ip):
+                    return str(client)
+        except ValueError:
+            pass
+    return _client_ip_for_rate_limit(handler)
 
 
 def _onboarding_request_is_local(handler) -> bool:
@@ -18454,7 +18491,7 @@ def handle_post(handler, parsed) -> bool:
 
         if not is_auth_enabled():
             return j(handler, {"ok": True, "message": "Auth not enabled"})
-        client_ip = handler.client_address[0]
+        client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(
                 handler,
@@ -18502,7 +18539,7 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
         if not is_auth_enabled():
             return j(handler, {"error": "Auth not enabled"}, status=400)
-        client_ip = handler.client_address[0]
+        client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
         try:
