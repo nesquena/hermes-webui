@@ -5359,7 +5359,65 @@ function _fitComposerFooter(){
   const left=footer.querySelector('.composer-left');
   if(!left) return;
   if(!left.clientWidth) return;
-  const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  // #7686: the composer primary button is a SIBLING of .composer-left
+  // (static/index.html:723 — the left group closes at 721), and its
+  // rendered width depends on the current action: an idle `send` is a
+  // 34px circle, while a busy action (stop / queue / interrupt / steer)
+  // expands to a text pill (`width:auto` + padding + the `data-label`
+  // ::after text). Comparing `.composer-left` against ITSELF could never
+  // see that pill, so a stage resolved at the idle width overflows the
+  // moment a turn starts, and because the resize-triggered fit repeats
+  // the same under-measurement it can never self-correct. Measure the
+  // row's real demand: the width the left group needs plus the button's
+  // CURRENT outer width, against the footer's own content box.
+  const btn=footer.querySelector('#btnSend');
+  const _fmt=function(v){const n=parseFloat(v);return isNaN(n)?0:n;};
+  const _btnOuter=function(){
+    // Read the button's outer width without assuming a full layout API:
+    // rect → offsetWidth → 0. `.send-btn` pins 34px in CSS, so a rendered
+    // button is never 0 in a browser; only the reduced DOM harnesses
+    // (which have no btnSend at all — `btn` is already null) hit the 0
+    // path, and they take the legacy predicate below.
+    const bs=(typeof window!=='undefined'&&window.getComputedStyle)?window.getComputedStyle(btn):null;
+    const fs=(typeof window!=='undefined'&&window.getComputedStyle)?window.getComputedStyle(footer):null;
+    if(!bs||!fs) return null;
+    const w=(btn.getBoundingClientRect?btn.getBoundingClientRect().width:0)||btn.offsetWidth||0;
+    return {
+      outer:w+_fmt(bs.marginLeft)+_fmt(bs.marginRight)
+        +_fmt(bs.borderLeftWidth)+_fmt(bs.borderRightWidth),
+      gaps:_fmt(fs.columnGap||fs.gap||0),
+      available:(footer.clientWidth||(footer.getBoundingClientRect&&footer.getBoundingClientRect().width)||0)
+        -_fmt(fs.paddingLeft)-_fmt(fs.paddingRight),
+    };
+  };
+  const overflows=function(){
+    if(!btn) return left.scrollWidth>left.clientWidth+1;
+    const m=_btnOuter();
+    if(!m||!m.available) return left.scrollWidth>left.clientWidth+1;
+    // The left group is the only flexible row member, so its scrollWidth is
+    // its natural demand; add the button's fixed outer width and compare
+    // the sum against the footer's content box.
+    const leftDemand=Math.max(left.scrollWidth,left.clientWidth);
+    return (leftDemand+m.gaps+m.outer)>m.available+1;
+  };
+  // Give the button the widest state it can reach for the measurement
+  // (#7686). While busy it renders as a text pill whose width comes from
+  // CSS attribute selectors keyed on ``data-action`` and whose label text
+  // comes from ``data-label``; measuring the idle `send` circle (34px) hid
+  // that demand, so a stage resolved at the idle width overflows the moment
+  // a turn starts — and the resize-triggered fit repeats the same
+  // under-measurement, so it can never self-correct. Stamp the widest
+  // action plus a representative label for the duration of the probe: the
+  // freeze below keeps the probe invisible (visibility:hidden and a pinned
+  // height), so the temporary state cannot paint, and it is reverted in the
+  // same `finally` that releases the frozen box.
+  const prevBtnStyle=btn?btn.getAttribute('style'):null;
+  const prevBtnAction=btn?btn.getAttribute('data-action'):null;
+  const prevBtnLabel=btn?btn.getAttribute('data-label'):null;
+  if(btn){
+    btn.setAttribute('data-action','steer');
+    if(!prevBtnLabel) btn.setAttribute('data-label','XXXXXXXXXXXXXXXX');
+  }
   // Measure without ever PAINTING the expanded state. Stripping the stage
   // classes makes the footer briefly full-width, which grows the composer and
   // shrinks #messages by a few px; restoring them a moment later shrinks it
@@ -5390,6 +5448,15 @@ function _fitComposerFooter(){
     // task so no intermediate geometry is ever committed to the screen.
     footer.classList.toggle('cf-icons',next.includes('cf-icons'));
     footer.classList.toggle('cf-burger',next.includes('cf-burger'));
+    // Undo the worst-case button state applied for the probe (#7686).
+    if(btn){
+      if(prevBtnStyle===null) btn.removeAttribute('style');
+      else btn.setAttribute('style',prevBtnStyle);
+      if(prevBtnAction===null) btn.removeAttribute('data-action');
+      else btn.setAttribute('data-action',prevBtnAction);
+      if(prevBtnLabel===null) btn.removeAttribute('data-label');
+      else btn.setAttribute('data-label',prevBtnLabel);
+    }
     if(frozenHeight>0){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
@@ -8743,6 +8810,19 @@ function _setComposerPrimaryButtonIcon(btn,action){
   };
   const next=icons[action]||icons.send;
   if(btn.innerHTML!==next) btn.innerHTML=next;
+  // #1804: surface a short text label next to the icon for busy-mode
+  // actions so the user can see the current mode without relying on
+  // the hover tooltip. The label is read via ``t()`` so non-English
+  // locales get the translated name. ``data-label`` is consumed by
+  // the CSS ::after pseudo-element.
+  const _labelKeys={stop:'composer_action_stop',queue:'composer_action_queue',interrupt:'composer_action_interrupt',steer:'composer_action_steer'};
+  if(_labelKeys[action]){
+    const _key=_labelKeys[action];
+    const _val=(typeof t==='function')?t(_key):_key;
+    btn.dataset.label=_val||_key;
+  }else{
+    delete btn.dataset.label;
+  }
 }
 
 function updateSendBtn(){

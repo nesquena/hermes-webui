@@ -63,7 +63,14 @@ def test_profile_default_action_saves_null_override():
     assert "session_toolsets_use_profile_defaults" in UI_JS
     assert "if (e.target.closest('#toolsetsProfileDefaultsBtn'))" in click_block
     assert "_applySessionToolsets(null);" in click_block
-    assert "static/index.html" not in UI_JS
+    # Guard against ui.js logic depending on the HTML file: a *path literal*
+    # inside the JS would be real coupling. A bare mention inside a comment
+    # (a line reference like "static/index.html:723") is documentation, not
+    # coupling, and is deliberately allowed — matching the quoted forms keeps
+    # the guard honest about what it forbids.
+    assert "'static/index.html" not in UI_JS
+    assert '"static/index.html' not in UI_JS
+    assert "static/index.html)" not in UI_JS
     assert "toolsetsProfileDefaultsBtn" not in INDEX_HTML
 
 

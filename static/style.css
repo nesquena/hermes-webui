@@ -2753,7 +2753,25 @@
   .voice-mode-label{color:var(--muted);font-size:11px;}
   @keyframes voice-mode-pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(.85);}}
   .status-text{font-size:11px;color:var(--muted);padding-left:4px;}
-  .send-btn{width:34px;height:34px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s,transform .15s,box-shadow .15s;box-shadow:0 2px 8px var(--accent-bg-strong);}
+  .send-btn{width:34px;height:34px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s,transform .15s,box-shadow .15s,width .15s,padding .15s,border-radius .15s;box-shadow:0 2px 8px var(--accent-bg-strong);}
+  /* #1804: When the primary action is one of the busy-mode actions
+     (stop / queue / interrupt / steer), surface a short text label
+     alongside the icon so the user can see the current mode without
+     relying on the hover tooltip. The pill shape is a deliberate
+     affordance change: a circular icon-only button reads as
+     "send" even when it is actually a stop. The label is read from
+     the ``data-label`` attribute (set by JS via t()) so non-English
+     locales pick up the translated action name. */
+  .send-btn[data-action="stop"],.send-btn[data-action="queue"],.send-btn[data-action="interrupt"],.send-btn[data-action="steer"]{
+    width:auto;padding:0 12px 0 10px;border-radius:999px;gap:6px;
+  }
+  .send-btn[data-action="stop"]::after,
+  .send-btn[data-action="queue"]::after,
+  .send-btn[data-action="interrupt"]::after,
+  .send-btn[data-action="steer"]::after{
+    content:attr(data-label);
+    font-size:12px;font-weight:600;letter-spacing:.02em;
+  }
   .send-btn.stop,.send-btn.interrupt{background:var(--error);box-shadow:0 2px 10px rgba(0,0,0,.18);}
   .send-btn.steer{background:var(--purple,#8b5cf6);box-shadow:0 2px 10px rgba(139,92,246,.25);}
   .send-btn.queue{background:var(--accent);}

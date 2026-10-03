@@ -72,6 +72,7 @@ graphify-out/
 .graphify_uncached.txt
 
 .venv/
+.venv
 
 # Dev-only lint tooling (ESLint runtime-error guard) — see TESTING.md
 node_modules/

@@ -73,6 +73,16 @@ const STAGE_LEFT_WIDTH = { full: 900, icons: 600, burger: 300 };
 const OUTCOME_WIDTH = { full: 1000, icons: 700, burger: 400 };
 const STAGE_CLASSES = { full: [], icons: ['cf-icons'], burger: ['cf-icons', 'cf-burger'] };
 const VIEWPORT_HEIGHT = 800;
+// #7686: the composer primary button's rendered outer width by state. An
+// idle `send` is a 34px circle; every busy action is a wider text pill, and
+// the pill grows with the label text it carries (the `data-label` ::after).
+const IDLE_BUTTON_WIDTH = 34;
+const BUSY_BUTTON_BASE = 60;
+// Slack the footer's content box keeps beyond the left group's clientWidth,
+// mirroring a real flex row where `.composer-left` is the flexible member and
+// the fixed-width primary button sits beside it. Set to the widest button
+// state (a labelled busy pill) so the idle-width row never looks cramped.
+const BTN_ROW_SLACK = BUSY_BUTTON_BASE + 16 * 7;
 
 function stageOf(classes) {
   return classes.has('cf-burger') ? 'burger' : classes.has('cf-icons') ? 'icons' : 'full';
@@ -137,19 +147,68 @@ function makeFooterDom(opts) {
       return Math.max(opts.availableWidth, STAGE_LEFT_WIDTH[stageOf(classes)]);
     },
   };
+  // #7686: a stub of the composer primary button with enough surface for
+  // the footer fit's worst-case row measurement. `getComputedStyle` is faked
+  // globally below (see `installComputedStyle`), this stub only models the
+  // element: its attribute store (so the probe's temporary data-action /
+  // data-label stamping is observable and reversible) and its outer width,
+  // which depends on the stamped action exactly like the real CSS: a `send`
+  // circle is IDLE_BUTTON_WIDTH wide, any busy action is a wider pill.
+  const btnAttrs = {};
+  const btn = {
+    style: {},
+    getAttribute(name) {
+      layout('btn.getAttribute(' + name + ')');
+      return Object.prototype.hasOwnProperty.call(btnAttrs, name) ? btnAttrs[name] : null;
+    },
+    setAttribute(name, value) {
+      btnAttrs[name] = String(value);
+      layout('btn.setAttribute(' + name + ')');
+    },
+    removeAttribute(name) {
+      delete btnAttrs[name];
+      layout('btn.removeAttribute(' + name + ')');
+    },
+    get offsetWidth() { return btnWidth(); },
+    getBoundingClientRect() { return { left: 0, top: 0, width: btnWidth(), height: 34 }; },
+  };
+  function btnWidth() {
+    const action = Object.prototype.hasOwnProperty.call(btnAttrs, 'data-action')
+      ? btnAttrs['data-action'] : 'send';
+    const idle = action === 'send';
+    // A busy pill is wider than the idle circle, and a stamped label widens
+    // it further (matching `.send-btn[data-action=...]::after{content:attr(data-label)}`).
+    if (idle) return IDLE_BUTTON_WIDTH;
+    const label = Object.prototype.hasOwnProperty.call(btnAttrs, 'data-label')
+      ? String(btnAttrs['data-label']).length : 0;
+    return BUSY_BUTTON_BASE + label * 7;
+  }
   const footer = {
     style, classList,
-    querySelector(sel) { return sel === '.composer-left' ? left : null; },
-    getBoundingClientRect() { return { left: 0, top: 0, width: 0, height: borderBoxHeight() }; },
+    querySelector(sel) {
+      if (sel === '.composer-left') return left;
+      if (sel === '#btnSend') return btn;
+      return null;
+    },
+    get clientWidth() { return opts.availableWidth + (opts.btnSlack === undefined ? BTN_ROW_SLACK : opts.btnSlack); },
+    getBoundingClientRect() { return { left: 0, top: 0, width: opts.availableWidth + (opts.btnSlack === undefined ? BTN_ROW_SLACK : opts.btnSlack), height: borderBoxHeight() }; },
   };
   const document = {
     querySelector(sel) { return sel === '.composer-footer' ? footer : null; },
   };
   return {
-    document, samples, styleWrites, store,
+    document, samples, styleWrites, store, btnAttrs,
     snapshot() { layout('snapshot'); return samples[samples.length - 1]; },
     classes() { return Array.from(classes).sort().join(' '); },
     stage() { return stageOf(classes); },
+    buttonAction() {
+      return Object.prototype.hasOwnProperty.call(btnAttrs, 'data-action')
+        ? btnAttrs['data-action'] : null;
+    },
+    buttonLabel() {
+      return Object.prototype.hasOwnProperty.call(btnAttrs, 'data-label')
+        ? btnAttrs['data-label'] : null;
+    },
   };
 }
 
@@ -159,8 +218,24 @@ function runFit(fit, opts) {
   const dom = makeFooterDom(opts);
   const before = dom.snapshot();
   global.document = dom.document;
+  // #7686: the fit's row measurement reads `window.getComputedStyle` for the
+  // button's / footer's box model. The real CSS used here contributes no
+  // margin, padding, border or column gap, so a zero-valued style sheet is a
+  // faithful stand-in — what matters is that the API exists, otherwise the
+  // fit falls back to the legacy predicate and would stop seeing the button.
+  const prevComputedStyle = global.window && global.window.getComputedStyle;
+  global.window = global.window || {};
+  global.window.getComputedStyle = function () {
+    return {
+      marginLeft: '0px', marginRight: '0px',
+      borderLeftWidth: '0px', borderRightWidth: '0px',
+      paddingLeft: '0px', paddingRight: '0px',
+      columnGap: '0px', gap: '0px',
+    };
+  };
   let error = null;
   try { fit(); } catch (e) { error = String((e && e.message) || e); }
+  global.window.getComputedStyle = prevComputedStyle;
   const after = dom.snapshot();
   // Samples committed by class mutations and overflow measurements: every one
   // of them happens inside the probe window and must be frozen + hidden.
@@ -171,6 +246,8 @@ function runFit(fit, opts) {
     startHeight: before.footerHeight, finalHeight: after.footerHeight,
     startMessagesHeight: before.messagesClientHeight, finalMessagesHeight: after.messagesClientHeight,
     finalStage: dom.stage(), finalClasses: dom.classes(),
+    buttonAction: dom.buttonAction(),
+    buttonLabel: dom.buttonLabel(),
     styleHeight: dom.store.height, styleVisibility: dom.store.visibility,
     heights: dedupe(dom.samples.map(s => s.footerHeight)),
     messagesHeights: dedupe(dom.samples.map(s => s.messagesClientHeight)),
@@ -378,3 +455,100 @@ def test_harness_detects_unfrozen_probe(outcome):
         f"the messages viewport: {[r['messagesHeights'] for r in steady]}"
     )
     assert len(jitter) >= len(steady), [r["heights"] for r in outcome["control_unfrozen"]]
+
+
+# ── #7686: the footer fit must see the busy pill ─────────────────────────
+
+
+def _run_fit_with(tmp_path, ui_js_text, available_width, btn_slack=None, strip_button=False):
+    driver = tmp_path / "fit_driver_busy_pill.js"
+    extra = ""
+    if btn_slack is not None:
+        extra += f", btnSlack: {btn_slack}"
+    payload = (
+        _DRIVER_SRC
+        + "\n"
+        + f"const out = runFit(eval('(' + extractFunc('_fitComposerFooter') + ')'), {{ start: 'full', availableWidth: {available_width}{extra}, prevHeight: '', prevVisibility: '' }});\n"
+        "process.stdout.write('\\n@@BUSYPILL@@' + JSON.stringify(out) + '\\n');\n"
+    )
+    driver.write_text(payload, encoding="utf-8")
+    probe = tmp_path / "probe_ui.js"
+    text = ui_js_text
+    if strip_button:
+        text = text.replace(
+            "const btn=footer.querySelector('#btnSend');", "const btn=null;", 1
+        )
+        assert "const btn=null;" in text, "could not strip the button measurement"
+    probe.write_text(text, encoding="utf-8")
+    r = subprocess.run(
+        [NODE, str(driver), str(probe)], capture_output=True, text=True, timeout=60
+    )
+    if r.returncode != 0:
+        raise AssertionError(r.stderr[-2000:])
+    # _DRIVER_SRC is a complete script that already prints its own JSON; the
+    # marker isolates the run we asked for.
+    marker = "@@BUSYPILL@@"
+    if marker not in r.stdout:
+        raise AssertionError("driver produced no marker: " + r.stdout[-500:])
+    return json.loads(r.stdout.split(marker, 1)[1].strip())
+
+
+def _strip_button_measurement(ui_js_text):
+    """Control variant: make the fit ignore the button (the pre-fix
+    predicate that only ever compared .composer-left against itself)."""
+    return ui_js_text.replace(
+        "const btn=footer.querySelector('#btnSend');",
+        "const btn=null;",
+        1,
+    )
+
+
+# A row that fits only because the idle circle was assumed:
+#   left demand       900   (STAGE_LEFT_WIDTH.full)
+#   busy pill width   172   (BUSY_BUTTON_BASE 60 + 16-char label * 7)
+#   footer content box 900 + 60 = 960
+#   -> legacy (left-only) predicate sees 900 <= 960  and resolves FULL
+#   -> new    (left+pill)  predicate sees 1072 > 960 and resolves BURGER
+_BUSY_PILL_ROW_AVAILABLE = 900
+_BUSY_PILL_ROW_SLACK = 60
+
+
+def test_fit_uses_busy_pill_width_not_idle_circle(tmp_path):
+    """The footer fit must see the busy-mode pill, not just the idle circle.
+
+    On a row that fits only because the idle 34px circle was assumed, the
+    fit resolves to the compact stage, and the busy state it stamps on the
+    button for the measurement is reverted before the function returns (the
+    temporary stamp never paints: the probe freezes visibility)."""
+    run = _run_fit_with(
+        tmp_path,
+        UI_JS_PATH.read_text(encoding="utf-8"),
+        _BUSY_PILL_ROW_AVAILABLE,
+        btn_slack=_BUSY_PILL_ROW_SLACK,
+    )
+    assert run["error"] is None, run["error"]
+    assert run["finalStage"] == "burger", run
+    assert run["buttonAction"] is None, (
+        "the probe's temporary busy stamp must be reverted: "
+        f"data-action left as {run['buttonAction']!r}"
+    )
+
+
+def test_fit_outcome_is_invariant_when_only_the_idle_width_fits(tmp_path):
+    """Control: with the button measurement removed (the pre-#7686
+    predicate), the same tight footer resolves to the WIDE stage -- so the
+    button-aware measurement is what changes the outcome, and the
+    assertions above cannot pass vacuously."""
+    ui = UI_JS_PATH.read_text(encoding="utf-8")
+    control = _run_fit_with(
+        tmp_path,
+        _strip_button_measurement(ui),
+        _BUSY_PILL_ROW_AVAILABLE,
+        btn_slack=_BUSY_PILL_ROW_SLACK,
+        strip_button=True,
+    )
+    assert control["error"] is None, control["error"]
+    assert control["finalStage"] == "full", (
+        "control run must resolve wide when the button is invisible to the "
+        f"measurement, got {control['finalStage']!r}"
+    )
