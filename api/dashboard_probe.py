@@ -82,8 +82,18 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
     if parsed.params or parsed.query or parsed.fragment:
         raise ValueError("invalid dashboard URL path")
     path = parsed.path or ""
-    if path not in ("", "/"):
+    if "%2f" in path.lower() or "%2e" in path.lower():
         raise ValueError("invalid dashboard URL path")
+    import posixpath as _posixpath
+
+    if path and path not in ("", "/"):
+        had_trailing_slash = path.endswith("/")
+        norm = _posixpath.normpath(path)
+        if norm != path.rstrip("/"):
+            raise ValueError("invalid dashboard URL path")
+        path = f"{norm}/" if had_trailing_slash else norm
+    else:
+        path = ""
     try:
         port = parsed.port
     except ValueError as exc:
@@ -96,7 +106,7 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
         if not (1 <= port <= 65535):
             raise ValueError("invalid dashboard URL port")
         netloc = f"{netloc}:{port}"
-    return urlunparse((parsed.scheme, netloc, "", "", "", ""))
+    return urlunparse((parsed.scheme, netloc, path, "", "", ""))
 
 
 def _looks_like_official_dashboard(payload: object) -> bool:

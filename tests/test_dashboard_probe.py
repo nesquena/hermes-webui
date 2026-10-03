@@ -139,6 +139,32 @@ def test_dashboard_browser_url_preserves_ipv6_host_brackets():
     assert normalize_dashboard_browser_url("https://[2001:db8::1]") == "https://[2001:db8::1]"
 
 
+def test_dashboard_browser_url_allows_subpaths_and_rejects_traversal():
+    import pytest
+    from api.dashboard_probe import normalize_dashboard_browser_url
+
+    # Sub-paths behind reverse proxy are preserved (including trailing slash semantics):
+    assert normalize_dashboard_browser_url("https://hermes.example.com/dashboard") == "https://hermes.example.com/dashboard"
+    assert normalize_dashboard_browser_url("https://hermes.example.com/dashboard/") == "https://hermes.example.com/dashboard/"
+    assert normalize_dashboard_browser_url("https://hermes.example.com/apps/hermes-dashboard") == "https://hermes.example.com/apps/hermes-dashboard"
+    assert normalize_dashboard_browser_url("https://hermes.example.com/apps/hermes-dashboard/") == "https://hermes.example.com/apps/hermes-dashboard/"
+    assert normalize_dashboard_browser_url("http://127.0.0.1:8080/prefix") == "http://127.0.0.1:8080/prefix"
+    assert normalize_dashboard_browser_url("http://127.0.0.1:8080/prefix/") == "http://127.0.0.1:8080/prefix/"
+    assert normalize_dashboard_browser_url("https://hermes.example.com/") == "https://hermes.example.com"
+
+    # Traversal and invalid patterns are rejected:
+    for invalid in (
+        "https://hermes.example.com/dashboard/../admin",
+        "https://hermes.example.com/..",
+        "https://hermes.example.com/dashboard/%2e%2e/admin",
+        "https://hermes.example.com/dashboard/%2fadmin",
+        "https://hermes.example.com/dashboard?q=1",
+        "https://hermes.example.com/dashboard#fragment",
+    ):
+        with pytest.raises(ValueError, match="invalid dashboard URL path"):
+            normalize_dashboard_browser_url(invalid)
+
+
 def test_status_honors_never_and_external_browser_link_without_probe(monkeypatch):
     from api import dashboard_probe
 
@@ -158,6 +184,11 @@ def test_status_honors_never_and_external_browser_link_without_probe(monkeypatch
         "url": "https://dashboard.example.test",
         "browser_url": "https://dashboard.example.test",
     }
+
+    result_subpath = dashboard_probe.get_dashboard_status(
+        config_data={"webui": {"dashboard": {"enabled": "always", "url": "https://dashboard.example.test/subpath/"}}}
+    )
+    assert result_subpath["browser_url"] == "https://dashboard.example.test/subpath/"
 
 
 
@@ -214,11 +245,11 @@ def test_dashboard_config_roundtrip_writes_profile_config_yaml(tmp_path, monkeyp
     assert saved == {"enabled": "auto", "url": "http://127.0.0.1:19119"}
     assert "dashboard:" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
 
-    saved = save_dashboard_config({"enabled": "always", "url": "https://dashboard.example.test"})
-    assert saved == {"enabled": "always", "url": "https://dashboard.example.test"}
-    assert get_dashboard_config() == {"enabled": "always", "url": "https://dashboard.example.test"}
+    saved = save_dashboard_config({"enabled": "always", "url": "https://dashboard.example.test/dashboard"})
+    assert saved == {"enabled": "always", "url": "https://dashboard.example.test/dashboard"}
+    assert get_dashboard_config() == {"enabled": "always", "url": "https://dashboard.example.test/dashboard"}
 
-    for unsafe_url in ("https://example.com/path", "https://user:pass@example.com", "javascript:alert(1)"):
+    for unsafe_url in ("https://example.com/path/../admin", "https://user:pass@example.com", "javascript:alert(1)"):
         try:
             save_dashboard_config({"enabled": "auto", "url": unsafe_url})
         except ValueError:
