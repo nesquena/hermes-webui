@@ -12496,6 +12496,26 @@ def _merge_session_messages_append_only_impl(
         and boundary_ts is not None
         and boundary_ts < watermark_timestamp
     )
+    # Self-heal for a STALE (wall-clock) watermark left by the pre-fix
+    # advance helper. A legitimate watermark always equals a real message
+    # timestamp (session_ops._truncation_watermark_for uses the last kept
+    # row's timestamp), so a watermark NEWER than every sidecar row cannot be a
+    # real truncate cutoff -- it is an invented boundary. Because
+    # sidecar_advanced_past_watermark then stays False forever, the filter
+    # below hides exactly the state.db rows that would advance the sidecar past
+    # the watermark: a self-locked transcript that silently drops every later
+    # turn. Detect that and drop the watermark, restoring normal merge order
+    # (fail OPEN toward data, matching the intent of session_recovery's
+    # watermark guards). The replaced-tail suppression still works via the
+    # legitimate boundary/watermark values, which are always <= max_sidecar.
+    watermark_is_stale_wall_clock = (
+        watermark_timestamp is not None
+        and watermark_timestamp != 0
+        and max_sidecar_timestamp is not None
+        and watermark_timestamp > max_sidecar_timestamp
+    )
+    if watermark_is_stale_wall_clock:
+        watermark_timestamp = None
 
     def _state_row_is_truncated(
         msg, key, content_key, timestamp, checkpoint_consumed,
