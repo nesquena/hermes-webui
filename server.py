@@ -108,6 +108,7 @@ activate_managed_agent()
 logger = logging.getLogger(__name__)
 
 from api.request_logging import emit_request_log
+from api.routes import request_log_forwarded_fields  # #7863
 from api.auth import check_auth_or_close, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
@@ -361,11 +362,6 @@ class Handler(BaseHTTPRequestHandler):
                 remote = str(self.client_address[0])
         except Exception:
             remote = '-'
-        forwarded_for = None
-        try:
-            forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
-        except Exception:
-            forwarded_for = None
         record_data = {
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'remote': remote,
@@ -374,8 +370,12 @@ class Handler(BaseHTTPRequestHandler):
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         }
-        if forwarded_for:
-            record_data['forwarded_for'] = forwarded_for
+        try:
+            # #7863/#7864: trusted-proxy resolution + a per-record flag when a
+            # forwarded header was dropped, so the loss is visible per request.
+            record_data.update(request_log_forwarded_fields(self))
+        except Exception:
+            pass
         record = _json.dumps(record_data)
         self._safe_webui_print(f'[webui] {record}')
 
@@ -601,7 +601,7 @@ def main() -> None:
         print('[ok] Running within container.', flush=True)
 
     # Security: warn if binding non-loopback without authentication
-    from api.auth import get_oidc_startup_warning, is_auth_enabled
+    from api.auth import get_oidc_startup_warning, is_auth_enabled, print_startup_warnings
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
         print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
         print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
@@ -614,9 +614,9 @@ def main() -> None:
         print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
         print(f'        enable authentication.', flush=True)
 
-    oidc_startup_warning = get_oidc_startup_warning()
-    if oidc_startup_warning:
-        print(f'[!!] WARNING: {oidc_startup_warning}', flush=True)
+    if (w := get_oidc_startup_warning()):
+        print(f'[!!] WARNING: {w}', flush=True)
+    print_startup_warnings()  # #7864 r2: no-op TRUST_FORWARDED_FOR etc.
 
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:
