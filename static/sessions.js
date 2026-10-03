@@ -4754,6 +4754,63 @@ function _profileQueryIntentFromLocation(){
     };
   }catch(_e){return empty;}
 }
+// #7652 review round 4: a sessionless cron notification carries an explicit
+// panel intent so the click lands on the panel the run belongs to instead of
+// the last chat the user had open. Only panels the main view actually renders
+// are accepted, so a stray parameter can never leave the app on a blank view.
+// Review round 5: a bare `^[a-z0-9][a-z0-9_-]*$` shape check accepted
+// `?panel=doesnotexist` — a valid-looking intent that made boot skip the
+// saved-chat restore and then had switchPanel select nothing. The name is
+// validated against the real panel set instead: the rail's own data-panel
+// attributes when the DOM is available, with the rendered panel views as a
+// headless fallback.
+function _knownPanelNames(){
+  const names=new Set();
+  try{
+    if(typeof document!=='undefined'&&document&&typeof document.querySelectorAll==='function'){
+      document.querySelectorAll('[data-panel]').forEach((el)=>{
+        const n=el&&el.dataset?el.dataset.panel:'';
+        if(n) names.add(String(n));
+      });
+      document.querySelectorAll('.panel-view').forEach((el)=>{
+        if(!el||!el.id) return;
+        const m=/^panel([A-Z][A-Za-z]*)$/.exec(el.id);
+        if(m) names.add(m[1].charAt(0).toLowerCase()+m[1].slice(1));
+      });
+    }
+  }catch(_e){/* fall through to the static set */}
+  if(!names.size){
+    ['chat','tasks','kanban','skills','memory','workspaces','profiles','todos','insights','logs','settings','plugin']
+      .forEach((n)=>names.add(n));
+  }
+  return names;
+}
+function _panelQueryIntentFromLocation(){
+  const empty={hasParam:false,valid:false,name:''};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    if(!qs.has('panel')) return empty;
+    const name=String(qs.get('panel')||'');
+    return {
+      hasParam:true,
+      valid:/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)&&_knownPanelNames().has(name),
+      name
+    };
+  }catch(_e){return empty;}
+}
+function _consumePanelQueryParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('panel');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _consumeProfileQueryParamFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{
