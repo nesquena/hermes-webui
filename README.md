@@ -299,6 +299,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Plain skills match case-insensitive keywords in their name or description; built-in, agent/plugin, and bundle commands keep prefix matching and take precedence over a same-slug skill
 - Built-in: `/help`, `/clear`, `/compress [focus topic]`, `/compact` (alias), `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`
 - Arrow keys navigate, Tab/Enter select, Escape closes
+- `/refine [focus]` runs the memory/skill review fork in the background, like the Hermes CLI — any memory/skill updates are reported in the chat when done
 - Unrecognized commands pass through to the agent
 
 #### Model aliases in `/model`
