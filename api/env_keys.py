@@ -28,7 +28,7 @@ there is a reason to add a re-authentication gate for it (#7815).
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qs, unquote
+from urllib.parse import unquote
 
 from api.helpers import bad, j
 
@@ -36,6 +36,10 @@ from api.helpers import bad, j
 # obviously malformed names before touching the agent module. The writer's own
 # ``validate_env_var_name_for_write`` is the authority.
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class EnvKeyProfileError(Exception):
+    """The request has no provable profile home to act on (fail closed)."""
 
 _ENV_PREFIX = "/api/env/keys"
 _ENV_KEY_PREFIX = "/api/env/keys/"
@@ -47,14 +51,78 @@ _RESERVED_ENV_PREFIXES = ("HERMES_",)
 _RESERVED_ENV_EXACT = frozenset({"PATH", "HOME", "USER", "SHELL", "LANG", "TERM"})
 
 
-def _profile_scope(profile):
-    """Enter the requested profile's scope for the agent's env reader/writer.
+def _authorized_profile() -> str:
+    """Return the profile THIS request is authorized to act on.
 
-    Same binding the dashboard uses (``hermes_cli.web_server_profiles``), so a
-    WebUI write lands in the SAME per-profile ``.env`` the dashboard would
-    touch. An unavailable binding degrades to a no-op scope rather than
-    failing the request — the launch profile is still the documented default.
+    WebUI auth already establishes the active/bound profile per request
+    (the ``hermes_profile`` cookie → thread-local, an isolated-profile
+    deployment's own name, or the process-level default). That value is the
+    authorization boundary: it is the home whose settings this browser
+    session is allowed to read and mutate.
+
+    The caller-supplied ``?profile=`` selector is deliberately NOT accepted.
+    Resolving a valid profile is not the same as being authorized to act on
+    it: with the query parameter, a request bound to profile A could read
+    profile B's key names, value lengths and previews, and could write or
+    delete B's credentials — an authorization mismatch, not a
+    path-traversal issue (#7870 review). The dashboard's profile switcher
+    is a UI affordance for an already-authenticated session; it is not an
+    HTTP authorization mechanism.
+
+    Raises ``EnvKeyProfileError`` when the active profile cannot be
+    resolved: without a provable owner there is no home to act on, and
+    guessing (or silently falling back to the launch/default profile)
+    would mutate a profile the caller never proved they belong to.
     """
+    try:
+        from api.profiles import get_active_profile_name
+    except Exception as exc:  # pragma: no cover - agent module unavailable
+        raise EnvKeyProfileError(f"cannot resolve the active profile: {exc}") from exc
+    name = get_active_profile_name()
+    if not isinstance(name, str) or not name.strip():
+        raise EnvKeyProfileError(
+            "active profile is unresolved; refusing to act on an unknown home"
+        )
+    # Root aliases ("default" and any name that resolves to ~/.hermes) are
+    # ONE home: a request bound to a renamed root profile must address the
+    # same .env the dashboard would, not a second namespace that happens to
+    # be spelled differently.
+    return _canonical_profile_name(name.strip())
+
+
+def _canonical_profile_name(name: str) -> str:
+    """Collapse every spelling of the root profile onto ``'default'``."""
+    if not name or name == "default":
+        return "default"
+    try:
+        from api.profiles import _is_root_profile
+
+        if _is_root_profile(name):
+            return "default"
+    except Exception:
+        # Lookup unavailable: keep the concrete name. A wrong-but-concrete
+        # profile is confined to that profile's home; collapsing every name
+        # to the root on a failed lookup would cross-tenant them.
+        pass
+    return name
+
+
+def _profile_scope(profile):
+    """Enter ``profile``'s scope for the agent's env reader/writer.
+
+    ``profile`` is always the AUTHORIZED profile for the request (see
+    :func:`_authorized_profile`) — never a query parameter. A scope that
+    cannot be constructed is an error the caller must see: the previous
+    behaviour returned a no-op context, which let a request answer against
+    the process's launch/home ``.env`` (i.e. the DEFAULT profile) instead of
+    the caller's — a silent cross-profile mutation reported as success
+    (#7870 review, "wrong-home default").
+
+    Raises ``EnvKeyProfileError`` on any binding failure.
+    """
+    if not profile:
+        raise EnvKeyProfileError("no profile to scope the .env access to")
+
     class _NoScope:
         def __enter__(self):
             return None
@@ -62,16 +130,18 @@ def _profile_scope(profile):
         def __exit__(self, *exc):
             return False
 
-    if not profile:
-        return _NoScope()
     try:
         from hermes_cli.web_server_profiles import _profile_scope as _scope
     except Exception:
-        return _NoScope()
+        raise EnvKeyProfileError(
+            "the agent profile binding is unavailable; refusing to touch a .env"
+        ) from None
     try:
         return _scope(profile)
-    except Exception:
-        return _NoScope()
+    except Exception as exc:
+        raise EnvKeyProfileError(
+            f"could not bind the {profile!r} profile scope: {exc}"
+        ) from exc
 
 
 def _active_profile_env(profile=None):
@@ -92,24 +162,24 @@ def _active_profile_env(profile=None):
 
 
 def _redacted(value: str) -> str:
-    """Mask the middle of a secret, keeping the first and last 2 chars — enough
-    to tell two keys apart, never enough to use."""
+    """Fully mask the secret.
+
+    The previous preview revealed the first and last two characters of any
+    value longer than eight. Two known plaintext characters of a credential is
+    a real leak (many tokens are ``<prefix><random><suffix>`` with a shared
+    family prefix/suffix), and the redaction was the only thing standing
+    between a list response and the secret. A masked string of the same length
+    still distinguishes keys — it carries the length, which is what a user
+    needs to recognise "that's the long one".
+    """
     text = str(value or "")
-    if len(text) <= 8:
-        return "*" * len(text)
-    return f"{text[:2]}{'*' * (len(text) - 4)}{text[-2:]}"
+    return "*" * len(text)
 
 
 def _is_reserved(name: str) -> bool:
     if name in _RESERVED_ENV_EXACT:
         return True
     return any(name.startswith(prefix) for prefix in _RESERVED_ENV_PREFIXES)
-
-
-def _profile_from_query(parsed) -> str | None:
-    query = parse_qs(parsed.query or "")
-    values = query.get("profile") or []
-    return str(values[0]).strip() if values and str(values[0]).strip() else None
 
 
 def _write_error(exc: Exception) -> str:
@@ -124,11 +194,19 @@ def _write_error(exc: Exception) -> str:
 def handle_env_keys_get(handler, parsed) -> bool:
     """GET /api/env/keys — list the profile's `.env` keys, redacted.
 
-    Managed families (provider/channel credentials, Hermes' own config) are
-    filtered out: they belong to the Providers/Channels pages, exactly as the
-    dashboard excludes them from Custom Keys.
+    Lists every key the authenticated profile's ``.env`` holds, each tagged
+    ``managed_elsewhere`` when a richer settings page owns it (Providers,
+    Channels, Hermes' own config) — the same label the dashboard's Custom Keys
+    section uses. The tag is advisory only: nothing here is hidden, because a
+    hidden entry cannot be reconciled against the page that owns it. The
+    response never contains a value, only a same-length mask.
     """
-    env_on_disk, error = _active_profile_env(_profile_from_query(parsed))
+    try:
+        profile = _authorized_profile()
+    except EnvKeyProfileError as exc:
+        return bad(handler, f"Profile scope unavailable: {exc}", status=503)
+
+    env_on_disk, error = _active_profile_env(profile)
     if env_on_disk is None:
         kind, detail = error
         return bad(handler, f"Failed to read .env ({kind}): {detail}", status=500)
@@ -178,8 +256,31 @@ def handle_env_keys_put(handler, parsed, body: dict) -> bool:
     except Exception as exc:  # pragma: no cover - agent module unavailable
         return bad(handler, f"Failed to import the .env writer: {exc}", status=500)
     try:
-        with _profile_scope(_profile_from_query(parsed)):
+        profile = _authorized_profile()
+    except EnvKeyProfileError as exc:
+        return bad(handler, f"Profile scope unavailable: {exc}", status=503)
+
+    try:
+        with _profile_scope(profile):
+            # The installed writer signals a managed-.env refusal by returning
+            # WITHOUT raising, and returns ``None`` on success too — so its
+            # return value cannot distinguish "wrote it" from "declined", and
+            # discarding it let a refused write answer ok:true (the reviewer's
+            # fourth finding). Prove the mutation instead: read the AUTHORIZED
+            # profile's ``.env`` back and require the key to be there. A
+            # success response now means the write is observable on disk, not
+            # merely that no exception escaped.
             save_env_value(name, value)
+            if _active_profile_env(profile)[0] is None or name not in (
+                _active_profile_env(profile)[0] or {}
+            ):
+                return bad(
+                    handler,
+                    f"the writer did not store {name} in the {profile!r} profile .env",
+                    status=409,
+                )
+    except EnvKeyProfileError as exc:
+        return bad(handler, f"Profile scope unavailable: {exc}", status=503)
     except Exception as exc:
         return bad(handler, _write_error(exc), status=400)
 
@@ -187,6 +288,7 @@ def handle_env_keys_put(handler, parsed, body: dict) -> bool:
         handler,
         {
             "ok": True,
+            "profile": profile,
             "key": {
                 "name": name,
                 "is_set": True,
@@ -220,9 +322,26 @@ def handle_env_key_delete(handler, name: str, parsed=None) -> bool:
     except Exception as exc:  # pragma: no cover - agent module unavailable
         return bad(handler, f"Failed to import the .env writer: {exc}", status=500)
     try:
-        with _profile_scope(_profile_from_query(parsed) if parsed is not None else None):
+        profile = _authorized_profile()
+    except EnvKeyProfileError as exc:
+        return bad(handler, f"Profile scope unavailable: {exc}", status=503)
+
+    try:
+        with _profile_scope(profile):
             remove_env_value(name)
+        # Prove the key is gone from the AUTHORIZED profile's .env rather than
+        # trusting the writer's return (a managed refusal returns False, and
+        # the old code answered ok:true anyway).
+        after, _err = _active_profile_env(profile)
+        if after is not None and name in after:
+            return bad(
+                handler,
+                f"{name} is still present in the {profile!r} profile .env",
+                status=409,
+            )
+    except EnvKeyProfileError as exc:
+        return bad(handler, f"Profile scope unavailable: {exc}", status=503)
     except Exception as exc:
         return bad(handler, _write_error(exc), status=400)
 
-    return j(handler, {"ok": True, "deleted": name})
+    return j(handler, {"ok": True, "profile": profile, "deleted": name})

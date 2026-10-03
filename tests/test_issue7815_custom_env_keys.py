@@ -72,11 +72,37 @@ def _install_agent(monkeypatch, store: _FakeEnvStore):
     fake_cli.config = fake_config  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_config)
-    # No profile binding in this environment: the scope degrades to a no-op.
-    monkeypatch.setitem(
-        sys.modules,
-        "hermes_cli.web_server_profiles",
-        types.ModuleType("hermes_cli.web_server_profiles"),
+
+    # A REAL profile-scope binding of the installed agent's shape (raises on
+    # an unknown name, no silent no-op fallback) — see #7870's authorization
+    # fix: a request must act on the WebUI-authenticated profile's home, and a
+    # binding that cannot be built is an error, not a fallback to the launch
+    # profile's .env.
+    fake_scope_mod = types.ModuleType("hermes_cli.web_server_profiles")
+
+    class _Scope:
+        def __init__(self, profile):
+            self._profile = profile
+
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *exc):
+            return False
+
+    def _profile_scope(profile):
+        if not profile or not isinstance(profile, str):
+            raise ValueError(f"unusable profile {profile!r}")
+        return _Scope(profile)
+
+    fake_scope_mod._profile_scope = _profile_scope  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", fake_scope_mod)
+
+    # WebUI's authorization source for the request's profile.
+    import api.profiles as profiles
+
+    monkeypatch.setattr(
+        profiles, "get_active_profile_name", lambda: "default", raising=False
     )
 
 
@@ -159,9 +185,12 @@ def test_list_returns_redacted_previews_not_plaintext(env_store):
     assert row["is_set"] is True
     assert row["redacted_value"] != "super-secret-value"
     assert "super-secret-value" not in str(captured.payload)
-    # The mask keeps enough to tell two keys apart.
-    assert row["redacted_value"].startswith("su") and row["redacted_value"].endswith("ue")
-    assert row["redacted_value"].count("*") == len("super-secret-value") - 4
+    # #7870 review: the preview reveals NOTHING — not even the first and last
+    # two characters, which is a real leak for the many credentials built as
+    # <shared-family-prefix><random><shared-suffix>. The mask keeps the LENGTH
+    # only, which is what a user needs to tell two keys apart.
+    assert row["redacted_value"] == "*" * len("super-secret-value")
+    assert not any(ch in row["redacted_value"] for ch in "super-value")
 
 
 def test_list_marks_reserved_families_as_managed_elsewhere(env_store):
