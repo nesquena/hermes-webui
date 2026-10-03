@@ -83,7 +83,7 @@ def test_profile_mismatch_returns_409_with_code_and_profile(helper_scope) -> Non
     handler = _FakeHandler()
     helper_scope["_resolve"] = lambda sid: _FakeSession(profile="alpha")
     # Visibility predicate: returns False (profile mismatch).
-    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h: False
+    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h, profile=None: False
 
     _exec_helper(helper_scope)
     fn = helper_scope["_session_id_visible_to_request_profile"]
@@ -101,7 +101,7 @@ def test_unknown_profile_returns_404_for_frontend_self_heal(helper_scope) -> Non
     """A session with ``profile=None`` MUST keep 404 so the frontend's self-heal fires."""
     handler = _FakeHandler()
     helper_scope["_resolve"] = lambda sid: _FakeSession(profile=None)
-    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h: False
+    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h, profile=None: False
 
     _exec_helper(helper_scope)
     fn = helper_scope["_session_id_visible_to_request_profile"]
@@ -116,7 +116,7 @@ def test_visible_session_returns_no_error(helper_scope) -> None:
     """A session owned by the active profile MUST pass the guard silently."""
     handler = _FakeHandler()
     helper_scope["_resolve"] = lambda sid: _FakeSession(profile="default")
-    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h: True
+    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h, profile=None: True
 
     _exec_helper(helper_scope)
     fn = helper_scope["_session_id_visible_to_request_profile"]
@@ -139,7 +139,7 @@ def test_emit_error_false_suppresses_response(helper_scope) -> None:
     """``emit_error=False`` MUST return False without writing any response (used by the guard's exemption probe)."""
     handler = _FakeHandler()
     helper_scope["_resolve"] = lambda sid: _FakeSession(profile="alpha")
-    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h: False
+    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h, profile=None: False
 
     _exec_helper(helper_scope)
     fn = helper_scope["_session_id_visible_to_request_profile"]
