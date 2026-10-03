@@ -10,7 +10,7 @@ that historical assistant messages don't mask a silent provider failure.
 
 import pytest
 
-from api.streaming import _has_new_assistant_reply
+from api.streaming import _has_new_assistant_reply, _should_retry_silent_failure
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -169,3 +169,48 @@ class TestHasNewAssistantReplyEdgeCases:
             _msg("assistant", "   "),
         ]
         assert _has_new_assistant_reply(all_msgs, len(prev)) is False
+
+
+# ── Silent-failure retry gate ────────────────────────────────────────────────
+
+class TestShouldRetrySilentFailure:
+    """The one-shot retry gate for a turn that failed silently.
+
+    A silent turn: no error string, no assistant reply, no streamed text, and
+    the classifier fell back to ``no_response``. That is the "provider closed
+    the stream with zero content and no error" shape that used to end as a
+    dead-end card; it now earns the same single retry as a 401.
+    """
+
+    def test_silent_empty_turn_retries(self):
+        assert _should_retry_silent_failure(
+            last_err='', assistant_added=False, token_sent=False,
+            error_type='no_response',
+        ) is True
+
+    def test_explicit_error_is_not_silent(self):
+        """A classified error keeps its own (non-silent) path."""
+        assert _should_retry_silent_failure(
+            last_err='provider returned 500', assistant_added=False,
+            token_sent=False, error_type='no_response',
+        ) is False
+
+    def test_assistant_reply_added_is_not_silent(self):
+        assert _should_retry_silent_failure(
+            last_err='', assistant_added=True, token_sent=True,
+            error_type='no_response',
+        ) is False
+
+    def test_streamed_text_is_not_silent(self):
+        """A retry after text reached the client would duplicate it."""
+        assert _should_retry_silent_failure(
+            last_err='', assistant_added=False, token_sent=True,
+            error_type='no_response',
+        ) is False
+
+    def test_other_classifications_keep_their_own_path(self):
+        for error_type in ('auth_mismatch', 'quota_exhausted', 'cancelled', 'interrupted'):
+            assert _should_retry_silent_failure(
+                last_err='', assistant_added=False, token_sent=False,
+                error_type=error_type,
+            ) is False
