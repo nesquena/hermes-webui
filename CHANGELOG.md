@@ -65,6 +65,14 @@
 
 ### Security
 
+- **Remote images in chat no longer load until you click them (zero-click exfiltration fix).** Any assistant-rendered
+  `![x](https://host/?d=…)` used to fetch the moment it rendered, which let a prompt-injected reply beacon chat data to
+  an outside server. The default CSP `img-src` no longer allows arbitrary `https:` images, and a non-allowlisted remote
+  image renders as an inert "🖼 Open image · host" chip that fetches nothing until clicked (the tooltip says why).
+  Operators can allow image origins with `HERMES_WEBUI_CSP_IMG_EXTRA`; the CSP header and the page read the same
+  validated list, and public share pages follow it too. Extension pages and injected extension scripts that load
+  remote images need their origins allowlisted the same way (see `docs/EXTENSIONS.md`). (#7962, fixes #7941)
+
 - **Public shares no longer 500 on large inline images, and never treat a `data:` URI as a file path.** A
   conversation containing a `MEDIA:data:image/…` token over about 4 KB failed share creation with a
   filename-too-long error, because the share builder tried to resolve the blob on disk. `data:` tokens now never touch
