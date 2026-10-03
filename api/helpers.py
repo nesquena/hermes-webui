@@ -658,6 +658,24 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 
 
 # ── Credential redaction ──────────────────────────────────────────────────────
+# Agent redact is catastrophic on megabyte tool dumps and wedges
+# ThreadingHTTPServer behind the GIL. After a VM crash Firefox reopened a 33MB
+# session; GET /api/session spent ~117s in redact_sensitive_text and even
+# GET / timed out. The agent's cheap substring pre-checks ("://" in text,
+# "eyJ" in text) do not help here: a URL-heavy dump passes them trivially, so
+# the full URL/DB/JWT scans run over the whole blob (measured on current
+# hermes-agent: 4MB field = ~2.3s full vs ~0.24s prefix-only). Above this cap
+# only the cheap local fallback runs.
+#
+# The fallback also masks the three prefix-less agent-only shapes that would
+# otherwise leak above this cap — bare JWTs (eyJ…), URI userinfo passwords
+# (postgres://u:***@host), and Telegram bot tokens (<digits>:<token>) — via the
+# cheap _JWT_RE/_URI_USERINFO_RE/_TELEGRAM_RE passes in _fallback_redact. So a
+# huge single field degrades only in that it skips the *expensive* agent pattern
+# set (Stripe/Slack/Google/… prefixes are still covered by the fallback's own
+# prefix list). Pinned both ways by test_residual_shapes_masked_above_agent_cap.
+# Raising the cap trades latency for the remaining long-tail agent-only patterns.
+_REDACT_AGENT_MAX_TEXT_LEN = 16384
 
 def _build_redact_fn():
     """Return a redactor backed by hermes-agent plus local fallback patterns."""
@@ -724,6 +742,17 @@ def _build_redact_fn():
         r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
     )
 
+    # Prefix-less shapes the agent redactor covers but the prefix/keyword-based
+    # fallback historically did not. Needed so the agent-pass bypass above
+    # _REDACT_AGENT_MAX_TEXT_LEN does not leak these in a huge single field.
+    # All three are structure-preserving (keep botid / scheme/user/host and mask
+    # only the secret).
+    _JWT_RE = _re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}")
+    # scheme://user:PASSWORD@host — keep scheme/user/host, mask the password.
+    _URI_USERINFO_RE = _re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^/:@\s]+:)([^@/\s]+)(@)")
+    # Telegram bot token <botid>:<token> — keep the numeric botid, mask token.
+    _TELEGRAM_RE = _re.compile(r"(\b\d{5,}:)([A-Za-z0-9_-]{20,})")
+
     def _mask(token: str) -> str:
         return f"{token[:6]}...{token[-4:]}" if len(token) >= 18 else "***"
 
@@ -786,12 +815,47 @@ def _build_redact_fn():
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+        # Prefix-less agent-only shapes — closes the >16KB agent-bypass residual.
+        text = _JWT_RE.sub("[REDACTED JWT]", text)
+        text = _URI_USERINFO_RE.sub(lambda m: m.group(1) + _mask(m.group(2)) + m.group(3), text)
+        text = _TELEGRAM_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         return text
 
     try:
         from agent.redact import redact_sensitive_text
     except ImportError:
         return _fallback_redact
+
+    try:
+        import agent.redact as _agent_redact_mod
+    except ImportError:  # pragma: no cover - imported just above
+        _agent_redact_mod = None
+
+    def _agent_prefix_only_redact(text: str) -> str:
+        """Cheap agent pass for oversized fields: known + plugin prefixes only.
+
+        ``register_redaction_patterns()`` rebuilds the agent's module-level
+        ``_PREFIX_RE``, so it is looked up per call — runtime-registered plugin
+        patterns stay honoured above the cap (fail-closed, see
+        tests/test_redact_large_string_cache.py). Skips the expensive
+        URL/JSON/YAML/JWT/DB scans; _fallback_redact covers those shapes.
+        """
+        mod = _agent_redact_mod
+        prefix_re = getattr(mod, "_PREFIX_RE", None) if mod else None
+        mask_token = getattr(mod, "_mask_token", None) if mod else None
+        if prefix_re is None or mask_token is None:
+            # Unknown agent layout: fail closed to the full (slow) pass.
+            try:
+                return redact_sensitive_text(text, force=True)
+            except TypeError:
+                return redact_sensitive_text(text)
+        has_prefix = getattr(mod, "_has_known_prefix_substring", None)
+        if has_prefix is not None and not has_prefix(text):
+            return text
+        split = getattr(mod, "_mask_control_split_tokens", None)
+        if split is not None:
+            text = split(text, mask_token)
+        return prefix_re.sub(lambda m: mask_token(m.group(1)), text)
 
     def _combined_redact(text: str) -> str:
         if not isinstance(text, str) or not text:
@@ -801,11 +865,17 @@ def _build_redact_fn():
         # connection strings, Telegram bot tokens) run regardless of the user's
         # HERMES_REDACT_SECRETS opt-in. The local fallback then handles the
         # common short-prefix shapes the agent omits (ghp_, sk-, hf_, AKIA).
-        try:
-            agent_redacted = redact_sensitive_text(text, force=True)
-        except TypeError:
-            # Older hermes-agent builds that predate the force kwarg.
-            agent_redacted = redact_sensitive_text(text)
+        if len(text) > _REDACT_AGENT_MAX_TEXT_LEN:
+            # Oversized single field (tool dump): run only the agent's cheap
+            # prefix pass (incl. plugin patterns); _fallback_redact below still
+            # masks the common prefix-less credential shapes.
+            agent_redacted = _agent_prefix_only_redact(text)
+        else:
+            try:
+                agent_redacted = redact_sensitive_text(text, force=True)
+            except TypeError:
+                # Older hermes-agent builds that predate the force kwarg.
+                agent_redacted = redact_sensitive_text(text)
         agent_redacted = _restore_code_env_key_literals(text, agent_redacted)
         return _fallback_redact(agent_redacted)
 
