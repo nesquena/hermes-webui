@@ -8,8 +8,12 @@ load entirely.
 That is only sound because the cache key no longer depends on the loaded rows.
 These tests pin the two properties that make the shortcut safe:
   1. a hit returns EXACTLY what the full load+merge path returns;
-  2. anything uncertain (active session, unbuildable key, changed data) falls
-     back to the full load rather than serving a stale transcript.
+  2. anything uncertain (active session without a registered in-process stream,
+     unbuildable key, changed data, expired streaming TTL) falls back to the
+     full load rather than serving a stale transcript. RC1 additionally pins
+     that an active session WITH a registered stream probes under the
+     freeze-marker key within the streaming TTL, and that msg_before paging
+     keeps bypassing the cache.
 """
 
 import sys
@@ -127,8 +131,14 @@ def test_shortcut_matches_the_full_merge_path(monkeypatch, stable_key):
 # Fail-closed: never serve a stale transcript.
 # --------------------------------------------------------------------------
 
-def test_active_stream_never_uses_the_cache(stable_key):
-    """An active session's in-memory tail can be ahead of its disk signature."""
+def test_unregistered_active_stream_never_uses_the_cache(stable_key):
+    """Fail-closed for a stream this process cannot see.
+
+    RC1 lets an in-process registered stream probe under the freeze marker, but
+    a cross-process (gateway/CLI) turn has no registered stream id here: the
+    in-memory tail cannot be verified against anything this process can build,
+    so the probe must refuse instead of serving a possibly stale transcript.
+    """
     session = _Session()
     sidecar = [{"role": "user", "content": "hi", "timestamp": 10.0}]
     _seed(session, sidecar, [{"role": "user", "content": "hi", "timestamp": 10.0}])
@@ -137,13 +147,75 @@ def test_active_stream_never_uses_the_cache(stable_key):
     assert routes._display_merge_cached_messages(session, sidecar) is None
 
 
-def test_pending_user_message_never_uses_the_cache(stable_key):
+def test_pending_user_message_without_registered_stream_never_uses_the_cache(stable_key):
+    """A queued user message is not part of the merge, but without a registered
+    in-process stream there is no freeze marker either — fail closed."""
     session = _Session()
     sidecar = [{"role": "user", "content": "hi", "timestamp": 10.0}]
     _seed(session, sidecar, [{"role": "user", "content": "hi", "timestamp": 10.0}])
 
     session.pending_user_message = {"content": "not yet on disk"}
     assert routes._display_merge_cached_messages(session, sidecar) is None
+
+
+def test_registered_active_stream_probes_the_streaming_cache(monkeypatch, stable_key):
+    """RC1: an active session with an in-process registered stream may hit the
+    memoized merge under the freeze-marker key, bounded by the streaming TTL."""
+    marker = ("streaming", ("stream-123",))
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"stream-123"})
+    now = [1000.0]
+    monkeypatch.setattr(routes.time, "monotonic", lambda: now[0])
+    session = _Session(active="stream-123")
+    sidecar = [{"role": "user", "content": "hi", "timestamp": 10.0}]
+    merged = [{"role": "user", "content": "hi", "timestamp": 10.0}]
+    key = routes._display_merge_cache_key(
+        session, sidecar, None, state_db_signature=marker)
+    assert key is not None
+    with routes._display_merge_cache_lock:
+        routes._display_merge_cache[session.session_id] = {
+            "key": key,
+            "messages": merged,
+            "stored_at": now[0],
+        }
+
+    now[0] += routes._DISPLAY_MERGE_STREAMING_TTL_SECONDS - 0.1
+    assert routes._display_merge_cached_messages(session, sidecar) == merged
+
+    now[0] += 0.2  # past the TTL
+    assert routes._display_merge_cached_messages(session, sidecar) is None
+
+
+def test_registered_active_stream_fills_the_entry_the_probe_hits(monkeypatch, stable_key):
+    """Fill and probe must agree for an active session: one merge, then hits."""
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"stream-123"})
+    session = _Session(active="stream-123")
+    sidecar = [{"role": "user", "content": "one", "timestamp": 1.0}]
+    rows = [
+        {"role": "user", "content": "one", "timestamp": 1.0},
+        {"role": "assistant", "content": "two", "timestamp": 2.0},
+    ]
+
+    merge_calls = {"n": 0}
+    real_merge = routes.merge_session_messages_append_only
+
+    def counting_merge(*args, **kwargs):
+        merge_calls["n"] += 1
+        return real_merge(*args, **kwargs)
+
+    routes.merge_session_messages_append_only = counting_merge
+    try:
+        filled = routes._limited_webui_messages_for_display_with_sidecar(
+            session, sidecar, rows)
+        probed = routes._display_merge_cached_messages(session, sidecar)
+    finally:
+        routes.merge_session_messages_append_only = real_merge
+
+    assert probed == filled, "probe must serve exactly what the fill memoized"
+    assert merge_calls["n"] == 1, "repeat tail load within the TTL re-ran the merge"
+    with routes._display_merge_cache_lock:
+        entry = routes._display_merge_cache.get(session.session_id)
+    assert entry is not None
+    assert entry["key"][4][0] == "streaming", "active fills must use the freeze marker"
 
 
 def test_live_memory_session_blocks_hit_from_stale_idle_object(stable_key):
