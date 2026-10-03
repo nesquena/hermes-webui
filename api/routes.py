@@ -25269,10 +25269,23 @@ def _process_wakeup_provider_has_recovery_credential(
         return False
     profile_name = str(getattr(session, "profile", "") or "").strip()
     if profile_name:
+        # A default/root session profile under a NAMED process-level profile
+        # must be bound explicitly: profile_scope_for_detached_worker's no-op
+        # branch for root would otherwise let this thread resolve — and
+        # validate credentials against — the named process profile (#7724).
+        try:
+            from api.config import _is_root_active_profile, _is_root_profile_key
+
+            _bind_root_wakeup = _is_root_profile_key(
+                profile_name
+            ) and _is_root_active_profile()
+        except Exception:
+            _bind_root_wakeup = False
         with profile_scope_for_detached_worker(
             profile_name,
             "process_wakeup credential revalidation",
             logger_override=logger,
+            bind_root=_bind_root_wakeup,
         ):
             return provider_has_process_wakeup_recovery_credential(provider_id, refresh=True)
     return provider_has_process_wakeup_recovery_credential(provider_id, refresh=True)

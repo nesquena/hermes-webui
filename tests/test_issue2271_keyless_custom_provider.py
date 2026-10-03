@@ -69,12 +69,14 @@ def test_custom_provider_overrides_resolve_connection_within_profile_scope(monke
     import api.streaming as streaming
     import api.profiles as profiles
 
-    scope_state = {"active": False, "name": None}
+    scope_state = {"active": False, "name": None, "bind_root": None}
 
     @contextlib.contextmanager
-    def _fake_scope(name, purpose="", logger_override=None):
+    def _fake_scope(name, purpose="", logger_override=None, *, bind_root=False):
         scope_state["active"] = True
         scope_state["name"] = name
+        # A named profile scope never needs the root-binding escape hatch.
+        scope_state["bind_root"] = bind_root
         try:
             yield
         finally:
@@ -98,6 +100,9 @@ def test_custom_provider_overrides_resolve_connection_within_profile_scope(monke
 
     assert seen["scope_active"] is True, "connection resolved OUTSIDE the profile scope"
     assert seen["scope_name"] == "team"
+    assert scope_state["bind_root"] is False, (
+        "a NAMED profile scope must not request root binding"
+    )
     assert provider == "custom"
     assert api_key == "team-key"
     assert base_url == "https://team.example/v1"
