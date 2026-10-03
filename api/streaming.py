@@ -3423,6 +3423,199 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
         logger.debug("Failed to reset streaming Hermes home override", exc_info=True)
 
 
+def _resolve_streaming_terminal_scope_module():
+    """Resolve tools.terminal_scope from the installed agent, if present."""
+    try:
+        import tools.terminal_scope as _ts
+        if hasattr(_ts, "install_profile_terminal_scope") and hasattr(_ts, "reset_terminal_scope"):
+            return _ts
+    except Exception:
+        pass
+    return None
+
+
+# The launch process's TERMINAL_* environment, frozen before any per-turn
+# environ mutation can run. A deployment launched with an env-only terminal
+# policy (TERMINAL_ENV=ssh from systemd / op run / a launcher bridge) has no
+# file to rebuild that policy from; this snapshot is the only way a bound
+# scope can keep it. Mirrors tui_gateway/launch_terminal_policy.py in the
+# Hermes agent (first capture wins, never re-read from ambient state).
+#
+# The snapshot is a LOAN to the home that owned the process at capture time
+# (review of #7861, round 3): switch_profile(..., process_wide=True) re-pins
+# the process owner to a different profile home, and that new profile must
+# not inherit the previous deployment's env-only terminal policy. Recording
+# the captured owner and comparing against the live process owner keeps the
+# overlay with the deployment it belongs to (a switch back restores it; the
+# snapshot itself is never destroyed or refreshed).
+_LAUNCH_TERMINAL_ENV_SNAPSHOT: dict = {}
+_LAUNCH_TERMINAL_ENV_OWNER: Optional[str] = None
+
+
+def _capture_launch_terminal_env() -> dict:
+    """Freeze the process's TERMINAL_* env; the first capture wins."""
+    global _LAUNCH_TERMINAL_ENV_SNAPSHOT, _LAUNCH_TERMINAL_ENV_OWNER
+    if not _LAUNCH_TERMINAL_ENV_SNAPSHOT:
+        _LAUNCH_TERMINAL_ENV_SNAPSHOT = {
+            k: v for k, v in os.environ.items() if k.startswith("TERMINAL_")
+        }
+        try:
+            from api.profiles import get_process_profile_home
+
+            _LAUNCH_TERMINAL_ENV_OWNER = os.path.realpath(
+                str(get_process_profile_home())
+            )
+        except Exception:
+            _LAUNCH_TERMINAL_ENV_OWNER = None
+    return dict(_LAUNCH_TERMINAL_ENV_SNAPSHOT)
+
+
+def _frozen_launch_terminal_env() -> dict:
+    """The frozen launch TERMINAL_* overlay for the CURRENT process owner.
+
+    Empty unless the process is still owned by the home that owned it when
+    the snapshot was captured: a process-wide profile switch means the new
+    owner's policy comes from its own files, not the old deployment's env.
+    """
+    if not _LAUNCH_TERMINAL_ENV_SNAPSHOT or _LAUNCH_TERMINAL_ENV_OWNER is None:
+        return {}
+    try:
+        from api.profiles import get_process_profile_home
+
+        _current = os.path.realpath(str(get_process_profile_home()))
+    except Exception:
+        return {}
+    if _current != _LAUNCH_TERMINAL_ENV_OWNER:
+        return {}
+    return dict(_LAUNCH_TERMINAL_ENV_SNAPSHOT)
+
+
+# Freeze at import: this module loads during app startup, before any streaming
+# turn can mirror a profile's runtime env into os.environ — the last moment
+# ambient environ is provably the launch process's own. (The multiplexed
+# gateway freezes at first-secondary-home instead; the WebUI's first turn may
+# itself be a routed profile, so import time is the equivalent point.)
+_capture_launch_terminal_env()
+
+
+def _is_process_owning_home(profile_home: str) -> bool:
+    """True when this turn's home IS the home this WebUI process serves as its own.
+
+    Only the owning home may borrow the launch env overlay; routed secondary
+    homes must resolve their policy from their own files alone (borrowing the
+    launch profile's env policy would recreate the cross-profile leak in the
+    other direction).
+    """
+    try:
+        from api.profiles import get_process_profile_home
+        import os as _os
+
+        _owner = _os.path.realpath(str(get_process_profile_home()))
+        _turn = _os.path.realpath(str(profile_home))
+        return _owner == _turn
+    except Exception:
+        logger.debug("process-owning-home comparison failed", exc_info=True)
+        return False
+
+
+def _set_streaming_terminal_scope(profile_home: str, turn_overlay: Optional[dict] = None):
+    """Install the turn's profile terminal policy as context-local state.
+
+    The runtime env export below applies each profile's TERMINAL_* settings via
+    the process-global os.environ for this turn's duration. Two concurrent
+    turns on different profiles therefore interleave their environ writes: a
+    turn whose profile pins a non-local backend (docker/ssh/...) can have its
+    terminal/file tool calls resolve the SIBLING profile's backend from the
+    shared environ mid-turn (scope-aware readers fall back to os.environ when
+    no per-turn scope is bound). Binding the profile's complete terminal
+    policy via install_profile_terminal_scope() makes terminal_env() and the
+    environment-selection path resolve THIS turn's policy from task-local
+    context, immune to the sibling environ writes — mirroring the
+    Hermes-home override above for the terminal/file side.
+
+    Launch-profile parity with the multiplexed gateway (review of #7861): a
+    deployment started with an env-only terminal policy (TERMINAL_ENV=ssh from
+    systemd / op run / a launcher bridge) has no file to rebuild that policy
+    from, so a file-built scope would silently downgrade it to the default
+    backend. The launch TERMINAL_* environment is therefore frozen once at
+    module import — before any per-turn environ mutation can run — and
+    overlaid ONLY when this turn's home IS the process-owning home. Routed
+    secondary homes keep the no-overlay call: they must not borrow the launch
+    profile's env policy. Live os.environ is never read at turn entry (a
+    sibling turn may be mirroring its values there — the exact race the
+    scope removes).
+
+    Turn-effective values (review of #7861, round 2): once a policy scope is
+    bound, terminal_env() reads ONLY the scope — everything the turn used to
+    put into the thread/process env becomes invisible. Two WebUI behaviours
+    must therefore be re-projected onto the scope, applied last so they win
+    exactly as they won in the pre-PR env mirror:
+
+    * TERMINAL_CWD = the session workspace (s.workspace). The file-built
+      scope resolves the profile cwd or the home dir; without this overlay
+      every command in a WebUI turn would run in the wrong directory.
+    * The turn's effective TERMINAL_* values from the profile runtime env
+      (_safe_profile_runtime_env). WebUI applies the profile .env AFTER
+      config.yaml, so .env wins in the mirror; the Agent's scope builder
+      applies config.yaml last, so YAML would win in the scope. Overlaying
+      the runtime env restores WebUI's precedence and keeps any .env
+      terminal override working.
+
+    Only TERMINAL_* keys from *turn_overlay* are applied (non-terminal keys
+    are the thread-env's business, not the terminal policy's). Never raises.
+
+    Returns ``(module, token, installed)``.
+    """
+    if not profile_home:
+        return None, None, False
+
+    _scope_mod = _resolve_streaming_terminal_scope_module()
+    if _scope_mod is None:
+        return None, None, False
+
+    try:
+        _overlay = None
+        if _is_process_owning_home(profile_home):
+            _overlay = _frozen_launch_terminal_env()
+        try:
+            _scope = _scope_mod.build_profile_terminal_scope(
+                profile_home, env_overlay=_overlay
+            )
+        except Exception:
+            # Profile policy unreadable (TerminalPolicyUnavailable): keep the
+            # Agent's fail-closed refusal scope — never silently widen back to
+            # the environ mirror. The turn overlay is not applied; the policy
+            # it would modify is unavailable. (install_... never raises.)
+            _token = _scope_mod.install_profile_terminal_scope(
+                profile_home, env_overlay=_overlay
+            )
+            return _scope_mod, _token, True
+        if turn_overlay:
+            _scope.update(
+                (str(k), str(v))
+                for k, v in turn_overlay.items()
+                if str(k).startswith("TERMINAL_")
+            )
+        _token = _scope_mod.set_terminal_scope(_scope)
+        return _scope_mod, _token, True
+    except Exception:
+        logger.debug(
+            "Failed to set streaming terminal scope; continuing with os.environ mirror",
+            exc_info=True,
+        )
+        return None, None, False
+
+
+def _reset_streaming_terminal_scope(scope_mod, scope_token, scope_installed: bool) -> None:
+    """Reset the context-local terminal scope if it was installed."""
+    if scope_mod is None or not scope_installed:
+        return
+    try:
+        scope_mod.reset_terminal_scope(scope_token)
+    except Exception:
+        logger.debug("Failed to reset streaming terminal scope", exc_info=True)
+
+
 # ── Per-turn session identity (xsession wakeup misroute root fix — Option 1) ─
 # WebUI bound per-turn session identity ONLY to the process-global
 # os.environ['HERMES_SESSION_KEY'] (turn-start, line ~3263) and released the
@@ -11111,6 +11304,7 @@ def _run_agent_streaming(
     _streaming_cron_profile_home_token = None
     _turn_pending_source = 'webui'
     _streaming_hermes_home_override_ctx = (None, None, False)
+    _streaming_terminal_scope_ctx = (None, None, False)
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
@@ -11341,6 +11535,18 @@ def _run_agent_streaming(
             _profile_home,
         )
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
+        # Turn-effective TERMINAL_* values, re-projected onto the bound scope
+        # (review of #7861 round 2): the profile runtime env (WebUI resolves
+        # .env after config.yaml, so .env wins — the Agent's file-built scope
+        # would invert that) plus the session workspace as TERMINAL_CWD (the
+        # scope would otherwise resolve the profile cwd / home dir). Order
+        # matches the environ mirror below: runtime env first, then the
+        # workspace wins, exactly as before this PR.
+        _turn_terminal_overlay = dict(_safe_profile_runtime_env or {})
+        _turn_terminal_overlay['TERMINAL_CWD'] = str(s.workspace)
+        _streaming_terminal_scope_ctx = _set_streaming_terminal_scope(
+            _profile_home, turn_overlay=_turn_terminal_overlay
+        )
         _set_thread_env(**_thread_env)
         # process_complete agent-wakeup wiring (ours-original, Option B): bind
         # this session's HERMES_SESSION_KEY to its WebUI session_id so the
@@ -15204,6 +15410,7 @@ def _run_agent_streaming(
             _SKILL_HOME_MODULE_PATCH_LOCK.release()
             _acquired_streaming_skill_home_patch_lock = False
         _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
+        _reset_streaming_terminal_scope(*_streaming_terminal_scope_ctx)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
         # every exit path so a reused thread-pool worker leaks no identity and
