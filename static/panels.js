@@ -9046,12 +9046,20 @@ async function _autosavePreferencesSettings(payload){
     const pwField=$('settingsPassword');
     const pwDirty=!!(pwField&&pwField.value);
     const modelSel=$('settingsModel');
+    // The raw select value and _settingsHermesDefaultModelOnOpen speak the same
+    // language — both are the qualified dropdown value (@<provider>:<model> for
+    // catalog options), as written on open (models.default_model) and on save
+    // (body.default_model). Comparing the provider-stripped modelState.model
+    // against it marked the picker dirty on every autosave after a qualified
+    // default was saved (#7865 re-gate), so only the provider is taken from
+    // modelState — a same-value/different-provider re-pick still counts.
     const modelState=(typeof _captureModelDropdownSelection==='function'&&modelSel)
       ? (_captureModelDropdownSelection(modelSel)||{model:String((modelSel&&modelSel.value)||''),model_provider:null})
       : {model:String((modelSel&&modelSel.value)||''),model_provider:null};
+    const rawModelValue=String((modelSel&&modelSel.value)||'');
     const modelDirty=!!(
       modelSel&&(
-        (modelState.model||'')!==(_settingsHermesDefaultModelOnOpen||'')||
+        rawModelValue!==(_settingsHermesDefaultModelOnOpen||'')||
         ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null))
       )
     );
@@ -12975,7 +12983,14 @@ async function saveSettings(andClose){
         try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
-        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        // The provider comes from the same dropdown selection as `model` above
+        // (both captured from $('settingsModel')), so there is no cross-check to
+        // perform against the raw select value: the raw value can be a qualified
+        // @<provider>:<model> id while modelState.model carries the
+        // provider-stripped model, and comparing them directly would write null
+        // for every qualified option — clearing window._activeProvider on save
+        // (#7865 re-gate).
+        body.default_model_provider=modelState.model_provider||null;
         }catch(_modelErr){
           // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
           // one provider) is user-fixable, not a partial success. Surface the
@@ -13011,7 +13026,14 @@ async function saveSettings(andClose){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
-        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        // The provider comes from the same dropdown selection as `model` above
+        // (both captured from $('settingsModel')), so there is no cross-check to
+        // perform against the raw select value: the raw value can be a qualified
+        // @<provider>:<model> id while modelState.model carries the
+        // provider-stripped model, and comparing them directly would write null
+        // for every qualified option — clearing window._activeProvider on save
+        // (#7865 re-gate).
+        body.default_model_provider=modelState.model_provider||null;
         }catch(_modelErr){
           // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
           // one provider) is user-fixable, not a partial success. Surface the
