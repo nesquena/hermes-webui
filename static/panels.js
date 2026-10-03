@@ -9735,13 +9735,35 @@ async function loadSettingsPanel(){
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
           {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
+          {value:'fr-FR-RemyMultilingualNeural',label:'Rémy (French, Male, Multilingual)'},
+          {value:'fr-FR-VivienneMultilingualNeural',label:'Vivienne (French, Female, Multilingual)'},
+          {value:'fr-FR-DeniseNeural',label:'Denise (French, Female)'},
+          {value:'fr-FR-EloiseNeural',label:'Eloise (French, Female, Child)'},
+          {value:'fr-FR-HenriNeural',label:'Henri (French, Male)'},
+          {value:'fr-CA-AntoineNeural',label:'Antoine (French Canadian, Male)'},
+          {value:'fr-CA-JeanNeural',label:'Jean (French Canadian, Male)'},
+          {value:'fr-CA-SylvieNeural',label:'Sylvie (French Canadian, Female)'},
+          {value:'fr-CA-ThierryNeural',label:'Thierry (French Canadian, Male)'},
         ];
         ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
-        edgeVoices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.value;opt.textContent=v.label;
-          if(v.value===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
+        // Group by language (macOS / Windows / Edge Read Aloud convention) now that
+        // the list spans five locales; order inside each group is unchanged.
+        const edgeVoiceGroups=[
+          ['zh-CN','Chinese'],['en-US','English'],['id-ID','Indonesian'],
+          ['fr-FR','French'],['fr-CA','French (Canada)'],
+        ];
+        edgeVoiceGroups.forEach(([prefix,groupLabel])=>{
+          const voices=edgeVoices.filter(v=>v.value.startsWith(prefix+'-'));
+          if(!voices.length) return;
+          const og=document.createElement('optgroup');
+          og.label=groupLabel;
+          voices.forEach(v=>{
+            const opt=document.createElement('option');
+            opt.value=v.value;opt.textContent=v.label;
+            if(v.value===current) opt.selected=true;
+            og.appendChild(opt);
+          });
+          ttsVoiceSel.appendChild(og);
         });
       } else {
         if(!('speechSynthesis' in window)){
