@@ -845,6 +845,73 @@ function _consumeSelectedTextReplySelection(){
 
 let _savedPromptsCache=null;
 
+// ── Notion prompt library: slash expansion ───────────────────────────────────
+// `/cr target=x focus=authz <payload>` -> fetch the row's page body, fill
+// {{variables}} from key=value tokens, drop the payload into the last unfilled
+// variable (the body's main input), leave the rest visible for the agent.
+// Builtin and dispatchable agent commands always win on name collisions.
+
+const _NOTION_BUSY_CONTROL_NAMES=['steer','interrupt','queue','terminal','goal','yolo','stop'];
+
+function _parseNotionPromptArgs(tokens){
+  const values={};
+  let payload='';
+  let rest=String(tokens||'');
+  // key=value (single-or-double quoted values allowed) tokens at the front
+  const kv=/^([A-Za-z0-9_]+)=("([^"]*)"|'([^']*)'|(\S+))(\s+|$)/;
+  while(rest){
+    const m=rest.match(kv);
+    if(!m)break;
+    values[m[1]]=m[3]??m[4]??m[5]??'';
+    rest=rest.slice(m[0].length);
+  }
+  payload=rest.trim();
+  return {values,payload};
+}
+
+function _fillNotionVariables(body,values,payload){
+  let out=String(body||'');
+  const filled=Object.assign({},values);
+  out=out.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g,(m,name)=>{
+    if(Object.prototype.hasOwnProperty.call(filled,name))return filled[name];
+    return m;
+  });
+  if(payload){
+    // Payload lands in the LAST still-unfilled variable — the body's main input.
+    const unfilled=[...out.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)].map(m=>m[1]);
+    if(unfilled.length){
+      const target=unfilled[unfilled.length-1];
+      out=out.replace(new RegExp(`\\{\\{\\s*${target.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}\\s*\\}\\}`,'g'),payload);
+    }else{
+      out+=`\n\n${payload}`;
+    }
+  }
+  return out;
+}
+
+async function expandNotionPromptSlash(text){
+  const raw=String(text||'');
+  if(!raw.startsWith('/'))return null;
+  const name=raw.slice(1).split(/\s+/)[0].toLowerCase();
+  if(!name)return null;
+  if(typeof COMMANDS!=='undefined'&&COMMANDS.some(c=>c.name===name))return null;
+  if(_NOTION_BUSY_CONTROL_NAMES.includes(name))return null;
+  const palette=await loadNotionPromptPalette();
+  const entry=(palette||[]).find(p=>String(p&&p.trigger||'').replace(/^\//,'').toLowerCase()===name);
+  if(!entry||!entry.id)return null;
+  let res=null;
+  try{res=await api(`/api/prompts/notion/body?id=${encodeURIComponent(entry.id)}`);}
+  catch(_){res=null;}
+  if(!res||!res.ok||!res.body){
+    if(typeof showToast==='function')showToast(t('notion_prompt_expand_failed'),3000,'error');
+    return null;
+  }
+  const {values,payload}=_parseNotionPromptArgs(raw.slice(1+name.length).trim());
+  const filled=_fillNotionVariables(res.body,values,payload);
+  if(typeof showToast==='function')showToast(t('notion_prompt_expanded',[entry.trigger]),1600);
+  return filled;
+}
+
 async function _loadSavedPrompts(){
   try{
     const data=await api('/api/prompts');
@@ -866,8 +933,44 @@ async function toggleSavedPromptsPopup(){
   popup.style.display='flex';
   if(btn)btn.setAttribute('aria-expanded','true');
   const prompts=await _loadSavedPrompts();
+  // Notion prompt library section (loaded in parallel; empty on failure).
+  let notionPrompts=[];
+  try{
+    const notion=await loadNotionPromptPalette();
+    notionPrompts=Array.isArray(notion)?notion:[];
+  }catch(_){notionPrompts=[];}
   popup.innerHTML='';
-  if(!prompts.length){
+  if(notionPrompts.length){
+    const notionHeader=document.createElement('div');
+    notionHeader.className='saved-prompts-section-header';
+    notionHeader.textContent=(typeof t==='function'&&t('saved_prompts_notion_header'))||'Prompt Library (Notion)';
+    popup.appendChild(notionHeader);
+    for(const p of notionPrompts){
+      const row=document.createElement('div');
+      row.className='saved-prompt-row saved-prompt-row-notion';
+      row.setAttribute('role','menuitem');
+      const label=document.createElement('span');
+      label.className='saved-prompt-label';
+      label.textContent=`${p.trigger} — ${p.label||p.trigger}`;
+      label.title=p.use_when||p.label||'';
+      row.onclick=()=>{
+        insertSavedPromptIntoComposer(`${p.trigger} `);
+        popup.style.display='none';
+        if(btn)btn.setAttribute('aria-expanded','false');
+      };
+      const open=document.createElement('a');
+      open.className='saved-prompt-delete';
+      open.href=p.url||'#';
+      open.target='_blank';
+      open.rel='noopener noreferrer';
+      open.title=(typeof t==='function'&&t('saved_prompts_notion_open'))||'Open in Notion';
+      open.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+      row.appendChild(label);
+      row.appendChild(open);
+      popup.appendChild(row);
+    }
+  }
+  if(!prompts.length&&!notionPrompts.length){
     const empty=document.createElement('div');
     empty.className='saved-prompts-empty';
     empty.textContent=(typeof t==='function'&&t('saved_prompts_empty'))||'No saved prompts yet.';
@@ -926,6 +1029,29 @@ async function toggleSavedPromptsPopup(){
     if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_saved'))||'Prompt saved',1600);
   };
   addRow.appendChild(saveBtn);
+  const notionSaveBtn=document.createElement('button');
+  notionSaveBtn.type='button';
+  notionSaveBtn.className='saved-prompt-save-btn saved-prompt-save-btn-notion';
+  notionSaveBtn.textContent=(typeof t==='function'&&t('saved_prompts_save_notion'))||'Save as Notion Draft';
+  notionSaveBtn.onclick=async()=>{
+    const msgEl=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+    const text=(msgEl&&msgEl.value||'').trim();
+    if(!text){
+      if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_empty_input'))||'Type a prompt first',2000,'error');
+      return;
+    }
+    let res=null;
+    try{res=await api('/api/prompts/notion/save',{method:'POST',body:JSON.stringify({text})});}
+    catch(_e){
+      if(typeof showToast==='function') showToast(_e&&_e.message||'Failed to save to Notion',3000,'error');
+      return;
+    }
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+    if(typeof invalidateNotionPromptPalette==='function')invalidateNotionPromptPalette();
+    if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_notion_saved'))||'Saved to Notion as Draft',2400);
+  };
+  addRow.appendChild(notionSaveBtn);
   popup.appendChild(addRow);
 }
 
@@ -1415,6 +1541,19 @@ async function send(){
   _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  // Notion prompt library slash expansion (/cr target=x <diff>): rewrite the
+  // composer text to the filled prompt body BEFORE any other slash handling or
+  // draft snapshot, so the expanded text is exactly what gets sent and what a
+  // failed-send draft restores. Returns null for non-Notion text (no rewrite).
+  if(text.startsWith('/')&&!literalSlash&&!S.pendingFiles.length){
+    let _expanded=null;
+    try{_expanded=await expandNotionPromptSlash(text);}catch(_){_expanded=null;}
+    if(_expanded){
+      $('msg').value=_expanded;
+      autoResize();
+      text=_expanded;
+    }
+  }
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
     if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
     _sendInProgress=false;_sendInProgressSid=null;

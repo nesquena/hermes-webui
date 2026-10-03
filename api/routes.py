@@ -14981,6 +14981,23 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/prompts":
         return j(handler, {"prompts": _load_saved_prompts()})
 
+    if parsed.path == "/api/prompts/notion/palette":
+        from api.prompts_notion import notion_palette
+
+        force = (parsed.query or "").lower() in ("refresh=1", "refresh=true")
+        return j(handler, notion_palette(force_refresh=force))
+
+    if parsed.path == "/api/prompts/notion/body":
+        from urllib.parse import parse_qs as _pq
+
+        from api.prompts_notion import notion_prompt_body
+
+        qs = _pq(parsed.query or "")
+        page_id = str((qs.get("id") or [""])[0]).strip()
+        if not page_id:
+            return bad(handler, "id is required")
+        return j(handler, notion_prompt_body(page_id))
+
     if parsed.path == "/api/session/export":
         return _handle_session_export(handler, parsed)
 
@@ -16083,6 +16100,21 @@ def handle_post(handler, parsed) -> bool:
         prompts.append(new_prompt)
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True, "prompt": new_prompt})
+
+    if parsed.path == "/api/prompts/notion/save":
+        from api.prompts_notion import notion_save_draft
+
+        text = str(body.get("text") or "").strip()
+        label = str(body.get("label") or "").strip()
+        if not text:
+            return bad(handler, "text is required")
+        if len(text) > 20000:
+            return bad(handler, "text too long (max 20000 chars)")
+        try:
+            return j(handler, notion_save_draft(label, text))
+        except Exception as exc:
+            logger.warning("notion draft save failed: %s", exc)
+            return bad(handler, f"save to Notion failed: {exc}", status=502)
 
     if parsed.path == "/api/share/create":
         sid = str(body.get("session_id") or "").strip()
