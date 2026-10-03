@@ -1989,7 +1989,7 @@ function _statusCardFromSession(s){
     {label:t('status_started'), value:_formatStatusTimestamp(s.created_at)},
     {label:t('status_updated'), value:_formatStatusTimestamp(s.updated_at||s.last_message_at)},
     {label:t('status_tokens'), value:_formatStatusTokens(s)},
-    {label:t('status_messages'), value:String(s.message_count??(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool').length)},
+    {label:t('status_messages'), value:String((typeof s.visible_message_count==='number'&&s.visible_message_count>=0)?s.visible_message_count:(s.message_count??(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length))},
     {label:t('status_agent_running'), value:running?t('status_yes'):t('status_no')},
   ];
   return {

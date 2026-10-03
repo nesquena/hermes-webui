@@ -1249,7 +1249,7 @@ function _sessionTitleLooksDefaultOrProvisional(titleText, provisionalText){
 }
 
 function _firstUserMessageTitleCandidate(){
-  const first=(S.messages||[]).find(m=>m&&m.role==='user'&&m.content);
+  const first=(S.messages||[]).find(m=>m&&m.role==='user'&&m._source!=='delegation_wakeup'&&m.content);
   return first?String(first.content||'').trim().slice(0,64):'';
 }
 
@@ -7413,7 +7413,7 @@ function transcript(){
   const lines=[`# Hermes session ${S.session?.session_id||''}`,``,
     `Workspace: ${S.session?.workspace||''}`,`Model: ${S.session?.model||''}`,``];
   for(const m of S.messages){
-    if(!m||m.role==='tool')continue;
+    if(!m||m.role==='tool'||m._source==='delegation_wakeup')continue;
     let c=m.content||'';
     if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('\n');
     const ct=String(c).trim();
@@ -8720,12 +8720,15 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
       try { _markSessionViewed(sid, (S&&S.session&&S.session.session_id===sid)?(S.session.message_count??(S.messages&&S.messages.length)??0):0); } catch(_){}
       try { if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(sid); } catch(_){}
     } else {
-      // T4 drop-when-focused: suppress toast only; ack below still fires.
-      try {
-        const tid = (d.task_id || '').slice(0, 8) || '?';
-        const tail = d.summary ? `: ${String(d.summary).slice(0, 80)}` : '';
-        showToast(`Task ${tid} done${tail}`, 2600);
-      } catch (_) {}
+      // Child report-backs are internal; ordinary process completions still toast.
+      // The diagnostic ack below fires for both kinds.
+      if (d.kind !== 'async_delegation') {
+        try {
+          const tid = (d.task_id || '').slice(0, 8) || '?';
+          const tail = d.summary ? `: ${String(d.summary).slice(0, 80)}` : '';
+          showToast(`Task ${tid} done${tail}`, 2600);
+        } catch (_) {}
+      }
     }
 
     // Fire-and-forget ack (diagnostic only — Option Z made this a no-op for

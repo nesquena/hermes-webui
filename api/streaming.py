@@ -13601,7 +13601,7 @@ def _run_agent_streaming(
                             _err_type,
                             _err_hint,
                         )
-                        if _turn_pending_source == 'process_wakeup':
+                        if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                             _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                                 s,
                                 classification=_err_type,
@@ -14620,7 +14620,7 @@ def _run_agent_streaming(
                 with _lock_ctx:
                     if (
                         not ephemeral
-                        and _turn_pending_source == 'process_wakeup'
+                        and _turn_pending_source in ('process_wakeup', 'delegation_wakeup')
                         and _exc_is_credential_pool_empty
                     ):
                         # Merge the pause into the CURRENT session object under
@@ -15023,7 +15023,7 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                    if _turn_pending_source == 'process_wakeup':
+                    if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                         # #6623 re-gate: merge the pause into the CURRENT
                         # session object under the canonical lock — never save
                         # the worker's detached snapshot. The helper fails
@@ -15043,7 +15043,7 @@ def _run_agent_streaming(
                     )
                     return
 
-                if _turn_pending_source == 'process_wakeup':
+                if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                     _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                         s,
                         classification=_exc_type,

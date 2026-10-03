@@ -139,6 +139,19 @@ def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
         msg["_wakeup_meta"] = meta
 
 
+def is_hidden_transcript_row(msg: Any) -> bool:
+    """Return True when a transcript row is internal and must never render.
+
+    Single predicate every transcript consumer calls — restore window, retry
+    target, content search, title derivation, HTML export, public shares, and
+    visible counts — so a hidden row hidden in one surface stays hidden in all
+    of them (#quiet-delegation gate review). Keyed on the typed ``_source``
+    stamp only, never on content: content sniffing would misclassify real user
+    rows whose text merely resembles a wakeup envelope.
+    """
+    return isinstance(msg, dict) and msg.get("_source") == "delegation_wakeup"
+
+
 def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:
     """Return the exact eager-row token for one active WebUI turn."""
     if not stream_id:

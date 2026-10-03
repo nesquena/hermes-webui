@@ -107,10 +107,16 @@ class TestSidebarDensitySessionRendering(unittest.TestCase):
         self.assertIn("if(density==='detailed')", SESSIONS_JS)
 
     def test_detailed_mode_uses_message_count_and_model(self):
+        # #quiet-delegation: the sidebar label prefers the visible count
+        # (hidden internal rows excluded), falling back to the raw count.
         self.assertIn("typeof s.message_count==='number'?s.message_count:0", SESSIONS_JS)
+        self.assertIn(
+            "typeof s.visible_message_count==='number'&&s.visible_message_count>=0",
+            SESSIONS_JS,
+        )
         self.assertIn("const modelMeta=_formatSessionModelWithGateway(s);", SESSIONS_JS)
         self.assertIn("if(modelMeta) metaBits.push(modelMeta);", SESSIONS_JS)
-        self.assertIn("t('session_meta_messages', msgCount)", SESSIONS_JS)
+        self.assertIn("t('session_meta_messages', _visibleCount)", SESSIONS_JS)
 
     def test_profile_only_when_show_all_profiles(self):
         self.assertIn(

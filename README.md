@@ -203,6 +203,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Cancel a running task directly from the composer footer (Stop button next to Send)
 - Tool call cards inline -- each shows the tool name, args, and result snippet; expand/collapse all toggle for multi-tool turns
 - Subagent delegation cards -- child agent activity shown with distinct icon and indented border
+- Detached child results are delivered to the parent as internal wakeups. Their raw prompts and completion toasts do not appear as messages from the user; the parent can summarize the results in its own reply. Ordinary background-process wakeups remain visible. A completed parent reply does not, by itself, cancel or suppress outstanding children; a later result may still start a follow-up turn.
 - Mermaid diagram rendering inline (flowcharts, sequence diagrams, gantt charts)
 - Thinking/reasoning display -- collapsible gold-themed cards for Claude extended thinking and o3 reasoning blocks
 - Approval card for dangerous shell commands (allow once / session / always / deny)

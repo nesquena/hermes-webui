@@ -624,6 +624,10 @@ def _build_payload(evt: dict, session_id: str) -> dict:
         "completed_at": time.time(),
         "event_id": uuid.uuid4().hex,
     }
+    # Source provenance is explicit: the browser can quiet child report-backs
+    # without muting ordinary process completion notifications.
+    if evt.get("type") == "async_delegation":
+        payload["kind"] = "async_delegation"
     # Best-effort optional summary: the first non-empty line of the synthetic
     # wakeup body, trimmed. Omitted entirely when nothing useful is available.
     try:
@@ -1062,7 +1066,7 @@ def _start_async_delegation_wakeup_turn(
             resp = start_session_turn(
                 session_id,
                 wakeup_prompt,
-                source="process_wakeup",
+                source="delegation_wakeup",
             )
             raw_status = (resp or {}).get("_status")
             if raw_status is None:

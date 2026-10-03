@@ -20,6 +20,7 @@ from typing import Any
 from api.config import LOCK, _get_session_agent_lock
 from api.models import get_session, SESSIONS
 from api.agent_sessions import normalize_agent_session_source
+from api.process_event_utils import is_hidden_transcript_row
 
 logger = logging.getLogger(__name__)
 
@@ -589,16 +590,44 @@ def mark_session_title_generated(session) -> None:
     session.manual_title = False
 
 
-def _truncate_at_last_user(messages):
-    history = messages or []
-    last_user_idx = None
-    for i in range(len(history) - 1, -1, -1):
-        if isinstance(history[i], dict) and history[i].get('role') == 'user':
-            last_user_idx = i
-            break
-    if last_user_idx is None:
+def _truncate_context_before_row(context_messages, target_row):
+    """Cut model context before the exact canonical identity of ``target_row``.
+
+    Retry/undo select the last visible human turn in the display transcript.
+    The model context must be cut at that SAME turn — not at the context's own
+    last user row, which after compression can be an unrelated summary user
+    while the hidden delegation handoff and its reply survive after it
+    (#quiet-delegation gate review). Matching is identity-first (message id),
+    then content, then timestamp — never content alone when both rows carry a
+    timestamp that disagrees.
+
+    Returns the truncated list, or None when the selected turn cannot be
+    proved present in context (compression already dropped it or everything
+    after it): the caller then clears the later context so the next send
+    cannot carry the removed turn.
+    """
+    history = context_messages if isinstance(context_messages, list) else []
+    if not isinstance(target_row, dict):
         return None
-    return history[:last_user_idx]
+    target_text = _extract_text(target_row.get('content', ''))
+    target_id = target_row.get('id') or target_row.get('message_id')
+    target_ts = target_row.get('timestamp')
+    for i in range(len(history) - 1, -1, -1):
+        row = history[i]
+        if not isinstance(row, dict) or row.get('role') != 'user':
+            continue
+        row_id = row.get('id') or row.get('message_id')
+        if target_id is not None and row_id == target_id:
+            return history[:i]
+        if _extract_text(row.get('content', '')) != target_text:
+            continue
+        row_ts = row.get('timestamp')
+        if target_ts is not None and row_ts is not None:
+            if row_ts == target_ts:
+                return history[:i]
+            continue
+        return history[:i]
+    return None
 
 
 def _truncation_watermark_for(messages):
@@ -983,6 +1012,12 @@ def retry_last(session_id: str) -> dict[str, Any]:
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
                 if history[i].get('role') == 'user':
+                    # Hidden internal rows (delegation_wakeup) are not user
+                    # turns: retrying "past" one would resubmit the internal
+                    # handoff prompt as an ordinary human turn
+                    # (#quiet-delegation gate review).
+                    if is_hidden_transcript_row(history[i]):
+                        continue
                     last_user_idx = i
                     break
             if last_user_idx is None:
@@ -997,9 +1032,20 @@ def retry_last(session_id: str) -> dict[str, Any]:
             # can distinguish legitimate prefix from deleted suffix.
             s.truncation_boundary = s.truncation_watermark
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_at_last_user(s.context_messages)
+                truncated_context = _truncate_context_before_row(
+                    s.context_messages, history[last_user_idx]
+                )
                 if truncated_context is not None:
                     s.context_messages = truncated_context
+                else:
+                    # The selected visible human turn is not in model context
+                    # any more (compression already dropped it or everything
+                    # after it). Cutting only at the context's own last user
+                    # row would LEAVE the hidden delegation handoff and its
+                    # reply in context while the display transcript lost them
+                    # (gate review finding 2). Fail closed: clear the later
+                    # context so the next send cannot carry the removed turn.
+                    s.context_messages = []
         s.save()
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
@@ -1027,6 +1073,12 @@ def undo_last(session_id: str) -> dict[str, Any]:
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
                 if history[i].get('role') == 'user':
+                    # Hidden internal rows (delegation_wakeup) are not user
+                    # turns: undo must remove the last VISIBLE human turn and
+                    # everything after it, not the internal handoff
+                    # (#quiet-delegation gate review).
+                    if is_hidden_transcript_row(history[i]):
+                        continue
                     last_user_idx = i
                     break
             if last_user_idx is None:
@@ -1040,9 +1092,18 @@ def undo_last(session_id: str) -> dict[str, Any]:
             # Persist the original truncate cutoff.
             s.truncation_boundary = s.truncation_watermark
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_at_last_user(s.context_messages)
+                truncated_context = _truncate_context_before_row(
+                    s.context_messages, history[last_user_idx]
+                )
                 if truncated_context is not None:
                     s.context_messages = truncated_context
+                else:
+                    # Same compressed-history fail-closed rule as retry_last:
+                    # the removed visible turn is already gone from model
+                    # context, so clearing the later context is the only way
+                    # to keep the hidden delegation handoff out of the next
+                    # send (gate review finding 2).
+                    s.context_messages = []
         s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
@@ -1077,6 +1138,13 @@ def session_status(session_id: str) -> dict[str, Any]:
         'workspace': s.workspace,
         'personality': s.personality,
         'message_count': len(s.messages or []),
+        # #quiet-delegation: /status "messages" must not count hidden internal
+        # rows (delegation_wakeup handoffs). The client (static/commands.js)
+        # prefers this visible count and falls back to message_count.
+        'visible_message_count': sum(
+            1 for m in (s.messages or [])
+            if not is_hidden_transcript_row(m)
+        ),
         'created_at': s.created_at,
         'updated_at': s.updated_at,
         'agent_running': bool(getattr(s, 'active_stream_id', None)),

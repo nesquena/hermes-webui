@@ -46,7 +46,11 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import (
+    stamp_message_source,
+    is_hidden_transcript_row,
+    attach_wakeup_display_meta,
+)
 
 logger = logging.getLogger(__name__)
 # Size of the interactive sidebar recency window. Also bounds how many
@@ -1635,6 +1639,21 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+        # #quiet-delegation: visible count from the sidecar metadata prefix
+        # (written by save()); None on legacy sidecars → compact() walks
+        # messages instead.
+        _raw_visible_count = kwargs.get('visible_message_count')
+        _parsed_visible_count = None
+        if _raw_visible_count is not None:
+            try:
+                _parsed_visible_count = int(_raw_visible_count)
+            except (TypeError, ValueError):
+                _parsed_visible_count = None
+        self._metadata_visible_message_count = (
+            _parsed_visible_count
+            if _parsed_visible_count is not None and _parsed_visible_count >= 0
+            else None
+        )
 
     @property
     def path(self):
@@ -1721,6 +1740,15 @@ class Session:
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
         meta['message_count'] = len(guarded_messages or [])
+        # #quiet-delegation: visible count excludes hidden internal rows
+        # (delegation_wakeup). Raw message_count stays the paging/reconnect
+        # authority; sidebar/topbar labels consume the visible count. Both are
+        # derived from the same in-memory array inside this same atomic write,
+        # so they can never disagree about a shrink.
+        meta['visible_message_count'] = sum(
+            1 for m in (guarded_messages or [])
+            if not is_hidden_transcript_row(m)
+        )
         # _mc_v marks this file as written by the current writer contract,
         # where `message_count` equals len(the persisted guarded messages) by
         # construction and both keys land in the same atomic write. save()'s
@@ -2082,6 +2110,11 @@ class Session:
                 if count is not None
             ]
             session._metadata_message_count = max(known_counts) if known_counts else None
+            # Note: visible_message_count rides the same modern-prefix contract
+            # and is picked up by __init__ from the parsed kwargs; legacy
+            # sidecars omit it. compact() consumes the metadata value ONLY on
+            # this metadata-only stub (messages=[]); full loads re-walk the
+            # live array so an appended turn can never report a stale count.
             # Mark this session as a metadata-only stub. save() refuses to write
             # such a session because doing so would atomically replace the
             # on-disk JSON with messages=[], wiping the conversation. Any
@@ -2145,6 +2178,39 @@ class Session:
         )
         if has_pending_user_message:
             message_count = max(message_count, 1)
+        # #quiet-delegation: labels that count "messages" for humans must not
+        # count hidden internal rows. Raw message_count stays the paging /
+        # reconnect authority; visible_message_count feeds topbar + sidebar.
+        # The metadata-prefix value is trusted ONLY for metadata-only stubs
+        # (messages=[]); a full session re-walks the live array so a
+        # save → load → append → save sequence cannot report a stale count
+        # (gate review finding 3: visible 1 for 2 persisted messages).
+        if getattr(self, '_loaded_metadata_only', False):
+            _meta_visible = getattr(self, '_metadata_visible_message_count', None)
+            # Legacy sidecars written before this PR have NO visible-count
+            # prefix field, which parses as None — not as "unknown". Emitting
+            # 0 here made older sessions show "0 messages" in the sidebar
+            # (gate review, metadata-only load). Fall back to the raw
+            # message_count: a legacy file cannot contain hidden
+            # delegation_wakeup rows, so every message is visible.
+            if _meta_visible is None:
+                _meta_visible = message_count if message_count else None
+        else:
+            _meta_visible = None
+        visible_message_count = max(
+            0,
+            _meta_visible
+            if _meta_visible is not None
+            else sum(
+                1 for m in (self.messages or [])
+                if not is_hidden_transcript_row(m)
+            ),
+        )
+        if (
+            has_pending_user_message
+            and getattr(self, 'pending_user_source', None) != 'delegation_wakeup'
+        ):
+            visible_message_count = max(visible_message_count, 1)
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
@@ -2207,6 +2273,7 @@ class Session:
                 'worktree_created_at': self.worktree_created_at,
             } if self.worktree_path else {}),
             'user_message_count': Session._compute_user_message_count(self.messages),
+            'visible_message_count': visible_message_count,
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,
@@ -6363,6 +6430,7 @@ def _refresh_index_rows_from_sidecar_metadata(
             'profile', 'pre_compression_snapshot', 'parent_session_id', 'source_tag',
             'raw_source', 'session_source', 'source_label', 'active_stream_id',
             'has_pending_user_message', 'pending_user_message', 'pending_started_at',
+            'visible_message_count',
         ):
             value = compact.get(key)
             if value is not None:
@@ -7332,15 +7400,21 @@ def _strip_attached_files_marker(text: str) -> str:
 def title_from(messages, fallback: str='Untitled'):
     """Derive a session title from the first user message."""
     for m in messages:
-        if m.get('role') == 'user':
-            c = m.get('content', '')
-            if c is None:
-                continue
-            if isinstance(c, list):
-                c = ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
-            text = _strip_attached_files_marker(str(c))
-            if text:
-                return text[:64]
+        if not isinstance(m, dict) or m.get('role') != 'user':
+            continue
+        # Hidden internal rows (delegation_wakeup) never name a session — the
+        # title would be the internal handoff prompt instead of the human's
+        # first real message (#quiet-delegation gate review).
+        if is_hidden_transcript_row(m):
+            continue
+        c = m.get('content', '')
+        if c is None:
+            continue
+        if isinstance(c, list):
+            c = ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
+        text = _strip_attached_files_marker(str(c))
+        if text:
+            return text[:64]
     return fallback
 
 
@@ -10645,6 +10719,44 @@ def _native_image_leading_text(message):
             return None
         parts.append(text)
     return None
+
+
+def _stamp_pending_source_for_display(session, state_messages):
+    """Stamp the pending turn's ``_source`` onto unprovenanced state.db rows.
+
+    The Agent core appends the pending user row to state.db WITHOUT the
+    ``_source`` stamp — provenance lives only in the session's
+    ``pending_user_message``/``pending_user_source`` fields until the turn
+    settles. A reload that reads state.db during the deferred-save window
+    would otherwise adopt the row unstamped and render a hidden
+    ``delegation_wakeup`` handoff as a visible user bubble (#quiet-delegation
+    gate review; #7828 fixes the settle-side stamp, this fixes the projection
+    side). Rows are freshly read per request, so mutating them here is safe.
+    Timestamp identity mirrors ``_suppress_native_image_display_mirrors``:
+    the live worker recorded the exact ``persist_user_timestamp`` value, so an
+    exact match is authoritative.
+    """
+    if not state_messages:
+        return state_messages
+    source = str(getattr(session, "pending_user_source", None) or "")
+    if not source or source == "webui":
+        return state_messages
+    pending_started = getattr(session, "pending_started_at", None)
+    if not isinstance(pending_started, (int, float)) or pending_started <= 0:
+        return state_messages
+    if not str(getattr(session, "pending_user_message", None) or ""):
+        return state_messages
+    target_ts = float(pending_started)
+    for message in state_messages:
+        if not isinstance(message, dict) or message.get("_source"):
+            continue
+        if str(message.get("role") or "").lower() != "user":
+            continue
+        ts, ts_valid = _message_exact_timestamp_details(message)
+        if ts_valid and ts == target_ts:
+            message["_source"] = source
+            attach_wakeup_display_meta(message, source)
+    return state_messages
 
 
 def _suppress_native_image_display_mirrors(
