@@ -29,11 +29,19 @@ def _run_harness():
     provider_helper = _function(UI_JS, "_getOptionProviderId")
     identity = _function(UI_JS, "_modelPickerOptionIdentity")
     helper = _function(UI_JS, "_deduplicateModelPickerOptions")
+    # #7400: _addLiveModelsToSelect() stamps provider-qualified options through
+    # _stampQualifiedOptionMeta(), which resolves the bare model with
+    # _qualifiedCatalogOptionMeta(). Extract both alongside it or the harness
+    # dies with a ReferenceError on the first live option it inserts.
+    qualified_meta = _function(UI_JS, "_qualifiedCatalogOptionMeta")
+    stamp_meta = _function(UI_JS, "_stampQualifiedOptionMeta")
     live_add = _function(UI_JS, "_addLiveModelsToSelect")
     script = f"""
 {provider_helper}
 {identity}
 {helper}
+{qualified_meta}
+{stamp_meta}
 {live_add}
 class Node {{
   constructor(tag) {{ this.tagName=tag.toUpperCase(); this.children=[]; this.dataset={{}}; this.parentElement=null; }}
