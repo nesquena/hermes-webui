@@ -274,10 +274,57 @@ def test_session_channel_does_not_replay_history_without_a_known_cursor():
         assert unknown.empty()
         assert fresh._session_channel_initial_event_id.startswith("session-channel:")
         assert unknown._session_channel_initial_event_id.startswith("session-channel:")
-        assert fresh._session_channel_initial_event_id != unknown._session_channel_initial_event_id
+        # Both cursors encode the CURRENT watermark (1) and are bound to this
+        # channel incarnation's token, so a later reconnect replays only what
+        # lands after this point and only on this channel.
+        assert fresh._session_channel_initial_event_id == channel._frame_cursor(1)
+        assert unknown._session_channel_initial_event_id == channel._frame_cursor(1)
     finally:
         channel.unsubscribe(fresh)
         channel.unsubscribe(unknown)
+
+
+def test_cursor_from_another_channel_incarnation_fails_closed():
+    """A reaped-and-recreated (or pre-restart) channel restarts ``seq`` at 0.
+
+    A cursor minted by the OLD incarnation must not be interpreted in the new
+    channel's sequence space: ``@2`` from the old channel would pass the
+    contiguity check against new history ``1..4`` and replay only ``3, 4`` even
+    though the client never saw ``1, 2``. Reject the foreign token and fail
+    closed: no replay, and a fresh cursor bound to the new incarnation.
+    """
+    sid = "s-reincarnated"
+    old = background_process.SessionChannel(sid)
+    old_sub = old.subscribe(maxsize=64)
+    old.emit("bg_task_complete", {"event_id": "old-1", "session_id": sid})
+    old.emit("bg_task_complete", {"event_id": "old-2", "session_id": sid})
+    stale_cursor = old_sub.get_nowait().cursor  # frame cursor for seq 1
+    old_sub.get_nowait()
+    old.unsubscribe(old_sub)
+
+    new = background_process.SessionChannel(sid)  # reaper collected ``old``
+    for n in range(1, 5):
+        new.emit("bg_task_complete", {"event_id": f"new-{n}", "session_id": sid})
+
+    # Same grammar and a seq that would be "contiguous" here (1 >= 1 - 1)...
+    assert background_process._parse_channel_cursor_watermark(stale_cursor) == 1
+    reconnect = new.subscribe(maxsize=64, after_event_id=stale_cursor)
+    try:
+        # ...but the token names another incarnation: fail closed.
+        assert reconnect.empty()
+        assert reconnect._session_channel_replay_count == 0
+        assert reconnect._session_channel_initial_event_id == new._frame_cursor(4)
+        assert reconnect._session_channel_initial_event_id != stale_cursor
+    finally:
+        new.unsubscribe(reconnect)
+
+    # The new incarnation's own cursor still replays normally.
+    own = new.subscribe(maxsize=64, after_event_id=new._frame_cursor(2))
+    try:
+        assert own._session_channel_replay_count == 2
+        assert [d["event_id"] for _e, d in (own.get_nowait(), own.get_nowait())] == ["new-3", "new-4"]
+    finally:
+        new.unsubscribe(own)
 
 
 def test_aged_channel_keeps_reconnect_grace_and_gap_history(monkeypatch):

@@ -117,13 +117,16 @@ _SESSION_CHANNEL_REPLAY_LIMIT = 32
 
 
 def _parse_channel_cursor_watermark(cursor: str | None) -> int | None:
-    """Extract the replay watermark from a synthetic subscribe cursor.
+    """Extract the replay watermark from a channel cursor.
 
-    A synthetic cursor has the shape ``session-channel:<uuid>@<seq>`` where
-    ``<seq>`` is the channel's monotonic replay counter observed at connect
-    time. Returns the integer watermark, or ``None`` when ``cursor`` is not a
-    watermarked synthetic cursor (a real event id, a legacy marker without an
-    ``@seq`` suffix, or anything malformed) so the caller fails closed.
+    A cursor has the shape ``session-channel:<token>@<seq>`` where ``<seq>`` is
+    the channel's monotonic replay counter (the value observed at connect time
+    for the synthetic ``initial`` cursor, or the frame's own position for a
+    delivered frame). Returns the integer watermark, or ``None`` when ``cursor``
+    is not a watermarked cursor (a payload event id, a legacy marker without an
+    ``@seq`` suffix, or anything malformed) so the caller fails closed. This
+    parses the grammar only; ``SessionChannel._cursor_watermark`` additionally
+    binds ``<token>`` to the minting channel incarnation.
     """
     if not cursor or not isinstance(cursor, str):
         return None
@@ -251,7 +254,7 @@ class SessionChannel:
                 # completion emit records it on two frames, so matching it is
                 # ambiguous (it would land on the newest alias and skip every
                 # completion between the original and that alias).
-                watermark = _parse_channel_cursor_watermark(after_event_id)
+                watermark = self._cursor_watermark(after_event_id)
                 pending: list[tuple[str, dict, str, int]] = []
                 if watermark is not None and (
                     oldest_seq is None or watermark >= oldest_seq - 1
@@ -276,7 +279,7 @@ class SessionChannel:
                 # The replay events are delivered AFTER this `initial` frame; if
                 # the connection drops between the initial frame and replay
                 # delivery, the next reconnect must still re-replay them. (Once a
-                # replay frame is actually delivered, its own real ``event_id``
+                # replay frame is actually delivered, its own frame cursor
                 # advances the client's Last-Event-ID past it, so resumption is
                 # correct on either side of the drop.)
                 initial_event_id = str(after_event_id)
@@ -286,10 +289,11 @@ class SessionChannel:
                 # CURRENT replay watermark so an event emitted during the later
                 # EOF/reconnect gap can still replay — without appending anything
                 # to the bounded replay history. Unknown/evicted cursors fall
-                # here too and never replay stale data (fail-closed).
-                initial_event_id = (
-                    f"session-channel:{uuid.uuid4().hex}@{self._event_seq}"
-                )
+                # here too and never replay stale data (fail-closed). The cursor
+                # is minted with THIS channel's token so a reaped-and-recreated
+                # (or pre-restart) channel, whose ``seq`` space restarts at 0,
+                # rejects it instead of misreading the watermark as its own.
+                initial_event_id = self._frame_cursor(self._event_seq)
             q._session_channel_initial_event_id = initial_event_id
             q._session_channel_replay_count = replay_count
             self._subscribers.append(q)
@@ -318,6 +322,24 @@ class SessionChannel:
     def _frame_cursor(self, seq: int) -> str:
         """Wire ``id:`` for the retained frame stamped with ``seq``."""
         return f"session-channel:{self._cursor_token}@{seq}"
+
+    def _cursor_watermark(self, cursor: str | None) -> int | None:
+        """``seq`` encoded in a cursor THIS channel minted, else ``None``.
+
+        The ``<token>`` half of ``session-channel:<token>@<seq>`` identifies the
+        channel incarnation. ``seq`` restarts at 0 on every new ``SessionChannel``
+        (reaper collected the old one during a long tab absence, or the server
+        restarted), so a cursor from another incarnation must not be read in
+        this channel's sequence space: the contiguity check would pass and
+        frames the client never saw would be skipped or partially replayed.
+        Rejecting it makes the caller fail closed (fresh cursor, no replay).
+        """
+        if not isinstance(cursor, str):
+            return None
+        prefix = f"session-channel:{self._cursor_token}@"
+        if not cursor.startswith(prefix):
+            return None
+        return _parse_channel_cursor_watermark(cursor)
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:

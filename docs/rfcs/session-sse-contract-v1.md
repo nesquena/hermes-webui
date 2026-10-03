@@ -127,9 +127,12 @@ the dual-name completion emit (`bg_task_complete` plus the legacy
 `event_id` cannot name a unique replay position. The payload `event_id` is kept
 for the browser's `(session_id, event_id)` dedupe. Every first `initial` frame
 establishes a synthetic cursor in the same grammar; a known cursor replays only
-the retained frames recorded after its sequence number, in order. A fresh,
-unknown, or evicted cursor replays no old completion toast and falls back to the
-existing active-turn and persisted-message-count recovery. The channel's
+the retained frames recorded after its sequence number, in order. The `<token>`
+names the channel incarnation: a cursor minted by a channel the reaper has since
+collected, or by a pre-restart process, is rejected rather than read in the new
+channel's sequence space. A fresh, unknown, evicted, or foreign-incarnation
+cursor replays no old completion toast and falls back to the existing
+active-turn and persisted-message-count recovery. The channel's
 subscriber-drop grace is preserved for the full reconnect interval even when the
 channel itself is older than its idle TTL.
 
