@@ -228,6 +228,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Sessions persist across page reloads and SSH tunnel reconnects
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
+- Sidebar detailed mode shows a user-turn count per session (e.g. "7 user turns") alongside the total message count, so a one-question/one-answer stub, a cron/autonomous run with no real user navigation, and a long interactive conversation triage differently when cleaning up
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
 
 ### Workspace file browser
