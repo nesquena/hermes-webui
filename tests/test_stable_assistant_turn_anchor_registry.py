@@ -762,6 +762,7 @@ def test_invisible_anchor_outcome_applies_without_repainting_live_scene():
     assert NODE, "node is required for assistant-turn ownership tests"
     apply_source = _function_source(_read(MESSAGES_JS), "_applyToAnchor")
     script = f"""
+const _anchorPaintDisposed=false;
 const activeSid='sid-owned-outcome';
 const streamId='stream-owned-outcome';
 const _anchorRegistry={{anchor:{{}}}};
@@ -802,6 +803,7 @@ console.log(JSON.stringify({{result,applied,renderCount,renderOutcome}}));
     assert data["applied"][0]["context"] == {
         "session_id": "sid-owned-outcome",
         "stream_id": "stream-owned-outcome",
+        "order_domain": "transport",
     }
 
 
@@ -849,6 +851,7 @@ def test_side_effect_only_scene_is_persisted_without_creating_a_worklog():
         messages_js, "_attachProjectedAnchorSceneToLastAssistant"
     )
     script = f"""
+const _anchorPaintDisposed=false;
 const activeSid='sid-owned-outcome';
 const streamId='stream-owned-outcome';
 const _anchorRegistry={{}};

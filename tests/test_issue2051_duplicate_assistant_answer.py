@@ -264,6 +264,7 @@ console.log('OK');
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_settled_scene_drops_the_prose_row_that_is_the_final_answer():
     script = DOM_STUB + js(
+        "_anchorSceneSourceRows",
         "_anchorSceneIsSettledSuccessfulCompression",
         "_anchorSceneProseMatchesFinalAnswer",
         "_anchorSceneProseDuplicatesFinalAnswer",
