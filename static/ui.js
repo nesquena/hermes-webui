@@ -10350,6 +10350,9 @@ function restoreLiveTurnHtmlForSession(sid){
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+  if(typeof highlightCode==='function') highlightCode(restored);
+  if(typeof initTreeViews==='function') initTreeViews(restored);
+  if(typeof addCopyButtons==='function') addCopyButtons(restored);
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(restored));
   return true;
 }
@@ -17427,6 +17430,9 @@ function renderMessages(options){
       _rehydrateDeferredWorklogsFromCache(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      if(typeof highlightCode==='function') highlightCode(inner);
+      if(typeof initTreeViews==='function') initTreeViews(inner);
+      if(typeof addCopyButtons==='function') addCopyButtons(inner);
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
@@ -19081,6 +19087,12 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
+  // Synchronously highlight code blocks, initialize structured tree views, and attach
+  // copy buttons BEFORE the frame is painted so virtualized transcripts do not paint
+  // unhighlighted raw text for one frame when scrolled into view (#7752).
+  if(typeof highlightCode==='function') highlightCode(inner);
+  if(typeof initTreeViews==='function') initTreeViews(inner);
+  if(typeof addCopyButtons==='function') addCopyButtons(inner);
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
