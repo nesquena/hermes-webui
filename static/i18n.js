@@ -14402,7 +14402,7 @@ const LOCALES = {
     settings_extensions_installed_loading: 'Carregando extensões instaladas…',
     settings_extensions_copy_diagnostics: 'Copiar diagnósticos',
     settings_extensions_trust_model_label: 'Modelo de confiança',
-    settings_extensions_trust_model_text: 'As extensões rodam no browser origin do WebUI e podem acessar as mesmas APIs autenticadas desta sessão. Configurações e armazenamento das extensões vivem apenas no navegador e não são para segredos. Carigue somente diretórios locais de extensões confiáveis; desabilitar uma extensão só tem efeito após recarregar para assets já injetados.',
+    settings_extensions_trust_model_text: 'As extensões rodam na mesma origem do WebUI no navegador e podem acessar as mesmas APIs autenticadas desta sessão. As configurações e o armazenamento das extensões ficam só no navegador e não servem para guardar segredos. Carregue somente pastas locais de extensões em que você confia; ao desativar uma extensão, os arquivos que ela já injetou na página só deixam de valer depois de recarregar.',
     settings_extensions_runtime_title: 'Runtime de extensões',
     settings_extensions_runtime_status_from: 'Status de /api/extensions/status; os toggles persistem um override local para entradas de manifest instaladas.',
     settings_extensions_diag_extension_dir_configured: 'Diretório de extensões configurado',
