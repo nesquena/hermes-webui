@@ -1094,6 +1094,34 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     }
 
 
+def restore_goal_continuations_on_startup(session_dir: Path) -> dict:
+    """#6885 slice 2a: startup-only durable goal-continuation intent restore.
+
+    NOT the repair path: repair_safe_session_recovery() must never re-arm a
+    consumed continuation. This runs BEFORE the missing-session-dir early
+    return of the session scan, so a fresh install with no sessions dir still
+    restores durable intent. Also sweeps expired records so stale disk intent
+    cannot survive forever. Never raises into startup.
+    """
+    try:
+        from api.goal_continuation_store import (
+            restore_goal_continuations,
+            sweep_expired_goal_continuations,
+        )
+        restored = restore_goal_continuations()
+        swept = sweep_expired_goal_continuations()
+        return {
+            "restored": restored,
+            "swept": swept,
+            "sessions_dir_exists": bool(session_dir.exists()),
+        }
+    except Exception as exc:
+        logger.warning(
+            "restore_goal_continuations_on_startup failed: %s", exc
+        )
+        return {"restored": 0, "swept": 0, "error": str(exc)}
+
+
 def recover_all_sessions_on_startup(
     session_dir: Path,
     rebuild_index: bool = False,

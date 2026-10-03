@@ -595,6 +595,14 @@ def goal_command_payload(
     if lower in ("clear", "stop", "done"):
         had = bool(mgr.has_goal())
         mgr.clear()
+        # #6885 slice 2a: clearing the goal must also retire any pending
+        # durable continuation intent so it cannot be re-armed on restart.
+        try:
+            from api.goal_continuation_store import retire_pending_goal_continuation
+
+            retire_pending_goal_continuation(sid, reason="cleared")
+        except Exception:
+            pass
         return _payload(
             action="clear",
             message="Goal cleared." if had else "No active goal.",
