@@ -1920,6 +1920,11 @@ class Session:
             except Exception:
                 pass
             raise
+        # `compact()` prefers this load-time metadata value for cheap sidebar
+        # reads. A successful save is authoritative, including deliberate
+        # shrinking paths such as /clear and /truncate, so keep the live object
+        # aligned with the guarded message_count written to the sidecar.
+        self._metadata_message_count = len(guarded_messages)
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -2162,6 +2167,10 @@ class Session:
             'transcript_generation_baseline': self.transcript_generation_baseline,
             'pinned': self.pinned,
             'archived': self.archived,
+            # An opaque, durable marker set only when /clear removed an existing
+            # transcript. The boot client uses it to distinguish a deliberately
+            # cleared empty session from an unstarted scratch session.
+            'clear_generation': self.clear_generation,
             'project_id': self.project_id,
             'profile': self.profile,
             'input_tokens': self.input_tokens,
