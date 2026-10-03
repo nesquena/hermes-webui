@@ -3642,6 +3642,7 @@ def _recover_journaled_output_and_terminal_error(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    dedupe_tools: bool | None = None,
     terminal_recovery: dict | None = None,
 ) -> tuple[bool, bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error.
@@ -3667,6 +3668,7 @@ def _recover_journaled_output_and_terminal_error(
         session,
         stream_id,
         dedupe_existing=dedupe_existing,
+        dedupe_tools=dedupe_tools,
     )
     terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
         session,
@@ -3716,6 +3718,7 @@ def _append_journaled_partial_output(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    dedupe_tools: bool | None = None,
 ) -> tuple[bool, bool]:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -4174,13 +4177,19 @@ def _append_journaled_partial_output(
             # exists — only the anchor allocation is deferred.
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
+            # #7167: ``dedupe_tools`` is independent of the CONTENT dedupe
+            # mode. ``None`` (the default) preserves the historical coupling
+            # to ``dedupe_existing``; the stale-pending caller passes True so
+            # tool cards dedupe by same-stream provenance even though the
+            # content path uses its own provenance-reuse mode.
+            _tools_dedupe = dedupe_existing if dedupe_tools is None else dedupe_tools
             tool_match_idx = (
                 _find_journal_tool_match(
                     session, name, preview, stream_id=stream_id,
                     current_turn_min_idx=current_turn_min_idx,
                     consumed_indexes=consumed_tool_card_indexes,
                 )
-                if dedupe_existing
+                if _tools_dedupe
                 else None
             )
             tool_already_present = tool_match_idx is not None
@@ -4780,7 +4789,20 @@ def _apply_core_sync_or_error_marker(
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
+                # #7167: TOOL CARDS must dedupe by same-stream provenance at
+                # this caller even though the CONTENT path stays on its
+                # provenance-reuse mode (``dedupe_existing=False``): the two
+                # are independent. With content dedupe off, every repair
+                # cycle re-appended one recovered card per journaled tool
+                # event — three stale-pending cycles left three cards for a
+                # single ``terminal: ls -la`` event, all tid ``journal-1``,
+                # stream A. ``dedupe_tools`` runs the stream-scoped
+                # one-to-one matcher, so identical calls from DISTINCT
+                # streams still keep a card each, ownership-unknown cards
+                # still append, and an older untagged live card is never
+                # swallowed.
                 dedupe_existing=False,
+                dedupe_tools=True,
                 terminal_recovery=_terminal_recovery,
             )
         )
