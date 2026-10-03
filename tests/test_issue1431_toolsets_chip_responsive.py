@@ -188,26 +188,39 @@ class TestToolsetsDropdownResizeGuard:
     anchor, or stay open with no visible chip to dismiss it from.
     """
 
-    def test_resize_handler_closes_dropdown_when_chip_hidden(self):
-        """Resize listener must close dropdown when the chip is no longer visible."""
+    def test_resize_handler_closes_dropdown_when_no_entry_point_is_rendered(self):
+        """Resize must close the dropdown once NO entry point is rendered.
+
+        CONTRACT CHANGE (PR #7437). This used to pin a chip-only check
+        (`chip.offsetParent === null`). The redesign gave the picker a second
+        entry point: in `.cf-burger` the chip is hidden by design while the
+        mobile panel action is the visible anchor, so the chip-only rule closed
+        a valid open sheet on every resize. Ownership now goes through
+        _activeToolsetsTrigger(), the same rule the toggle uses, which checks
+        both triggers. The original intent - close when the dropdown is left
+        with nothing to anchor it, e.g. after crossing the 1100px threshold -
+        is unchanged, and is proven behaviourally (chip only, burger action
+        only, neither) in tests/test_7437_mobile_toolsets_entry_points.py.
+        """
         js = _src("ui.js")
-        # Find the resize handler block for the toolsets dropdown
-        # It must check chip.offsetParent === null and close, not reposition
         m = re.search(
             r"window\.addEventListener\('resize',\s*\([^)]*\)\s*=>\s*\{[^}]*composerToolsetsDropdown[^}]*\}",
             js, re.DOTALL,
         )
         assert m, "Toolsets resize handler must exist"
         body = m.group(0)
-        assert "offsetParent" in body, (
-            "Resize handler must check chip.offsetParent === null — without it "
-            "the open dropdown stays open after CSS hides the chip mid-session "
-            "(e.g. workspace-panel toggle crossing 1100px threshold)"
+        assert "_activeToolsetsTrigger()" in body, (
+            "Resize must decide ownership through _activeToolsetsTrigger(), so a "
+            "sheet anchored to the burger action is not closed just because the "
+            "chip is hidden"
         )
         assert "closeToolsetsDropdown" in body, (
-            "Resize handler must call closeToolsetsDropdown() when chip is "
-            "hidden — repositioning a hidden chip leaves the dropdown anchored "
-            "to a zero-rect element"
+            "Resize must still call closeToolsetsDropdown() when no entry point "
+            "is rendered - repositioning against nothing leaves the dropdown "
+            "anchored to a zero-rect element"
+        )
+        assert "composerToolsetsChip" not in body, (
+            "Resize must not regress to the chip-only visibility rule"
         )
 
     def test_position_dropdown_guards_against_hidden_chip(self):
@@ -235,11 +248,22 @@ class TestToolsetsDropdownResizeGuard:
         )
         assert m, "toggleToolsetsDropdown function must exist"
         body = m.group(0)
-        # Currently the only invoker is the chip's own onclick (so this is
-        # latent), but defensive guard is needed because the function is in
-        # global scope and could be called by future #1431 redesign code.
-        assert "offsetParent" in body, (
-            "toggleToolsetsDropdown must check chip.offsetParent === null "
-            "before opening — function is global and could be invoked when "
-            "the chip is hidden by responsive CSS"
+        # This guard anticipated "future #1431 redesign code" invoking the
+        # toggle — and the redesign did: it added a second entry point, the
+        # mobile config panel action, which is the ONLY live entry point in
+        # .cf-burger while the chip is hidden there by design. So the guard is
+        # generalised from "the chip is hidden" to "no entry point is rendered",
+        # and it lives in _activeToolsetsTrigger(), which checks both. The
+        # intent is unchanged: never open without a visible anchor.
+        # Behavioural proof: test_7437 ... test_does_not_open_when_no_entry_point_is_rendered.
+        assert "_activeToolsetsTrigger()" in body and "if (!trigger) return;" in body, (
+            "toggleToolsetsDropdown must refuse to open when no entry point is "
+            "rendered — function is global and can be invoked while every "
+            "trigger is hidden by responsive CSS"
+        )
+        trig = re.search(r"function _activeToolsetsTrigger\(\)\s*\{.*?\n\}", js, re.DOTALL)
+        assert trig, "_activeToolsetsTrigger must exist"
+        assert trig.group(0).count("offsetParent") >= 2, (
+            "_activeToolsetsTrigger must check visibility of BOTH the chip and "
+            "the mobile panel action"
         )

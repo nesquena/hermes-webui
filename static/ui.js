@@ -5395,6 +5395,19 @@ function _fitComposerFooter(){
       footer.style.visibility=prevVisibility;
     }
   }
+  // The stage decides the toolsets picker's positioning strategy (anchored vs
+  // floating), and these classes land a frame after a resize — the resize
+  // handler already positioned the picker against the PREVIOUS stage. Re-run it
+  // now that the stage is settled, or a picker open across a collapse threshold
+  // stays anchored inside the clipping footer (or floating after expanding)
+  // until it is closed. Deliberately AFTER the finally: during measurement the
+  // footer is frozen and hidden, and anchoring against that box would be wrong.
+  try{
+    const dd=document.getElementById('composerToolsetsDropdown');
+    if(dd&&dd.classList.contains('open')&&typeof _positionToolsetsDropdown==='function'){
+      _positionToolsetsDropdown();
+    }
+  }catch(_){ }
 }
 window._fitComposerFooter=_fitComposerFooter;
 
@@ -5744,6 +5757,11 @@ document.addEventListener('click',function(e){
 // ── Session toolsets chip (#493) ───────────────────────────────────────────
 let _currentSessionToolsets = null; // null = active profile defaults, array = custom list
 let _toolsetsCatalog = null;
+// Owner token for one open of the picker. Every open AND every close bumps it,
+// so a callback scheduled by an earlier open - the 50 ms focus timer, the
+// catalog continuation - can tell it has been superseded and stand down,
+// rather than act on a sheet that is closed or now belongs to a later open.
+let _toolsetsOpenGeneration = 0;
 
 function _applyToolsetsChip(toolsets) {
   _currentSessionToolsets = toolsets;
@@ -5775,6 +5793,17 @@ function _applyToolsetsChip(toolsets) {
     chip.classList.remove('has-custom');
     chip.title = t('session_toolsets') + ': ' + t('session_toolsets_profile_defaults');
   }
+  // Mirror the label into the mobile burger panel. The chip is hidden below the
+  // 1100px container query (#1431) and was never mirrored into the mobile
+  // config panel — which left toolset/MCP selection with NO mobile affordance
+  // at all, even though /api/session/toolsets kept working for scripted callers.
+  const mobileLabel = $('composerMobileToolsetsLabel');
+  if (mobileLabel) mobileLabel.textContent = label.textContent;
+  // In burger mode the chip is gone, so `.has-custom` has nothing to colour.
+  // Flag the burger button itself so an active restriction stays visible at a
+  // glance with the panel closed (#1431 acceptance criterion 3).
+  const mobileBtn = $('composerMobileConfigBtn');
+  if (mobileBtn) mobileBtn.classList.toggle('has-toolset-override', !!hasCustom);
 }
 
 function _syncToolsetsChip() {
@@ -5836,6 +5865,24 @@ function _ensureToolsetsPresetSection() {
   section = document.createElement('div');
   section.id = 'toolsetsPresetSections';
   section.className = 'toolsets-preset-sections';
+  // Built once and never replaced. The defaults button is the open's focus
+  // fallback while the catalog is still loading, so it must be the SAME node
+  // when the catalog settles: re-creating it detached the focused element and
+  // dropped keyboard focus to <body> with the sheet still open. Only the server
+  // list below it is ever re-rendered.
+  const defaultsBtn = document.createElement('button');
+  defaultsBtn.type = 'button';
+  defaultsBtn.id = 'toolsetsProfileDefaultsBtn';
+  defaultsBtn.className = 'toolsets-action-btn toolsets-clear-btn';
+  section.appendChild(defaultsBtn);
+  const serversLabel = document.createElement('div');
+  serversLabel.id = 'toolsetsServersLabel';
+  serversLabel.className = 'toolsets-dropdown-desc';
+  section.appendChild(serversLabel);
+  const list = document.createElement('div');
+  list.id = 'toolsetsServerList';
+  list.className = 'toolsets-server-list';
+  section.appendChild(list);
   const inputRow = dd.querySelector('.toolsets-dropdown-input-row');
   if (inputRow) dd.insertBefore(section, inputRow);
   else dd.appendChild(section);
@@ -5861,43 +5908,61 @@ function _renderToolsetsPresetSections(opts) {
     ? '🔧 ' + selected.join(', ')
     : '👤 ' + t('session_toolsets_profile_defaults');
 
-  section.innerHTML = '';
-  const defaultsBtn = document.createElement('button');
-  defaultsBtn.type = 'button';
-  defaultsBtn.id = 'toolsetsProfileDefaultsBtn';
-  defaultsBtn.className = 'toolsets-action-btn toolsets-clear-btn';
-  defaultsBtn.textContent = t('session_toolsets_use_profile_defaults');
-  section.appendChild(defaultsBtn);
+  // Refresh only the TEXT of the stable controls; the nodes themselves stay.
+  const defaultsBtn = $('toolsetsProfileDefaultsBtn');
+  if (defaultsBtn) defaultsBtn.textContent = t('session_toolsets_use_profile_defaults');
+  const serversLabel = $('toolsetsServersLabel');
+  if (serversLabel) serversLabel.textContent = t('session_toolsets_configured_servers');
 
-  _appendToolsetsLabel(section, t('session_toolsets_configured_servers'));
-  if (_toolsetsCatalog === null) {
-    _appendToolsetsLabel(section, t('session_toolsets_loading_servers'));
-    return;
+  const list = $('toolsetsServerList');
+  if (!list) return;
+  let status = null;
+  if (_toolsetsCatalog === null) status = t('session_toolsets_loading_servers');
+  else if (_toolsetsCatalog === false) status = t('mcp_load_failed');
+  else if (!Array.isArray(_toolsetsCatalog) || !_toolsetsCatalog.length) status = t('session_toolsets_no_configured_servers');
+  // Rebuild only when WHAT is listed changes. A selection change - a checkbox
+  // toggle, typing in the field - just flips `checked` below, so the control
+  // the user is operating is never detached from under them. (The full
+  // re-render on every `change` used to drop keyboard focus to <body> after
+  // each Space press on a checkbox.)
+  const key = status !== null ? 'status:' + status : 'servers:' + JSON.stringify(_toolsetsCatalog);
+  if (list.dataset.renderKey !== key) {
+    // The listing can still change under focus - the catalog settling or being
+    // invalidated mid-open. Put focus back on the same server's checkbox
+    // instead of letting it fall to <body>.
+    const active = document.activeElement;
+    const refocus = active && active.classList && list.contains(active)
+      && active.classList.contains('toolsets-server-checkbox') ? active.value : null;
+    list.innerHTML = '';
+    if (status !== null) {
+      _appendToolsetsLabel(list, status);
+    } else {
+      _toolsetsCatalog.forEach(function(name) {
+        const row = document.createElement('label');
+        row.className = 'toolsets-server-option';
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '6px';
+        row.style.margin = '4px 0';
+        row.style.fontSize = '12px';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'toolsets-server-checkbox';
+        checkbox.value = name;
+        row.appendChild(checkbox);
+        row.appendChild(document.createTextNode(name));
+        list.appendChild(row);
+      });
+    }
+    list.dataset.renderKey = key;
+    if (refocus !== null) {
+      const again = Array.from(list.querySelectorAll('.toolsets-server-checkbox'))
+        .find(function(cb) { return cb.value === refocus; });
+      if (again) again.focus();
+    }
   }
-  if (_toolsetsCatalog === false) {
-    _appendToolsetsLabel(section, t('mcp_load_failed'));
-    return;
-  }
-  if (!Array.isArray(_toolsetsCatalog) || !_toolsetsCatalog.length) {
-    _appendToolsetsLabel(section, t('session_toolsets_no_configured_servers'));
-    return;
-  }
-  _toolsetsCatalog.forEach(function(name) {
-    const row = document.createElement('label');
-    row.className = 'toolsets-server-option';
-    row.style.display = 'flex';
-    row.style.alignItems = 'center';
-    row.style.gap = '6px';
-    row.style.margin = '4px 0';
-    row.style.fontSize = '12px';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.className = 'toolsets-server-checkbox';
-    checkbox.value = name;
-    checkbox.checked = selectedSet.has(name);
-    row.appendChild(checkbox);
-    row.appendChild(document.createTextNode(name));
-    section.appendChild(row);
+  list.querySelectorAll('.toolsets-server-checkbox').forEach(function(cb) {
+    cb.checked = selectedSet.has(cb.value);
   });
 }
 
@@ -5924,18 +5989,113 @@ function _populateToolsetsDropdown() {
   _renderToolsetsPresetSections({ state, input });
 }
 
+// The picker has two entry points: the footer chip (full + .cf-icons stages)
+// and the mobile config panel action (.cf-burger, where the chip is hidden).
+// Return whichever is actually rendered, or null when neither is.
+function _activeToolsetsTrigger() {
+  const chip = $('composerToolsetsChip');
+  if (chip && chip.offsetParent !== null) return chip;
+  const action = $('composerMobileToolsetsAction');
+  if (action && action.offsetParent !== null) return action;
+  return null;
+}
+
+let _toolsetsDropdownHome = null;
+
+// Put the dropdown back inside the footer and drop every inline coordinate the
+// phone path wrote, so the desktop CSS anchor is identical to master.
+function _restoreToolsetsDropdownHome() {
+  const dd = $('composerToolsetsDropdown');
+  if (!dd) return;
+  dd.classList.remove('composer-toolsets-dropdown--floating');
+  dd.style.left = '';
+  dd.style.top = '';
+  dd.style.bottom = '';
+  dd.style.width = '';
+  dd.style.maxWidth = '';
+  dd.style.maxHeight = '';
+  if (_toolsetsDropdownHome && _toolsetsDropdownHome.parent && dd.parentNode !== _toolsetsDropdownHome.parent) {
+    const ref = _toolsetsDropdownHome.nextSibling;
+    if (ref && ref.parentNode === _toolsetsDropdownHome.parent) {
+      _toolsetsDropdownHome.parent.insertBefore(dd, ref);
+    } else {
+      _toolsetsDropdownHome.parent.appendChild(dd);
+    }
+  }
+}
+
 function _positionToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
-  const chip = $('composerToolsetsChip');
   const footer = document.querySelector('.composer-footer');
-  if (!dd || !chip || !footer) return;
-  // Defense: if the chip has been hidden by responsive CSS (e.g. resize across
-  // 1100px container threshold while dropdown was open), don't try to anchor
-  // to a zero-rect element — close the dropdown instead. (#1431)
-  if (chip.offsetParent === null) { closeToolsetsDropdown(); return; }
-  const chipRect = chip.getBoundingClientRect();
+  if (!dd || !footer) return;
+  const chip = $('composerToolsetsChip');
+  const mobileAction = $('composerMobileToolsetsAction');
+  const panel = $('composerMobileConfigPanel');
+  // Anchor to whichever entry point the user actually reached for.
+  const anchor = (panel && panel.classList.contains('open') && mobileAction)
+    ? mobileAction
+    : (chip && chip.offsetParent ? chip : mobileAction);
+  if (!anchor) return;
+  // Gate on the COLLAPSE STAGE, not on viewport width. _fitComposerFooter() picks
+  // the stage by available space, so `.cf-icons` / `.cf-burger` occur well above
+  // 640px (a narrow desktop window, or a tablet with a long model label). Keying
+  // this to a width media query left collapsed layouts between 641px and ~900px
+  // on the anchored path, where `.composer-left`'s hidden vertical overflow clips
+  // the upward-opening picker — and in `.cf-burger` the hidden chip made the
+  // anchored path close the dropdown outright.
+  const collapsed = footer.classList
+    && (footer.classList.contains('cf-icons') || footer.classList.contains('cf-burger'));
+  if (collapsed) {
+    // #6080: .composer-footer sets container-type:inline-size (and a
+    // backdrop-filter under the Geist Contrast skin) — both establish a fixed
+    // containing block, so a position:fixed dropdown left inside the footer
+    // resolves against the FOOTER instead of the viewport and lands below the
+    // fold. Reparent to <body>, the same idiom as #composerModelDropdown and
+    // #profileDropdown, then compute coordinates against the visual viewport.
+    if (!_toolsetsDropdownHome) {
+      _toolsetsDropdownHome = { parent: dd.parentNode, nextSibling: dd.nextSibling };
+    }
+    if (dd.parentNode !== document.body) document.body.appendChild(dd);
+    dd.classList.add('composer-toolsets-dropdown--floating');
+    const anchorRect = anchor.getBoundingClientRect();
+    const vv = window.visualViewport;
+    const viewportWidth = Math.max(1, Number(vv && vv.width) || window.innerWidth || 1);
+    const viewportHeight = Math.max(1, Number(vv && vv.height) || window.innerHeight || 1);
+    const viewportTop = Math.max(0, Number(vv && vv.offsetTop) || 0);
+    const viewportLeft = Math.max(0, Number(vv && vv.offsetLeft) || 0);
+    const viewportBottom = viewportTop + viewportHeight;
+    const viewportRight = viewportLeft + viewportWidth;
+    const margin = 8;
+    const gap = 6;
+    const titlebar = document.querySelector('.app-titlebar');
+    const titlebarBottom = titlebar && typeof titlebar.getBoundingClientRect === 'function'
+      ? Number(titlebar.getBoundingClientRect().bottom) || 0
+      : 0;
+    const contentTop = Math.max(viewportTop + margin, titlebarBottom + margin);
+    const menuWidth = Math.max(1, viewportWidth - margin * 2);
+    const left = Math.max(viewportLeft + margin, Math.min(anchorRect.left, viewportRight - menuWidth - margin));
+    dd.style.left = left + 'px';
+    dd.style.width = menuWidth + 'px';
+    dd.style.maxWidth = menuWidth + 'px';
+    dd.style.bottom = 'auto';
+    const menuHeight = Math.max(dd.scrollHeight, dd.offsetHeight);
+    const aboveSpace = Math.max(0, anchorRect.top - contentTop - gap - margin);
+    const belowSpace = Math.max(0, viewportBottom - anchorRect.bottom - gap - margin);
+    const openAbove = aboveSpace >= Math.min(menuHeight, belowSpace) || aboveSpace >= belowSpace;
+    const availableHeight = Math.max(1, openAbove ? aboveSpace : belowSpace);
+    dd.style.maxHeight = availableHeight + 'px';
+    const visibleHeight = Math.min(menuHeight || availableHeight, availableHeight);
+    const top = openAbove ? anchorRect.top - gap - visibleHeight : anchorRect.bottom + gap;
+    dd.style.top = Math.max(contentTop, Math.min(top, viewportBottom - margin - visibleHeight)) + 'px';
+    return;
+  }
+  // Uncollapsed footer: unchanged master behaviour — an absolutely positioned
+  // .composer-footer child. Restore in case a prior collapsed open moved it.
+  _restoreToolsetsDropdownHome();
+  if (!chip || chip.offsetParent === null) { closeToolsetsDropdown(); return; }
+  const anchorRect = anchor.getBoundingClientRect();
   const footerRect = footer.getBoundingClientRect();
-  let left = chipRect.left - footerRect.left;
+  let left = anchorRect.left - footerRect.left;
   const maxLeft = Math.max(0, footer.clientWidth - dd.offsetWidth);
   left = Math.max(0, Math.min(left, maxLeft));
   dd.style.left = left + 'px';
@@ -5943,39 +6103,69 @@ function _positionToolsetsDropdown() {
 
 function toggleToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
-  const chip = $('composerToolsetsChip');
-  if (!dd || !chip) return;
-  // Don't open when the chip itself is hidden by responsive CSS (#1431).
-  // offsetParent === null catches display:none on the element or any ancestor.
-  if (chip.offsetParent === null) return;
+  if (!dd) return;
+  // Don't open when NO entry point is rendered. Gating on the chip alone left
+  // the .cf-burger panel action dead, since the chip is hidden in that stage.
+  const trigger = _activeToolsetsTrigger();
+  if (!trigger) return;
   const open = dd.classList.contains('open');
   if (open) { closeToolsetsDropdown(); return; }
   if (typeof closeProfileDropdown === 'function') closeProfileDropdown();
   if (typeof closeWsDropdown === 'function') closeWsDropdown();
   closeModelDropdown();
   if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  // This open owns everything it schedules below. A close or a later open bumps
+  // the generation, and these callbacks then stand down: "still open" alone
+  // could not tell a sheet that stayed open from one closed and reopened while
+  // the request was in flight.
+  const gen = ++_toolsetsOpenGeneration;
   _syncToolsetsChip();
   _populateToolsetsDropdown();
   _loadToolsetsCatalog().then(function() {
-    const stillOpen = dd && dd.classList.contains('open');
-    if (stillOpen) {
-      const state = $('toolsetsDropdownState');
-      const input = $('toolsetsInput');
-      _renderToolsetsPresetSections({ state, input });
-    }
+    if (gen !== _toolsetsOpenGeneration) return;
+    const state = $('toolsetsDropdownState');
+    const input = $('toolsetsInput');
+    _renderToolsetsPresetSections({ state, input });
   });
   dd.classList.add('open');
   _positionToolsetsDropdown();
-  chip.classList.add('active');
-  // Focus the input after a tick so the layout has settled
-  setTimeout(() => { const inp = $('toolsetsInput'); if (inp) inp.focus(); }, 50);
+  trigger.classList.add('active');
+  trigger.setAttribute('aria-expanded', 'true');
+  // Focus after a tick so the layout has settled. The floating sheet hides the
+  // free-text field, so focusing it was a silent no-op that left focus on the
+  // trigger — no keyboard path into the sheet. Land on the first actionable
+  // control instead; the profile-defaults button is rendered synchronously by
+  // _populateToolsetsDropdown(), so it is a safe fallback while the server
+  // catalog is still loading - and it is never re-created, so the catalog
+  // settling later cannot detach it.
+  setTimeout(() => {
+    // Dismissed (or reopened) inside the 50 ms window: this timer belongs to an
+    // open that no longer exists. Acting anyway focused the hidden free-text
+    // field of a closed dropdown, yanking focus out of wherever the user went.
+    if (gen !== _toolsetsOpenGeneration) return;
+    if (!dd.classList.contains('composer-toolsets-dropdown--floating')) {
+      const inp = $('toolsetsInput'); if (inp) inp.focus();
+      return;
+    }
+    const first = dd.querySelector('.toolsets-server-checkbox') || $('toolsetsProfileDefaultsBtn');
+    if (first && typeof first.focus === 'function') first.focus();
+  }, 50);
 }
 
 function closeToolsetsDropdown() {
+  // Supersedes whatever the last open scheduled (see _toolsetsOpenGeneration).
+  _toolsetsOpenGeneration++;
   const dd = $('composerToolsetsDropdown');
-  const chip = $('composerToolsetsChip');
   if (dd) dd.classList.remove('open');
-  if (chip) chip.classList.remove('active');
+  _restoreToolsetsDropdownHome();
+  // Clear both entry points: either may have opened it, and the stage can change
+  // underneath an open dropdown.
+  ['composerToolsetsChip', 'composerMobileToolsetsAction'].forEach(function(id) {
+    const el = $(id);
+    if (!el) return;
+    el.classList.remove('active');
+    el.setAttribute('aria-expanded', 'false');
+  });
 }
 
 function _applySessionToolsets(toolsets) {
@@ -6017,6 +6207,7 @@ function _applySessionToolsets(toolsets) {
 document.addEventListener('click', function(e) {
   if (
     !e.target.closest('#composerToolsetsChip') &&
+    !e.target.closest('#composerMobileToolsetsAction') &&
     !e.target.closest('#composerToolsetsDropdown')
   ) closeToolsetsDropdown();
   // Active profile defaults button
@@ -6064,15 +6255,16 @@ document.addEventListener('change', function(e) {
   _renderToolsetsPresetSections({ state, input });
 });
 
-// Position toolsets dropdown on resize, OR close it if the chip is no longer
-// visible (e.g. resize crossed the 1100px container threshold while dropdown
-// was open — the wrap is hidden by CSS but the dropdown sibling stays open
-// without an anchor). (#1431)
+// Reposition the open dropdown on resize, or close it once NO entry point is
+// rendered - e.g. resize crossed the 1100px container threshold while it was
+// open and nothing is left to anchor it (#1431). Ownership goes through
+// _activeToolsetsTrigger(), the same rule the toggle uses: in `.cf-burger` the
+// chip is hidden by design while the panel action is the visible anchor, so a
+// chip-only check closed a valid open sheet on every resize.
 window.addEventListener('resize', () => {
   const dd = $('composerToolsetsDropdown');
   if (!dd || !dd.classList.contains('open')) return;
-  const chip = $('composerToolsetsChip');
-  if (!chip || chip.offsetParent === null) { closeToolsetsDropdown(); return; }
+  if (!_activeToolsetsTrigger()) { closeToolsetsDropdown(); return; }
   _positionToolsetsDropdown();
 });
 
@@ -6136,7 +6328,13 @@ document.addEventListener('click',function(e){
     e.target.closest('#composerMobileConfigPanel') ||
     e.target.closest('#composerWsDropdown') ||
     e.target.closest('#composerModelDropdown') ||
-    e.target.closest('#composerReasoningDropdown')
+    e.target.closest('#composerReasoningDropdown') ||
+    // Reparented to <body> when floating, like the three above — so a click on
+    // a server checkbox is no longer inside the panel. Without this, it tore the
+    // panel down behind the open sheet: the in-panel anchor went 0x0 (the next
+    // reposition snapped the sheet to the corner) and the burger button reported
+    // aria-expanded="false" while its popup was still visibly open.
+    e.target.closest('#composerToolsetsDropdown')
   ) return;
   closeMobileComposerConfig();
 });
@@ -6146,10 +6344,42 @@ document.addEventListener('keydown',function(e){
   const panel=$('composerMobileConfigPanel');
   if(!panel||!panel.classList.contains('open')) return;
   e.preventDefault();
+  // Read BEFORE the dismissal below. This handler is registered ahead of the
+  // toolsets Escape handler, so once it closes the sheet that handler sees it
+  // already closed and skips its own focus restoration — this one has to do it.
+  const toolsetsDd=$('composerToolsetsDropdown');
+  const sheetWasOpen=!!(toolsetsDd&&toolsetsDd.classList.contains('open'));
   closeMobileComposerConfig();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
   closeReasoningDropdown();
+  // The toolsets sheet anchors to an action INSIDE this panel; closing the panel
+  // without it left the sheet open against a hidden anchor. Closed here rather
+  // than inside closeMobileComposerConfig(), which the desktop resize handler
+  // also calls — putting it there would close the anchored desktop picker on
+  // every window resize.
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  // The trigger that opened the sheet lives inside the panel just closed, so it
+  // can no longer take focus. Hand focus to the burger button — the visible
+  // control that owns both surfaces — rather than dropping it onto <body>.
+  if(sheetWasOpen){
+    const burger=$('composerMobileConfigBtn');
+    if(burger&&typeof burger.focus==='function') burger.focus();
+  }
+});
+
+// Escape for the toolsets picker itself. Its only previous Escape binding lived
+// on #toolsetsInput, which the floating sheet hides — so nothing could take
+// focus and Escape did nothing in .cf-icons, where there is no panel to close
+// either. Restores focus to the trigger so keyboard users are not dropped.
+document.addEventListener('keydown',function(e){
+  if(e.key!=='Escape') return;
+  const dd=$('composerToolsetsDropdown');
+  if(!dd||!dd.classList.contains('open')) return;
+  const trigger=typeof _activeToolsetsTrigger==='function'?_activeToolsetsTrigger():null;
+  e.preventDefault();
+  closeToolsetsDropdown();
+  if(trigger&&typeof trigger.focus==='function') trigger.focus();
 });
 
 window.addEventListener('resize',function(){
