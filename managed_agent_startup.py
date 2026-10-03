@@ -40,3 +40,37 @@ def activate_managed_agent() -> None:
                 file=sys.stderr,
                 flush=True,
             )
+        _install_agent_tls_trust()
+
+
+def _install_agent_tls_trust() -> None:
+    """Install the Agent's process-wide TLS trust store before any WebUI import.
+
+    The Agent patches ``ssl.SSLContext`` with truststore once per process, and its
+    own entry points do it at start. Embedded here it would otherwise happen lazily
+    on the first outbound call, after urllib3/botocore built contexts against the
+    unpatched class, and those recurse forever on next use (Bedrock model listing
+    failed with "maximum recursion depth exceeded").
+    """
+    try:
+        ssl_verify = importlib.import_module("agent.ssl_verify")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("agent", "agent.ssl_verify"):
+            return  # Agents that predate the process-wide trust store.
+        _warn_tls_trust_failure(exc)
+        return
+    except Exception as exc:  # noqa: BLE001 - same policy as the bootstrap above
+        _warn_tls_trust_failure(exc)
+        return
+    install = getattr(ssl_verify, "install_truststore", None)
+    if install is not None:
+        install()  # Never raises; falls back to OpenSSL's default trust paths.
+
+
+def _warn_tls_trust_failure(exc: BaseException) -> None:
+    print(
+        f"[!!] Hermes Agent TLS trust store setup failed: {type(exc).__name__}: {exc}; "
+        "continuing startup with OpenSSL's default trust paths.",
+        file=sys.stderr,
+        flush=True,
+    )
