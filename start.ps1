@@ -135,6 +135,13 @@ if (Test-Path $agentVenvPython) {
     $Python = $agentVenvPython
 }
 
+# managed_agent_startup.activate_managed_agent() keys off the env var
+# only: without this export the discovered/validated dir never reaches
+# the child process, dependency activation is skipped, and server.py dies
+# on ModuleNotFoundError before api/config.py's fallback discovery runs
+# (#7937).
+$env:HERMES_WEBUI_AGENT_DIR = $AgentDir
+
 # === Resolve bind + state defaults =====================================
 $BindHostFinal = if ($BindHost) { $BindHost } elseif ($env:HERMES_WEBUI_HOST) { $env:HERMES_WEBUI_HOST } else { '127.0.0.1' }
 $PortFinal = if ($Port) {
