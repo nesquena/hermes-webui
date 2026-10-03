@@ -12064,6 +12064,52 @@ function _worklogDetailScrollableBody(el){
   if(!el||!el.querySelector) return null;
   return el.querySelector('.thinking-card-body,.tool-card-detail');
 }
+// Live thinking tail-follow: reasoning text that streams into an expanded
+// thinking card should keep scrolling into view the way the message pane
+// follows its bottom, while a reader who scrolls up inside the card is held
+// in place. Tail-follow state is EXPLICIT to live thinking rows: a settled
+// card is never seeded or pinned, so it keeps master's open-at-top reading
+// behavior. The latch below records per-body follow intent on live bodies
+// only (true at stream start, flipped by the passive scroll listener as the
+// reader moves: hold away from the tail, resume at the tail), and the detail
+// capture/restore path carries it across DOM rebuilds via the atBottom
+// snapshot field, which is recorded only for bodies that participate.
+const _THINKING_TAIL_STICK_PX=24;
+function _thinkingRowIsLive(row){
+  if(!row||!row.getAttribute) return false;
+  if(row.getAttribute('data-live-thinking-row')==='1') return true;
+  if(row.getAttribute('data-live-thinking')==='1') return true;
+  if(row.getAttribute('data-thinking-active')==='1') return true;
+  return !!(row.closest&&row.closest('[data-live-anchor-scene-owner="1"],[data-live-tool-call-group="1"],[data-live-assistant-turn="1"]'));
+}
+function _bindThinkingTailFollow(body, atTail){
+  if(!body||typeof body.addEventListener!=='function') return;
+  // atTail===undefined: a live body's own write seeds follow=true only when
+  // the latch is unset. An explicit atTail is AUTHORITATIVE (restore replaying
+  // captured intent onto a rebuilt body): it overrides the latch, or a body
+  // recreated mid-hold would be re-seeded true by its creation write and yank
+  // the reader to the bottom on the next rebuild.
+  if(atTail===undefined){
+    if(body._thinkingTailFollow===undefined) body._thinkingTailFollow=true;
+  }else{
+    body._thinkingTailFollow=!!atTail;
+  }
+  if(body._thinkingTailFollowBound) return;
+  body._thinkingTailFollowBound=true;
+  body.addEventListener('scroll',()=>{
+    const room=Math.max(0,(Number(body.scrollHeight)||0)-(Number(body.clientHeight)||0));
+    body._thinkingTailFollow=room-(Number(body.scrollTop)||0)<=_THINKING_TAIL_STICK_PX;
+  },{passive:true});
+}
+function _worklogDetailBodyAtTail(body){
+  if(!body) return true;
+  if(body._thinkingTailFollow===true) return true;
+  if(body._thinkingTailFollow===false) return false;
+  // Unbound body (e.g. a settled card that never streamed): fall back to the
+  // literal scroll position.
+  const room=Math.max(0,(Number(body.scrollHeight)||0)-(Number(body.clientHeight)||0));
+  return room-(Number(body.scrollTop)||0)<=_THINKING_TAIL_STICK_PX;
+}
 function _setWorklogDetailDisclosureOpen(el, open){
   if(!el||!el.classList) return;
   // #5966 (Codex F2 r2): restoring an OPEN state on a settled Transparent Stream
@@ -12104,10 +12150,16 @@ function _captureWorklogDetailDisclosureState(root){
     const key=_worklogDetailDisclosureKeyForElement(el, counts);
     if(!key) return;
     const body=_worklogDetailScrollableBody(el);
-    state.set(key,{
+    // atBottom is tail-follow state and is recorded ONLY for live thinking
+    // bodies that participate in tail-follow. Tool-card details and settled
+    // thinking cards keep master's plain absolute-offset restore.
+    const participates=!!(body&&body.classList&&body.classList.contains('thinking-card-body')&&body._thinkingTailFollow!==undefined);
+    const snap={
       open:_worklogDetailDisclosureIsOpen(el),
       scrollTop:body?Math.max(0,Number(body.scrollTop)||0):0,
-    });
+    };
+    if(participates) snap.atBottom=_worklogDetailBodyAtTail(body);
+    state.set(key,snap);
   });
   return state;
 }
@@ -12123,9 +12175,27 @@ function _restoreWorklogDetailDisclosureState(root, state){
     const open=(saved&&typeof saved==='object'&&'open' in saved)?saved.open:saved;
     _setWorklogDetailDisclosureOpen(el, open);
     const scrollTop=(saved&&typeof saved==='object')?Number(saved.scrollTop):0;
-    if(open&&Number.isFinite(scrollTop)&&scrollTop>0){
+    // Only snapshots that carried tail-follow state (participating live
+    // thinking bodies) bind the rebuilt body; everything else — tool details,
+    // settled cards, legacy boolean snapshots — keeps master's plain
+    // absolute-offset restore with no follow latch.
+    const hasFollow=!!(saved&&typeof saved==='object'&&'atBottom' in saved);
+    const atBottom=hasFollow&&saved.atBottom===true;
+    if(open){
       const body=_worklogDetailScrollableBody(el);
-      if(body) body.scrollTop=Math.min(scrollTop, Math.max(0, body.scrollHeight-body.clientHeight));
+      if(body){
+        // Carry the captured follow/hold intent across the rebuild (seeded
+        // WITH its scroll listener so later reader movement still counts) and
+        // re-pin tail readers to the NEW bottom — content may have grown while
+        // the DOM was rebuilt. Readers who had scrolled up get their absolute
+        // offset replayed.
+        if(hasFollow&&typeof _bindThinkingTailFollow==='function') _bindThinkingTailFollow(body, atBottom);
+        if(atBottom){
+          body.scrollTop=Math.max(0, body.scrollHeight-body.clientHeight);
+        }else if(Number.isFinite(scrollTop)&&scrollTop>0){
+          body.scrollTop=Math.min(scrollTop, Math.max(0, body.scrollHeight-body.clientHeight));
+        }
+      }
     }
   });
 }
@@ -12139,10 +12209,14 @@ function _thinkingCardHtml(text, open){
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
-function _thinkingActivityNode(text, open, disclosureKey){
+function _thinkingActivityNode(text, open, disclosureKey, live){
   const row=document.createElement('div');
   row.className='agent-activity-thinking';
   row.setAttribute('data-worklog-thinking-card','1');
+  // Mark live rows BEFORE the creation write: the row is still detached here,
+  // and tail-follow must know this body is allowed to follow while settled
+  // cards are not.
+  if(live) row.setAttribute('data-live-thinking-row','1');
   if(disclosureKey) row.setAttribute('data-thinking-key', String(disclosureKey));
   row.innerHTML=_thinkingCardHtml(text, open);
   _renderThinkingInto(row,text);
@@ -13508,7 +13582,7 @@ function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
     const thinkingKey=(opts&&opts.thinkingKey)||`reason:${String(thinkingText).trim()}`;
     const thinkingDisclosureKey=(opts&&opts.thinkingDisclosureKey)||thinkingKey;
     if(!seenReasons||!seenReasons.has(thinkingKey)){
-      const thinking=_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey);
+      const thinking=_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey, !!(opts&&opts.live));
       if(thinking){
         list.appendChild(thinking);
         wroteProse=true;
@@ -13700,7 +13774,7 @@ function _anchorSceneNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
-    node=_thinkingActivityNode(text, false, row.row_id||row.local_id||'anchor-thinking');
+    node=_thinkingActivityNode(text, false, row.row_id||row.local_id||'anchor-thinking', !settled);
   }else if(row.role==='tool'){
     node=buildToolCard(_anchorSceneToolCallFromRow(row,opts));
   }else if(row.role==='lifecycle'){
@@ -13775,7 +13849,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
-    node=_decorateTransparentEventRow(_thinkingActivityNode(text,false,row.row_id||row.local_id||'anchor-thinking'),{
+    node=_decorateTransparentEventRow(_thinkingActivityNode(text,false,row.row_id||row.local_id||'anchor-thinking', live),{
       type:'thinking',
       text,
       preview:text,
@@ -14379,8 +14453,17 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   const existingPre = existing.querySelector('.thinking-card-body pre');
   const nodePre = node.querySelector('.thinking-card-body pre');
   if(!existingPre || !nodePre) return false;
+  const thinkingBody = existingPre.closest ? existingPre.closest('.thinking-card-body') : null;
+  // Same tail-follow rule as _renderThinkingInto: only live thinking rows may
+  // seed the follow latch or move their body to the tail.
+  const thinkingLive = typeof _thinkingRowIsLive==='function'?_thinkingRowIsLive(existing):true;
+  if(thinkingBody&&thinkingLive&&typeof _bindThinkingTailFollow==='function') _bindThinkingTailFollow(thinkingBody);
+  const thinkingFollow = thinkingBody&&thinkingLive&&thinkingBody._thinkingTailFollow!==false;
   const nextText = String(nodePre.textContent || '');
-  if(existingPre.textContent !== nextText) existingPre.textContent = nextText;
+  if(existingPre.textContent !== nextText){
+    existingPre.textContent = nextText;
+    if(thinkingFollow) thinkingBody.scrollTop=Math.max(0,(Number(thinkingBody.scrollHeight)||0)-(Number(thinkingBody.clientHeight)||0));
+  }
   const nodePreview = node.querySelector('.transparent-event-thinking-preview');
   const previewText = nodePreview ? String(nodePreview.textContent || '') : nextText;
   if(typeof _decorateTransparentEventRow === 'function'){
@@ -18699,7 +18782,7 @@ function renderMessages(options){
             // Echoed reasoning already rendered for this turn — skip the duplicate.
           }else{
             if(_thinkKey)_seen.add(_thinkKey);
-            const thinkingRow=_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false),{
+            const thinkingRow=_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false,null,true),{
               type:'thinking',
               text:event.thinkingText,
               preview:event.thinkingText,
@@ -21048,7 +21131,17 @@ function _renderThinkingInto(row,text=''){
   }
   const pre=row.querySelector('.thinking-card-body pre');
   if(pre){
+    const body=pre.closest?pre.closest('.thinking-card-body'):null;
+    // Tail-follow applies to LIVE thinking rows only. A settled card (or any
+    // body whose reader has scrolled up) keeps its scroll position: a creation
+    // write must never seed the follow latch or the next rebuild would jump a
+    // settled top-of-card reader to the bottom.
+    const live=typeof _thinkingRowIsLive==='function'?_thinkingRowIsLive(row):true;
+    if(body&&live&&typeof _bindThinkingTailFollow==='function') _bindThinkingTailFollow(body);
+    const follow=body&&live&&body._thinkingTailFollow!==false;
+    const changed=pre.textContent!==clean;
     pre.textContent=clean;
+    if(follow&&changed) body.scrollTop=Math.max(0,(Number(body.scrollHeight)||0)-(Number(body.clientHeight)||0));
     return;
   }
   row.innerHTML=_thinkingMarkup(text);
@@ -21163,7 +21256,7 @@ function appendThinking(text='', options){
     if(isTransparentStream()){
       let row=blocks.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
-        row=_thinkingActivityNode(clean, false);
+        row=_thinkingActivityNode(clean, false, null, true);
         row.id='thinkingRow';
         row.setAttribute('data-live-thinking','1');
         row.setAttribute('data-live-thinking-key',thinkingKey);
@@ -21212,7 +21305,7 @@ function appendThinking(text='', options){
     if(list){
       let row=list.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
-        row=_thinkingActivityNode(clean, false, thinkingKey);
+        row=_thinkingActivityNode(clean, false, thinkingKey, true);
         row.setAttribute('data-live-thinking','1');
         row.setAttribute('data-live-thinking-key',thinkingKey);
         if(segmentSeq) row.setAttribute('data-live-segment-seq',segmentSeq);

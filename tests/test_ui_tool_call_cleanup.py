@@ -323,10 +323,10 @@ class TestToolCallGroupingStatic:
         assert ".thinking-card-body pre" not in thinking_body and "textContent" not in thinking_body, (
             "Thinking-card disclosure keys must not depend on streaming body text."
         )
-        assert "_thinkingActivityNode(clean, false, thinkingKey)" in append_thinking_fn, (
+        assert "_thinkingActivityNode(clean, false, thinkingKey, true)" in append_thinking_fn, (
             "Live streaming Thinking rows must stamp the stable thinking key at creation time."
         )
-        assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in append_step_fn, (
+        assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey, !!(opts&&opts.live))" in append_step_fn, (
             "Settled Worklog Thinking rows must stamp the stable thinking key at creation time."
         )
         assert "thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:''" in _function_body(UI_JS, "renderMessages"), (
@@ -618,7 +618,7 @@ class TestToolCallGroupingStatic:
         assert "_worklogReasonNodeFromText(thinkingText" not in live_thinking_fn, (
             "Provider reasoning should not render as live Worklog process prose."
         )
-        assert "_thinkingActivityNode(clean, false, thinkingKey)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
+        assert "_thinkingActivityNode(clean, false, thinkingKey, true)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
             "Live provider thinking should render as a collapsed Worklog Thinking Card."
         )
         assert "ensureLiveWorklogContainer" in live_thinking_fn, (

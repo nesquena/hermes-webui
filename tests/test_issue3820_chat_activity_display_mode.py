@@ -742,7 +742,7 @@ def test_transparent_stream_static_branch_bypasses_worklog_summary_and_adds_even
     end = UI_JS.index("// Render per-turn duration", start)
     transparent_branch = UI_JS[start:end]
 
-    assert "_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false)" in transparent_branch
+    assert "_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false,null,true)" in transparent_branch
     assert "_decorateTransparentEventRow(buildToolCard(event.toolCall)" in transparent_branch
     assert "type:'thinking'" in transparent_branch
     assert "type:'tool'" in transparent_branch
