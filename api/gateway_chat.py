@@ -707,126 +707,316 @@ def _run_gateway_runs_api_streaming(
         on_run_id(run_id)
 
     url_events = f"{base_url.rstrip('/')}/v1/runs/{run_id}/events"
-    headers_sse = dict(headers)
-    headers_sse["Accept"] = "text/event-stream"
-    req_events = urllib.request.Request(url_events, headers=headers_sse, method="GET")
     final_text = ""
     sse_event = "message"
-    with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
-        for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
-            if cancel_event.is_set():
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
-                return None, usage
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                sse_event = "message"
-                continue
-            if line.startswith("event:"):
-                sse_event = line[6:].strip() or "message"
-                continue
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
+    # Watchdog consume loop (#gateway-events-watchdog): the browser-facing turn
+    # must never outlive its gateway run. A single SSE connection is fragile —
+    # a lost terminal frame (run.completed / close race) left the old code
+    # pinned on keepalives forever. Each connection therefore carries a short
+    # byte-silence budget; when it trips (or the socket EOFs/drops, or the
+    # events endpoint refuses the reconnect) without a terminal frame, the
+    # durable run status is probed and is the ONLY success arbiter (Fix 1):
+    #
+    #   completed              -> finalize; a non-empty durable output is
+    #                             preferred over the streamed text (Fix 3)
+    #   failed                 -> raise with the status error
+    #   cancelled/interrupted  -> surface cancellation; partial streamed text
+    #                             is never settled as success
+    #   status 404 (unknown
+    #   run)                   -> terminal after a tiny grace for the status-
+    #                             before-registration race: two consecutive
+    #                             404s with only an immediate re-probe (no
+    #                             poll-interval sleep) between them fail the
+    #                             turn closed (round-2 review)
+    #   status unavailable
+    #   (5xx / transport)      -> fail closed once the reattach budget is
+    #                             exhausted (Fix 2); still-running reconnects
+    #                             the events stream with Last-Event-ID and
+    #                             skips replayed frames.
+    # Probe failures share the reattach poller's budget
+    # (GATEWAY_REATTACH_MAX_POLL_FAILURES / GATEWAY_REATTACH_POLL_INTERVAL) so a
+    # transient status blip cannot kill a run that is alive and streaming
+    # (Fix 2); Stop is honoured between attempts and the events stream keeps
+    # reconnecting between probe rounds. A durable-status 404 is exempt from
+    # that budget: it is the gateway's definitive "no record of this run"
+    # (unlike a transport error or 5xx, where the run may still be alive), so
+    # it must not spin the turn for ~5 minutes (round-2 review).
+    _WATCHDOG_SECS = 120.0
+    from api.route_approvals import settle_gateway_pending_run
+    last_event_id = -1
+    pending_seq: int | None = None
+    terminal_seen = False
+    probe_failures = 0
+    status_404_streak = 0
+
+    def _settle_by_status(status: dict):
+        """Decide the turn from the durable run status (Fix 1: the only success
+        arbiter). Returns ``(action, value)`` with action in
+        ``{"continue", "cancel", "raise", "success"}``; ``"success"`` carries
+        the usage delta and has already adopted the status output per Fix 3."""
+        state = str(status.get("status") or "").strip().lower()
+        if state not in _GATEWAY_RUN_TERMINAL_STATUSES:
+            return "continue", None
+        settle_gateway_pending_run(
+            session_id,
+            run_id,
+            reason=f"Gateway run {state} before approval resolution",
+        )
+        if state in ("cancelled", "interrupted"):
+            return "cancel", None
+        if state != "completed":
+            return "raise", RuntimeError(str(status.get("error") or f"Gateway run {state}"))
+        output = str(status.get("output") or "")
+        if output:
+            # Fix 3: prefer the non-empty durable output over whatever the
+            # stream carried, overwriting STREAM_PARTIAL_TEXT so the UI
+            # writeback matches the adopted turn text.
+            nonlocal final_text
+            final_text = output
+            if stream_id in STREAM_PARTIAL_TEXT:
+                STREAM_PARTIAL_TEXT[stream_id] = output
+        return "success", {k: v for k, v in _gateway_stream_usage(status).items() if v}
+
+    while True:
+        if cancel_event.is_set():
+            put_gateway_event("cancel", {"message": "Cancelled by user"})
+            return None, usage
+        headers_sse = dict(headers)
+        headers_sse["Accept"] = "text/event-stream"
+        if last_event_id >= 0:
+            headers_sse["Last-Event-ID"] = str(last_event_id)
+        req_events = urllib.request.Request(url_events, headers=headers_sse, method="GET")
+        resp = None
+        events_unreachable = False
+        try:
+            resp = urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs())
+        except urllib.error.HTTPError as exc:
+            # Fix 1: the events stream is gone (404 after a restart) or the
+            # endpoint refuses; the durable run status — not any already-
+            # streamed text — decides the outcome. Fall through to the probe.
+            logger.warning(
+                "Gateway events stream for run %s connect failed (HTTP %s); probing durable run status",
+                run_id, exc.code)
+            events_unreachable = True
+        except (urllib.error.URLError, OSError):
+            events_unreachable = True  # connect failure: fall through to the status probe below
+        # Keepalives are liveness, not progress: a stream that emits nothing but
+        # comment frames past _WATCHDOG_SECS is treated as stalled even though
+        # the socket read never blocks past its timeout (this exact case pinned
+        # the old single-connection loop forever).
+        last_progress = time.monotonic()
+        if resp is not None:
             try:
-                payload = json.loads(data)
-            except json.JSONDecodeError:
+                with resp:
+                    for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
+                        if cancel_event.is_set():
+                            put_gateway_event("cancel", {"message": "Cancelled by user"})
+                            return None, usage
+                        if time.monotonic() - last_progress > _WATCHDOG_SECS:
+                            logger.warning(
+                                "Gateway events stream for run %s stalled "
+                                "(no real events past %ss); probing run status",
+                                run_id, _WATCHDOG_SECS)
+                            break
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if line.startswith(":"):
+                            continue  # comment/keepalive: liveness only, not progress
+                        if line.startswith("id:"):
+                            try:
+                                pending_seq = int(line[3:].strip())
+                            except ValueError:
+                                pending_seq = None
+                            continue
+                        if not line:
+                            sse_event = "message"
+                            continue
+                        if line.startswith("event:"):
+                            sse_event = line[6:].strip() or "message"
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        # A real (non-comment) frame: this is stream progress.
+                        last_progress = time.monotonic()
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            payload = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        if pending_seq is not None:
+                            if pending_seq <= last_event_id:
+                                # Replayed frame already processed on an earlier
+                                # connection; do not double-deliver or re-append.
+                                sse_event = "message"
+                                continue
+                            last_event_id = pending_seq
+                            pending_seq = None
+                        payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
+                        if payload_event == "approval.request":
+                            _relay_gateway_run_approval(
+                                session_id, run_id, payload, base_url, api_key,
+                                put_gateway_event=put_gateway_event,
+                            )
+                            sse_event = "message"
+                            continue
+                        if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
+                            translated = _gateway_tool_progress_event(payload)
+                            if translated:
+                                event_name, event_payload = translated
+                                if event_name == "reasoning":
+                                    reason_delta = event_payload.get("text")
+                                    if reason_delta and stream_id in STREAM_REASONING_TEXT:
+                                        STREAM_REASONING_TEXT[stream_id] += reason_delta
+                                elif stream_id in STREAM_LIVE_TOOL_CALLS:
+                                    if event_name == "tool":
+                                        STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                                            "name": event_payload.get("name"),
+                                            "args": event_payload.get("args") or {},
+                                            "done": False,
+                                            **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
+                                        })
+                                    elif event_name == "tool_complete":
+                                        for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                            if shared_tc.get("done"):
+                                                continue
+                                            if (
+                                                event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
+                                            ) or shared_tc.get("name") == event_payload.get("name"):
+                                                shared_tc["done"] = True
+                                                shared_tc["is_error"] = bool(event_payload.get("is_error"))
+                                                break
+                                put_gateway_event(event_name, event_payload)
+                                if event_name != "reasoning":
+                                    update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
+                            sse_event = "message"
+                            continue
+                        if payload_event == "message.delta":
+                            delta = str(payload.get("delta") or "")
+                            if delta:
+                                final_text += delta
+                                if stream_id in STREAM_PARTIAL_TEXT:
+                                    STREAM_PARTIAL_TEXT[stream_id] += delta
+                                put_gateway_event("token", {"text": delta})
+                            sse_event = "message"
+                            continue
+                        if payload_event == "run.completed":
+                            from api.route_approvals import settle_gateway_pending_run
+                            settle_gateway_pending_run(
+                                session_id,
+                                run_id,
+                                reason="Gateway run completed before approval resolution",
+                            )
+                            if payload.get("error"):
+                                raise RuntimeError(str(payload["error"]))
+                            output = str(payload.get("output") or "")
+                            if output:
+                                # Fix 3: prefer the non-empty durable output
+                                # over the streamed text (overwrite, not
+                                # fill-if-empty) so the turn keeps the full
+                                # answer even when the stream was truncated.
+                                final_text = output
+                                if stream_id in STREAM_PARTIAL_TEXT:
+                                    STREAM_PARTIAL_TEXT[stream_id] = output
+                            usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                            terminal_seen = True
+                            sse_event = "message"
+                            continue
+                        if payload_event == "run.failed":
+                            from api.route_approvals import settle_gateway_pending_run
+                            settle_gateway_pending_run(
+                                session_id,
+                                run_id,
+                                reason="Gateway run failed before approval resolution",
+                            )
+                            raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
+                        if payload_event == "run.cancelled":
+                            from api.route_approvals import settle_gateway_pending_run
+                            settle_gateway_pending_run(
+                                session_id,
+                                run_id,
+                                reason="Gateway run was cancelled before approval resolution",
+                            )
+                            put_gateway_event("cancel", {"message": "Cancelled by gateway"})
+                            return None, usage
+                        reasoning_delta = _gateway_sse_reasoning_delta(payload)
+                        if reasoning_delta:
+                            if stream_id in STREAM_REASONING_TEXT:
+                                STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+                            put_gateway_event("reasoning", {"text": reasoning_delta})
+                        delta = _gateway_sse_delta(payload)
+                        if delta:
+                            final_text += delta
+                            if stream_id in STREAM_PARTIAL_TEXT:
+                                STREAM_PARTIAL_TEXT[stream_id] += delta
+                            put_gateway_event("token", {"text": delta})
+                        usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+            except (urllib.error.URLError, OSError):
+                # read timeout / reset mid-stream: fall through to the status
+                # probe, and pace the reconnect below it
+                events_unreachable = True
+        if terminal_seen:
+            break
+        # ---- durable status probe: the only success arbiter (Fix 1) ----
+        try:
+            status = _get_gateway_run_status(base_url, api_key, run_id)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                # Credentials cannot self-heal; fail now (mirrors the reattach poller).
+                raise RuntimeError(
+                    f"Gateway rejected the WebUI credentials (HTTP {exc.code}) while polling run {run_id}"
+                ) from exc
+            if exc.code == 404:
+                # Terminal, not retryable (round-2 review): a durable-status
+                # 404 is the gateway's definitive "I have no record of this
+                # run", so it must not spend the long reattach budget that
+                # exists for transport errors and 5xx (where the run may
+                # still be alive). Only a small grace guards the status-
+                # before-registration race: the first 404 is re-probed
+                # immediately — no poll-interval sleep — and a second
+                # consecutive 404 fails the turn closed. Any non-404 probe
+                # outcome resets the streak; Stop is honoured at the loop top.
+                status_404_streak += 1
+                if status_404_streak >= _STATUS_404_GRACE_PROBES:
+                    raise RuntimeError(
+                        "Gateway no longer has the run; failing the turn rather "
+                        "than settling partial streamed output") from exc
                 continue
-            payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
-            if payload_event == "approval.request":
-                _relay_gateway_run_approval(
-                    session_id, run_id, payload, base_url, api_key,
-                    put_gateway_event=put_gateway_event,
-                )
-                sse_event = "message"
-                continue
-            if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
-                translated = _gateway_tool_progress_event(payload)
-                if translated:
-                    event_name, event_payload = translated
-                    if event_name == "reasoning":
-                        reason_delta = event_payload.get("text")
-                        if reason_delta and stream_id in STREAM_REASONING_TEXT:
-                            STREAM_REASONING_TEXT[stream_id] += reason_delta
-                    elif stream_id in STREAM_LIVE_TOOL_CALLS:
-                        if event_name == "tool":
-                            STREAM_LIVE_TOOL_CALLS[stream_id].append({
-                                "name": event_payload.get("name"),
-                                "args": event_payload.get("args") or {},
-                                "done": False,
-                                **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
-                            })
-                        elif event_name == "tool_complete":
-                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                                if shared_tc.get("done"):
-                                    continue
-                                if (
-                                    event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
-                                ) or shared_tc.get("name") == event_payload.get("name"):
-                                    shared_tc["done"] = True
-                                    shared_tc["is_error"] = bool(event_payload.get("is_error"))
-                                    break
-                    put_gateway_event(event_name, event_payload)
-                    if event_name != "reasoning":
-                        update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
-                sse_event = "message"
-                continue
-            if payload_event == "message.delta":
-                delta = str(payload.get("delta") or "")
-                if delta:
-                    final_text += delta
-                    if stream_id in STREAM_PARTIAL_TEXT:
-                        STREAM_PARTIAL_TEXT[stream_id] += delta
-                    put_gateway_event("token", {"text": delta})
-                sse_event = "message"
-                continue
-            if payload_event == "run.completed":
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    run_id,
-                    reason="Gateway run completed before approval resolution",
-                )
-                if payload.get("error"):
-                    raise RuntimeError(str(payload["error"]))
-                output = str(payload.get("output") or "")
-                if output and not final_text:
-                    final_text = output
-                    if stream_id in STREAM_PARTIAL_TEXT:
-                        STREAM_PARTIAL_TEXT[stream_id] = output
-                usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
-                sse_event = "message"
-                continue
-            if payload_event == "run.failed":
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    run_id,
-                    reason="Gateway run failed before approval resolution",
-                )
-                raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
-            if payload_event == "run.cancelled":
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    run_id,
-                    reason="Gateway run was cancelled before approval resolution",
-                )
-                put_gateway_event("cancel", {"message": "Cancelled by gateway"})
-                return None, usage
-            reasoning_delta = _gateway_sse_reasoning_delta(payload)
-            if reasoning_delta:
-                if stream_id in STREAM_REASONING_TEXT:
-                    STREAM_REASONING_TEXT[stream_id] += reasoning_delta
-                put_gateway_event("reasoning", {"text": reasoning_delta})
-            delta = _gateway_sse_delta(payload)
-            if delta:
-                final_text += delta
-                if stream_id in STREAM_PARTIAL_TEXT:
-                    STREAM_PARTIAL_TEXT[stream_id] += delta
-                put_gateway_event("token", {"text": delta})
-            usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+            probe_failures += 1
+            status_404_streak = 0
+            if probe_failures >= GATEWAY_REATTACH_MAX_POLL_FAILURES:
+                raise RuntimeError(
+                    "Gateway became unreachable while waiting for the run to finish") from exc
+            # Fix 2: a probe failure is not proof the run is gone. Wait out the
+            # poll interval (Stop is honoured between attempts) and reconnect
+            # the events stream from the top of the loop.
+            cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
+            continue
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            probe_failures += 1
+            status_404_streak = 0
+            if probe_failures >= GATEWAY_REATTACH_MAX_POLL_FAILURES:
+                raise RuntimeError(
+                    "Gateway became unreachable while waiting for the run to finish") from exc
+            cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
+            continue
+        probe_failures = 0
+        status_404_streak = 0
+        action, value = _settle_by_status(status)
+        if action == "continue":
+            # Still running: reconnect and resume from the last seen event id,
+            # pacing the reconnect when the events channel just failed so a
+            # broken endpoint cannot hot-loop the probe.
+            if events_unreachable:
+                cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
+            continue
+        if action == "cancel":
+            put_gateway_event("cancel", {"message": "Cancelled by gateway"})
+            return None, usage
+        if action == "raise":
+            raise value
+        usage.update(value)
+        break
     return final_text, usage
 
 
@@ -864,6 +1054,11 @@ _GATEWAY_RUN_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", 
 GATEWAY_REATTACH_POLL_INTERVAL = 2.0
 # Consecutive unreachable polls tolerated before the reattached turn is failed (~5 min at 2s).
 GATEWAY_REATTACH_MAX_POLL_FAILURES = 150
+# Consecutive durable-status 404s tolerated inside the streaming watchdog
+# before the turn fails closed: a 404 is terminal (round-2 review); the extra
+# probe only covers a status-before-registration race, and the re-probe runs
+# immediately with no poll-interval sleep.
+_STATUS_404_GRACE_PROBES = 2
 _REATTACH_SCAN_HEAD_BYTES = 16 * 1024
 
 

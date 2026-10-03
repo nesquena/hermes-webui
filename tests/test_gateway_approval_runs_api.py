@@ -703,9 +703,33 @@ def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
         def __exit__(self, *args):
             return None
 
+    class _ReattachedSseResponse:
+        # reconnect after [DONE]: the already-consumed event window replays empty
+        def __iter__(self):
+            return iter([])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    events_connects = 0
+
     def fake_urlopen(req, *, timeout=None):
+        nonlocal events_connects
         if req.full_url.endswith("/v1/runs"):
             return _JsonResponse()
+        # durable-status probe from the watchdog (run ended via [DONE] without a terminal frame):
+        # no durable record for this run, so the second consecutive 404 fails
+        # the turn closed while the approval mirror stays pending. A terminal
+        # status answer would settle the run and retire the mirror before the
+        # assertions below can read it.
+        if req.full_url.endswith("/v1/runs/run-empty-ingress"):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+        if req.full_url.endswith("/events"):
+            events_connects += 1
+            return _SseResponse() if events_connects == 1 else _ReattachedSseResponse()
         return _SseResponse()
 
     handler = MagicMock()
@@ -713,12 +737,13 @@ def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
     try:
         with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
              patch("api.config.gateway_supports_approval_identity_v1", return_value=True):
-            _run_gateway_runs_api_streaming(
-                session_id=sid, msg_text="hi", model="test-model", workspace="/tmp",
-                stream_id=stream_id, base_url="http://gw:8642", api_key="secret",
-                prefill_messages=[], body_extras={}, put_gateway_event=lambda event, data: events.append((event, data)),
-                cancel_event=threading.Event(),
-            )
+            with pytest.raises(RuntimeError, match="no longer has the run"):
+                _run_gateway_runs_api_streaming(
+                    session_id=sid, msg_text="hi", model="test-model", workspace="/tmp",
+                    stream_id=stream_id, base_url="http://gw:8642", api_key="secret",
+                    prefill_messages=[], body_extras={}, put_gateway_event=lambda event, data: events.append((event, data)),
+                    cancel_event=threading.Event(),
+                )
             mirror = approvals.gateway_pending_mirror(sid, run_id="run-empty-ingress")
             browser_id = mirror["approval_id"]
             with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id=stream_id)), \
@@ -782,9 +807,33 @@ def test_live_authoritative_ingress_id_relays_exactly_under_capability_v1():
         def __exit__(self, *args):
             return None
 
+    class _ReattachedSseResponse:
+        # reconnect after [DONE]: the already-consumed event window replays empty
+        def __iter__(self):
+            return iter([])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    events_connects = 0
+
     def fake_urlopen(req, *, timeout=None):
+        nonlocal events_connects
         if req.full_url.endswith("/v1/runs"):
             return _JsonResponse()
+        # durable-status probe from the watchdog (run ended via [DONE] without a terminal frame):
+        # no durable record for this run, so the second consecutive 404 fails
+        # the turn closed while the approval mirror stays pending. A terminal
+        # status answer would settle the run and retire the mirror before the
+        # assertions below can read it.
+        if req.full_url.endswith("/v1/runs/run-authoritative-ingress"):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+        if req.full_url.endswith("/events"):
+            events_connects += 1
+            return _SseResponse() if events_connects == 1 else _ReattachedSseResponse()
         return _SseResponse()
 
     handler = MagicMock()
@@ -792,12 +841,13 @@ def test_live_authoritative_ingress_id_relays_exactly_under_capability_v1():
     try:
         with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
              patch("api.config.gateway_supports_approval_identity_v1", return_value=True):
-            _run_gateway_runs_api_streaming(
-                session_id=sid, msg_text="hi", model="test-model", workspace="/tmp",
-                stream_id=stream_id, base_url="http://gw:8642", api_key="secret",
-                prefill_messages=[], body_extras={}, put_gateway_event=lambda event, data: events.append((event, data)),
-                cancel_event=threading.Event(),
-            )
+            with pytest.raises(RuntimeError, match="no longer has the run"):
+                _run_gateway_runs_api_streaming(
+                    session_id=sid, msg_text="hi", model="test-model", workspace="/tmp",
+                    stream_id=stream_id, base_url="http://gw:8642", api_key="secret",
+                    prefill_messages=[], body_extras={}, put_gateway_event=lambda event, data: events.append((event, data)),
+                    cancel_event=threading.Event(),
+                )
             mirror = approvals.gateway_pending_mirror(
                 sid, approval_id="agent-approval-1", run_id="run-authoritative-ingress"
             )
@@ -862,16 +912,43 @@ def test_gateway_runs_api_streaming_same_run_fifo_emits_head_and_promotes_succes
         def __exit__(self, *args):
             return None
 
+    class _ReattachedSseResponse:
+        # reconnect after [DONE]: the already-consumed event window replays empty
+        def __iter__(self):
+            return iter([])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    events_connects = 0
+
     def fake_urlopen(req, *, timeout=None):
-        return _JsonResponse() if req.full_url.endswith("/v1/runs") else _SseResponse()
+        nonlocal events_connects
+        if req.full_url.endswith("/v1/runs"):
+            return _JsonResponse()
+        # durable-status probe from the watchdog (run ended via [DONE] without a terminal frame):
+        # no durable record for this run, so the second consecutive 404 fails
+        # the turn closed while the approval mirrors stay pending. A terminal
+        # status answer would settle the run and retire the mirrors before the
+        # assertions below can read them.
+        if req.full_url.endswith("/v1/runs/run-fifo"):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+        if req.full_url.endswith("/events"):
+            events_connects += 1
+            return _SseResponse() if events_connects == 1 else _ReattachedSseResponse()
+        return _SseResponse()
 
     try:
         with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            _run_gateway_runs_api_streaming(
-                sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
-                put_gateway_event=lambda event, data: events.append((event, data)),
-                cancel_event=threading.Event(),
-            )
+            with pytest.raises(RuntimeError, match="no longer has the run"):
+                _run_gateway_runs_api_streaming(
+                    sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
+                    put_gateway_event=lambda event, data: events.append((event, data)),
+                    cancel_event=threading.Event(),
+                )
 
         approval_events = [data for event, data in events if event == "approval"]
         assert [(data["approval_id"], data["pending_count"]) for data in approval_events] == [
@@ -936,8 +1013,32 @@ def test_empty_id_runs_approval_reaches_real_response_lifecycle():
             def __exit__(self, *args):
                 return None
 
+        class _ReattachedSseResponse:
+            # reconnect after [DONE]: the already-consumed event window replays empty
+            def __iter__(self):
+                return iter([])
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return None
+
+        events_connects = 0
+
         def fake_urlopen(req, *, timeout=None):
-            return _JsonResponse() if req.full_url.endswith("/v1/runs") else _SseResponse()
+            nonlocal events_connects
+            if req.full_url.endswith("/v1/runs"):
+                return _JsonResponse()
+            # durable-status probe from the watchdog (run ended via [DONE] without a terminal frame):
+            # no durable record for this run, so the second consecutive 404
+            # fails the turn closed while the approval mirror stays pending. A
+            # terminal status answer would settle the run and retire the
+            # mirror before the assertions below can read it.
+            if req.full_url.endswith(f"/v1/runs/run-real-{choice}"):
+                raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+            if req.full_url.endswith("/events"):
+                events_connects += 1
+                return _SseResponse() if events_connects == 1 else _ReattachedSseResponse()
+            return _SseResponse()
 
         handler = MagicMock()
         handler.wfile = io.BytesIO()
@@ -946,11 +1047,12 @@ def test_empty_id_runs_approval_reaches_real_response_lifecycle():
              patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
              patch("api.gateway_chat._gateway_api_key", return_value=""), \
              patch("api.runner_client.HttpRunnerClient._request_json", return_value={"ok": True}):
-            _run_gateway_runs_api_streaming(
-                sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
-                put_gateway_event=lambda event, data, _events=events: _events.append((event, data)),
-                cancel_event=threading.Event(),
-            )
+            with pytest.raises(RuntimeError, match="no longer has the run"):
+                _run_gateway_runs_api_streaming(
+                    sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
+                    put_gateway_event=lambda event, data, _events=events: _events.append((event, data)),
+                    cancel_event=threading.Event(),
+                )
             approval_id = events[0][1]["approval_id"]
             assert approval_id
             mirror = approvals.gateway_pending_mirror(sid, approval_id=approval_id)
