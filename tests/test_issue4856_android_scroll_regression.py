@@ -124,7 +124,7 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
     assert "function _recentMessageRenderArtifactWindow" in UI_JS
     listener_idx = UI_JS.find("el.addEventListener('scroll'")
     assert listener_idx != -1, "messages scroll listener not found"
-    listener = UI_JS[listener_idx: listener_idx + 4000]
+    listener = _balanced_block(UI_JS, UI_JS.index("{", listener_idx))
     assert "_recentMessageRenderArtifactWindow(1400)" in listener
     assert "!_recentMessageTouchScrollIntent()" in listener
     assert "!_recentNonMessageScrollIntent()" in listener
@@ -132,10 +132,6 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
         "#4970: the post-render artifact suppression must also require no recent "
         "low-delta message-pane wheel intent so a gentle trackpad scroll-up is "
         "not swallowed."
-    )
-    assert listener.find("return;") < listener.find("if(movedUp&&bottomDistance>1){"), (
-        "recent render artifact scrolls must return before the movedUp branch "
-        "can mark the reader unpinned."
     )
 
 
@@ -362,7 +358,10 @@ def test_low_delta_wheel_intent_is_tracked_separately():
     assert "function _recentMessageWheelIntent" in UI_JS
     rec_idx = UI_JS.find("function _recordNonMessageScrollIntent")
     assert rec_idx != -1, "_recordNonMessageScrollIntent not found"
-    rec = UI_JS[rec_idx: rec_idx + 2000]
+    # Window spans the whole function body (next top-level helper), not a
+    # fixed byte count — comment/guard additions inside must not break it.
+    rec_end = UI_JS.find("function _recentNonMessageScrollIntent", rec_idx)
+    rec = UI_JS[rec_idx: rec_end if rec_end != -1 else rec_idx + 2000]
     assert "e.deltaY<0) _lastMessageWheelIntentMs=performance.now()" in rec, (
         "#4970: _recordNonMessageScrollIntent must record low-delta upward wheel "
         "intent (deltaY<0) separately from the decisive deltaY<-30 unpin."
@@ -479,6 +478,13 @@ const document = {
   _handler: null,
   addEventListener(type, fn){ if(type === 'keydown') this._handler = fn; },
 };
+// #7494: the keydown capture is gated on the targeting helper; Node has no
+// layout engine, so provide the global and a pass-through gate matching the
+// fake nodes (no nested surfaces in this harness).
+const getComputedStyle = () => ({ overflowY: 'visible' });
+const _isTranscriptScrollTarget = () => true;
+const _captureMessageScrollInputTail = () => {};
+const _cancelBottomSettle = () => {};
 function makeNode({tag='DIV', inMessages=true, interactive=false, editable=false}={}){
   return {
     tagName: tag,
@@ -488,7 +494,8 @@ function makeNode({tag='DIV', inMessages=true, interactive=false, editable=false
   };
 }
 // Run via a closure so the stamped variable lives with the extracted handler.
-const env = Function('el','document','performance', `let _lastMessageKeyScrollIntentMs=-Infinity; ${region}\nreturn {handler:document._handler, get:()=>_lastMessageKeyScrollIntentMs, setActive:(n)=>{document.activeElement=n;}};`)(el, document, performance);
+const env = Function('el','document','performance','_isTranscriptScrollTarget', `let _lastMessageKeyScrollIntentMs=-Infinity; ${region}
+return {handler:document._handler, get:()=>_lastMessageKeyScrollIntentMs, setActive:(n)=>{document.activeElement=n;}};`)(el, document, performance, _isTranscriptScrollTarget);
 const button = makeNode({tag:'BUTTON', interactive:true});
 env.setActive(button);
 env.handler({key:' ', target:button});

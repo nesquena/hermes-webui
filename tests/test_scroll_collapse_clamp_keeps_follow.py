@@ -231,8 +231,7 @@ def test_upward_unpin_branch_requires_leaving_the_bottom():
     # Source pin: the upward branch must not fire on a pure clamp. Keeps a future
     # refactor from dropping the bottom-distance check while the behavioural tests
     # above still exercise the real callback body.
-    listener_start = UI_JS.index("el.addEventListener('scroll'")
-    listener = UI_JS[listener_start : listener_start + 4000]
+    listener = _scroll_listener_raf_body()
     assert "if(movedUp&&bottomDistance>1){" in listener, (
         "The movedUp branch must require the reader to have left the true bottom "
         "(bottomDistance>1) before it unpins; an above-tail collapse clamp fires "
