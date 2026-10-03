@@ -1033,6 +1033,109 @@ async function loadCronGatewayNotice() {
   }
 }
 
+// #2316: Scripts subtab -- list and read-only view of the profile's
+// ~/.hermes/scripts/ directory. Read-only is the first slice.
+//
+// #7685 finding 3: the pane is PROFILE-OWNED. Every reply is published only
+// if the request was issued for the profile and generation that are still
+// current (the same discipline switchProfile() applies to the conversation
+// list and workspace tree), and an accepted profile switch clears the rows
+// immediately so a newer profile never shows an earlier profile's scripts.
+let _scriptsOwnerProfile='';
+let _scriptsRequestSeq=0;
+let _scriptsLastDir=null;
+// Set by switchProfile() when the Scripts pane was the visible subtab, so the
+// accepted switch can refresh it for the new owner instead of leaving it empty.
+let _scriptsSwitchNeedsRefresh=false;
+
+function _scriptsOwnerKey(){
+  // The server resolves the list against the active profile, so the client's
+  // notion of "who is active" is what ownership means here.
+  return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+}
+
+function clearScriptsList(){
+  // Used by the profile-switch path: drop the previous owner's rows without
+  // issuing a fetch that would race the switch.
+  const box=$('scriptsList');
+  if(box) box.innerHTML='';
+  _scriptsOwnerProfile='';
+  _scriptsLastDir=null;
+}
+
+async function loadScriptsList(animate){
+  const box=$('scriptsList');
+  if(!box) return;
+  const owner=_scriptsOwnerKey();
+  const seq=++_scriptsRequestSeq;
+  _scriptsOwnerProfile=owner;
+  if(animate&&box) box.style.opacity='0.5';
+  let data;
+  try{
+    data=await api('/api/scripts/list');
+  }catch(_e){
+    // Late reply for a superseded owner/generation: discard silently.
+    if(owner!==_scriptsOwnerProfile||seq!==_scriptsRequestSeq) return;
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_load_failed')||'Could not load scripts.')}</div>`;
+    if(animate) box.style.opacity='';
+    return;
+  }
+  // Stale-owner guard: a profile switch (or a newer request) superseded this
+  // one while it was in flight. Publishing would overwrite the current
+  // owner's result with the previous profile's scripts (or an error).
+  if(owner!==_scriptsOwnerProfile||seq!==_scriptsRequestSeq) return;
+  if(animate) box.style.opacity='';
+  if(!data.exists){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_no_directory')||'No scripts directory yet.')}</div>`;
+    _scriptsLastDir=null;
+    return;
+  }
+  if(!data.scripts.length){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_empty')||'No scripts in this profile yet.')}</div>`;
+    _scriptsLastDir=data.directory||null;
+    return;
+  }
+  _scriptsLastDir=data.directory||null;
+  box.innerHTML=data.scripts.map(s=>_renderScriptItem(s)).join('');
+}
+
+function _renderScriptItem(s){
+  const name=esc(s.name||'');
+  const desc=s.description?`<div class="scripts-item-desc">${esc(s.description)}</div>`:'';
+  const size=s.size!=null?`<span class="scripts-item-size">${_formatScriptSize(s.size)}</span>`:'';
+  return `<div class="scripts-item" data-script-name="${name}">
+    <div class="scripts-item-head">
+      <span class="scripts-item-name">${name}</span>
+      ${size}
+    </div>
+    ${desc}
+  </div>`;
+}
+
+function _formatScriptSize(bytes){
+  if(bytes==null) return '';
+  if(bytes<1024) return `${bytes} B`;
+  if(bytes<1024*1024) return `${Math.round(bytes/1024)} KB`;
+  return `${(bytes/1024/1024).toFixed(1)} MB`;
+}
+
+let _currentTasksSubtab='jobs';
+function switchTasksSubtab(name){
+  if(name!=='jobs'&&name!=='scripts') return;
+  _currentTasksSubtab=name;
+  const jobsBtn=$('tasksTabJobs');
+  const scriptsBtn=$('tasksTabScripts');
+  if(jobsBtn) jobsBtn.classList.toggle('active',name==='jobs');
+  if(scriptsBtn) scriptsBtn.classList.toggle('active',name==='scripts');
+  if(jobsBtn) jobsBtn.setAttribute('aria-selected',String(name==='jobs'));
+  if(scriptsBtn) scriptsBtn.setAttribute('aria-selected',String(name==='scripts'));
+  const cronList=$('cronList');
+  const scriptsList=$('scriptsList');
+  if(cronList) cronList.hidden=(name!=='jobs');
+  if(scriptsList) scriptsList.hidden=(name!=='scripts');
+  if(name==='scripts') loadScriptsList(true);
+}
+
 async function loadCrons(animate) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
@@ -7119,6 +7222,15 @@ async function switchToProfile(name) {
   // context change where dismissing those transient affordances is correct.
   if (typeof _renamingSid !== 'undefined' && _renamingSid) _renamingSid = null;
   if (typeof closeSessionActionMenu === 'function') closeSessionActionMenu();
+  // #7685 finding 3: drop the previous profile's Scripts rows now. Without
+  // this the next profile kept showing the earlier profile's scripts until
+  // the user clicked the subtab, and a late reply from the old owner could
+  // then overwrite the new one's list. Requests already in flight are
+  // invalidated, and the active pane is refreshed once the switch resolves.
+  if (typeof clearScriptsList === 'function') {
+    _scriptsSwitchNeedsRefresh = _currentTasksSubtab === 'scripts';
+    clearScriptsList();
+  }
   // Determine whether the current session must be replaced instead of being
   // retagged in place. A session with messages/active runtime belongs to the
   // current profile. After the profile-switch POST returns, we also treat an
@@ -7169,6 +7281,14 @@ async function switchToProfile(name) {
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
+    }
+    // #7685 finding 3: the switch is accepted, so the Scripts pane's owner is
+    // now this profile. If it was the visible subtab, refresh it for the new
+    // owner (its rows were cleared at switch start). The load itself is
+    // guarded, so a still-in-flight reply from the old owner is discarded.
+    if (_scriptsSwitchNeedsRefresh) {
+      _scriptsSwitchNeedsRefresh = false;
+      if (typeof loadScriptsList === 'function') loadScriptsList(true);
     }
     // #7509: the slash-skill caches hold the previous profile's disabled-filtered
     // /api/skills payload, so drop them once the switch has actually succeeded —
