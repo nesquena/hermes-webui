@@ -138,6 +138,29 @@ def _parse_channel_cursor_watermark(cursor: str | None) -> int | None:
         return None
 
 
+class _SessionChannelFrame(tuple):
+    """An ``(event, data)`` subscriber payload that also knows its wire cursor.
+
+    Consumers keep unpacking/comparing it as a plain two-tuple. ``cursor`` is
+    the SSE ``id:`` the route writes for this frame: a per-frame replay cursor
+    in the same ``session-channel:<token>@<seq>`` grammar as the synthetic
+    subscribe cursor, NOT the payload ``event_id``. The dual-name completion
+    emit (``bg_task_complete`` + legacy ``process_complete`` alias) repeats one
+    ``event_id`` across two retained frames, so an ``event_id`` cannot address
+    a unique replay position; the monotonic ``seq`` can. Frames without a
+    replayable ``event_id`` carry an empty cursor and are written without an
+    ``id:`` line. The payload itself is untouched, so the browser's
+    ``(session_id, event_id)`` dedupe is unaffected.
+    """
+
+    cursor: str
+
+    def __new__(cls, event: str, data: Any, cursor: str = ""):
+        frame = tuple.__new__(cls, (event, data))
+        frame.cursor = cursor
+        return frame
+
+
 class SessionChannel:
     """A long-lived multi-subscriber SSE channel for one WebUI session.
 
@@ -175,6 +198,8 @@ class SessionChannel:
         # Monotonic counter over replayable events. A subscribe cursor encodes the
         # value observed at connect time; reconnect replays only events past it.
         self._event_seq: int = 0
+        # Opaque prefix for the per-frame wire cursors this channel mints.
+        self._cursor_token = uuid.uuid4().hex
         now = time.time()
         self.created_at = now
         self.last_event_at = now
@@ -208,7 +233,6 @@ class SessionChannel:
         q: queue.Queue = queue.Queue(maxsize=maxsize)
         with self._lock:
             matched_cursor = False
-            matched_real_id = False
             replay_count = 0
             # A closed channel (#7302) never replays: the late subscriber only
             # gets the close sentinel below, which must always fit its queue,
@@ -216,48 +240,37 @@ class SessionChannel:
             if after_event_id and not self._closed:
                 history = list(self._history)
                 oldest_seq = history[0][3] if history else None
-                # 1. Real event cursor — the client's Last-Event-ID is a genuine
-                #    event's id. Match it and replay everything after it.
-                match_index = next(
-                    (
-                        index
-                        for index in range(len(history) - 1, -1, -1)
-                        if history[index][2] == after_event_id
-                    ),
-                    None,
-                )
+                # Every cursor a client can hold — the `initial` frame's
+                # synthetic cursor or a delivered frame's own cursor — carries
+                # an ``@<seq>`` watermark. Replay the retained frames recorded
+                # strictly after it, but only when the watermark is provably
+                # contiguous with retained history; a watermark older than the
+                # oldest retained event means an intervening event was evicted,
+                # so fail closed (fresh marker, replay nothing). A payload
+                # ``event_id`` is deliberately NOT a cursor: the dual-name
+                # completion emit records it on two frames, so matching it is
+                # ambiguous (it would land on the newest alias and skip every
+                # completion between the original and that alias).
+                watermark = _parse_channel_cursor_watermark(after_event_id)
                 pending: list[tuple[str, dict, str, int]] = []
-                if match_index is not None:
+                if watermark is not None and (
+                    oldest_seq is None or watermark >= oldest_seq - 1
+                ):
                     matched_cursor = True
-                    matched_real_id = True
                     pending = [
-                        item for item in history[match_index + 1:] if item[0]
+                        item
+                        for item in history
+                        if item[3] > watermark and item[0]
                     ]
-                else:
-                    # 2. Synthetic subscribe cursor — carries an ``@<seq>``
-                    #    watermark instead of occupying a replay slot. Only
-                    #    replay when the watermark is provably contiguous with
-                    #    retained history; a watermark older than the oldest
-                    #    retained event means an intervening event was evicted,
-                    #    so fail closed (fresh marker, replay nothing).
-                    watermark = _parse_channel_cursor_watermark(after_event_id)
-                    if watermark is not None and (
-                        oldest_seq is None or watermark >= oldest_seq - 1
-                    ):
-                        matched_cursor = True
-                        pending = [
-                            item
-                            for item in history
-                            if item[3] > watermark and item[0]
-                        ]
                 if matched_cursor and pending and len(pending) <= maxsize:
-                    for event, data, _event_id, _seq in pending:
-                        q.put_nowait((event, dict(data)))
+                    for event, data, _event_id, seq in pending:
+                        q.put_nowait(
+                            _SessionChannelFrame(
+                                event, dict(data), self._frame_cursor(seq)
+                            )
+                        )
                     replay_count = len(pending)
-            if matched_real_id:
-                # Continue from the exact real event id the client last saw.
-                initial_event_id = str(after_event_id)
-            elif matched_cursor and replay_count > 0:
+            if matched_cursor and replay_count > 0:
                 # A synthetic reconnect WITH queued replay: keep advertising the
                 # client's INCOMING watermark cursor, not the post-replay one.
                 # The replay events are delivered AFTER this `initial` frame; if
@@ -301,6 +314,10 @@ class SessionChannel:
             except Exception:
                 logger.debug("Failed to send close sentinel to late subscriber")
         return q
+
+    def _frame_cursor(self, seq: int) -> str:
+        """Wire ``id:`` for the retained frame stamped with ``seq``."""
+        return f"session-channel:{self._cursor_token}@{seq}"
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
@@ -364,9 +381,12 @@ class SessionChannel:
                 if isinstance(data, dict)
                 else ""
             )
+            cursor = ""
             if event_id:
                 self._event_seq += 1
                 self._history.append((event, dict(data), event_id, self._event_seq))
+                cursor = self._frame_cursor(self._event_seq)
+            frame = _SessionChannelFrame(event, data, cursor)
             self.last_event_at = time.time()
             # Deliver to live subscribers INSIDE the lock so history ordering and
             # subscriber-queue ordering are one atomic serialized operation.
@@ -376,7 +396,7 @@ class SessionChannel:
             # bookkeeping current for the reaper (see the docstring above).
             for q in list(self._subscribers):
                 try:
-                    q.put_nowait((event, data))
+                    q.put_nowait(frame)
                     delivered += 1
                     # Drained — any previous stall run is over. A live tab lands
                     # here on every event, which is exactly why the stall window

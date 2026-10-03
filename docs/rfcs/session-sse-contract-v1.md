@@ -119,10 +119,17 @@ refresh/snapshot work every five minutes.
 
 `GET /api/session/stream` also uses the native `Last-Event-ID` request header to
 bridge the reconnect gap. `SessionChannel` retains at most 32 copied events that
-carry stable payload `event_id` values. Every first `initial` frame establishes a
-synthetic cursor; a known cursor replays only the later retained FIFO prefix. A
-fresh, unknown, or evicted cursor replays no old completion toast and falls back
-to the existing active-turn and persisted-message-count recovery. The channel's
+carry stable payload `event_id` values, each stamped with a channel-monotonic
+sequence number. The SSE `id:` line of every retained frame is that frame's own
+replay cursor (`session-channel:<token>@<seq>`), **not** the payload `event_id`:
+the dual-name completion emit (`bg_task_complete` plus the legacy
+`process_complete` alias) repeats one `event_id` across two frames, so an
+`event_id` cannot name a unique replay position. The payload `event_id` is kept
+for the browser's `(session_id, event_id)` dedupe. Every first `initial` frame
+establishes a synthetic cursor in the same grammar; a known cursor replays only
+the retained frames recorded after its sequence number, in order. A fresh,
+unknown, or evicted cursor replays no old completion toast and falls back to the
+existing active-turn and persisted-message-count recovery. The channel's
 subscriber-drop grace is preserved for the full reconnect interval even when the
 channel itself is older than its idle TTL.
 

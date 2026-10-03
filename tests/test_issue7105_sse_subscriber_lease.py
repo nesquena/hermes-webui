@@ -244,8 +244,18 @@ def test_session_channel_replays_event_emitted_between_lease_generations(monkeyp
         )
     )
 
-    assert second.wfile.body.count(b"id: evt-2") == 1
+    # The payload keeps its event_id (browser dedupe) …
     assert second.wfile.body.count(b'"event_id": "evt-2"') == 1
+    # … but the wire ``id:`` is the frame's own replay cursor, never the
+    # payload event_id (which the dual-name emit can repeat across frames).
+    second_ids = [
+        line.split(b": ", 1)[1].decode("utf-8")
+        for line in second.wfile.body.splitlines()
+        if line.startswith(b"id: ")
+    ]
+    assert second_ids[0] == initial_cursor  # replay queued: incoming cursor echoed
+    assert second_ids[1:] == [channel._frame_cursor(1)]
+    assert b"id: evt-2" not in second.wfile.body
     with background_process.SESSION_CHANNELS_LOCK:
         background_process.SESSION_CHANNELS.pop(sid, None)
 
@@ -670,3 +680,137 @@ def test_emit_serializes_history_order_with_subscriber_delivery():
     delivered_retained = [e for e in delivered_order if e in retained]
     # history is capped; compare the tail of delivered against history order
     assert delivered_retained[-len(history_order):] == history_order
+
+
+def _sse_id_lines(body: bytes) -> list[str]:
+    return [
+        line.split(b": ", 1)[1].decode("utf-8")
+        for line in bytes(body).splitlines()
+        if line.startswith(b"id: ")
+    ]
+
+
+def test_dual_name_completion_alias_does_not_hide_later_completion_on_reconnect(monkeypatch):
+    """A, B, B-alias, A-alias: a tab that saw A must still get B on reconnect.
+
+    ``_emit_bg_task_complete_events_now`` emits every completion twice with the
+    SAME payload ``event_id`` (canonical ``bg_task_complete`` plus the legacy
+    ``process_complete`` alias), and the coalescer can interleave two
+    completions as ``A, B, B-alias, A-alias``. If the SSE ``id:`` line is the
+    payload ``event_id``, the browser's ``Last-Event-ID: A`` is ambiguous: it
+    also names ``A-alias`` (the newest retained frame), so matching it replays
+    nothing and B is lost in exactly the lease-reconnect gap this PR bridges.
+    The wire ``id:`` must therefore be a per-frame replay cursor, derived here
+    the way native EventSource derives it: the last ``id:`` line received.
+    """
+    monkeypatch.setattr(routes, "_SSE_SUBSCRIBER_LEASE_SECONDS", 0.25, raising=False)
+    monkeypatch.setattr(routes, "_SSE_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda handler: None)
+    sid = "s-alias"
+    channel = background_process.SessionChannel(sid)
+    with background_process.SESSION_CHANNELS_LOCK:
+        background_process.SESSION_CHANNELS[sid] = channel
+    monkeypatch.setattr(background_process, "active_stream_id_for_session", lambda _sid: None)
+    monkeypatch.setattr(background_process, "persisted_message_count_for_session", lambda _sid: None)
+
+    try:
+        first = _FakeHandler()
+        first_done = threading.Event()
+
+        def first_worker() -> None:
+            try:
+                routes._handle_session_sse_stream(
+                    first,
+                    urlparse(f"http://example.test/api/session/stream?session_id={sid}"),
+                )
+            finally:
+                first_done.set()
+
+        threading.Thread(target=first_worker, daemon=True).start()
+        assert first.wfile.first_write.wait(0.5), "no initial frame"
+        # Completion A reaches the live generation before its lease expires.
+        assert channel.emit(
+            "bg_task_complete", {"event_id": "A", "session_id": sid}
+        ) == 1
+        assert first_done.wait(1.0), "generation one outlived its lease"
+        assert b'"event_id": "A"' in first.wfile.body
+        # Native EventSource remembers the LAST ``id:`` it received.
+        browser_last_event_id = _sse_id_lines(first.wfile.body)[-1]
+
+        # Reconnect gap: B lands, then the coalescer flushes B's alias and A's
+        # alias (same payload event_id as their originals).
+        assert channel.emit("bg_task_complete", {"event_id": "B", "session_id": sid}) == 0
+        assert channel.emit("process_complete", {"event_id": "B", "session_id": sid}) == 0
+        assert channel.emit("process_complete", {"event_id": "A", "session_id": sid}) == 0
+
+        second = _FakeHandler()
+        second.headers["Last-Event-ID"] = browser_last_event_id
+        _run_bounded(
+            lambda: routes._handle_session_sse_stream(
+                second,
+                urlparse(f"http://example.test/api/session/stream?session_id={sid}"),
+            )
+        )
+
+        body = bytes(second.wfile.body)
+        assert b'"event_id": "B"' in body, body  # B must NOT be lost
+        assert b"event: bg_task_complete\n" in body
+        # Replay keeps history order: B's canonical frame precedes A's alias.
+        assert body.index(b'"event_id": "B"') < body.index(b'"event_id": "A"')
+    finally:
+        with background_process.SESSION_CHANNELS_LOCK:
+            background_process.SESSION_CHANNELS.pop(sid, None)
+
+
+def test_channel_frames_carry_per_frame_replay_cursor():
+    """Every retained frame owns an ordered wire cursor distinct from event_id.
+
+    Two frames may legitimately share a payload ``event_id`` (the dual-name
+    completion emit). Each delivered frame must therefore expose its own
+    monotonic replay cursor, in the same ``session-channel:…@<seq>`` grammar
+    as the synthetic subscribe cursor, so a reconnect with that cursor replays
+    exactly the frames recorded after it. The payload stays untouched so the
+    browser's ``(session_id, event_id)`` dedupe keeps working.
+    """
+    sid = "s-frame-cursor"
+    channel = background_process.SessionChannel(sid)
+    sub = channel.subscribe(maxsize=64)
+    channel.emit("bg_task_complete", {"event_id": "A", "session_id": sid})
+    frame_a = sub.get_nowait()
+    channel.unsubscribe(sub)
+
+    # Still a plain (event, data) pair for every existing consumer…
+    assert frame_a == ("bg_task_complete", {"event_id": "A", "session_id": sid})
+    # …that also knows its own wire cursor.
+    cursor_a = frame_a.cursor
+    assert cursor_a != "A"
+    assert background_process._parse_channel_cursor_watermark(cursor_a) == 1
+
+    channel.emit("bg_task_complete", {"event_id": "B", "session_id": sid})
+    channel.emit("process_complete", {"event_id": "B", "session_id": sid})
+    channel.emit("process_complete", {"event_id": "A", "session_id": sid})
+
+    reconnect = channel.subscribe(maxsize=64, after_event_id=cursor_a)
+    try:
+        assert reconnect._session_channel_replay_count == 3
+        replayed = [reconnect.get_nowait() for _ in range(3)]
+        assert [(e, d["event_id"]) for e, d in replayed] == [
+            ("bg_task_complete", "B"),
+            ("process_complete", "B"),
+            ("process_complete", "A"),
+        ]
+        seqs = [
+            background_process._parse_channel_cursor_watermark(f.cursor)
+            for f in replayed
+        ]
+        assert seqs == [2, 3, 4]
+        assert reconnect.empty()
+        # Resuming from the LAST replayed frame's cursor has nothing left.
+        channel.unsubscribe(reconnect)
+        resumed = channel.subscribe(maxsize=64, after_event_id=replayed[-1].cursor)
+        assert resumed.empty()
+        assert resumed._session_channel_replay_count == 0
+        channel.unsubscribe(resumed)
+    except BaseException:
+        channel.unsubscribe(reconnect)
+        raise

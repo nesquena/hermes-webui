@@ -26742,13 +26742,15 @@ def _handle_session_sse_stream(handler, parsed):
                 handler.close_connection = True
                 return False
             event_name, data = payload
-            event_id = (
-                str(data.get("event_id") or "").strip()
-                if isinstance(data, dict)
-                else ""
-            )
-            if event_id:
-                _sse_with_id(handler, event_name, data, event_id)
+            # The wire ``id:`` is the channel's per-frame replay cursor
+            # (``SessionChannel`` stamps it on each delivered frame), NOT the
+            # payload ``event_id``: the dual-name completion emit repeats one
+            # ``event_id`` across two frames, so ``Last-Event-ID: <event_id>``
+            # cannot name a unique replay position. The payload keeps its
+            # ``event_id`` for the browser's ``(session_id, event_id)`` dedupe.
+            wire_id = str(getattr(payload, "cursor", "") or "").strip()
+            if wire_id:
+                _sse_with_id(handler, event_name, data, wire_id)
             else:
                 _sse(handler, event_name, data)
             # Delivered: that write completed, so this subscriber is alive right
