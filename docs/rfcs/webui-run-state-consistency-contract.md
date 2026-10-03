@@ -269,6 +269,8 @@ and 5; it does not mark every run-state boundary implemented.
    moments ago is never mistaken for an orphan.
 10. **Sidecar writes are generation-fenced.** A writer may replace a session JSON
    sidecar only while the exact durable revision it observed is still current.
+   A modern cache hit must compare that exact generation-plus-digest revision;
+   equal generation and row count alone are not freshness authority.
    Text publication must use canonical LF bytes so the stored digest matches the
    file on native Windows. First creation must use an atomic create-only primitive:
    hard-link on POSIX, create-only rename on Windows, or fail closed when neither
@@ -292,7 +294,9 @@ and 5; it does not mark every run-state boundary implemented.
    archive preservation does not depend on hard-link support; the stricter
    create-only primitive remains mandatory for live sidecars. Backup retirement
    requires matching receipts for both the backup and the committed live
-   generation. Any deletion path must decide and act while holding the same SID
+   generation, unlinks before parent-directory fsync, and reports a post-unlink
+   fsync failure as retryable/indeterminate rather than complete. Any deletion
+   path must decide and act while holding the same SID
    authority, revalidate its payload and exact revision at the deletion point,
    publish a durable tombstone before unlinking, and remove the primary sidecar,
    backup, backup archives, and session-owned replay-v10 recovery artifacts
@@ -300,6 +304,11 @@ and 5; it does not mark every run-state boundary implemented.
    both cancellation and normal completion, with the agent lock acquired before
    the SID authority. Its response-level cleanup may remain best-effort, but a
    protocol failure must be logged and must not fall back to a raw unlink.
+   Tombstone bounds must not evict an ID while an authoritative WebUI/fork State
+   DB row remains, or while the row's absence cannot be proved. A foreign-session
+   chat claim must hold canonical agent-lock then SID-authority order across
+   discovery, targeted authoritative reread, delete-tombstone recheck, and first
+   create-only publication.
 
 ## Client-side unread persistence (sidebar layer)
 

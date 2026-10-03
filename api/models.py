@@ -785,13 +785,37 @@ def _retire_backup_if_owned(
         live_path = backup_path.with_suffix("")
         if _read_sidecar_revision(live_path, session_id) != live_receipt:
             return False
-        if _read_sidecar_revision(backup_path, session_id) != backup_receipt:
+        current_backup_receipt = _read_sidecar_revision(backup_path, session_id)
+        if current_backup_receipt != backup_receipt:
+            # A previous authorized attempt can have completed its unlinks but
+            # failed the parent-directory fsync. Retrying that receipt must be
+            # able to establish durability instead of remaining permanently
+            # indeterminate merely because the primary backup is now absent.
+            if not (
+                backup_receipt.state == "PRESENT"
+                and current_backup_receipt.state == "ABSENT"
+            ):
+                return False
+        try:
+            if current_backup_receipt == backup_receipt:
+                backup_path.unlink(missing_ok=True)
+            # Retry archive retirement too: an earlier attempt can have removed
+            # the primary and then failed midway through the archive unlinks.
+            for archive_path in backup_path.parent.glob(
+                f"{backup_path.name}.archive-*"
+            ):
+                archive_path.unlink(missing_ok=True)
+            # unlink(2) completion is not directory-durable. A failure here is
+            # deliberately reported as indeterminate (False), so the caller can
+            # retry this exact receipt and fsync the already-absent state.
+            _fsync_sidecar_directory(backup_path.parent)
+        except OSError:
+            logger.warning(
+                "Backup retirement durability is indeterminate for session %s",
+                session_id,
+                exc_info=True,
+            )
             return False
-        backup_path.unlink(missing_ok=True)
-        for archive_path in backup_path.parent.glob(
-            f"{backup_path.name}.archive-*"
-        ):
-            archive_path.unlink(missing_ok=True)
         return not backup_path.exists()
 
 
@@ -1475,6 +1499,51 @@ def _load_webui_deleted_session_tombstone() -> frozenset[str]:
     )
 
 
+def _authoritative_webui_or_fork_state_db_session_ids(ids) -> set[str] | None:
+    """Return tombstoned SIDs that still have authoritative state.db rows.
+
+    ``None`` means the absence proof was unavailable. Callers must fail closed
+    in that case: dropping a tombstone while a WebUI/fork row may survive lets
+    startup recovery recreate a session the user deleted.
+    """
+    candidates = sorted({
+        str(sid).strip() for sid in (ids or ()) if str(sid or "").strip()
+    })
+    if not candidates:
+        return set()
+    try:
+        db_path = _active_state_db_path()
+        if not db_path or not Path(db_path).exists():
+            return set()
+        import sqlite3
+
+        protected: set[str] = set()
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+            conn.execute("BEGIN")
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if not {"id", "source"}.issubset(columns):
+                return None
+            # Stay below SQLite's common 999-variable limit.
+            for offset in range(0, len(candidates), 900):
+                chunk = candidates[offset:offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                for row in conn.execute(
+                    f"SELECT id FROM sessions WHERE id IN ({placeholders}) "
+                    "AND lower(trim(COALESCE(source, ''))) IN ('webui', 'fork')",
+                    chunk,
+                ).fetchall():
+                    protected.add(str(row[0]))
+        return protected
+    except Exception:
+        logger.warning(
+            "Could not prove deleted-session tombstones safe to compact",
+            exc_info=True,
+        )
+        return None
+
+
 def _save_webui_deleted_session_tombstone(
     ids,
     *,
@@ -1487,20 +1556,21 @@ def _save_webui_deleted_session_tombstone(
     if required_sid and required_sid not in sorted_ids:
         raise ValueError("required deleted-session tombstone SID is missing")
     if len(sorted_ids) > WEBUI_DELETED_SESSION_TOMBSTONE_CAP:
+        if required_sid and WEBUI_DELETED_SESSION_TOMBSTONE_CAP < 1:
+            raise RuntimeError("deleted-session tombstone cannot retain required SID")
+        protected = _authoritative_webui_or_fork_state_db_session_ids(sorted_ids)
+        if protected is None:
+            # A cap is a resource preference, never authorization to resurrect
+            # a deletion. If state.db cannot prove which rows are gone, retain
+            # every tombstone and retry compaction on a later write.
+            protected = set(sorted_ids)
         if required_sid:
-            if WEBUI_DELETED_SESSION_TOMBSTONE_CAP < 1:
-                raise RuntimeError("deleted-session tombstone cannot retain required SID")
-            other_ids = [candidate for candidate in sorted_ids if candidate != required_sid]
-            retained_other_count = WEBUI_DELETED_SESSION_TOMBSTONE_CAP - 1
-            sorted_ids = (
-                other_ids[-retained_other_count:]
-                if retained_other_count
-                else []
-            )
-            sorted_ids.append(required_sid)
-            sorted_ids.sort()
-        else:
-            sorted_ids = sorted_ids[-WEBUI_DELETED_SESSION_TOMBSTONE_CAP:]
+            protected.add(required_sid)
+        unprotected = [candidate for candidate in sorted_ids if candidate not in protected]
+        remaining = max(0, WEBUI_DELETED_SESSION_TOMBSTONE_CAP - len(protected))
+        sorted_ids = sorted(
+            protected | set(unprotected[-remaining:] if remaining else [])
+        )
     payload = {
         "version": WEBUI_DELETED_SESSION_TOMBSTONE_VERSION,
         "ids": sorted_ids,
@@ -6086,11 +6156,12 @@ def _cached_session_lags_disk(cached) -> bool:
                 if disk_generation != expected_revision.generation:
                     return True
                 if expected_revision.generation > 0:
-                    # Modern compliant writers advance the prefix generation for
-                    # metadata and transcript changes alike. Parity therefore
-                    # avoids hashing/parsing the potentially huge sidecar on every
-                    # cache hit and preserves any newer unsaved in-memory tail.
-                    return False
+                    # Generation is only a bounded rejection hint, not an exact
+                    # identity. An out-of-band equal-generation/equal-count body
+                    # rewrite must not leave stale cached content authoritative.
+                    # _read_sidecar_revision streams a digest without parsing the
+                    # potentially huge JSON body.
+                    return _read_sidecar_revision(path, sid) != expected_revision
         # Generation-zero legacy files can still be changed by older writers
         # without a revision bump. Fall through to the directional count/scene
         # checks below for compatibility.

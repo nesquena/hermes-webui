@@ -271,6 +271,8 @@ The digest is recomputed in chunks on each save, while only the bounded JSON
 metadata prefix is parsed for the generation. This avoids decoding a large
 transcript on every save but intentionally keeps a linear file scan: a cached
 prefix or file stat alone cannot detect an external same-generation body rewrite.
+Cache freshness likewise compares the exact generation-plus-digest revision
+before accepting a modern durable cache hit.
 Legacy layouts with metadata after messages fall back to a full parse.
 Out-of-band replacements increment `_sidecar_generation_v1` and invalidate cached
 aliases before later saves can proceed.
@@ -289,6 +291,12 @@ lock then SID authority, records a durable delete tombstone before unlinking,
 invalidates cached aliases, removes recoverable backups, attempts State DB
 cleanup, and fsyncs the session directory.
 
+Chat-start claims of foreign State DB sessions use the same agent-lock then SID-
+authority order. They rediscover the sidecar, reread the targeted authoritative
+row, recheck the delete tombstone, and perform first create-only publication in
+one authority interval, so an `ABSENT -> create -> delete -> ABSENT` cycle cannot
+authorize a stale claim.
+
 Deleted-WebUI-session tombstone updates are serialized by a global cross-process
 authority in a lock-path namespace that no accepted session SID can alias. It is
 acquired only after any SID authority. Manual delete, hidden-background cleanup,
@@ -299,7 +307,11 @@ Tombstone publication flushes the file and parent directory before sidecar
 deletion can start; a failure leaves that candidate uncounted. Primary, backup,
 or archive unlink failure also fails closed before State DB cleanup or cleanup
 success. A successful delete verifies those files are absent and fsyncs the
-session directory again.
+session directory again. The tombstone size cap is soft for IDs whose authoritative
+State DB WebUI/fork row still exists (and when that absence cannot be proved), so
+a failed State DB cleanup cannot later be resurrected by cap eviction. Authorized
+backup retirement fsyncs the parent after all unlinks; a post-unlink fsync failure
+is indeterminate and the same receipts can retry the directory durability step.
 
 Sidecar, primary-backup, and incomparable-backup archive publications flush the
 file before atomic publication and fsync the parent directory on POSIX. Native

@@ -2056,6 +2056,82 @@ def test_backup_retirement_requires_live_revision_to_still_match(
     assert session.path.with_suffix(".json.bak").exists()
 
 
+def test_backup_retirement_unlinks_before_parent_directory_fsync(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "retire-fsync-order"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "one"}],
+    )
+    session.save(skip_index=True)
+    backup_path = session.path.with_suffix(".json.bak")
+    backup_path.write_bytes(session.path.read_bytes())
+    archive_path = backup_path.with_name(f"{backup_path.name}.archive-test")
+    archive_path.write_bytes(b"archive")
+    backup_receipt = models._read_sidecar_revision(backup_path, sid)
+    live_receipt = models._read_sidecar_revision(session.path, sid)
+    events = []
+
+    def fsync_directory(directory):
+        assert not backup_path.exists()
+        assert not archive_path.exists()
+        events.append(("fsync", directory))
+
+    monkeypatch.setattr(models, "_fsync_sidecar_directory", fsync_directory)
+
+    assert models._retire_backup_if_owned(
+        sid, backup_path, backup_receipt, live_receipt
+    ) is True
+    assert events == [("fsync", session_dir)]
+
+
+def test_backup_retirement_post_unlink_fsync_failure_is_retryable(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "retire-fsync-retry"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "one"}],
+    )
+    session.save(skip_index=True)
+    backup_path = session.path.with_suffix(".json.bak")
+    backup_path.write_bytes(session.path.read_bytes())
+    backup_receipt = models._read_sidecar_revision(backup_path, sid)
+    live_receipt = models._read_sidecar_revision(session.path, sid)
+    attempts = []
+
+    def fail_first_fsync(directory):
+        attempts.append(directory)
+        raise OSError("directory fsync failed")
+
+    monkeypatch.setattr(models, "_fsync_sidecar_directory", fail_first_fsync)
+    assert models._retire_backup_if_owned(
+        sid, backup_path, backup_receipt, live_receipt
+    ) is False
+    assert not backup_path.exists()
+
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        lambda directory: attempts.append(directory),
+    )
+    assert models._retire_backup_if_owned(
+        sid, backup_path, backup_receipt, live_receipt
+    ) is True
+    assert attempts == [session_dir, session_dir]
+
+
 def test_same_count_external_metadata_update_reloads_cached_owner(
     tmp_path, monkeypatch
 ):
@@ -2086,7 +2162,7 @@ def test_same_count_external_metadata_update_reloads_cached_owner(
     assert loaded.messages == cached.messages
 
 
-def test_modern_cache_freshness_uses_prefix_generation_not_full_digest(
+def test_modern_cache_freshness_compares_exact_generation_and_digest(
     tmp_path, monkeypatch
 ):
     from api import models
@@ -2102,13 +2178,54 @@ def test_modern_cache_freshness_uses_prefix_generation_not_full_digest(
     cached = models.Session.load(session.session_id)
     assert cached is not None
 
+    calls = []
+    real_read = models._read_sidecar_revision
     monkeypatch.setattr(
         models,
         "_read_sidecar_revision",
-        lambda *_args, **_kwargs: pytest.fail("cache hit hashed the full sidecar"),
+        lambda *args, **kwargs: calls.append(args) or real_read(*args, **kwargs),
+    )
+    assert models._cached_session_lags_disk(cached) is False
+    assert calls == [(session.path, session.session_id)]
+
+
+def test_equal_generation_equal_count_body_rewrite_reloads_cached_owner(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "equal-generation-body-rewrite"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "before"}],
+    )
+    session.save(skip_index=True)
+    cached = models.Session.load(sid)
+    assert cached is not None
+    with models.LOCK:
+        models.SESSIONS[sid] = cached
+
+    rewritten = json.loads(session.path.read_text(encoding="utf-8"))
+    rewritten["messages"][0]["content"] = "after!"
+    # Keep both bounded freshness hints identical. Only the exact digest can
+    # distinguish this out-of-band rewrite from the cached durable revision.
+    assert rewritten["message_count"] == len(cached.messages)
+    assert rewritten["_sidecar_generation_v1"] == cached._sidecar_revisions[sid][
+        "generation"
+    ]
+    session.path.write_text(
+        json.dumps(rewritten, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+        newline="\n",
     )
 
-    assert models._cached_session_lags_disk(cached) is False
+    loaded = models.get_session(sid)
+
+    assert loaded is not cached
+    assert loaded.messages[0]["content"] == "after!"
 
 
 def test_recovery_rejects_backup_with_foreign_embedded_sid(tmp_path, monkeypatch):

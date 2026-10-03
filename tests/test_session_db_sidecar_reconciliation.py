@@ -305,6 +305,58 @@ def test_delete_at_tombstone_cap_retains_current_sid_and_blocks_state_db_recover
     assert not (tmp_path / f"{sid}.json").exists()
 
 
+def test_tombstone_overflow_retains_sid_after_first_db_cleanup_failure(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    state_db = tmp_path / "state.db"
+    sid = _make_state_db(
+        state_db,
+        sid="deleted-cleanup-failed-first",
+        source="webui",
+        messages=1,
+    )
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: state_db)
+    monkeypatch.setattr(models, "WEBUI_DELETED_SESSION_TOMBSTONE_CAP", 3)
+    cleanup_attempts = []
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda requested_sid: cleanup_attempts.append(requested_sid) or False,
+    )
+    session = models.Session(
+        session_id=sid,
+        messages=[{"role": "user", "content": "must stay deleted"}],
+    )
+    session.save(skip_index=True)
+
+    # The route commits the sidecar deletion/tombstone before its best-effort
+    # state.db cleanup. Reproduce that ordering and the first cleanup failure.
+    with models._session_sidecar_authority(sid):
+        assert models._delete_session_sidecar_artifacts_locked(sid) is True
+    assert models.delete_cli_session(sid) is False
+    assert cleanup_attempts == [sid]
+
+    # Overflow the nominal cap after the failed cleanup. The old SID is not the
+    # required/current entry on these writes, so only the authoritative state.db
+    # row can protect it from garbage collection.
+    for extra_sid in ("z-overflow-1", "z-overflow-2", "z-overflow-3"):
+        models._record_webui_deleted_session_tombstone(extra_sid)
+
+    retained = models._load_webui_deleted_session_tombstone()
+    assert sid in retained
+    assert len(retained) == models.WEBUI_DELETED_SESSION_TOMBSTONE_CAP
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, state_db)
+
+    assert result["materialized"] == 0
+    assert not (tmp_path / f"{sid}.json").exists()
+
+
 
 def test_recover_missing_sidecars_from_state_db_skips_deleted_webui_tombstone(tmp_path, monkeypatch):
     import api.models as _m

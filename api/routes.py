@@ -9009,6 +9009,62 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
     return build_session(sid, cli_meta, msgs, read_only_flag=False), "materialized"
 
 
+def _claim_and_publish_cli_session_for_chat_start(sid: str):
+    """Claim a missing foreign session without an ABSENT ABA publication gap.
+
+    Canonical order is agent lock -> SID sidecar authority -> global delete
+    tombstone authority (taken by the checks below). Discovery is repeated after
+    both per-SID locks are held, then the targeted state.db synthesis and final
+    tombstone check happen in the same authority interval as create-only publish.
+    """
+    from api import models as _models
+
+    with _get_session_agent_lock(sid):
+        with _models._session_sidecar_authority(sid):
+            # The optimistic get_session() in the handler can have observed
+            # ABSENT before waiting. Rediscover under authority so a competing
+            # create is adopted rather than overwritten or misclassified.
+            existing = Session.load(sid)
+            if existing is not None:
+                with LOCK:
+                    SESSIONS[sid] = existing
+                    SESSIONS.move_to_end(sid)
+                return existing, "existing"
+
+            # This is a fresh, targeted authoritative reread for this SID; do
+            # not reuse the earlier discovery result or a synthesized object
+            # created before the authority interval.
+            synth, reason = _claim_or_synthesize_cli_session(sid)
+            if synth is None or reason != "materialized":
+                return synth, reason
+
+            # Recheck the durable delete fence after the state.db reread and
+            # immediately before first publication. A create->delete sequence
+            # cannot pass this point as the original absence.
+            state_db_source = _state_db_session_source(sid)
+            if (
+                (
+                    _session_index_marks_was_webui(sid)
+                    or (
+                        _session_deleted_tombstone_marks_was_webui(sid)
+                        and state_db_source in ("", "webui", "fork")
+                    )
+                )
+                and state_db_source != "subagent"
+            ):
+                return None, "was_webui"
+
+            # save() would reacquire the non-reentrant SID authority. Invoke its
+            # owned-generation core while the authority remains held; the
+            # ABSENT revision causes atomic create-only publication.
+            synth._save_owned_generation()
+            with LOCK:
+                SESSIONS[sid] = synth
+                SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()
+            return synth, "materialized"
+
+
 def _request_wants_all_profiles_import(body) -> bool:
     if not isinstance(body, dict):
         return False
@@ -26121,7 +26177,22 @@ def _handle_chat_start(handler, body, diag=None):
             # TUI/Desktop session loads read-only via GET /api/session but
             # 404s on the first POST /api/chat/start, making the typed
             # message disappear into the empty state.
-            synth, reason = _claim_or_synthesize_cli_session(body["session_id"])
+            try:
+                synth, reason = _claim_and_publish_cli_session_for_chat_start(
+                    body["session_id"]
+                )
+            except Exception as _save_err:
+                # Discovery/publication failed: surface a generic 500 to the
+                # client and retain the full exception server-side.
+                logger.exception(
+                    "failed to persist materialised sidecar for foreign session %s",
+                    body["session_id"],
+                )
+                return bad(
+                    handler,
+                    f"failed to claim session: {_sanitize_error(_save_err)}",
+                    500,
+                )
             if synth is None:
                 # 'was_webui' (deleted WebUI session, client should self-heal
                 # via the existing 404 path), 'no_foreign_state' (sid has
@@ -26146,34 +26217,7 @@ def _handle_chat_start(handler, body, diag=None):
                     "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
                     403,
                 )
-            try:
-                synth.save()
-            except Exception as _save_err:
-                # Persisting the sidecar failed: surface a generic 500 to
-                # the client (paths sanitised, see _sanitize_error) and log
-                # the full exception server-side. Returning the raw str(exc)
-                # would leak /root/.hermes/webui/sessions/<sid>.json or any
-                # other absolute filesystem path the OSError happened to
-                # carry — #4911 review feedback.
-                logger.exception(
-                    "failed to persist materialised sidecar for foreign session %s",
-                    body["session_id"],
-                )
-                return bad(
-                    handler,
-                    f"failed to claim session: {_sanitize_error(_save_err)}",
-                    500,
-                )
             s = synth
-            try:
-                with LOCK:
-                    SESSIONS[s.session_id] = s
-                    SESSIONS.move_to_end(s.session_id)
-            except Exception:
-                # If the in-memory LRU refuses the new session, fall through
-                # with the just-persisted sidecar; _start_run will load it
-                # from disk if needed.
-                pass
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         diag.stage("validate_profile") if diag else None
