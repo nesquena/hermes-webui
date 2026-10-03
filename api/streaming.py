@@ -15783,6 +15783,32 @@ def cancel_stream(stream_id: str) -> bool:
                         "Failed to recover pending user message on cancel for %s",
                         _cancel_session_id,
                     )
+                # Gateway runs: mirror the interrupted turn (recovered user
+                # row + the streamed partial snapshot taken under streams_lock
+                # above) into the model-facing context BEFORE the stream id is
+                # cleared below. This runs while _stream_writeback_is_current
+                # still passes, so a normal user Stop reconciles the same
+                # snapshot a gateway-side cancel would, and the next turn's
+                # client-built conversation_history includes everything the
+                # gateway persisted at the moment of interruption.
+                try:
+                    _cancel_backend = ""
+                    if isinstance(active_run_entry, dict):
+                        _cancel_backend = str(active_run_entry.get("backend") or "")
+                    if _cancel_backend == "gateway" or (
+                        (getattr(_cs, "gateway_run", None) or {}).get("stream_id") == stream_id
+                    ):
+                        from api.gateway_chat import _reconcile_gateway_cancelled_context
+
+                        _reconcile_gateway_cancelled_context(
+                            _cs, stream_id, partial_text=_cancel_partial_text,
+                        )
+                except Exception:
+                    logger.debug(
+                        "Failed gateway cancel-context reconcile for %s",
+                        stream_id,
+                        exc_info=True,
+                    )
                 _cs.active_stream_id = None
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []

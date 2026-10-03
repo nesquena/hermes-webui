@@ -1124,8 +1124,179 @@ def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
         if not _stream_writeback_is_current(session, stream_id):
             return
         _persist_cancelled_turn(session, message="Cancelled by gateway")
+        # Mirror the interrupted turn (prompt + streamed partial) into the
+        # model-facing context while the stream id is still current, so the
+        # next turn's client-built conversation_history carries everything the
+        # gateway persisted at the moment of interruption.
+        _reconcile_gateway_cancelled_context(session, stream_id)
         session.gateway_run = None
         session.save()
+
+
+# Rows reconciled at cancel time carry the settling stream id so a replayed
+# settle of the same turn can never append the same partial twice.
+_GATEWAY_CANCEL_RECONCILED_STREAM_KEY = "_gateway_cancelled_stream"
+
+
+def _gateway_stream_partial_text(stream_id) -> str:
+    """Best-effort read of the partial assistant text streamed for a run."""
+    try:
+        return str(STREAM_PARTIAL_TEXT.get(stream_id) or "")
+    except Exception:
+        return ""
+
+
+def _reconcile_gateway_cancelled_context(session, stream_id, *, partial_text=None) -> bool:
+    """Mirror an interrupted gateway turn into the model-facing context.
+
+    Called when a gateway run settles cancelled/interrupted so WebUI's
+    context_messages includes everything the gateway persisted at the moment
+    of interruption. With that snapshot complete, the next turn's always-send
+    conversation_history is correct for every flow: fork (snapshot includes
+    the parent prefix), truncate/undo/retry (snapshot is the shortened one),
+    prefill (snapshot + prefill compose), and a normal user Stop (cancel_stream
+    invokes this while the stream id is still current). Session state is saved
+    by the caller.
+
+    Order: the interrupted turn's pending user row first, then the partial
+    assistant text the browser saw (STREAM_PARTIAL_TEXT for the stream;
+    skipped when empty). When the context is empty and the prompt was already
+    consumed by an earlier recovery, nothing is mirrored and the next turn
+    falls back to the gateway's own stored transcript, which holds the same
+    adopted rows.
+
+    Idempotent per turn/stream identity: the partial row is stamped with the
+    settling stream id and user-row mirrors are deduped by content and
+    timestamp, so double settlement appends nothing twice. A replayed settle
+    can still make the pending-user materializer re-append the prompt AFTER
+    the already-reconciled partial (its exact-checkpoint guard only inspects
+    the context tail); such trailing duplicates are collapsed here.
+
+    Returns True when the context changed.
+    """
+    from api.streaming import (
+        _build_partial_message,
+        _normalize_user_text,
+        stamp_message_source,
+    )
+
+    if session is None or not stream_id:
+        return False
+    context = getattr(session, "context_messages", None)
+    if not isinstance(context, list):
+        context = []
+        session.context_messages = context
+
+    changed = False
+
+    # (a) The interrupted turn's user prompt. cancel_stream and
+    # _persist_cancelled_turn materialize it into session.messages; mirror the
+    # same row (content + pending_started_at timestamp) into the context
+    # unless an identical row is already there.
+    pending_text = str(getattr(session, "pending_user_message", None) or "")
+    if pending_text:
+        pending_started_at = getattr(session, "pending_started_at", None)
+        recovered_ts = int(time.time())
+        if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
+            recovered_ts = int(pending_started_at)
+        normalized_pending = _normalize_user_text(pending_text)
+        already_mirrored = False
+        for row in reversed(context[-8:]):
+            if not (isinstance(row, dict) and row.get("role") == "user"):
+                continue
+            if _normalize_user_text(str(row.get("content") or "")) != normalized_pending:
+                break
+            try:
+                row_ts = int(row.get("timestamp") or 0)
+            except (TypeError, ValueError):
+                row_ts = None
+            if row_ts is None or row_ts == recovered_ts:
+                already_mirrored = True
+            break
+        if not already_mirrored:
+            user_row = {
+                "role": "user",
+                "content": pending_text,
+                "timestamp": recovered_ts,
+                "_recovered": True,
+            }
+            stamp_message_source(
+                user_row, getattr(session, "pending_user_source", None) or "webui",
+            )
+            pending_attachments = list(getattr(session, "pending_attachments", None) or [])
+            if pending_attachments:
+                user_row["attachments"] = pending_attachments
+            context.append(user_row)
+            changed = True
+
+    def _user_row_identity(row):
+        """Comparable identity for a user context row (or None)."""
+        if not isinstance(row, dict) or row.get("role") != "user":
+            return None
+        try:
+            row_ts = int(row.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            row_ts = -1
+        return (_normalize_user_text(str(row.get("content") or "")), row_ts)
+
+    # Locate a partial this stream already reconciled, and collapse any
+    # replayed user rows the materializer appended after it.
+    reconciled_idx = None
+    for idx in range(len(context) - 1, -1, -1):
+        row = context[idx]
+        if (
+            isinstance(row, dict)
+            and row.get(_GATEWAY_CANCEL_RECONCILED_STREAM_KEY) == stream_id
+        ):
+            reconciled_idx = idx
+            break
+    if reconciled_idx is not None:
+        seen_user_identities = {
+            _user_row_identity(row) for row in context[:reconciled_idx]
+        }
+        seen_user_identities.discard(None)
+        kept = []
+        dropped_replay = False
+        for row in context[reconciled_idx + 1:]:
+            identity = _user_row_identity(row)
+            if (
+                identity is not None
+                and identity in seen_user_identities
+                and isinstance(row, dict)
+                and row.get("_recovered")
+            ):
+                dropped_replay = True
+                continue
+            if identity is not None:
+                seen_user_identities.add(identity)
+            kept.append(row)
+        if dropped_replay:
+            context[reconciled_idx + 1:] = kept
+            changed = True
+
+    # (b) The partial assistant text the browser saw (what the gateway's
+    # persisted incomplete snapshot holds). Only appended while the
+    # interrupted prompt is the live context tail — never orphaned under the
+    # wrong turn (e.g. after a user edit shortened the context).
+    if reconciled_idx is None:
+        raw_partial = (
+            partial_text
+            if partial_text is not None
+            else _gateway_stream_partial_text(stream_id)
+        )
+        partial_row = _build_partial_message(raw_partial, "", []) if raw_partial else None
+        if partial_row is not None:
+            if context and isinstance(context[-1], dict) and context[-1].get("role") == "user":
+                partial_row[_GATEWAY_CANCEL_RECONCILED_STREAM_KEY] = stream_id
+                context.append(partial_row)
+                changed = True
+            else:
+                logger.debug(
+                    "Skipping gateway cancel partial mirror for stream %s: "
+                    "interrupted prompt is not the context tail",
+                    stream_id,
+                )
+    return changed
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
