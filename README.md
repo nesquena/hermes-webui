@@ -236,7 +236,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Preview text, code, Markdown (rendered), and images inline
 - Chat links using `workspace://path/to/file` open files in the right-side preview pane
 - Edit, create, delete, and rename files; create folders
-- Binary file download (auto-detected from server)
+- Binary file download (auto-detected from server). In the file tree, clicking a download glyph (PDFs and downloadable binary formats) downloads directly; clicking a PDF filename opens preview. Other file-type icons retain their usual row action. The download glyph is keyboard accessible with Enter or Space.
 - File preview auto-closes on directory navigation (with unsaved-edit guard)
 - Git detection -- branch name and dirty file count badge in workspace header
 - Right panel is drag-resizable
