@@ -4504,6 +4504,29 @@ async function _ensureAllMessagesLoaded() {
   }
 }
 
+// A detached full-history read for export and artifact discovery. Never hydrate
+// S.messages here: a response can arrive while streaming or while paging.
+function _sessionSnapshotOwner(){
+  const sid = S.session?.session_id;
+  const profile = S.activeProfile || 'default';
+  const generation = _loadSessionGeneration;
+  return {sid, profile, isCurrent:()=>!!sid && S.session?.session_id===sid
+    && (S.activeProfile||'default')===profile && _loadSessionGeneration===generation
+    && (!_loadingSessionId || _loadingSessionId===sid)};
+}
+
+async function _readFullSessionSnapshot(owner = _sessionSnapshotOwner()){
+  if(!owner.isCurrent()) return null;
+  const data = await api(`/api/session?session_id=${encodeURIComponent(owner.sid)}&profile=${encodeURIComponent(owner.profile)}&messages=1&resolve_model=0&msg_limit=all`, {timeoutMs:120000});
+  if(!owner.isCurrent()) return null;
+  const session = data?.session;
+  if(!session || session.session_id!==owner.sid || !Array.isArray(session.messages)
+      || session._messages_truncated || Number(session._messages_offset||0)>0){
+    throw new Error('Incomplete session history');
+  }
+  return {session, isCurrent:owner.isCurrent};
+}
+
 const SESSION_ARCHIVED_PAGE_SIZE = 100;
 const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 2000;
 let _allSessions = [];  // cached for search filter
@@ -6925,11 +6948,23 @@ function startGatewaySSE(){
               // If the user switches sessions while the fetch is in-flight, discard the result.
               const activeSid = S.session.session_id;
               api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(S.session))})
-                .then(res=>{
+                .then(async res=>{
                   if(!S.session || S.session.session_id !== activeSid) return;
                   if(res && res.session && Array.isArray(res.session.messages)){
                     const prev = S.messages.length;
                     const next = res.session.messages.filter(m => m && m.role);
+                    const pageOffset = Number(_oldestIdx || 0);
+                    if(pageOffset > 0){
+                      const knownCount = Math.max(Number(S.session.message_count || 0), pageOffset + prev);
+                      if(next.length <= knownCount) return;
+                      const loadGeneration = _loadSessionGeneration;
+                      _captureSameSessionForceReloadHint(activeSid);
+                      await _ensureMessagesLoaded(activeSid, {force:true, loadGeneration});
+                      if(!S.session || S.session.session_id !== activeSid || _loadSessionGeneration !== loadGeneration) return;
+                      renderMessages({preserveScroll:true});
+                      if(typeof highlightCode==='function') highlightCode();
+                      return;
+                    }
                     if (next.length < prev) return;
                     if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
                     // Carry forward ephemeral turn fields (_turnUsage/

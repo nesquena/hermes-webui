@@ -5,6 +5,7 @@
 
 const LOCALES = {
   en: {
+    session_history_failed: "Could not load complete session history. Please retry.",
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',
@@ -1842,6 +1843,7 @@ const LOCALES = {
   },
 
   it: {
+    session_history_failed: "Impossibile caricare la cronologia completa della sessione. Riprova.",
     offline_title: 'Connessione persa',
     offline_browser_detail: 'Il browser segnala che questo dispositivo è offline.',
     offline_network_detail: 'Hermes non è raggiungibile da questo browser al momento.',
@@ -3662,6 +3664,7 @@ const LOCALES = {
   },
 
   ja: {
+    session_history_failed: "セッション履歴全体を読み込めませんでした。再試行してください。",
     offline_title: '接続が切断されました',
     offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
     offline_network_detail: '現在、このブラウザからHermesに到達できません。',
@@ -5487,6 +5490,7 @@ const LOCALES = {
   },
 
   ru: {
+    session_history_failed: "Не удалось загрузить полную историю сеанса. Повторите попытку.",
     offline_title: 'Соединение потеряно',
     offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
     offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
@@ -7286,6 +7290,7 @@ const LOCALES = {
   },
 
   es: {
+    session_history_failed: "No se pudo cargar el historial completo de la sesión. Inténtalo de nuevo.",
     offline_title: 'Conexión perdida',
     offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
     offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
@@ -9052,6 +9057,7 @@ const LOCALES = {
   },
 
   de: {
+    session_history_failed: "Der vollständige Sitzungsverlauf konnte nicht geladen werden. Bitte erneut versuchen.",
     offline_title: 'Verbindung verloren',
     offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
     offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
@@ -10812,6 +10818,7 @@ const LOCALES = {
   },
 
   zh: {
+    session_history_failed: "无法加载完整的会话历史记录。请重试。",
     offline_title: '连接已断开',
     offline_browser_detail: '浏览器报告此设备当前离线。',
     offline_network_detail: '此浏览器当前无法连接到 Hermes。',
@@ -12566,6 +12573,7 @@ const LOCALES = {
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
+    session_history_failed: "無法載入完整的工作階段歷史紀錄。請重試。",
 
     offline_title: '連線中斷',
     offline_browser_detail: '瀏覽器回報此裝置目前離線。',
@@ -14389,6 +14397,7 @@ const LOCALES = {
   },
 
   pt: {
+    session_history_failed: "Não foi possível carregar o histórico completo da sessão. Tente novamente.",
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
@@ -16027,6 +16036,7 @@ const LOCALES = {
     settings_tts_voice_default_system: 'Default system voice',
   },
   ko: {
+    session_history_failed: "전체 세션 기록을 불러오지 못했습니다. 다시 시도해 주세요.",
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
     offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
@@ -17837,6 +17847,7 @@ const LOCALES = {
   },
 
   fr: {
+    session_history_failed: "Impossible de charger l’historique complet de la conversation. Veuillez réessayer.",
     offline_title: 'Connexion perdue',
     offline_browser_detail: 'Votre navigateur signale que cet appareil est hors ligne.',
     offline_network_detail: 'Hermes est actuellement inaccessible depuis ce navigateur.',
@@ -19630,6 +19641,7 @@ const LOCALES = {
   },
 
   cs: {
+    session_history_failed: "Úplnou historii relace se nepodařilo načíst. Zkuste to znovu.",
     _label: 'Čeština',
     sessions_source_webui: 'Relace WebUI ({0})',
     sessions_source_cli: 'Relace CLI ({0})',
@@ -21409,6 +21421,7 @@ const LOCALES = {
     settings_tts_voice_default_system: 'Default system voice',
   },
   tr: {
+    session_history_failed: "Oturum geçmişinin tamamı yüklenemedi. Lütfen yeniden deneyin.",
 
 
 
@@ -23224,6 +23237,7 @@ const LOCALES = {
     settings_tts_voice_default_system: 'Default system voice',
   },
   pl: {
+    session_history_failed: "Nie udało się wczytać pełnej historii sesji. Spróbuj ponownie.",
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
     offline_network_detail: 'Hermes jest obecnie nieosiągalny z tej przeglądarki.',
@@ -25039,6 +25053,7 @@ const LOCALES = {
     settings_tts_voice_default_system: 'Default system voice',
   },
   vi: {
+    session_history_failed: "Không thể tải toàn bộ lịch sử phiên. Vui lòng thử lại.",
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
     offline_network_detail: 'Không thể kết nối tới Hermes từ trình duyệt lúc này.',

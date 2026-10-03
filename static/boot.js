@@ -2167,11 +2167,62 @@ $('btnNewChat').onclick=async()=>{
   // queued a second full list read in front of the composer focus (#7936).
   await newSession();closeMobileSidebar();$('msg').focus();
 };
-$('btnDownload').onclick=()=>{
-  if(!S.session)return;
-  const blob=new Blob([transcript()],{type:'text/markdown'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
+function _capturePendingSessionExport(owner){
+  if(!owner.isCurrent() || !S.session || S.session.session_id!==owner.sid)return null;
+  const messages=Array.isArray(S.messages)?S.messages:[];
+  let pendingRow=null;
+  for(let i=messages.length-1;i>=0;i--){
+    const row=messages[i];
+    if(row&&row.role==='user'&&row._pending===true){pendingRow=row;break;}
+  }
+  const serverPendingText=String(S.session.pending_user_message||'').trim();
+  const pendingCandidate=serverPendingText?{role:'user',content:serverPendingText}:null;
+  if(pendingRow&&pendingCandidate&&typeof _sameTranscriptMessage==='function'
+      && !_sameTranscriptMessage(pendingRow,pendingCandidate))pendingRow=null;
+  if(!pendingRow&&pendingCandidate){
+    const activeRow=typeof _pendingActiveTurnUserMessage==='function'
+      ? _pendingActiveTurnUserMessage(messages,S.session)
+      : null;
+    const tailRow=typeof _pendingCurrentTailUserMessage==='function'
+      ? _pendingCurrentTailUserMessage(messages)
+      : null;
+    const visibleRow=activeRow||tailRow;
+    if(visibleRow&&(typeof _sameTranscriptMessage!=='function'
+        || _sameTranscriptMessage(visibleRow,pendingCandidate)))pendingRow=visibleRow;
+  }
+  const pendingText=pendingRow&&typeof pendingRow.content==='string'
+    ? pendingRow.content
+    : serverPendingText;
+  if(!pendingText)return null;
+  return {
+    ...S.session,
+    pending_user_message:pendingText,
+    pending_attachments:Array.isArray(pendingRow?.attachments)
+      ? [...pendingRow.attachments]
+      : (Array.isArray(S.session.pending_attachments)?[...S.session.pending_attachments]:[]),
+    pending_started_at:S.session.pending_started_at||(pendingRow&&(pendingRow._ts||pendingRow.timestamp))||null,
+  };
+}
+$('btnDownload').onclick=async()=>{
+  if(!S.session || $('btnDownload').disabled)return;
+  const button=$('btnDownload');
+  const owner=_sessionSnapshotOwner();
+  const pendingExportSession=_capturePendingSessionExport(owner);
+  button.disabled=true;
+  try{
+    const snapshot=await _readFullSessionSnapshot(owner);
+    if(!snapshot || !snapshot.isCurrent())return;
+    const session=snapshot.session;
+    const exportMessages=session.messages.slice();
+    if(pendingExportSession)_mergePendingSessionMessage(pendingExportSession,exportMessages);
+    const blob=new Blob([transcript(session,exportMessages)],{type:'text/markdown'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download=`hermes-${session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
+  }catch(_){
+    if(owner.isCurrent())setStatus(t('session_history_failed'));
+  }finally{
+    if(owner.isCurrent())_syncHermesPanelSessionActions();
+  }
 };
 function _buildSessionExportUrl(sessionId,params){
   const url=new URL('api/session/export',document.baseURI||location.href);
