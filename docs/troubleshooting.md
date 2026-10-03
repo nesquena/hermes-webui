@@ -412,6 +412,27 @@ python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_proces
 
 ---
 
+## Skills list shows another profile's external skills, or omits them
+
+**Symptom.** With several profiles, the Skills panel of profile A lists skills from profile B's `skills.external_dirs`, or the external roots configured for profile A do not appear at all. `/api/skills` reports `runtime_scope: "unavailable"`.
+
+**Why.** The WebUI binds external-root discovery to the request profile (`ARCHITECTURE.md` §4.11), reads that profile's `skills.external_dirs` directly, and expands variables from its runtime environment with `HERMES_HOME` fixed to the profile home. Relative paths start at that home; `~` and `$HOME` use the stable shell home. The root profile also accepts variables captured at server launch, with its `.env` taking precedence. Named profiles use only their own runtime environment, including when the server is pinned to a named profile. Variables missing from those sources withhold external roots instead of using another streaming profile's process environment. If the Agent's routed-profile decision cannot be matched to the profile WebUI resolved, external roots are also withheld. Local skills remain usable in panels, cron, and slash suggestions; incomplete lists are retried on the next lookup. An accepted profile switch clears the previous profile's skill selection and edit form immediately. Delayed list, detail, linked-file, toggle, save, and delete responses cannot repaint the new profile or reopen an old form; select a skill again in the new profile.
+
+**Diagnostic commands.**
+
+```bash
+# runtime_scope: "profile" (bound), "legacy_process" (Agent without a routed-profile
+# predicate but a bound home), "unavailable" (scope could not be confirmed; roots withheld)
+curl -s -b "hermes_profile=<profile>" http://127.0.0.1:8787/api/skills | python3 -m json.tool | grep -E '"(name|runtime_scope)"'
+python3 -c "import agent.secret_scope as s, hermes_constants as h; print(hasattr(s, 'serves_routed_profile'), hasattr(h, 'hermes_home_key'))"
+```
+
+**Fix.** `unavailable` while a turn is running is expected: refresh once the turn finishes. If it persists with no turn running, check that path variables and their profile `.env` replacement values contain no unresolved `$VAR` / `${VAR}` tokens, and that the Agent can bind the request profile's home; upgrade Hermes Agent if it predates that support. `legacy_process` means the Agent has no routed-profile predicate but the request profile's home is bound, so the lookup reads that profile. Confirm the external path is listed under `skills.external_dirs` in that profile's `config.yaml` and exists on disk. Switching profiles retires both panel and cron skill caches, including pending responses; a late response must never restore the previous profile's list.
+
+**When to file a bug.** File a WebUI bug if `runtime_scope` is `"profile"` and `/api/skills` still lists a path that belongs to another profile's `config.yaml`.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

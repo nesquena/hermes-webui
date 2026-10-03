@@ -12,8 +12,13 @@ import stat
 import tempfile
 import threading
 from pathlib import Path
+from types import MappingProxyType
 
 HOME = Path.home()
+# Imported by config before profile initialization can reload .env or streams
+# can mirror per-profile values. Keep launch authority immutable and separate
+# from the live process environment.
+STARTUP_ENV = MappingProxyType(dict(os.environ))
 
 
 def _create_atomic_temp_file(write_path: Path, *, existing: bool) -> tuple[int, str]:

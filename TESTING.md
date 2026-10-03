@@ -54,6 +54,45 @@ npm run lint:runtime
 npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
 ```
 
+## Skills profile ownership regression
+
+Run `./scripts/test.sh tests/test_skills_launch_environment.py tests/test_profile_external_skills_scope.py`
+for external-root path expansion. Fresh subprocesses exercise the production
+`/api/skills` handler with an Agent routing/scanner adapter and disposable homes.
+They cover root launch variables, renamed-root identity, profile `.env` precedence,
+named and isolated named profiles, and rejection of variables introduced after
+startup. Live environment changes before the resolver imports must not redirect
+the lookup. This is WebUI boundary proof, not real-Agent integration.
+
+Run `./scripts/test.sh tests/test_skills_runtime_scope_cache.py tests/test_skills_detail_ownership.py`.
+The detail regression uses Python Playwright's version-matched bundled Node driver
+and installed Chromium, as provided by the pytest CI job. For local setup, install
+`playwright` in the repo `.venv` and run `.venv/bin/python -m playwright install chromium`;
+`PLAYWRIGHT_BROWSERS_PATH` may select an existing matching browser installation.
+With Python Playwright present, a missing driver/browser fails the test instead of
+silently skipping because an npm dependency is absent. It composes the
+complete production panels/session modules with the real Skills list/detail/form
+DOM and deferred API fixtures; it does not start a server or access Agent state.
+It checks both accepted profile-switch paths, immediate clearing of populated edit
+state, both response orders, A→B→A, same-named skills, stale errors and writes,
+confirmation after switching, same-profile supersession, mutation reloads, and
+queued markdown/code enhancements, and destination-profile toggle/save/delete
+completion after a real A→B transition. Visible Skills switches await the real
+destination load; hidden Skills reopen through `switchPanel('skills')`. Every
+mutation is recorded with request ordinal, exact path, and captured profile;
+stale work must emit no new save/delete/toggle request after switching, including
+late confirmation and A→B→A.
+Supplemental cases compose the actual `workspace.js` API helper over a deferred
+fetch fixture to check that stale network failures do not retry and stale timeouts
+do not toast. This proves browser publication/transport ownership rather than real
+Agent behavior.
+
+This one pytest item runs all 132 schedules with a 180-second subprocess limit
+and a focused 240-second pytest timeout override. The margin lets controller
+timeouts and report assertions finish under CI's default `--timeout=60` without
+changing the limit for other tests. Verify with
+`./scripts/test.sh tests/test_skills_detail_ownership.py tests/test_skills_runtime_scope_cache.py --timeout=60`.
+
 ## Native raster redaction boundary
 
 Run `./scripts/test.sh tests/test_mpf_jpeg_redaction.py tests/test_raster_data_uri_redaction.py tests/test_security_redaction.py`.
