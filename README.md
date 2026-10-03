@@ -910,3 +910,63 @@ Configurable assistant display name, thinking/reasoning block display, and a log
 ```
 git@github.com:nesquena/hermes-webui.git
 ```
+
+
+### Origin-chat task receipts (opt-in)
+
+To receive native Kanban lifecycle updates in the requesting WebUI chat, set
+`HERMES_WEBUI_TASK_UPDATES_PROFILE` to that chat's profile and keep the existing
+`HERMES_HOME` and `HERMES_WEBUI_STATE_DIR`. Optional
+`HERMES_WEBUI_TASK_UPDATES_LANGUAGE=ar-EG` enables short Egyptian Arabic receipts;
+the default is English. Unconfigured instances retain their existing behavior.
+
+The existing background-completion drain reads native board events and routes
+only by the task's durable `session_id`. Both the profile's native session row
+and WebUI sidecar must prove ownership. Native compression continuations are
+followed within that profile. Missing origins, other profiles, CLI and messaging
+sessions fail closed. Messaging-origin delivery remains with Hermes's native
+notifier; this feature adds no Telegram subscription or transport fallback.
+
+Completion, failure, blocking and review events produce concise status receipts.
+Raw titles, summaries, reasons, filenames and diagnostic comments are not forwarded.
+Meaningful progress comes from worker-owned nonempty artifact attachments, saved
+continuation checkpoints containing changed files, or an explicit native
+`kanban_comment` whose body is JSON such as:
+
+```json
+{"user_update":{"stage":"checks_passed","count":3}}
+```
+
+Supported stages are `checks_passed`, `files_written` and `items_verified`.
+The comment author must match the task assignee. The worker must emit these only
+after observing the actual result. A checkpoint indicates work saved for
+continuation, not completed checks; an attachment indicates a submitted artifact,
+not approved work. Heartbeats, bare budget exits, arbitrary prose and repeated
+identical milestones stay silent. Receipts describe native worker events; they
+do not independently certify the worker's result or replace normal review.
+
+Receipts wait for WebUI writer admission and the native cross-process turn lease.
+The native transcript transaction dedupes by board/event identity. A persisted
+pending cursor retries interrupted delivery, while the same stable row identity
+reconciles into the WebUI sidecar. The existing `session-updated` channel and
+on-subscribe count recovery update open or reconnecting tabs without page refresh.
+No model polling, model turn, worker restart, new daemon or cron is involved.
+Activation starts at each board's current event watermark, so old tasks are not
+replayed or changed. Pending delivery is bounded; later events remain in the
+native board until capacity is available. Rollback: unset the opt-in and restart
+the existing WebUI; preserve transcripts and `kanban-chat-updates.json`.
+
+Targeted verification:
+`./scripts/test.sh tests/test_kanban_chat_updates.py`.
+For browser verification, keep the origin and a second session open, run an
+explicit disposable Kanban test task in a separate process, and check automatic
+progress/completion, reconnect recovery, one native and sidecar receipt per
+event, and no receipt in the second session.
+
+Controlled-fixture browser evidence (before the native event and after automatic
+receipt delivery in that same tab; desktop and 390px mobile):
+
+| Before receipt | After receipt |
+| --- | --- |
+| ![Desktop before](docs/ui-ux/kanban-origin-chat/before-desktop.png) | ![Desktop after](docs/ui-ux/kanban-origin-chat/after-desktop.png) |
+| ![Mobile before](docs/ui-ux/kanban-origin-chat/before-mobile.png) | ![Mobile after](docs/ui-ux/kanban-origin-chat/after-mobile.png) |

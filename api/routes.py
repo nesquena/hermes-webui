@@ -22273,6 +22273,11 @@ def _handle_session_sse_stream(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
 
+    # SessionChannel is SID-keyed; admit only the request's profile before
+    # registering a subscriber, just like the chat/detail endpoints.
+    if not _session_id_visible_to_request_profile(handler, sid):
+        return None
+
     # The (re)subscribing tab reports its last-known message_count via
     # ?known_count=N so the on-subscribe self-heal can detect a server-initiated
     # turn that started AND finished entirely inside this tab's SSE gap (see the
