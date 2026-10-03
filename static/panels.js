@@ -816,6 +816,22 @@ function _isCronScheduleError(job) {
     (job.state === 'error' || job.last_status === 'error');
 }
 
+function _cronRecentRollup(job) {
+  const recent = job && job.recent;
+  return recent && typeof recent === 'object' ? recent : null;
+}
+
+function _isCronRecentDegraded(job) {
+  const recent = _cronRecentRollup(job);
+  if (!recent) return false;
+  const total = Number(recent.total) || 0;
+  const failed = Number(recent.failed) || 0;
+  const consecutive = Number(recent.consecutive_failures) || 0;
+  if (consecutive >= 3) return true;
+  if (total >= 5 && failed / total >= 0.5) return true;
+  return false;
+}
+
 function _cronStatusMeta(job) {
   if (_isCronNeedsAttention(job)) return {
     state: 'needs_attention',
@@ -846,6 +862,12 @@ function _cronStatusMeta(job) {
     listClass: 'error',
     detailClass: 'err',
     label: t('cron_status_error'),
+  };
+  if (_isCronRecentDegraded(job)) return {
+    state: 'degraded',
+    listClass: 'attention',
+    detailClass: 'warn',
+    label: t('cron_status_degraded'),
   };
   return {
     state: 'active',
@@ -971,6 +993,7 @@ function _cronDiagnostics(job) {
     last_status: job.last_status || null,
     last_error: job.last_error || null,
     last_delivery_error: job.last_delivery_error || null,
+    recent: job.recent || null,
     repeat: job.repeat || null,
     deliver: job.deliver || null,
   };
