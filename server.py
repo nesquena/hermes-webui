@@ -108,7 +108,7 @@ activate_managed_agent()
 logger = logging.getLogger(__name__)
 
 from api.request_logging import emit_request_log
-from api.auth import check_auth_or_close, reset_trusted_auth_request_state
+from api.auth import check_auth_or_close, hsts_header_value, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
@@ -341,6 +341,8 @@ class Handler(BaseHTTPRequestHandler):
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
+        if hsts_header := hsts_header_value(self):
+            self.send_header("Strict-Transport-Security", hsts_header)
         advertise_connection_close(self)  # tell the client when the socket dies
         super().end_headers()
 
