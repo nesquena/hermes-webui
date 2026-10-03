@@ -17571,6 +17571,14 @@ def handle_post(handler, parsed) -> bool:
         if not command:
             return bad(handler, "command is required")
 
+        sid = str(body.get("session_id", "") or "")
+        if sid and not _session_id_visible_to_request_profile(handler, sid):
+            return True
+        if command.split()[0].lower() in ("/review", "review"):
+            from api.review import run_review_command
+            return j(handler, {"output": run_review_command(sid, command.partition(" ")[2],
+                                                            request_profile=_get_active_profile_name())})
+
         try:
             return j(handler, {"output": execute_agent_command(command)})
         except KeyError:
