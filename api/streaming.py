@@ -1747,6 +1747,30 @@ def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
     )
 
 
+def _should_retry_silent_failure(
+    *, last_err, assistant_added: bool, token_sent: bool, error_type: str,
+) -> bool:
+    """Return True when a turn failed *silently* and deserves one retry.
+
+    A provider can close the stream with zero content and no error at all: the
+    agent raises nothing, so nothing reaches the main retry/fallback chain, the
+    turn ends with no assistant reply, and the user is left with a dead-end
+    "no response from provider" card. That shape is a transient provider
+    failure and gets the same one-shot retry as a 401.
+
+    Never retry when an error string exists (the normal classification path
+    owns it), when the turn did add an assistant reply, when text was already
+    streamed (a retry would duplicate it), or when the classifier pinned a
+    different cause (auth / quota / cancelled).
+    """
+    return (
+        not last_err
+        and not assistant_added
+        and not token_sent
+        and error_type == 'no_response'
+    )
+
+
 def _preferred_agent_display_name() -> str:
     """Return the configured assistant display name for user-facing copy."""
     try:
@@ -13326,16 +13350,36 @@ def _run_agent_streaming(
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
                     _err_str = str(_last_err) if _last_err else ''
+                    # A silent turn (nothing produced AND nothing raised: the
+                    # provider closed the stream with zero content and no error
+                    # to classify) is a transient provider failure too. Retry it
+                    # once below, reusing the credential self-heal machinery,
+                    # instead of dropping the user's turn with a dead-end card.
+                    _is_silent_no_response = _should_retry_silent_failure(
+                        last_err=_last_err,
+                        assistant_added=_assistant_added,
+                        token_sent=_token_sent,
+                        error_type=_classification['type'],
+                    )
                     if _is_quota:
                         _err_label = _classification['label']
                         _err_type = _classification['type']
                         _err_hint = _classification['hint']
-                    elif _is_auth and not _self_healed:
-                        # ── Credential self-heal on 401 (#1401) ──
+                    elif (_is_auth or _is_silent_no_response) and not _self_healed:
+                        # ── Credential self-heal on 401 (#1401), plus a one-shot
+                        # retry on a silent no-response turn (nothing streamed,
+                        # no error to classify) ──
                         # Before emitting the error, try re-reading credentials
                         # and retrying once with a fresh agent.
                         _heal_result = None
                         _heal_stale_classification = None
+                        if _is_silent_no_response:
+                            # This retry is not a credential refresh, so if it
+                            # also comes back empty the error card must keep the
+                            # pre-retry classification ("no response from the
+                            # provider") instead of the auth wording the
+                            # heal-failure path below would otherwise apply.
+                            _heal_stale_classification = _classification
                         # Bind the session's profile so the self-heal re-resolve
                         # AND the custom-provider override below read one
                         # profile-owned snapshot (finding #3): otherwise a named
@@ -13360,7 +13404,8 @@ def _run_agent_streaming(
                                     target_model=resolved_model,
                                 )
                         if _heal_rt is not None:
-                            logger.info('[webui] self-heal: retrying stream after credential refresh')
+                            _heal_reason = 'credential refresh' if _is_auth else 'silent no-response'
+                            logger.info('[webui] self-heal: retrying stream after %s', _heal_reason)
                             # Rebuild runtime variables from the refreshed resolve
                             _rt = _heal_rt
                             resolved_api_key = _heal_rt.get('api_key')
