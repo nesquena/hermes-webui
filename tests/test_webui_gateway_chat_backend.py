@@ -1790,3 +1790,59 @@ def test_gateway_worker_skips_runs_api_when_opt_in_absent():
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+
+
+def test_gateway_chat_worker_emits_title_from_state_db(tmp_path):
+    """When state.db has a generated title, gateway streaming emits a title event and updates session."""
+    from unittest.mock import patch, MagicMock
+    from api.config import create_stream_channel, STREAMS, STREAMS_LOCK
+    stream_id = "stream-gateway-title-test"
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = channel
+
+    s = new_session()
+    s.active_stream_id = stream_id
+    s.pending_user_message = "What is the capital of France?"
+    s.title = "What is the capital of France?"
+    s.save()
+
+    sse_body = (
+        b"data: {\"choices\": [{\"delta\": {\"content\": \"Paris\"}}]}"
+        b"\n\ndata: [DONE]\n\n"
+    )
+
+    def fake_urlopen(req, *args, **kwargs):
+        resp = MagicMock()
+        resp.__iter__ = lambda self: iter(sse_body.split(b"\n"))
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+
+    try:
+        with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+             patch("api.streaming._read_state_db_title_if_available", return_value="Capital of France"):
+            gateway_chat._run_gateway_chat_streaming(
+                session_id=s.session_id,
+                msg_text="What is the capital of France?",
+                model="test",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+            )
+
+        events = []
+        while not subscriber.empty():
+            events.append(subscriber.get_nowait())
+        event_types = [e[0] for e in events]
+        assert "title" in event_types, f"expected title event, got: {event_types}"
+        title_event = next(e for e in events if e[0] == "title")
+        assert title_event[1]["title"] == "Capital of France"
+
+        updated = models.get_session(s.session_id)
+        assert updated.title == "Capital of France"
+        assert updated.llm_title_generated is True
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)

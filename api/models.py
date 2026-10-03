@@ -2189,6 +2189,7 @@ class Session:
             'gateway_routing': self.gateway_routing,
             'gateway_routing_history': self.gateway_routing_history,
             'manual_title': self.manual_title,
+            'llm_title_generated': getattr(self, 'llm_title_generated', False),
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
             **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
@@ -7036,7 +7037,10 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         if (
             state_db_title
             and state_db_title != title
-            and _sidebar_title_is_generic_webui(title)
+            and (
+                _sidebar_title_is_generic_webui(title)
+                or (not session.get('manual_title') and not session.get('llm_title_generated'))
+            )
         ):
             session['_state_db_title'] = state_db_title
             session['display_title'] = state_db_title
