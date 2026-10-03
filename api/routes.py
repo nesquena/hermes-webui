@@ -4231,6 +4231,179 @@ def _anchor_scene_message_ref_digest(payload: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _anchor_scene_json_dumps(scene) -> str:
+    return json.dumps(scene, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _anchor_scene_fits_size_cap(scene) -> bool:
+    return len(_anchor_scene_json_dumps(scene).encode("utf-8")) <= _ANCHOR_ACTIVITY_SCENE_MAX_BYTES
+
+
+# Row roles a size-capped scene drops first, least expendable last: tool and
+# thinking rows carry the Worklog's actual work record; boundary/status
+# scaffolding is what reloads least miss.
+_ANCHOR_SCENE_DROP_ROLE_ORDER = (
+    "terminal", "control", "lifecycle", "activity", "prose", "tool", "thinking",
+)
+# Field-clamp bounds for the degrade path: a single huge leaf (a giant tool
+# result, an over-long reasoning blob) shrinks to a bounded preview before
+# whole rows are dropped.
+_ANCHOR_SCENE_FIELD_CLAMP_MAX_BYTES = 32_000
+_ANCHOR_SCENE_FIELD_CLAMP_MIN_BYTES = 4_000
+_ANCHOR_SCENE_FIELD_CLAMP_SUFFIX = "\n\n[…truncated to fit the persisted Worklog scene cap…]"
+
+
+def _anchor_scene_clamp_string(value: str, budget: int) -> str:
+    raw = value.encode("utf-8")
+    if len(raw) <= budget:
+        return value
+    return raw[:budget].decode("utf-8", "ignore") + _ANCHOR_SCENE_FIELD_CLAMP_SUFFIX
+
+
+def _anchor_scene_clamp_long_strings(node, budget: int, stats) -> None:
+    """Clamp every string leaf over ``budget`` bytes in place; stats[0] counts
+    clamped fields."""
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            if isinstance(value, str):
+                if len(value.encode("utf-8")) > budget:
+                    node[key] = _anchor_scene_clamp_string(value, budget)
+                    stats[0] += 1
+            else:
+                _anchor_scene_clamp_long_strings(value, budget, stats)
+    elif isinstance(node, list):
+        for item in node:
+            _anchor_scene_clamp_long_strings(item, budget, stats)
+
+
+def _anchor_scene_dedupe_row(row) -> int:
+    """Drop a row's byte-for-byte fallback copies; returns removed field count.
+
+    A settled thinking row carries the same reasoning in ``text``,
+    ``thinking.text`` and ``payload.*`` (~4x the bytes), and a settled tool
+    row carries args/snippet in ``tool``, ``payload`` and ``text``. The
+    renderer resolves ``row.text`` before ``row.thinking.text`` and the
+    ``tool`` card before its ``payload`` mirrors, so these copies are safe to
+    drop (mirrors the live transport's projection).
+    """
+    removed = 0
+    role = str(row.get("role") or "")
+    thinking = row.get("thinking")
+    if role == "thinking" and isinstance(thinking, dict):
+        thinking_text = thinking.get("text")
+        if isinstance(thinking_text, str) and thinking_text:
+            if not row.get("text"):
+                row["text"] = thinking_text
+            if thinking_text == row.get("text"):
+                row.pop("thinking", None)
+                removed += 1
+    payload = row.get("payload")
+    if isinstance(payload, dict):
+        text = row.get("text")
+        if isinstance(text, str) and text:
+            for key in list(payload.keys()):
+                if payload.get(key) == text:
+                    payload.pop(key, None)
+                    removed += 1
+    if role == "tool" and isinstance(row.get("tool"), dict):
+        tool = row["tool"]
+        if tool.get("preview") == tool.get("snippet"):
+            tool.pop("preview", None)
+            removed += 1
+        if tool.get("tid") == tool.get("id"):
+            tool.pop("tid", None)
+            removed += 1
+        if isinstance(payload, dict):
+            for pkey, tkey in (
+                ("id", "id"), ("tid", "id"), ("name", "name"), ("args", "args"),
+                ("command", "command"), ("preview", "preview"), ("snippet", "snippet"),
+                ("result", "result"), ("output", "output"), ("is_error", "is_error"),
+                ("duration", "duration"), ("started_at", "started_at"),
+            ):
+                if pkey in payload and payload.get(pkey) == tool.get(tkey):
+                    payload.pop(pkey, None)
+                    removed += 1
+        if "text" in row:
+            row.pop("text", None)
+            removed += 1
+    return removed
+
+
+def _degrade_anchor_activity_scene(scene):
+    """Shrink an over-cap scene instead of rejecting it (#7969).
+
+    A persisted scene that crosses the byte cap used to be rejected whole —
+    the settled Worklog silently vanished on reload. Degrade in order of
+    least loss until the scene fits (or can't shrink further, in which case
+    the caller still rejects):
+
+    1. drop ``side_effects``/``artifacts`` — outcome metadata also carried by
+       the outcome records, while ``activity_rows`` is the Worklog itself;
+    2. de-duplicate each row's byte-for-byte fallback copies;
+    3. clamp oversized leaf strings to a bounded preview;
+    4. drop rows by render expendability (status scaffolding first, worklog
+       tool/thinking rows last, oldest first within a role).
+
+    Returns the degraded scene with ``scene['truncated']`` recording what was
+    removed.
+    """
+    truncated = {}
+    for key in ("side_effects", "artifacts"):
+        if scene.get(key):
+            scene[key] = []
+            truncated.setdefault("dropped_outcomes", []).append(key)
+    if _anchor_scene_fits_size_cap(scene):
+        if truncated:
+            scene["truncated"] = truncated
+        return scene
+
+    deduped = 0
+    for row in scene.get("activity_rows") or []:
+        if isinstance(row, dict):
+            deduped += _anchor_scene_dedupe_row(row)
+    if deduped:
+        truncated["deduped_fields"] = deduped
+    if _anchor_scene_fits_size_cap(scene):
+        scene["truncated"] = truncated
+        return scene
+
+    clamped = [0]
+    budget = _ANCHOR_SCENE_FIELD_CLAMP_MAX_BYTES
+    while not _anchor_scene_fits_size_cap(scene) and budget >= _ANCHOR_SCENE_FIELD_CLAMP_MIN_BYTES:
+        _anchor_scene_clamp_long_strings(scene, budget, clamped)
+        budget //= 2
+    if clamped[0]:
+        truncated["clamped_fields"] = clamped[0]
+    if _anchor_scene_fits_size_cap(scene):
+        scene["truncated"] = truncated
+        return scene
+
+    rows = scene.get("activity_rows")
+    if isinstance(rows, list):
+        role_rank = {role: rank for rank, role in enumerate(_ANCHOR_SCENE_DROP_ROLE_ORDER)}
+        ranked = sorted(
+            range(len(rows)),
+            key=lambda i: (
+                role_rank.get(str((rows[i] or {}).get("role") or "activity"), 99)
+                if isinstance(rows[i], dict)
+                else 99,
+                i,
+            ),
+        )
+        dropped = 0
+        for i in ranked:
+            if _anchor_scene_fits_size_cap(scene):
+                break
+            rows[i] = None
+            dropped += 1
+        if dropped:
+            scene["activity_rows"] = [row for row in rows if row is not None]
+            truncated["dropped_rows"] = dropped
+    if truncated:
+        scene["truncated"] = truncated
+    return scene
+
+
 def _sanitize_anchor_activity_scene(scene):
     if not isinstance(scene, dict):
         raise ValueError("scene must be an object")
@@ -4242,10 +4415,11 @@ def _sanitize_anchor_activity_scene(scene):
     if len(rows) > _ANCHOR_ACTIVITY_SCENE_MAX_ROWS:
         raise ValueError("scene.activity_rows is too large")
     scene_copy = copy.deepcopy(scene)
-    encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
-    if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+    if not _anchor_scene_fits_size_cap(scene_copy):
+        scene_copy = _degrade_anchor_activity_scene(scene_copy)
+    if not _anchor_scene_fits_size_cap(scene_copy):
         raise ValueError("scene payload is too large")
-    return json.loads(encoded.decode("utf-8"))
+    return json.loads(_anchor_scene_json_dumps(scene_copy).encode("utf-8"))
 
 
 def _anchor_scene_int_or_none(value):
@@ -5673,7 +5847,10 @@ def _handle_session_anchor_scene(handler, body):
             records = dict(ordered[-256:])
         s.anchor_activity_scenes = records
         s.save(touch_updated_at=False, skip_index=True)
-    return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
+    payload = {"ok": True, "message_index": idx, "message_ref": ref}
+    if scene.get("truncated"):
+        payload["truncated"] = scene["truncated"]
+    return j(handler, payload)
 
 
 def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
