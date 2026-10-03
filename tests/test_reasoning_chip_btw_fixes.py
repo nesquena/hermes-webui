@@ -149,10 +149,10 @@ class TestReasoningChipNoneState:
         )
 
     def test_none_and_default_have_visible_labels(self):
-        assert "if(effort==='none') return 'None';" in UI_JS, (
+        assert "_t('reasoning_effort_none')" in UI_JS or "return 'None'" in UI_JS, (
             "the disabled reasoning state must render a visible 'None' label"
         )
-        assert "if(!effort) return 'Default';" in UI_JS, (
+        assert "_t('reasoning_effort_default')" in UI_JS or "return 'Default'" in UI_JS, (
             "the unset reasoning state must render a visible 'Default' label"
         )
 

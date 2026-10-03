@@ -1,10 +1,48 @@
 """Tests for #1116 — composer placeholder reflects active profile name."""
+import json
+import pathlib
 import re
+import subprocess
+import textwrap
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _src(name: str) -> str:
     with open(f"static/{name}") as f:
         return f.read()
+
+
+def _resolve_en(key: str, *args) -> str:
+    """Resolve an i18n key through the REAL `t()` in static/i18n.js (node vm).
+
+    Used instead of a source regex so the assertion pins the English text a
+    user actually sees, not the shape of the call site.
+    """
+    expr = "t(" + ", ".join([json.dumps(key), *(json.dumps(a) for a in args)]) + ")"
+    script = textwrap.dedent(
+        f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const src = fs.readFileSync({json.dumps(str(REPO_ROOT / 'static' / 'i18n.js'))}, 'utf8');
+        const storage = {{}};
+        const ctx = {{
+          localStorage: {{
+            getItem: (k) => Object.prototype.hasOwnProperty.call(storage, k) ? storage[k] : null,
+            setItem: (k, v) => {{ storage[k] = String(v); }},
+          }},
+          document: {{ documentElement: {{ lang: '' }}, querySelectorAll: () => [] }},
+          navigator: undefined,
+        }};
+        vm.createContext(ctx);
+        vm.runInContext(src, ctx);
+        process.stdout.write(JSON.stringify(vm.runInContext({json.dumps(expr)}, ctx)));
+        """
+    )
+    proc = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
+    return json.loads(proc.stdout)
 
 
 class TestComposerPlaceholderProfile:
@@ -94,10 +132,26 @@ class TestComposerPlaceholderProfile:
             "switchToProfile must call applyBotName after profile switch"
 
     def test_placeholder_uses_name_variable(self):
-        """The composer placeholder must use the resolved name variable."""
+        """The composer placeholder must use the resolved name variable.
+
+        #7697 moved the literal out of boot.js: applyBotName now passes the
+        resolved name into the `composer_placeholder_idle` catalog key. The
+        source therefore no longer contains the word 'Message', but the
+        ENGLISH output must still resolve to 'Message <name>…' — asserted
+        below against the real `t()` in static/i18n.js, not a copy of it.
+        """
         src = _src("boot.js")
         m = re.search(r'function applyBotName\(\)\{.*?\n\}', src, re.DOTALL)
         assert m, "applyBotName function must exist"
         body = m.group(0)
-        assert re.search(r"msg\.placeholder\s*=\s*.*Message.*name", body), \
-            "applyBotName must set composer placeholder to 'Message <name>…'"
+        call = re.search(
+            r"msg\.placeholder\s*=\s*t\(\s*'([^']+)'\s*,\s*name\s*\)", body
+        )
+        assert call, (
+            "applyBotName must set the composer placeholder from an i18n key, "
+            "passing the resolved name as the {0} argument "
+            "(e.g. t('composer_placeholder_idle', name))"
+        )
+        # Resolve the key through the production i18n runtime so a wrong/renamed
+        # catalog value cannot slip past a source-only assertion.
+        assert _resolve_en(call.group(1), "Hermes") == "Message Hermes…"
