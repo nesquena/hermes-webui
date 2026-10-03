@@ -13,7 +13,10 @@ def test_sessions_js_resyncs_tool_calls_after_history_window_replacement():
     can keep stale anchors and show unloaded/thinking placeholders while the
     user scrolls through history.
     """
-    assert "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls)" in SESSIONS_JS
+    # The header is pinned without the closing paren so the optional
+    # third ``sessionId`` parameter (#7358 round 9, session-scoped
+    # persisted verdict map) does not fail the anchor.
+    assert "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls" in SESSIONS_JS
     assert "_syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
     assert "S.messages = nextMessages;\n    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);" in SESSIONS_JS
     assert "S.messages = _msgsToAssign;\n    _messagesTruncated = false;\n    _oldestIdx = 0;\n    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
