@@ -462,6 +462,7 @@ whose default `SessionDB()` path remains frozen at module import. Keep this fall
 compatibility-only: new goal semantics belong in Hermes Agent's native manager rather
 than a second WebUI implementation.
 
+
 ### 4.9 Hermes Agent Moved-Name Compatibility
 
 Hermes Agent owns its module layout. Its September 2026 decomposition moved names the
@@ -560,6 +561,144 @@ that cache and sending HTTP responses happen after the lock is released.
 This transaction serializes cooperating writes/reloads in one WebUI process.
 It does not lock out other processes or provide Agent status/schema/dispatch
 isolation; those remain the runtime boundary described above.
+
+### 4.11 Model Catalog Rebuild Budget and Probe Scheduling
+
+The model picker's catalog (`GET /api/models`) is produced by one cold rebuild that
+live-probes providers. A probe is a network call to a provider the WebUI may not be able
+to reach — a LAN LM Studio/Ollama host is the usual case, because the probe runs in the
+server process rather than the browser — so the rebuild runs on a daemon worker under a
+wall-clock budget:
+
+| Knob | Default | Meaning |
+| --- | --- | --- |
+| `HERMES_WEBUI_MODELS_REBUILD_BUDGET` | `4` (seconds) | Window a foreground caller waits for a cold rebuild. `0` restores the legacy synchronous unbounded rebuild. |
+| `CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS` | `5.0` | Per-endpoint cap for a custom provider `/v1/models` probe. |
+| `CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS` | `0.01` | Attempt-only timeout for a probe reached after the window is already spent while the caller is still waiting. Not a per-probe minimum and not a slice — see below. |
+
+Within the window the rebuild behaves normally; past it the caller is served a fallback
+(last-known disk cache, else a network-free static catalog) while the worker keeps going so
+the refresh lands out-of-band for the next caller.
+
+Custom endpoints are probed **serially**: the active `model.base_url` first, then each
+named `custom_providers` entry in config order, then the LM Studio provider-group
+fallback. `_CustomProbeSchedule` in `api/config.py` hands each of those probes a fair
+slice of the *remaining* window instead of letting one probe take the whole per-endpoint
+cap, so an unreachable endpoint cannot leave the reachable providers behind it with no
+in-band probe at all (#7481).
+
+- Each slice is `min(cap, left / (remaining + 1))`, with **no lower bound**. The `+1`
+  reserves a slot of headroom, so a chain of N probes can spend at most `N/(N+1)` of the
+  window and always finishes inside it — that is what keeps the foreground caller on a
+  published catalog instead of the over-budget fallback. A floor (however small) would make
+  the chain's cumulative spend grow with the endpoint count, and `custom_providers` has no
+  count limit, so a long enough chain of dead endpoints could again outspend the window and
+  push the reachable providers behind it out of the in-band rebuild.
+- The window belongs to the **caller, not to the chain**. One absolute deadline is captured
+  before the worker and the foreground wait start and is handed to `_CustomProbeSchedule`;
+  the foreground waits only `max(0, deadline - now)`. A schedule that minted its own deadline
+  at construction — deep inside the worker, after provider detection, the live id lookups and
+  the profile rebind — charged that discovery work to the caller's wait *and* granted it to
+  the chain again, so the chain could still be probing after the caller had already been
+  served the over-budget fallback, and the reachable provider landed out-of-band at best.
+- The two states that keep the unthrottled per-endpoint cap are stated explicitly rather
+  than inferred from the clock, because a spent window says nothing about whether anyone is
+  still waiting:
+  - the legacy unbounded path (budget `0`), which has no window to share;
+  - the out-of-band continuation — the worker still probing after the foreground caller
+    gave up and served its fallback. It is recognised through an explicit signal (the
+    caller sets the event when it stops waiting) and is the only in-process state allowed
+    to spend past the window. The narrow race where a probe finds the window spent while
+    the caller *is* still waiting is not that state: it gets the attempt-only timeout
+    above, never the cap.
+- Trade-off to know about: slices shrink as the chain grows, because the window is fixed
+  and shared. A slow-but-reachable endpoint in a long chain can be cut off; size
+  `HERMES_WEBUI_MODELS_REBUILD_BUDGET` for the endpoints actually in use, or give a
+  `custom_providers` entry a static `models:` allowlist so it is never probed live.
+- An endpoint is probed **at most once per rebuild**. The three live-probe consumers
+  (active `model.base_url`, named `custom_providers`, LM Studio provider-group fallback)
+  share a per-rebuild memo keyed by the endpoint URL plus the credential sent, so the
+  common config where the active endpoint and `providers.lmstudio.base_url` are the same
+  LAN host no longer pays that host's connect timeout twice, and two named entries on one
+  endpoint probe it once. A different URL — or the same URL with a different key, which can
+  change the outcome — is still its own probe, and the memo is consulted only after the
+  per-endpoint SSRF/authentication checks, so a call that would have been refused still is.
+- Probe order, per-endpoint SSRF and authentication rules, and the per-endpoint cap are
+  preserved.
+
+Publication is ordered by **generation, not by wall clock**. Each cold rebuild takes the
+next sequence number (`_allocate_models_rebuild_seq`), and a result is dropped when it is
+older than the newest *allocated* generation (`_models_rebuild_seq`) — in which case it also
+leaves the build flag alone rather than clearing it, because that flag now belongs to the
+newer rebuild. This matters for the out-of-band publisher, which outlives the
+foreground caller: without the guard it could resurrect a superseded
+catalog over a newer one. A timestamp comparison cannot express the ordering, because an
+older build can publish *after* a newer build has already started.
+
+The fence is the latest **allocated** generation rather than the latest *published* one
+because `invalidate_models_cache()` clears `_cache_build_in_progress` without cancelling an
+in-flight worker: a newer rebuild can be allocated while an older one is still running. If
+the older worker finishes first, a published-sequence comparison would let it publish the
+invalidated catalog and release the flag that now belongs to the newer rebuild. Comparing
+against the allocated generation rejects it, so invalidation is a real freshness boundary,
+and a newer rebuild that then fails leaves the cache empty instead of resurrecting the
+invalidated catalog.
+
+Both `invalidate_models_cache()` and the provider-scoped invalidator used by
+`/api/models/refresh` share one epoch/owner reset. They advance the allocated generation,
+clear memory and provenance, retire the in-flight owner, and delete the durable cache.
+Every build already running becomes superseded *even when no successor rebuild is ever
+allocated*; otherwise a delayed worker could repopulate the cleared catalog under a
+fresh-looking fingerprint. Disk snapshots read before taking the catalog lock (including
+the session-visit warmer) are published only if their captured epoch still matches: a
+preloaded fresh candidate whose epoch moved is dropped rather than published under the
+current fingerprint. The *degraded* stale fallback is deliberately not fenced — it is
+returned to a caller that already stopped waiting and is never published to memory, so
+discarding it would only swap a stale-but-real answer for a static catalog.
+
+A build's **identity is captured when it starts and re-validated when it publishes**, in
+memory and at the durable commit: the source fingerprint (`_models_cache_source_fingerprint`
+— config, auth store and provider catalog; its `config_yaml` axis is the profile-specific
+config path, so it fences a foreign profile too) plus the profile name. A build that outlives
+a config edit describes sources that no longer exist, so its result is dropped instead of
+being published under the *current* fingerprint. The check fails closed — an identity that
+cannot be read is not a match — and disk publication records the fingerprint the build READ,
+never a recomputed one.
+
+Ownership of the single-flight slot is explicit too: the completion path clears
+`_cache_build_in_progress` only when the completing build is still the newest allocated
+generation, including on the error paths and after the disk I/O. A superseded publisher
+therefore cannot admit a third rebuild beside the newer one it lost to.
+
+The **durable commit is fenced separately from the in-memory one**, because the file write
+runs with the catalog lock released (a disk write must not hold it). Each build writes its
+own temp file — unique per build and thread, in the destination directory so the commit stays
+a same-filesystem atomic rename — and the rename is serialized by
+`_models_cache_disk_commit_lock` after re-checking the accepted generation, the last
+committed generation (`_models_disk_committed_seq`) and the build's source identity.
+The catalog lock remains held from that check **through** rename; invalidation takes the
+same fixed order (disk-commit lock, then catalog lock) through deletion, so an admitted
+writer cannot restore a file after invalidation returns. A superseded or re-sourced
+commit discards its temp file and leaves the durable catalog to the build that won.
+
+**The two locks have one order everywhere: disk-commit then catalog.** The writer and the
+invalidator both take them that way, so a caller that takes them in the opposite order is a
+deadlock, not a latency bug — and both acquisitions are unbounded in production. A foreground
+publisher used to: `get_available_models` owns the catalog lock across its whole cold path,
+and its synchronous, within-budget and budget-boundary winners called
+`_save_models_cache_to_disk` from inside that ownership, i.e. catalog → commit. A publisher
+blocked on the commit mutex an invalidator held, with that invalidator then blocked on the
+catalog lock the publisher owned, waited on each other forever, so a `/api/models` load and a
+config-save/`/api/models/refresh` invalidation could each hang (#7481 review). The foreground
+paths therefore do not commit inline: memory publication still happens in short
+`_available_models_cache_lock` critical sections (owner, source identity and the absolute
+deadline are read there too), while the durable commit is **queued** and run by
+`_DeferredCatalogPublication` on its way out — after the catalog lock has been released — by
+`_commit_models_cache_to_disk_after_lock`. The caller still gets the cache and the durable
+file populated before `get_available_models` returns, and the single-flight release rides
+with the queued commit, so ownership still spans the durable write. The out-of-band worker
+commits directly, which is correct because it holds no catalog lock by then.
+
 
 ---
 
