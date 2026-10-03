@@ -635,6 +635,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             continue
 
         merged = dict(row)
+        merged['pinned'] = bool(row.get('pinned') or tip.get('pinned'))
         # Keep the chain head's visible identity (title, started_at), but
         # point the row at the latest importable segment for navigation AND
         # surface the tip's recency so an actively-used chain bubbles to the
@@ -802,6 +803,9 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
+        # Durable pin flag shared with Hermes Desktop / CLI (`hermes sessions pin`).
+        pinned_expr = _optional_col('pinned', session_cols, fallback="0")
+        has_pinned_col = 'pinned' in session_cols
         archived_expr = _optional_col('archived', session_cols)
         project_id_expr = _optional_col('project_id', session_cols)
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
@@ -995,6 +999,7 @@ def read_importable_agent_session_rows(
                    {origin_chat_id_expr},
                    {origin_user_id_expr},
                    {platform_expr},
+                   {pinned_expr},
                    {project_id_expr},
                    {parent_expr},
                    {ended_expr},
@@ -1056,12 +1061,24 @@ def read_importable_agent_session_rows(
                     candidate_order_clause=candidate_order_clause,
                 )
 
+            # Back-fill pinned rows past the recency window, like the agent's list endpoints.
+            if has_pinned_col:
+                row_filter = (
+                    "WHERE c.id IS NOT NULL OR (s.pinned = 1 AND "
+                    + " AND ".join(where_clauses)
+                    + ")"
+                )
+                candidate_join = "LEFT JOIN candidates c ON c.id = s.id"
+            else:
+                row_filter = ""
+                candidate_join = "JOIN candidates c ON c.id = s.id"
             candidate_sql = f"""
                 {candidate_cte}
                 {select_sql}
                 FROM sessions s
-                JOIN candidates c ON c.id = s.id
+                {candidate_join}
                 {join_clause}
+                {row_filter}
                 {group_by_clause}
                 {order_by_clause}
                 """
@@ -1075,7 +1092,10 @@ def read_importable_agent_session_rows(
             window_exhausted = False
             for multiplier in CANDIDATE_WINDOW_MULTIPLIERS:
                 candidate_limit = max(result_limit * multiplier, result_limit)
-                cur.execute(candidate_sql, [*params, candidate_limit])
+                query_params = [*params, candidate_limit]
+                if has_pinned_col:
+                    query_params += params
+                cur.execute(candidate_sql, query_params)
                 raw_rows = [dict(row) for row in cur.fetchall()]
                 projected = _project(raw_rows)
                 window_exhausted = (
@@ -1087,7 +1107,8 @@ def read_importable_agent_session_rows(
                     # was not binding, so projection has seen every candidate this
                     # query can reveal.
                     break
-            selected = projected[:result_limit]
+            pinned_rows = [row for row in projected if row.get('pinned')]
+            selected = pinned_rows + [row for row in projected if not row.get('pinned')][:result_limit]
 
             # The recency slice is per-row, but subagent rows are only renderable as
             # children: the sidebar nests a child under its parent solely when that
