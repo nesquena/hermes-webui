@@ -3386,6 +3386,12 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   // silently snap to the first <option>. _ensureModelOptionInDropdown already
   // tries _applyModelToDropdown first, so delegate to it (single scan) and keep
   // the plain-apply fallback for the unlikely case it is unavailable.
+  // #7507: every path here is a NON-session selection — the fresh-boot
+  // profile default, or the persisted previous pick from a tab the user
+  // has since left. Neither is the running session's model, so the
+  // per-provider picker exclude policy applies in full and an excluded
+  // id must never be (re-)injected here. The active-session exception
+  // lives in syncTopbar() (which passes allowExcludedForActiveSession).
   const _applyOrEnsure = function(modelId, providerId) {
     if (typeof _ensureModelOptionInDropdown === 'function') {
       return _ensureModelOptionInDropdown(modelId, sel, providerId);
@@ -3737,10 +3743,174 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   }
   return null;
 }
-function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
+/**
+ * #7507: per-provider picker exclude policy, browser side.
+ *
+ * ``window._pickerExcludes`` is the provider → [model id] map the server
+ * ships inside the /api/models payload (same source as
+ * ``api.config.get_picker_excludes``). Returns the bare model ids the
+ * caller must NOT (re-)inject, or an empty Set when the policy is
+ * unknown/absent. A missing/empty policy is treated as "nothing
+ * excluded" so the option-injection paths keep their existing behaviour
+ * for installs that never configured the feature.
+ */
+function _pickerExcludesForProvider(providerId){
+  try{
+    const raw=window._pickerExcludes;
+    if(!raw||typeof raw!=='object') return new Set();
+    const pid=String(providerId||'').trim();
+    // Union across every stored key that resolves to the requested
+    // provider's canonical id, mirroring the server's
+    // api.config.get_picker_excludes. A settings.json can carry BOTH
+    // ``zai`` and ``z.ai``, each with its own slice of hides; taking
+    // only the first match resurrected the models named under the other
+    // key (#7777 P1: "Alias exclusions are dropped").
+    const keys=[pid,pid.toLowerCase(),pid.replace(/\./g,''),pid.toLowerCase().replace(/\./g,'')];
+    const out=new Set();
+    const consume=(v)=>{
+      if(!Array.isArray(v)) return;
+      for(const m of v){ const s=String(m||'').trim(); if(s) out.add(s); }
+    };
+    for(const k of new Set(keys.filter(Boolean))){ if(k in raw) consume(raw[k]); }
+    if(pid){
+      // Also absorb every stored key that is a punctuation-variant of the
+      // requested id (z.ai / zai / ZAI), which is the whole alias family
+      // WebUI's provider slugs can be spelled with.
+      const norm=(k)=>String(k||'').trim().toLowerCase().replace(/[^a-z0-9]/g,'');
+      const target=norm(pid);
+      if(target){
+        for(const k of Object.keys(raw)){
+          if(k in raw&&norm(k)===target) consume(raw[k]);
+        }
+      }
+      return out;
+    }
+    // No provider context — union every provider's list (mirrors the
+    // server-side get_picker_excludes(None) aggregate).
+    const all=new Set();
+    for(const k of Object.keys(raw)){
+      const list=raw[k];
+      if(Array.isArray(list)) for(const m of list){ const s=String(m||'').trim(); if(s) all.add(s); }
+    }
+    return all;
+  }catch(_e){ return new Set(); }
+}
+/**
+ * #7507: bare model id for a possibly ``@provider:``-prefixed value,
+ * stripping the COMPLETE provider prefix (provider ids can contain
+ * colons — ``@custom:alpha:chat-a`` → ``chat-a``), mirroring
+ * ``api.config._strip_provider_prefix_from_model_id``.
+ */
+function _bareModelIdForExcludeMatch(modelId, knownProviders){
+  const value=String(modelId||'').trim();
+  if(!value.startsWith('@')||!value.includes(':')) return value;
+  const body=value.slice(1);
+  const boundaries=[];
+  for(let i=0;i<body.length;i++){ if(body[i]===':') boundaries.push(i); }
+  // Longest (most specific) prefix first, mirroring the server's
+  // _strip_provider_prefix_from_model_id. Provider ids themselves can
+  // contain colons (a named custom provider is `custom:<slug>`), so the
+  // prefix boundary is NOT the last colon in the value.
+  for(const idx of boundaries.reverse()){
+    const candidate=body.slice(0,idx).trim();
+    if(!candidate) continue;
+    if(_isKnownPickerProvider(candidate,knownProviders)) return body.slice(idx+1).trim();
+  }
+  // Unknown provider id: strip the FIRST colon-delimited segment only,
+  // preserving the historical plain `@provider:model` behaviour.
+  const first=body.indexOf(':');
+  if(first<=0) return value;
+  return body.slice(first+1).trim();
+}
+/**
+ * #7507/#7777: the set of provider ids the picker can render, collected
+ * once per catalog load so the exclude matcher can tell a real provider
+ * prefix from a colon that belongs to the MODEL id itself
+ * (`@opencode-zen:vendor/model:1` — the model is `vendor/model:1`, not `1`).
+ */
+function _collectKnownPickerProviders(){
+  const out=new Set();
+  try{
+    const groups=(window._modelCatalogGroups&&Array.isArray(window._modelCatalogGroups))
+      ? window._modelCatalogGroups : [];
+    for(const g of groups){
+      const pid=g&&g.provider_id?String(g.provider_id).trim():'';
+      if(pid) out.add(pid);
+    }
+    const badges=window._configuredModelBadges||{};
+    for(const k of Object.keys(badges)){
+      const p=badges[k]&&badges[k].provider?String(badges[k].provider).trim():'';
+      if(p) out.add(p);
+    }
+    const active=window._activeProvider?String(window._activeProvider).trim():'';
+    if(active) out.add(active);
+  }catch(_e){}
+  return out;
+}
+function _isKnownPickerProvider(candidate,known){
+  const c=String(candidate||'').trim().toLowerCase();
+  if(!c) return false;
+  if(c.startsWith('custom:')) return true;
+  if(known&&typeof known.has==='function'&&known.has(c)) return true;
+  return false;
+}
+/**
+ * #7507: true when *modelId* is on the per-provider picker exclude list
+ * for *providerId*. Checks the raw value first, then the bare id, so an
+ * excluded ``chat-a`` also blocks a ``@custom:alpha:chat-a`` rendering.
+ */
+function _modelIsPickerExcluded(modelId, providerId){
+  const excludes=_pickerExcludesForProvider(providerId);
+  if(!excludes.size) return false;
+  const value=String(modelId||'').trim();
+  if(!value) return false;
+  // Exact, case-preserving match — the server policy is case-preserving and
+  // the browser must not hide a server-provided option by folding case
+  // (a lowercase exclusion `model-a` must not suppress `MODEL-A`; #7777 P1).
+  if(excludes.has(value)) return true;
+  // `@provider:`-prefixed rendering: strip the COMPLETE provider prefix
+  // (provider ids can contain colons) before comparing, so an exclusion
+  // for the bare id still matches the prefixed rendering. The strip is
+  // provider-aware: only a boundary naming a real provider is stripped,
+  // which keeps a colon inside the MODEL id intact
+  // (`@opencode-zen:vendor/model:1` → `vendor/model:1`, #7777 P1).
+  if(value.startsWith('@')&&value.includes(':')){
+    const bare=_bareModelIdForExcludeMatch(value,_collectKnownPickerProviders());
+    if(bare&&excludes.has(bare)) return true;
+  }
+  // `provider/model` slash form (the shape config `model.default` uses).
+  // #7777 P1: the unconditional tail comparison kept hiding the distinct
+  // valid model `vendor/bar` from a bare-`bar` exclusion. Only a prefix
+  // that names a provider the picker actually renders may be treated as a
+  // provider separator; otherwise exact-ID matching stands.
+  if(value.includes('/')){
+    const slash=value.indexOf('/');
+    const head=value.slice(0,slash);
+    const tail=value.slice(slash+1);
+    if(head&&tail&&_isKnownPickerProvider(head,_collectKnownPickerProviders())){
+      if(excludes.has(tail)) return true;
+    }
+  }
+  return false;
+}
+function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId, opts){
   if(!modelId||!sel) return null;
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
   const requestedProvider=String(preferredProviderId||_providerFromModelValue(modelId)||'').trim();
+  // #7507: an excluded model must NOT be re-injected for a NON-session
+  // selection (boot default, previous pick, fallback row, settings
+  // apply). The one documented exception is the RUNNING session's own
+  // model, which stays visible and selected while its catalog stays
+  // clean — callers opt in with ``opts.allowExcludedForActiveSession``.
+  // Everything else returns null so the caller proceeds to its normal
+  // fallback instead of synthesizing an option the user explicitly
+  // hid. Checked BEFORE _applyModelToDropdown so a stale custom option
+  // cannot satisfy the lookup either.
+  const excludePolicyApplies=(typeof _modelIsPickerExcluded==='function')
+    && _modelIsPickerExcluded(modelId,requestedProvider);
+  if(excludePolicyApplies&&!(opts&&opts.allowExcludedForActiveSession)){
+    return null;
+  }
   const applied=_applyModelToDropdown(modelId,sel,requestedProvider||null);
   if(applied){
     const appliedState=typeof _modelStateForSelect==='function'
@@ -3797,19 +3967,57 @@ let _modelCatalogFallbackRetried=false;
 
 function _applySessionModelFallback(sel){
   if(!sel) return null;
+  // #7507: exclude-aware fallback helper — declared at FUNCTION scope (not
+  // inside the configuredDefault branch) because the last-resort
+  // `first option` path below also consults it. The typeof guard keeps it
+  // callable from isolated unit tests that extract only this function.
+  const _excluded=(modelId,providerId)=>(typeof _modelIsPickerExcluded==='function')
+    &&_modelIsPickerExcluded(modelId,providerId);
   const configuredDefault=String(window._defaultModel||'').trim();
   if(configuredDefault){
-    const appliedDefault=_applyModelToDropdown(configuredDefault,sel,window._activeProvider||null);
-    if(appliedDefault) return _modelStateFromAppliedDropdown(sel,appliedDefault);
+    // The configured default is a NON-session fallback — the
+    // exclude policy applies. Try the remaining catalog rows first,
+    // then the plain default, then the first option (matching the
+    // pre-existing priority order minus the excluded row).
+    if(!_excluded(configuredDefault,window._activeProvider||null)){
+      const appliedDefault=_applyModelToDropdown(configuredDefault,sel,window._activeProvider||null);
+      if(appliedDefault) return _modelStateFromAppliedDropdown(sel,appliedDefault);
+    }
+    const eligibleFirst=Array.from(sel.options||[]).find(o=>
+      !_excluded(String(o.value||''),_getOptionProviderId(o)));
+    if(eligibleFirst){
+      sel.value=eligibleFirst.value;
+      if(sel.id==='modelSelect'){
+        if(typeof syncModelChip==='function') syncModelChip();
+        _refreshOpenModelDropdown();
+      }
+      return _modelStateFromAppliedDropdown(sel,eligibleFirst.value);
+    }
   }
+  // Last resort (no configured default): start from the first rendered
+  // option (the pre-existing pattern) and walk forward past excluded rows
+  // so the last-resort fallback honours the picker policy too. If every
+  // option is excluded, leave the selection untouched (return null)
+  // rather than fighting the user's policy.
   const first=sel.querySelector('optgroup > option, option');
   if(first){
-    sel.value=first.value;
-    if(sel.id==='modelSelect'){
-      if(typeof syncModelChip==='function') syncModelChip();
-      _refreshOpenModelDropdown();
+    const allOptions=Array.from(sel.options||[]);
+    // #7777 P1: the old `||`-fallback selected the FIRST option whenever
+    // the eligibility scan found nothing — and when every option is
+    // excluded that first option is exactly the forbidden model the user
+    // asked to hide, which then became the active selection. Use a single
+    // `find`: only an option that IS eligible may be applied. When the
+    // whole picker is filtered out, return null and let the caller leave
+    // the selection untouched rather than fighting the user's policy.
+    const eligibleLast=allOptions.find(o=>o&&!_excluded(String(o.value||''),_getOptionProviderId(o)));
+    if(eligibleLast){
+      sel.value=eligibleLast.value;
+      if(sel.id==='modelSelect'){
+        if(typeof syncModelChip==='function') syncModelChip();
+        _refreshOpenModelDropdown();
+      }
+      return _modelStateFromAppliedDropdown(sel,eligibleLast.value);
     }
-    return _modelStateFromAppliedDropdown(sel,first.value);
   }
   return null;
 }
@@ -3837,6 +4045,15 @@ async function populateModelDropdown(opts={}){
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
+    // #7507: keep the browser-side exclude policy in sync with the server's.
+    // Without this the re-injection paths (boot default, previous pick,
+    // synthesized fallback rows) have no policy to check against and
+    // resurrect an id the server already filtered out.
+    if(data&&typeof data.picker_excludes==='object'&&data.picker_excludes!==null){
+      window._pickerExcludes=data.picker_excludes;
+    }else{
+      window._pickerExcludes={};
+    }
     window._modelEndpointErrors={};
     // Keep g.extra_models label hydration in this function for /model and tail selections.
 
@@ -3859,6 +4076,11 @@ async function populateModelDropdown(opts={}){
         // @provider:model and provider/model to avoid noisy duplicates.
         if(!mid||mid.startsWith('@')||mid.includes('/')) continue;
         const provider=(badge&&badge.provider)||'configured';
+        // #7507: the synthesized-fallback rows must honour the
+        // per-provider picker exclude list, exactly like the server
+        // groups above. Without this the no-server-groups fallback
+        // re-adds an id the user just excluded from the picker.
+        if(typeof _modelIsPickerExcluded==='function'&&_modelIsPickerExcluded(mid,provider)) continue;
         addModel(provider,mid);
       }
 
@@ -3880,6 +4102,10 @@ async function populateModelDropdown(opts={}){
     const groups=usedConfiguredFallback
       ? _synthGroupsFromConfigured()
       : data.groups;
+    // #7777: expose the rendered provider set so the exclude matcher can
+    // tell a real provider prefix from a colon that belongs to the model id
+    // itself (see _collectKnownPickerProviders).
+    window._modelCatalogGroups=Array.isArray(groups)?groups:[];
     const willRetry=usedConfiguredFallback && requestedFreshness!=='session_visit' && !_modelCatalogFallbackRetried;
 
     if(!groups.length){
@@ -3960,6 +4186,50 @@ const _liveModelCache={};
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
 
+/**
+ * #7507: drop the browser-side live-model cache and force the picker to
+ * rebuild against the latest server catalog. Called from
+ * panels.js:saveSettings() when the server returns
+ * ``_invalidate_models: true`` after a ``picker_excludes`` save, and
+ * directly by any future edit surface that touches the policy. Cheap
+ * when the picker is already in sync (the rebuild is a single
+ * /api/models call). Mirrors the server-side invalidation in
+ * api/routes.py:/api/settings which clears the /api/models and
+ * /api/models/live caches in lockstep.
+ */
+function _invalidateLiveModelCache(opts){
+  try{
+    // #7507: bump the epoch FIRST so any in-flight live fetch (which
+    // captured the previous epoch before its await) drops its response
+    // instead of writing a pre-exclusion list into the picker.
+    _bumpLiveModelFetchEpoch();
+  }catch(_e){}
+  try{
+    for(const k of Object.keys(_liveModelCache)) delete _liveModelCache[k];
+  }catch(_e){}
+  try{
+    _liveModelFetchPending.clear();
+  }catch(_e){}
+  try{
+    if(typeof populateModelDropdown==='function'){
+      populateModelDropdown({freshness:(opts&&opts.freshness)||'session_visit'}).catch(()=>{});
+    }
+  }catch(_e){}
+}
+
+/**
+ * #7507: invalidation epoch for every live-model fetch. Bumped when the
+ * exclude policy changes (``_invalidateLiveModelCache``) and when the
+ * model catalog is rebuilt (``populateModelDropdown``). A response that
+ * was assembled before the bump belongs to an older view of the world —
+ * applying it would re-fill the picker with a model the user just
+ * excluded. The epoch is captured BEFORE the ``await fetch`` and
+ * re-checked BEFORE the models are written into the select, so a slow
+ * in-flight fetch can never overwrite a newer catalog.
+ */
+let _liveModelFetchEpoch=0;
+function _bumpLiveModelFetchEpoch(){ _liveModelFetchEpoch++; return _liveModelFetchEpoch; }
+
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
   const currentVal=sel.value;
@@ -4009,6 +4279,13 @@ function _addLiveModelsToSelect(provider, models, sel){
   let added=0;
   for(const m of models){
     let mid=m.id;
+    // #7507: never write an excluded id into the dropdown, whichever code
+    // path supplied the payload (live fetch, cached _liveModelCache entry
+    // captured before a policy change, or the Settings-modal fetch). The
+    // server already filters its own /api/models/live response; this is the
+    // client-side belt for the paths that bypass it. typeof-guarded so the
+    // function stays callable from isolated unit tests.
+    if(typeof _modelIsPickerExcluded==='function'&&_modelIsPickerExcluded(mid,provider)) continue;
     if(_isPortalFetch && !mid.startsWith('@')){
       mid=`@${provider}:${mid}`;
     }
@@ -4062,9 +4339,14 @@ function _addLiveModelsToSelect(provider, models, sel){
 async function _fetchLiveModels(provider, sel, requestSeq=null){
   if(!provider||!sel) return;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+  // #7507: capture the epoch BEFORE the fetch. A response that lands
+  // after a policy change / catalog rebuild belongs to an older view and
+  // must be dropped rather than re-adding an excluded id.
+  const fetchEpoch=_liveModelFetchEpoch;
   // Already fetched — apply cached models to this select element (#872)
   if(_liveModelCache[provider]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(fetchEpoch!==_liveModelFetchEpoch) return;
     const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
@@ -4075,12 +4357,15 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
     url.searchParams.set('provider',provider);
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(fetchEpoch!==_liveModelFetchEpoch) return;
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(fetchEpoch!==_liveModelFetchEpoch) return;
     if(!data.models||!data.models.length) return;
     _liveModelCache[provider]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(fetchEpoch!==_liveModelFetchEpoch) return;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
@@ -11653,12 +11938,15 @@ function syncTopbar(){
           // Named custom providers/OpenRouter can also route vendor-prefixed IDs
           // outside the static catalog, so preserve the user's explicit choice.
           if(typeof _ensureModelOptionInDropdown==='function'){
-            const sessionOption=_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null);
+            const sessionOption=_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null,{allowExcludedForActiveSession:true});
             if(sessionOption) currentModel=sessionOption;
           }
         } else {
+          // #7507: the RUNNING session's model is the one documented
+          // exception to the picker exclude policy — it stays visible and
+          // selected so the user isn't silently switched mid-conversation.
           const sessionOption=(typeof _ensureModelOptionInDropdown==='function')
-            ? _ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)
+            ? _ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null,{allowExcludedForActiveSession:true})
             : null;
           if(sessionOption){
             currentModel=sessionOption;
