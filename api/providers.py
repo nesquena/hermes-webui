@@ -13,6 +13,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -77,6 +78,8 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
     return pid in candidates
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
+_OPENCODE_GO_QUOTA_URL = "https://opencode.ai/zen/go/v1/usage"
+_COMMANDCODE_API_URL = "https://api.commandcode.ai"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 45.0
@@ -1520,13 +1523,20 @@ def _active_provider_id() -> str | None:
 def _quota_number(value: Any) -> int | float | None:
     if isinstance(value, bool) or value is None:
         return None
-    if isinstance(value, (int, float)):
-        return value
+    # Remote quota APIs are untrusted: NaN/Infinity (json.loads accepts them) and
+    # integers beyond float range are not measurements; they would leak as $nan,
+    # break strict JSON, or raise OverflowError in the percentage math.
+    if isinstance(value, int):
+        return value if abs(value) <= sys.float_info.max else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     try:
         text = str(value).strip()
         if not text:
             return None
         number = float(text)
+        if not math.isfinite(number):
+            return None
         return int(number) if number.is_integer() else number
     except (TypeError, ValueError):
         return None
@@ -1544,12 +1554,108 @@ def _sanitize_openrouter_quota(payload: Any) -> dict[str, int | float | None]:
     }
 
 
+def _quota_window(payload: Any, label: str) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    used = _quota_number(payload.get("used", payload.get("used_amount")))
+    limit = _quota_number(payload.get("limit", payload.get("limit_amount", payload.get("cap"))))
+    if used is None or limit is None or float(used) < 0 or float(limit) <= 0:
+        return None
+    used_percent = max(0.0, min(100.0, float(used) / float(limit) * 100.0))
+    return {
+        "label": label,
+        "used_percent": used_percent,
+        "remaining_percent": 100.0 - used_percent,
+        "reset_at": _isoformat_utc(payload.get("reset_at", payload.get("resetAt"))),
+        "detail": f"${float(used):g} used of ${float(limit):g}",
+    }
+
+
+def _sanitize_opencode_go_quota(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    quota = payload.get("quota", payload.get("data", payload.get("usage", payload)))
+    if not isinstance(quota, dict):
+        return None
+    specs = (("rolling", "Rolling"), ("weekly", "Weekly"), ("monthly", "Monthly"))
+    windows = []
+    for key, label in specs:
+        raw = quota.get(key)
+        if not isinstance(raw, dict):
+            continue
+        percent = _quota_number(raw.get("percent"))
+        if percent is None or float(percent) < 0:
+            continue
+        used_percent = max(0.0, min(100.0, float(percent)))
+        windows.append({
+            "label": label, "used_percent": used_percent,
+            "remaining_percent": 100.0 - used_percent,
+            "reset_at": _isoformat_utc(raw.get("resetsAt")),
+            "detail": str(raw.get("status") or "").strip() or None,
+        })
+    if not windows:
+        return None
+    return {
+        "provider": "opencode-go", "source": "usage_api",
+        "title": "OpenCode Go limits", "plan": "OpenCode Go",
+        "windows": windows, "details": [], "available": True,
+        "unavailable_reason": None, "fetched_at": None,
+    }
+
+
+def _sanitize_commandcode_quota(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict) or not isinstance(payload.get("windowLimits"), dict):
+        return None
+    windows = []
+    for key, label in (("fiveHour", "5-hour"), ("weekly", "Weekly")):
+        window = _quota_window(payload["windowLimits"].get(key), label)
+        if window:
+            windows.append(window)
+    if not windows:
+        return None
+    credits = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
+    remaining = sum(
+        max(0.0, float(_quota_number(credits.get(key)) or 0))
+        for key in ("monthlyCredits", "purchasedCredits", "freeCredits")
+    )
+    # Each credit field is finite, but their sum can still overflow to inf.
+    details = [f"Credits remaining: ${remaining:g}"] if math.isfinite(remaining) else []
+    return {
+        "provider": "commandcode", "source": "usage_api",
+        "title": "Command Code limits", "plan": "Command Code",
+        "windows": windows, "details": details,
+        "available": True, "unavailable_reason": None, "fetched_at": None,
+    }
+
+
+def _fetch_bearer_quota(url: str, api_key: str) -> Any:
+    req = urllib.request.Request(
+        url, headers={
+            "Authorization": f"Bearer {api_key}", "Accept": "application/json",
+            # OpenCode's WAF rejects urllib's default identity; this is the
+            # same proven header used by the existing quota cron job.
+            "User-Agent": "curl/8.5.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+        raw = resp.read()
+    return json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+
+
 def _isoformat_utc(value: Any) -> str | None:
     if value in (None, ""):
         return None
     if isinstance(value, datetime):
         dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            # float() of an oversized int raises OverflowError too, so convert inside the guard.
+            number = float(value)
+            seconds = number / 1000.0 if abs(number) >= 1_000_000_000_000 else number
+            return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            return None
     text = str(value).strip()
     return text or None
 
@@ -2142,7 +2248,10 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
             "message": "No active provider is configured.",
         }
 
-    display_name = _PROVIDER_DISPLAY.get(provider, provider.replace("-", " ").title())
+    display_name = {
+        "commandcode": "Command Code",
+        "opencode-go": "OpenCode Go",
+    }.get(provider, _PROVIDER_DISPLAY.get(provider, provider.replace("-", " ").title()))
     if provider in _ACCOUNT_USAGE_PROVIDERS:
         return _provider_account_usage_status(provider, display_name, refresh=refresh)
 
@@ -2206,6 +2315,38 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
                 "quota": None,
                 "message": "OpenRouter quota status is temporarily unavailable.",
             }
+
+    if provider in {"opencode-go", "commandcode"}:
+        api_key = _get_provider_api_key(provider)
+        if not api_key:
+            return {
+                "ok": False, "provider": provider, "display_name": display_name,
+                "supported": True, "status": "no_key", "quota": None,
+                "account_limits": None,
+                "message": f"{display_name} quota status needs a configured API key.",
+            }
+        url = _OPENCODE_GO_QUOTA_URL if provider == "opencode-go" else f"{_COMMANDCODE_API_URL}/alpha/billing/credits"
+        try:
+            payload = _fetch_bearer_quota(url, api_key)
+            account_limits = _sanitize_opencode_go_quota(payload) if provider == "opencode-go" else _sanitize_commandcode_quota(payload)
+            if not account_limits:
+                raise ValueError("unrecognized quota response")
+            return {
+                "ok": True, "provider": provider, "display_name": display_name,
+                "supported": True, "status": "available", "quota": None,
+                "account_limits": account_limits, "label": account_limits["title"],
+                "message": f"{display_name} account limits loaded.",
+            }
+        except urllib.error.HTTPError as exc:
+            status = "invalid_key" if exc.code in (401, 403) else "unavailable"
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+            status = "unavailable"
+        return {
+            "ok": False, "provider": provider, "display_name": display_name,
+            "supported": True, "status": status, "quota": None,
+            "account_limits": None,
+            "message": f"{display_name} rejected the configured API key." if status == "invalid_key" else f"{display_name} quota status is temporarily unavailable.",
+        }
 
     local_snapshot = _local_pool_snapshot(provider)
     if local_snapshot is not None:

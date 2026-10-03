@@ -16,6 +16,8 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import api.config as config
 import api.profiles as profiles
 
@@ -157,6 +159,243 @@ def test_openrouter_quota_invalid_key_and_timeout_are_sanitized(monkeypatch, tmp
             assert "secret" not in repr(result).lower()
     finally:
         _restore_config(old_cfg, old_mtime)
+
+
+def test_commandcode_quota_exposes_sanitized_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "private-commandcode-key")
+    old_cfg, old_mtime = _with_config(model={"provider": "commandcode"})
+    import api.providers as providers
+
+    # commandcode's env var comes from the agent's bundled provider plugin; pin it so the test
+    # does not depend on hermes-agent being importable.
+    real_env_var_for = providers._provider_env_var_for
+    monkeypatch.setattr(
+        providers, "_provider_env_var_for",
+        lambda pid: "COMMANDCODE_API_KEY" if pid == "commandcode" else real_env_var_for(pid),
+    )
+
+    def fake_urlopen(req, timeout):
+        assert req.full_url == "https://api.commandcode.ai/alpha/billing/credits"
+        assert req.headers["Authorization"] == "Bearer private-commandcode-key"
+        assert timeout == 3.0
+        return _FakeResponse(json.dumps({
+            "credits": {"monthlyCredits": 7, "purchasedCredits": 2, "freeCredits": 1, "secret": "no"},
+            "windowLimits": {
+                "fiveHour": {"used": 3, "cap": 12, "resetAt": "2030-03-17T17:30:00Z"},
+                "weekly": {"used": 12, "cap": 30, "resetAt": "2030-03-24T12:30:00Z"},
+            },
+        }).encode())
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["status"] == "available"
+    assert [w["remaining_percent"] for w in result["account_limits"]["windows"]] == [75.0, 60.0]
+    assert result["account_limits"]["details"] == ["Credits remaining: $10"]
+    assert "private-commandcode-key" not in repr(result)
+    assert "secret" not in repr(result)
+
+
+def test_opencode_go_quota_accepts_triple_window_response(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "private-opencode-key")
+    old_cfg, old_mtime = _with_config(model={"provider": "opencode-go"})
+    import api.providers as providers
+
+    def fake_urlopen(req, timeout):
+        assert req.full_url == "https://opencode.ai/zen/go/v1/usage"
+        assert req.headers["User-agent"] == "curl/8.5.0"
+        return _FakeResponse(json.dumps({"usage": {
+            "rolling": {"percent": 50, "status": "ok", "resetsAt": "2030-03-17T17:30:00Z"},
+            "weekly": {"percent": 30, "status": "ok", "resetsAt": "2030-03-24T12:30:00Z"},
+            "monthly": {"percent": 25, "status": "ok", "resetsAt": "2030-04-01T00:00:00Z"},
+        }}).encode())
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["status"] == "available"
+    assert [w["remaining_percent"] for w in result["account_limits"]["windows"]] == [50.0, 70.0, 75.0]
+    assert "private-opencode-key" not in repr(result)
+
+
+
+# ── usage-API providers: untrusted numbers and failure statuses ─────────────
+
+_USAGE_API_KEYS = {"commandcode": "COMMANDCODE_API_KEY", "opencode-go": "OPENCODE_GO_API_KEY"}
+# Shared bridge keys that also satisfy these providers (_PROVIDER_ENV_VAR_ALIASES).
+_USAGE_API_KEY_ALIASES = ("OPENCODE_API_KEY",)
+
+
+def _usage_api_quota(monkeypatch, tmp_path, provider, urlopen, *, key="private-usage-key"):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    for env_var in (*_USAGE_API_KEYS.values(), *_USAGE_API_KEY_ALIASES):
+        monkeypatch.delenv(env_var, raising=False)
+    if key:
+        monkeypatch.setenv(_USAGE_API_KEYS[provider], key)
+    old_cfg, old_mtime = _with_config(model={"provider": provider})
+    import api.providers as providers
+
+    real_env_var_for = providers._provider_env_var_for
+    monkeypatch.setattr(
+        providers, "_provider_env_var_for",
+        lambda pid: _USAGE_API_KEYS.get(pid) or real_env_var_for(pid),
+    )
+    monkeypatch.setattr(providers.urllib.request, "urlopen", urlopen)
+    try:
+        return providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+
+def _respond(body):
+    raw = body if isinstance(body, bytes) else body.encode()
+    return lambda req, timeout: _FakeResponse(raw)
+
+
+def _assert_strict_json_safe(result):
+    text = json.dumps(result, allow_nan=False)  # raises on NaN/Infinity floats
+    assert not re.search(r"\b(nan|inf|infinity)\b", text, re.IGNORECASE), text
+
+
+_NON_FINITE = ['"NaN"', '"Infinity"', '"-Infinity"', "NaN", "Infinity", "-Infinity", "1" + "0" * 400]
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+def test_opencode_go_quota_drops_non_finite_percent(monkeypatch, tmp_path, bad):
+    body = (
+        '{"usage": {"rolling": {"percent": %s}, "weekly": {"percent": 30},'
+        ' "monthly": {"percent": -5}}}' % bad
+    )
+    result = _usage_api_quota(monkeypatch, tmp_path, "opencode-go", _respond(body))
+
+    assert result["status"] == "available"
+    assert [w["label"] for w in result["account_limits"]["windows"]] == ["Weekly"]
+    _assert_strict_json_safe(result)
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+@pytest.mark.parametrize("field", ["used", "cap"])
+def test_commandcode_quota_drops_non_finite_window_numbers(monkeypatch, tmp_path, bad, field):
+    five_hour = {"used": "3", "cap": "12"}
+    five_hour[field] = "@BAD@"
+    body = json.dumps({
+        "credits": {"monthlyCredits": "@BAD@", "purchasedCredits": 2},
+        "windowLimits": {"fiveHour": five_hour, "weekly": {"used": 12, "cap": 30}},
+    }).replace('"@BAD@"', bad)
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(body))
+
+    assert result["status"] == "available"
+    windows = result["account_limits"]["windows"]
+    assert [w["label"] for w in windows] == ["Weekly"]
+    assert result["account_limits"]["details"] == ["Credits remaining: $2"]
+    _assert_strict_json_safe(result)
+
+
+def test_commandcode_quota_rejects_negative_used(monkeypatch, tmp_path):
+    body = json.dumps({"windowLimits": {
+        "fiveHour": {"used": -4, "cap": 12}, "weekly": {"used": 12, "cap": 30}}})
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(body))
+
+    assert [w["label"] for w in result["account_limits"]["windows"]] == ["Weekly"]
+    assert "-4" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "provider, body",
+    [
+        ("opencode-go", '{"usage": {"rolling": {"percent": "NaN"}, "weekly": {"percent": Infinity}}}'),
+        ("commandcode", '{"windowLimits": {"fiveHour": {"used": NaN, "cap": 12},'
+                        ' "weekly": {"used": 1, "cap": "Infinity"}}}'),
+    ],
+)
+def test_usage_api_quota_all_windows_invalid_is_unavailable(monkeypatch, tmp_path, provider, body):
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, _respond(body))
+
+    assert result["status"] == "unavailable"
+    assert result["account_limits"] is None
+    _assert_strict_json_safe(result)
+
+
+
+def test_commandcode_quota_omits_credit_detail_when_the_sum_overflows(monkeypatch, tmp_path):
+    body = json.dumps({
+        "credits": {"monthlyCredits": 1e308, "purchasedCredits": 1e308},
+        "windowLimits": {"weekly": {"used": 12, "cap": 30}},
+    })
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(body))
+
+    assert result["status"] == "available"
+    assert result["account_limits"]["details"] == []
+    _assert_strict_json_safe(result)
+
+
+@pytest.mark.parametrize(
+    "provider, body",
+    [
+        ("commandcode", '{"windowLimits": {"weekly": {"used": 12, "cap": 30, "resetAt": 1%s}}}' % ("0" * 400)),
+        ("opencode-go", '{"usage": {"weekly": {"percent": 30, "resetsAt": 1%s}}}' % ("0" * 400)),
+    ],
+)
+def test_usage_api_quota_oversized_reset_keeps_the_window(monkeypatch, tmp_path, provider, body):
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, _respond(body))
+
+    assert result["status"] == "available"
+    [window] = result["account_limits"]["windows"]
+    assert window["label"] == "Weekly"
+    assert window["reset_at"] is None
+    _assert_strict_json_safe(result)
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+def test_usage_api_quota_without_key_reports_no_key_and_skips_fetch(monkeypatch, tmp_path, provider):
+    def fail_urlopen(req, timeout):
+        raise AssertionError("must not fetch without a key")
+
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, fail_urlopen, key=None)
+
+    assert result["status"] == "no_key"
+    assert result["account_limits"] is None
+
+
+def _raiser(exc):
+    def urlopen(req, timeout):
+        raise exc
+    return urlopen
+
+
+def _http_error(code):
+    return urllib.error.HTTPError("https://example.invalid", code, "err", {}, BytesIO(b"private body"))
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+@pytest.mark.parametrize(
+    "urlopen, expected",
+    [
+        (lambda: _raiser(_http_error(401)), "invalid_key"),
+        (lambda: _raiser(_http_error(403)), "invalid_key"),
+        (lambda: _raiser(_http_error(500)), "unavailable"),
+        (lambda: _raiser(TimeoutError("timed out")), "unavailable"),
+        (lambda: _raiser(urllib.error.URLError("down")), "unavailable"),
+        (lambda: _respond(b"not json {"), "unavailable"),
+        (lambda: _respond(b'{"unexpected": true}'), "unavailable"),
+    ],
+    ids=["401", "403", "500", "timeout", "urlerror", "malformed-json", "unrecognized-shape"],
+)
+def test_usage_api_quota_failures_map_to_sanitized_status(monkeypatch, tmp_path, provider, urlopen, expected):
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, urlopen(), key="private-usage-key")
+
+    assert result["status"] == expected
+    assert result["ok"] is False
+    assert result["account_limits"] is None
+    assert "private-usage-key" not in repr(result)
+    assert "private body" not in repr(result)
 
 
 def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
