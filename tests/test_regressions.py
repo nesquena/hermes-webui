@@ -1202,7 +1202,7 @@ def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
     assert "const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'" in ui_src
     assert "function saveInflightState(sid, state)" in ui_src
     assert "function loadInflightState(sid, streamId)" in ui_src
-    assert "function clearInflightState(sid)" in ui_src
+    assert "function clearInflightState(sid, expectedStreamId)" in ui_src
     assert "saveInflightState(activeSid" in messages_src, \
         "messages.js must persist live stream snapshots while a turn is in flight"
     assert "clearInflightState(activeSid)" in messages_src, \

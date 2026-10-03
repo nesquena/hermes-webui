@@ -9925,11 +9925,12 @@ function loadInflightState(sid, streamId){
   }
   return entry;
 }
-function clearInflightState(sid){
+function clearInflightState(sid, expectedStreamId){
   if(!sid) return;
   try{
     const all=_readInflightStateMap();
     if(!(sid in all)) return;
+    if(expectedStreamId&&(!all[sid]||all[sid].streamId!==expectedStreamId)) return;
     delete all[sid];
     if(Object.keys(all).length) localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
     else localStorage.removeItem(INFLIGHT_STATE_KEY);
@@ -10366,7 +10367,13 @@ function markInflight(sid, streamId) {
     }catch(_){}
   }
 }
-function clearInflight() {
+function clearInflight(sid, expectedStreamId) {
+  if(sid||expectedStreamId){
+    try{
+      const saved=JSON.parse(localStorage.getItem(INFLIGHT_KEY)||'null');
+      if(!saved||saved.sid!==sid||saved.streamId!==expectedStreamId) return;
+    }catch(_){return;}
+  }
   localStorage.removeItem(INFLIGHT_KEY);
 }
 function showReconnectBanner(msg) {

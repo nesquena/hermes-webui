@@ -6,15 +6,20 @@ address that session's stream id and must only clear approval/clarify UI owned b
 that session.
 """
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).parent.parent
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
-def _function_body(src: str, name: str, window: int = 1800) -> str:
+def _function_body(src: str, name: str, window: int | None = 1800) -> str:
     idx = src.find(f"function {name}(")
     assert idx >= 0, f"{name} not found"
+    if window is None:
+        next_function = re.search(r"\n(?:async )?function ", src[idx + 1 :])
+        assert next_function, f"end of {name} not found"
+        return src[idx : idx + 1 + next_function.start()]
     return src[idx : idx + window]
 
 
@@ -42,7 +47,7 @@ class TestSidebarCancelAction:
 
     def test_cancel_session_stream_uses_session_owned_stream_id(self):
         """Cancel-from-sidebar must call /api/chat/cancel with the row's stream id."""
-        body = _function_body(BOOT_JS, "cancelSessionStream")
+        body = _function_body(BOOT_JS, "cancelSessionStream", None)
         assert "session&&session.active_stream_id" in body or "session && session.active_stream_id" in body
         assert "stream_id=${encodeURIComponent(streamId)}" in body
         assert "S.activeStreamId" not in body.split("const streamId", 1)[1].split("fetch", 1)[0], (
@@ -51,7 +56,7 @@ class TestSidebarCancelAction:
 
     def test_cancel_session_stream_clears_only_owned_clarify_and_approval_cards(self):
         """Cancelling A from sidebar must not blanket-clear B's clarify/approval cards."""
-        body = _function_body(BOOT_JS, "cancelSessionStream")
+        body = _function_body(BOOT_JS, "cancelSessionStream", None)
         assert "_clarifySessionId===sid" in body, (
             "clarify card cleanup must be gated to the cancelled session id"
         )
