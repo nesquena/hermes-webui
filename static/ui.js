@@ -8143,6 +8143,30 @@ function renderMd(raw){
   // Inline backtick spans: restore <code> tags produced in the stash callback above.
   // Must happen BEFORE bold/italic so **`code`** → <strong><code>code</code></strong>.
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
+  function _bareAutolinkParts(rawUrl){
+    const url=String(rawUrl||'');
+    const schemeEnd=url.indexOf('://')+3;
+    const authorityTail=url.slice(schemeEnd).search(/[/?#]/);
+    const authorityEnd=authorityTail<0?url.length:schemeEnd+authorityTail;
+    const pathStart=url.indexOf('/',schemeEnd);
+    const boundaryMarks='，。．｡；：！？、）】」》〕';
+    for(let i=schemeEnd;i<url.length;i++){
+      const mark=url[i];
+      if(!boundaryMarks.includes(mark)) continue;
+      // UTS #46 maps these three authority characters to an ASCII dot. They
+      // are label separators, not sentence endings, when another label follows.
+      if((mark==='。'||mark==='．'||mark==='｡')&&i<authorityEnd
+         &&i+1<authorityEnd&&/[A-Za-z0-9_\-\u0080-\uFFFF]/.test(url[i+1])) continue;
+      // Once a path contains raw CJK, interior CJK punctuation is a plausible
+      // IRI character. Keep it unless it is the final character in the run.
+      const cjkBeforeMark=pathStart>=0&&i>pathStart
+        &&/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(url.slice(pathStart,i));
+      if(cjkBeforeMark&&i<url.length-1) continue;
+      return [url.slice(0,i),url.slice(i)];
+    }
+    const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';
+    return [trail?url.slice(0,-1):url,trail];
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -8167,7 +8191,7 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
-    t=t.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{const trail=url.match(/[.,;:!?)\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
+    t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const [clean,trail]=_bareAutolinkParts(url);return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -8515,12 +8539,16 @@ function renderMd(raw){
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
-  s=s.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{
+  s=s.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{
     // Strip trailing punctuation that was likely not part of the URL.
-    // CJK full-width punctuation (）。，；：！？、) is included because LLMs
-    // frequently use full-width delimiters in Chinese/Japanese text.
-    const trail=url.match(/[.,;:!?)]$/)||url.match(/[\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';
-    const clean=trail?url.slice(0,-1):url;
+    // High-confidence CJK sentence marks and closing brackets
+    // (）。，；：！？、】」》〕) stop the match so a URL glued to prose —
+    // （https://ex.com/，節錄原文） — ends before that prose. Keep other
+    // Unicode IRI characters (for example em dash and smart apostrophe)
+    // matchable rather than treating broad punctuation ranges as delimiters.
+    // This generalizes the #6792 strip, which could only drop a single mark
+    // sitting at the very end of the match.
+    const [clean,trail]=_bareAutolinkParts(url);
     return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
   });
   s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);

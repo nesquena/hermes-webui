@@ -201,3 +201,104 @@ class TestAutolinkInlinePass:
         out = _render(driver_path, "> [link](https://example.com/x)")
         assert 'href="https://example.com/x"' in out
         assert out.count("<a ") == 1, f"Inline markdown link double-wrapped. Got: {out!r}"
+
+
+# ── Follow-up fix: URL + CJK punctuation + CONTINUED prose ────────────────
+#
+# The #6792 strip could only drop a single mark sitting at the very END of the
+# matched run. When a URL was followed by a full-width mark and then MORE prose
+# before the closing mark — e.g. 「（https://example.com/x/，節錄原文）」 — the
+# whole 「，節錄原文」 was swallowed into href, because the match never stopped
+# at the interior mark. Fix: the match now STOPS at the high-confidence CJK
+# sentence marks and closing brackets needed by the report, so the prose stays
+# outside the anchor without truncating other valid Unicode IRI characters.
+# Reported shape: （https://opencode.ai/docs/go/，節錄原文） and
+# （https://opencode.ai/auth；文件也寫用量在那裡看） both clicked through to a
+# broken URL.
+
+CJK_CONTINUATION_MARKS = ["，", "。", "；", "：", "！", "？", "、", "）", "】", "」", "》", "〕"]
+
+
+class TestAutolinkCjkProseContinuation:
+    """A CJK mark between a URL and continued prose must end the link."""
+
+    @pytest.mark.parametrize("mark", CJK_CONTINUATION_MARKS)
+    def test_outer_pass_mark_terminates_and_prose_stays_visible(self, driver_path, mark):
+        out = _render(driver_path, f"See https://example.com/menu{mark}節錄原文）")
+        assert 'href="https://example.com/menu"' in out, (
+            f"CJK mark {mark!r} must end the URL match. Got: {out!r}"
+        )
+        assert f'href="https://example.com/menu{mark}' not in out, (
+            f"CJK mark {mark!r} leaked into href with following prose. Got: {out!r}"
+        )
+        assert f"</a>{mark}節錄原文）" in out, (
+            f"Prose after {mark!r} must stay visible outside the anchor. Got: {out!r}"
+        )
+
+    @pytest.mark.parametrize("mark", ["，", "；", "）", "」"])
+    def test_inline_pass_mark_terminates_and_prose_stays_visible(self, driver_path, mark):
+        out = _render(driver_path, f"- See https://example.com/menu{mark}後續文字")
+        assert 'href="https://example.com/menu"' in out, (
+            f"Inline pass: CJK mark {mark!r} must end the URL match. Got: {out!r}"
+        )
+        assert f'href="https://example.com/menu{mark}' not in out
+        assert f"</a>{mark}後續文字" in out
+
+    def test_reported_shape_fullwidth_parens_with_interior_marks(self, driver_path):
+        """The reported message shape: （URL，說明） and URL；說明） in one line."""
+        out = _render(
+            driver_path,
+            "來源（https://example.com/docs/go/，節錄原文）以及 https://example.com/auth；文件也寫用量在那裡看）",
+        )
+        assert 'href="https://example.com/docs/go/"' in out
+        assert 'href="https://example.com/auth"' in out
+        assert 'href="https://example.com/docs/go/，' not in out
+        assert 'href="https://example.com/auth；' not in out
+        assert "</a>，節錄原文）" in out
+        assert "</a>；文件也寫用量在那裡看）" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    @pytest.mark.parametrize("dot", ["。", "．", "｡"])
+    def test_uts46_dot_variant_remains_in_authority(self, driver_path, prefix, dot):
+        url = f"https://example{dot}com/path"
+        out = _render(driver_path, prefix + url)
+        assert f'href="{url}"' in out
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    @pytest.mark.parametrize("mark", ["，", "。", "；", "）"])
+    def test_raw_cjk_path_preserves_interior_cjk_punctuation(
+        self, driver_path, prefix, mark
+    ):
+        url = f"https://example.com/日本語{mark}続き"
+        out = _render(driver_path, prefix + url)
+        assert f'href="{url}"' in out
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("iri_char", ["—", "’"])
+    def test_outer_pass_preserves_unicode_iri_path_characters(self, driver_path, iri_char):
+        url = f"https://example.com/owner{iri_char}s-guide"
+        out = _render(driver_path, f"See {url}")
+        assert f'href="{url}"' in out, (
+            f"Unicode IRI character {iri_char!r} must remain inside a bare URL. Got: {out!r}"
+        )
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("iri_char", ["—", "’"])
+    def test_inline_pass_preserves_unicode_iri_path_characters(self, driver_path, iri_char):
+        url = f"https://example.com/owner{iri_char}s-guide"
+        out = _render(driver_path, f"- See {url}")
+        assert f'href="{url}"' in out, (
+            f"Inline pass must preserve {iri_char!r} in a bare Unicode IRI. Got: {out!r}"
+        )
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("iri_char", ["—", "’"])
+    def test_explicit_markdown_link_preserves_unicode_iri_path_characters(
+        self, driver_path, iri_char
+    ):
+        url = f"https://example.com/owner{iri_char}s-guide"
+        out = _render(driver_path, f"[guide]({url})")
+        assert f'href="{url}"' in out
+        assert ">guide</a>" in out
+        assert out.count("<a ") == 1
