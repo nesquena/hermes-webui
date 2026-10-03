@@ -209,6 +209,21 @@ class _AliasPredicateCase:
         _AliasPredicateCase("ollama", "kilocode", False, "cross-provider: must repair"),
         _AliasPredicateCase("anthropic", "openai", False, "cross-provider: must repair"),
         _AliasPredicateCase("copilot", "openai-codex", False, "cross-provider: must repair"),
+        # #7568 SILENT finding 2: the family-normalization clause made
+        # ``_normalize_provider_id('openai-codex') == 'openai'`` count as a
+        # match, so a persisted ``@openai-codex:gpt-5.5`` / ``openai`` pair
+        # was PRESERVED even though the ``@openai-codex:`` qualifier routes
+        # through Codex. The displayed provider then disagreed with where the
+        # turn actually goes. Family membership is not identity — only a real
+        # alias (a declared rename of the same routing destination) matches.
+        _AliasPredicateCase(
+            "openai-codex", "openai", False,
+            "#7568: codex vs openai are same family, different routing",
+        ),
+        _AliasPredicateCase(
+            "openai", "openai-codex", False,
+            "#7568 symmetric: openai vs codex must repair",
+        ),
         # Empty/None inputs are never preservable.
         _AliasPredicateCase("", "claude", False, "empty hint"),
         _AliasPredicateCase("claude", "", False, "empty requested"),

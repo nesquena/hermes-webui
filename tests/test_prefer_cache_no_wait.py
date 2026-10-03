@@ -181,3 +181,144 @@ def _hold_lock_briefly(lock, release_event, seconds):
         release_event.wait(timeout=seconds + 1.0)
     finally:
         lock.release()
+
+# ── #7568: in-flight rebuild overlap must be non-authoritative ──────────────
+
+
+def _warm_catalog(monkeypatch, *, provider_ids):
+    """Warm memory cache holding exactly these provider group ids.
+
+    The payload carries the FULL /api/models shape (``_is_valid_models_cache``
+    requires active_provider / default_model / configured_model_badges /
+    groups) or the warm-cache read is rejected as stale and the branch under
+    test is never reached.
+    """
+    monkeypatch.setattr(
+        cfg,
+        "_available_models_cache",
+        {
+            "active_provider": provider_ids[0] if provider_ids else "",
+            "default_model": "",
+            "configured_model_badges": {},
+            "groups": [
+                {"provider_id": pid, "models": [], "extra_models": []}
+                for pid in provider_ids
+            ],
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(cfg, "_available_models_cache_ts", time.monotonic(), raising=False)
+    # Match the runtime source fingerprint exactly, or the warm cache is
+    # rejected as stale and the test would silently exercise the minimal
+    # catalog fallback instead of the branch under test.
+    monkeypatch.setattr(
+        cfg,
+        "_available_models_cache_source_fingerprint",
+        cfg._models_cache_source_fingerprint(),
+        raising=False,
+    )
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
+    _pin_cfg_mtime(monkeypatch)
+
+
+def test_warm_cache_overlapping_rebuild_is_non_authoritative(monkeypatch):
+    """#7568 CORE finding 1: a warm snapshot served to a no-wait display
+    caller WHILE a rebuild is in flight must be marked non-authoritative.
+
+    The warm cache predates the provider the user just added (the in-flight
+    rebuild is the one that will add it). A display caller that repairs the
+    persisted ``@copilot:gpt-5.5`` / ``copilot`` pair against this snapshot
+    returns ``gpt-5.5`` / ``openai-codex``, and ``_resolveSessionModelFor
+    DisplaySoon()`` writes that back into ``S.session.model`` /
+    ``model_provider`` — which the next send uses, so the user's choice is
+    lost for real.
+    """
+    _warm_catalog(monkeypatch, provider_ids=["openai"])
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+
+    result = cfg.get_available_models(
+        prefer_cache=True, wait_for_inflight_rebuild=False
+    )
+
+    assert result.get("_non_authoritative") is True, (
+        "a warm cache served while a rebuild overlaps must be marked "
+        "non-authoritative so the display resolver preserves the persisted pair"
+    )
+    assert result.get("_non_authoritative_reason") == "no_wait_warm_cache_during_rebuild"
+    # The catalog content is still the valid warm snapshot — marking changes
+    # authority, not content.
+    assert [g["provider_id"] for g in result.get("groups", [])] == ["openai"]
+
+
+def test_warm_cache_without_rebuild_stays_authoritative(monkeypatch):
+    """No overlap → the warm snapshot keeps its normal authority.
+
+    Otherwise every ordinary display resolution would stop repairing a stale
+    pair, which is the repair the feature exists to perform.
+    """
+    _warm_catalog(monkeypatch, provider_ids=["openai"])
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", False, raising=False)
+
+    result = cfg.get_available_models(
+        prefer_cache=True, wait_for_inflight_rebuild=False
+    )
+
+    assert result.get("_non_authoritative") is None
+    assert [g["provider_id"] for g in result.get("groups", [])] == ["openai"]
+
+
+def test_warm_cache_overlapping_rebuild_is_authoritative_for_routing(monkeypatch):
+    """The routing-authoritative caller (provider repair) must NOT be
+    downgraded: it still needs the real catalog to decide the fallback, and
+    it is willing to wait for the rebuild."""
+    _warm_catalog(monkeypatch, provider_ids=["openai"])
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+    monkeypatch.setattr(cfg, "_cache_build_cv", _WaitWildcard(cfg._cache_build_cv, blocking=False))
+
+    result = cfg.get_available_models(
+        prefer_cache=True, wait_for_inflight_rebuild=True
+    )
+
+    assert result.get("_non_authoritative") is None, (
+        "wait_for_inflight_rebuild=True declares a routing-authoritative "
+        "caller; downgrading it would silently disable the provider repair"
+    )
+
+
+def test_marking_does_not_mutate_the_shared_cache_entry(monkeypatch):
+    """The in-memory cache entry must stay clean for authoritative readers.
+
+    Marking is done on a deep copy wherever the marked document could be the
+    shared object; here the warm-cache branch marks the object it is about to
+    return, so this pins that it was copied first (otherwise a later
+    authoritative read would inherit ``_non_authoritative`` from the same
+    object identity the module cached).
+    """
+    warm = {
+        "active_provider": "openai",
+        "default_model": "",
+        "configured_model_badges": {},
+        "groups": [{"provider_id": "openai", "models": [], "extra_models": []}],
+    }
+    _warm_catalog(monkeypatch, provider_ids=["openai"])
+    monkeypatch.setattr(cfg, "_available_models_cache", warm, raising=False)
+    monkeypatch.setattr(cfg, "_available_models_cache_ts", time.monotonic(), raising=False)
+    monkeypatch.setattr(
+        cfg,
+        "_available_models_cache_source_fingerprint",
+        cfg._models_cache_source_fingerprint(),
+        raising=False,
+    )
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+
+    result = cfg.get_available_models(
+        prefer_cache=True, wait_for_inflight_rebuild=False
+    )
+
+    assert result.get("_non_authoritative") is True
+    assert warm.get("_non_authoritative") is None, (
+        "the module-level cache entry was marked in place; an authoritative "
+        "reader would now inherit the non-authoritative flag (#7568)"
+    )

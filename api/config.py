@@ -10148,7 +10148,16 @@ def get_available_models(
             # Lock busy → an in-flight rebuild owns it. Serve the best
             # lock-free snapshot now; never wait on the builder.
             if disk_groups is not None:
-                return copy.deepcopy(disk_groups)
+                # The rebuild this caller overlaps may be the one that is
+                # adding the provider the persisted pair names, so even a
+                # fully valid disk snapshot is not authoritative here (#7568
+                # CORE). Deep-copy before marking: the on-disk cache loader
+                # owns no shared state, but later callers must still see a
+                # clean document.
+                return _mark_non_authoritative_catalog(
+                    copy.deepcopy(disk_groups),
+                    reason="no_wait_lock_busy_disk_cache",
+                )
             if stale_disk_groups is not None:
                 return _mark_non_authoritative_catalog(
                     copy.deepcopy(stale_disk_groups),
@@ -10214,6 +10223,20 @@ def get_available_models(
         cached = _get_fresh_memory_models_cache(now)
         if cached is not None:
             if not force_refresh:
+                # A no-wait display caller that overlaps an IN-FLIGHT rebuild
+                # must not treat this snapshot as authoritative (#7568 CORE):
+                # the warm cache predates the provider the user just added, so
+                # the display resolvers would repair a valid persisted pair
+                # against it — and their result is written back into
+                # S.session.model / model_provider, which the next send uses.
+                # Marking the snapshot non-authoritative lets
+                # _resolve_compatible_session_model_state preserve the
+                # persisted pair instead.
+                if prefer_cache and not wait_for_inflight_rebuild and _cache_build_in_progress:
+                    return _mark_non_authoritative_catalog(
+                        cached,
+                        reason="no_wait_warm_cache_during_rebuild",
+                    )
                 return cached
             if (
                 force_refresh_started_at is not None
@@ -10257,6 +10280,17 @@ def get_available_models(
             _available_models_cache_ts = now
             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
             _sync_models_cache_provenance()
+            # Same in-flight-rebuild overlap rule as the warm-cache branch
+            # above (#7568 CORE): a valid disk snapshot that predates the
+            # provider being added is not authoritative for a no-wait display
+            # caller. Note the snapshot is deep-copied before marking so the
+            # in-memory cache entry itself stays clean for authoritative
+            # readers.
+            if prefer_cache and not wait_for_inflight_rebuild and _cache_build_in_progress:
+                return _mark_non_authoritative_catalog(
+                    copy.deepcopy(disk_groups),
+                    reason="no_wait_disk_cache_during_rebuild",
+                )
             return copy.deepcopy(disk_groups)
 
         # ── prefer_cache: NEVER run the live provider rebuild ────────────────

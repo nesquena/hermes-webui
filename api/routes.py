@@ -6788,11 +6788,21 @@ def _non_authoritative_hint_matches_requested_provider(
     existing ``@`` qualifier intact rather than re-qualifying it.
 
     So preserve only when the hint resolves to the same provider as the
-    request — raw-equal, alias-equal, or normalized-equal (the same three
-    comparisons the authoritative path makes against
-    ``hint_matches_active``). Everything else falls through to the
+    request — raw-equal or canonical-alias-equal (the two comparisons that
+    prove same-identity). Everything else falls through to the
     compatibility-repair path, which is what rewrites a stale cross-provider
     pair to the correct routed default.
+
+    ``_normalize_provider_id`` is deliberately NOT consulted for identity.
+    It collapses an entire routing FAMILY onto one slug — most importantly
+    ``openai-codex`` → ``openai`` — because the caller that introduced it
+    (the ``@provider:model`` qualifier rewriter) wanted family-level
+    matching. Two providers in one family are still DIFFERENT routing
+    destinations: ``@openai-codex:gpt-5.5`` routes through Codex while
+    ``openai`` does not. Preserving a ``openai``/``openai-codex`` pair on the
+    strength of the family normalization would leave the displayed provider
+    disagreeing with where the next turn actually goes, which is exactly the
+    class of bug this predicate exists to prevent.
     """
     hint = str(hinted_provider or "").strip().lower()
     requested = str(requested_provider or "").strip().lower()
@@ -6803,20 +6813,23 @@ def _non_authoritative_hint_matches_requested_provider(
     from api.config import _resolve_provider_alias as _resolve_alias
 
     # The authoritative ``hint_matches_active`` chain compares against the
-    # canonical form of the active provider on the alias-equal and
-    # normalized-equal clauses, so it handles either side carrying an alias
-    # (e.g. ``hint="claude"`` vs ``active="anthropic"`` AND ``hint="anthropic"``
-    # vs ``active="claude"``). Mirror it: canonicalize the REQUESTED side
-    # too. The previous one-sided ``_resolve_alias(hint) == requested``
-    # silently failed when the hint was the canonical form and the request
-    # carried the alias, which let a no-wait display lookup repair a valid
-    # persisted ``@anthropic:claude-opus-4.7`` / ``claude`` pair to the
-    # catalog default (greptile P1, 2026-09-25).
+    # canonical form of the active provider on the alias-equal clause, so it
+    # handles either side carrying an alias (e.g. ``hint="claude"`` vs
+    # ``active="anthropic"`` AND ``hint="anthropic"`` vs ``active="claude"``).
+    # Mirror it: canonicalize BOTH sides. The previous one-sided
+    # ``_resolve_alias(hint) == requested`` silently failed when the hint was
+    # the canonical form and the request carried the alias, which let a
+    # no-wait display lookup repair a valid persisted
+    # ``@anthropic:claude-opus-4.7`` / ``claude`` pair to the catalog default
+    # (greptile P1, 2026-09-25).
+    #
+    # A canonical alias is the ONLY equivalence accepted beyond raw equality:
+    # it is a declared rename of the SAME provider (verified spelling of one
+    # routing destination), not a family grouping. Unknown names pass through
+    # ``_resolve_provider_alias`` unchanged, so they can only match when they
+    # are already equal — which ``hint == requested`` handled above.
     requested_canonical = _resolve_alias(requested)
-    if _resolve_alias(hint) == requested_canonical:
-        return True
-    normalized = _normalize_provider_id(hint)
-    return bool(normalized) and normalized == requested_canonical
+    return _resolve_alias(hint) == requested_canonical
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
