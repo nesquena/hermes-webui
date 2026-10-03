@@ -8885,6 +8885,8 @@ function _preferencesPayloadFromUi(){
   if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
   const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
   if(newChatOnWorkspaceSwitchCb) payload.new_chat_on_workspace_switch=newChatOnWorkspaceSwitchCb.checked;
+  const newChatOnSessionDeleteCb=$('settingsNewChatOnSessionDelete');
+  if(newChatOnSessionDeleteCb) payload.new_chat_on_session_delete=newChatOnSessionDeleteCb.checked;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
   Object.assign(payload,_speechPreferencesPayloadFromUi());
@@ -9033,6 +9035,9 @@ async function _autosavePreferencesSettings(payload){
     }
     if(payload&&payload.new_chat_on_workspace_switch!==undefined){
       window._newChatOnWorkspaceSwitch=!!(saved&&saved.new_chat_on_workspace_switch);  // #5473
+    }
+    if(payload&&payload.new_chat_on_session_delete!==undefined){
+      window._newChatOnSessionDelete=!!(saved&&saved.new_chat_on_session_delete);  // opt-in: delete → new chat
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -9823,6 +9828,12 @@ async function loadSettingsPanel(){
       newChatOnWorkspaceSwitchCb.checked=!!settings.new_chat_on_workspace_switch;
       window._newChatOnWorkspaceSwitch=newChatOnWorkspaceSwitchCb.checked;
       newChatOnWorkspaceSwitchCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    const newChatOnSessionDeleteCb=$('settingsNewChatOnSessionDelete');
+    if(newChatOnSessionDeleteCb){
+      newChatOnSessionDeleteCb.checked=!!settings.new_chat_on_session_delete;
+      window._newChatOnSessionDelete=newChatOnSessionDeleteCb.checked;
+      newChatOnSessionDeleteCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');

@@ -328,9 +328,12 @@ STEPS:
 EXPECT:
   - A "Conversation deleted" toast appears at the bottom for ~3 seconds
   - The deleted session disappears from the sidebar list
-  - The next most recent session automatically loads (or empty state if none remain)
-  - NO new session is auto-created
-FAIL: Session not removed, new session auto-created, error shown, or wrong session loaded.
+  - Default ("Start a new chat when deleting the open conversation" off): the next most recent
+    session automatically loads (or empty state if none remain), and NO new session is auto-created
+  - Opt-in on (Settings > Preferences): a fresh chat opens instead of loading another session,
+    and the deleted conversation's workspace stays selected
+FAIL: Session not removed, error shown, wrong session loaded, or a new session auto-created
+while the opt-in setting is off.
 
 ### T2.6: Delete Non-Active Session
 SETUP: At least two sessions exist. Session B is not active.

@@ -36,7 +36,7 @@ def test_new_session_remembers_regular_empty_session_id():
     remember_idx = body.find("_rememberNewChatDraftSession(S.session)")
     assert assign_idx != -1, "newSession must assign S.session from the POST response"
     assert remember_idx > assign_idx, "newSession must remember the created empty session id"
-    assert "if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);" in body, (
+    assert "if(!(options&&options.worktree)&&!(options&&options.preserveRememberedDraftPointer)) _rememberNewChatDraftSession(S.session);" in body, (
         "worktree-backed new sessions must not become New Chat draft candidates"
     )
 
@@ -79,7 +79,7 @@ def test_new_chat_empty_reuse_guard_checks_loaded_visible_messages():
 
 def test_restore_helper_validates_candidate_with_session_metadata():
     assert "const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';" in SESSIONS_JS
-    assert "async function _restoreRememberedNewChatDraftSession()" in SESSIONS_JS
+    assert "async function _restoreRememberedNewChatDraftSession(requiredWorkspace=null, stillOwnsPane=null) {" in SESSIONS_JS
     assert "messages=0&resolve_model=0" in SESSIONS_JS, (
         "helper should validate the hidden zero-message candidate through /api/session metadata"
     )
