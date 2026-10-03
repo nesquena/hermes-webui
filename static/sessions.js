@@ -5477,10 +5477,18 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
     }
   }
   const currentRow=_findSessionRenameRow(sid);
-  const currentAnchor=currentRow&&currentRow.querySelector
-    ? currentRow.querySelector('.session-actions-trigger')
-    : null;
-  if(!currentSession||!currentAnchor||!currentAnchor.isConnected||currentAnchor===anchorEl) return null;
+  // Keep the opener's kind: expanded rows contain child triggers before their
+  // own, and touch long-press must stay on the visible row, not hidden dots.
+  const anchorClasses=anchorEl&&anchorEl.classList;
+  let currentAnchor=anchorEl&&anchorEl.isConnected?anchorEl:null;
+  if(anchorClasses&&anchorClasses.contains('session-actions-trigger')){
+    currentAnchor=currentRow&&currentRow.querySelector(':scope > .session-actions > .session-actions-trigger');
+  }else if(anchorClasses&&anchorClasses.contains('session-actions')){
+    currentAnchor=currentRow&&currentRow.querySelector(':scope > .session-actions');
+  }else if(anchorClasses&&(anchorClasses.contains('session-item')||anchorClasses.contains('session-child-session'))){
+    currentAnchor=currentRow;
+  }
+  if(!currentSession||!currentAnchor||!currentAnchor.isConnected) return null;
   if(contextPoint) currentAnchor._projectPickerContextPoint=contextPoint;
   return {session:currentSession,anchorEl:currentAnchor};
 }

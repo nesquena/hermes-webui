@@ -123,10 +123,11 @@ def _fixture_script() -> str:
     )
 
 
-def _picker_handoff_fixture_script() -> str:
+def _picker_handoff_fixture_script(anchor_kind="trigger") -> str:
     """Exercise picker-to-menu handoff with real browser DOM replacement."""
     return "\n".join(
         [
+            f"const handoffAnchorKind = '{anchor_kind}';",
             "let _sessionActionMenu = null;",
             "let _sessionActionAnchor = null;",
             "let _sessionActionSessionId = null;",
@@ -158,7 +159,7 @@ def _picker_handoff_fixture_script() -> str:
             "const deleteSession = async () => {};",
             "const removeWorktree = async () => {};",
             "const cancelSessionStream = async () => true;",
-            "function _positionSessionActionMenu(){}",
+            _function_source("_positionSessionActionMenu"),
             "function _playSessionActionMenuEntrance(){}",
             "let persistedPinned = null;",
             "const api = async (path, options) => { if(path === '/api/session/pin') persistedPinned = JSON.parse(options.body).pinned; return {}; };",
@@ -170,9 +171,16 @@ def _picker_handoff_fixture_script() -> str:
             "  const child = document.createElement('div'); child.className = 'session-child-session'; child.dataset.sid = 'picker-child';",
             "  const picker = document.createElement('div'); picker.className = 'project-picker'; child.appendChild(picker); parent.appendChild(child);",
             "  const other = document.createElement('div'); other.className = 'session-item'; other.dataset.sid = 'other-row';",
-            "  const trigger = document.createElement('button'); trigger.className = 'session-actions-trigger'; trigger.textContent = 'Actions'; trigger.setAttribute('aria-expanded', 'false'); other.appendChild(trigger);",
-            "  host.replaceChildren(parent, other); currentOtherAnchor = trigger;",
-            "  return {picker, trigger};",
+            "  other.tabIndex = -1; other.style.cssText = 'position:fixed;top:300px;left:16px;width:340px;height:48px';",
+            "  const fork = document.createElement('div'); fork.className = 'session-child-session session-child-session-fork';",
+            "  const childActions = document.createElement('div'); childActions.className = 'session-actions';",
+            "  const childTrigger = document.createElement('button'); childTrigger.className = 'session-actions-trigger'; childTrigger.dataset.sid = 'child-39'; childActions.appendChild(childTrigger); fork.appendChild(childActions); other.appendChild(fork);",
+            "  const actions = document.createElement('div'); actions.className = 'session-actions'; other.appendChild(actions);",
+            "  const trigger = document.createElement('button'); trigger.className = 'session-actions-trigger'; trigger.textContent = 'Actions'; trigger.setAttribute('aria-expanded', 'false'); trigger.dataset.sid = 'other-row'; actions.appendChild(trigger);",
+            "  if(handoffAnchorKind === 'row') actions.style.display = 'none';",
+            "  host.replaceChildren(parent, other); currentOtherAnchor = handoffAnchorKind === 'row' ? other : trigger;",
+            "  const opener = handoffAnchorKind === 'row' ? other : trigger;",
+            "  return {picker, trigger:opener};",
             "}",
             "function renderSessionListFromCache(){ repaintCount += 1; paintRows(); }",
             _function_source("_focusSessionActionMenuRestoreTarget"),
@@ -198,7 +206,12 @@ def _picker_handoff_fixture_script() -> str:
                 repaintBeforeMenu: repaintCount === 1,
                 staleAnchorReplaced: !first.trigger.isConnected && _sessionActionAnchor === currentOtherAnchor,
                 currentStateAction: Boolean(unpin),
+                childNotActive: !document.querySelector('[data-sid="child-39"]').classList.contains('active'),
+                ownAria: handoffAnchorKind === 'row' || currentOtherAnchor.getAttribute('aria-expanded') === 'true',
+                touchAnchorVisible: handoffAnchorKind !== 'row' || _sessionActionAnchor.getBoundingClientRect().height > 0,
               };
+              currentOtherAnchor.dispatchEvent(new Event('touchend', {bubbles:true}));
+              result.menuSurvivesRelease = Boolean(document.querySelector('.session-action-menu'));
               unpin.click();
               await new Promise(resolve => setTimeout(resolve, 0));
               result.persistedUnpin = persistedPinned === false;
@@ -274,7 +287,9 @@ def test_session_action_menu_returns_to_prior_focus_for_nonfocusable_opener_in_b
     }
 
 
-def test_picker_handoff_rebuilds_other_row_menu_and_escape_focus_in_browser():
+@pytest.mark.parametrize("anchor_kind", ["trigger", "row"])
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 620)])
+def test_picker_handoff_rebuilds_other_row_menu_and_escape_focus_in_browser(anchor_kind, width, height):
     try:
         from playwright.sync_api import sync_playwright
     except Exception:  # pragma: no cover - dependency missing path
@@ -285,9 +300,9 @@ def test_picker_handoff_rebuilds_other_row_menu_and_escape_focus_in_browser():
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
-        page = browser.new_page()
+        page = browser.new_page(viewport={"width": width, "height": height}, has_touch=anchor_kind == "row")
         page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
-        page.add_script_tag(content=_picker_handoff_fixture_script())
+        page.add_script_tag(content=_picker_handoff_fixture_script(anchor_kind))
         result = page.evaluate("window.__pickerMenuHandoffResult()")
         browser.close()
 
@@ -295,6 +310,10 @@ def test_picker_handoff_rebuilds_other_row_menu_and_escape_focus_in_browser():
         "repaintBeforeMenu": True,
         "staleAnchorReplaced": True,
         "currentStateAction": True,
+        "childNotActive": True,
+        "ownAria": True,
+        "touchAnchorVisible": True,
+        "menuSurvivesRelease": True,
         "persistedUnpin": True,
         "escapeFocusesReplacement": True,
         "parentAndNestedChildRemain": True,

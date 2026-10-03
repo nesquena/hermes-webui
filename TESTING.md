@@ -1,5 +1,13 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Project-picker deferred repaint handoff regression
+
+Expand a parent with fork-child menus, open a picker, defer a list repaint,
+then reopen the parent's action menu. Its own dots must receive active/ARIA
+state and Escape focus, never the child's. On touch layouts, long-press must
+retain the rebuilt row as its anchor through release. Repeat for a fork child
+and the connected topbar title.
+
 > This document is for manual browser testing by you or by a Claude browser agent.
 > It covers user-facing features of the UI across current releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.

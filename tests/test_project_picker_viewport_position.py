@@ -881,6 +881,57 @@ def _project_picker_session_action_handoff_source() -> str:
     return SESSIONS_JS[start:end]
 
 
+@pytest.mark.parametrize("kind", ["trigger", "row", "actions", "topbar"])
+def test_picker_handoff_preserves_anchor_kind_and_parent_scope(kind):
+    """A child trigger appears before the parent's own trigger in DOM order."""
+    script = r"""
+const kind = KIND;
+const classes = (...names) => ({contains: name => names.includes(name)});
+const oldRow = {isConnected:true, classList:classes('session-item')};
+const anchor = kind === 'row' ? oldRow : {
+  isConnected:true,
+  classList:classes(kind === 'trigger' ? 'session-actions-trigger' :
+    kind === 'actions' ? 'session-actions' : 'topbar-title'),
+};
+anchor._projectPickerContextPoint = {clientX:310,clientY:420};
+const childTrigger = {isConnected:true, owner:'child-39'};
+const ownTrigger = {isConnected:true, owner:'review-one'};
+const ownActions = {isConnected:true, owner:'review-one'};
+const newRow = {
+  isConnected:true, classList:classes('session-item'),
+  querySelector(selector) {
+    if(selector === '.session-actions-trigger') return childTrigger;
+    if(selector === ':scope > .session-actions > .session-actions-trigger') return ownTrigger;
+    if(selector === ':scope > .session-actions') return ownActions;
+    return null;
+  },
+};
+let _projectPickerTeardown = () => {};
+let _sessionListRepaintDeferredByPicker = true;
+const _allSessions = [{session_id:'review-one',pinned:true}];
+function renderSessionListFromCache() {
+  oldRow.isConnected=false;
+  if(kind !== 'topbar') anchor.isConnected=false;
+}
+function _findSessionRenameRow() {return newRow;}
+""" .replace("KIND", json.dumps(kind)) + _project_picker_session_action_handoff_source() + r"""
+const result = _projectPickerSessionActionHandoff({session_id:'review-one'}, anchor);
+const expected = kind === 'row' ? newRow : kind === 'actions' ? ownActions :
+  kind === 'topbar' ? anchor : ownTrigger;
+console.log(JSON.stringify({
+  correctAnchor:result && result.anchorEl === expected,
+  canonicalSession:result && result.session === _allSessions[0],
+  point:result && result.anchorEl._projectPickerContextPoint,
+}));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["correctAnchor"] is True
+    assert data["canonicalSession"] is True
+    assert data["point"] == {"clientX": 310, "clientY": 420}
+
+
 def test_closing_the_action_menu_drains_a_picker_deferred_repaint():
     assert NODE is not None
     script = r"""
@@ -969,7 +1020,7 @@ const replacementMenuButton = {
   closest: () => row,
 };
 const replacementRow = {
-  querySelector: selector => selector === '.session-actions-trigger' ? replacementMenuButton : null,
+  querySelector: selector => selector === ':scope > .session-actions > .session-actions-trigger' ? replacementMenuButton : null,
 };
 otherRowMenuButton.onclick = event => {
   event.stopPropagation();
