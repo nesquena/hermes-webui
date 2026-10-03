@@ -112,8 +112,21 @@
     // RTL users don't see an LTR flash on initial load.
     (function(){
       try{
-        if(localStorage.getItem('hermes-rtl')==='true'){
+        var mode = localStorage.getItem('hermes-rtl-mode');
+        if (mode === 'on') {
           document.documentElement.classList.add('chat-content-rtl');
+        } else if (mode === 'off') {
+          document.documentElement.classList.remove('chat-content-rtl');
+        } else {
+          var stored = localStorage.getItem('hermes-rtl');
+          if (stored === 'true') {
+            document.documentElement.classList.add('chat-content-rtl');
+          } else if (stored === null) {
+            var lang = localStorage.getItem('hermes-lang') || (navigator.language || '').slice(0, 2);
+            if (lang === 'fa') {
+              document.documentElement.classList.add('chat-content-rtl');
+            }
+          }
         }
       }catch(_){}
     })();

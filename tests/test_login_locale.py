@@ -68,6 +68,24 @@ def test_login_page_uses_traditional_chinese_for_zh_hant():
         assert restored.get("language") == prev_lang
 
 
+def test_login_page_uses_persian_for_fa_with_rtl():
+    prev_lang = _current_language()
+    try:
+        saved, status = post("/api/settings", {"language": "fa"})
+        assert status == 200
+        assert saved.get("language") == "fa"
+        html, status2 = get_raw("/login")
+        assert status2 == 200
+        assert 'lang="fa-IR"' in html
+        assert 'dir="rtl"' in html
+        assert "ورود" in html
+        assert "برای ادامه رمز عبور خود را وارد کنید" in html
+    finally:
+        restored, restore_status = post("/api/settings", {"language": prev_lang})
+        assert restore_status == 200
+        assert restored.get("language") == prev_lang
+
+
 def test_login_page_uses_russian_for_ru():
     prev_lang = _current_language()
     try:

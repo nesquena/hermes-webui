@@ -8870,7 +8870,10 @@ function _preferencesPayloadFromUi(){
   const soundCb=$('settingsSoundEnabled');
   if(soundCb) payload.sound_enabled=soundCb.checked;
   const rtlCb=$('settingsRtl');
-  if(rtlCb) payload.rtl=rtlCb.checked;
+  if(rtlCb){
+    payload.rtl=rtlCb.checked;
+    payload.rtl_mode=window._rtlMode||(localStorage.getItem('hermes-rtl-mode')||'auto');
+  }
   const notifCb=$('settingsNotificationsEnabled');
   if(notifCb) payload.notifications_enabled=notifCb.checked;
   const sidebarDensitySel=$('settingsSidebarDensity');
@@ -9448,6 +9451,12 @@ async function loadSettingsPanel(){
       langSel.value=resolvedLanguage;
       langSel.addEventListener('change',function(){
         if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
+        const rtlBox = $('settingsRtl');
+        if (rtlBox && (window._rtlMode || 'auto') === 'auto') {
+          const autoRtl = this.value === 'fa';
+          rtlBox.checked = autoRtl;
+          document.documentElement.classList.toggle('chat-content-rtl', autoRtl);
+        }
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -9621,14 +9630,32 @@ async function loadSettingsPanel(){
     // Right-to-left chat layout (#1721 salvage) — Settings-only, no composer button.
     const rtlCb=$('settingsRtl');
     if(rtlCb){
-      const saved=!!settings.rtl || localStorage.getItem('hermes-rtl')==='true';
-      rtlCb.checked=saved;
-      try{localStorage.setItem('hermes-rtl',saved?'true':'false');}catch(_){}
-      document.documentElement.classList.toggle('chat-content-rtl',saved);
+      const currentLocale = (typeof _locale !== 'undefined' && _locale && _locale._lang) || (typeof resolvePreferredLocale === 'function' ? resolvePreferredLocale() : localStorage.getItem('hermes-lang'));
+      const isFaLocale = currentLocale === 'fa';
+      const localRtlMode = localStorage.getItem('hermes-rtl-mode');
+      const serverRtlMode = (settings && typeof settings.rtl_mode === 'string' && ['auto','on','off'].includes(settings.rtl_mode)) ? settings.rtl_mode : null;
+      let effectiveMode;
+      if (localRtlMode && ['auto','on','off'].includes(localRtlMode)) {
+        effectiveMode = localRtlMode;
+      } else if (serverRtlMode) {
+        effectiveMode = serverRtlMode;
+      } else {
+        effectiveMode = 'auto';
+      }
+      window._rtlMode = effectiveMode;
+      if (settings && typeof settings.rtl_mode === 'string') window._serverRtlMode = settings.rtl_mode;
+      const saved = effectiveMode === 'on' ? true : (effectiveMode === 'off' ? false : isFaLocale);
+      rtlCb.checked = saved;
+      document.documentElement.classList.toggle('chat-content-rtl', saved);
       rtlCb.addEventListener('change',()=>{
-        const on=rtlCb.checked;
-        try{localStorage.setItem('hermes-rtl',on?'true':'false');}catch(_){}
-        document.documentElement.classList.toggle('chat-content-rtl',on);
+        const on = rtlCb.checked;
+        const newMode = on ? 'on' : 'off';
+        window._rtlMode = newMode;
+        try{
+          localStorage.setItem('hermes-rtl-mode', newMode);
+          localStorage.setItem('hermes-rtl', on ? 'true' : 'false');
+        }catch(_){}
+        document.documentElement.classList.toggle('chat-content-rtl', on);
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -12951,6 +12978,7 @@ async function saveSettings(andClose){
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.rtl=!!($('settingsRtl')||{}).checked;
+  body.rtl_mode=window._rtlMode||(localStorage.getItem('hermes-rtl-mode')||'auto');
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
   body.show_thinking=window._showThinking!==false;
   body.sidebar_density=sidebarDensity;

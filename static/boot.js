@@ -3527,6 +3527,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
+    if(s && typeof s.rtl_mode === 'string' && ['auto','on','off'].includes(s.rtl_mode)){
+      window._serverRtlMode = s.rtl_mode;
+    }
     if(typeof setLocale==='function'){
       // #7622 (round 3): the settings payload's `s.language` is
       // absent (None) for a fresh install, so an explicit non-empty
