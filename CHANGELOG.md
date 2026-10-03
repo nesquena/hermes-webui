@@ -74,6 +74,11 @@
 
 ### Fixed
 
+- **Clarify questions work with Agents that pass the batch as `questions=`.** Some Hermes Agent builds call the
+  WebUI clarify callback as `callback("", None, questions=[...])` instead of `callback([...])`. The adapter only
+  recognised the positional form, so it showed an empty single question and returned a plain string the Agent
+  could not map back to its questions. It now accepts the batch from `questions=` too; the positional batch and the
+  legacy `callback(question, choices)` forms are unchanged. (#7980 by @HarukiTakehata)
 - **Hermes Desktop files WebUI sessions under their workspace instead of "Home".** The Agent creates the
   `state.db` row for a WebUI turn but only stamps `cwd` for CLI sources. WebUI now writes the session's
   workspace into `sessions.cwd` through the Agent's `update_session_cwd` when the workspace changes and at

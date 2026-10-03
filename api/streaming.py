@@ -11532,13 +11532,18 @@ def _run_agent_streaming(
         def _clarify_callback(*args, **kwargs):
             """Accept both Hermes Agent clarify callback contracts.
 
-            Current agents call ``callback(questions)`` and expect a
-            ``{answers, outcome, notice?}`` dict; older agents call
-            ``callback(question, choices)`` and expect the answer string.
+            Current agents pass normalized questions either as the sole
+            positional argument or through ``questions=`` beside legacy
+            positional slots, and expect an ``{answers, outcome, notice?}``
+            dict. Older agents call ``callback(question, choices)`` and expect
+            the answer string.
             """
-            if len(args) == 1 and not kwargs and isinstance(args[0], (list, tuple)):
+            questions = kwargs.get('questions')
+            if not isinstance(questions, (list, tuple)):
+                questions = args[0] if len(args) == 1 and not kwargs else None
+            if isinstance(questions, (list, tuple)):
                 return _clarify_batch_reply(
-                    args[0],
+                    questions,
                     lambda question, choices: _clarify_ask_one(
                         question, choices, session_id, cancel_event
                     ),
