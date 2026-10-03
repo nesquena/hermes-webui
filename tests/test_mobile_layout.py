@@ -533,7 +533,9 @@ def _run_sidebar_lifecycle(start_width, start_drawer_open, end_width, pref):
     import subprocess
     helpers = _extract_boot_js_functions(
         'closeMobileSidebar', '_isDesktopWidth', '_isCompactWorkspaceViewport',
-        '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState')
+        '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState',
+        '_isPhoneWidthViewport', '_isFocusableControl',
+        '_releaseFocusFromClosedPanel')
     pref_js = 'null' if pref is None else repr(pref)
     script = f"""
 {helpers}
@@ -622,6 +624,8 @@ def _run_sidebar_open_then_resize(width, pref, opener, clicks=1):
     helpers = _extract_boot_js_functions(
         'closeMobileSidebar', '_isDesktopWidth', '_isCompactWorkspaceViewport',
         '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState',
+        '_isPhoneWidthViewport', '_isFocusableControl',
+        '_releaseFocusFromClosedPanel',
         '_isSidebarCollapsed', 'toggleSidebar', 'expandSidebar',
         'toggleMobileSidebar', 'mobileSwitchPanel')
     pref_js = 'null' if pref is None else repr(pref)
@@ -933,13 +937,20 @@ def test_workspace_toggle_close_race_guard_present():
     PR fixes, so lock the guard in.
     """
     fn = _js_function_body(BOOT, "closeMobileWorkspacePanelFromChat")
-    # The guard must short-circuit before closeWorkspacePanel()
+    # The guard must short-circuit before the close call. Anchor on the
+    # argument-bearing call: the explicit-dismiss path passes the invoker
+    # control so focus lands back on the toggle, and a bare "closeWorkspacePanel()"
+    # anchor would not match that form.
     assert "#btnWorkspacePanelToggle" in fn, \
         "pointerdown close must ignore taps on the workspace panel toggle"
     for selector in ("#btnWorkspacePanelEdgeToggle", ".workspace-toggle-btn", ".mobile-files-btn"):
         assert selector in fn, f"toggle guard must also cover {selector}"
-    assert fn.index("if(t) return;") < fn.index("closeWorkspacePanel()"), \
+    assert fn.index("if(t) return;") < fn.index("closeWorkspacePanel("), \
         "the guard must return before closeWorkspacePanel() runs"
+    # The explicit-dismiss path hands focus back to the edge toggle that opened
+    # the drawer; a bare close() would strand focus on the now-hidden panel.
+    assert "closeWorkspacePanel($('btnWorkspacePanelEdgeToggle'))" in fn, \
+        "tapping outside the drawer must return focus to the invoker"
 
 
 def test_executed_sidebar_tests_skip_cleanly_without_node():
@@ -964,7 +975,11 @@ def test_mobile_sidebar_drawer_uses_transform_instead_of_left():
         "Mobile .sidebar should keep left:0 in the drawer rules"
     assert sidebar_rule.get("transform") == "translateX(-100%)", \
         "Closed mobile .sidebar should use transform:translateX(-100%)"
-    assert sidebar_rule.get("transition") == "transform .25s ease", \
+    # #7866's follow-up added a delayed `visibility 0s linear .25s` step so the
+    # closed drawer stays invisible-to-Tab without cutting the slide-out short, so
+    # assert the transform animation is present rather than pinning the whole
+    # transition string — a future step must not read as a regression.
+    assert "transform .25s ease" in (sidebar_rule.get("transition") or ""), \
         "Mobile .sidebar should transition transform for drawer animation"
     assert sidebar_rule.get("will-change") == "transform", \
         "Mobile .sidebar should promote the transform layer before drawer animation"
@@ -1229,7 +1244,7 @@ def test_mobile_sidebar_opens_as_full_screen_surface_with_panel_rail():
     assert sidebar_rule.get("transform") == "translateX(-100%)", (
         "Closed mobile sidebar should sit fully offscreen"
     )
-    assert sidebar_rule.get("transition") == "transform .25s ease", (
+    assert "transform .25s ease" in (sidebar_rule.get("transition") or ""), (
         "Mobile sidebar should animate with transform"
     )
     assert sidebar_rule.get("will-change") == "transform", (
@@ -1453,8 +1468,22 @@ def test_mobile_session_page_close_button_is_mobile_scoped():
     assert 'class="panel-head-btn mobile-sidebar-close' in HTML, (
         "Sidebar needs a close button for the full-screen mobile session page"
     )
-    assert 'onclick="closeMobileSidebar()"' in HTML, (
+    assert (
+        'onclick="dismissMobileSidebar()"' in HTML
+        and 'data-tooltip="Close menu"' in HTML
+    ), (
         "Mobile session page close button should close the sidebar"
+    )
+    # The X is an EXPLICIT dismiss, so it routes through dismissMobileSidebar() to hand
+    # focus back to the hamburger (#7713 follow-up). That must still be a real close,
+    # not a new stub: pin that it delegates to closeMobileSidebar with the hamburger.
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    dismiss_start = boot_js.find("function dismissMobileSidebar(")
+    assert dismiss_start != -1, "boot.js must expose dismissMobileSidebar()"
+    dismiss_body = boot_js[dismiss_start : boot_js.find("\n}", dismiss_start) + 2]
+    assert "closeMobileSidebar($('btnHamburger'))" in dismiss_body, (
+        f"dismissMobileSidebar() must close the sidebar and return focus to the "
+        f"hamburger; got {dismiss_body!r}"
     )
     assert "mobile-sidebar-close{display:none" in CSS.replace(" ", ""), (
         "Mobile sidebar close button should be hidden by default"
