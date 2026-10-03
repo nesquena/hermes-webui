@@ -9695,7 +9695,7 @@ def _materialize_pending_user_turn_before_error(
     }
     if str(pending_source or '').strip().lower() == 'fork':
         recovered['_fork_child_turn'] = session.session_id
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(recovered, pending_source, active_turn_token=active_turn_token)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -15751,8 +15751,11 @@ def cancel_stream(stream_id: str) -> bool:
                             if isinstance(_m, dict) and _m.get('role') == 'user':
                                 _last_user = _m
                                 break
-                        _already_persisted = False
-                        if _last_user is not None:
+                        _pending_token = build_active_turn_token(stream_id, _pending_started)
+                        _already_persisted = bool(_pending_token) and any(
+                            _active_turn_token_matches(_m, {'token': _pending_token})
+                            for _m in _msgs_for_recovery)
+                        if _last_user is not None and not _already_persisted:
                             _last_content = _last_user.get('content')
                             _last_ts = _last_user.get('timestamp') or 0
                             # Only treat as already-persisted if the latest user turn
@@ -15775,6 +15778,8 @@ def cancel_stream(stream_id: str) -> bool:
                                 'timestamp': _recovered_ts,
                             }
                             stamp_message_source(_user_turn, _pending_source)
+                            if _pending_token:  # same turn identity as the eager/merged row
+                                _user_turn['_active_turn_token'] = _pending_token
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)

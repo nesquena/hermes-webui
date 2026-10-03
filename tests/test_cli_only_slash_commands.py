@@ -1027,13 +1027,14 @@ def _run_busy_intercept_js(script_body: str) -> dict:
             busy: true,
             activeStreamId: 'stream-1',
             session: {{ session_id: 'sess-1' }},
+            messages: [],
             pendingFiles: []
           }},
           cancelStream: async (reason) => {{ calls.push('cancelStream:' + reason); return true; }},
           showToast: () => {{}},
           $: () => ({{ value: '' }}),
           autoResize: () => {{}},
-          api: async () => ({{}}),
+          api: async (url, opts) => {{ calls.push('api:' + url + ' ' + ((opts && opts.body) || '')); return {{ output: 'Loop paused.' }}; }},
           _trySteer: async () => {{ calls.push('steer'); }},
           queueSessionMessage: () => {{ calls.push('queue'); }}
         }};
@@ -1077,7 +1078,8 @@ def test_busy_stop_executes_real_cancel_branch():
         """
         const r1 = await busyIntercept('/stop', false);
         const r2 = await busyIntercept('/agents', false);
-        return { stop: r1, agents: r2 };
+        const r3 = await busyIntercept('/loop pause', false);
+        return { stop: r1, agents: r2, loop: r3 };
         """
     )
     # /stop is intercepted by the busy branch (cmdStop -> cancelStream ran,
@@ -1085,5 +1087,8 @@ def test_busy_stop_executes_real_cancel_branch():
     # falls through to mode routing (documented: it is no longer announced).
     assert out["result"]["stop"] == {"intercepted": True}
     assert out["result"]["agents"] == {"intercepted": False}
+    # /loop controls must reach the loop even while its own wakeup turn is running.
+    assert out["result"]["loop"] == {"intercepted": True}
+    assert 'api:/api/commands/exec {"command":"/loop pause","session_id":"sess-1"}' in out["calls"], out["calls"]
     assert any(c.startswith("cancelStream:slash-stop") for c in out["calls"]), out["calls"]
     assert not any(c.startswith("steer") for c in out["calls"]), out["calls"]
