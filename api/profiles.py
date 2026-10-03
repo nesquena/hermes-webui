@@ -49,6 +49,15 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+# #7655: values a profile .env OVERWROTE in process env, keyed by name.
+# _reload_dotenv() writes a profile's .env straight into os.environ (only the
+# _PROTECTED_ENV_KEYS list is withheld), so a key the operator set at launch is
+# clobbered by whichever profile loaded last. Installation-scoped readers
+# (api.routes._read_installation_config) need the operator's original value to
+# expand a base-config ${VAR} placeholder without adopting the profile's.
+# Entries are removed when the owning profile is unloaded, exactly matching
+# _loaded_profile_env_keys bookkeeping.
+_profile_overridden_env: dict[str, str] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -215,6 +224,21 @@ _PROTECTED_ENV_KEYS = frozenset({
     # the operator intended. Same shape as the isolated-profile key: only
     # the operator/launcher env at startup can set it.
     'HERMES_WEBUI_MAX_SESSION_RESOLVE',
+    # #7611: HERMES_WEBUI_INSTANCE_NAME is the deployment's instance label. It is
+    # installation-scoped by definition (it distinguishes Production/Staging/Dev
+    # deployments for every user of that installation), so a per-profile .env must
+    # not be able to rewrite it — otherwise whichever profile loads last wins and
+    # two tabs on one deployment disagree on the label.
+    'HERMES_WEBUI_INSTANCE_NAME',
+    # #7611: HERMES_CONFIG_PATH points the whole config layer at a specific
+    # config.yaml. It is read LIVE by _installation_config_path(), which exists
+    # so the INSTALLATION-scoped instance label never comes from a request
+    # profile's file. If a profile's .env could set it, activating that profile
+    # would repoint installation configuration at the profile's own config.yaml
+    # — the label could then differ per profile, which is precisely the
+    # profile-scoping this function family is defined against. Only the
+    # operator/launcher env at startup may set it.
+    'HERMES_CONFIG_PATH',
 })
 
 
@@ -1590,11 +1614,13 @@ def _reload_dotenv(home: Path):
     profile-scoped secrets from leaking across profile switches.
     """
     global _loaded_profile_env_keys
+    global _profile_overridden_env
 
     # Remove keys loaded from the previous profile first.
     for key in list(_loaded_profile_env_keys):
         os.environ.pop(key, None)
     _loaded_profile_env_keys = set()
+    _profile_overridden_env = {}
 
     env_path = home / '.env'
     if not env_path.exists():
@@ -1618,11 +1644,19 @@ def _reload_dotenv(home: Path):
                             k, env_path,
                         )
                         continue
+                    # #7655: record the pre-profile value BEFORE overwriting so
+                    # an installation-scoped reader (base config.yaml
+                    # placeholders) can still resolve an operator-set ${VAR}
+                    # without adopting the profile's clobbered value.
+                    _prior = os.environ.get(k)
                     os.environ[k] = v
                     loaded_keys.add(k)
+                    if _prior is not None and _prior != v:
+                        _profile_overridden_env[k] = _prior
         _loaded_profile_env_keys = loaded_keys
     except Exception:
         _loaded_profile_env_keys = set()
+        _profile_overridden_env = {}
         logger.debug("Failed to reload dotenv from %s", env_path)
 
 

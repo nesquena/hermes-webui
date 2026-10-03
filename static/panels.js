@@ -81,6 +81,17 @@ function syncAppTitlebar() {
   if (panel !== 'chat') {
     const bot = typeof assistantDisplayName === 'function' ? assistantDisplayName() : '';
     document.title = bot ? mainText + ' \u2014 ' + bot : mainText;
+    // #7611: prefix the installation-scoped instance label here too.
+    // This branch is the one that just REBUILT document.title from the
+    // panel name, so prefixing is applied to a title this function
+    // owns — the chat panel never reaches it (syncTopbar() keeps
+    // sole ownership of the "<session> — <assistant>" title and
+    // applies the same label itself), so the prefix can never stack
+    // on a session title. Without it the label vanishes the moment
+    // the user opens Settings / Tasks / Kanban — exactly the panels
+    // they visit while configuring a multi-instance install.
+    const _instanceLabel=(window._instanceLabel||'').trim();
+    if(_instanceLabel) document.title=_instanceLabel+' \u2022 '+document.title;
   }
   if (subEl) {
     if (subText) {
