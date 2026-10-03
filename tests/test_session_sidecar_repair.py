@@ -320,10 +320,14 @@ class TestDraftRecovery:
         assert len(user_msgs) == 1
         assert user_msgs[0]["content"] == "My important question"
         assert user_msgs[0].get("_recovered") is True
-        assert user_msgs[0]["timestamp"] == int(_ts), (
+        assert user_msgs[0]["timestamp"] == _ts, (
             f"Recovered turn timestamp should match pending_started_at ({_ts}), "
             f"got {user_msgs[0]['timestamp']}"
         )
+        # Round 5 (2026-09-08 re-gate): the recovered row preserves FULL
+        # precision — int() truncation here would persist a row that can no
+        # longer match its own checkpoint identity (500.9 -> 500) once pending
+        # state is cleared, re-opening the same-second data-loss shape.
 
     def test_pending_message_recovered_into_context_messages(self, hermes_home, monkeypatch):
         """A recovered pending prompt must remain visible to the next agent turn.
@@ -1278,7 +1282,17 @@ class TestNonEmptyMessagesPendingCleared:
         s.save()
 
         core_messages = [
-            {"role": "user", "content": "Check maintainer activity"},
+            {
+                "role": "user",
+                "content": "Check maintainer activity",
+                # Checkpoint identity is EXACT full-precision (2026-09 round 5):
+                # the whole-second int-vs-float allowance was removed because it
+                # let a same-second historical row win ownership of a sub-second
+                # current turn and suppress/lose the prompt. An int-truncated
+                # legacy row can no longer match and fails closed toward
+                # appending, so eager checkpoints must persist full precision.
+                "timestamp": s.pending_started_at,
+            },
             {"role": "assistant", "content": "I will check GitHub first."},
         ]
         core_tool_calls = [
@@ -1288,6 +1302,12 @@ class TestNonEmptyMessagesPendingCleared:
                 "snippet": "gh pr list --repo nesquena/hermes-webui",
                 "assistant_msg_idx": 1,
                 "done": True,
+                # Stream-scoped identity is now required for a tool card to
+                # dedupe against journal recovery (2026-09 round 5): tokenless,
+                # untagged cards cannot prove ownership, and an unprovable card
+                # must not suppress the current recovered tool. Eager core
+                # checkpoints stamp the recovered stream id.
+                "_recovered_stream_id": "duplicate_core_journal_stream",
             },
         ]
         core_path = _write_core_transcript(

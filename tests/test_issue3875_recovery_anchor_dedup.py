@@ -50,7 +50,7 @@ def test_tool_first_recovery_creates_single_empty_anchor(hermes_home):
     s = Session(session_id=sid, title="repro", messages=[{"role": "user", "content": "go"}])
 
     # First recovery: one empty anchor is created to host the recovered tool card.
-    assert _append_journaled_partial_output(s, stream_id, dedupe_existing=True) is True
+    assert _append_journaled_partial_output(s, stream_id, dedupe_existing=True) == (True, True)
     anchors = [
         m for m in s.messages
         if isinstance(m, dict)
@@ -118,7 +118,7 @@ def test_text_bearing_recovery_still_appends_real_content(hermes_home):
     append_run_event(sid, stream_id, "done", {})
     s = Session(session_id=sid, title="repro", messages=[{"role": "user", "content": "go"}])
 
-    assert _append_journaled_partial_output(s, stream_id, dedupe_existing=True) is True
+    assert _append_journaled_partial_output(s, stream_id, dedupe_existing=True) == (True, True)
     recovered_text = [
         m for m in s.messages
         if isinstance(m, dict)
