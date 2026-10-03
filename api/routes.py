@@ -2514,6 +2514,13 @@ def _build_session_list_cache_payload(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
         reverse=True,
     )
+    # Each sidebar tab is loaded on its own, so a child can arrive without its parent's row.
+    # Stamp the parent's tab (the same classifier _filter_sidebar_source uses) on the child.
+    _merged_by_id = {s.get("session_id"): s for s in merged if s.get("session_id")}
+    for s in merged:
+        _parent = _merged_by_id.get(s.get("parent_session_id"))
+        if _parent is not None:
+            s["parent_is_cli_session"] = _is_cli_session_for_settings(_parent)
     # ── Profile scoping (#1611) ────────────────────────────────────────
     # Default: filter to the active profile. ?all_profiles=1 opts into
     # the aggregate view used by the "All profiles" sidebar toggle.
