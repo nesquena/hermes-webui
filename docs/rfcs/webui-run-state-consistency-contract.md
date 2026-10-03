@@ -268,6 +268,31 @@ and 5; it does not mark every run-state boundary implemented.
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
 
+## Sidebar notification ownership
+
+A conversation row's notification indicator reflects only that conversation's
+own running, unread-completion, or approval/clarification state. Nested child
+sessions (including attached forks) must not light the parent's dot, hide its
+timestamp, or add unread/attention styling to it. A separate status mark on the
+child-count chip exposes aggregated child state even while collapsed, including
+reference-only archived children. Approval takes precedence over clarification,
+then other attention, running, and unread completion. Expanded fork and delegated
+child rows expose their own running, unread, and attention states. Rendering or
+expanding the parent does not acknowledge its children; visiting a child retains
+its per-session acknowledgement semantics. Reference-only state does not make
+hidden archived children navigable. Child activity may still affect sidebar
+ordering. Compression-lineage segments remain one logical conversation and are
+not delegated child sessions.
+
+Child-chip tooltips and accessible toggle labels lead with the aggregated state,
+followed by one separator and the localized child count/toggle hint. Approval
+and clarification tint the chip with semantic error/warning colors, including
+when its parent is active. Running and unread retain a plain status mark. A
+reference-only chip uses a localized archived label and is not an expander.
+Fork and delegated row indicators are both 14px; delegated navigation targets
+are at least 44px tall on narrow layouts or coarse pointers, while fine-pointer
+desktop rows remain compact.
+
 ## Client-side unread persistence (sidebar layer)
 
 The sidebar unread dot is backed by two client-side stores in `static/sessions.js`.

@@ -33,6 +33,25 @@ including requests started without a session. The Node harness executes the
 real loaders with deferred responses and PDF-ready/timeout callbacks; it does
 not certify browser rendering or real CDN availability.
 
+## Sidebar child-state presentation
+
+Run `./scripts/test.sh tests/test_child_session_status.py tests/test_child_session_ux.py tests/test_parent_notification_scope.py tests/test_sidebar_tooltips.py tests/test_465_session_branching.py tests/test_session_lineage_collapse.py tests/test_session_touch_actions.py tests/test_issue3242_3214_i18n_tooltips.py`.
+The production attach/render component covers independent parent and child
+notifications, archived reference-only inclusion, state precedence, navigation,
+and localized state-first chip labels in every locale.
+
+With Playwright/Chromium available, run
+`python tests/browser_child_session_status.py --output <artifact-directory>`.
+This credential-free component gate loads production sidebar rendering, CSS and
+i18n without starting an Agent or server. It checks collapsed/expanded rows at
+1280/768/390px, light/dark skins (including all five active-row color-inheritance
+skins), approval/clarify/running/unread, equal fork/delegated spinner sizes,
+44px delegated touch targets, compact desktop rows, clipping, and keyboard/tap
+navigation. Screenshots and computed-style results are saved in the artifact
+directory. These isolated fixtures prove presentation and control behavior, not
+live approval producers or runtime streaming. Also check the full app sidebar
+with real session metadata when verifying an installed build.
+
 ## Static JS runtime lint (brick-class regression guard)
 
 Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function

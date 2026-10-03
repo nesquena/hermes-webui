@@ -31,7 +31,9 @@ def test_sidebar_status_badges_have_explanatory_tooltips():
     assert "function _sessionStateTooltip" in js
     assert "branchInd.title=_sessionForkTooltip(parentLabel);" in js
     assert "segmentCountEl.title=_sessionLineageBadgeTooltip(segmentLabel,canExpandLineageSegments);" in js
-    assert "childCountEl.title=_sessionChildBadgeTooltip(childLabel);" in js
+    assert "const childBadgeTip=childCount>0?_sessionChildBadgeTooltip(childLabel):childLabel;" in js
+    assert "childCountEl.title=childBadgeTip;" in js
+    assert "childCountEl.title=`${state.title} · ${childBadgeTip}`;" in js
     assert "_sessionStateTooltip({isStreaming,hasUnread})" in js
 
 

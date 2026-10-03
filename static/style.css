@@ -205,7 +205,7 @@
   :root[data-skin="graphite"] .session-item.active .session-title,
   :root[data-skin="graphite"] .session-item.active .session-meta,
   :root[data-skin="graphite"] .session-item.active .session-preview,
-  :root[data-skin="graphite"] .session-item.active *{color:inherit!important;}
+  :root[data-skin="graphite"] .session-item.active :not(:where(.session-child-count,.session-child-count-state,.session-child-session-state)){color:inherit!important;}
   :root[data-skin="graphite"] .composer-box{background:var(--surface)!important;border-color:var(--border2)!important;border-radius:14px!important;box-shadow:0 1px 2px rgba(0,0,0,0.07);}
   :root.dark[data-skin="graphite"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="graphite"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
@@ -331,7 +331,7 @@
   :root[data-skin="codex"] .session-item.active .session-title,
   :root[data-skin="codex"] .session-item.active .session-meta,
   :root[data-skin="codex"] .session-item.active .session-preview,
-  :root[data-skin="codex"] .session-item.active *{color:inherit!important;}
+  :root[data-skin="codex"] .session-item.active :not(:where(.session-child-count,.session-child-count-state,.session-child-session-state)){color:inherit!important;}
   :root[data-skin="codex"] .composer-box{background:var(--surface)!important;border-color:var(--border2)!important;border-radius:14px!important;box-shadow:0 1px 2px rgba(0,0,0,0.07);}
   :root.dark[data-skin="codex"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="codex"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
@@ -457,7 +457,7 @@
   :root[data-skin="terracotta"] .session-item.active .session-title,
   :root[data-skin="terracotta"] .session-item.active .session-meta,
   :root[data-skin="terracotta"] .session-item.active .session-preview,
-  :root[data-skin="terracotta"] .session-item.active *{color:inherit!important;}
+  :root[data-skin="terracotta"] .session-item.active :not(:where(.session-child-count,.session-child-count-state,.session-child-session-state)){color:inherit!important;}
   :root[data-skin="terracotta"] .composer-box{background:var(--surface)!important;border-color:var(--border2)!important;border-radius:14px!important;box-shadow:0 1px 2px rgba(0,0,0,0.07);}
   :root.dark[data-skin="terracotta"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="terracotta"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
@@ -583,7 +583,7 @@
   :root[data-skin="github"] .session-item.active .session-title,
   :root[data-skin="github"] .session-item.active .session-meta,
   :root[data-skin="github"] .session-item.active .session-preview,
-  :root[data-skin="github"] .session-item.active *{color:inherit!important;}
+  :root[data-skin="github"] .session-item.active :not(:where(.session-child-count,.session-child-count-state,.session-child-session-state)){color:inherit!important;}
   :root[data-skin="github"] .composer-box{background:var(--surface)!important;border-color:var(--border2)!important;border-radius:14px!important;box-shadow:0 1px 2px rgba(0,0,0,0.07);}
   :root.dark[data-skin="github"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="github"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
@@ -973,9 +973,9 @@
   :root[data-skin="geist-contrast"] .session-item.active .session-title,
   :root[data-skin="geist-contrast"] .session-item.active .session-meta,
   :root[data-skin="geist-contrast"] .session-item.active .session-preview,
-  :root[data-skin="geist-contrast"] .session-item.active *{color:inherit!important;}
+  :root[data-skin="geist-contrast"] .session-item.active :not(:where(.session-child-count,.session-child-count-state,.session-child-session-state)){color:inherit!important;}
   :root.dark[data-skin="geist-contrast"] .session-item.active,
-  :root.dark[data-skin="geist-contrast"] .session-item.active *{color:var(--text)!important;}
+  :root.dark[data-skin="geist-contrast"] .session-item.active :not(:where(.session-child-count,.session-child-count-state,.session-child-session-state)){color:var(--text)!important;}
   :root[data-skin="geist-contrast"] .nav-tab.active,
   :root[data-skin="geist-contrast"] .rail-btn.active{color:var(--accent-text)!important;}
   :root.dark[data-skin="geist-contrast"] .nav-tab.active svg,
@@ -5715,6 +5715,22 @@ main.main > #mainPlugin{display:none;}
 .session-lineage-segment:hover,.session-lineage-segment.active{background:rgba(148,163,184,.12);color:var(--text);}
 .session-child-count{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(99,179,237,.16);color:#63b3ed;margin-left:6px;flex-shrink:0;user-select:none;cursor:pointer;}
 .session-child-count:hover{background:rgba(99,179,237,.26);color:#90cdf4;}
+.session-child-count{gap:5px;}
+.session-child-count:not([role="button"]){cursor:default;flex-shrink:1;min-width:0;}
+.session-child-count-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.session-child-count:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.session-child-count-state{width:10px;height:10px;}
+:root .session-item .session-child-count.is-attention-approval,
+:root .session-item .session-child-count.is-attention-approval:hover{background:color-mix(in srgb,var(--error) 16%,var(--surface));color:var(--error);}
+:root .session-item .session-child-count.is-attention-clarify,
+:root .session-item .session-child-count.is-attention-clarify:hover{background:color-mix(in srgb,var(--warning) 16%,var(--surface));color:var(--warning);}
+.session-child-session-delegated{display:flex;align-items:center;gap:4px;min-width:0;}
+.session-child-session-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;}
+.session-child-session-delegated.streaming .session-child-session-label{color:var(--accent);}
+.session-child-session.needs-attention{box-shadow:inset 2px 0 0 var(--warning);}
+.session-child-session.attention-approval{box-shadow:inset 2px 0 0 var(--error);}
+.session-child-session-state.is-attention-approval{color:var(--error);}
+.session-child-session-state.is-attention-clarify,.session-child-session-state.is-attention-generic{color:var(--warning);}
 .session-child-sessions{display:flex;flex-direction:column;gap:3px;margin-top:6px;margin-left:12px;padding-left:8px;border-left:1px solid var(--border,rgba(255,255,255,.1));}
 .session-child-session{appearance:none;border:0;background:transparent;color:var(--muted);font:inherit;font-size:11px;text-align:left;padding:3px 4px;border-radius:5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .session-child-session:hover,.session-child-session.active{background:rgba(255,255,255,.06);color:var(--text);}
@@ -5723,7 +5739,11 @@ main.main > #mainPlugin{display:none;}
 .session-child-session-fork:hover .session-child-session-main,.session-child-session-fork.active .session-child-session-main,.session-child-session-fork .session-child-session-main.active{background:rgba(255,255,255,.06);color:var(--text);}
 .session-child-session-fork.streaming .session-child-session-main{color:var(--accent);}
 .session-child-session-fork .session-actions{position:static;transform:none;opacity:1;pointer-events:auto;flex:0 0 auto;}
-.session-child-session-fork .session-child-session-state{position:static;transform:none;flex:0 0 auto;width:14px;height:14px;margin-right:2px;color:var(--accent);}
+.session-child-session-fork .session-child-session-state{position:static;transform:none;flex:0 0 auto;width:14px;height:14px;margin-right:2px;}
+.session-child-session-state{width:14px;height:14px;color:var(--accent);}
+@media (max-width:768px), (pointer:coarse){
+  .session-child-session-delegated{min-height:44px;box-sizing:border-box;padding:8px 6px;}
+}
 .session-child-session-fork .session-actions-trigger{width:22px;height:22px;}
 .session-child-session-fork .session-swipe-affordance{top:1px;bottom:1px;}
 .session-child-session-fork .session-child-session-main,.session-child-session-fork .session-actions{z-index:1;}
