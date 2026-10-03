@@ -61,6 +61,24 @@ function t(key, ...args){
   return out;
 }
 
+// The parser/card helpers also read the async-delegation grammar constants and
+// aggregators; `const` inside a direct eval stays scoped to that eval, so the
+// shipped declarations are re-bound as `var` to hoist them into driver scope.
+function extractConst(name){
+  const start = src.indexOf('const ' + name + '=');
+  if(start === -1) throw new Error(name + ' not found');
+  return 'var ' + src.slice(start + 'const '.length, src.indexOf('\n', start));
+}
+eval(extractConst('_ASYNC_DELEGATION_WAKEUP_HEADER_RE'));
+eval(extractConst('_ASYNC_DELEGATION_CHIP_CLASS'));
+eval(extractConst('_ASYNC_DELEGATION_BATCH_UNIT_RE'));
+eval(extractConst('_ASYNC_DELEGATION_SINGLE_GOAL_RE'));
+eval(extractFunc('_asyncDelegationBatchUnitCount'));
+eval(extractFunc('_asyncDelegationBatchOutcome'));
+eval(extractFunc('_asyncDelegationBatchCrashed'));
+eval(extractFunc('_asyncDelegationSingleFrameOutcome'));
+eval(extractFunc('_asyncDelegationSingleStatus'));
+eval(extractFunc('_asyncDelegationSingleGoal'));
 eval(extractFunc('_parseProcessWakeupBody'));
 eval(extractFunc('_processWakeupInfo'));
 eval(extractFunc('_processWakeupCardHtml'));
