@@ -103,6 +103,9 @@ Use three explicit font tokens:
   `var(--font-ui)` in `static/style.css`
 - `--font-mono`: code, file paths, command lines, tool payloads, technical logs,
   and terminal output
+- `--font-emoji`: color emoji fallback; Apple platforms use Apple Color Emoji,
+  Chrome/Edge can load the self-hosted Noto Color Emoji COLRv1 font, and Segoe
+  UI Emoji remains the last Windows fallback
 
 Use semantic tokens for typography. Keep prose on `--font-conversation` by
 default so it tracks `--font-ui` whenever a skin intentionally retunes UI type.
@@ -118,6 +121,22 @@ intent.
 
 Keep scale tight. Avoid introducing near-duplicate one-off font sizes, colors,
 radius values, or spacing values when an existing token works.
+
+## Message width
+
+The width picker labels and accessible names follow the active locale, including
+changes made while the menu is open. Keyboard selection returns focus to the
+trigger; Escape closes without changing the selection. Long unbroken prose and
+headings wrap within the message column, while tables and code retain their
+dedicated horizontal overflow behavior.
+
+The composer message-width button offers Default, Wide, and Full columns and
+reflows the conversation immediately. The browser retains explicit selections,
+including Default, when appearance autosave fails or returns a partial response;
+a late response for an older selection must not revert a newer choice. The
+selected width is also saved through the appearance settings endpoint. On narrow
+screens the column stays within the available space, and enhanced Markdown tables
+scroll horizontally without widening the conversation.
 
 ## Color, depth, and shape
 

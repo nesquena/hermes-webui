@@ -61,8 +61,8 @@ def test_graphite_skin_keeps_code_block_frame_continuous():
 
 
 def test_graphite_skin_uses_native_ui_and_mono_font_stacks():
-    assert '--font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif' in CSS
-    assert '--font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace' in CSS
+    assert '--font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",var(--font-emoji),sans-serif' in CSS
+    assert '--font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",var(--font-emoji),monospace' in CSS
     assert "font-weight:430" in CSS
     assert "-webkit-font-smoothing:antialiased" in CSS
     assert ':root[data-skin="graphite"] textarea#msg' in CSS
