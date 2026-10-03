@@ -1000,6 +1000,29 @@ def _runtime_preferred_base_url(
     return configured_base_url
 
 
+def _provider_routing_kwargs_for_agent(cfg, agent_params):
+    """Map a profile config's ``provider_routing`` block to AIAgent kwargs.
+
+    Returns only the routing kwargs the installed hermes-agent build accepts
+    (``agent_params``), so older builds degrade gracefully. The WebUI
+    in-process runtime reads the session's own profile config and must forward
+    these, or OpenRouter provider routing (sort/ignore/only/order) is silently
+    dropped for browser chat turns. Mirrors the gateway's TurnRunner.
+    """
+    pr = (cfg or {}).get("provider_routing") or {}
+    if not isinstance(pr, dict):
+        pr = {}
+    mapping = {
+        "providers_allowed": pr.get("only"),
+        "providers_ignored": pr.get("ignore"),
+        "providers_order": pr.get("order"),
+        "provider_sort": pr.get("sort"),
+        "provider_require_parameters": pr.get("require_parameters", False),
+        "provider_data_collection": pr.get("data_collection"),
+    }
+    return {k: v for k, v in mapping.items() if k in agent_params}
+
+
 def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
     """Return True if an agent lifecycle status should surface as a fallback warning."""
     k = str(kind or '').strip().lower()
@@ -10299,6 +10322,7 @@ def _compute_agent_cache_signature(
     reasoning_config=None,
     main_request_overrides=None,
     _main_request_overrides=None,
+    provider_routing_kwargs=None,
     prefill_context=None,
     profile_home: str | None = None,
     safe_profile_runtime_env: dict | None = None,
@@ -10325,6 +10349,7 @@ def _compute_agent_cache_signature(
         sorted(toolsets) if toolsets else [],
         reasoning_config or {},
         _main_request_overrides or {},
+        provider_routing_kwargs or {},
         _public_prefill_context_status(prefill_context),
         profile_home or '',
         _env.get('TERMINAL_ENV', '') or '',
@@ -12470,6 +12495,15 @@ def _run_agent_streaming(
             # re-instantiated fresh each turn (#855).
             if 'gateway_session_key' in _agent_params:
                 _agent_kwargs['gateway_session_key'] = session_id
+            # OpenRouter provider_routing (sort/ignore/only/order): mirror the
+            # gateway's TurnRunner so browser chat turns respect the profile's
+            # provider_routing block. Per-param guarded for older agent builds.
+            # Captured (not recomputed) so the agent-cache signature below can
+            # include the effective routing: editing sort/only/ignore must mint
+            # a new agent for an already-open session instead of reusing one
+            # built on the old routing.
+            _routing_kwargs = _provider_routing_kwargs_for_agent(_cfg, _agent_params)
+            _agent_kwargs.update(_routing_kwargs)
 
             # ── Agent cache: reuse across messages in the same session ──
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
@@ -12495,6 +12529,7 @@ def _run_agent_streaming(
                     toolsets=_toolsets,
                     reasoning_config=_reasoning_config,
                     main_request_overrides=_main_request_overrides,
+                    provider_routing_kwargs=_routing_kwargs,
                     prefill_context=_prefill_context,
                     profile_home=_profile_home,
                     safe_profile_runtime_env=_safe_profile_runtime_env,
@@ -13436,6 +13471,7 @@ def _run_agent_streaming(
                                 toolsets=_toolsets,
                                 reasoning_config=_reasoning_config,
                                 main_request_overrides=_main_request_overrides,
+                                provider_routing_kwargs=_routing_kwargs,
                                 prefill_context=_prefill_context,
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
@@ -14822,6 +14858,7 @@ def _run_agent_streaming(
                         toolsets=_toolsets,
                         reasoning_config=_reasoning_config,
                         main_request_overrides=_main_request_overrides,
+                        provider_routing_kwargs=_routing_kwargs,
                         prefill_context=_prefill_context,
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
