@@ -479,14 +479,14 @@ def test_non_prefix_partial_uses_agent_turn_boundary_without_webui_token():
         "messages": [
             {"role": "user", "content": "repeat prompt"},
             {"role": "assistant", "content": "historical answer"},
-            {"role": "user", "content": "  repeat   prompt  "},
+            {"role": "user", "content": "  repeat   prompt  ", "timestamp": 42.0},  # stamped by the Agent (persist_user_timestamp)
             {"role": "assistant", "content": "current partial"},
             {"role": "user", "content": "later turn"},
             {"role": "assistant", "content": "later answer"},
         ],
     }
     identity = streaming._resolve_active_turn_authority(
-        {"token": "webui-token", "text": "repeat prompt", "turn_id": "", "current_turn_user_idx": None},
+        {"token": "webui-token", "text": "repeat prompt", "timestamp": 42.0, "turn_id": "", "current_turn_user_idx": None},
         result=result,
     )
 
@@ -507,14 +507,14 @@ def test_non_prefix_self_heal_accepts_agent_turn_boundary_without_webui_token(te
         "messages": [
             {"role": "user", "content": "repeat prompt"},
             {"role": "assistant", "content": "historical answer"},
-            {"role": "user", "content": " repeat\n prompt "},
+            {"role": "user", "content": " repeat\n prompt ", "timestamp": 43.0},  # stamped by the Agent (persist_user_timestamp)
             {"role": "assistant", "content": f"healed after {terminal}"},
             {"role": "user", "content": "later turn"},
             {"role": "assistant", "content": "later answer"},
         ],
     }
     identity = streaming._resolve_active_turn_authority(
-        {"token": "webui-token", "text": "repeat prompt", "turn_id": "", "current_turn_user_idx": None},
+        {"token": "webui-token", "text": "repeat prompt", "timestamp": 43.0, "turn_id": "", "current_turn_user_idx": None},
         result=result,
     )
 
@@ -674,14 +674,14 @@ def test_differing_live_and_result_snapshots_are_exact_once(
         "current_turn_user_idx": 1,
         "messages": [
             {"role": "assistant", "content": "[compacted] history"},
-            {"role": "user", "content": " current\n prompt "},
+            {"role": "user", "content": " current\n prompt ", "timestamp": 44.0},  # stamped by the Agent
             {"role": "assistant", "content": result_snapshot},
             {"role": "user", "content": "later turn"},
             {"role": "assistant", "content": "later wrong"},
         ],
     }
     identity = streaming._resolve_active_turn_authority(
-        {"token": token, "text": "current prompt"},
+        {"token": token, "text": "current prompt", "timestamp": 44.0},
         result=result,
     )
     monkeypatch.setitem(streaming.STREAM_PARTIAL_TEXT, stream_id, live_snapshot)
@@ -897,7 +897,8 @@ def test_webui_run_missing_explicit_profile_passes_no_foreign_revision(
                 "completed": True,
                 "final_response": "ok",
                 "messages": [
-                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "user", "content": kwargs["persist_user_message"],
+                     "timestamp": kwargs.get("persist_user_timestamp")},  # stamp_message_timestamp
                     {"role": "assistant", "content": "ok"},
                 ],
             }
@@ -1289,7 +1290,7 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
         assert "next message" in reloaded.messages[-1]["content"].lower()
 
 
-def _repeated_prompt_collision_result_messages(prompt, *, current_answer):
+def _repeated_prompt_collision_result_messages(prompt, *, current_answer, current_timestamp=None):
     """Non-prefix Agent projection where BOTH candidate positions are user rows
     with the same normalized text.
 
@@ -1306,6 +1307,9 @@ def _repeated_prompt_collision_result_messages(prompt, *, current_answer):
         {"role": "assistant", "content": "historical answer"},  # historical-only prose
         {"role": "user", "content": prompt},  # exact Agent index target (current)
     ]
+    if current_timestamp is not None:
+        # The Agent stamps the row it appends with persist_user_timestamp.
+        rows[-1]["timestamp"] = current_timestamp
     if current_answer is not None:
         rows.append({"role": "assistant", "content": current_answer})
     return rows
@@ -1398,6 +1402,7 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
                         if collision == "current_output_after_exact_row"
                         else None
                     ),
+                    current_timestamp=kwargs.get("persist_user_timestamp"),
                 ),
             }
             if collision == "current_output_after_exact_row":
