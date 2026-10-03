@@ -1742,7 +1742,7 @@ def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
         # than appending, so check whether the tail changed.
         return False
     return any(
-        m.get('role') == 'assistant' and str(m.get('content') or '').strip()
+        m.get('role') == 'assistant' and (str(m.get('content') or '').strip() or str(m.get('reasoning_content') or '').strip())
         for m in candidates
     )
 
@@ -7010,8 +7010,19 @@ def _sanitize_messages_for_api(
             sanitized.pop("api_content", None)
         # Drop empty tool_calls — strict providers (DeepSeek, newer OpenAI)
         # reject tool_calls: [] with HTTP 400 even when no orphaned calls exist.
-        if 'tool_calls' in sanitized and not sanitized['tool_calls']:
-            del sanitized['tool_calls']
+        # Also handle the string-form '[]' that compression-summary messages
+        # carry: the non-empty string is truthy, so `not sanitized['tool_calls']`
+        # is False and the string survives to the serialization layer where it
+        # is re-parsed into a real empty list [] that the provider rejects.
+        # (Root Cause A — 2026-08-08 persistent 400 case.)
+        _tc = sanitized.get('tool_calls')
+        if _tc is not None:
+            try:
+                _tc_parsed = json.loads(_tc) if isinstance(_tc, str) else _tc
+            except (json.JSONDecodeError, TypeError):
+                _tc_parsed = _tc
+            if not (isinstance(_tc_parsed, list) and _tc_parsed):
+                del sanitized['tool_calls']
         # Provider-aware reasoning_content stripping from model-facing history.
         # Historical assistant reasoning_content is stripped only when the user
         # explicitly requests strip mode or auto mode identifies a local/generic
@@ -7154,8 +7165,14 @@ def _api_safe_message_positions(messages):
             [sanitized],
             message_records=True,
         )[0]
-        if 'tool_calls' in sanitized and not sanitized['tool_calls']:
-            del sanitized['tool_calls']
+        if 'tool_calls' in sanitized:
+            _tc = sanitized['tool_calls']
+            try:
+                _tc_parsed = json.loads(_tc) if isinstance(_tc, str) else _tc
+            except (json.JSONDecodeError, TypeError):
+                _tc_parsed = _tc
+            if not (isinstance(_tc_parsed, list) and _tc_parsed):
+                del sanitized['tool_calls']
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
         if 'content' in sanitized:
@@ -8931,7 +8948,7 @@ def _assistant_reply_added_after_current_turn(result_messages, previous_context,
         isinstance(m, dict)
         and m.get('role') == 'assistant'
         and not m.get('_error')
-        and _assistant_message_has_final_visible_text(m)
+        and (_assistant_message_has_final_visible_text(m) or str(m.get('reasoning_content') or '').strip())
         for m in candidates
     )
 
@@ -8949,7 +8966,9 @@ def _session_lacks_final_assistant_answer(messages) -> bool:
         if role == 'tool':
             return True
         if role == 'assistant':
-            if _assistant_message_has_final_visible_text(msg):
+            if msg.get('tool_calls'):
+                return True
+            if _assistant_message_has_final_visible_text(msg) or str(msg.get('reasoning_content') or '').strip():
                 return False
             continue
         if role == 'user':
