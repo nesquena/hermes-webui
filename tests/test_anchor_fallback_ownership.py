@@ -408,18 +408,27 @@ def test_transparent_raw_content_fallback_exits_for_anchor_owned_messages():
     }
 
 
-def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds():
-    """Drive the real renderMessages() gate, not only source-order assertions."""
+def test_render_messages_preserves_action_and_activity_ownership_boundaries():
+    """Drive the real renderMessages() gates, not only source-order assertions."""
 
     render_source = _function_source(_ui_js(), "renderMessages")
     transparent_source = _function_source(_ui_js(), "_transparentStreamOrderedParts")
     legacy_metadata_source = _function_source(
         _ui_js(), "_legacySettledFallbackHasToolMetadata"
     )
+    silent_reply_source = _function_source(
+        _ui_js(), "_isSilentWakeupSentinelReply"
+    )
+    silent_turn_source = _function_source(
+        _ui_js(), "_computeSilentWakeupTurnIdxs"
+    )
     # #2051: renderMessages() inserts a message block through this helper, so it is
     # evaluated with it. The shim's createElement() returns no template `content`, so the
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
     insert_block_source = _function_source(_ui_js(), "_insertSegmentBlock")
+    worklog_ownership_source = _function_source(
+        _ui_js(), "_assistantMessageBelongsInWorklog"
+    )
     script = textwrap.dedent(
         f"""
         class FakeClassList {{
@@ -511,7 +520,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           querySelector(selector) {{
             return this.querySelectorAll(selector)[0] || null;
           }}
-          insertAdjacentHTML() {{}}
+          insertAdjacentHTML(_position, html) {{ this.innerHTML += String(html || ''); }}
         }}
         function dataKey(name) {{
           return String(name).slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
@@ -547,7 +556,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           msgInner: new FakeElement('div'),
           emptyState: new FakeElement('div'),
         }};
-        global.window = {{}};
+        global.window = {{ _showBackgroundWakeups: true }};
         global.document = {{
           createElement: (tag) => new FakeElement(tag),
           getElementById: (id) => elements[id] || null,
@@ -587,7 +596,16 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _captureMessageScrollSnapshot() {{ return null; }}
         function _resetMessageRenderWindow(sid) {{ _messageRenderWindowSid = sid; }}
         function _latestPreservedCompressionTaskListMessages() {{ return []; }}
-        function _getVisibleMessagesWithIdx() {{ return S.messages.map((m, rawIdx) => (m && m.role !== 'tool') ? {{ m, rawIdx }} : null).filter(Boolean); }}
+        function _getVisibleMessagesWithIdx() {{
+          const silent = _computeSilentWakeupTurnIdxs(S.messages);
+          return S.messages.map((m, rawIdx) => (
+            m && !silent.has(rawIdx) && m.role !== 'tool' &&
+            !(m._source === 'process_wakeup' && window._showBackgroundWakeups === false)
+          ) ? {{ m, rawIdx }} : null).filter(Boolean);
+        }}
+        function _silentWakeupTurnHiddenIdxs() {{
+          return _computeSilentWakeupTurnIdxs(S.messages);
+        }}
         function _messageVirtualKeepTailCount() {{ return 100; }}
         function _currentMessageVirtualWindow(vis) {{ return {{ virtualized: false, start: 0, end: vis.length, topPad: 0, bottomPad: 0, total: vis.length, tailStart: vis.length }}; }}
         function _messageVirtualWindowKeyFor() {{ return 'all'; }}
@@ -634,7 +652,6 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _isAssistantEmptyPlaceholderContent() {{ return false; }}
         function _assistantTurnAnchorSettledFinalAnswer() {{ return null; }}
         function _worklogReasoningTextFromMessage() {{ return ''; }}
-        function _assistantMessageBelongsInWorklog() {{ return false; }}
         function _assistantThinkingBelongsInWorklog() {{ return false; }}
         function _assistantReasoningPayloadText() {{ return ''; }}
         function _statusCardHtml() {{ return ''; }}
@@ -704,10 +721,22 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           if (blocks) blocks.insertBefore(group, segment);
           return true;
         }}
+        function _hasHiddenProcessWakeupBoundaryBefore(rawIdx) {{
+          if (window._showBackgroundWakeups !== false) return false;
+          for (let idx = Number(rawIdx) - 1; idx >= 0; idx--) {{
+            const previous = (S.messages || [])[idx];
+            if (previous && previous._source === 'process_wakeup') return true;
+            if (previous && previous.role !== 'tool') return false;
+          }}
+          return false;
+        }}
 
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
+        eval({json.dumps(silent_reply_source)});
+        eval({json.dumps(silent_turn_source)});
         eval({json.dumps(insert_block_source)});
+        eval({json.dumps(worklog_ownership_source)});
         eval({json.dumps(render_source)});
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
@@ -844,12 +873,127 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           sToolCalls: S.toolCalls.length,
         }};
 
+        elements.msgInner = new FakeElement('div');
+        window._showBackgroundWakeups = false;
+        S = {{
+          session: {{ session_id: 'hidden-wakeup' }},
+          messages: [
+            {{ role: 'user', content: 'original human question' }},
+            {{ role: 'assistant', content: 'first assistant answer', _activityBurstId: 'before-wakeup' }},
+            {{ role: 'user', content: 'background completed', _source: 'process_wakeup' }},
+            {{ role: 'assistant', content: 'assistant answer after wakeup' }},
+          ],
+          toolCalls: [],
+          busy: false,
+        }};
+        renderMessages();
+        const hiddenWakeupUserRow = elements.msgInner.querySelector('[data-role="user"]');
+        const hiddenWakeupAssistantSegments = elements.msgInner.querySelectorAll('.assistant-segment');
+        const hiddenWakeupSummary = {{
+          wakeupRows: elements.msgInner.querySelectorAll('[data-role="process_wakeup"]').length,
+          assistantTurns: elements.msgInner.querySelectorAll('.assistant-turn').length,
+          oldHumanHasEdit: !!(hiddenWakeupUserRow && hiddenWakeupUserRow.innerHTML.includes('onclick="editMessage(this)"')),
+          assistantRegenerate: hiddenWakeupAssistantSegments.map(segment => segment.innerHTML.includes('onclick="regenerateResponse(this)"')),
+          assistantHidden: hiddenWakeupAssistantSegments.map(segment => segment.hidden),
+          assistantWorklogSource: hiddenWakeupAssistantSegments.map(segment => segment.classList.contains('assistant-segment-worklog-source')),
+        }};
+
+        elements.msgInner = new FakeElement('div');
+        window._showBackgroundWakeups = false;
+        S = {{
+          session: {{ session_id: 'normal-edit-owner' }},
+          messages: [
+            {{ role: 'user', content: 'latest human question' }},
+            {{ role: 'assistant', content: 'assistant answer' }},
+          ],
+          toolCalls: [],
+          busy: false,
+        }};
+        renderMessages();
+        const latestHumanRow = elements.msgInner.querySelector('[data-role="user"]');
+        const normalAssistantSegment = elements.msgInner.querySelector('.assistant-segment');
+        const normalEditSummary = {{
+          latestHumanHasEdit: !!(latestHumanRow && latestHumanRow.innerHTML.includes('onclick="editMessage(this)"')),
+          terminalAssistantHasRegenerate: !!(normalAssistantSegment && normalAssistantSegment.innerHTML.includes('onclick="regenerateResponse(this)"')),
+        }};
+
+        elements.msgInner = new FakeElement('div');
+        window._showBackgroundWakeups = false;
+        S = {{
+          session: {{ session_id: 'trailing-hidden-wakeup' }},
+          messages: [
+            {{ role: 'user', content: 'human question before background task' }},
+            {{ role: 'assistant', content: 'assistant response before background completion' }},
+            {{ role: 'user', content: 'background completed', _source: 'process_wakeup' }},
+          ],
+          toolCalls: [],
+          busy: false,
+        }};
+        renderMessages();
+        const preWakeupAssistantSegment = elements.msgInner.querySelector('.assistant-segment');
+        const trailingHiddenWakeupSummary = {{
+          wakeupRows: elements.msgInner.querySelectorAll('[data-role="process_wakeup"]').length,
+          preWakeupAssistantHasRegenerate: !!(preWakeupAssistantSegment && preWakeupAssistantSegment.innerHTML.includes('onclick="regenerateResponse(this)"')),
+        }};
+
+        function renderSilentToolWakeup(coldReload) {{
+          elements.msgInner = new FakeElement('div');
+          legacyCards = [];
+          window._showBackgroundWakeups = true;
+          const tid = coldReload ? 'silent-cold-tool' : 'silent-live-tool';
+          const toolCallingAssistant = {{
+            role: 'assistant',
+            content: '',
+            tool_calls: [{{
+              id: tid,
+              function: {{ name: 'terminal', arguments: '{{"cmd":"internal status"}}' }},
+            }}],
+          }};
+          const messages = [
+            {{ role: 'user', content: 'original human question' }},
+            {{ role: 'assistant', content: 'prior visible assistant answer' }},
+            {{ role: 'user', content: 'background completed', _source: 'process_wakeup' }},
+            toolCallingAssistant,
+            {{ role: 'tool', tool_call_id: tid, content: 'internal result' }},
+            {{ role: 'assistant', content: '[[SILENT]]' }},
+          ];
+          S = {{
+            session: {{ session_id: coldReload ? 'silent-cold' : 'silent-live', tool_calls: [] }},
+            messages,
+            toolCalls: coldReload ? [] : [{{
+              tid,
+              assistant_msg_idx: 3,
+              name: 'terminal',
+              snippet: 'internal result',
+              done: true,
+            }}],
+            busy: false,
+          }};
+          renderMessages();
+          return {{
+            userRows: elements.msgInner.querySelectorAll('[data-role="user"]').length,
+            wakeupRows: elements.msgInner.querySelectorAll('[data-role="process_wakeup"]').length,
+            assistantSegments: elements.msgInner.querySelectorAll('.assistant-segment').length,
+            toolRows: elements.msgInner.querySelectorAll('.tool-card-row').length,
+            legacyGroups: elements.msgInner.querySelectorAll('[data-legacy-fallback-owner]').length,
+            legacyCards,
+            sToolCalls: S.toolCalls.length,
+          }};
+        }}
+        const silentLiveSettlementSummary = renderSilentToolWakeup(false);
+        const silentColdReloadSummary = renderSilentToolWakeup(true);
+
         console.log(JSON.stringify({{
           selectorSanity,
           anchorSummary,
           historicalSummary,
           rawHistoricalSummary,
           duplicateReferenceSummary,
+          hiddenWakeupSummary,
+          normalEditSummary,
+          trailingHiddenWakeupSummary,
+          silentLiveSettlementSummary,
+          silentColdReloadSummary,
         }}));
         """
     )
@@ -897,6 +1041,38 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     assert "toolu_anchor_dup" not in {card["tid"] for card in duplicate_cards}
     assert duplicate_cards[0]["snippet"] == "historical persisted result"
 
+    assert result["hiddenWakeupSummary"] == {
+        "wakeupRows": 0,
+        "assistantTurns": 2,
+        "oldHumanHasEdit": False,
+        "assistantRegenerate": [False, True],
+        "assistantHidden": [False, False],
+        "assistantWorklogSource": [False, False],
+    }
+    assert result["normalEditSummary"] == {
+        "latestHumanHasEdit": True,
+        "terminalAssistantHasRegenerate": True,
+    }
+    assert result["trailingHiddenWakeupSummary"] == {
+        "wakeupRows": 0,
+        "preWakeupAssistantHasRegenerate": False,
+    }
+    for scenario in ("silentLiveSettlementSummary", "silentColdReloadSummary"):
+        summary = dict(result[scenario])
+        summary.pop("sToolCalls")
+        assert summary == {
+            "userRows": 1,
+            "wakeupRows": 0,
+            "assistantSegments": 1,
+            "toolRows": 0,
+            "legacyGroups": 0,
+            "legacyCards": [],
+        }, scenario
+    # Rendering is a projection: live settlement metadata stays intact while
+    # cold reload derives no replacement metadata from the hidden raw turn.
+    assert result["silentLiveSettlementSummary"]["sToolCalls"] == 1
+    assert result["silentColdReloadSummary"]["sToolCalls"] == 0
+
 
 def test_settled_legacy_tool_rebuild_excludes_anchor_owned_turns():
     render = _function_body(_ui_js(), "renderMessages")
@@ -910,8 +1086,26 @@ def test_settled_legacy_tool_rebuild_excludes_anchor_owned_turns():
     assert set_decl < collect_segments < metadata_scan < fallback_sources < source_collect
     assert "S.messages.indexOf(m)" not in render
     assert "S.messages.some((m,rawIdx)=>" in render
-    assert "!anchorOwnedAssistantRawIdxs.has(rawIdx)&&_legacySettledFallbackHasToolMetadata(m)" in render
+    assert "!silentWakeupTurnRawIdxs.has(rawIdx)&&" in render
+    assert "!anchorOwnedAssistantRawIdxs.has(rawIdx)&&" in render
+    assert "_legacySettledFallbackHasToolMetadata(m)" in render
     assert "if(anchorOwnedAssistantRawIdxs.has(rawIdx)) return;" in render
+
+
+def test_silent_wakeup_raw_owner_is_filtered_before_fallback_and_anchor_lookup():
+    render = _function_body(_ui_js(), "renderMessages")
+
+    silent_set = render.index("const silentWakeupTurnRawIdxs=typeof _silentWakeupTurnHiddenIdxs==='function'")
+    metadata_scan = render.index("const hasMessageToolMetadata=")
+    message_scan = render.index("S.messages.forEach((m,rawIdx)=>{")
+    raw_row_skip = render.index("if(silentWakeupTurnRawIdxs.has(rawIdx)) return;", message_scan)
+    tool_loop = render.index("for(const tc of (S.toolCalls||[])){")
+    owner_skip = render.index("if(_toolCallOwnedBySilentWakeup(tc)) continue;", tool_loop)
+    fallback_key = render.index("const key=segmentSeq?", tool_loop)
+    anchor_lookup = render.index("_assistantAnchorForActivity(a.aIdx", tool_loop)
+
+    assert silent_set < metadata_scan < message_scan < raw_row_skip < tool_loop
+    assert tool_loop < owner_skip < fallback_key < anchor_lookup
 
 
 def test_settled_legacy_activity_buckets_skip_anchor_owned_turns_before_rendering():
