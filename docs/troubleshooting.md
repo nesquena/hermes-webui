@@ -128,6 +128,16 @@ startup. If a restart fails, inspect the current service journal and selected
 interpreter. This ordering repair does not remove the static fallback lock or
 change cross-profile credential handling.
 
+The native Windows launcher also decides *which* Agent root that bootstrap runs
+from, so the two have to agree. `start.ps1` normally keeps the source-first
+order from `api.config._discover_agent_dir`, but when a source checkout and an
+installed Agent both match its candidate list and only the install has a
+`venv\Scripts\python.exe`, it selects the install: a source checkout gets its
+dependencies from `hermes_bootstrap.py`, and the Agent's relaunch/repair exit
+would stop the process before the server binds. A source checkout that has its
+own venv keeps priority, since it is launchable on its own.
+`HERMES_WEBUI_AGENT_DIR` remains authoritative over both.
+
 Current Hermes managed environments ship `ruamel.yaml` and may not include
 PyYAML. WebUI reads and writes YAML through `api/yaml_compat.py`, which uses
 PyYAML when it is importable and falls back to `ruamel.yaml` otherwise, and the

@@ -20,6 +20,11 @@ on:
       - '.github/workflows/native-windows-startup.yml'
   workflow_dispatch:
 
+# Read-only token: this workflow only checks the PR's own tree out and runs
+# start.ps1 against fixtures it creates itself. Nothing here needs write access.
+permissions:
+  contents: read
+
 jobs:
   native-windows-startup:
     name: start.ps1 path discovery (mock hermes-agent)
@@ -130,3 +135,327 @@ jobs:
             }
           }
           exit 0
+
+  # Selection probes for layouts from PR #7948 review:
+  # 1) LOCALAPPDATA pip Agent must beat stale Program Files source
+  # 2) explicit HERMES_WEBUI_STATE_DIR must keep LOCALAPPDATA HERMES_HOME
+  #    despite leftover %USERPROFILE%\.hermes\webui
+  # 3) legacy-only Agent in %USERPROFILE%\.hermes\hermes-agent (no WebUI state)
+  # 4) same legacy-only layout with explicit HERMES_WEBUI_STATE_DIR
+  # Stub server.py so start.ps1 runs real discovery/home logic then exits 0.
+  start-ps1-selection:
+    name: start.ps1 selection probes (two-install / explicit state / legacy-only)
+    runs-on: windows-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Probe two-install / explicit-state / legacy-only layouts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'hermes-sel'
+          if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          Copy-Item server.py server.py.bak-ci
+          $stub = @(
+            'import os, sys'
+            "print('PROBE_HERMES_HOME=' + os.environ.get('HERMES_HOME', ''))"
+            "print('PROBE_AGENT_DIR=' + os.environ.get('HERMES_WEBUI_AGENT_DIR', ''))"
+            "print('PROBE_PYTHON=' + sys.executable)"
+            "print('PROBE_STATE_DIR=' + os.environ.get('HERMES_WEBUI_STATE_DIR', ''))"
+            'sys.exit(0)'
+          ) -join "`n"
+          Set-Content -Path server.py -Value $stub -Encoding UTF8
+
+          function Invoke-StartPs1Probe {
+            param([hashtable]$EnvMap, [string]$Label)
+            # Child wrapper only — do not mutate USERPROFILE/LOCALAPPDATA here.
+            $wrap = Join-Path $env:RUNNER_TEMP "start-ps1-wrap-$Label.ps1"
+            $sb = New-Object System.Text.StringBuilder
+            [void]$sb.AppendLine('$ErrorActionPreference = ''Stop''')
+            [void]$sb.AppendLine('foreach ($k in @(''HERMES_WEBUI_AGENT_DIR'',''HERMES_HOME'',''HOME'')) { Remove-Item -Path "Env:$k" -ErrorAction SilentlyContinue }')
+            if (-not $EnvMap.ContainsKey('HERMES_WEBUI_STATE_DIR')) {
+              [void]$sb.AppendLine('Remove-Item -Path "Env:HERMES_WEBUI_STATE_DIR" -ErrorAction SilentlyContinue')
+            }
+            foreach ($k in $EnvMap.Keys) {
+              $v = [string]$EnvMap[$k]
+              $v = $v.Replace("'", "''")
+              # SetEnvironmentVariable avoids `$env:ProgramFiles(x86) = ...` parse errors
+              # (parens are not valid in bare $env:Name assignment form).
+              [void]$sb.AppendLine(('[Environment]::SetEnvironmentVariable(''{0}'', ''{1}'', ''Process'')' -f $k, $v))
+            }
+            $repo = $PWD.Path.Replace("'", "''")
+            [void]$sb.AppendLine(('Set-Location -LiteralPath ''{0}''' -f $repo))
+            [void]$sb.AppendLine('& .\start.ps1')
+            [void]$sb.AppendLine('exit $LASTEXITCODE')
+            Set-Content -Path $wrap -Value $sb.ToString() -Encoding UTF8
+
+            $stdout = Join-Path $env:RUNNER_TEMP "start-ps1-$Label.out"
+            $stderr = Join-Path $env:RUNNER_TEMP "start-ps1-$Label.err"
+            $proc = Start-Process -FilePath 'pwsh' `
+              -ArgumentList '-NoLogo','-File',$wrap `
+              -WorkingDirectory $PWD `
+              -PassThru `
+              -RedirectStandardOutput $stdout `
+              -RedirectStandardError $stderr
+            $null = $proc.WaitForExit(30000)
+            if (-not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              throw "${Label}: start.ps1 did not exit within 30s"
+            }
+            $out = if (Test-Path $stdout) { Get-Content $stdout -Raw } else { '' }
+            $err = if (Test-Path $stderr) { Get-Content $stderr -Raw } else { '' }
+            Write-Host "===== $Label stdout ====="
+            Write-Host $out
+            if ($err) { Write-Host "===== $Label stderr ====="; Write-Host $err }
+            if ($proc.ExitCode -ne 0) { throw "${Label}: start.ps1 exited $($proc.ExitCode)" }
+            return $out
+          }
+
+          # Probe 1: LOCALAPPDATA pip beats Program Files source
+          $local = Join-Path $root 'local'
+          $user = Join-Path $root 'user1'
+          $pf = Join-Path $root 'pf'
+          $localAgent = Join-Path (Join-Path $local 'hermes') 'hermes-agent'
+          $pfAgent = Join-Path (Join-Path $pf 'hermes') 'hermes-agent'
+          New-Item -ItemType Directory -Force -Path (Join-Path $localAgent 'hermes_cli') | Out-Null
+          New-Item -ItemType Directory -Force -Path $pfAgent | Out-Null
+          Set-Content -Path (Join-Path $pfAgent 'run_agent.py') -Value '# stale source'
+          $out1 = Invoke-StartPs1Probe -Label 'two-install' -EnvMap @{
+            LOCALAPPDATA = $local
+            USERPROFILE = $user
+            ProgramW6432 = $pf
+            ProgramFiles = $pf
+            'ProgramFiles(x86)' = $pf
+          }
+          if ($out1 -notmatch [regex]::Escape("PROBE_AGENT_DIR=$localAgent")) {
+            throw "two-install: expected Agent dir $localAgent"
+          }
+          if ($out1 -match [regex]::Escape("PROBE_AGENT_DIR=$pfAgent")) {
+            throw "two-install: Program Files source incorrectly won"
+          }
+          Write-Host "OK probe1: LOCALAPPDATA pip beat Program Files source"
+
+          # Probe 2: explicit STATE_DIR keeps LOCALAPPDATA HERMES_HOME
+          $local2 = Join-Path $root 'local2'
+          $user2 = Join-Path $root 'user2'
+          $pf2 = Join-Path $root 'pf2'
+          $customState = Join-Path $root 'custom-state'
+          $localHome = Join-Path $local2 'hermes'
+          $legacyHome = Join-Path $user2 '.hermes'
+          $localAgent2 = Join-Path $localHome 'hermes-agent'
+          New-Item -ItemType Directory -Force -Path (Join-Path $localAgent2 'hermes_cli') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $legacyHome 'webui') | Out-Null
+          New-Item -ItemType Directory -Force -Path $customState | Out-Null
+          $out2 = Invoke-StartPs1Probe -Label 'explicit-state' -EnvMap @{
+            LOCALAPPDATA = $local2
+            USERPROFILE = $user2
+            ProgramW6432 = $pf2
+            ProgramFiles = $pf2
+            'ProgramFiles(x86)' = $pf2
+            HERMES_WEBUI_STATE_DIR = $customState
+          }
+          if ($out2 -notmatch [regex]::Escape("PROBE_HERMES_HOME=$localHome")) {
+            throw "explicit-state: expected HERMES_HOME=$localHome"
+          }
+          if ($out2 -match [regex]::Escape("PROBE_HERMES_HOME=$legacyHome")) {
+            throw "explicit-state: migration incorrectly switched HERMES_HOME to legacy"
+          }
+          if ($out2 -notmatch [regex]::Escape("PROBE_STATE_DIR=$customState")) {
+            throw "explicit-state: custom STATE_DIR was not preserved"
+          }
+          Write-Host "OK probe2: explicit STATE_DIR preserved LOCALAPPDATA HERMES_HOME"
+
+          # Probe 3: legacy-only Agent (no WebUI state) must still be found
+          $local3 = Join-Path $root 'local3'
+          $user3 = Join-Path $root 'user3'
+          $pf3 = Join-Path $root 'pf3'
+          $legacyAgent3 = Join-Path (Join-Path $user3 '.hermes') 'hermes-agent'
+          New-Item -ItemType Directory -Force -Path (Join-Path $legacyAgent3 'hermes_cli') | Out-Null
+          New-Item -ItemType Directory -Force -Path $local3 | Out-Null
+          New-Item -ItemType Directory -Force -Path $pf3 | Out-Null
+          $out3 = Invoke-StartPs1Probe -Label 'legacy-only' -EnvMap @{
+            LOCALAPPDATA = $local3
+            USERPROFILE = $user3
+            ProgramW6432 = $pf3
+            ProgramFiles = $pf3
+            'ProgramFiles(x86)' = $pf3
+          }
+          if ($out3 -notmatch [regex]::Escape("PROBE_AGENT_DIR=$legacyAgent3")) {
+            throw "legacy-only: expected Agent dir $legacyAgent3"
+          }
+          Write-Host "OK probe3: legacy-only Agent found"
+
+          # Probe 4: legacy-only + explicit STATE_DIR (migration gated off)
+          $local4 = Join-Path $root 'local4'
+          $user4 = Join-Path $root 'user4'
+          $pf4 = Join-Path $root 'pf4'
+          $customState4 = Join-Path $root 'custom-state4'
+          $legacyAgent4 = Join-Path (Join-Path $user4 '.hermes') 'hermes-agent'
+          New-Item -ItemType Directory -Force -Path (Join-Path $legacyAgent4 'hermes_cli') | Out-Null
+          New-Item -ItemType Directory -Force -Path $local4 | Out-Null
+          New-Item -ItemType Directory -Force -Path $pf4 | Out-Null
+          New-Item -ItemType Directory -Force -Path $customState4 | Out-Null
+          $out4 = Invoke-StartPs1Probe -Label 'legacy-only-explicit-state' -EnvMap @{
+            LOCALAPPDATA = $local4
+            USERPROFILE = $user4
+            ProgramW6432 = $pf4
+            ProgramFiles = $pf4
+            'ProgramFiles(x86)' = $pf4
+            HERMES_WEBUI_STATE_DIR = $customState4
+          }
+          if ($out4 -notmatch [regex]::Escape("PROBE_AGENT_DIR=$legacyAgent4")) {
+            throw "legacy-only-explicit-state: expected Agent dir $legacyAgent4"
+          }
+          if ($out4 -notmatch [regex]::Escape("PROBE_STATE_DIR=$customState4")) {
+            throw "legacy-only-explicit-state: custom STATE_DIR was not preserved"
+          }
+          Write-Host "OK probe4: legacy-only Agent found with explicit STATE_DIR"
+
+          # Probe 5: legacy pip Agent + a STALE Program Files SOURCE checkout.
+          # Program Files is launcher-only and sorts after the legacy root, so
+          # ranking these roots by kind (a run_agent.py pass, then a hermes_cli
+          # pass) let the stale source checkout win. Its hermes_bootstrap.py can
+          # SystemExit before the server binds, so this is a brick, not a
+          # preference. Master picks the legacy pip Agent.
+          $local5 = Join-Path $root 'local5'
+          $user5 = Join-Path $root 'user5'
+          $pf5 = Join-Path $root 'pf5'
+          $legacyAgent5 = Join-Path (Join-Path $user5 '.hermes') 'hermes-agent'
+          $pfAgent5 = Join-Path (Join-Path $pf5 'hermes') 'hermes-agent'
+          New-Item -ItemType Directory -Force -Path (Join-Path $legacyAgent5 'hermes_cli') | Out-Null
+          New-Item -ItemType Directory -Force -Path $local5 | Out-Null
+          # A source checkout: run_agent.py, no hermes_cli.
+          New-Item -ItemType Directory -Force -Path $pfAgent5 | Out-Null
+          Set-Content -Path (Join-Path $pfAgent5 'run_agent.py') -Value '# stale source checkout'
+          $out5 = Invoke-StartPs1Probe -Label 'legacy-pip-vs-stale-pf-source' -EnvMap @{
+            LOCALAPPDATA = $local5
+            USERPROFILE = $user5
+            ProgramW6432 = $pf5
+            ProgramFiles = $pf5
+            'ProgramFiles(x86)' = $pf5
+          }
+          if ($out5 -notmatch [regex]::Escape("PROBE_AGENT_DIR=$legacyAgent5")) {
+            throw "legacy-pip-vs-stale-pf-source: stale Program Files source outranked the legacy pip Agent"
+          }
+          Write-Host "OK probe5: legacy pip Agent beats the stale Program Files source"
+
+          # Probe 6: explicit STATE_DIR + populated legacy webui state, with pip
+          # Agents at BOTH %USERPROFILE%\.hermes\hermes-agent and
+          # %USERPROFILE%\hermes-agent. api/paths._platform_default_hermes_home()
+          # does not gate the #2905 legacy preference on HERMES_WEBUI_STATE_DIR,
+          # so the launcher's platform-default Agent candidate must be the
+          # legacy home here while the exported HERMES_HOME stays LOCALAPPDATA.
+          $local6 = Join-Path $root 'local6'
+          $user6 = Join-Path $root 'user6'
+          $pf6 = Join-Path $root 'pf6'
+          $customState6 = Join-Path $root 'custom-state6'
+          $legacyAgent6 = Join-Path (Join-Path $user6 '.hermes') 'hermes-agent'
+          $homeAgent6 = Join-Path $user6 'hermes-agent'
+          New-Item -ItemType Directory -Force -Path (Join-Path $legacyAgent6 'hermes_cli') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $homeAgent6 'hermes_cli') | Out-Null
+          # Populated legacy WebUI state, and nothing at the new home.
+          New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $user6 '.hermes') 'webui') | Out-Null
+          New-Item -ItemType Directory -Force -Path $local6 | Out-Null
+          New-Item -ItemType Directory -Force -Path $pf6 | Out-Null
+          New-Item -ItemType Directory -Force -Path $customState6 | Out-Null
+          $out6 = Invoke-StartPs1Probe -Label 'explicit-state-legacy-webui-state' -EnvMap @{
+            LOCALAPPDATA = $local6
+            USERPROFILE = $user6
+            ProgramW6432 = $pf6
+            ProgramFiles = $pf6
+            'ProgramFiles(x86)' = $pf6
+            HERMES_WEBUI_STATE_DIR = $customState6
+          }
+          if ($out6 -notmatch [regex]::Escape("PROBE_AGENT_DIR=$legacyAgent6")) {
+            throw "explicit-state-legacy-webui-state: expected the legacy Agent $legacyAgent6, got a different candidate"
+          }
+          # The exported HERMES_HOME must still stay at the new home, so
+          # api/profiles.py does not read provider settings from the legacy one.
+          $localHome6 = Join-Path $local6 'hermes'
+          if ($out6 -notmatch [regex]::Escape("PROBE_HERMES_HOME=$localHome6")) {
+            throw "explicit-state-legacy-webui-state: exported HERMES_HOME moved to the legacy home"
+          }
+          if ($out6 -notmatch [regex]::Escape("PROBE_STATE_DIR=$customState6")) {
+            throw "explicit-state-legacy-webui-state: custom STATE_DIR was not preserved"
+          }
+          Write-Host "OK probe6: legacy Agent candidate with explicit STATE_DIR and LOCALAPPDATA HERMES_HOME"
+
+          # Probe 7: a selected PIP-STYLE install with no venv of its own keeps
+          # its root AND its interpreter, even though a later candidate has a
+          # venv. The repair that used to run here treated "some later root has
+          # a venv" as authority and moved the launch off a working install;
+          # %USERPROFILE%\hermes-agent is the launcher's last server candidate
+          # and master never searched it at all.
+          $local7 = Join-Path $root 'local7'
+          $user7 = Join-Path $root 'user7'
+          $pf7 = Join-Path $root 'pf7'
+          $selected7 = Join-Path (Join-Path $local7 'hermes') 'hermes-agent'
+          $later7 = Join-Path $user7 'hermes-agent'
+          New-Item -ItemType Directory -Force -Path (Join-Path $selected7 'hermes_cli') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $later7 'hermes_cli') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $later7 'venv\Scripts') | Out-Null
+          New-Item -ItemType Directory -Force -Path $local7 | Out-Null
+          New-Item -ItemType Directory -Force -Path $pf7 | Out-Null
+          $out7 = Invoke-StartPs1Probe -Label 'pip-install-no-venv-keeps-root' -EnvMap @{
+            LOCALAPPDATA = $local7
+            USERPROFILE = $user7
+            ProgramW6432 = $pf7
+            ProgramFiles = $pf7
+            'ProgramFiles(x86)' = $pf7
+          }
+          if ($out7 -notmatch [regex]::Escape("PROBE_AGENT_DIR=$selected7")) {
+            throw "pip-install-no-venv-keeps-root: a later venv displaced the selected install $selected7"
+          }
+          $laterVenv7 = Join-Path $later7 'venv\Scripts\python.exe'
+          if ($out7 -match [regex]::Escape("PROBE_PYTHON=$laterVenv7")) {
+            throw "pip-install-no-venv-keeps-root: interpreter moved onto $laterVenv7, which belongs to a different Agent"
+          }
+          Write-Host "OK probe7: selected pip install without a venv keeps its root and interpreter"
+
+          # Probe 8: same layout, but the selected root is a BOOTSTRAP-MANAGED
+          # source checkout (hermes_bootstrap.py, no hermes_cli) and so supplies
+          # its own dependencies. Master's hermes_cli-only pass never accepted
+          # such a root, so there is no displaced install to repair toward and
+          # the checkout stays selected.
+          $local8 = Join-Path $root 'local8'
+          $user8 = Join-Path $root 'user8'
+          $pf8 = Join-Path $root 'pf8'
+          $selected8 = Join-Path (Join-Path $local8 'hermes') 'hermes-agent'
+          $later8 = Join-Path $user8 'hermes-agent'
+          New-Item -ItemType Directory -Force -Path $selected8 | Out-Null
+          Set-Content -Path (Join-Path $selected8 'run_agent.py') -Value '# source checkout'
+          Set-Content -Path (Join-Path $selected8 'hermes_bootstrap.py') -Value 'pass'
+          New-Item -ItemType Directory -Force -Path (Join-Path $later8 'hermes_cli') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $later8 'venv\Scripts') | Out-Null
+          New-Item -ItemType Directory -Force -Path $local8 | Out-Null
+          New-Item -ItemType Directory -Force -Path $pf8 | Out-Null
+          $out8 = Invoke-StartPs1Probe -Label 'bootstrap-managed-no-venv-keeps-root' -EnvMap @{
+            LOCALAPPDATA = $local8
+            USERPROFILE = $user8
+            ProgramW6432 = $pf8
+            ProgramFiles = $pf8
+            'ProgramFiles(x86)' = $pf8
+          }
+          if ($out8 -notmatch [regex]::Escape("PROBE_AGENT_DIR=$selected8")) {
+            throw "bootstrap-managed-no-venv-keeps-root: a later venv displaced the selected checkout $selected8"
+          }
+          Write-Host "OK probe8: bootstrap-managed checkout without a venv keeps its root"
+
+
+      - name: Restore server.py
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path server.py.bak-ci) {
+            Move-Item -Force server.py.bak-ci server.py
+          }

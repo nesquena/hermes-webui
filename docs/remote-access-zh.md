@@ -139,6 +139,13 @@ python -m venv venv
 > 会用上你装的依赖——非常容易踩坑。最稳的路径仍然是装到 hermes-agent
 > 的 venv。
 
+如果机器上同时存在多个 hermes-agent（例如仓库旁边还有一个源码检出），
+`start.ps1` 的选择规则是：**只有在“源码检出没有自己的
+`venv\Scripts\python.exe`，而某个已安装的 Agent 有”时，才会选已安装的那个**——
+因为源码检出的依赖来自 `hermes_bootstrap.py`，它的重启/修复退出会在服务绑定
+之前终止进程。源码检出自带 venv 时仍然优先，符合 `api/config.py` 的
+源码优先顺序。想完全指定位置就设 `HERMES_WEBUI_AGENT_DIR`。
+
 ### 2. 带密码启动（前台）
 
 ```powershell
