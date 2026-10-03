@@ -15,6 +15,27 @@
 
 ---
 
+## Public-share media properties
+
+Run `./scripts/test.sh tests/test_share_properties.py tests/test_public_share_private_media_refs.py tests/test_session_public_share.py`.
+Use isolated `HERMES_HOME`, `HERMES_BASE_HOME`, `HERMES_CONFIG_PATH`, and
+`HERMES_WEBUI_STATE_DIR`. The deterministic seeds are `7868`, `20261003`, and
+`5391774930`. Tests execute the actual snapshot builder and Markdown renderer,
+inspect emitted image URLs independently, verify snapshot immutability and
+idempotence, and compare Node-decoded bytes for generated PNG and fixture JPEG/GIF
+images. Cases cover private-path encodings, malformed prefixes, public neighbors,
+titles, accepted data-URI forms, and 16 KiB/2 MiB boundaries. Three runtime-only
+mutations verify the privacy and image-preservation oracles fail on regressions.
+The shared bounded Markdown matcher is compared with the original regex spans,
+capture groups, substitutions and snapshots on 6,374 deterministic inputs.
+Malformed-alt/destination capacity cases reach 32,768 markers and fail an 8-second
+snapshot watchdog; this server bound does not claim a linear browser renderer.
+Node-dependent tests skip when Node is absent; the bounded capacity watchdog
+requires POSIX signals. Decoder acceptance does not certify browser pixel decoding;
+verify real public pages at desktop, narrow, and mobile widths separately. Raw HTML
+and arbitrary private hyperlinks are outside these media-token properties, and
+known-path/credential prose redaction remains active inside image-shaped text.
+
 ## Session-scoped media authorization
 
 Run `./scripts/test.sh tests/test_media_inline.py tests/test_media_session_preview_auth.py`.

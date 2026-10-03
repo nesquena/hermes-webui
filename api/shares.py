@@ -15,6 +15,7 @@ import json
 import logging
 import mimetypes
 import os
+import posixpath
 import re
 import secrets
 import tempfile
@@ -22,6 +23,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from api.config import STATE_DIR
 from api.helpers import redact_session_data, split_media_token_ref
@@ -123,6 +125,407 @@ def _redact_share_paths(text: str, extra_paths) -> str:
 _SHARE_MEDIA_RE = re.compile(
     r"MEDIA:(?!https?://)([^\s\)\]>]+)"
 )
+
+# Public-share hardening for renderer-active references that bypass
+# _SHARE_MEDIA_RE because they already look like HTTP(S), plus bare file://
+# references that renderMd() routes through the authenticated /api/media path.
+# The public snapshot is the trust boundary: it must be safe without knowing
+# reverse-proxy origin configuration.
+_SHARE_ANY_MEDIA_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_SHARE_WRAPPED_MEDIA_RE = re.compile(r"`MEDIA:([^`\s]+)`")
+# Titles classify the complete wrapper before the bare-token alternative.
+_SHARE_TITLE_MEDIA_RE = re.compile(
+    _SHARE_WRAPPED_MEDIA_RE.pattern + "|" + _SHARE_ANY_MEDIA_RE.pattern
+)
+_SHARE_FILE_MARKDOWN_RE = re.compile(
+    r"!?\[[^\]\r\n]*\]\(\s*file://[^)\s]+\s*\)",
+    re.IGNORECASE,
+)
+_SHARE_FILE_CODE_RE = re.compile(r"`file://[^`\r\n]+`", re.IGNORECASE)
+_SHARE_FILE_URI_RE = re.compile(r"file://[^\s<>\"')\]]+", re.IGNORECASE)
+# Unknown malformed destinations must not consume a later image marker. A
+# renderer-supported outer scheme still consumes its full reference so a private
+# outer URL cannot evade classification by nesting a public image inside it.
+# The renderer's outer Markdown scheme gate is case-sensitive.
+_SHARE_MARKDOWN_IMAGE_DESTINATION_GUARD = (
+    r"(?:(?=(?-i:https?://|file://|data:image/))|(?![^)\r\n]*!\[))"
+)
+_SHARE_MARKDOWN_IMAGE_RE = re.compile(
+    r"!\[[^\]\r\n]*\]\(\s*(?:"
+    rf"<({_SHARE_MARKDOWN_IMAGE_DESTINATION_GUARD}[^>\r\n]+)>|"
+    rf"({_SHARE_MARKDOWN_IMAGE_DESTINATION_GUARD}[^)\r\n]+))\s*\)",
+    re.IGNORECASE,
+)
+_SHARE_HTTP_SCHEME_RE = re.compile(r"https?://", re.IGNORECASE)
+_SHARE_MEDIA_SAFETY_MAX_CHARS = 16 * 1024
+_SHARE_MEDIA_SAFETY_DECODE_ROUNDS = 4
+# Match self-contained renderer image forms and its 2 MiB URI budget.
+# A complete self-contained payload cannot route to authenticated local media.
+# Keep SVG base64 strict; escaped raster base64 must validate after one decode.
+_SHARE_BASE64_IMAGE_RE = re.compile(
+    r"data:image/(?:png|jpe?g|gif|webp|avif|svg\+xml);base64,[a-z0-9+/=]+",
+    re.IGNORECASE,
+)
+_SHARE_RASTER_DATA_IMAGE_RE = re.compile(
+    r"data:image/(?:png|jpe?g|gif|webp|avif),[a-z0-9+/=%._~:@!$&'()*+,;-]*",
+    re.IGNORECASE,
+)
+# Recognize the raster header even if the escaped payload is malformed.
+# Validation below must reject it instead of falling through to URL handling.
+_SHARE_ESCAPED_BASE64_RASTER_RE = re.compile(
+    r"data:image/(?:png|jpe?g|gif|webp|avif);base64,(.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+_SHARE_DATA_IMAGE_MAX_CHARS = 2 * 1024 * 1024
+
+
+def _bounded_decode_share_media_ref(raw: str) -> str | None:
+    """Decode one public MEDIA reference with a small fail-closed budget."""
+    if not isinstance(raw, str) or len(raw) > _SHARE_MEDIA_SAFETY_MAX_CHARS:
+        return None
+    value = html.unescape(raw)
+    total = len(value)
+    for _ in range(_SHARE_MEDIA_SAFETY_DECODE_ROUNDS):
+        decoded = html.unescape(unquote(value))
+        total += len(decoded)
+        if total > _SHARE_MEDIA_SAFETY_MAX_CHARS * (_SHARE_MEDIA_SAFETY_DECODE_ROUNDS + 1):
+            return None
+        if decoded == value:
+            return value
+        value = decoded
+    # More decoding would still change the value: classification is uncertain,
+    # so the public boundary rejects it instead of publishing a partial view.
+    return value if html.unescape(unquote(value)) == value else None
+
+
+def _share_query_has_path_param(query: str) -> bool:
+    """Return True only for a real path= query field, never a fragment."""
+    for field in str(query or "").split("&"):
+        key, sep, _value = field.partition("=")
+        if sep and key.strip().lower() == "path":
+            return True
+    return False
+
+
+def _canonical_share_url_path(path: str) -> str:
+    """Apply browser-style slash/dot-segment normalization to a URL path."""
+    value = str(path or "").replace("\\", "/")
+    value = re.sub(r"/+", "/", value)
+    if not value.startswith("/"):
+        value = "/" + value
+    normalized = posixpath.normpath(value)
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if normalized != "/":
+        normalized = normalized.rstrip("/")
+    return normalized.lower()
+
+
+def _share_url_candidate_is_private(candidate: str) -> bool:
+    """Classify one decoded URL/path candidate against the private media route."""
+    try:
+        parsed = urlsplit(str(candidate or "").strip())
+    except ValueError:
+        # An unparseable renderer-active candidate cannot be proven public.
+        return True
+    return (
+        _canonical_share_url_path(parsed.path) == "/api/media"
+        and _share_query_has_path_param(parsed.query)
+    )
+
+
+def _iter_share_url_candidates(value: str):
+    """Yield the whole value plus every nested HTTP(S) URL start.
+
+    Bounded decoding happens before this step, so a percent-encoded nested URL
+    becomes visible here. Starting a candidate at every scheme occurrence lets
+    us classify an inner private URL without mistaking an outer CDN path that
+    merely contains the text "/api/media".
+    """
+    text = str(value or "").strip()
+    if text:
+        yield text
+    for match in _SHARE_HTTP_SCHEME_RE.finditer(text):
+        start = match.start()
+        if start == 0:
+            continue
+        tail = text[start:]
+        candidate = re.split(r"[\s<>\"'\x60\]\)]", tail, maxsplit=1)[0]
+        if candidate:
+            yield candidate
+
+
+def _share_media_ref_is_self_contained_image(raw: str) -> bool:
+    """Recognize a complete supported image URI within the renderer's budget."""
+    if not isinstance(raw, str) or len(raw) > _SHARE_DATA_IMAGE_MAX_CHARS:
+        return False
+    if _SHARE_BASE64_IMAGE_RE.fullmatch(raw) or _SHARE_RASTER_DATA_IMAGE_RE.fullmatch(raw):
+        return True
+    match = _SHARE_ESCAPED_BASE64_RASTER_RE.fullmatch(raw)
+    if not match or "%" not in match.group(1):
+        return False
+    try:
+        # unquote preserves literal +; a second decode is never permitted.
+        payload = re.sub(r"[ \t\n\f\r]", "", unquote(match.group(1)))
+        # Match the browser's forgiving-base64 after exactly one URI decode.
+        if len(payload) % 4 == 0:
+            if payload.endswith("=="):
+                payload = payload[:-2]
+            elif payload.endswith("="):
+                payload = payload[:-1]
+        if len(payload) % 4 == 1 or not re.fullmatch(r"[A-Za-z0-9+/]*", payload):
+            return False
+        base64.b64decode(payload + "=" * (-len(payload) % 4), validate=True)
+    except ValueError:
+        return False
+    return True
+
+
+def _share_media_ref_is_private(raw: str) -> bool:
+    """Return True when a renderer-active ref can route to private local media."""
+    if _share_media_ref_is_self_contained_image(raw):
+        return False
+    # Malformed escaped raster payloads fail closed even below the URL budget.
+    if "%" in raw and _SHARE_ESCAPED_BASE64_RASTER_RE.fullmatch(raw):
+        return True
+    decoded = _bounded_decode_share_media_ref(raw)
+    if decoded is None:
+        return True
+    normalized = decoded.strip().replace("\\", "/")
+    if "file:" in normalized.lower():
+        return True
+    return any(
+        _share_url_candidate_is_private(candidate)
+        for candidate in _iter_share_url_candidates(normalized)
+    )
+
+
+class _BoundedShareMarkdownPattern:
+    """Preserve existing matches while avoiding repeated malformed-tail scans.
+
+    The sanitizer uses only finditer/sub. Structural bounds retain the original
+    Match objects and groups, including nested alt brackets and angle references.
+    """
+
+    def __init__(self, pattern, *, image=False):
+        self.original = pattern
+        self.opener = re.compile(r"!\[" if image else r"!?\[")
+        self.angle = image
+        guard = _SHARE_MARKDOWN_IMAGE_DESTINATION_GUARD
+        self.guard = re.compile(guard, re.I) if guard in pattern.pattern else None
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+    def finditer(self, text):
+        cursor = 0
+        cached = {}
+        spaces = {}
+        size = len(text)
+
+        def next_at(token, start, purpose=""):
+            key = (token, purpose)
+            position = cached.get(key, -1)
+            if position < start:
+                position = text.find(token, start)
+                if position < 0:
+                    position = size
+                cached[key] = position
+            return position
+
+        def skip_space(start, purpose):
+            first, last = spaces.get(purpose, (-1, -1))
+            if first <= start <= last:
+                return last
+            end = start
+            while end < size and text[end].isspace():
+                end += 1
+            spaces[purpose] = (start, end)
+            return end
+
+        def guard_ok(start, purpose):
+            if self.guard is None:
+                return True
+            boundary = min(
+                next_at(")", start, purpose),
+                next_at("\r", start, purpose),
+                next_at("\n", start, purpose),
+            )
+            nested = next_at("![", start, purpose)
+            end = min(boundary, nested + 2) if nested < boundary else boundary
+            return self.guard.match(text, start, end) is not None
+
+        while cursor < size:
+            opened = self.opener.search(text, cursor)
+            if not opened:
+                return
+            # One failed destination invalidates every opener sharing this alt close.
+            close = next_at("]", opened.end(), "label")
+            line = min(
+                next_at("\r", opened.end(), "label"),
+                next_at("\n", opened.end(), "label"),
+            )
+            if line < close:
+                cursor = line + 1
+                continue
+            if close == size:
+                return
+            if text[close + 1 : close + 2] != "(":
+                cursor = close + 1
+                continue
+            # No later closing paren proves every remaining match impossible.
+            if next_at(")", close + 2, "global") == size:
+                return
+            raw_start = close + 2
+            dest = skip_space(raw_start, "leading")
+            paren = next_at(")", dest, "bare")
+            newline = min(next_at("\r", dest, "bare"), next_at("\n", dest, "bare"))
+            boundary = min(paren, newline)
+            tail = (
+                skip_space(boundary, "bare-tail") if boundary == newline else boundary
+            )
+            bare_end = (
+                tail + 1
+                if tail < size
+                and text[tail] == ")"
+                and (boundary > dest or dest > raw_start)
+                and guard_ok(dest, "bare-guard")
+                else None
+            )
+            angle_end = None
+            if self.angle and text[dest : dest + 1] == "<":
+                angle_close = next_at(">", dest + 1, "angle")
+                angle_line = min(
+                    next_at("\r", dest + 1, "angle"), next_at("\n", dest + 1, "angle")
+                )
+                if dest + 1 < angle_close < angle_line:
+                    angle_tail = skip_space(angle_close + 1, "angle-tail")
+                    if (
+                        angle_tail < size
+                        and text[angle_tail] == ")"
+                        and guard_ok(dest + 1, "angle-guard")
+                    ):
+                        angle_end = angle_tail + 1
+            # Bound the regex to a viable terminator, rather than every later tail.
+            end = angle_end if angle_end is not None else bare_end
+            found = (
+                self.original.match(text, opened.start(), end)
+                if end is not None
+                else None
+            )
+            if found:
+                yield found
+                cursor = found.end()
+            else:
+                cursor = close + 1
+
+    def sub(self, replacement, text, count=0):
+        out = []
+        cursor = 0
+        number = 0
+        for match in self.finditer(text):
+            out.append(text[cursor : match.start()])
+            out.append(
+                replacement(match)
+                if callable(replacement)
+                else match.expand(replacement)
+            )
+            cursor = match.end()
+            number += 1
+            if count and number >= count:
+                break
+        out.append(text[cursor:])
+        return "".join(out)
+
+_SHARE_MARKDOWN_IMAGE_RE = _BoundedShareMarkdownPattern(_SHARE_MARKDOWN_IMAGE_RE, image=True)
+_SHARE_FILE_MARKDOWN_RE = _BoundedShareMarkdownPattern(_SHARE_FILE_MARKDOWN_RE)
+
+def _omit_private_share_media_references(text: str, *, plain_text: bool = False) -> str:
+    """Remove renderer-active private media references from a public snapshot.
+
+    This intentionally does not infer the WebUI's public origin. Any MEDIA URL
+    that decodes to the authenticated /api/media?path= shape is private,
+    regardless of host. Ordinary public HTTP(S) media remain unchanged.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    # Bodies mirror renderMd()'s wrapped-token activation. Plain-text titles
+    # keep public wrappers intact and omit a private wrapper as one unit.
+    if not plain_text:
+        text = _SHARE_WRAPPED_MEDIA_RE.sub(lambda m: f"MEDIA:{m.group(1)}", text)
+
+    def _replace_media(match: re.Match) -> str:
+        # The title alternation puts bare references in group 2. Give the
+        # shared splitter the original bare match so quoted prose stays outside
+        # classification, just as in the local-image embedding path.
+        token_match = (
+            _SHARE_ANY_MEDIA_RE.match(text, match.start())
+            if plain_text and match.group(1) is None else match
+        )
+        parts = split_media_token_ref(text, token_match)
+        if not parts:
+            return match.group(0)
+        raw, suffix = parts
+        if _share_media_ref_is_private(raw):
+            return _PLACEHOLDER + suffix
+        if plain_text:
+            if _share_media_ref_is_self_contained_image(raw):
+                return match.group(0)
+            # Titles have no file-reading context: reuse the no-root embedding
+            # decision for local paths, before any wrapper can be consumed.
+            token = f"MEDIA:{raw}"
+            if _embed_share_media(token, allowed_roots=()) != token:
+                return _PLACEHOLDER + suffix
+        return match.group(0)
+
+    media_re = _SHARE_TITLE_MEDIA_RE if plain_text else _SHARE_ANY_MEDIA_RE
+    text = media_re.sub(_replace_media, text)
+
+    # Markdown images are renderer-active even without the MEDIA: prefix.
+    # Run their URL through the same classifier so direct private media links
+    # cannot survive into the anonymous share page.
+    def _replace_markdown_image(match: re.Match) -> str:
+        raw = str(match.group(1) or match.group(2) or "")
+        return _PLACEHOLDER if _share_media_ref_is_private(raw) else match.group(0)
+
+    text = _SHARE_MARKDOWN_IMAGE_RE.sub(_replace_markdown_image, text)
+
+    # Public JSON must not expose filesystem URIs even when markdown would have
+    # treated the literal as inert code. Replace larger constructs first so the
+    # snapshot does not retain broken markdown shells around the placeholder.
+    for pattern in (_SHARE_FILE_MARKDOWN_RE, _SHARE_FILE_CODE_RE, _SHARE_FILE_URI_RE):
+        # Recompute after every scrub: replacing a private neighbor shifts the
+        # image offsets. URI metadata is inert within a complete accepted image.
+        protected = []
+        for image in _SHARE_MARKDOWN_IMAGE_RE.finditer(text):
+            group = 1 if image.group(1) is not None else 2
+            if _share_media_ref_is_self_contained_image(image.group(group)):
+                protected.append(image.span(group))
+        for media in media_re.finditer(text):
+            token = (
+                _SHARE_ANY_MEDIA_RE.match(text, media.start())
+                if plain_text and media.group(1) is None else media
+            )
+            parts = split_media_token_ref(text, token)
+            if parts and _share_media_ref_is_self_contained_image(parts[0]):
+                start = token.start(1)
+                protected.append((start, start + len(parts[0])))
+        parts = []
+        cursor = 0
+        for start, end in sorted(protected):
+            if end <= cursor:
+                continue
+            # Scrub gaps rather than whole matches: an internal file:// match
+            # can cross a closing backtick into an outside private neighbor.
+            start = max(start, cursor)
+            parts.append(pattern.sub(_PLACEHOLDER, text[cursor:start]))
+            parts.append(text[start:end])
+            cursor = end
+        parts.append(pattern.sub(_PLACEHOLDER, text[cursor:]))
+        text = "".join(parts)
+    return text
+
 
 # Max size (in bytes) for files we'll embed as base64 in a share snapshot.
 _SHARE_EMBED_MAX_BYTES = 512 * 1024  # 512 KiB
@@ -357,12 +760,14 @@ def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Pa
         return None
     # ALWAYS-ON hardening for the public boundary, independent of any setting:
     # (1) force credential redaction, (2) embed allowed local media,
-    # (3) strip known local paths.
+    # (3) remove residual renderer-active private media references,
+    # (4) strip known local paths.
     text = _force_redact_credentials(text)
     # Embed local media BEFORE path redaction so the concrete path is still
     # available for file reads.  MEDIA: references become self-contained data
     # URIs — or a static placeholder if the path is outside the allowed roots.
     text = _embed_share_media(text, allowed_roots=allowed_roots)
+    text = _omit_private_share_media_references(text)
     text = _redact_share_paths(text, redact_paths)
     if not text.strip():
         return None
@@ -444,6 +849,10 @@ def build_share_snapshot(session) -> dict:
     _raw_title = safe_session.get("title")
     _raw_title = _raw_title if isinstance(_raw_title, str) else "Untitled"
     title = _force_redact_credentials(_raw_title or "Untitled")
+    # Titles share the same public trust boundary but have no file-reading
+    # context. Local MEDIA refs fail closed; ordinary public HTTP(S) refs may
+    # remain, while residual file:// and authenticated /api/media refs do not.
+    title = _omit_private_share_media_references(title, plain_text=True)
     title = _redact_share_paths(title, redact_paths) or "Untitled"
     return {
         "title": title,
