@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-09-15
+- **Updated:** 2026-09-26
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -18,7 +18,9 @@ A single WebUI agent turn is represented by several overlapping state layers:
 - durable run journal / replay state,
 - automatic compression summaries and active-task handoff text,
 - the browser's live timeline DOM/cache,
-- sidebar ordering, unread state, and `updated_at` metadata.
+- sidebar ordering, unread state, and `updated_at` metadata,
+- derived model/context metadata the UI reads (model catalog caches,
+  context-window limits) without re-syncing its source.
 
 Those layers are not independent. When they drift apart, the user sees failures
 that look unrelated: a prompt is visible but missing from recovered model
@@ -139,6 +141,29 @@ and 5; it does not mark every run-state boundary implemented.
 | Live UI scene/cache | Preserves expanded rows, in-progress cards, local scroll, and transient grouping | May optimize presentation but must be rebuildable or degradable from transcript/replay | Become the only place where chronological ordering exists |
 | Sidebar/session metadata | Helps the user find active and recent sessions | Must reflect meaningful user or assistant activity | Treat background cleanup as a fresh user-facing update |
 | Client-side unread stores (`localStorage`) | Backs the sidebar unread dot for every client on the origin | Converges counts/markers across clients and stores clear ordering independently per session | Let one client's stale cache lower a count or resurrect a cleared marker |
+| Derived model/context metadata | Projects the model catalog, plus context-window and threshold limits, into pickers, context bars, and compression thresholds | Must re-sync from its own source — config/`/api/models` for the catalog, session/stream usage for window and threshold — before it is rendered or acted on | Outlive its source (stale TTL cache, stale usage after resume or model switch) and drive thresholds silently |
+
+### Authority matrix
+
+The table above says what each layer is for. This matrix is the reviewable
+form of that contract: for every layer, who owns it, how long it persists, what
+divergence is tolerated, and how replay/recovery must treat it. Anchors are
+symbol names, never line numbers, so the matrix stays true across source-layout
+shifts (#5513, #5542).
+
+| Layer | Authority | Persistence lifetime | Allowed divergence | Replay / recovery rule |
+|---|---|---|---|---|
+| Visible transcript | Settled sidecar session file (`SESSION_DIR`, `Session.messages`); while a turn runs, the streamed scene feeding it | Durable on disk until the session is deleted; `.json.bak` retained for recovery | May trail the live stream by in-flight events; may downgrade to labeled structured replay, never to silently reordered rows | Rebuild chronologically from sidecar rows plus run journal events, letting `recover_session()` restore a larger `.json.bak` first; never from the browser cache |
+| Model context (`context_messages`) | Server-side reconstruction over `Session.context_messages` at handoff time | Rebuilt per turn; persisted only as far as the sidecar persists it | May differ from the visible transcript only for deliberately excluded turns, with the reason shown to the user | Recovery must re-include the visible or pending user turn (invariant 1) before any continuation is requested |
+| Pending turn metadata | `pending_user_message` with `pending_started_at` / `pending_user_source` on the session record | From submit until the turn is checkpointed into `Session.messages` and the field is cleared | Metadata only; must never become a second transcript row | Turn journal (`TURN_JOURNAL_DIR_NAME`) re-derives state; `_latest_user_matches_pending_text` decides whether a recovered pending turn is already checkpointed |
+| Live stream / SSE | Observation path only: `STREAMS` channels and the session events routes | Process memory, per stream; gone on restart | May lose events on disconnect; anything already emitted must remain recoverable elsewhere | Replay from `RUN_JOURNAL_DIR_NAME` with a cursor; live and replayed events share one renderer |
+| Worker lifecycle registry (`ACTIVE_RUNS`) | Occupancy — whether a worker still owns the session | Process memory; cancelling rows reclaimed after the bounded unwind window once they own no live `STREAMS` channel | Broader than attachable UI work (invariant 9) | Never replayed; re-derived empty at startup and repopulated by live work |
+| Run journal / replay | Emitted runtime events: ordering, seq cursors, terminal states | `_run_journal` JSONL under `SESSION_DIR`, append-only, bounded snapshot args | Snapshot argument values may be truncated; event identity and `seq` must not change | Cursor-safe and idempotent: a resumed cursor never re-delivers settled events or duplicates cards |
+| Compression summary / handoff | `compression_anchor_*` session fields produced by `is_context_compression_marker()` | Retained as anchor/recovery metadata; live-only divider rows are omitted from settled history | Agent-facing recovery material may exist with no matching user-visible row | Render as a quiet non-interactive divider only; later tool, reasoning, or interim events prove the barrier passed |
+| Live UI scene/cache | None — presentation only: `INFLIGHT`, `INFLIGHT_STATE_*`, renderer caches, DOM | Tab-local; localStorage snapshots are best-effort and cleared on teardown | May be stale, degraded, or partially rebuilt | Rebuildable from transcript plus replay; if it cannot be, downgrade to explicit structured replay (invariant 3) |
+| Sidebar/session metadata | Projection: `SESSION_INDEX_FILE` (`_index.json`) and the session list cache; counts come from the session store | Durable but derived; pruned and rebuilt by recovery (`_rebuild_recovery_session_index`) | May lag counts briefly; must never be refreshed by maintenance as if it were activity (invariant 4) | Rebuilt after recovery or repair so restored rows appear immediately |
+| Client-side unread stores (`localStorage`) | Projection written by the sidebar layer in `static/sessions.js` — viewed counts, completion markers, and per-session clear records (`SESSION_VIEWED_COUNTS_KEY`, `SESSION_COMPLETION_UNREAD_KEY`) | Browser `localStorage` under the origin, shared by every client on that origin; clear/tombstone records age out on the documented retention window | Concurrent clients may transiently lose a whole-map entry; merges and storage-event repair must re-assert held facts | Fold stored markers and clear records per session; never lower a count across a transcript generation or resurrect a cleared marker |
+| Derived model/context metadata | Two sources: the model catalog — source config (`config.yaml`, `_PROVIDER_MODELS`) and the `/api/models` response — and the window/threshold values the indicator reads from session and stream usage (`context_length`, `threshold_tokens`) | Catalog cache only: `STATE_DIR/models_cache.json` via `_get_models_cache_path`, plus in-memory `_available_models_cache` / `_available_models_cache_ts` TTL; usage values live with the session/stream payload and persist only as far as the session store does | Catalog may lag its source only within the TTL and must be invalidated when the source changes (#2443); usage may lag until the next payload, never across a resume or model switch | Catalog: re-read from `/api/models` after a source change. Usage: re-sync from the session/stream payload after a resume or model switch, before the UI renders context windows or compression thresholds (#2442) |
 
 ## Core Invariants
 
@@ -268,6 +293,27 @@ and 5; it does not mark every run-state boundary implemented.
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
 
+10. **Derived state is subordinate to its source.** Persisted caches,
+    in-memory TTL caches, optimistic client flags, display counts, and sidebar
+    rows project state they do not own. When a projection and its source
+    disagree, the source wins, and a change at the source must invalidate or
+    re-sync every downstream projection before it is rendered or acted on: a
+    model catalog cache must not outlive a provider config change (#2443),
+    context-window metadata — the session/stream usage `context_length` and
+    `threshold_tokens` the indicator reads — must be re-synced after a session
+    resume or model switch before the UI computes compression thresholds
+    (#2442), and a stale client-side busy or optimistic flag must never block a
+    new turn or override canonical idle server rows (#2796).
+11. **Recovery leaves provenance, not only content.** Startup or repair that
+    restores state from a backup or `state.db` (`recover_session()`,
+    `recover_missing_sidecars_from_state_db()`) must also persist content-free
+    metadata — recovered_from, recovered_at, recovery_reason, before/after
+    message counts — that downstream consumers and audit or health endpoints
+    can use to stay idempotent, and must rebuild derived indexes
+    (`SESSION_INDEX_FILE`) so projections reflect restored state immediately.
+    That provenance is maintenance, never user activity (invariant 4), and an
+    intentional delete must not be resurrected by orphan-backup recovery.
+
 ## Client-side unread persistence (sidebar layer)
 
 The sidebar unread dot is backed by two client-side stores in `static/sessions.js`.
@@ -382,20 +428,34 @@ context reconstruction, or session metadata:
   (`hermes-session-viewed-counts`, `hermes-session-completion-unread`,
   `hermes-session-completion-unread-cleared`), and does it keep the merge and
   tombstone rules in the client-side unread persistence section?
+- Which derived caches or client projections does this read or write, and what
+  invalidates them when their source changes (invariant 10)?
+- After a session resume or model switch, which metadata must be re-synced
+  before the UI renders context windows, thresholds, or counts?
+- Does any client-side optimistic or busy flag override canonical server state?
+- If this restores state from a backup or `state.db`, what recovery provenance
+  is persisted, which derived indexes are rebuilt, and how is an intentional
+  delete told apart from an orphaned backup (invariant 11)?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map
 
-| Example | State boundary exposed | Relevant invariant |
-|---|---|---|
-| [#2341](https://github.com/nesquena/hermes-webui/issues/2341) / [#2342](https://github.com/nesquena/hermes-webui/pull/2342) | Active reattach could show agent activity without the pending user turn that started it | 2 |
-| [#2344](https://github.com/nesquena/hermes-webui/issues/2344) / [#2347](https://github.com/nesquena/hermes-webui/pull/2347) | Session switching could lose or reorder the live thinking/tool/interim timeline | 3, 5 |
-| [#2345](https://github.com/nesquena/hermes-webui/issues/2345) / [#2349](https://github.com/nesquena/hermes-webui/pull/2349) | Stale stream cleanup could mutate `updated_at` and resurface old sessions | 4 |
-| [#2346](https://github.com/nesquena/hermes-webui/issues/2346) / [#2348](https://github.com/nesquena/hermes-webui/pull/2348) | Thinking cards could repeat interim assistant progress text | 5 |
-| [#2353](https://github.com/nesquena/hermes-webui/issues/2353) / [#2354](https://github.com/nesquena/hermes-webui/pull/2354) | Recovered pending user turns could be visible but missing from model context | 1 |
-| [#2355](https://github.com/nesquena/hermes-webui/issues/2355) / [#2357](https://github.com/nesquena/hermes-webui/pull/2357) | Auto-compression rotation could leave reference-only cards in the active conversation tail | 3, 6 |
-| [#2308](https://github.com/nesquena/hermes-webui/issues/2308) / [#2309](https://github.com/nesquena/hermes-webui/pull/2309) | Compressed sessions could resume stale agent tasks when the user starts an ordinary fresh chat | 6 |
-| [#2283](https://github.com/nesquena/hermes-webui/pull/2283) | Run event journal replay provides the foundation for ordered recovery | 5 |
+| Example | State boundary exposed | Layer | Relevant invariant |
+|---|---|---|---|
+| [#2341](https://github.com/nesquena/hermes-webui/issues/2341) / [#2342](https://github.com/nesquena/hermes-webui/pull/2342) | Active reattach could show agent activity without the pending user turn that started it | Pending turn metadata, Live UI scene/cache | 2 |
+| [#2344](https://github.com/nesquena/hermes-webui/issues/2344) / [#2347](https://github.com/nesquena/hermes-webui/pull/2347) | Session switching could lose or reorder the live thinking/tool/interim timeline | Live stream / SSE, Live UI scene/cache | 3, 5 |
+| [#2345](https://github.com/nesquena/hermes-webui/issues/2345) / [#2349](https://github.com/nesquena/hermes-webui/pull/2349) | Stale stream cleanup could mutate `updated_at` and resurface old sessions | Sidebar/session metadata | 4 |
+| [#2346](https://github.com/nesquena/hermes-webui/issues/2346) / [#2348](https://github.com/nesquena/hermes-webui/pull/2348) | Thinking cards could repeat interim assistant progress text | Live UI scene/cache | 5 |
+| [#2353](https://github.com/nesquena/hermes-webui/issues/2353) / [#2354](https://github.com/nesquena/hermes-webui/pull/2354) | Recovered pending user turns could be visible but missing from model context | Model context, Pending turn metadata | 1 |
+| [#2355](https://github.com/nesquena/hermes-webui/issues/2355) / [#2357](https://github.com/nesquena/hermes-webui/pull/2357) | Auto-compression rotation could leave reference-only cards in the active conversation tail | Compression summary / handoff, Visible transcript | 3, 6 |
+| [#2308](https://github.com/nesquena/hermes-webui/issues/2308) / [#2309](https://github.com/nesquena/hermes-webui/pull/2309) | Compressed sessions could resume stale agent tasks when the user starts an ordinary fresh chat | Compression summary / handoff | 6 |
+| [#2283](https://github.com/nesquena/hermes-webui/pull/2283) | Run event journal replay provides the foundation for ordered recovery | Run journal / replay | 5 |
+| [#2442](https://github.com/nesquena/hermes-webui/issues/2442) / [#2444](https://github.com/nesquena/hermes-webui/pull/2444) | Context-window metadata could stay stale after a session resume or model switch, driving premature compression | Derived model/context metadata | 10 |
+| [#2443](https://github.com/nesquena/hermes-webui/issues/2443) | A persisted model-list cache could outlive the provider config change that should have replaced it | Derived model/context metadata | 10 |
+| [#2796](https://github.com/nesquena/hermes-webui/pull/2796) / [#2797](https://github.com/nesquena/hermes-webui/pull/2797) / [#2801](https://github.com/nesquena/hermes-webui/pull/2801) | Stale optimistic busy state, non-deduped display counts, and session-level `tool_calls` overriding settled message metadata | Live UI scene/cache, Sidebar/session metadata | 10 |
+| [#4208](https://github.com/nesquena/hermes-webui/pull/4208) / [#4221](https://github.com/nesquena/hermes-webui/pull/4221) | Coarse polling or focus recovery could refresh the active transcript late or without a session id | Live stream / SSE, Sidebar/session metadata | 3, 4 |
+| [#4216](https://github.com/nesquena/hermes-webui/pull/4216) | Reconciliation could drop `state.db`-only user prompts that predate a newer sidecar tail | Visible transcript, Model context | 1 |
+| [#4213](https://github.com/nesquena/hermes-webui/pull/4213) / [#4218](https://github.com/nesquena/hermes-webui/pull/4218) | Sidebar and lineage projections could hide real TUI-origin or multi-row session history | Sidebar/session metadata, Visible transcript | 10 |
 
 These references are evidence for the contract. This RFC does not make the
 linked implementation PRs dependent on this document, and it does not close the
