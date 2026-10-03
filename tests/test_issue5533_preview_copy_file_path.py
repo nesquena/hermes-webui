@@ -1,39 +1,35 @@
+import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
 def _function_body(src: str, name: str) -> str:
-    start = src.index(f"function {name}(")
-    brace = src.index("{", start)
-    depth = 0
-    in_string = ""
-    escape = False
-    for idx in range(brace, len(src)):
-        ch = src[idx]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == in_string:
-                in_string = ""
-            continue
-        if ch in "'\"`":
-            in_string = ch
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start : idx + 1]
-    raise AssertionError(f"{name} body did not close")
+    """Full source of a top-level `[async] function name(...)` declaration.
+
+    Delegates to the comment/string-aware scanner defined further down
+    (_js_function_source) so a `'` inside a code comment cannot swallow the
+    rest of the body.
+    """
+    fn = _js_function_source(src, name)
+    assert fn is not None, f"{name}() not found in source"
+    return fn
 
 
 def _compact(src: str) -> str:
@@ -54,7 +50,10 @@ def test_preview_copy_relative_path_uses_current_preview_path():
     assert "_previewCurrentPath" in body
     assert "_normalizeWorkspaceRelPath(_previewCurrentPath)" in body
     assert "api('/api/file/path'" not in body
-    assert "constrel=_normalizeWorkspaceRelPath(_previewCurrentPath)||_previewCurrentPath" in compact
+    assert (
+        "constrel=_normalizeWorkspaceRelPath(_previewCurrentPath)||_previewCurrentPath"
+        in compact
+    )
 
 
 def test_preview_copy_relative_path_disables_button_while_request_is_in_flight():
@@ -103,9 +102,10 @@ def test_preview_copy_button_is_accessible_and_icon_only_on_narrow_pane():
     its label span is class-tagged, and a narrow-width media query hides that label.
     """
     import re
+
     # The button carries an explicit aria-label (screen-reader name survives label-hide).
     assert 'id="btnCopyPreviewRelPath"' in INDEX
-    btn = INDEX[INDEX.index('id="btnCopyPreviewRelPath"'):]
+    btn = INDEX[INDEX.index('id="btnCopyPreviewRelPath"') :]
     btn = btn[: btn.index("</button>")]
     assert 'aria-label="Copy relative path"' in btn
     assert 'class="preview-btn-label"' in btn
@@ -119,4 +119,2496 @@ def test_preview_copy_button_is_accessible_and_icon_only_on_narrow_pane():
         r"@container\s+rightpanel[^{]*max-width:\s*520px[^{]*\{[^}]*"
         r"\.preview-path\s+#btnCopyPreviewRelPath\s+\.preview-btn-label\s*\{\s*display:\s*none",
         STYLE,
-    ), "expected a @container rightpanel query hiding the copy-button label on a narrow pane"
+    ), (
+        "expected a @container rightpanel query hiding the copy-button label on a narrow pane"
+    )
+
+
+def test_preview_toolbar_has_copy_content_button():
+    """The control exists and is named in every locale.
+
+    Maintainer review PR #6957 (blocker 2) made it icon-only everywhere, so it
+    carries no visible text label: its name reaches the user through the
+    localized tooltip and accessible name instead of a `data-i18n` span.
+    """
+    assert 'id="btnCopyPreviewContent"' in INDEX
+    assert 'onclick="copyPreviewContent()"' in INDEX
+    assert 'data-i18n-title="copy_file_contents"' in INDEX
+    assert 'data-i18n-aria-label="copy_file_contents"' in INDEX
+
+
+def test_preview_copy_content_uses_current_preview_raw_content():
+    """The copy button reads the cache through the shared ownership gate.
+
+    Maintainer review defect #1: path equality alone is not ownership, because
+    a delayed save re-labels the cache from the live `_previewCurrentPath`. The
+    gate therefore requires the cached text to belong to the displayed file AND
+    to the current preview generation. The behaviour is covered by
+    test_delayed_save_* below; this pins the wiring so the caller cannot grow a
+    second, weaker copy of the rules.
+    """
+    body = _function_body(WORKSPACE_JS, "copyPreviewContent")
+    compact = _compact(body)
+
+    assert "_previewCurrentPath" in body
+    assert "previewRawContentIsCopyable()" in compact
+    assert "constcontent=_previewRawContent;" in compact
+    # The caller must not re-implement (or weaken) the ownership check.
+    assert "_previewRawContentPath!==_previewCurrentPath" not in compact
+    assert "typeof_previewRawContent!=='string'" not in compact
+
+    gate = _compact(_function_body(WORKSPACE_JS, "previewRawContentIsCopyable"))
+    assert "typeof_previewRawContent==='string'" in gate
+    assert "_previewRawContentPath===_previewCurrentPath" in gate
+    assert "_previewRawContentGen===_previewGen" in gate
+    assert "!_previewRawContentBinary" in gate
+
+
+def test_preview_copy_content_fails_when_content_not_available():
+    body = _function_body(WORKSPACE_JS, "copyPreviewContent")
+    compact = _compact(body)
+
+    guard = "if(!previewRawContentIsCopyable()){"
+    fallback_toast = "showToast(t('content_not_available'),null,'error');"
+    assert guard in compact
+    assert fallback_toast in compact
+    guard_idx = compact.index(guard)
+    assert compact.index(fallback_toast, guard_idx) == guard_idx + len(guard)
+    assert compact.index(fallback_toast) < compact.index(
+        "constcontent=_previewRawContent;"
+    )
+    assert (
+        "return;"
+        in compact[
+            compact.index(fallback_toast) : compact.index(fallback_toast)
+            + len(fallback_toast)
+            + 10
+        ]
+    )
+
+
+def test_preview_copy_content_disables_button_while_request_is_in_flight():
+    body = _function_body(WORKSPACE_JS, "copyPreviewContent")
+    compact = _compact(body)
+
+    guard = "if(btn&&btn.disabled)return;"
+    disable = "if(btn)btn.disabled=true;"
+    enable = "finally{if(btn)btn.disabled=false;}"
+    assert "$('btnCopyPreviewContent')" in body
+    assert guard in compact
+    assert disable in compact
+    assert enable in compact
+    assert compact.index(guard) < compact.index(disable)
+    assert compact.index(disable) < compact.index("previewRawContentIsCopyable()")
+
+
+def test_preview_copy_content_reuses_clipboard_fallback_and_toasts():
+    body = _function_body(WORKSPACE_JS, "copyPreviewContent")
+    # copyPreviewContent must delegate to the shared clipboard helper and NOT
+    # carry its own duplicated inline navigator.clipboard/execCommand fallback
+    # (finding #4 — the helper always exists, so the inline block was dead code).
+    assert (
+        "_copyTextWithFallback(content,t('content_copied'),t('content_copy_failed'))"
+        in body
+    )
+    assert "navigator.clipboard.writeText(content)" not in body
+    assert "document.execCommand('copy')" not in body
+    assert "t('content_copied')" in body
+    assert "t('content_copy_failed')" in body
+
+    # renderCodePreviewContent must cache the raw text + its path so the button
+    # copies the currently-previewed code file rather than stale md/csv text
+    # (finding #1).
+    render = _function_body(WORKSPACE_JS, "renderCodePreviewContent")
+    render_compact = _compact(render)
+    assert "_previewRawContent=content;" in render_compact
+    assert "_previewRawContentPath=path;" in render_compact
+
+
+def test_preview_toolbar_keeps_copy_content_button_from_shrinking_path_layout():
+    assert ".preview-path #btnCopyPreviewContent" in STYLE
+    selector_start = STYLE.index(".preview-path #btnCopyPreviewContent")
+    selector_block = STYLE[selector_start : STYLE.index("}", selector_start) + 1]
+    assert "flex-shrink:0" in selector_block
+    assert "white-space:nowrap" in selector_block
+
+
+def test_reset_text_preview_copy_state_hides_button_and_clears_cache():
+    """Greptile auto-review (PR #6957): a failed md/code/csv load must not leave
+    the copy-content button visible in a stale state carried over from the
+    previously-previewed file. resetTextPreviewCopyState() must clear the raw
+    content cache (and its path) and hide the button.
+    """
+    body = _function_body(WORKSPACE_JS, "resetTextPreviewCopyState")
+    compact = _compact(body)
+
+    # The clearing itself lives in the shared chokepoint, so the cache, its
+    # generation stamp, the binary flag and the button state can never be
+    # cleared in three different half-ways.
+    assert "invalidatePreviewRawContent()" in compact
+    invalidate = _compact(_function_body(WORKSPACE_JS, "invalidatePreviewRawContent"))
+    assert "_previewRawContent=''" in invalidate
+    assert "_previewRawContentPath=''" in invalidate
+    assert "_previewRawContentGen=-1" in invalidate
+    assert "_previewRawContentBinary=false" in invalidate
+    assert "syncPreviewCopyContentBtn()" in invalidate
+    sync = _compact(_function_body(WORKSPACE_JS, "syncPreviewCopyContentBtn"))
+    assert "$('btnCopyPreviewContent')" in sync
+    assert (
+        "btn.style.display=previewRawContentIsCopyable()?'inline-flex':'none'" in sync
+    )
+
+
+def test_reset_text_preview_copy_state_guards_against_stale_request_ownership():
+    """Greptile P1 (PR #6957, r3768442266): if file A's request fails after file B
+    has already become the current preview, A's stale catch must not clobber B's
+    cached content or hide B's copy button. resetTextPreviewCopyState() takes the
+    owning path and skips the reset when that path no longer matches the current
+    preview.
+    """
+    body = _function_body(WORKSPACE_JS, "resetTextPreviewCopyState")
+    compact = _compact(body)
+
+    assert "resetTextPreviewCopyState(ownerPath,previewGen)" in compact
+    guard = "if(ownerPath&&_previewCurrentPath!==ownerPath)return;"
+    assert guard in compact
+    # The guard must run before the cache/button are cleared.
+    assert compact.index(guard) < compact.index("invalidatePreviewRawContent()")
+
+
+def test_reset_text_preview_copy_state_guards_against_stale_generation():
+    """Maintainer review (PR #6957 comment 5272907466): a path-equality guard alone
+    cannot distinguish two overlapping openFile() calls for the SAME path — request
+    A for notes.md, request B for notes.md, B succeeds, A then fails must not clear
+    B's fresh cache/button. resetTextPreviewCopyState() must additionally reject a
+    stale generation via previewGenerationIsStale(), and that check must run before
+    the cache/button are cleared.
+    """
+    body = _function_body(WORKSPACE_JS, "resetTextPreviewCopyState")
+    compact = _compact(body)
+
+    guard = "if(previewGenerationIsStale(previewGen))return;"
+    assert guard in compact
+    assert compact.index(guard) < compact.index("invalidatePreviewRawContent()")
+
+
+def test_preview_generation_counter_exists_and_openfile_captures_it():
+    """The preview-open generation counter mirrors the existing workspace-tree
+    generation pattern (_wsTreeGen / bumpWorkspaceTreeGen, used by loadDir()) so
+    that overlapping openFile() calls can be told apart. openFile() must capture
+    the generation before the DOWNLOAD_EXTS early return, before any
+    other state is touched, so selecting a download-only file while a preview
+    request is pending advances the generation and invalidates the pending read.
+
+    The early return does not repaint the panel, so a SETTLED text preview that
+    is still on screen keeps its copy control: its ownership stamp is carried
+    onto the freshly bumped generation instead of being dropped. With nothing
+    settled to keep, it still fails closed (maintainer review PR #6957).
+    """
+    assert "let _previewGen = 0;" in WORKSPACE_JS
+    assert "function bumpPreviewGeneration(){" in WORKSPACE_JS
+    assert "function previewGenerationIsStale(previewGen){" in WORKSPACE_JS
+
+    compact = _compact(WORKSPACE_JS)
+    capture = (
+        "constpreviewGen=(typeofbumpPreviewGeneration==='function')?bumpPreviewGeneration():0;"
+    )
+    assert capture in compact
+
+    download_guard = (
+        "if(DOWNLOAD_EXTS.has(ext)){"
+        "if(settledPreviewWasCopyable){"
+        "_previewRawContentGen=previewGen;"
+        "if(typeofsyncPreviewCopyContentBtn==='function')syncPreviewCopyContentBtn();"
+        "}elseif(typeofinvalidatePreviewRawContent==='function'){"
+        "invalidatePreviewRawContent();"
+        "}"
+        "downloadFile(path);"
+        "return;"
+        "}"
+    )
+    assert download_guard in compact
+    capture_idx = compact.index(capture)
+    assert capture_idx < compact.index(download_guard)
+    # Nothing else in openFile() writes preview state before the generation is captured.
+    assert capture_idx < compact.index("_previewServerEditable=null;", capture_idx)
+
+
+def test_markdown_open_file_failure_resets_copy_state_with_request_owner():
+    """The markdown branch of openFile() must call resetTextPreviewCopyState(path,
+    previewGen) on load failure, passing its own request's path and generation as
+    the owner, so a stale failure can't clobber a newer file's copy-button state
+    (Greptile P1 PR #6957 finding r3768442266; generation guard added per
+    maintainer review comment 5272907466).
+    """
+    # openFile()'s default-parameter signature (`opts={}`) breaks the brace-matching
+    # _function_body() helper (its own `{}` closes before the real body opens), so
+    # this checks the whole-file compact source instead, anchored around the
+    # markdown branch's render call and failure catch.
+    compact = _compact(WORKSPACE_JS)
+
+    catch_marker = (
+        "}catch(e){"
+        "if(previewGenerationIsStale(previewGen)"
+        "||(S?.session?.session_id||'')!==capturedSid"
+        "||(S?.session?.workspace||'')!==capturedWs)return;"
+        "resetTextPreviewCopyState(path,previewGen);setStatus(t('file_open_failed'));"
+        "}"
+    )
+    assert catch_marker in compact
+    assert "renderMarkdownPreviewContent(data);" in compact
+    assert compact.index("renderMarkdownPreviewContent(data);") < compact.index(
+        catch_marker
+    )
+    assert "MD_EXTS.has(ext)" in compact
+    assert compact.index("MD_EXTS.has(ext)") < compact.index(catch_marker)
+
+
+def test_csv_and_code_open_file_failures_also_pass_request_owner():
+    """The CSV and plain-code/text branches of openFile() must likewise pass their
+    own path and generation as the owner to resetTextPreviewCopyState(), so stale
+    failures in those branches can't clobber a newer preview either (Greptile P1
+    PR #6957 finding r3768442266; generation guard added per maintainer review
+    comment 5272907466). All three text-preview failure branches (markdown, csv,
+    plain code/text) call resetTextPreviewCopyState(path, previewGen), each guarded
+    by an immediately-preceding stale-generation return.
+    """
+    compact = _compact(WORKSPACE_JS)
+    assert compact.count("resetTextPreviewCopyState(path,previewGen);") == 3
+    # No call site still uses the old ownerless or generation-less signatures.
+    assert "resetTextPreviewCopyState();" not in compact
+    assert "resetTextPreviewCopyState(path);" not in compact
+    # Every catch block that resets copy state bails out first when stale.
+    stale_return_before_reset = (
+        "if(previewGenerationIsStale(previewGen)"
+        "||(S?.session?.session_id||'')!==capturedSid"
+        "||(S?.session?.workspace||'')!==capturedWs)return;"
+        "resetTextPreviewCopyState(path,previewGen);"
+    )
+    assert compact.count(stale_return_before_reset) == 3
+
+
+def test_openfile_checks_staleness_immediately_after_each_awaited_read():
+    """Each of the markdown, csv, and plain-code/text branches must reject a stale
+    response immediately after its awaited /api read and before any cache/render
+    write, mirroring loadDir()'s `if(...||treeGen!==_wsTreeGen)return;` pattern
+    (maintainer review PR #6957 comment 5272907466). This closes the race where
+    an old file-A success could render after the user navigated to file B, or a
+    stale SUCCESS could overwrite a newer same-path response.
+    """
+    compact = _compact(WORKSPACE_JS)
+    stale_check = (
+        "if(previewGenerationIsStale(previewGen)"
+        "||(S?.session?.session_id||'')!==capturedSid"
+        "||(S?.session?.workspace||'')!==capturedWs)return;"
+    )
+    # markdown, csv, and plain-code/text branches each have one post-await check
+    # in the try body, plus one in the catch — six total. resetTextPreviewCopyState()
+    # carries a seventh, generation-only check of its own (defense in depth); it
+    # runs synchronously from callers that already proved identity, so it does not
+    # re-check the session/workspace pair.
+    assert compact.count(stale_check) == 6
+    # The seventh guard is resetTextPreviewCopyState()'s own generation-only check.
+    assert compact.count("if(previewGenerationIsStale(previewGen))return;") == 1
+
+    read_call = "awaitapi(_workspaceRouteForPath(path,'read'));"
+    idx = 0
+    found = 0
+    while True:
+        idx = compact.find(read_call, idx)
+        if idx == -1:
+            break
+        after = compact[idx + len(read_call) : idx + len(read_call) + len(stale_check)]
+        assert after == stale_check, (
+            f"expected staleness check immediately after read at {idx}"
+        )
+        found += 1
+        idx += len(read_call)
+    assert found == 3
+
+
+def test_bump_workspace_tree_gen_pattern_is_mirrored_by_preview_generation():
+    """Sanity check that the preview generation guard follows the same shape as
+    the pre-existing workspace-tree generation guard used by loadDir(), rather
+    than diverging into a different mechanism.
+    """
+    ws_gen = _function_body(WORKSPACE_JS, "bumpWorkspaceTreeGen")
+    preview_gen = _function_body(WORKSPACE_JS, "bumpPreviewGeneration")
+    normalized_ws_gen = (
+        _compact(ws_gen)
+        .replace("bumpWorkspaceTreeGen", "bumpPreviewGeneration")
+        .replace("_wsTreeGen", "_previewGen")
+    )
+    assert normalized_ws_gen == _compact(preview_gen)
+
+
+def test_preview_copy_content_button_is_icon_only_everywhere_and_stays_accessible():
+    """Maintainer review PR #6957 (blocker 2): the copy-content button is
+    icon-only in EVERY state, not only on a narrow pane.
+
+    With no text label there is nothing to fold, so the button must ship without
+    a .preview-btn-label span while keeping its localized tooltip and accessible
+    name (WCAG 2.5.3) — an icon-only control is unusable if its name is
+    English-only or missing.
+    """
+    assert 'id="btnCopyPreviewContent"' in INDEX
+    btn = INDEX[INDEX.index('id="btnCopyPreviewContent"') :]
+    btn = btn[: btn.index("</button>")]
+    assert 'aria-label="Copy file contents"' in btn
+    assert 'title="Copy file contents"' in btn
+    assert "<svg" in btn, "the icon-only button must keep its glyph"
+    assert "preview-btn-label" not in btn, (
+        "the copy-content button must carry no visible text label at any width"
+    )
+    assert ">Copy file contents<" not in btn, (
+        "the copy-content button must not render its name as button text"
+    )
+    # Localized tooltip + accessible name: the icon-only state must not leave a
+    # Russian/German user with an English tooltip/screen-reader name.
+    assert 'data-i18n-title="copy_file_contents"' in btn
+    assert 'data-i18n-aria-label="copy_file_contents"' in btn
+    # The sibling relative-path button keeps its label-fold rule unchanged.
+    assert re.search(
+        r"@container\s+rightpanel[^{]*max-width:\s*520px[^{]*\{[^}]*"
+        r"\.preview-path\s+#btnCopyPreviewRelPath\s+\.preview-btn-label\s*\{\s*display:\s*none",
+        STYLE,
+    ), (
+        "expected a @container rightpanel query hiding the copy-relative-path label at 520px"
+    )
+
+
+# ── Behavioural harness: real production functions driven in Node ────────────
+# Maintainer review (PR #6957, CHANGES_REQUESTED on f6405feb) found three
+# defects that a source-string assert cannot see, because all three are about
+# ORDERING and observable STATE rather than about which tokens appear in a
+# function body:
+#
+#   1. a delayed save relabels file A's content as file B and copies it,
+#   2. unknown/binary files are offered for copy after lossy UTF-8 replacement
+#      decoding (api/workspace.py read_file_content decodes with
+#      errors='replace' and sets no `binary` flag),
+#   3. localized copy failures are downgraded to short informational toasts
+#      (showToast()'s type sniffing only recognises English words).
+#
+# The helpers below pull the REAL functions out of static/workspace.js and
+# static/ui.js, run them under Node against a minimal DOM stub, and assert what
+# the user can observe: what landed on the clipboard, whether the copy control
+# is offered, and the toast's level + dismiss delay. Functions that only exist
+# after the fix are shimmed when absent, so a pre-fix tree still exercises the
+# real (buggy) production ordering and fails on the assertion rather than on a
+# missing symbol.
+
+
+def _js_function_source(src: str, name: str):
+    """Return the full source of a top-level `[async] function name(...)`
+    declaration, or None when that function does not exist."""
+    m = re.search(r"(?:async\s+)?function\s+" + re.escape(name) + r"\s*\(", src)
+    if not m:
+        return None
+    idx = src.index("(", m.end() - 1)
+    depth = 0
+    while idx < len(src):
+        if src[idx] == "(":
+            depth += 1
+        elif src[idx] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        idx += 1
+    brace = src.index("{", idx)
+    depth = 0
+    j = brace
+    while j < len(src):
+        ch = src[j]
+        if ch in "'\"`":
+            quote = ch
+            j += 1
+            while j < len(src):
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == quote:
+                    break
+                j += 1
+        elif ch == "/" and src[j + 1 : j + 2] == "/":
+            j = src.index("\n", j)
+        elif ch == "/" and src[j + 1 : j + 2] == "*":
+            j = src.index("*/", j) + 1
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[m.start() : j + 1]
+        j += 1
+    raise AssertionError(f"{name}() body did not close in source")
+
+
+def _js_functions(src: str, names) -> str:
+    """Concatenate the real source of every named function that exists."""
+    out = []
+    for name in names:
+        fn = _js_function_source(src, name)
+        if fn is not None:
+            out.append(fn)
+    return "\n".join(out)
+
+
+def _run_node(script: str) -> dict:
+    result = subprocess.run(
+        [NODE, "--input-type=commonjs", "-e", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "node harness failed\nstdout:\n"
+            + (result.stdout or "<empty>")
+            + "\nstderr:\n"
+            + (result.stderr or "<empty>")
+        )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+# Minimal DOM/i18n stub. `t()` returns the key so assertions can match on the
+# i18n key instead of on one locale's wording.
+_DOM_STUB = r"""
+const ELS={};
+function _mkEl(id){
+  return {
+    id:id, style:{display:'',cssText:''}, value:'', textContent:'', innerHTML:'',
+    title:'', disabled:false, className:'', dataset:{}, _attrs:{}, _children:[],
+    classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},
+               contains(c){return this._s.has(c);}},
+    setAttribute(k,v){this._attrs[k]=String(v);},
+    getAttribute(k){return Object.prototype.hasOwnProperty.call(this._attrs,k)?this._attrs[k]:null;},
+    removeAttribute(k){delete this._attrs[k];},
+    appendChild(c){this._children.push(c);if(c&&c.textContent)this.textContent+=c.textContent;return c;},
+    removeChild(c){this._children=this._children.filter(x=>x!==c);return c;},
+    remove(){}, select(){}, focus(){}, click(){},
+  };
+}
+const $=(id)=>ELS[id]||(ELS[id]=_mkEl(id));
+const document={createElement:(tag)=>_mkEl('<'+tag+'>'),
+                body:{appendChild(){},removeChild(){}},
+                execCommand:()=>false};
+const t=(k)=>k;
+const toasts=[];
+function showToast(msg,ms,type){toasts.push({msg:String(msg),ms:(ms===undefined?null:ms),type:type||null});}
+const statuses=[];
+function setStatus(msg){statuses.push(String(msg));}
+const copied=[];
+function _copyTextWithFallback(text,okMsg,failPrefix){copied.push(text);showToast(okMsg);return Promise.resolve();}
+function requestAnimationFrame(){}
+function fileExt(p){const m=String(p||'').match(/\.[^./\\]+$/);return m?m[0].toLowerCase():'';}
+function _workspacePathIsReadOnly(){return false;}
+function updateEditBtn(){}
+function setLargeMarkdownForceRenderVisible(){}
+function _prismLanguageForPath(){return '';}
+function renderMd(content){return '<p>'+String(content||'')+'</p>';}
+function renderKatexBlocks(){}
+const MD_EXTS = new Set(['.md','.markdown','.mdown']);
+const DOWNLOAD_EXTS = new Set(['.bin','.exe','.zip']);
+const IMAGE_EXTS = new Set(['.png','.jpg','.jpeg','.gif','.svg','.webp','.ico','.bmp']);
+const AUDIO_EXTS = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);
+const VIDEO_EXTS = new Set(['.mp4','.mov','.m4v','.webm','.ogv','.avi','.mkv']);
+const PDF_EXTS = new Set(['.pdf']);
+const HTML_EXTS = new Set(['.html','.htm']);
+function renderBreadcrumb(){}
+function renderFileBreadcrumb(){}
+function closeWorkspacePanel(){}
+function openWorkspacePanel(){}
+function syncWorkspacePanelUI(){}
+let _workspacePanelMode='preview';
+function _workspaceRouteForPath(path,kind,opts){return '/api/file/read?path='+encodeURIComponent(path);}
+function shouldRenderMarkdownPreviewAsPlainText(){return false;}
+function largeMarkdownPlainTextStatus(){return '';}
+function _workspaceEscapeGrantForPath(){return null;}
+function _clearWorkspaceEscapeGrant(){}
+const downloads=[];
+function downloadFile(p){downloads.push(p);}
+function buildCsvTablePreview(){return {html:'<table></table>'};}
+const tick=()=>new Promise(r=>setImmediate(r));
+
+let _previewCurrentPath='';
+let _previewCurrentMode='';
+let _previewDirty=false;
+let _previewServerEditable=null;
+let _previewSaveRoute='/api/file/save';
+let _previewOfficeFormat='';
+let _previewPreviewKind='';
+let _previewRawContent='';
+let _previewRawContentPath='';
+let _previewRawContentGen=-1;
+let _previewRawContentBinary=false;
+// A cached preview belongs to one session's workspace, so the stub carries the
+// same identity pair the production cache stamps (maintainer review PR #6957).
+let _previewRawContentSessionId='';
+let _previewRawContentWorkspace='';
+let _previewGen=0;
+let S={session:{session_id:'test-session', workspace:'/test/workspace'}};
+let api=async()=>({});
+
+// Shim for the post-fix ownership chokepoint so a PRE-fix tree still runs the
+// real buggy production ordering and fails on the assertion below.
+function _claim(path,gen){
+  if(typeof claimPreviewRawContent==='function') return claimPreviewRawContent(path,gen);
+  return true;
+}
+"""
+
+_PREVIEW_FNS = (
+    "bumpPreviewGeneration",
+    "previewGenerationIsStale",
+    "previewTextLooksBinary",
+    "claimPreviewRawContent",
+    "invalidatePreviewRawContent",
+    "previewRawContentIsCopyable",
+    "previewRawContentIsBinaryForCurrentPreview",
+    "syncPreviewCopyContentBtn",
+    "resetTextPreviewCopyState",
+    "showPreview",
+    "renderMarkdownPreviewContent",
+    "renderCodePreviewContent",
+    "renderCsvPreviewContent",
+    "openFile",
+    "copyPreviewContent",
+    "toggleEditMode",
+)
+
+
+def _run_preview_scenario(scenario: str, boot_source: str = None) -> dict:
+    boot = boot_source if boot_source is not None else BOOT_JS
+    script = (
+        _DOM_STUB
+        + _js_functions(WORKSPACE_JS, _PREVIEW_FNS)
+        + "\n"
+        + _js_functions(boot, ("clearPreview",))
+        + "\n(async()=>{\n"
+        + scenario
+        + "\n})().catch(e=>{console.error(e);process.exit(1);});\n"
+    )
+    return _run_node(script)
+
+
+# ── Defect 1: a delayed save must not relabel file A's content as file B ─────
+
+
+def _delayed_save_scenario(b_loaded: bool) -> dict:
+    return _run_preview_scenario(
+        """
+  _previewCurrentMode='md';
+  const genA=bumpPreviewGeneration();
+  _previewCurrentPath='notes/a.md';
+  _previewRawContent='A ORIGINAL';
+  _previewRawContentPath='notes/a.md';
+  _claim('notes/a.md',genA);
+
+  // The user is editing a.md in the preview editor.
+  $('previewEditArea').style.display='';
+  $('previewEditArea').value='A EDITED';
+
+  const saveCalls=[];
+  let release=null;
+  api=(route,opts)=>{
+    const body=JSON.parse(opts.body);
+    saveCalls.push(body);
+    return new Promise(res=>{release=()=>res({content:body.content});});
+  };
+
+  const savePromise=toggleEditMode();   // real save path, still in flight
+  await tick();
+
+  // While the save is in flight the user opens b.md. openFile()'s synchronous
+  // prologue bumps the preview generation and repoints the panel at b.md.
+  const genB=bumpPreviewGeneration();
+  _previewCurrentPath='notes/b.md';
+  if(B_LOADED){
+    // b.md's read resolves and caches its own text.
+    _previewRawContent='B CONTENT';
+    _previewRawContentPath='notes/b.md';
+    _claim('notes/b.md',genB);
+  }
+
+  release();                            // ...and only now does the save land
+  await savePromise;
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    copied, toasts, statuses, saveCalls,
+    rawContent:_previewRawContent, rawPath:_previewRawContentPath,
+    currentPath:_previewCurrentPath,
+  }));
+""".replace("B_LOADED", "true" if b_loaded else "false")
+    )
+
+
+@requires_node
+def test_delayed_save_cannot_relabel_previous_file_content_as_current_file():
+    """Maintainer review defect #1 (production ordering).
+
+    toggleEditMode() awaits /api/file/save and then re-labels the preview
+    raw-content cache from the LIVE globals (`_previewRawContentPath =
+    _previewCurrentPath`). openFile() assigns `_previewCurrentPath`
+    synchronously, so a save that completes after the user opened b.md stamps
+    a.md's just-saved text with b.md's path — and the copy button, whose only
+    ownership check was that same path equality, then copies a.md's text while
+    the panel shows b.md. Cache ownership must be bound to the displayed file
+    AND the preview generation that produced the text.
+    """
+    out = _delayed_save_scenario(b_loaded=True)
+
+    assert out["saveCalls"] and out["saveCalls"][0]["path"] == "notes/a.md", (
+        f"the save must target the edited file: {out['saveCalls']}"
+    )
+    assert "A EDITED" not in out["copied"], (
+        "a delayed save relabelled a.md's content as b.md and the copy button "
+        f"copied it: {out}"
+    )
+    assert out["copied"] == ["B CONTENT"], (
+        f"the copy button must copy the displayed file's own content: {out}"
+    )
+    assert out["rawContent"] == "B CONTENT", f"stale save clobbered b.md's cache: {out}"
+    assert out["rawPath"] == "notes/b.md", (
+        f"cache label no longer matches its text: {out}"
+    )
+
+
+@requires_node
+def test_delayed_save_landing_on_a_still_loading_file_refuses_to_copy():
+    """Same ordering, but b.md's read has not resolved yet: the stale save must
+    not be able to present a.md's text as b.md's content. With no provable
+    owner the copy must fail closed with a localized error, not copy the wrong
+    file (guideline 3: "unknown" is not "allowed").
+    """
+    out = _delayed_save_scenario(b_loaded=False)
+
+    assert out["copied"] == [], f"copied content that belongs to another file: {out}"
+    assert out["rawPath"] != "notes/b.md", (
+        f"a.md's text was relabelled with b.md's path: {out}"
+    )
+    assert out["toasts"], f"a refused copy must tell the user why: {out}"
+    last = out["toasts"][-1]
+    assert last["msg"] == "content_not_available", f"unexpected toast: {out['toasts']}"
+    assert last["type"] == "error", (
+        f"a refused copy is an error-level notification, got {last}"
+    )
+
+
+@requires_node
+def test_preview_copy_content_still_copies_the_freshly_loaded_file():
+    """Control case: the happy path must keep working — a normal load caches the
+    text and the button copies exactly that text (no over-blocking)."""
+    out = _run_preview_scenario(
+        """
+  _previewCurrentPath='docs/notes.md';
+  const gen=bumpPreviewGeneration();
+  _previewCurrentMode='md';
+  _previewRawContent='# Title\\n\\nBody with emoji 🐾 and CJK 漢字.';
+  _previewRawContentPath='docs/notes.md';
+  _claim('docs/notes.md',gen);
+  await copyPreviewContent();
+  console.log(JSON.stringify({copied,toasts}));
+"""
+    )
+    assert out["copied"] == ["# Title\n\nBody with emoji 🐾 and CJK 漢字."], out
+    assert out["toasts"][-1]["msg"] == "content_copied", out
+
+
+# ── Defect 2: binary / lossily-decoded text is never copyable ────────────────
+
+
+_LOSSY_UNKNOWN_TYPE = "PK\\u0003\\u0004\\u0000\\u0000\\uFFFD\\uFFFD\\uFFFDjunk"
+
+
+def _binary_gate_scenario(
+    render_call: str, content_js: str, mode_hint: str = ""
+) -> dict:
+    return _run_preview_scenario(
+        """
+  _previewCurrentPath='PATH';
+  const gen=bumpPreviewGeneration();
+  MODE_HINT
+  const content=CONTENT;
+  RENDER_CALL
+  const btn=$('btnCopyPreviewContent');
+  await copyPreviewContent();
+  console.log(JSON.stringify({
+    copied, toasts, statuses,
+    display:btn.style.display, ariaDisabled:btn.getAttribute('aria-disabled'),
+    title:btn.title, ariaLabel:btn.getAttribute('aria-label'),
+  }));
+""".replace("RENDER_CALL", render_call)
+        .replace("CONTENT", content_js)
+        .replace("MODE_HINT", mode_hint)
+        .replace("PATH", "reports/blob.dat")
+    )
+
+
+@requires_node
+def test_unknown_type_binary_file_is_not_offered_as_copyable_text():
+    """Maintainer review defect #2 (production path).
+
+    api/workspace.py read_file_content() decodes every non-Office file with
+    `raw.decode('utf-8', errors='replace')` and returns no `binary` flag, so
+    openFile()'s unknown-type branch hands renderCodePreviewContent() text in
+    which undecodable bytes have become U+FFFD. That text is not the file's
+    content, so it must never be offered for copy.
+    """
+    out = _binary_gate_scenario(
+        "renderCodePreviewContent(_previewCurrentPath, content);",
+        "'" + _LOSSY_UNKNOWN_TYPE + "'",
+    )
+
+    assert out["display"] == "none", (
+        f"the copy control is still offered for lossily-decoded binary text: {out}"
+    )
+    assert out["copied"] == [], f"lossy replacement text reached the clipboard: {out}"
+    assert out["toasts"], f"a refused copy must explain itself: {out}"
+    last = out["toasts"][-1]
+    assert last["msg"] == "content_binary_not_copyable", (
+        f"expected the localized binary state, got {out['toasts']}"
+    )
+    assert last["type"] == "error", f"expected an error-level notification: {last}"
+    assert out["ariaDisabled"] is None, (
+        f"dead aria-disabled must be removed from hidden button: {out}"
+    )
+
+
+@requires_node
+def test_nul_byte_binary_file_is_not_offered_as_copyable_text():
+    """Sibling branch (fix the class): a NUL-carrying file that reaches the code
+    preview must be gated the same way — NUL never occurs in text files."""
+    out = _binary_gate_scenario(
+        "renderCodePreviewContent(_previewCurrentPath, content);",
+        "'sqlite format 3\\u0000\\u0000\\u0000binary'",
+    )
+    assert out["display"] == "none", out
+    assert out["copied"] == [], out
+    assert out["toasts"][-1]["msg"] == "content_binary_not_copyable", out
+
+
+@requires_node
+def test_csv_branch_binary_content_is_not_offered_as_copyable_text():
+    """Sibling branch (fix the class): the .csv branch caches through
+    renderCsvPreviewContent(), which must apply the same gate."""
+    out = _binary_gate_scenario(
+        "renderCsvPreviewContent(_previewCurrentPath, content);",
+        "'a,b\\n\\u0000\\uFFFD,2'",
+    )
+    assert out["display"] == "none", out
+    assert out["copied"] == [], out
+    assert out["toasts"][-1]["msg"] == "content_binary_not_copyable", out
+
+
+@requires_node
+def test_markdown_branch_binary_content_is_not_offered_as_copyable_text():
+    """Sibling branch (fix the class): the markdown branch caches inline, then
+    hands the (path, generation) pair to the shared ownership chokepoint, so the
+    same gate must apply to a .md file whose bytes were not valid UTF-8."""
+    out = _binary_gate_scenario(
+        "_previewRawContent=content;_previewRawContentPath=_previewCurrentPath;"
+        "_claim(_previewCurrentPath,gen);",
+        "'# Heading\\n\\uFFFD\\uFFFD\\uFFFD'",
+        mode_hint="showPreview('md');",
+    )
+    assert out["display"] == "none", out
+    assert out["copied"] == [], out
+    assert out["toasts"][-1]["msg"] == "content_binary_not_copyable", out
+
+
+@requires_node
+def test_clean_unicode_text_is_still_copyable():
+    """The gate must not over-block: real text with emoji, CJK and accents has
+    no NUL and no U+FFFD, so it stays copyable."""
+    out = _binary_gate_scenario(
+        "renderCodePreviewContent(_previewCurrentPath, content);",
+        "'const s=\"héllo 漢字 🐾\";'",
+    )
+    assert out["display"] == "inline-flex", out
+    assert out["copied"] == ['const s="héllo 漢字 🐾";'], out
+    assert out["toasts"][-1]["msg"] == "content_copied", out
+
+
+@requires_node
+def test_markdown_branch_routes_its_cache_write_through_the_ownership_chokepoint():
+    """The three text-preview branches must all reach the SAME chokepoint, so the
+    binary gate and the (path, generation) ownership stamp cannot drift apart."""
+    compact = _compact(WORKSPACE_JS)
+    assert (
+        "_previewRawContent=data.content;_previewRawContentPath=path;"
+        "claimPreviewRawContent(path,previewGen,capturedSid,capturedWs);"
+        in compact
+    ), "the markdown branch must hand its cache write to claimPreviewRawContent()"
+    for renderer in ("renderCodePreviewContent", "renderCsvPreviewContent"):
+        body = _compact(_function_body(WORKSPACE_JS, renderer))
+        assert "claimPreviewRawContent(path)" in body, (
+            f"{renderer} must claim the cache through the shared chokepoint"
+        )
+        assert "invalidatePreviewRawContent()" in body, (
+            f"{renderer} must fail closed when it has no text to cache"
+        )
+
+
+# ── Defect 3: localized copy failures are error-level, long-lived toasts ─────
+
+
+_TOAST_FNS = (
+    "clearToastDismissTimer",
+    "setToastDismissTimer",
+    "dismissToast",
+    "showToast",
+    "copyToastText",
+    "_copyTextWithFallback",
+)
+
+
+def _locale_string(locale: str, key: str) -> str:
+    """Pull one locale's literal string for `key` out of static/i18n.js."""
+    start = I18N_JS.index("\n  " + locale + ": {")
+    block = I18N_JS[start : start + 200000]
+    m = re.search(r"\n\s+" + re.escape(key) + r": '((?:[^'\\]|\\.)*)'", block)
+    assert m, f"{key} missing from the {locale} locale"
+    return m.group(1)
+
+
+def _run_copy_failure_scenario(failure_prefix: str, clipboard: str) -> dict:
+    toast_consts = "\n".join(
+        line
+        for line in UI_JS.splitlines()
+        if line.startswith("const TOAST_DEFAULT_MS=")
+        or line.startswith("const TOAST_ERROR_DEFAULT_MS=")
+    )
+    assert (
+        "TOAST_DEFAULT_MS=" in toast_consts
+        and "TOAST_ERROR_DEFAULT_MS=" in toast_consts
+    )
+    script = (
+        (
+            r"""
+const ELS={};
+function _mkEl(id){
+  return {id:id, style:{display:'',cssText:''}, value:'', textContent:'', innerHTML:'',
+    className:'', dataset:{}, _t:null,
+    classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},
+               contains(c){return this._s.has(c);}},
+    appendChild(){}, removeChild(){}, remove(){}, select(){}, focus(){},
+    closest(){return this;}};
+}
+const $=(id)=>ELS[id]||(ELS[id]=_mkEl(id));
+const document={createElement:(tag)=>_mkEl('<'+tag+'>'),
+                body:{appendChild(){},removeChild(){}},
+                execCommand:()=>false};
+const esc=(s)=>String(s==null?'':s);
+const t=(k)=>'[[' + k + ']]';
+const delays=[];
+const setTimeout=(cb,ms)=>{delays.push(ms);return delays.length;};
+const clearTimeout=()=>{};
+const navigator=CLIPBOARD;
+"""
+            + toast_consts
+            + "\n"
+            + _js_functions(UI_JS, _TOAST_FNS)
+            + "\n"
+            + r"""
+(async()=>{
+  await _copyTextWithFallback('payload','ok-message',FAILURE_PREFIX);
+  await new Promise(r=>setImmediate(r));
+  const el=$('toast');
+  console.log(JSON.stringify({
+    className:el.className, html:el.innerHTML, text:el.textContent,
+    message:el.dataset.toastMessage, delays,
+  }));
+})().catch(e=>{console.error(e);process.exit(1);});
+"""
+        )
+        .replace("CLIPBOARD", clipboard)
+        .replace("FAILURE_PREFIX", json.dumps(failure_prefix))
+    )
+    return _run_node(script)
+
+
+def _rejecting_clipboard(reason_js: str) -> str:
+    return "{clipboard:{writeText:()=>Promise.reject(" + reason_js + ")}}"
+
+
+# showToast() sniffs the toast level from the message text with an English-only
+# regex, so whether a copy failure reads as an error depends on the wording the
+# BROWSER appended — not on the copy failing. Firefox's clipboard rejection
+# ("blocked due to lack of user activation") and an empty-message rejection both
+# carry no English keyword, so a localized prefix left the user with a 2.8s
+# info toast and no Copy/Dismiss affordance.
+_FIREFOX_REJECTION = (
+    "new Error('Clipboard write was blocked due to lack of user activation.')"
+)
+_NO_REASON_REJECTION = "undefined"
+_NO_CLIPBOARD = "{}"
+
+
+@requires_node
+def test_localized_copy_failure_is_an_error_level_long_lived_toast():
+    """Maintainer review defect #3 (production path).
+
+    _copyTextWithFallback()'s failure branch calls showToast() with no explicit
+    type, and showToast() sniffs the level from the MESSAGE TEXT against an
+    English-only regex (/fail|error|denied|.../). The English prefix matches, so
+    en users get the 20s dismissible error toast — but every localized prefix
+    (ru/ja/de/...) falls through to a 2.8s auto-dismissed info toast with no
+    Copy/Dismiss affordance. The level must not depend on the locale.
+    """
+    ru_prefix = _locale_string("ru", "content_copy_failed")
+    out = _run_copy_failure_scenario(
+        ru_prefix, _rejecting_clipboard(_FIREFOX_REJECTION)
+    )
+
+    assert "error" in out["className"].split(), (
+        f"a localized copy failure was downgraded to {out['className']!r}: {out}"
+    )
+    assert max(out["delays"]) >= 20000, (
+        f"a localized copy failure auto-dismissed after {out['delays']}ms: {out}"
+    )
+    assert "toast-dismiss" in out["html"], (
+        f"an error toast must carry the Dismiss affordance: {out}"
+    )
+    assert ru_prefix in out["message"], f"the localized message was lost: {out}"
+
+
+@requires_node
+def test_english_copy_failure_stays_error_level():
+    """Control case: the English path already produced an error toast and must
+    keep doing so (the fix must not flip the level for any locale)."""
+    en_prefix = _locale_string("en", "content_copy_failed")
+    out = _run_copy_failure_scenario(
+        en_prefix, _rejecting_clipboard(_FIREFOX_REJECTION)
+    )
+    assert "error" in out["className"].split(), out
+    assert max(out["delays"]) >= 20000, out
+
+
+@requires_node
+def test_copy_failure_with_no_reason_text_is_still_error_level():
+    """A rejection carrying no reason (engines that reject with `undefined`)
+    leaves the toast text as the localized prefix alone — the level must come
+    from the call site, not from sniffing the message."""
+    for locale in ("ru", "ja", "de"):
+        prefix = _locale_string(locale, "content_copy_failed")
+        out = _run_copy_failure_scenario(
+            prefix, _rejecting_clipboard(_NO_REASON_REJECTION)
+        )
+        assert "error" in out["className"].split(), (locale, out)
+        assert max(out["delays"]) >= 20000, (locale, out)
+
+
+@requires_node
+def test_clipboard_unavailable_failure_is_localized():
+    """With no async clipboard API and execCommand('copy') refusing, the failure
+    reason was the hard-coded English literal 'clipboard unavailable' appended
+    to a localized prefix. It must come from t() like every other string."""
+    out = _run_copy_failure_scenario(
+        _locale_string("ru", "content_copy_failed"), _NO_CLIPBOARD
+    )
+    assert "clipboard unavailable" not in out["message"], (
+        f"untranslated English literal surfaced to the user: {out}"
+    )
+    assert "[[clipboard_unavailable]]" in out["message"], (
+        f"the clipboard-unavailable reason must be resolved through t(): {out}"
+    )
+    assert "error" in out["className"].split(), out
+
+
+def test_new_copy_state_strings_exist_in_every_locale_that_ships_the_feature():
+    """Fallbacks/defaults are contracts: the new strings must land in the SAME
+    locale set as the feature's existing copy strings, not in `en` only."""
+    baseline = I18N_JS.count("content_not_available:")
+    assert baseline >= 15, f"unexpected locale coverage baseline: {baseline}"
+    for key in ("content_binary_not_copyable", "clipboard_unavailable"):
+        assert I18N_JS.count(key + ":") == baseline, (
+            f"{key} ships in {I18N_JS.count(key + ':')} locales, expected {baseline}"
+        )
+
+
+# ── Defect 4: clearPreview() lifecycle transition & in-flight response guard ──
+
+
+def test_clear_preview_advances_generation_and_invalidates_raw_content_authority():
+    """Maintainer review PR #6957 (re-gate blocker).
+
+    clearPreview() must be a real preview-lifecycle transition: it must advance
+    the preview generation before clearing state, and invalidate raw-content
+    ownership through the shared invalidation function. This ensures that any
+    in-flight openFile() request or delayed save treats its awaited response as
+    stale and cannot repopulate DOM, preview mode, or copy controls after the
+    user closed the preview.
+    """
+    body = _function_body(BOOT_JS, "clearPreview")
+    compact = _compact(body)
+
+    bump_call = "bumpPreviewGeneration()"
+    invalidate_call = "invalidatePreviewRawContent()"
+    clear_path = "_previewCurrentPath='';"
+
+    assert bump_call in compact, "clearPreview() must call bumpPreviewGeneration()"
+    assert invalidate_call in compact, (
+        "clearPreview() must call invalidatePreviewRawContent()"
+    )
+    assert compact.index(bump_call) < compact.index(clear_path), (
+        "clearPreview() must advance the generation BEFORE clearing preview state"
+    )
+    assert compact.index(invalidate_call) < compact.index(clear_path), (
+        "clearPreview() must invalidate raw content authority BEFORE clearing preview state"
+    )
+
+
+def _deferred_preview_scenario(
+    file_path: str, content: str, boot_src: str = None
+) -> dict:
+    return _run_preview_scenario(
+        """
+  let release = null;
+  api = (route) => new Promise(res => { release = () => res({content: CONTENT_JSON}); });
+
+  const openPromise = openFile(PATH_JSON);
+  await tick();
+
+  const preClearGen = _previewGen;
+  clearPreview();
+  const postClearGen = _previewGen;
+
+  release();
+  await openPromise;
+  await tick();
+
+  console.log(JSON.stringify({
+    preClearGen, postClearGen,
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    areaVisible: $('previewArea').classList.contains('visible'),
+    mdHtml: $('previewMd').innerHTML,
+    codeText: $('previewCode').textContent,
+    pathText: $('previewPathText').textContent,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    rawContentGen: _previewRawContentGen,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    statuses,
+    toasts,
+  }));
+""".replace("PATH_JSON", json.dumps(file_path)).replace(
+            "CONTENT_JSON", json.dumps(content)
+        ),
+        boot_source=boot_src,
+    )
+
+
+@requires_node
+def test_deferred_markdown_preview_closed_by_clear_preview_drops_stale_response():
+    """Maintainer review PR #6957: a deferred markdown preview where clearPreview()
+    is called before /api/file/read resolves must NOT restore preview mode,
+    rendered DOM, raw-content authority, status, or copy controls when the read lands.
+    """
+    out = _deferred_preview_scenario("notes/doc.md", "# Heading\nMarkdown body")
+
+    assert out["postClearGen"] > out["preClearGen"], (
+        f"clearPreview() must advance the generation: {out}"
+    )
+    assert out["mode"] == "", (
+        f"preview mode was repopulated after clearPreview: {out['mode']}"
+    )
+    assert out["path"] == "", (
+        f"preview path was restored after clearPreview: {out['path']}"
+    )
+    assert out["areaVisible"] is False, f"previewArea remained visible: {out}"
+    assert out["mdHtml"] == "", f"previewMd rendered DOM was restored: {out['mdHtml']}"
+    assert out["codeText"] == "", f"previewCode text was restored: {out['codeText']}"
+    assert out["pathText"] == "", f"previewPathText was restored: {out['pathText']}"
+    assert out["rawContent"] == "", (
+        f"raw content authority was restored: {out['rawContent']}"
+    )
+    assert out["rawContentPath"] == "", (
+        f"raw content path was restored: {out['rawContentPath']}"
+    )
+    assert out["rawContentGen"] == -1, (
+        f"raw content generation was restored: {out['rawContentGen']}"
+    )
+    assert out["copyable"] is False, f"raw content was marked copyable: {out}"
+    assert out["copyBtnDisplay"] == "none", (
+        f"copy button display was restored: {out['copyBtnDisplay']}"
+    )
+    assert out["statuses"] == [], (
+        f"status was restored after clearPreview: {out['statuses']}"
+    )
+
+
+@requires_node
+def test_deferred_code_preview_closed_by_clear_preview_drops_stale_response():
+    """Sibling branch: plain code/text preview must fail closed the same way
+    when closed while in flight.
+    """
+    out = _deferred_preview_scenario("src/app.py", "def main():\n    print('hi')\n")
+
+    assert out["postClearGen"] > out["preClearGen"], (
+        f"clearPreview() must advance the generation: {out}"
+    )
+    assert out["mode"] == "", f"code preview mode was restored: {out['mode']}"
+    assert out["codeText"] == "", f"code DOM was restored: {out['codeText']}"
+    assert out["rawContent"] == "", (
+        f"raw content authority was restored: {out['rawContent']}"
+    )
+    assert out["copyable"] is False, f"raw content was marked copyable: {out}"
+    assert out["copyBtnDisplay"] == "none", (
+        f"copy button display was restored: {out['copyBtnDisplay']}"
+    )
+    assert out["statuses"] == [], f"status was restored: {out['statuses']}"
+
+
+@requires_node
+def test_deferred_text_preview_different_path_open_rejects_stale_first_response():
+    """Maintainer review PR #6957: different-path open case.
+
+    User opens file A (deferred), closes preview via clearPreview(), and opens
+    file B (different path). When file A's read lands, it must be rejected as
+    stale and must not corrupt file B's panel mode, DOM, or raw-content authority.
+    When file B's read lands, file B is displayed and its own content is copyable.
+    """
+    out = _run_preview_scenario(
+        """
+  let releaseA = null;
+  let releaseB = null;
+  api = (route) => {
+    if (route.includes("notes%2Fa.md") || route.includes("notes/a.md")) {
+      return new Promise(res => { releaseA = () => res({content: "# Doc A Content"}); });
+    }
+    return new Promise(res => { releaseB = () => res({content: "def util(): return 42"}); });
+  };
+
+  // 1. Open A (deferred)
+  const pA = openFile("notes/a.md");
+  await tick();
+
+  // 2. Clear preview
+  clearPreview();
+
+  // 3. Open B (different path, deferred)
+  const pB = openFile("src/utils.py");
+  await tick();
+
+  // 4. Release A (stale)
+  releaseA();
+  await pA;
+  await tick();
+
+  const stateAfterStaleA = {
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    mdHtml: $('previewMd').innerHTML,
+    codeText: $('previewCode').textContent,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+  };
+
+  // 5. Release B (fresh)
+  releaseB();
+  await pB;
+  await tick();
+
+  await copyPreviewContent();
+
+  const stateAfterFreshB = {
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    codeText: $('previewCode').textContent,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copied,
+  };
+
+  console.log(JSON.stringify({ stateAfterStaleA, stateAfterFreshB }));
+"""
+    )
+
+    stale_a = out["stateAfterStaleA"]
+    assert stale_a["path"] == "src/utils.py", (
+        f"stale A corrupted current path: {stale_a}"
+    )
+    assert stale_a["mode"] != "md", f"stale A repopulated markdown mode: {stale_a}"
+    assert stale_a["mdHtml"] == "", f"stale A rendered its markdown into DOM: {stale_a}"
+    assert stale_a["rawContentPath"] != "notes/a.md", (
+        f"stale A claimed raw content path: {stale_a}"
+    )
+    assert stale_a["rawContent"] != "# Doc A Content", (
+        f"stale A claimed raw content: {stale_a}"
+    )
+
+    fresh_b = out["stateAfterFreshB"]
+    assert fresh_b["mode"] == "code", f"fresh B mode expected code, got: {fresh_b}"
+    assert fresh_b["path"] == "src/utils.py", f"fresh B path unexpected: {fresh_b}"
+    assert fresh_b["codeText"] == "def util(): return 42", (
+        f"fresh B DOM unexpected: {fresh_b}"
+    )
+    assert fresh_b["rawContent"] == "def util(): return 42", (
+        f"fresh B raw content unexpected: {fresh_b}"
+    )
+    assert fresh_b["rawContentPath"] == "src/utils.py", (
+        f"fresh B raw path unexpected: {fresh_b}"
+    )
+    assert fresh_b["copyable"] is True, f"fresh B was not marked copyable: {fresh_b}"
+    assert fresh_b["copied"] == ["def util(): return 42"], (
+        f"copied wrong content: {fresh_b}"
+    )
+
+
+@requires_node
+def test_deferred_text_preview_same_path_reopen_rejects_stale_first_response():
+    """Maintainer review PR #6957: same-path/reopen generation case.
+
+    User opens file A (deferred read 1), closes preview via clearPreview(), and
+    reopens file A (deferred read 2). When read 1 resolves, its stale generation
+    must cause it to be discarded without populating DOM or raw-content cache.
+    When read 2 resolves, read 2's content is rendered and copyable.
+    """
+    out = _run_preview_scenario(
+        """
+  let release1 = null;
+  let release2 = null;
+  let callCount = 0;
+  api = (route) => {
+    callCount++;
+    if (callCount === 1) {
+      return new Promise(res => { release1 = () => res({content: "VERSION 1 (STALE)"}); });
+    }
+    return new Promise(res => { release2 = () => res({content: "VERSION 2 (FRESH)"}); });
+  };
+
+  // 1. Open notes/readme.md (request 1, deferred)
+  const p1 = openFile("notes/readme.md");
+  await tick();
+
+  // 2. Clear preview
+  clearPreview();
+
+  // 3. Reopen notes/readme.md (request 2, deferred)
+  const p2 = openFile("notes/readme.md");
+  await tick();
+
+  // 4. Release request 1 (stale generation)
+  release1();
+  await p1;
+  await tick();
+
+  const stateAfterStale1 = {
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    mdHtml: $('previewMd').innerHTML,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+  };
+
+  // 5. Release request 2 (current generation)
+  release2();
+  await p2;
+  await tick();
+
+  await copyPreviewContent();
+
+  const stateAfterFresh2 = {
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    mdHtml: $('previewMd').innerHTML,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copied,
+  };
+
+  console.log(JSON.stringify({ stateAfterStale1, stateAfterFresh2 }));
+"""
+    )
+
+    stale_1 = out["stateAfterStale1"]
+    assert "VERSION 1 (STALE)" not in stale_1["mdHtml"], (
+        f"stale first read rendered into DOM: {stale_1}"
+    )
+    assert stale_1["rawContent"] != "VERSION 1 (STALE)", (
+        f"stale first read claimed raw content authority: {stale_1}"
+    )
+
+    fresh_2 = out["stateAfterFresh2"]
+    assert fresh_2["mode"] == "md", f"fresh 2 mode expected md, got {fresh_2}"
+    assert fresh_2["path"] == "notes/readme.md", f"fresh 2 path unexpected: {fresh_2}"
+    assert "<p>VERSION 2 (FRESH)</p>" in fresh_2["mdHtml"], (
+        f"fresh 2 DOM unexpected: {fresh_2}"
+    )
+    assert fresh_2["rawContent"] == "VERSION 2 (FRESH)", (
+        f"fresh 2 raw content unexpected: {fresh_2}"
+    )
+    assert fresh_2["copyable"] is True, f"fresh 2 was not copyable: {fresh_2}"
+    assert fresh_2["copied"] == ["VERSION 2 (FRESH)"], f"copied wrong text: {fresh_2}"
+
+
+@requires_node
+def test_clear_preview_regression_fails_when_generation_bump_removed():
+    """Maintainer review PR #6957 requirement:
+    'The test must fail when the clear-time generation bump is removed.'
+
+    Simulates pre-fix clearPreview() by removing the generation bump. Without
+    advancing the generation, openFile()'s post-await check fails to detect staleness,
+    repopulating preview mode and rendered DOM after clearPreview().
+    """
+    boot_no_bump = BOOT_JS.replace(
+        "if(typeof bumpPreviewGeneration==='function') bumpPreviewGeneration();",
+        "// no bump",
+    )
+    # Sanity check that the replacement actually occurred
+    assert "// no bump" in boot_no_bump, (
+        "failed to simulate clearPreview without generation bump"
+    )
+
+    out = _deferred_preview_scenario(
+        "notes/doc.md", "# Heading\nBody text", boot_src=boot_no_bump
+    )
+
+    # Without the generation bump, the race reproduces: preview state repopulates
+    assert out["postClearGen"] == out["preClearGen"], (
+        f"generation should not advance without the bump: {out}"
+    )
+    assert out["mode"] == "md", (
+        "expected reproduction of stale repopulation bug when generation bump is missing"
+    )
+    assert out["mdHtml"] == "<p># Heading\nBody text</p>", (
+        "expected stale markdown render in DOM when generation bump is missing"
+    )
+
+
+@requires_node
+def test_deferred_text_preview_download_only_file_advances_generation_and_drops_pending_preview():
+    """Greptile review comment 3985363643 (PR #6957):
+    Selecting a download-only file (.zip, .bin, .exe) while a text preview request
+    is pending must advance the preview generation and invalidate raw content authority.
+    When the deferred preview response resolves, its stale generation causes it to be
+    discarded without rendering into DOM, claiming raw content, or showing the copy button.
+    """
+    out = _run_preview_scenario(
+        """
+  // --- Scenario A: Deferred Markdown preview interrupted by download-only file ---
+  let releaseMd = null;
+  api = (route) => new Promise(res => { releaseMd = () => res({content: "# Pending Markdown\\nBody text"}); });
+
+  // 1. Start opening markdown file (deferred read)
+  const openMdPromise = openFile("notes/doc.md");
+  await tick();
+
+  const preDownloadGenMd = _previewGen;
+
+  // 2. Select a download-only file while markdown preview request is in flight
+  await openFile("downloads/bundle.zip");
+  await tick();
+
+  const postDownloadGenMd = _previewGen;
+
+  // 3. Resolve deferred markdown preview read (now stale)
+  releaseMd();
+  await openMdPromise;
+  await tick();
+
+  const stateAfterMd = {
+    preDownloadGen: preDownloadGenMd,
+    postDownloadGen: postDownloadGenMd,
+    mode: _previewCurrentMode,
+    mdHtml: $('previewMd').innerHTML,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    rawContentGen: _previewRawContentGen,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    downloads: [...downloads],
+  };
+
+  // --- Scenario B: Deferred Code preview interrupted by download-only file ---
+  let releaseCode = null;
+  api = (route) => new Promise(res => { releaseCode = () => res({content: "def util():\\n    return 42\\n"}); });
+
+  // 4. Start opening code file (deferred read)
+  const openCodePromise = openFile("src/util.py");
+  await tick();
+
+  const preDownloadGenCode = _previewGen;
+
+  // 5. Select a download-only file while code preview request is in flight
+  await openFile("downloads/binary.bin");
+  await tick();
+
+  const postDownloadGenCode = _previewGen;
+
+  // 6. Resolve deferred code preview read (now stale)
+  releaseCode();
+  await openCodePromise;
+  await tick();
+
+  const stateAfterCode = {
+    preDownloadGen: preDownloadGenCode,
+    postDownloadGen: postDownloadGenCode,
+    mode: _previewCurrentMode,
+    codeText: $('previewCode').textContent,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    rawContentGen: _previewRawContentGen,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    downloads: [...downloads],
+  };
+
+  console.log(JSON.stringify({ stateAfterMd, stateAfterCode }));
+"""
+    )
+
+    # Validate Markdown scenario
+    md_state = out["stateAfterMd"]
+    assert md_state["postDownloadGen"] > md_state["preDownloadGen"], (
+        f"openFile() on download-only file must advance generation: {md_state}"
+    )
+    assert "downloads/bundle.zip" in md_state["downloads"], (
+        f"downloadFile() must be called for download-only file: {md_state}"
+    )
+    assert md_state["mdHtml"] == "", (
+        f"pending preview rendered markdown into DOM: {md_state['mdHtml']}"
+    )
+    assert md_state["rawContent"] == "", (
+        f"pending preview claimed raw content authority: {md_state['rawContent']}"
+    )
+    assert md_state["rawContentPath"] == "", (
+        f"pending preview claimed raw content path: {md_state['rawContentPath']}"
+    )
+    assert md_state["rawContentGen"] == -1, (
+        f"pending preview claimed raw content gen: {md_state['rawContentGen']}"
+    )
+    assert md_state["copyable"] is False, f"raw content marked copyable: {md_state}"
+    assert md_state["copyBtnDisplay"] == "none", (
+        f"copy button displayed after download: {md_state['copyBtnDisplay']}"
+    )
+
+    # Validate Code scenario
+    code_state = out["stateAfterCode"]
+    assert code_state["postDownloadGen"] > code_state["preDownloadGen"], (
+        f"openFile() on download-only file must advance generation: {code_state}"
+    )
+    assert "downloads/binary.bin" in code_state["downloads"], (
+        f"downloadFile() must be called for download-only file: {code_state}"
+    )
+    assert code_state["codeText"] == "", (
+        f"pending preview rendered code into DOM: {code_state['codeText']}"
+    )
+    assert code_state["rawContent"] == "", (
+        f"pending preview claimed raw content authority: {code_state['rawContent']}"
+    )
+    assert code_state["rawContentPath"] == "", (
+        f"pending preview claimed raw content path: {code_state['rawContentPath']}"
+    )
+    assert code_state["rawContentGen"] == -1, (
+        f"pending preview claimed raw content gen: {code_state['rawContentGen']}"
+    )
+    assert code_state["copyable"] is False, f"raw content marked copyable: {code_state}"
+    assert code_state["copyBtnDisplay"] == "none", (
+        f"copy button displayed after download: {code_state['copyBtnDisplay']}"
+    )
+
+
+def test_preview_toolbar_groups_copy_content_in_right_cluster_before_download():
+    """Maintainer review PR #6957:
+    The copy content button must be grouped in the right cluster with export actions
+    (immediately before Download), wrapped in .preview-actions carrying margin-left:auto
+    so Download's margin does not split the free space into a double gap.
+    """
+    assert 'class="preview-actions"' in INDEX
+    assert 'id="btnCopyPreviewContent"' in INDEX
+    assert 'id="btnDownloadFile"' in INDEX
+    actions_idx = INDEX.index('class="preview-actions"')
+    copy_idx = INDEX.index('id="btnCopyPreviewContent"')
+    download_idx = INDEX.index('id="btnDownloadFile"')
+    assert actions_idx < copy_idx < download_idx, (
+        "btnCopyPreviewContent must sit inside .preview-actions before btnDownloadFile"
+    )
+    btn_download = INDEX[download_idx : download_idx + 150]
+    assert "margin-left:auto" not in btn_download
+
+
+@requires_node
+def test_binary_and_download_fallback_invalidates_copy_state():
+    """Maintainer review defect #4:
+    Opening a binary file (data.binary: true) or a download-fallback file must
+    invalidate raw content and hide the copy button so the previous file's button
+    does not linger under the new filename.
+    """
+    out = _run_preview_scenario(
+        """
+  // 1. Open a valid text file
+  api = async (url) => ({ content: "Hello text" });
+  await openFile("hello.txt");
+  await tick();
+  const stateText = {
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+  };
+
+  // 2. Open a file the server flags as binary. The extension must NOT be in
+  //    DOWNLOAD_EXTS — those return from openFile()'s synchronous prologue
+  //    before api() is ever called, which is a different code path (see
+  //    test_settled_text_preview_preserved_on_direct_download).
+  api = async (url) => ({ binary: true });
+  await openFile("data.custom");
+  await tick();
+  const stateBinary = {
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    downloads: [...downloads],
+  };
+
+  console.log(JSON.stringify({ stateText, stateBinary }));
+"""
+    )
+    assert out["stateText"]["copyBtnDisplay"] == "inline-flex"
+    assert out["stateText"]["rawContent"] == "Hello text"
+    assert out["stateBinary"]["copyBtnDisplay"] == "none", (
+        f"copy button lingered visible for binary file: {out}"
+    )
+    assert out["stateBinary"]["rawContent"] == "", (
+        f"raw content was not cleared for binary file: {out}"
+    )
+    assert out["stateBinary"]["rawContentPath"] == ""
+    assert "data.custom" in out["stateBinary"]["downloads"]
+
+
+@requires_node
+def test_rename_previewed_file_remaps_raw_content_and_keeps_copyable():
+    """Maintainer review defect #4:
+    Renaming a currently-previewed file remaps _previewCurrentPath AND _previewRawContentPath
+    and calls syncPreviewCopyContentBtn() so copying under the new filename succeeds
+    without failing through to content_not_available.
+    """
+    script = (
+        _DOM_STUB
+        + "\n"
+        + _js_functions(WORKSPACE_JS, _PREVIEW_FNS)
+        + "\n"
+        + _js_functions(UI_JS, ["_workspaceParentDir", "_remapWorkspaceCachesAfterMove"])
+        + """
+  (async () => {
+    // 1. Open a text file
+    api = async (url) => ({ content: "Editable note content" });
+    await openFile("docs/note.md");
+    await tick();
+
+    const beforeRename = {
+      curPath: _previewCurrentPath,
+      rawPath: _previewRawContentPath,
+      copyable: previewRawContentIsCopyable(),
+    };
+
+    // 2. Simulate renaming docs/note.md -> docs/renamed.md
+    _remapWorkspaceCachesAfterMove("docs/note.md", "docs/renamed.md", false);
+
+    // 3. Try to copy content after rename
+    await copyPreviewContent();
+
+    const afterRename = {
+      curPath: _previewCurrentPath,
+      rawPath: _previewRawContentPath,
+      copyable: previewRawContentIsCopyable(),
+      copied: [...copied],
+      toasts: [...toasts],
+    };
+
+    console.log(JSON.stringify({ beforeRename, afterRename }));
+  })();
+"""
+    )
+    out = _run_node(script)
+    assert out["beforeRename"]["copyable"] is True
+    assert out["afterRename"]["curPath"] == "docs/renamed.md"
+    assert out["afterRename"]["rawPath"] == "docs/renamed.md"
+    assert out["afterRename"]["copyable"] is True
+    assert out["afterRename"]["copied"] == ["Editable note content"]
+    assert not any(t["msg"] == "content_not_available" for t in out["afterRename"]["toasts"])
+
+
+# ── Maintainer feedback regression suite ─────────────────────────────────────
+# Four behaviours the maintainer called out as must-not-regress:
+#   1. a direct download must not tear down the settled text preview behind it,
+#   2. both rename entry points must bind the SERVER's canonical paths,
+#   3. the raw-content cache is only valid inside the session/workspace that
+#      produced it — including across an await inside openFile(),
+#   4. at the 300px default right-panel width the copy control folds away, and
+#      its accessible name is localized everywhere it ships.
+
+
+@requires_node
+def test_settled_text_preview_preserved_on_direct_download():
+    """Maintainer feedback 1: downloading a .zip does not change what the panel
+    DISPLAYS, so a settled, copyable text preview must survive it intact.
+
+    openFile()'s DOWNLOAD_EXTS branch returns from the synchronous prologue —
+    after bumping the preview generation. Without carrying the settled cache's
+    ownership onto the new generation, the copy button would silently vanish
+    (and copying would fail through to content_not_available) from under a
+    preview that is still on screen and still showing the very same bytes.
+    """
+    out = _run_preview_scenario(
+        """
+  api = async () => ({content: 'My notes'});
+  await openFile('notes.txt');
+  await tick();
+
+  const settled = {
+    pathText: $('previewPathText').textContent,
+    curPath: _previewCurrentPath,
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    gen: _previewGen,
+  };
+
+  // A download-only extension: openFile() returns from its synchronous
+  // prologue, so api() is never called for it.
+  api = async () => { throw new Error('download-only file must not be read'); };
+  await openFile('archive.zip');
+  await tick();
+
+  const afterDownload = {
+    pathText: $('previewPathText').textContent,
+    curPath: _previewCurrentPath,
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    gen: _previewGen,
+    downloads: [...downloads],
+  };
+
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    settled, afterDownload, copied, toasts,
+  }));
+"""
+    )
+
+    settled = out["settled"]
+    after = out["afterDownload"]
+
+    # The text preview settled and offered its content for copy.
+    assert settled["pathText"] == "notes.txt"
+    assert settled["curPath"] == "notes.txt"
+    assert settled["rawContent"] == "My notes"
+    assert settled["copyable"] is True, f"text preview never became copyable: {settled}"
+    assert settled["copyBtnDisplay"] == "inline-flex"
+
+    # The download happened...
+    assert "archive.zip" in after["downloads"], (
+        f"download-only file was not downloaded: {after}"
+    )
+
+    # ...and the panel still shows notes.txt, unchanged.
+    assert after["pathText"] == "notes.txt", (
+        f"download repainted the preview header: {after['pathText']}"
+    )
+    assert after["curPath"] == "notes.txt", (
+        f"download moved _previewCurrentPath: {after['curPath']}"
+    )
+    assert after["rawContent"] == "My notes", (
+        f"download dropped the settled raw content: {after['rawContent']!r}"
+    )
+    assert after["rawPath"] == "notes.txt"
+
+    # The copy control stays offered, and still copies the right bytes.
+    assert after["copyable"] is True, (
+        f"settled preview stopped being copyable after a download: {after}"
+    )
+    assert after["copyBtnDisplay"] == "inline-flex", (
+        f"copy button was hidden by an unrelated download: {after['copyBtnDisplay']}"
+    )
+    assert out["copied"] == ["My notes"], (
+        f"copy after download put the wrong bytes on the clipboard: {out['copied']}"
+    )
+    assert not any(
+        tst["msg"] in ("content_not_available", "content_binary_not_copyable")
+        for tst in out["toasts"]
+    ), f"copy after download failed through to an error toast: {out['toasts']}"
+
+
+def _rename_entry_point_sources():
+    """Source of both rename entry points: the prompt-dialog rename and the
+    double-click inline rename inside the tree renderer."""
+    inline = _function_body(UI_JS, "_inlineRenameFileItem")
+    tree = _function_body(UI_JS, "_renderTreeItems")
+    assert "'/api/file/rename'" in tree, (
+        "double-click inline rename not found in _renderTreeItems()"
+    )
+    # Slice the whole ondblclick handler: the ownership capture sits above the
+    # rename input and finish() ends at the nameEl -> input swap.
+    start = tree.index("nameEl.ondblclick=")
+    dblclick = tree[start:]
+    dblclick = dblclick[: dblclick.index("nameEl.replaceWith(inp)")]
+    assert "'/api/file/rename'" in dblclick
+    return {"_inlineRenameFileItem": inline, "_renderTreeItems dblclick": dblclick}
+
+
+@requires_node
+def test_rename_entry_points_bind_server_canonical_path_and_preserve_preview():
+    """Maintainer feedback 2: the SERVER owns the post-rename path.
+
+    Both rename entry points must remap the caches from the /api/file/rename
+    response (data.old_path / data.new_path) rather than from the locally
+    guessed parent+'/'+newName — the server sanitizes the requested name, so a
+    locally-computed path can name a file that does not exist. They must also
+    reload the directory with {preservePreview:true}, since the rename did not
+    close the panel and a plain loadDir() would clear the caches that were just
+    remapped.
+    """
+    for label, src in _rename_entry_point_sources().items():
+        compact = _compact(src)
+        assert "awaitapi('/api/file/rename'" in compact, (
+            f"{label}: rename is not issued through /api/file/rename"
+        )
+        assert "constdata=awaitapi('/api/file/rename'" in compact, (
+            f"{label}: the rename response is not bound to a local `data`"
+        )
+        assert "data.old_path" in compact, (
+            f"{label}: does not read the server's canonical old_path"
+        )
+        assert "data.new_path" in compact, (
+            f"{label}: does not read the server's canonical new_path"
+        )
+        assert "constcanonicalOldPath=(data&&data.old_path)||" in compact, (
+            f"{label}: canonicalOldPath must prefer the server's old_path"
+        )
+        assert "constcanonicalNewPath=(data&&data.new_path)||" in compact, (
+            f"{label}: canonicalNewPath must prefer the server's new_path"
+        )
+        assert (
+            "_remapWorkspaceCachesAfterMove(canonicalOldPath,canonicalNewPath" in compact
+        ), f"{label}: canonical paths are not handed to _remapWorkspaceCachesAfterMove()"
+        assert "loadDir(S.currentDir,{preservePreview:true})" in compact, (
+            f"{label}: the reload after rename must preserve the open preview"
+        )
+
+    script = (
+        _DOM_STUB
+        + "\n"
+        + _js_functions(WORKSPACE_JS, _PREVIEW_FNS)
+        + "\n"
+        + _js_functions(UI_JS, ["_workspaceParentDir", "_remapWorkspaceCachesAfterMove"])
+        + """
+  (async () => {
+    api = async () => ({content: 'Text'});
+    await openFile('docs/old name.md');
+    await tick();
+
+    const before = {
+      curPath: _previewCurrentPath,
+      rawPath: _previewRawContentPath,
+      pathText: $('previewPathText').textContent,
+      copyable: previewRawContentIsCopyable(),
+    };
+
+    // The server sanitized 'old name.md' -> 'canonical_new.md'; the UI must
+    // follow the response, not its own guess.
+    _remapWorkspaceCachesAfterMove('docs/old name.md', 'docs/canonical_new.md', false);
+
+    await copyPreviewContent();
+
+    const after = {
+      curPath: _previewCurrentPath,
+      rawPath: _previewRawContentPath,
+      pathText: $('previewPathText').textContent,
+      copyable: previewRawContentIsCopyable(),
+      copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+      copied: [...copied],
+      toasts: [...toasts],
+    };
+
+    console.log(JSON.stringify({before, after}));
+  })().catch(e => {console.error(e); process.exit(1);});
+"""
+    )
+    out = _run_node(script)
+
+    assert out["before"]["copyable"] is True, (
+        f"preview never settled before the rename: {out['before']}"
+    )
+    assert out["before"]["pathText"] == "docs/old name.md"
+
+    after = out["after"]
+    assert after["curPath"] == "docs/canonical_new.md", (
+        f"_previewCurrentPath did not follow the server path: {after['curPath']}"
+    )
+    assert after["rawPath"] == "docs/canonical_new.md", (
+        f"_previewRawContentPath did not follow the server path: {after['rawPath']}"
+    )
+    assert after["pathText"] == "docs/canonical_new.md", (
+        f"the header still shows the pre-rename name: {after['pathText']}"
+    )
+    assert after["copyable"] is True, (
+        f"the preview stopped being copyable after the rename: {after}"
+    )
+    assert after["copyBtnDisplay"] == "inline-flex"
+    assert after["copied"] == ["Text"], (
+        f"copy after rename did not reach the clipboard: {after['copied']}"
+    )
+    assert not any(tst["msg"] == "content_not_available" for tst in after["toasts"]), (
+        f"copy after rename failed through to content_not_available: {after['toasts']}"
+    )
+
+
+@requires_node
+def test_session_and_workspace_identity_isolation_prevents_wrong_bytes():
+    """Maintainer feedback 3 (blocker 1): a relative path only names a file
+    inside ONE session's workspace.
+
+    sess-a's 'README.md' and sess-b's 'README.md' are different files with the
+    same label, so the raw-content cache must record the identity it was read
+    under and stop being copyable the moment that identity changes — both for a
+    settled cache (session switch) and for a read that crosses an await inside
+    openFile() (the post-await race below).
+    """
+    out = _run_preview_scenario(
+        """
+  // 1. Session A reads README.md and settles.
+  S.session = {session_id: 'sess-a', workspace: '/workspace/a'};
+  api = async () => ({content: 'Session A content'});
+  await openFile('README.md');
+  await tick();
+
+  const sessA = {
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+  };
+
+  // 2. Switch to session B (a different workspace). The switch entry points
+  //    call invalidatePreviewRawContent(); do the same here.
+  S.session = {session_id: 'sess-b', workspace: '/workspace/b'};
+  invalidatePreviewRawContent();
+
+  const sessB = {
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+  };
+
+  // 3. Post-await race: a read issued under sess-b resolves only after the
+  //    session moved on to sess-c. The identity captured before the await no
+  //    longer matches, so the bytes must be dropped, not claimed.
+  let release = null;
+  api = () => new Promise(res => { release = () => res({content: 'Session B content'}); });
+  const pending = openFile('README.md');
+  await tick();
+  const inFlightSid = S.session.session_id;
+
+  S.session.session_id = 'sess-c';
+  release();
+  await pending;
+  await tick();
+
+  await copyPreviewContent();
+
+  const race = {
+    inFlightSid,
+    liveSid: S.session.session_id,
+    curPath: _previewCurrentPath,
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    rawGen: _previewRawContentGen,
+    rawSid: _previewRawContentSessionId,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    mdHtml: $('previewMd').innerHTML,
+    copied: [...copied],
+    toasts: [...toasts],
+  };
+
+  console.log(JSON.stringify({sessA, sessB, race}));
+"""
+    )
+
+    assert out["sessA"]["copyable"] is True, (
+        f"session A's own read was not copyable: {out['sessA']}"
+    )
+    assert out["sessA"]["rawContent"] == "Session A content"
+    assert out["sessA"]["copyBtnDisplay"] == "inline-flex"
+
+    assert out["sessB"]["copyable"] is False, (
+        f"session A's bytes stayed copyable under session B: {out['sessB']}"
+    )
+    assert out["sessB"]["rawContent"] == ""
+    assert out["sessB"]["rawPath"] == ""
+    assert out["sessB"]["copyBtnDisplay"] == "none"
+
+    race = out["race"]
+    assert race["inFlightSid"] == "sess-b"
+    assert race["liveSid"] == "sess-c"
+    assert race["rawContent"] == "", (
+        f"a read issued in sess-b claimed the cache under sess-c: {race['rawContent']!r}"
+    )
+    assert race["rawPath"] == ""
+    assert race["rawGen"] == -1
+    assert race["rawSid"] == ""
+    assert race["copyable"] is False, f"stale-session read marked copyable: {race}"
+    assert race["copyBtnDisplay"] == "none"
+    assert "Session B content" not in race["mdHtml"], (
+        f"stale-session read repainted the preview: {race['mdHtml']}"
+    )
+    assert "Session B content" not in race["copied"], (
+        f"stale-session bytes reached the clipboard: {race['copied']}"
+    )
+    assert any(tst["msg"] == "content_not_available" for tst in race["toasts"]), (
+        f"copying after a rejected cross-session read must fail closed: {race['toasts']}"
+    )
+
+    # The identity guard is only real if every switch entry point runs it.
+    for label, src in (
+        ("sessions.js newSession", _function_body(SESSIONS_JS, "newSession")),
+        ("sessions.js loadSession", _function_body(SESSIONS_JS, "loadSession")),
+        ("panels.js switchToWorkspace", _function_body(PANELS_JS, "switchToWorkspace")),
+        ("panels.js switchToProfile", _function_body(PANELS_JS, "switchToProfile")),
+    ):
+        assert "invalidatePreviewRawContent()" in src, (
+            f"{label} does not invalidate the preview raw-content cache on switch"
+        )
+
+
+def test_300px_default_width_container_rule_and_locale_coverage():
+    """Maintainer feedback 4 (blocker 2): at the right panel's 300px default
+    width the copy control must drop out entirely rather than crush the path,
+    it must carry no text label to fold, and its accessible name must be
+    localized in every locale that ships the feature.
+    """
+    # A @container query on the right panel (not a viewport media query) hides
+    # the whole button at the 340px breakpoint, which covers the 300px default.
+    assert re.search(
+        r"@container\s+rightpanel\s*\(\s*max-width:\s*340px\s*\)\s*\{[^}]*"
+        r"\.preview-path\s+#btnCopyPreviewContent\s*\{[^}]*display:\s*none",
+        STYLE,
+    ), (
+        "expected a @container rightpanel (max-width:340px) rule hiding "
+        "#btnCopyPreviewContent with display:none"
+    )
+    rule_start = STYLE.index("@container rightpanel (max-width:340px)")
+    rule = STYLE[rule_start : STYLE.index("}", STYLE.index("{", rule_start)) + 1]
+    assert "#btnCopyPreviewContent" in rule
+    assert "display:none" in rule
+    # syncPreviewCopyContentBtn() writes an inline display, which would beat a
+    # plain container-query declaration.
+    assert "!important" in rule, (
+        "the fold rule must out-rank syncPreviewCopyContentBtn()'s inline display"
+    )
+
+    # Nothing to fold: the button ships icon-only, with no label span.
+    btn = INDEX[INDEX.index('id="btnCopyPreviewContent"') :]
+    btn = btn[: btn.index("</button>")]
+    assert "preview-btn-label" not in btn, (
+        "#btnCopyPreviewContent must not carry a .preview-btn-label span"
+    )
+
+    # Its only accessible name is the localized string, so that string has to
+    # exist in every locale that ships the feature — including de and ru.
+    baseline = I18N_JS.count("content_not_available:")
+    assert baseline >= 15, f"unexpected locale coverage baseline: {baseline}"
+    assert I18N_JS.count("copy_file_contents:") == baseline, (
+        f"copy_file_contents ships in {I18N_JS.count('copy_file_contents:')} locales, "
+        f"expected {baseline}"
+    )
+    english = _locale_string("en", "copy_file_contents")
+    assert english == "Copy file contents"
+    for locale in ("de", "ru", "fr", "es", "ja", "zh"):
+        translated = _locale_string(locale, "copy_file_contents")
+        assert translated, f"copy_file_contents is empty in the {locale} locale"
+        assert translated != english, (
+            f"copy_file_contents is left untranslated (English) in the {locale} locale"
+        )
+    assert _locale_string("de", "copy_file_contents") == "Dateiinhalt kopieren"
+    assert _locale_string("ru", "copy_file_contents") == "Копировать содержимое файла"
+
+
+# ── Cross-context rename ownership (maintainer review PR #6957) ──────────────
+# Both rename paths cross an await while holding a RELATIVE path. That path
+# names one file inside the session/workspace the rename started in and a
+# completely different file in every other one, so a response that resolves
+# after the user switched context must not be applied to the new context. The
+# tests below drive the REAL callers — _renderTreeItems()'s double-click handler
+# and _inlineRenameFileItem() — against a deferred /api/file/rename response.
+
+_TREE_RENAME_STUB = r"""
+// Track every element the production code creates so the test can reach the
+// inline rename <input> the double-click handler injects, and give elements the
+// replaceWith() the handler uses to swap the row label for that input.
+const createdEls=[];
+const _origCreate=document.createElement;
+document.createElement=(tag)=>{
+  const el=_origCreate(tag);
+  el.tagName=String(tag).toUpperCase();
+  el.replaceWith=()=>{};
+  createdEls.push(el);
+  return el;
+};
+const breadcrumbs=[];
+renderFileBreadcrumb=(p)=>{breadcrumbs.push(String(p));};
+const loadDirCalls=[];
+async function loadDir(dir,opts){loadDirCalls.push({dir:dir,opts:opts||null});}
+function renderFileTree(){}
+function _saveExpandedDirs(){}
+function li(){return '';}
+function fileIcon(){return '';}
+function _workspaceEscapeExactGrant(){return null;}
+function _setWsDragData(){}
+function _clearWsDragData(){}
+function _clearWorkspaceMoveDragOver(){}
+function _showFileContextMenu(){}
+function _bindWorkspaceMoveDropTarget(){}
+function _bindWorkspaceOsUploadDropTarget(){}
+function _workspaceEntriesForRender(entries){return entries||[];}
+async function showConfirmDialog(){return false;}
+async function authorizeWorkspaceEscapeNavigation(){return null;}
+const window={_isImeEnter:()=>false};
+// The rename input's focus/select timer is irrelevant here; keep it off the
+// event loop so `await tick()` only ever observes the rename flow.
+function setTimeout(fn,ms){return 0;}
+function clearTimeout(){}
+
+// showPromptDialog is deferred so a test can switch session/workspace WHILE the
+// rename prompt is open — the first await gap in _inlineRenameFileItem().
+let _promptResolve=null;
+let promptCalls=0;
+function showPromptDialog(){
+  promptCalls++;
+  return new Promise(res=>{_promptResolve=res;});
+}
+
+// A deferred /api/file/rename, plus plain reads for openFile().
+const renameRequests=[];
+let _renameResolve=null;
+let _renameReject=null;
+function armDeferredRename(readContent){
+  api=(route,opts)=>{
+    if(String(route).indexOf('/api/file/rename')!==-1){
+      renameRequests.push(JSON.parse(opts.body));
+      return new Promise((res,rej)=>{_renameResolve=res;_renameReject=rej;});
+    }
+    return Promise.resolve({content:readContent});
+  };
+}
+
+// Open `path` as the settled, copyable preview of the CURRENT session.
+async function settlePreview(path,content){
+  const armed=api;
+  api=async()=>({content:content});
+  await openFile(path);
+  await tick();
+  api=armed;
+}
+
+function snapshot(){
+  return {
+    curPath:_previewCurrentPath,
+    rawPath:_previewRawContentPath,
+    rawContent:_previewRawContent,
+    pathText:$('previewPathText').textContent,
+    breadcrumb:breadcrumbs[breadcrumbs.length-1]||'',
+    copyable:previewRawContentIsCopyable(),
+    dirCache:JSON.stringify(S._dirCache),
+    expandedDirs:[...S._expandedDirs],
+    loadDirCount:loadDirCalls.length,
+    toastCount:toasts.length,
+  };
+}
+
+// Double-click the row's file-name label and return the rename <input> the
+// handler put in its place.
+function openDblclickRename(item){
+  const container=_origCreate('div');
+  _renderTreeItems(container,[item],0);
+  const row=container._children[0];
+  const nameEl=row._children.find(c=>c.className==='file-name');
+  if(!nameEl) throw new Error('file-name element not rendered');
+  nameEl.ondblclick({stopPropagation(){}});
+  const inp=createdEls.filter(e=>e.className==='file-rename-input').pop();
+  if(!inp) throw new Error('double-click did not open a rename input');
+  return inp;
+}
+function commitDblclickRename(inp,newName){
+  inp.value=newName;
+  inp.onkeydown({key:'Enter',preventDefault(){}});
+}
+"""
+
+_RENAME_UI_FNS = (
+    "_workspaceParentDir",
+    "elideMiddle",
+    "_captureWorkspaceOpOwner",
+    "_workspaceOpOwnerIsCurrent",
+    "_remapWorkspaceCachesAfterMove",
+    "_renderTreeItems",
+    "_inlineRenameFileItem",
+)
+
+# The same relative path exists in both workspaces and names a different file in
+# each — that collision is the whole point of the race.
+_SHARED_REL_PATH = "docs/note.md"
+
+
+def _run_rename_scenario(scenario: str) -> dict:
+    script = (
+        _DOM_STUB
+        + _TREE_RENAME_STUB
+        + "\n"
+        + _js_functions(WORKSPACE_JS, _PREVIEW_FNS)
+        + "\n"
+        + _js_functions(UI_JS, _RENAME_UI_FNS)
+        + "\n(async()=>{\n"
+        + scenario
+        + "\n})().catch(e=>{console.error(e);process.exit(1);});\n"
+    )
+    return _run_node(script)
+
+
+# Session A starts the rename; the user then switches to session B, whose
+# workspace has its own file at the identical relative path.
+_ENTER_SESSION_A = """
+  S.session={session_id:'sess-a',workspace:'/workspace/a'};
+  S.currentDir='docs';
+  S._expandedDirs=new Set();
+  S._dirCache={'docs':[{name:'note.md',path:'docs/note.md',type:'file'}]};
+  await settlePreview('docs/note.md','A WORKSPACE BYTES');
+"""
+
+_SWITCH_TO_SESSION_B = """
+  // Real switch entry points (loadSession / switchToWorkspace) drop the cached
+  // raw content; mirror that, then let B settle its OWN docs/note.md.
+  S.session={session_id:'sess-b',workspace:'/workspace/b'};
+  invalidatePreviewRawContent();
+  S.currentDir='docs';
+  S._dirCache={'docs':[{name:'note.md',path:'docs/note.md',type:'file'}]};
+  await settlePreview('docs/note.md','B WORKSPACE BYTES');
+"""
+
+
+def _assert_session_b_untouched(out, label):
+    """Nothing a session-A rename response does may be visible in session B."""
+    before, after = out["beforeRelease"], out["afterRelease"]
+    assert before["rawContent"] == "B WORKSPACE BYTES", (
+        f"{label}: session B's preview never settled: {before}"
+    )
+    assert after["curPath"] == _SHARED_REL_PATH, (
+        f"{label}: the stale response remapped B's _previewCurrentPath: {after['curPath']}"
+    )
+    assert after["rawPath"] == _SHARED_REL_PATH, (
+        f"{label}: the stale response remapped B's raw-content path: {after['rawPath']}"
+    )
+    assert after["pathText"] == _SHARED_REL_PATH, (
+        f"{label}: B's header was relabeled with A's rename: {after['pathText']}"
+    )
+    assert after["breadcrumb"] == before["breadcrumb"], (
+        f"{label}: B's breadcrumb was rewritten by A's rename: {after['breadcrumb']}"
+    )
+    assert after["dirCache"] == before["dirCache"], (
+        f"{label}: the stale response mutated B's directory cache: {after['dirCache']}"
+    )
+    assert after["expandedDirs"] == before["expandedDirs"], (
+        f"{label}: the stale response mutated B's expanded-dir set"
+    )
+    assert after["loadDirCount"] == before["loadDirCount"], (
+        f"{label}: the stale response reloaded B's directory "
+        f"({before['loadDirCount']} -> {after['loadDirCount']})"
+    )
+    assert after["toastCount"] == before["toastCount"], (
+        f"{label}: the stale response toasted into session B: {out['toasts']}"
+    )
+    assert after["copyable"] is True, (
+        f"{label}: B's own preview stopped being copyable: {after}"
+    )
+    assert out["copied"] == ["B WORKSPACE BYTES"], (
+        f"{label}: the copy payload no longer belongs to session B: {out['copied']}"
+    )
+    assert not any(tst["msg"] == "renamed_to" for tst in out["toasts"]), (
+        f"{label}: a rename from session A was announced in session B: {out['toasts']}"
+    )
+
+
+@requires_node
+def test_dblclick_rename_response_cannot_relabel_a_newer_session():
+    """Double-click rename in session A, switch to session B (same relative
+    path, different workspace), then let A's response land.
+
+    The response describes a file in /workspace/a. Applying it in /workspace/b
+    would rename B's identically-pathed file on screen — header, breadcrumb,
+    raw-content path and copy target — without anything having been renamed
+    there. Ownership captured at ondblclick must drop the response instead.
+    """
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const inp=openDblclickRename({name:'note.md',path:'docs/note.md',type:'file'});
+  commitDblclickRename(inp,'renamed.md');
+  await tick();
+"""
+        + _SWITCH_TO_SESSION_B
+        + """
+  const beforeRelease=snapshot();
+
+  // A's rename finally resolves — canonicalized by the server, and scoped to a
+  // workspace the user is no longer in.
+  _renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await tick();await tick();
+
+  const afterRelease=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    beforeRelease, afterRelease, renameRequests, copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+
+    assert len(out["renameRequests"]) == 1, (
+        f"expected exactly one rename request: {out['renameRequests']}"
+    )
+    req = out["renameRequests"][0]
+    assert req["session_id"] == "sess-a", (
+        f"the rename was sent under the live session instead of the capturing "
+        f"one: {req['session_id']}"
+    )
+    assert req["path"] == _SHARED_REL_PATH, (
+        f"the rename was sent for a re-read path instead of the captured one: {req['path']}"
+    )
+    _assert_session_b_untouched(out, "dblclick rename")
+
+
+@requires_node
+def test_dblclick_rename_failure_does_not_toast_into_a_newer_session():
+    """A rename that FAILS in session A is not session B's error to report."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const inp=openDblclickRename({name:'note.md',path:'docs/note.md',type:'file'});
+  commitDblclickRename(inp,'renamed.md');
+  await tick();
+"""
+        + _SWITCH_TO_SESSION_B
+        + """
+  const toastsBefore=toasts.length;
+  _renameReject(new Error('boom'));
+  await tick();await tick();
+
+  console.log(JSON.stringify({toastsBefore, toasts:[...toasts]}));
+"""
+    )
+    assert len(out["toasts"]) == out["toastsBefore"], (
+        f"a failure from session A toasted into session B: {out['toasts']}"
+    )
+    assert not any(tst["msg"].startswith("rename_failed") for tst in out["toasts"])
+
+
+@requires_node
+def test_dblclick_rename_same_owner_still_remaps_to_the_canonical_path():
+    """Same-owner control: with no context switch the double-click rename must
+    still follow the SERVER's canonical path and reload with preservePreview."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  const before=snapshot();
+  armDeferredRename('unused');
+  const inp=openDblclickRename({name:'note.md',path:'docs/note.md',type:'file'});
+  commitDblclickRename(inp,'renamed.md');
+  await tick();
+
+  // No switch: the same session/workspace is still live when the response lands.
+  _renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await tick();await tick();
+
+  const after=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    before, after, renameRequests, loadDirCalls, copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+    after = out["after"]
+    assert out["renameRequests"][0]["session_id"] == "sess-a"
+    assert out["renameRequests"][0]["path"] == _SHARED_REL_PATH
+    assert after["curPath"] == "docs/canonical_renamed.md", (
+        f"the owner's own rename did not remap the preview: {after['curPath']}"
+    )
+    assert after["rawPath"] == "docs/canonical_renamed.md"
+    assert after["pathText"] == "docs/canonical_renamed.md"
+    assert after["breadcrumb"] == "docs/canonical_renamed.md"
+    assert after["copyable"] is True
+    assert out["copied"] == ["A WORKSPACE BYTES"]
+    assert out["loadDirCalls"] == [{"dir": "docs", "opts": {"preservePreview": True}}], (
+        f"the owner's reload must preserve the preview: {out['loadDirCalls']}"
+    )
+    assert any(tst["msg"] == "renamed_torenamed.md" for tst in out["toasts"]), (
+        f"the owner's own rename was not announced: {out['toasts']}"
+    )
+
+
+@requires_node
+def test_inline_rename_aborts_when_the_context_changes_during_the_prompt():
+    """_inlineRenameFileItem() awaits showPromptDialog() before it ever calls
+    the API. A switch inside that gap must abort the rename outright — issuing
+    it would rename the NEW workspace's identically-pathed file."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const pending=_inlineRenameFileItem({name:'note.md',path:'docs/note.md',type:'file'});
+  await tick();
+  const promptOpened=promptCalls;
+"""
+        + _SWITCH_TO_SESSION_B
+        + """
+  const beforeResolve=snapshot();
+  _promptResolve('renamed.md');   // the user confirms — but in session B now
+  await tick();await tick();
+  // If the rename went out anyway, resolve it so the scenario can REPORT that
+  // rather than hang on a promise nothing will settle.
+  if(_renameResolve)_renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await pending;
+  await tick();
+
+  const afterResolve=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    promptOpened, beforeResolve, afterResolve, renameRequests,
+    copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+    assert out["promptOpened"] == 1, "the rename prompt never opened"
+    assert out["renameRequests"] == [], (
+        f"a rename was issued after the context changed under the prompt: "
+        f"{out['renameRequests']}"
+    )
+    before, after = out["beforeResolve"], out["afterResolve"]
+    assert after["curPath"] == _SHARED_REL_PATH
+    assert after["rawPath"] == _SHARED_REL_PATH
+    assert after["pathText"] == _SHARED_REL_PATH
+    assert after["breadcrumb"] == before["breadcrumb"]
+    assert after["dirCache"] == before["dirCache"]
+    assert after["loadDirCount"] == before["loadDirCount"]
+    assert after["copyable"] is True
+    assert out["copied"] == ["B WORKSPACE BYTES"]
+
+
+@requires_node
+def test_inline_rename_response_cannot_relabel_a_newer_session():
+    """The prompt is answered in session A and the API call goes out there; the
+    user switches to session B while it is in flight. A's response must not
+    remap B's preview, caches, header, breadcrumb or copy target."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const pending=_inlineRenameFileItem({name:'note.md',path:'docs/note.md',type:'file'});
+  await tick();
+  _promptResolve('renamed.md');   // answered while session A is still live
+  await tick();
+"""
+        + _SWITCH_TO_SESSION_B
+        + """
+  const beforeRelease=snapshot();
+
+  _renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await pending;
+  await tick();
+
+  const afterRelease=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    beforeRelease, afterRelease, renameRequests, copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+    assert len(out["renameRequests"]) == 1, (
+        f"expected exactly one rename request: {out['renameRequests']}"
+    )
+    req = out["renameRequests"][0]
+    assert req["session_id"] == "sess-a", (
+        f"the rename re-read the live session instead of the captured one: {req['session_id']}"
+    )
+    assert req["path"] == _SHARED_REL_PATH
+    _assert_session_b_untouched(out, "inline rename")
+
+
+@requires_node
+def test_inline_rename_same_owner_still_remaps_to_the_canonical_path():
+    """Same-owner control for the prompt-dialog path."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const pending=_inlineRenameFileItem({name:'note.md',path:'docs/note.md',type:'file'});
+  await tick();
+  _promptResolve('renamed.md');
+  await tick();
+
+  _renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await pending;
+  await tick();
+
+  const after=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    after, renameRequests, loadDirCalls, copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+    after = out["after"]
+    assert out["renameRequests"][0]["session_id"] == "sess-a"
+    assert after["curPath"] == "docs/canonical_renamed.md"
+    assert after["rawPath"] == "docs/canonical_renamed.md"
+    assert after["pathText"] == "docs/canonical_renamed.md"
+    assert after["breadcrumb"] == "docs/canonical_renamed.md"
+    assert after["copyable"] is True
+    assert out["copied"] == ["A WORKSPACE BYTES"]
+    assert out["loadDirCalls"] == [{"dir": "docs", "opts": {"preservePreview": True}}]
+    assert any(tst["msg"] == "renamed_torenamed.md" for tst in out["toasts"])
+
+
+def test_both_rename_paths_capture_ownership_before_their_first_await():
+    """Source-level guard: the capture must precede the first await in each
+    path, and neither may re-read S.session for the request payload."""
+    inline = _function_body(UI_JS, "_inlineRenameFileItem")
+    compact_inline = _compact(inline)
+    assert compact_inline.index("_captureWorkspaceOpOwner(") < compact_inline.index(
+        "awaitshowPromptDialog("
+    ), "_inlineRenameFileItem() captures ownership after the prompt await"
+
+    for label, src in _rename_entry_point_sources().items():
+        compact = _compact(src)
+        assert "session_id:renameOwner.sessionId" in compact, (
+            f"{label}: the request re-reads the live session instead of the captured one"
+        )
+        assert "path:renameOwner.path" in compact, (
+            f"{label}: the request re-reads the item path instead of the captured one"
+        )
+        assert compact.count("_workspaceOpOwnerIsCurrent(renameOwner)") >= 3, (
+            f"{label}: expected ownership checks before the request, after the "
+            f"response, and in the error path"
+        )
+        assert compact.index("_workspaceOpOwnerIsCurrent(renameOwner)") < compact.index(
+            "awaitapi('/api/file/rename'"
+        ), f"{label}: nothing gates the request itself on ownership"

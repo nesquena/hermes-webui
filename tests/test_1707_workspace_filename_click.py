@@ -50,6 +50,20 @@ def _read_ui_js() -> str:
         return f.read()
 
 
+def _ownership_helper_sources() -> str:
+    """Real source of the workspace-op ownership helpers the rename handler
+    calls (PR #6957). They are injected alongside the handler block so this
+    harness drives the production capture rather than a stub of it."""
+    src = _read_ui_js()
+    start = src.index("function _captureWorkspaceOpOwner(")
+    end = src.index("function _remapWorkspaceCachesAfterMove(")
+    block = src[start:end]
+    assert "function _workspaceOpOwnerIsCurrent(" in block, (
+        "the ownership helpers are no longer adjacent in static/ui.js"
+    )
+    return block
+
+
 def _name_handler_block() -> str:
     """Return the source between the tooltip assignment block and the
     line that appends nameEl to the row (`el.appendChild(nameEl);`).
@@ -187,6 +201,7 @@ def _run_node_with_clicks(click_count: int, dblclick_after_first: bool, item_typ
     handler = _name_handler_block()
     payload = {
         "handlerBlock": handler,
+        "ownershipHelpers": _ownership_helper_sources(),
         "clickCount": click_count,
         "dblclickAfter": dblclick_after_first,
         "itemType": item_type,
@@ -195,6 +210,7 @@ def _run_node_with_clicks(click_count: int, dblclick_after_first: bool, item_typ
         "const params = " + json.dumps(payload) + ";\n"
         + r"""
 const handlerBlock = params.handlerBlock;
+const ownershipHelpers = params.ownershipHelpers;
 const clickCount = params.clickCount;
 const dblclickAfter = params.dblclickAfter;
 const itemType = params.itemType;
@@ -255,7 +271,7 @@ const elideMiddle = (s) => s;
 const runner = new Function(
   'nameEl', 'el', 'item', 'S', 't', 'loadDir', 'document', 'showToast', 'api', 'window',
   'setTimeout', 'clearTimeout', 'isLk', 'isExternalLink', 'isDirLike', 'elideMiddle',
-  '(()=>{' + handlerBlock + '})();'
+  '(()=>{' + ownershipHelpers + handlerBlock + '})();'
 );
 runner(nameEl, el, item, S, t, loadDir, document, showToast, api, {}, trackedSetTimeout, trackedClearTimeout, isLk, isExternalLink, isDirLike, elideMiddle);
 
