@@ -18322,6 +18322,17 @@ function renderMessages(options){
     _insertCompressionLikeNodeByRawIdx(_handoffCardsNode(entry.state), entry.rawIdx);
   }
   renderCompressionUi();
+  // Exact-[[SILENT]] wakeup turns remain authoritative raw transcript
+  // boundaries even though they have no visible segment. Legacy settled
+  // activity must not let their tool metadata/results fall back to an earlier
+  // visible assistant turn.
+  const silentWakeupTurnRawIdxs=typeof _silentWakeupTurnHiddenIdxs==='function'
+    ? _silentWakeupTurnHiddenIdxs()
+    : new Set();
+  const _toolCallOwnedBySilentWakeup=(tc)=>{
+    const rawIdx=tc&&tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx,10):-1;
+    return Number.isFinite(rawIdx)&&silentWakeupTurnRawIdxs.has(rawIdx);
+  };
   const anchorOwnedAssistantRawIdxs=new Set();
   for(const [rawIdx,seg] of assistantSegments){
     const msg=S.messages[rawIdx];
@@ -18342,7 +18353,9 @@ function renderMessages(options){
   // a display list from per-message tool_calls (OpenAI format) stored in each
   // assistant message. This covers the reload case described in issue #140.
   const hasMessageToolMetadata=!S.busy&&Array.isArray(S.messages)&&S.messages.some((m,rawIdx)=>
-    !anchorOwnedAssistantRawIdxs.has(rawIdx)&&_legacySettledFallbackHasToolMetadata(m)
+    !silentWakeupTurnRawIdxs.has(rawIdx)&&(
+      !anchorOwnedAssistantRawIdxs.has(rawIdx)&&_legacySettledFallbackHasToolMetadata(m)
+    )
   );
   if(!S.busy && (hasMessageToolMetadata||!S.toolCalls||!S.toolCalls.length)){
     // Index tool outputs by tool_call_id / tool_use_id so the
@@ -18367,6 +18380,9 @@ function renderMessages(options){
     }catch(e){}
     S.messages.forEach((m,rawIdx)=>{
       if(!m) return;
+      // Filter by the raw owner before collecting either declarations or
+      // results; otherwise a hidden result can be joined into a visible card.
+      if(silentWakeupTurnRawIdxs.has(rawIdx)) return;
       // OpenAI / Hermes CLI format: role=tool with tool_call_id
       if(m.role==='tool'){
         const tid=m.tool_call_id||m.tool_use_id||'';
@@ -18391,9 +18407,10 @@ function renderMessages(options){
       }
     });
     const derived=[];
-    const liveToolMetadata=Array.isArray(S._settledLiveToolMetadata)
+    const liveToolMetadataSource=Array.isArray(S._settledLiveToolMetadata)
       ? S._settledLiveToolMetadata
       : (Array.isArray(S.toolCalls)?S.toolCalls:[]);
+    const liveToolMetadata=liveToolMetadataSource.filter(tc=>!_toolCallOwnedBySilentWakeup(tc));
     const liveMetadataByTid=new Map();
     liveToolMetadata.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
@@ -18578,6 +18595,9 @@ function renderMessages(options){
     for(const s of assistantSegments.values()) if(s){const b=s.getAttribute('data-activity-burst-id');if(b)knownBurstIds.add(b);}
     for(const tc of (S.toolCalls||[])){
       if(!tc) continue;
+      // Apply raw turn ownership before tid dedupe, bucket selection, or the
+      // previous-visible-assistant fallback in _assistantAnchorForActivity().
+      if(_toolCallOwnedBySilentWakeup(tc)) continue;
       const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
       if(tid&&transparentOrderedToolIds.has(tid)) continue;
       const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
