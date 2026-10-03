@@ -262,11 +262,11 @@ def test_session_removal_reflows_surviving_rows_smoothly():
     assert "const reflowBefore=animateRefresh?flipBefore:_pendingSessionReflowPositions;" in SESSIONS_JS
     assert "const reflowTimeout=animateRefresh?SESSION_LIST_FLIP_TIMEOUT_MS:SESSION_REFLOW_TIMEOUT_MS;" in SESSIONS_JS
     assert "_playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);" in SESSIONS_JS
-    assert "async function _archiveSession(session, archived=true, beforeListRender=null){" in SESSIONS_JS
+    assert "async function _archiveSession(session, archived=true, beforeListRender=null, _retried=false){" in SESSIONS_JS
     assert "const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;" in SESSIONS_JS
     assert "const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);" in SESSIONS_JS
     assert "if(cached) cached.archived=archived;" in SESSIONS_JS
-    archive_start = SESSIONS_JS.find("async function _archiveSession(session, archived=true, beforeListRender=null){")
+    archive_start = SESSIONS_JS.find("async function _archiveSession(session, archived=true, beforeListRender=null, _retried=false){")
     archive_end = SESSIONS_JS.find("function _openSessionActionMenu", archive_start)
     archive_body = SESSIONS_JS[archive_start:archive_end]
     toast_idx = archive_body.find("showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));")
