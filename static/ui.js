@@ -24300,14 +24300,27 @@ function postProcessRenderedMessages(container) {
 // bound memory.
 //
 // #7778 invariant: the cache MUST only ever hold HTML that actually contains
-// tokenized spans. Prism's autoloader asynchronously fetches language
+// tokenized spans, AND the entry must record the grammar state it was
+// produced under. Prism's autoloader asynchronously fetches language
 // grammars from a CDN; the first `Prism.highlightElement` call for an
 // unloaded language returns the raw source text (no token spans) but still
-// mutates the element. If we cached that raw innerHTML, the cache would
-// permanently lock the block as "highlighted" with no tokens — the
-// subsequent rAF pass would skip it (data-highlighted='1' selector), and
-// the user would see an un-tokenized code block forever. We guard against
-// this with three layers:
+// mutates the element. Beyond the token-form gate, an HTML fence can be
+// *partially* tokenized: the `html` grammar may already be loaded (so the
+// outer markup produces tokens) while the embedded `javascript` grammar it
+// references is still being fetched. That HTML DOES contain `class="token"`
+// spans and would pass the token gate, yet the embedded <script> body stays
+// plain text until the javascript grammar arrives — and once cached, the
+// stale entry is re-applied on every rebuild while the next-frame pass skips
+// the block (data-highlighted='1'), so it never re-highlights.
+//
+// The grammar-state signature closes this: each entry records how many
+// Prism grammars were loaded when it was written. A later grammar load
+// (autoloader resolving javascript/css for an embedded fence) changes the
+// count, so the cached entry is recognized as stale and skipped — the
+// next-frame pass re-highlights the block with the extended grammar, and the
+// fresh (more tokenized) HTML overwrites the entry.
+//
+// We guard against the untokenized case with four layers:
 //   1. The cache writer (_writeCodeHighlightCache) refuses entries whose
 //      innerHTML has no `class="token"` span — so even if Prism's
 //      highlightElement returned without tokenizing, no bad entry lands.
@@ -24318,6 +24331,10 @@ function postProcessRenderedMessages(container) {
 //   3. _applyCachedCodeHighlights() refuses to stamp data-highlighted='1'
 //      on a cache entry that lacks token spans — a belt-and-suspenders
 //      defense for legacy cache state and any future regression.
+//   4. Entries carry the grammar-state signature they were written under
+//      (see _prismGrammarSignature); a stale entry is skipped so the
+//      next-frame pass re-highlights the block, and the writer may then
+//      overwrite the entry with the fully-tokenized form.
 const _CODE_HIGHLIGHT_CACHE_MAX = 512;
 const _codeHighlightCache = new Map();
 let _prismCompleteHookRegistered = false;
@@ -24326,11 +24343,26 @@ let _prismCompleteHookRegistered = false;
 // writes and restores; see #7778. The regex tolerates token classes like
 // `token keyword`, `class="token punctuation"`, and any attribute order.
 const _CODE_HIGHLIGHT_TOKEN_RE = /<span\b[^>]*\bclass="[^"]*\btoken\b/i;
+// Grammar-state signature for a cache entry (#7778). Any change in the set of
+// loaded Prism grammars can change how a fence tokenizes — most visibly an
+// HTML fence whose embedded <script> becomes tokenizable once the
+// javascript grammar finishes loading. The count of `Prism.languages` keys is
+// the cheapest observable proxy: it only ever grows within a page (grammars
+// are never unloaded), so a strictly-greater count means "more grammar is
+// available now than when this entry was written", i.e. the entry may be
+// stale. Returns 0 when Prism is unavailable, which keeps legacy entries
+// (written without a signature) and no-Prism pages comparable.
+function _prismGrammarSignature(){
+  try{
+    if(typeof Prism === 'undefined' || !Prism || !Prism.languages) return 0;
+    return Object.keys(Prism.languages).length;
+  }catch(_e){ return 0; }
+}
 function _codeHighlightCacheKey(block){
   if(!block) return '';
   // Read only the language-xxx class (set by the markdown renderer) and the
   // block's own textContent (the source code). We deliberately do NOT walk
-  // siblings or ancestors: the copy-button lives in <pre> (or a header
+  // siblings or ancestors: the copy button lives in <pre> (or a header
   // before <pre>), not inside <code>, so textContent is not polluted by it.
   // There is no line-number injection in this codebase — verified by grep
   // for `line-numbers` / `lineNumbers` / `pre-line-numbers` in static/.
@@ -24348,12 +24380,22 @@ function _writeCodeHighlightCache(block){
   if(!_CODE_HIGHLIGHT_TOKEN_RE.test(inner)) return;
   const cacheKey=_codeHighlightCacheKey(block);
   if(!cacheKey) return;
-  if(_codeHighlightCache.has(cacheKey)) return;
-  if(_codeHighlightCache.size >= _CODE_HIGHLIGHT_CACHE_MAX){
+  // Overwrite an existing entry rather than bailing out (#7778): when the
+  // autoloader later resolves a grammar an earlier pass lacked, the
+  // re-highlight produces MORE token spans for the same key, and that
+  // richer form must replace the partially-tokenized one. The stale entry
+  // stays out of the rebuild path in the meantime because
+  // _applyCachedCodeHighlights() skips signature mismatches.
+  const entry={ html: inner, sig: _prismGrammarSignature() };
+  if(_codeHighlightCache.has(cacheKey)){
+    // Refresh insertion order so an actively-rebuilt block is not evicted
+    // ahead of untouched ones.
+    _codeHighlightCache.delete(cacheKey);
+  } else if(_codeHighlightCache.size >= _CODE_HIGHLIGHT_CACHE_MAX){
     // FIFO eviction — drop the oldest entry.
     _codeHighlightCache.delete(_codeHighlightCache.keys().next().value);
   }
-  _codeHighlightCache.set(cacheKey, inner);
+  _codeHighlightCache.set(cacheKey, entry);
 }
 function _maybeRegisterPrismCompleteHook(){
   // Register the 'complete' hook lazily, once per page. Prism fires this
@@ -24388,11 +24430,27 @@ function _applyCachedCodeHighlights(container){
   if(!container) return 0;
   const blocks = container.querySelectorAll('pre code:not([data-highlighted])');
   if(blocks.length === 0) return 0;
+  const sigNow = _prismGrammarSignature();
   let applied = 0;
   for(let i = 0; i < blocks.length; i++){
     const block = blocks[i];
-    const cached = _codeHighlightCache.get(_codeHighlightCacheKey(block));
-    if(cached === undefined) continue;
+    const entry = _codeHighlightCache.get(_codeHighlightCacheKey(block));
+    if(entry === undefined) continue;
+    // Tolerate both the current {html, sig} shape and a legacy bare-string
+    // entry (written before the grammar signature existed): a legacy entry
+    // carries no signature, so treat it as matching whenever the current
+    // signature is the baseline (no grammars beyond what legacy ran with).
+    const cached = (entry && typeof entry === 'object' && 'html' in entry) ? entry.html : entry;
+    const entrySig = (entry && typeof entry === 'object' && 'sig' in entry) ? entry.sig : sigNow;
+    if(cached === undefined || cached === null || cached === '') continue;
+    // Stale under a NEWER grammar state (#7778): the entry was written before
+    // the autoloader resolved a grammar this fence embeds, so it holds the
+    // partially-tokenized form. Skip it — the next-frame post-process then
+    // re-highlights the block with the extended grammar and overwrites the
+    // entry. Applying a stale entry AND stamping data-highlighted='1' is what
+    // locked embedded <script>/<style> bodies as plain text for the life of
+    // the page.
+    if(entrySig < sigNow) continue;
     // Defensive #7778 guard: never stamp data-highlighted='1' on a cache
     // entry that lacks token spans. If the cache somehow holds raw HTML
     // (legacy state, pre-fix session, future regression), applying it AND

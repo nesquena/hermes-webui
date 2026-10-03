@@ -271,6 +271,9 @@ def _snapshot_via_node() -> dict:
     # can resolve the names.
     write_fn = extract("function _writeCodeHighlightCache(")
     register_hook_fn = extract("function _maybeRegisterPrismCompleteHook(")
+    # #7778: grammar-state signature helper, needed by the cache writer
+    # and reader (entries are {html, sig}).
+    grammar_sig_fn = extract("function _prismGrammarSignature(")
 
     # Extract the cache constant + map declarations. They sit on two lines
     # ABOVE `_codeHighlightCacheKey` in the source; capture both lines by
@@ -496,6 +499,7 @@ def _snapshot_via_node() -> dict:
 {cache_key_fn}
 {write_fn}
 {register_hook_fn}
+{grammar_sig_fn}
 {apply_fn}
 {highlight_fn}
 
@@ -873,6 +877,9 @@ def _autoloader_snapshot_via_node() -> dict:
     cache_key_fn = extract("function _codeHighlightCacheKey(")
     write_fn = extract("function _writeCodeHighlightCache(")
     register_hook_fn = extract("function _maybeRegisterPrismCompleteHook(")
+    # #7778: grammar-state signature helper, needed by the cache writer
+    # and reader (entries are {html, sig}).
+    grammar_sig_fn = extract("function _prismGrammarSignature(")
     apply_fn = extract("function _applyCachedCodeHighlights(")
     highlight_fn = extract("function highlightCode(")
 
@@ -946,6 +953,7 @@ def _autoloader_snapshot_via_node() -> dict:
 {cache_key_fn}
 {write_fn}
 {register_hook_fn}
+{grammar_sig_fn}
 {apply_fn}
 {highlight_fn}
 
@@ -989,7 +997,11 @@ console.log(JSON.stringify({{
   c1InnerIsTokenized: c1InnerAfterAutoload.includes('class="token'),
   cacheSizeAfterAutoload,
   cacheKeyAfterAutoload,
-  cacheValueIsTokenized: cacheKeyAfterAutoload.v !== null && cacheKeyAfterAutoload.v.includes('class="token'),
+  cacheValueIsTokenized: cacheKeyAfterAutoload.v !== null && (
+    typeof cacheKeyAfterAutoload.v === 'object'
+      ? String(cacheKeyAfterAutoload.v.html || '').includes('class="token')
+      : String(cacheKeyAfterAutoload.v).includes('class="token')
+  ),
   applied,
   c2Inner,
   c2InnerIsTokenized: c2Inner.includes('class="token'),
