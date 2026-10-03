@@ -8621,7 +8621,7 @@ function renderSessionListFromCache(){
   if(_sessionSourceFilter==='cli'&&sessions.length===0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
-    empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
+    empty.textContent=window._showCliSessions?'No Desktop / CLI sessions found.':'Enable Show non-WebUI sessions in Settings to list Desktop / CLI sessions here.';
     list.appendChild(empty);
   } else if(_activeProject&&sessions.length===0){
     const empty=document.createElement('div');
