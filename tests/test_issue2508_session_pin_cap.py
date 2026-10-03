@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import urllib.error
 import urllib.request
 
+import pytest
+
 from tests._pytest_port import BASE, TEST_STATE_DIR
 
 
@@ -42,6 +44,141 @@ def make_session(created):
     created.append(sid)
     return sid
 
+
+
+class _PinSession:
+    def __init__(self, sid, profile, pinned=False, persisted=None, parent=None):
+        self.session_id, self.profile = sid, profile
+        self.pinned, self.archived = pinned, False
+        self.parent_session_id, self._persisted = parent, persisted
+
+    def compact(self):
+        return {
+            "session_id": self.session_id, "profile": self.profile,
+            "pinned": self.pinned, "archived": self.archived,
+            "parent_session_id": self.parent_session_id,
+            "pre_compression_snapshot": False, "default_hidden": False,
+        }
+
+    def save(self):
+        if self._persisted is not None and self not in self._persisted:
+            self._persisted.append(self)
+
+
+def _configure_pin_route(monkeypatch, sessions, persisted, source, active_profile, root_names=None):
+    import threading
+    from collections import OrderedDict
+    from contextlib import nullcontext
+    import api.profiles as profiles
+    import api.routes as routes
+
+    by_id = {session.session_id: session for session in sessions}
+    names = sorted({"default", *(session.profile for session in sessions)})
+    monkeypatch.setattr(routes, "LOCK", threading.Lock())
+    monkeypatch.setattr(routes, "SESSIONS", OrderedDict(by_id if source == "memory" else {}))
+    monkeypatch.setattr(routes, "all_sessions", lambda: list(persisted) if source == "persisted" else [])
+    monkeypatch.setattr(routes, "get_session", lambda sid, **_: by_id[sid])
+    monkeypatch.setattr(routes, "list_profiles_api", lambda **_: [
+        {"name": name, "is_default": name == "default"} for name in names
+    ])
+    monkeypatch.setattr(profiles, "_root_profile_name_cache", set(root_names or {"default"}))
+    monkeypatch.setattr(profiles, "_root_profile_name_cache_loaded", root_names is not None)
+    monkeypatch.setattr(routes, "load_settings", lambda: {"pinned_sessions_limit": 3})
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: active_profile)
+    monkeypatch.setattr(routes, "_check_csrf", lambda *_: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda *_: False)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda *_: nullcontext())
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_, **__: None)
+    responses = []
+    monkeypatch.setattr(routes, "j", lambda _, payload, status=200, **__: responses.append((status, payload)))
+    monkeypatch.setattr(routes, "bad", lambda _, message, code=400: responses.append((code, {"error": message})))
+    return routes, responses
+
+
+@pytest.mark.parametrize("source", ("persisted", "memory"))
+def test_pin_quota_uses_target_owner_and_keeps_post_profile_guard(monkeypatch, source):
+    persisted = []
+    store = persisted if source == "persisted" else None
+    pinned_a = [_PinSession(f"a-{i}", "A", True, store) for i in range(3)]
+    parents = [_PinSession(f"b-parent-{i}", "B", parent="shared-parent") for i in range(3)]
+    targets = [
+        _PinSession(f"b-{i}", "B", persisted=store, parent=f"b-parent-{i}" if i < 3 else None)
+        for i in range(4)
+    ]
+    if store is not None:
+        persisted.extend(pinned_a + parents)
+    routes, responses = _configure_pin_route(
+        monkeypatch, pinned_a + parents + targets, persisted, source, "A", {"default"},
+    )
+    body = {}
+    monkeypatch.setattr(routes, "read_body", lambda _: body)
+
+    # Direct calls isolate quota ownership; requests with a handler still pass
+    # through the production profile guard checked below.
+    for target in targets:
+        body.update(session_id=target.session_id, pinned=True)
+        routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
+
+    assert [status for status, _ in responses] == [200, 200, 200, 400]
+    assert all(targets[i].pinned for i in range(3)) and not targets[3].pinned
+    routes.handle_post(object(), SimpleNamespace(path="/api/session/pin", query=""))
+    assert responses[-1][0] == 409
+
+
+def test_pin_quota_includes_known_root_aliases_and_fails_closed(monkeypatch):
+    pins = [_PinSession(f"root-{i}", "root-alias", True) for i in range(3)]
+    target = _PinSession("root-target", "default")
+    b_target = _PinSession("b-target", "B")
+    routes, responses = _configure_pin_route(
+        monkeypatch, pins + [target, b_target], pins, "persisted", "default", {"default", "root-alias"},
+    )
+    monkeypatch.setattr(routes, "list_profiles_api", lambda **_: [{"name": "default", "is_default": True}])
+    monkeypatch.setattr(routes, "read_body", lambda _: {"session_id": target.session_id, "pinned": True})
+    routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
+    assert responses[-1][0] == 400 and not target.pinned
+
+    monkeypatch.setattr(routes, "_root_profile_names_snapshot", lambda: None)
+    routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
+    assert responses[-1][0] == 503 and not target.pinned
+    pins[0].pinned = False
+    routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
+    assert responses[-1][0] == 200 and target.pinned
+    target.pinned = False
+    pins[0].pinned = True
+
+    monkeypatch.setattr(routes, "_root_profile_names_snapshot", lambda: {"default"})
+
+    def unavailable(**_):
+        raise RuntimeError("profile listing unavailable")
+
+    monkeypatch.setattr(routes, "list_profiles_api", unavailable)
+    routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
+    assert responses[-1][0] == 503 and not target.pinned
+    assert "retry" in responses[-1][1]["error"].lower()
+
+    monkeypatch.setattr(routes, "_root_profile_names_snapshot", lambda: {"default", "root-alias"})
+    monkeypatch.setattr(routes, "read_body", lambda _: {"session_id": b_target.session_id, "pinned": True})
+    routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
+    assert responses[-1][0] == 503 and not b_target.pinned
+    monkeypatch.setattr(routes, "list_profiles_api", lambda **_: [
+        {"name": "default", "is_default": True}, {"name": "B"},
+    ])
+    routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
+    assert responses[-1][0] == 200 and b_target.pinned
+
+    monkeypatch.setattr(routes, "read_body", lambda _: {"session_id": target.session_id, "pinned": True})
+    monkeypatch.setattr(routes, "list_profiles_api", unavailable)
+    pins.clear()
+    monkeypatch.setattr(routes, "_root_profile_names_snapshot", lambda: None)
+    assert not pins and not routes.SESSIONS
+    routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
+    assert responses[-1][0] == 503 and not target.pinned
+
+    monkeypatch.setattr(routes, "_root_profile_names_snapshot", lambda: {"default"})
+    monkeypatch.setattr(routes, "list_profiles_api", lambda **_: [{"name": "default", "is_default": False}])
+    routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
+    assert responses[-1][0] == 200 and target.pinned
 
 
 def inject_hidden_pinned_snapshot(sid="hidden-pinned-snapshot"):
