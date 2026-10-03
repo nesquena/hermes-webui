@@ -810,8 +810,15 @@ function _formatSelectedTextReplyQuote(text, includeMarker=true){
 function _appendComposerText(text){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer||!text)return;
-  const current=String(composer.value||'');
-  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}`:String(text);
+  if(typeof _composerAppendText==='function'){
+    const producer=typeof _newComposerProducerToken==='function'
+      ? _newComposerProducerToken('saved-prompt')
+      : 'saved-prompt';
+    _composerAppendText(text,null,producer,null,'block');
+  }else{
+    const current=String(composer.value||'');
+    composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}`:String(text);
+  }
   composer.focus();
   try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
   composer.dispatchEvent(new Event('input',{bubbles:true}));
@@ -1071,7 +1078,8 @@ function _clearComposerAfterQueuedSelectionSend(){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   const draftText=composer?String(composer.value||''):'';
   const draftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
-  if(composer)composer.value='';
+  if(composer&&typeof _composerSetText==='function')_composerSetText('');
+  else if(composer)composer.value='';
   if(sid&&typeof _clearComposerDraft==='function') _clearComposerDraft(sid,draftText,draftFiles);
   _clearPendingSelections();
   if(typeof autoResize==='function') autoResize();
@@ -1081,7 +1089,9 @@ function _flushSelectionBlocksToComposer(){
   if(!_pendingSelections.length)return;
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer)return;
-  composer.value=_composerTextWithPendingSelections();
+  const next=_composerTextWithPendingSelections();
+  if(typeof _composerSetText==='function')_composerSetText(next,next);
+  else composer.value=next;
   _clearPendingSelections();
   composer.focus();
   try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_e){}
@@ -1322,6 +1332,7 @@ async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPro
 }
 
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
+  const ownerProfile=String((filesSnapshot&&filesSnapshot._ownerProfile)||'').trim()||null;
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   if(!restore&&!files.length) return false;
@@ -1331,18 +1342,33 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // send failure would pollute another session's composer. (Codex #5484 catch.)
   const visibleSid=(S.session&&S.session.session_id)||null;
   const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);
+  // A failed background send has no visible tray to own its live File objects.
+  // Keep them under the profile+session captured when send() started so switching
+  // back can restore the exact browser objects without touching this session.
+  if(!belongsToVisible&&files.length&&typeof _rememberComposerPendingFiles==='function'){
+    _rememberComposerPendingFiles(sid,files,ownerProfile);
+  }
   let restoredVisible=false;
+  let ownerTransactionSnapshot=null;
   if(belongsToVisible){
     const inp=$('msg');
     // Do not clobber a new message the user began typing during the async window.
     if(inp && !String(inp.value||'').trim()){
-      inp.value=restore;
+      const producer=typeof _newComposerProducerToken==='function'
+        ? _newComposerProducerToken(`failed-send-${sid||'unknown'}`)
+        : `failed-send-${sid||'unknown'}`;
+      if(typeof _composerSetText==='function')_composerSetText(restore,restore,sid,producer,ownerProfile);
+      else inp.value=restore;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
       // Re-stage the originally attached files so a one-key resend keeps them.
       if(files.length){
-        S.pendingFiles=files;
+        if(typeof _composerReplaceFiles==='function')_composerReplaceFiles(files,sid,producer,ownerProfile);
+        else S.pendingFiles=files;
         if(typeof renderTray==='function') renderTray();
+      }
+      if(typeof _composerOwnerSnapshot==='function'){
+        ownerTransactionSnapshot=_composerOwnerSnapshot(sid,ownerProfile);
       }
       restoredVisible=true;
     }
@@ -1360,15 +1386,27 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   if(sid&&typeof _saveComposerDraftNow==='function'){
     const _persist=()=>{
       try{
+        const ownerSnapshot=ownerTransactionSnapshot;
         const stillVisible=(S.session&&S.session.session_id)===sid;
         if(stillVisible){
           const inp=$('msg');
           const liveText=inp?String(inp.value||''):restore;
           _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[]);
+        } else if(ownerSnapshot){
+          const snapshotIsCurrent=typeof _composerOwnerSnapshotIsCurrent!=='function'
+            ||_composerOwnerSnapshotIsCurrent(ownerSnapshot);
+          if(!snapshotIsCurrent)return;
+          _saveComposerDraftNow(
+            sid,ownerSnapshot.text,[...(ownerSnapshot.files||[])],ownerSnapshot.profile
+          );
         } else if(!restoredVisible){
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, files);
+          // Pass the captured owner profile when present so a later profile switch
+          // cannot file the live browser objects under whichever profile is
+          // visible now; snapshots without one keep the plain call shape.
+          if(ownerProfile)_saveComposerDraftNow(sid, restore, files, ownerProfile);
+          else _saveComposerDraftNow(sid, restore, files);
         }
         // else: restored the visible composer, then the user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.
@@ -1381,7 +1419,33 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+function _newSessionActionWasSuperseded(result){
+  if(typeof _newSessionResultWasSuperseded==='function'){
+    return _newSessionResultWasSuperseded(result);
+  }
+  return !!(result&&result.status==='superseded');
+}
+
+async function _ensureSessionForComposerAction(){
+  if(S.session)return true;
+  const result=await newSession();
+  if(_newSessionActionWasSuperseded(result)||!S.session)return false;
+  await renderSessionList();
+  return true;
+}
+
 async function send(){
+  // Voice Mode and other programmatic producers can call send() even while the
+  // composer controls are disabled. Wait until the New Session owner resolves;
+  // success sends to the fresh session, failure safely remains on the source.
+  if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+    // If another send already owns this transition, a Voice Mode callback is a
+    // duplicate producer for the same still-visible composer. Do not queue it.
+    if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
+    let newSessionResult=null;
+    try{newSessionResult=await _newSessionInFlight;}catch(_){ }
+    if(_newSessionActionWasSuperseded(newSessionResult))return;
+  }
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -1398,7 +1462,9 @@ async function send(){
       queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
       _clearComposerAfterQueuedSelectionSend();
       if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
-      S.pendingFiles=[];renderTray();
+      if(typeof _composerReplaceFiles==='function')_composerReplaceFiles([],_targetSid);
+      else S.pendingFiles=[];
+      renderTray();
       updateQueueBadge(_targetSid);
       showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
     }
@@ -1429,6 +1495,9 @@ async function send(){
   // immutable snapshot so later reassignments to `text` don't leak into it.
   const _failedSendDraftText=text;
   const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  _failedSendFilesSnapshot._ownerProfile=String(
+    (S.session&&S.session.profile)||S.activeProfile||'default'
+  ).trim()||'default';
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
@@ -1440,7 +1509,7 @@ async function send(){
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();await renderSessionList();}
+      if(!S.session&&!(await _ensureSessionForComposerAction())) return;
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, /yolo, or /stop while the agent is running and have
@@ -1518,7 +1587,7 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1536,7 +1605,7 @@ async function send(){
     }
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1565,7 +1634,7 @@ async function send(){
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
@@ -1573,7 +1642,7 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
@@ -1588,7 +1657,7 @@ async function send(){
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
@@ -1604,7 +1673,7 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session&&!(await _ensureSessionForComposerAction())) return;
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
@@ -1636,7 +1705,7 @@ async function send(){
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session){await newSession();await renderSessionList();}
+          if(!S.session&&!(await _ensureSessionForComposerAction())) return;
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
@@ -1645,7 +1714,7 @@ async function send(){
       }
     }
   }
-  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session&&!(await _ensureSessionForComposerAction())) return;
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
@@ -8759,6 +8828,7 @@ let _clarifyHideTimer = null;
 let _clarifyVisibleSince = 0;
 let _clarifySignature = '';
 let _clarifySessionId = null;
+let _clarifyOwnerProfile = null;
 let _clarifyId = null;
 let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
@@ -9021,8 +9091,18 @@ function _stashClarifyDraft(reason) {
   } catch (_) {}
   const composer = $('msg');
   if (composer) {
-    const current = String(composer.value || "");
-    composer.value = current.trim() ? `${current.replace(/\s+$/, "")}\n\n${draft}` : draft;
+    const ownerProfile=String(
+      (typeof _clarifyOwnerProfile!=='undefined'&&_clarifyOwnerProfile)
+      ||(S.session&&S.session.session_id===sid&&S.session.profile)
+      ||S.activeProfile||'default'
+    ).trim()||'default';
+    const producer=`clarify-${sid}-${_clarifySignature||'unknown'}`;
+    if(typeof _composerAppendText==='function'){
+      _composerAppendText(draft,sid,producer,ownerProfile,'block');
+    }else{
+      const current = String(composer.value || "");
+      composer.value = current.trim() ? `${current.replace(/\s+$/, "")}\n\n${draft}` : draft;
+    }
     if (typeof autoResize === "function") autoResize();
     if (typeof updateSendBtn === "function") updateSendBtn();
   }
@@ -9040,6 +9120,7 @@ function _resetClarifyCardState() {
   _clearClarifyCountdownTimer();
   _clarifyVisibleSince = 0;
   _clarifySignature = '';
+  _clarifyOwnerProfile = null;
   _clarifyId = null;
 }
 
@@ -9120,6 +9201,9 @@ function showClarifyCard(pending) {
   const input = $("clarifyInput");
   const sameClarify = card.classList.contains("visible") && _clarifySignature === sig;
   _clarifySessionId = sid;
+  _clarifyOwnerProfile=String(
+    (S.session&&S.session.session_id===sid&&S.session.profile)||S.activeProfile||'default'
+  ).trim()||'default';
   _clarifyId = pending.clarify_id || null;
   _clarifySignature = sig;
   if (Number(pending.timeout_seconds) > 0) {
@@ -9290,9 +9374,9 @@ async function respondClarify(response) {
         // the ``loading`` class set above. Clear loading first, otherwise
         // the typed answer is silently dropped (reviewer P1).
         _clarifySetControlsDisabled(false, false);
-        _clarifySessionId = null;
-        _clarifyId = null;
         _clearClarifyPendingForSession(sid);
+        // Keep the captured owner live until hideClarifyCard() stashes the draft;
+        // clearing it first would fall back to whichever session is visible now.
         hideClarifyCard(true, "expired");
         const errMsg = (e.message || "Clarification prompt expired or not found.");
         if (typeof setStatus === "function") setStatus("Clarify: " + errMsg);

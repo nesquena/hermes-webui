@@ -55,15 +55,18 @@ def test_load_dir_ignores_stale_session_results():
     assert "const sessionId=S.session.session_id" in block
     assert "encodeURIComponent(sessionId)" in block
     # #4671 extended this guard with a workspace-tree generation check (an empty-session
-    # profile switch reuses the same session_id, so the id check alone isn't enough), so
-    # the rejection is now a compound condition. The session_id rejection must remain.
-    assert "S.session.session_id!==sessionId" in block, (
-        "loadDir must still reject results whose session_id no longer matches"
+    # profile switch reuses the same session_id, so the id check alone isn't enough).
+    # The current-navigation helper must retain both ownership checks.
+    assert "S.session.session_id===sessionId" in block, (
+        "loadDir must still require the current session_id to match"
     )
-    assert "treeGen!==_wsTreeGen" in block, (
-        "loadDir must also reject results from a superseded workspace-tree generation "
+    assert "treeGen===_wsTreeGen" in block, (
+        "loadDir must also require the current workspace-tree generation to match "
         "(profile-switch stale-load race, #4671)"
     )
+    assert "navigationGen===_wsNavigationGen" in block
+    assert "String(S.currentDir||'.')===requestedPath" in block
+    assert block.count("if(!isCurrentNavigation())return false;") >= 2
 
 
 def test_file_preview_breadcrumb_uses_directory_navigation_for_root():
