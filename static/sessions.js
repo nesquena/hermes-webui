@@ -6948,11 +6948,23 @@ function startGatewaySSE(){
               // If the user switches sessions while the fetch is in-flight, discard the result.
               const activeSid = S.session.session_id;
               api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(S.session))})
-                .then(res=>{
+                .then(async res=>{
                   if(!S.session || S.session.session_id !== activeSid) return;
                   if(res && res.session && Array.isArray(res.session.messages)){
                     const prev = S.messages.length;
                     const next = res.session.messages.filter(m => m && m.role);
+                    const pageOffset = Number(_oldestIdx || 0);
+                    if(pageOffset > 0){
+                      const knownCount = Math.max(Number(S.session.message_count || 0), pageOffset + prev);
+                      if(next.length <= knownCount) return;
+                      const loadGeneration = _loadSessionGeneration;
+                      _captureSameSessionForceReloadHint(activeSid);
+                      await _ensureMessagesLoaded(activeSid, {force:true, loadGeneration});
+                      if(!S.session || S.session.session_id !== activeSid || _loadSessionGeneration !== loadGeneration) return;
+                      renderMessages({preserveScroll:true});
+                      if(typeof highlightCode==='function') highlightCode();
+                      return;
+                    }
                     if (next.length < prev) return;
                     if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
                     // Carry forward ephemeral turn fields (_turnUsage/

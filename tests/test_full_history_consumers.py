@@ -56,6 +56,18 @@ def page(browser):
       URL.createObjectURL=blob=>{window.lastBlob=blob;return 'blob:export';};
       URL.revokeObjectURL=()=>{};
       HTMLAnchorElement.prototype.click=function(){downloads.push(this.download);};
+      window._mergePendingSessionMessage=(session,messages)=>{
+        const text=String(session.pending_user_message||'').trim();
+        const existing=messages.find(message=>message&&message.role==='user'
+          && String(message.content||'').trim()===text);
+        if(existing){
+          if(!existing.attachments?.length)existing.attachments=session.pending_attachments;
+          return false;
+        }
+        messages.push({role:'user',content:text,attachments:session.pending_attachments,
+          _ts:session.pending_started_at,_pending:true});
+        return true;
+      };
     ''')
     sessions = (ROOT / 'static/sessions.js').read_text()
     start = sessions.find('function _sessionSnapshotOwner(')
@@ -71,7 +83,7 @@ def page(browser):
     page.add_script_tag(content=(ROOT / 'static/workspace.js').read_text())
     page.evaluate('() => { window.api=window.mockApi; }')
     boot = (ROOT / 'static/boot.js').read_text()
-    start = boot.index("$('btnDownload').onclick=")
+    start = boot.index('function _capturePendingSessionExport(')
     end = boot.index('\nfunction _buildSessionExportUrl', start)
     page.add_script_tag(content=boot[start:end])
     panels = (ROOT / 'static/panels.js').read_text()
@@ -148,6 +160,46 @@ def test_export_loads_complete_snapshot_without_touching_stream(page):
     assert 'OLDEST MESSAGE' in page.evaluate('lastBlob.text()')
     assert page.evaluate('S.messages.map(m=>m.content)') == ['tail', 'live delta']
     assert page.evaluate('S.session._messages_truncated') is True
+
+
+@pytest.mark.parametrize('already_persisted', [False, True])
+def test_export_during_send_includes_pending_prompt_once(page, already_persisted):
+    page.evaluate('''persisted => {
+      const pending={role:'user',content:'VISIBLE PENDING PROMPT',attachments:['note.txt'],
+        _ts:50,_pending:true};
+      S.session.pending_user_message='VISIBLE PENDING PROMPT';
+      S.session.pending_attachments=['note.txt'];
+      S.session.pending_started_at=50;
+      S.session.active_stream_id='stream-a';
+      S.messages.push(pending);
+      if(persisted) full.messages.push({...pending,_pending:false,timestamp:50});
+    }''', already_persisted)
+    page.click('#btnDownload')
+    page.evaluate('resolveFetch()')
+    page.wait_for_function('downloads.length === 1')
+    exported = page.evaluate('lastBlob.text()')
+    assert exported.count('VISIBLE PENDING PROMPT') == 1
+    assert exported.count('_Files: note.txt_') == 1
+
+
+def test_export_uses_visible_pending_row_when_server_prompt_is_wrapped(page):
+    page.evaluate('''() => {
+      S.session.pending_user_message='[Workspace::v1: /workspace]\\nVISIBLE PROMPT';
+      S.session.pending_started_at=50;
+      S.session.active_stream_id='stream-a';
+      S.messages.push({role:'user',content:'VISIBLE PROMPT',timestamp:50,
+        _active_turn_user:true});
+      window._pendingActiveTurnUserMessage=messages=>messages[messages.length-1];
+      window._pendingCurrentTailUserMessage=messages=>messages[messages.length-1];
+      window._sameTranscriptMessage=(left,right)=>String(left.content||'').endsWith(
+        String(right.content||'').split('\\n').pop());
+    }''')
+    page.click('#btnDownload')
+    page.evaluate('resolveFetch()')
+    page.wait_for_function('downloads.length === 1')
+    exported = page.evaluate('lastBlob.text()')
+    assert exported.count('VISIBLE PROMPT') == 1
+    assert 'Workspace::v1' not in exported
 
 
 @pytest.mark.parametrize('switch', [
