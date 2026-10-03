@@ -114,10 +114,14 @@ Before publishing any eligibility verdict, the classifier also:
   (`submodules_present`) because top-level probes cannot see inside it;
 - rejects branch-exclusive merge commits unless the resulting tree is proven
   identical to the target tree, because `git cherry` omits merge commits;
-- pins the branch, target, and worktree HEAD OIDs and revalidates them right
-  before publishing eligibility; it also re-lists the worktree and rechecks its
-  path, branch, HEAD, and lock state. A moved ref or an operator lock added
-  during the audit downgrades the verdict to `KEEP_UNCERTAIN`
+- pins the branch, target, worktree HEAD, complete worktree record, linked Git
+  directory identity, and a SHA-256 fingerprint of the exact index bytes used
+  for classification. Terminal worktree/ignored scans are bracketed by
+  `index.lock` checks; only afterward are all refs, HEAD, the full worktree
+  record, Git directory identity, and index fingerprint re-resolved. A
+  completed index replacement whose lock has disappeared, a ref move during
+  the terminal scan, unreadable evidence, or an operator lock added during the
+  audit downgrades the verdict to `KEEP_UNCERTAIN`
   (`pin_revalidation_failed`) instead of certifying stale evidence. A worktree
   already locked at the initial listing is kept as `worktree_locked`.
 
@@ -140,14 +144,17 @@ per-candidate mutation result and makes no claim that a worktree or branch was
 changed.
 
 The JSON report is written through a mode-`0600` temporary file in the
-destination directory. Every parent component is opened or created relative
-to a pinned no-follow directory handle; a symlink at any level aborts the
-write. Target inspection, temporary creation, replacement, and cleanup are all
-relative to the final pinned parent handle. The file is flushed and synced,
-atomically replaced, then the parent directory is synced. Platforms without
-the required directory-handle operations fail closed instead of using a
-path-based fallback. `--json` prints the same report to stdout; otherwise
-stdout contains a one-line summary and the report path.
+destination directory. Existing forbidden roots are pinned by filesystem
+identity (`st_dev`, `st_ino`), and every opened destination ancestor is checked
+against those identities. Every parent component is opened or created relative
+to a pinned no-follow directory handle; a symlink or an ordinary-directory
+rename substitution into a forbidden root aborts the write. Target inspection,
+temporary creation, replacement, and cleanup are all relative to the final
+pinned parent handle. The file is flushed and synced, atomically replaced, then
+the parent directory is synced. Platforms without the required directory-handle
+operations fail closed instead of using a path-based fallback. `--json` prints
+the same report to stdout; otherwise stdout contains a one-line summary and the
+report path.
 
 Reports contain only operational metadata: session IDs, profile, worktree
 identity, normalized timestamps and age, verdicts, reasons, health/process

@@ -672,3 +672,83 @@ def test_index_lock_added_before_publication_invalidates_eligibility(
     assert decision.verdict == KEEP_UNCERTAIN
     assert decision.eligible is False
     assert "index_lock_present" in decision.reasons
+
+
+def test_completed_index_transaction_before_terminal_scan_invalidates_eligibility(
+    tmp_path,
+    monkeypatch,
+):
+    """Round-5: a completed index replacement cannot validate older evidence."""
+    import api.worktree_gc_git as gc_git
+
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/index-transaction-toctou")
+    git_dir = Path(_git(worktree, "rev-parse", "--absolute-git-dir").stdout.strip())
+    index_path = git_dir / "index"
+    original_index = index_path.read_bytes()
+    real_scan = gc_git._scan_worktree_state
+    scans = {"count": 0}
+
+    def replace_index_before_terminal_scan(*args, **kwargs):
+        scans["count"] += 1
+        if scans["count"] == 2:
+            # This is a real completed Git index transaction: Git creates and
+            # replaces index.lock, and the lock is gone before the scan starts.
+            _git(worktree, "update-index", "--index-version", "4")
+            assert not (git_dir / "index.lock").exists()
+            assert index_path.read_bytes() != original_index
+            settle_index_clock(worktree)
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(gc_git, "_scan_worktree_state", replace_index_before_terminal_scan)
+
+    decision = classify_git_worktree(
+        worktree,
+        "gc/index-transaction-toctou",
+        case["repo"],
+    )
+
+    assert scans["count"] == 2
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert "pin_revalidation_failed" in decision.reasons
+
+
+def test_target_ref_move_during_terminal_scan_invalidates_eligibility(
+    tmp_path,
+    monkeypatch,
+):
+    """Round-5: refs are re-resolved after the terminal filesystem scans."""
+    import api.worktree_gc_git as gc_git
+
+    case = make_remote_repo(tmp_path)
+    repo = case["repo"]
+    assert isinstance(repo, Path)
+    worktree = add_worktree(case, tmp_path, "gc/ref-move-terminal-scan")
+    real_scan = gc_git._scan_worktree_state
+    scans = {"count": 0}
+
+    def move_ref_during_terminal_scan(*args, **kwargs):
+        scans["count"] += 1
+        result = real_scan(*args, **kwargs)
+        if scans["count"] == 2:
+            _git(
+                repo,
+                "update-ref",
+                "refs/remotes/origin/master",
+                str(case["base_sha"]),
+            )
+        return result
+
+    monkeypatch.setattr(gc_git, "_scan_worktree_state", move_ref_during_terminal_scan)
+
+    decision = classify_git_worktree(
+        worktree,
+        "gc/ref-move-terminal-scan",
+        repo,
+    )
+
+    assert scans["count"] == 2
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert "pin_revalidation_failed" in decision.reasons

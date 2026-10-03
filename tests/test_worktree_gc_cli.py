@@ -375,3 +375,45 @@ def test_report_intermediate_parent_symlink_swap_cannot_redirect_write(
 
     assert swapped["done"] is True
     assert redirected.read_text(encoding="utf-8") == original
+
+
+def test_report_parent_directory_rename_cannot_redirect_into_forbidden_root(
+    tmp_path,
+    monkeypatch,
+):
+    """A forbidden directory inode cannot replace an accepted path component."""
+    safe = tmp_path / "safe"
+    movable_parent = safe / "reports"
+    report_parent = movable_parent / "daily"
+    report_parent.mkdir(parents=True)
+    destination = report_parent / "report.json"
+
+    forbidden = tmp_path / "forbidden-repo"
+    redirected_parent = forbidden / "daily"
+    redirected_parent.mkdir(parents=True)
+    redirected = redirected_parent / destination.name
+    original = '{"repository": "must-stay-intact"}\n'
+    redirected.write_text(original, encoding="utf-8")
+
+    real_dumps = json.dumps
+    swapped = {"done": False}
+
+    def replace_parent_with_forbidden_directory(*args, **kwargs):
+        if not swapped["done"]:
+            moved_aside = safe / "reports-before-swap"
+            movable_parent.rename(moved_aside)
+            forbidden.rename(movable_parent)
+            swapped["done"] = True
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", replace_parent_with_forbidden_directory)
+
+    with pytest.raises(ValueError):
+        write_report_atomic(
+            {"new": True},
+            destination,
+            forbidden_roots=(forbidden,),
+        )
+
+    assert swapped["done"] is True
+    assert destination.read_text(encoding="utf-8") == original

@@ -25,6 +25,7 @@ conversion machinery, which is exactly the execution path this audit refuses.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import struct
@@ -162,6 +163,19 @@ class _IndexEntry:
 
 
 @dataclass(frozen=True)
+class _GitDirIdentity:
+    path: Path
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class _IndexFingerprint:
+    git_dir: _GitDirIdentity
+    index_sha256: bytes
+
+
+@dataclass(frozen=True)
 class _IndexSnapshot:
     entries: tuple[_IndexEntry, ...]
     index_mtime_sec: int
@@ -169,6 +183,7 @@ class _IndexSnapshot:
     masked_count: int
     gitlink_count: int
     unmerged_count: int
+    fingerprint: _IndexFingerprint
 
 
 @dataclass(frozen=True)
@@ -177,6 +192,7 @@ class _WorktreeScan:
     untracked_count: int
     masked_count: int
     gitlink_count: int
+    index_fingerprint: _IndexFingerprint
 
 
 class _GitInvocationError(RuntimeError):
@@ -738,21 +754,61 @@ def _worktree_git_dir(worktree_path: Path) -> tuple[Path | None, str | None]:
     return git_dir, None
 
 
-def _index_lock_reason(worktree_path: Path) -> str | None:
-    """Return a blocking reason when index-write state cannot be excluded."""
+def _open_worktree_git_dir(
+    worktree_path: Path,
+) -> tuple[int | None, _GitDirIdentity | None, str | None]:
+    """Open and identify the linked Git directory without following a symlink."""
     git_dir, error = _worktree_git_dir(worktree_path)
     if error or git_dir is None:
+        return None, None, error or "git_dir_unresolvable"
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(git_dir, flags)
+    except OSError:
+        return None, None, "git_dir_unreadable"
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            os.close(descriptor)
+            return None, None, "git_dir_not_directory"
+        return (
+            descriptor,
+            _GitDirIdentity(
+                path=git_dir,
+                device=info.st_dev,
+                inode=info.st_ino,
+            ),
+            None,
+        )
+    except OSError:
+        os.close(descriptor)
+        return None, None, "git_dir_unreadable"
+
+
+def _index_lock_reason(worktree_path: Path) -> str | None:
+    """Return a blocking reason when index-write state cannot be excluded."""
+    git_dir_fd, identity, error = _open_worktree_git_dir(worktree_path)
+    if error or git_dir_fd is None or identity is None:
         return error or "git_dir_unresolvable"
     try:
-        os.stat(git_dir / "index.lock", follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return "index_lock_unreadable"
-    return "index_lock_present"
+        try:
+            os.stat("index.lock", dir_fd=git_dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return "index_lock_unreadable"
+        return "index_lock_present"
+    finally:
+        os.close(git_dir_fd)
 
 
-def _read_index_bytes(index_path: Path) -> tuple[bytes, int] | str:
+def _read_index_bytes(
+    index_path: str | Path,
+    *,
+    dir_fd: int | None = None,
+) -> tuple[bytes, int] | str:
     """Read the index file without following symlinks, with a hard size cap.
 
     Returns ``(data, index_mtime_sec)`` or an error code.
@@ -760,7 +816,7 @@ def _read_index_bytes(index_path: Path) -> tuple[bytes, int] | str:
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        file_descriptor = os.open(index_path, flags)
+        file_descriptor = os.open(index_path, flags, dir_fd=dir_fd)
     except FileNotFoundError:
         return "index_missing"
     except OSError:
@@ -921,10 +977,13 @@ def _parse_index(data: bytes) -> list[_IndexEntry]:
 
 def _index_snapshot(worktree_path: Path) -> tuple[_IndexSnapshot | None, str | None]:
     """Read the worktree index directly; never through content-hashing Git."""
-    git_dir, git_dir_error = _worktree_git_dir(worktree_path)
-    if git_dir_error or git_dir is None:
+    git_dir_fd, identity, git_dir_error = _open_worktree_git_dir(worktree_path)
+    if git_dir_error or git_dir_fd is None or identity is None:
         return None, git_dir_error or "git_dir_unresolvable"
-    read_result = _read_index_bytes(git_dir / "index")
+    try:
+        read_result = _read_index_bytes("index", dir_fd=git_dir_fd)
+    finally:
+        os.close(git_dir_fd)
     if isinstance(read_result, str):
         return None, read_result
     data, index_mtime_sec = read_result
@@ -951,6 +1010,10 @@ def _index_snapshot(worktree_path: Path) -> tuple[_IndexSnapshot | None, str | N
             masked_count=masked,
             gitlink_count=gitlinks,
             unmerged_count=unmerged,
+            fingerprint=_IndexFingerprint(
+                git_dir=identity,
+                index_sha256=hashlib.sha256(data).digest(),
+            ),
         ),
         None,
     )
@@ -1142,6 +1205,7 @@ def _scan_worktree_state(
             untracked_count=untracked_count,
             masked_count=snapshot.masked_count,
             gitlink_count=snapshot.gitlink_count,
+            index_fingerprint=snapshot.fingerprint,
         ),
         None,
     )
@@ -1245,14 +1309,35 @@ def _pins_still_valid(
     target_ref: str,
     target_oid: str,
     worktree_head_oid: str,
+    worktree_record: _WorktreeRecord,
+    index_fingerprint: _IndexFingerprint,
 ) -> bool:
-    """Revalidate every pinned OID before publishing eligibility.
+    """Revalidate terminal filesystem and Git evidence before publication.
 
-    A concurrent ref or HEAD move between the clean-status read and the
-    published decision must downgrade eligibility to uncertainty, never
-    certify a moved target.  The worktree is also scanned again: a mutation
-    landing after the first scan invalidates the clean evidence as well.
+    The terminal scans are bracketed by index-lock checks.  Only after those
+    scans do we re-resolve every ref, HEAD, the complete worktree record, the
+    linked Git directory identity, and the exact index bytes that supplied the
+    original classification.
     """
+    if _index_lock_reason(worktree_path) is not None:
+        return False
+    scan, scan_error = _scan_worktree_state(worktree_path, worktree_head_oid)
+    if scan_error or scan is None:
+        return False
+    ignored_count, ignored_error = _ignored_files(worktree_path)
+    if ignored_error or ignored_count:
+        return False
+    if _index_lock_reason(worktree_path) is not None:
+        return False
+    if (
+        scan.dirty
+        or scan.untracked_count
+        or scan.masked_count
+        or scan.gitlink_count
+        or scan.index_fingerprint != index_fingerprint
+    ):
+        return False
+
     current_branch_oid, branch_error = _resolve_commit_oid(repo_root, branch_ref)
     if branch_error or current_branch_oid != branch_oid:
         return False
@@ -1263,26 +1348,16 @@ def _pins_still_valid(
     if current_worktree_head != worktree_head_oid:
         return False
     current_record, record_error = _worktree_record(repo_root, worktree_path)
+    if record_error or current_record != worktree_record:
+        return False
+    current_index, index_error = _index_snapshot(worktree_path)
     if (
-        record_error
-        or current_record is None
-        or current_record.branch_ref != branch_ref
-        or current_record.head_oid != worktree_head_oid
-        or current_record.locked
+        index_error
+        or current_index is None
+        or current_index.fingerprint != index_fingerprint
     ):
         return False
-    scan, scan_error = _scan_worktree_state(worktree_path, worktree_head_oid)
-    if scan_error or scan is None:
-        return False
-    if (
-        scan.dirty
-        or scan.untracked_count
-        or scan.masked_count
-        or scan.gitlink_count
-    ):
-        return False
-    ignored_count, ignored_error = _ignored_files(worktree_path)
-    if ignored_error or ignored_count:
+    if _index_lock_reason(worktree_path) is not None:
         return False
     return True
 
@@ -1350,15 +1425,26 @@ def classify_git_worktree(
     pinned_branch_oid: str | None = None
     pinned_target_oid: str | None = None
     pinned_worktree_head: str | None = None
+    pinned_worktree_record: _WorktreeRecord | None = None
+    pinned_index_fingerprint: _IndexFingerprint | None = None
 
     def result(verdict: str, *reasons: str, eligible: bool = False) -> GitWorktreeDecision:
-        if (
-            eligible
-            and pinned_branch_ref is not None
-            and pinned_branch_oid is not None
-            and pinned_target_oid is not None
-            and pinned_worktree_head is not None
-            and not _pins_still_valid(
+        if eligible:
+            if (
+                pinned_branch_ref is None
+                or pinned_branch_oid is None
+                or pinned_target_oid is None
+                or pinned_worktree_head is None
+                or pinned_worktree_record is None
+                or pinned_index_fingerprint is None
+            ):
+                return _decision(
+                    **audit,
+                    verdict=KEEP_UNCERTAIN,
+                    eligible=False,
+                    reasons=(*reasons, "pin_revalidation_failed"),
+                )
+            if not _pins_still_valid(
                 repo_path,
                 worktree_path,
                 pinned_branch_ref,
@@ -1366,14 +1452,15 @@ def classify_git_worktree(
                 target_name,
                 pinned_target_oid,
                 pinned_worktree_head,
-            )
-        ):
-            return _decision(
-                **audit,
-                verdict=KEEP_UNCERTAIN,
-                eligible=False,
-                reasons=(*reasons, "pin_revalidation_failed"),
-            )
+                pinned_worktree_record,
+                pinned_index_fingerprint,
+            ):
+                return _decision(
+                    **audit,
+                    verdict=KEEP_UNCERTAIN,
+                    eligible=False,
+                    reasons=(*reasons, "pin_revalidation_failed"),
+                )
         if eligible:
             lock_reason = _index_lock_reason(worktree_path)
             if lock_reason is not None:
@@ -1428,6 +1515,7 @@ def classify_git_worktree(
         return result(KEEP_UNCERTAIN, "worktree_not_listed")
     if worktree_record.locked:
         return result(KEEP_UNCERTAIN, "worktree_locked")
+    pinned_worktree_record = worktree_record
 
     index_lock_reason = _index_lock_reason(worktree_path)
     if index_lock_reason is not None:
@@ -1445,6 +1533,7 @@ def classify_git_worktree(
     audit["untracked_count"] = scan.untracked_count
     audit["index_masked_count"] = scan.masked_count
     audit["submodule_count"] = scan.gitlink_count
+    pinned_index_fingerprint = scan.index_fingerprint
     if scan.masked_count:
         return result(
             KEEP_UNCERTAIN,

@@ -1324,7 +1324,51 @@ def validate_report_destination(
     return destination
 
 
-def _open_report_parent(parent: Path) -> int:
+def _pin_forbidden_root_identities(
+    forbidden_roots: tuple[Any, ...],
+) -> frozenset[tuple[int, int]]:
+    """Pin existing forbidden directories by filesystem identity."""
+    identities: set[tuple[int, int]] = set()
+    dir_flags = os.O_RDONLY | os.O_CLOEXEC
+    dir_flags |= getattr(os, "O_DIRECTORY", 0)
+    dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+    for root in forbidden_roots:
+        if root is None:
+            continue
+        try:
+            real_root = Path(os.path.realpath(os.fspath(root)))
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            raise ValueError("forbidden report root is invalid") from exc
+        try:
+            root_fd = os.open(real_root, dir_flags)
+        except FileNotFoundError:
+            # A missing root has no inode that can be substituted into the
+            # destination walk; path containment is still checked separately.
+            continue
+        except OSError as exc:
+            raise ValueError("forbidden report root is unreadable") from exc
+        try:
+            info = os.fstat(root_fd)
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError("forbidden report root is not a directory")
+            identities.add((info.st_dev, info.st_ino))
+        finally:
+            os.close(root_fd)
+    return frozenset(identities)
+
+
+def _opened_directory_is_forbidden(
+    descriptor: int,
+    forbidden_identities: frozenset[tuple[int, int]],
+) -> bool:
+    info = os.fstat(descriptor)
+    return (info.st_dev, info.st_ino) in forbidden_identities
+
+
+def _open_report_parent(
+    parent: Path,
+    forbidden_identities: frozenset[tuple[int, int]],
+) -> int:
     """Walk/create every parent component with pinned, no-follow handles."""
     if not parent.is_absolute() or not parent.anchor:
         raise ValueError("report parent must be absolute")
@@ -1337,6 +1381,8 @@ def _open_report_parent(parent: Path) -> int:
     dir_flags |= getattr(os, "O_NOFOLLOW", 0)
     current_fd = os.open(parent.anchor, dir_flags)
     try:
+        if _opened_directory_is_forbidden(current_fd, forbidden_identities):
+            raise ValueError("report parent resolves inside a forbidden directory")
         for component in components:
             try:
                 child_fd = os.open(component, dir_flags, dir_fd=current_fd)
@@ -1347,6 +1393,11 @@ def _open_report_parent(parent: Path) -> int:
             if not stat.S_ISDIR(child_info.st_mode):
                 os.close(child_fd)
                 raise ValueError("report parent component is not a directory")
+            if (child_info.st_dev, child_info.st_ino) in forbidden_identities:
+                os.close(child_fd)
+                raise ValueError(
+                    "report parent resolves inside a forbidden directory"
+                )
             os.close(current_fd)
             current_fd = child_fd
         return current_fd
@@ -1358,9 +1409,10 @@ def _open_report_parent(parent: Path) -> int:
 def _write_report_via_dirfd(
     payload: str,
     destination: Path,
+    forbidden_identities: frozenset[tuple[int, int]],
 ) -> None:
     """Create and replace the report relative to a pinned parent handle."""
-    dir_fd = _open_report_parent(destination.parent)
+    dir_fd = _open_report_parent(destination.parent, forbidden_identities)
     temporary_name: str | None = None
     try:
         try:
@@ -1434,6 +1486,7 @@ def write_report_atomic(
     existing target regular and not a symlink), created and renamed relative
     to a pinned parent directory descriptor on platforms that support it.
     """
+    forbidden_identities = _pin_forbidden_root_identities(forbidden_roots)
     destination = validate_report_destination(
         path,
         forbidden_roots=forbidden_roots,
@@ -1452,6 +1505,6 @@ def write_report_atomic(
         and os.stat in os.supports_dir_fd
         and os.unlink in os.supports_dir_fd
     ):
-        _write_report_via_dirfd(payload, destination)
+        _write_report_via_dirfd(payload, destination, forbidden_identities)
     else:
         raise OSError("secure dirfd-relative report publication is unavailable")
