@@ -217,9 +217,13 @@ async function _restoreRememberedNewChatDraftSession() {
   }
 }
 
+let _newChatDraftSaveGeneration = 0;
+
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  const claimGeneration = ++_newChatDraftSaveGeneration;
+  const draftSession = S.session && S.session.session_id === sid ? S.session : null;
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
@@ -232,6 +236,12 @@ function _saveComposerDraft(sid, text, files) {
       body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
     }).then(() => {
       _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
+      // Publish only server-confirmed drafts. A newer edit/clear invalidates an
+      // older completion; switching sessions alone does not lose its owner.
+      if (claimGeneration === _newChatDraftSaveGeneration && draftSession
+          && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
+        _rememberNewChatDraftSession(draftSession);
+      }
     }).catch(() => {});
   }, _DRAFT_SAVE_DELAY_MS);
 }
@@ -263,6 +273,8 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files) {
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
+  const claimGeneration = ++_newChatDraftSaveGeneration;
+  const draftSession = S.session && S.session.session_id === sid ? S.session : null;
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
@@ -282,6 +294,10 @@ function _saveComposerDraftNow(sid, text, files) {
     body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
+    if (claimGeneration === _newChatDraftSaveGeneration && draftSession
+        && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
+      _rememberNewChatDraftSession(draftSession);
+    }
   }).catch(() => {});
 }
 
@@ -334,6 +350,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  ++_newChatDraftSaveGeneration;
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
@@ -1929,7 +1946,14 @@ function _setNewSessionPending(pending){
   for (let i=0;i<ids.length;i++){
     const btn=$(ids[i]);
     if(!btn) continue;
-    btn.disabled=!!pending;
+    if(btn.tagName==='A'){
+      // A link has no native disabled property. Keep its pending behavior in
+      // sync with the titlebar button while creation is in flight.
+      btn.setAttribute('aria-disabled',pending?'true':'false');
+      btn.tabIndex=pending?-1:0;
+    }else{
+      btn.disabled=!!pending;
+    }
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
   const statusEl=$('composerStatus');
@@ -2059,7 +2083,6 @@ async function newSession(flash, options={}){
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
-    if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
