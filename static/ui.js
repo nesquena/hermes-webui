@@ -1915,8 +1915,11 @@ function _getDashboardChipRestoreMode(){
 function _dashboardBrowserUrl(status){
   if(!status||!status.running) return '';
   if(status.browser_url||status.url){
-    try{return new URL(status.browser_url||status.url).toString().replace(/\/$/,'');}
-    catch(_){}
+    try{
+      const u=new URL(status.browser_url||status.url);
+      if(!u.pathname||u.pathname==='/') return u.origin;
+      return u.toString();
+    }catch(_){}
   }
   if(!status.port) return '';
   let source;
