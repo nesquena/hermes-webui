@@ -8592,6 +8592,7 @@ def _save_models_cache_to_disk(cache: dict) -> None:
         payload = {
             "_schema_version": _MODELS_CACHE_SCHEMA_VERSION,
             "_source_fingerprint": _models_cache_source_fingerprint(),
+            "_built_at": time.time(),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -10839,11 +10840,56 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         return copy.deepcopy(_static_models_catalog_without_live_probes())
 
 
-def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+def _models_disk_cache_built_at(cache_path: Path) -> float | None:
+    """Return the persisted ``_built_at`` (last live rebuild) stamp, if present.
+
+    Returns None for caches written before the stamp existed (their freshness
+    falls back to file mtime) and for any unreadable/unparseable payload, so the
+    freshness decision never hard-fails on a malformed cache.
+    """
     try:
-        return max(0.0, now - cache_path.stat().st_mtime)
+        with open(cache_path, encoding="utf-8") as f:
+            payload = json.load(f)
+        built_at = payload.get("_built_at")
+        return built_at if isinstance(built_at, (int, float)) else None
+    except Exception:
+        return None
+
+
+def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+    """Age of the disk models cache judged against when it was built.
+
+    mtime now doubles as *access time*: every fresh session-visit hit advances it,
+    so it can no longer measure freshness (#7723). The refresh clock is the
+    persisted ``_built_at`` stamp (last live rebuild) written by
+    ``_save_models_cache_to_disk``. mtime is used only to cheaply gate the payload
+    read: when the access clock already exceeds the freshness window the catalog
+    is stale regardless of ``_built_at``, so the read is skipped. A cache written
+    before the stamp existed falls back to mtime age, keeping old files on the
+    same refresh cadence as master.
+    """
+    try:
+        mtime_age = max(0.0, now - cache_path.stat().st_mtime)
     except OSError:
         return None
+    if mtime_age >= _SESSION_VISIT_MODELS_FRESHNESS_SECONDS:
+        return mtime_age  # stale by the access clock too; skip the payload read
+    built_at = _models_disk_cache_built_at(cache_path)
+    if built_at is not None:
+        return max(0.0, now - built_at)
+    return mtime_age
+
+
+def _touch_models_cache_mtime(cache_path: Path | None = None) -> bool:
+    """Update mtime of the on-disk models cache to keep sliding freshness active (#7723)."""
+    try:
+        path = cache_path or _get_models_cache_path()
+        if path.is_file():
+            os.utime(path, None)
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def warm_models_catalog_provenance_if_cold() -> None:
@@ -10961,10 +11007,11 @@ def get_available_models_for_session_visit() -> dict:
         now_mono = time.monotonic()
         with _available_models_cache_lock:
             cached = _get_fresh_memory_models_cache(now_mono)
-            if cached is not None:
-                _mark("memory_cache_hit")
-                _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-                return cached
+        if cached is not None:
+            _mark("memory_cache_hit")
+            _touch_models_cache_mtime(cache_path)
+            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+            return cached
         _mark("memory_cache_miss_loading_disk")
         disk_cached = _load_models_cache_from_disk()
         if disk_cached is not None:
@@ -10972,13 +11019,17 @@ def get_available_models_for_session_visit() -> dict:
                 cached = _get_fresh_memory_models_cache(time.monotonic())
                 if cached is not None:
                     _mark("disk_then_memory_cache_hit")
-                    _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-                    return cached
-                _available_models_cache = copy.deepcopy(disk_cached)
-                _available_models_cache_ts = time.monotonic()
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
+                else:
+                    _available_models_cache = copy.deepcopy(disk_cached)
+                    _available_models_cache_ts = time.monotonic()
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _sync_models_cache_provenance()
+            if cached is not None:
+                _touch_models_cache_mtime(cache_path)
+                _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                return cached
             _mark("disk_cache_returned")
+            _touch_models_cache_mtime(cache_path)
             _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
             return copy.deepcopy(disk_cached)
 
