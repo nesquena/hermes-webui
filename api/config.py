@@ -2690,6 +2690,53 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     return False
 
 
+def _custom_slug_looks_like_endpoint(seg: str) -> bool:
+    """True when single custom slug segment looks like an IP address, localhost, or domain."""
+    seg = str(seg or "").strip()
+    if not seg:
+        return False
+    if seg.lower() == "localhost":
+        return True
+    try:
+        import ipaddress
+
+        ipaddress.ip_address(seg)
+        return True
+    except ValueError:
+        pass
+    if "." in seg:
+        tld = seg.rsplit(".", 1)[1]
+        if tld.isalpha() and len(tld) >= 2:
+            return True
+    return False
+
+
+def _looks_like_model_tag(candidate: str) -> bool:
+    """True when candidate looks like a model tag (e.g. :latest, :free, :7b, :0731, :q4_k_m)."""
+    candidate = str(candidate or "").strip()
+    if not candidate:
+        return False
+    lower = candidate.lower()
+    if lower in {
+        "latest", "free", "preview", "thinking", "beta", "default",
+        "instruct", "chat", "base", "fp16", "fp32", "bf16", "int8", "int4",
+        "mini", "nano", "small", "medium", "large", "turbo", "light",
+    }:
+        return True
+    import re
+
+    # Parameter size / architecture suffix: e.g. 7b, 8b, 70b, 1.5b, 8x7b, 7b-instruct
+    if re.match(r"^(\d+(\.\d+)?[bmk]|(\d+x\d+[bmk]))(-.*)?$", lower):
+        return True
+    # Quantization tag: e.g. q4_0, q4_k_m, q8_0
+    if re.match(r"^q\d+.*$", lower):
+        return True
+    # Version / date stamp: e.g. v1, v2, 0731, 20240806, 1.0
+    if re.match(r"^(v?\d+(\.\d+)+|\d{4,8})$", lower):
+        return True
+    return False
+
+
 def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
 
@@ -2706,6 +2753,13 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
         _slug_rest = provider_hint[len("custom:"):]
         if not _custom_slug_rest_looks_like_host_port(_slug_rest):
+            provider_hint, extra = provider_hint.rsplit(":", 1)
+            bare_model = f"{extra}:{bare_model}"
+    elif provider_hint.startswith("custom:") and ":" not in provider_hint[len("custom:"):]:
+        _seg = provider_hint[len("custom:"):]
+        _named = bool(_named_custom_provider_slug_for_provider(provider_hint))
+        _endpoint_like = _custom_slug_looks_like_endpoint(_seg)
+        if not _named and not _endpoint_like and _looks_like_model_tag(bare_model):
             provider_hint, extra = provider_hint.rsplit(":", 1)
             bare_model = f"{extra}:{bare_model}"
     elif (provider_hint not in _PROVIDER_MODELS
