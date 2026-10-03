@@ -237,13 +237,13 @@ def _make_newer_session(session_dir, sid, *, title, draft):
     would mutate differ from the stale object — the rename target's own
     fields are the same.
     """
-    return Session(
-        session_id=sid,
-        title=title,
-        workspace=str(session_dir.parent),
-        messages=[{"role": "user", "content": "hi"}],
-        composer_draft=draft,
-    )
+    newer = Session.load(sid)
+    assert newer is not None
+    newer.title = title
+    newer.workspace = str(session_dir.parent)
+    newer.messages = [{"role": "user", "content": "hi"}]
+    newer.composer_draft = draft
+    return newer
 
 
 def test_rename_handler_re_resolves_session_under_lock_to_avoid_stale_overwrite(

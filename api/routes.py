@@ -24308,13 +24308,19 @@ def _cleanup_chat_start_launch_failure(
         from api.models import _coerce_sidecar_revision
         from api.session_ops import restore_session_state
 
-        compensation_revision = _coerce_sidecar_revision(
-            getattr(canonical, "_sidecar_revisions", {}).get(
-                canonical.session_id
-            ),
-            canonical.session_id,
+        revision_owners = getattr(canonical, "_sidecar_revisions", None)
+        compensation_revision = (
+            _coerce_sidecar_revision(
+                revision_owners.get(canonical.session_id),
+                canonical.session_id,
+            )
+            if isinstance(revision_owners, dict)
+            else None
         )
-        if compensation_revision is None:
+        # Real Session instances always carry a revision-owner map. Keep the
+        # cleanup helper compatible with lightweight session adapters, whose
+        # save implementation supplies its own persistence contract.
+        if isinstance(revision_owners, dict) and compensation_revision is None:
             return
 
         restore_session_state(canonical, snapshot)
@@ -24335,10 +24341,11 @@ def _cleanup_chat_start_launch_failure(
                 backup_provenance,
             )
         try:
-            _adopt_expected_chat_start_sidecar_revision(
-                canonical,
-                compensation_revision,
-            )
+            if compensation_revision is not None:
+                _adopt_expected_chat_start_sidecar_revision(
+                    canonical,
+                    compensation_revision,
+                )
             canonical.save(touch_updated_at=False)
             compensation_succeeded = True
             cleanup_result["sidecar_restored"] = True

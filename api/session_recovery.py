@@ -491,7 +491,7 @@ def _recover_session_owned(
         bak_path,
         session_path.stem,
     )
-    status = inspect_session_recovery_status(session_path)
+    status, backup_payload = _inspect_session_recovery_snapshot(session_path)
     if status["recommend"] != "restore":
         return {**status, "restored": False}
     if expected_live_revision.state == "ABSENT":
@@ -509,12 +509,17 @@ def _recover_session_owned(
             }
     if expected_backup_revision.state != "PRESENT":
         return {**status, "restored": False, "stale_generation": True}
+    if backup_payload is None:
+        return {**status, "restored": False, "error": "backup payload is unreadable"}
     tmp_path = session_path.with_suffix(
         f'.json.recover.tmp.{os.getpid()}.{threading.current_thread().ident}'
     )
     replace_started = False
     try:
-        backup = json.loads(bak_path.read_text(encoding='utf-8'))
+        # Restore the replay-guarded payload that authorized this recovery,
+        # not the raw backup bytes. The exact backup revision captured above
+        # is checked again immediately before publication.
+        backup = dict(backup_payload)
         if not isinstance(backup, dict):
             raise ValueError("backup payload is not a session object")
         if backup.get('session_id') != session_path.stem:
