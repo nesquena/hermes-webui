@@ -505,6 +505,11 @@ def _gateway_reasoning_delta(payload: dict) -> str:
     return ""
 
 
+# Shell tools whose runs-API preview is a display summary of the command (agent/display.py
+# summarize_shell_command). It is shown as display_command, never written back into args.
+_GATEWAY_SHELL_PREVIEW_TOOLS = frozenset({"terminal", "execute_code"})
+
+
 def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     """Translate Hermes Gateway tool-progress SSE payloads to WebUI events."""
     if not isinstance(payload, dict):
@@ -528,15 +533,28 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     status = str(payload.get("status") or "running").strip().lower()
     tid = payload.get("toolCallId") or payload.get("tool_call_id") or payload.get("id")
     is_complete = event_type == "tool.completed" or status in {"completed", "complete", "success", "error", "failed"}
+    preview = payload.get("label") or payload.get("preview")
+    args = payload.get("args")
+    args = bound_run_journal_snapshot_args(args) if isinstance(args, dict) and args else None
     event_payload = {
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
-        "preview": payload.get("label") or payload.get("preview"),
-        "args": bound_run_journal_snapshot_args(payload.get("args"))
-        if isinstance(payload.get("args"), dict)
-        else {},
+        "preview": preview,
         "is_error": bool(payload.get("error")) or status in {"error", "failed"},
     }
+    # Omitted on completion so the frontend keeps the args captured at start.
+    if args is not None or not is_complete:
+        event_payload["args"] = args or {}
+    if (
+        not is_complete and args is None and name in _GATEWAY_SHELL_PREVIEW_TOOLS
+        and isinstance(preview, str) and preview.strip()
+    ):
+        # Runs API tool.started carries only {tool, preview}; keep it labelled as a preview.
+        event_payload["display_command"] = bound_run_journal_snapshot_args({"c": preview})["c"]
+    if is_complete and payload.get("result") is not None:
+        # Full result when the Gateway sends one; preview stays the bounded fallback.
+        from api.streaming import _tool_result_snippet
+        event_payload["snippet"] = _tool_result_snippet(payload.get("result"))
     if tid:
         event_payload["tid"] = str(tid)
     return ("tool_complete" if is_complete else "tool"), event_payload
@@ -754,6 +772,7 @@ def _run_gateway_runs_api_streaming(
                             STREAM_LIVE_TOOL_CALLS[stream_id].append({
                                 "name": event_payload.get("name"),
                                 "args": event_payload.get("args") or {},
+                                **({"display_command": event_payload["display_command"]} if event_payload.get("display_command") else {}),
                                 "done": False,
                                 **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
                             })
@@ -1488,6 +1507,7 @@ def _run_gateway_chat_streaming(
                                     STREAM_LIVE_TOOL_CALLS[stream_id].append({
                                         "name": event_payload.get("name"),
                                         "args": event_payload.get("args") or {},
+                                        **({"display_command": event_payload["display_command"]} if event_payload.get("display_command") else {}),
                                         "done": False,
                                         **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
                                     })
@@ -1500,6 +1520,8 @@ def _run_gateway_chat_streaming(
                                         ) or shared_tc.get("name") == event_payload.get("name"):
                                             shared_tc["done"] = True
                                             shared_tc["is_error"] = bool(event_payload.get("is_error"))
+                                            if event_payload.get("snippet"):
+                                                shared_tc["snippet"] = event_payload["snippet"]
                                             break
                             put_gateway_event(event_name, event_payload)
                             if event_name != "reasoning":

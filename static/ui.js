@@ -13631,6 +13631,7 @@ function _anchorSceneToolCallFromRow(row, opts){
     args:(tool.args&&typeof tool.args==='object')?tool.args:((payload.args&&typeof payload.args==='object')?payload.args:{}),
     command:tool.command||payload.command||payload.cmd||'',
     raw_command:tool.raw_command||payload.raw_command||'',
+    display_command:tool.display_command||payload.display_command||'',
     preview:tool.preview||payload.preview||'',
     snippet:tool.snippet||payload.snippet||payload.result||payload.output||(
       row&&row.status!=='running'&&row.status!=='pending'?row.text:''
@@ -19173,6 +19174,13 @@ function _redactToolTargetLabel(value){
     .replace(/\bsshpass\s+-p\s+(?:"[^"]*"|'[^']*'|\S+)/gi,'sshpass -p "[redacted]"')
     .replace(/(--password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]')
     .replace(/(password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]')
+    // curl basic auth `-u user:pass` / `--user[=]user:pass`, curl only: mask the password
+    // through the end of the whole shell word (quotes, `\ ` escapes), keep the user.
+    .replace(/(\bcurl\b[^\n;|&]*?\s)(-u\s*|--user(?:=|\s+))((?:[^\s"'\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*')+)/gi,(m,pre,flag,word)=>{
+      const i=word.indexOf(':'); if(i<0) return m;
+      const q=(word[0]==='"'||word[0]==="'")&&word.length>1&&word.endsWith(word[0])?word[0]:'';
+      return pre+flag+word.slice(0,i)+':[redacted]'+q;
+    })
     // Env-assignment / flag secrets, masked across the full (multi-line) text so
     // the expanded shell card can't leak a key on a non-first line (#4926). Keys
     // matched case-insensitively: *(TOKEN|API_KEY|APIKEY|SECRET|PASSWD|PASSWORD|
@@ -19620,8 +19628,13 @@ function _toolCardAllowsDetail(kind, tc){
   if(infoKinds[kind]&&!(tc&&tc.is_error)) return false;
   return true;
 }
-function _toolDetailLeadLabel(kind){
-  if(kind==='shell') return 'Shell';
+function _toolCommandIsPreviewOnly(tc){
+  // Gateway runs send only a summarized display_command, not the executed command.
+  const a=tc&&tc.args||{};
+  return !!(tc&&tc.display_command)&&!(a.cmd||a.command||tc.command||tc.raw_command||tc.original_command);
+}
+function _toolDetailLeadLabel(kind, tc){
+  if(kind==='shell') return _toolCommandIsPreviewOnly(tc)?'Command preview':'Shell';
   if(kind==='write') return 'Target';
   return 'Input';
 }
@@ -19632,6 +19645,7 @@ function _toolDetailLeadText(kind, tc){
     // first line (#4926). Fall back to the first-line target if full is empty.
     const full=_toolFullCommandLabel(tc);
     const cmd=full||target;
+    if(cmd&&_toolCommandIsPreviewOnly(tc)) return cmd;
     return cmd?`$ ${cmd}`:'';
   }
   if(!target) return '';
@@ -19650,7 +19664,7 @@ function buildToolCard(tc){
   const disclosureKey=typeof _toolDisclosureIdentity==='function'?_toolDisclosureIdentity(tc):'';
   if(disclosureKey) row.setAttribute('data-tool-disclosure-key', disclosureKey);
   const icon=toolIcon(tc.name);
-  const hasRawDetail=!!(tc.snippet)||(tc.args&&Object.keys(tc.args).length>0);
+  const hasRawDetail=!!(tc.snippet)||!!(tc.display_command)||(tc.args&&Object.keys(tc.args).length>0);
   const allowsDetail=typeof _toolCardAllowsDetail==='function'?_toolCardAllowsDetail(toolKind,tc):true;
   const hasDetail=hasRawDetail&&allowsDetail;
   let displaySnippet='';
@@ -19680,7 +19694,7 @@ function buildToolCard(tc){
   if(toolKind==='shell'||previewText===argPreview||previewText==='Completed'||previewText==='Running'||previewText==='Failed') previewText='';
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
   const detailLeadText=hasDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
-  const detailLeadLabel=typeof _toolDetailLeadLabel==='function'?_toolDetailLeadLabel(toolKind):(toolKind==='shell'?'Shell':'Input');
+  const detailLeadLabel=typeof _toolDetailLeadLabel==='function'?_toolDetailLeadLabel(toolKind,tc):(toolKind==='shell'?'Shell':'Input');
   const detailLead=detailLeadText?`<div class="tool-card-detail-lead"><div class="tool-card-detail-lead-label">${esc(detailLeadLabel)}</div><pre>${esc(detailLeadText)}</pre></div>`:'';
   const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
   const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
