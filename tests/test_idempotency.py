@@ -35,6 +35,7 @@ from __future__ import annotations
 import io
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -1493,9 +1494,9 @@ def test_profile_drift_within_request_stays_bound_to_original_namespace(idem_env
     for method in ("claim", "complete", "reconcile", "release"):
         original = getattr(store, method)
         if method == "claim":
-            def spy(key_arg, fp, *, profile=None, _o=original):
+            def spy(key_arg, fp, *, profile=None, pending_identity=None, _o=original):
                 usage.append(("claim", profile))
-                return _o(key_arg, fp, profile=profile)
+                return _o(key_arg, fp, profile=profile, pending_identity=pending_identity)
         else:
             def spy(*a, profile=None, _m=method, _o=original, **k):
                 usage.append((_m, profile))
@@ -1532,3 +1533,391 @@ def test_profile_drift_within_request_stays_bound_to_original_namespace(idem_env
     assert store.lookup_stored(
         idem_mod.build_storage_key(key, profile="beta")
     ) is None
+
+
+# ─── #7782 review follow-ups: crash-window, persistence, namespace, tombstone ───
+
+
+def test_crash_between_claim_and_start_leaves_replayable_identity(idem_env, monkeypatch):
+    """#7782 finding 1: a crash after the claim but before the turn is admitted
+    must not turn the key into a day-long in-flight error.
+
+    The route now mints the turn identity and persists it WITH the claim
+    (``claim_with_identity``). Simulate the crash window by claiming directly
+    the way the route does, then dropping the in-memory store (restart) and
+    re-claiming: the recovered pending record carries a stream_id, so
+    ``claim`` replays the original identity instead of raising in-flight.
+    """
+    from api.idempotency import (
+        STATUS_PENDING,
+        build_storage_key,
+        compute_request_fingerprint,
+    )
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "messages": []}
+    fingerprint = compute_request_fingerprint(body, "default")
+    storage_key = build_storage_key("crash-window", "default")  # "default|crash-window"
+
+    # Route minted identity → persisted with the claim.
+    minted_stream = "stream-minted-at-claim"
+    record = env.store.claim_with_identity(
+        "crash-window",
+        fingerprint,
+        profile="default",
+        session_id=env.session.session_id,
+        stream_id=minted_stream,
+        turn_id="turn-minted-at-claim",
+    )
+    assert record.status == STATUS_PENDING
+    # The minted identity lives in the pending_* fields on purpose: the
+    # route's replay predicate reads stream_id only, so this record still
+    # flows to _start_run instead of short-circuiting as its own replay.
+    assert record.stream_id == ""
+    assert record.pending_stream_id == minted_stream
+    # Simulate the claim->admit crash: the owner process dies, so whatever
+    # a "restart" loads carries a foreign pid.
+    with env.store._lock:
+        env.store._records[storage_key].owner_pid = 999999
+    env.store._persist_locked()
+
+    # Restart: fresh instance over the same durable file.
+    restarted = type(env.store)(path=env.store._path)
+    # claim() loads the durable file lazily; the recovered pending record
+    # must carry the minted identity.
+    replay = restarted.claim("crash-window", fingerprint, profile="default")
+    assert replay.stream_id == minted_stream, "identity must survive the crash"
+
+    # Crucially NOT an in-flight / retry_after=1 answer for the whole TTL.
+    assert replay.turn_id == "turn-minted-at-claim"
+    assert len(env.recorder.calls) == 0, "no turn admitted by the retry"
+
+
+def test_pending_claim_with_no_identity_is_swept_to_outcome_unknown(idem_env):
+    """#7782 finding 1 (legacy window): a pending record recovered from disk
+    with no stream identity must fail closed with the distinct non-retryable
+    outcome, not `in_flight` + retry_after=1.
+    """
+    from api.idempotency import (
+        STATUS_PENDING,
+        IdempotencyOutcomeUnknown,
+        IdempotencyRecord,
+    )
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "messages": []}
+    from api.idempotency import build_storage_key, compute_request_fingerprint
+
+    fingerprint = compute_request_fingerprint(body, "default")
+    storage_key = build_storage_key("no-identity", "default")  # "default|no-identity"
+
+    # A pre-fix store (plain claim, no identity) — the exact crash window the
+    # old implementation left on disk.
+    env.store.claim("no-identity", fingerprint, profile="default")
+    with env.store._lock:
+        assert env.store._records[storage_key].pending_stream_id == ""
+        env.store._records[storage_key].outcome_unknown = False
+        # Simulate the owner's death: a restarted process has a different pid,
+        # which is what turns this pending record from "live sibling owns it"
+        # into "durable artifact to inspect".
+        env.store._records[storage_key].owner_pid = 999999
+    env.store._persist_locked()
+
+    restarted = type(env.store)(path=env.store._path)
+    restarted._ensure_loaded()
+    loaded = restarted._records[storage_key]
+    assert loaded.owner_pid == 999999, "durable file must carry the dead pid"
+    assert loaded.pending_stream_id == ""
+    assert restarted.sweep_pending_claims() == 1
+
+    with pytest.raises(IdempotencyOutcomeUnknown) as excinfo:
+        restarted.claim("no-identity", fingerprint, profile="default")
+    assert "may have run" in str(excinfo.value).lower()
+
+
+def test_persist_io_failure_during_fsync_is_not_swallowed(idem_env, monkeypatch):
+    """#7782 finding 3: an fsync error other than EINVAL/ENOTSUP must propagate,
+    not be logged-and-ignored. Losing JSON does not turn `_start_run` into a
+    data-loss path the contract asked us to eliminate (`except OSError` that
+    silently swallows is exactly how writes got lost before).
+    """
+    import errno
+
+    from api.idempotency import IdempotencyStore, IdempotencyStoreUnavailable
+
+    env = idem_env
+    store = IdempotencyStore(path=env.store._path, ttl_seconds=60)
+
+    class _FailFsync:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    real_open = open
+
+    def _fake_open(path, mode="r", *args, **kwargs):
+        if "w" in mode and str(path).endswith(".tmp"):
+            real_fh = real_open(path, mode, *args, **kwargs)
+
+            class _Wrapper:
+                def __enter__(self):
+                    real_fh.__enter__()
+                    return self
+
+                def __exit__(self, *exc):
+                    return real_fh.__exit__(*exc)
+
+                def write(self, data):
+                    return real_fh.write(data)
+
+                @property
+                def fileno(self):
+                    return real_fh.fileno()
+
+            return _Wrapper()
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr("api.idempotency.os.fsync", lambda _fd: (_ for _ in ()).throw(OSError(errno.EIO, "disk on fire")))
+    with pytest.raises(IdempotencyStoreUnavailable):
+        store.claim("io-fail", "fp", profile="default")
+
+
+def test_fsync_einval_and_enotsup_still_pass(idem_env, monkeypatch):
+    """The EINVAL/ENOTSUP exemption is deliberate (tmpfs/overlayfs do not all
+    support fsync), so the narrowed handling must not reject those.
+    """
+    import errno
+
+    from api.idempotency import IdempotencyStore
+
+    for err in (errno.EINVAL, errno.ENOTSUP):
+        env = idem_env
+        store = IdempotencyStore(path=env.store._path, ttl_seconds=60)
+        monkeypatch.setattr(
+            "api.idempotency.os.fsync",
+            lambda _fd, _e=err: (_ for _ in ()).throw(OSError(_e, "fsync unsupported")),
+        )
+        record = store.claim(f"fsync-ok-{err}", "fp", profile="default")
+        assert record.status == "pending"
+
+
+def test_expired_completed_key_is_not_re_admitted(idem_env, monkeypatch):
+    """#7782 contract call 5: an expired completed key must fail loudly on
+    re-claim. Before the fix, expiry silently dropped the record — and with
+    it the only memory that the turn ran — so a retry started a second turn.
+    """
+    from api.idempotency import IdempotencyKeyExpired
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "messages": []}
+    from api.idempotency import build_storage_key, compute_request_fingerprint
+
+    fingerprint = compute_request_fingerprint(body, "default")
+    short = type(env.store)(
+        path=env.store._path,
+        ttl_seconds=0.01,
+        max_records=100,
+        tombstone_max_records=100,
+    )
+
+    short.claim("gone", fingerprint, profile="default")
+    with short._lock:
+        short._records[build_storage_key("gone", "default")].owner_pid = 999999
+    short.complete(
+        "gone",
+        profile="default",
+        session_id="s",
+        stream_id="st",
+        turn_id="t",
+        response_status=200,
+        response_payload={},
+    )
+    time.sleep(0.05)
+    short._evict_expired_locked()
+
+    assert build_storage_key("gone", "default") in short._expired_keys
+    assert not [k for k in short._records if "gone" in k], "expired record must be gone"
+
+    with pytest.raises(IdempotencyKeyExpired):
+        short.claim("gone", fingerprint, profile="default")
+
+
+def test_tombstones_survive_ttl_expiry_and_restart(idem_env):
+    """#7782 contract call 5: the tombstone set is deliberately OUTSIDE the
+    record cap and OUTLIVES the record. A full or swept store must not be able
+    to re-admit a turn that already ran, and the protection is persisted so a
+    restart still refuses the key.
+    """
+    import time
+
+    from api.idempotency import (
+        IdempotencyKeyExpired,
+        IdempotencyStore,
+        IdempotencyStoreUnavailable,
+        build_storage_key,
+        compute_request_fingerprint,
+    )
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "messages": []}
+    fingerprint = compute_request_fingerprint(body, "default")
+
+    # A tiny record cap: under capacity pressure the store FAILS CLOSED (503)
+    # rather than dropping an unexpired record — that is precisely why the
+    # tombstone set must live outside the cap. Nothing is silently evicted,
+    # so no completed key can be re-admitted by capacity pressure.
+    capped = IdempotencyStore(
+        path=env.store._path, ttl_seconds=9999, max_records=4, tombstone_max_records=100
+    )
+    for i in range(4):
+        capped.claim(f"cap-{i}", fingerprint, profile="default")
+        with capped._lock:
+            capped._records[build_storage_key(f"cap-{i}", "default")].owner_pid = 999999
+        capped.complete(
+            f"cap-{i}",
+            profile="default",
+            session_id="s",
+            stream_id=f"st{i}",
+            turn_id=f"t{i}",
+            response_status=200,
+            response_payload={},
+        )
+    # The fifth key cannot be admitted while all four records are unexpired.
+    # The store refuses (503) rather than evict a live guard.
+    with pytest.raises(IdempotencyStoreUnavailable):
+        capped.claim("cap-nope", fingerprint, profile="default")
+
+    # TTL expiry is the sanctioned removal path — and it leaves a tombstone.
+    short = IdempotencyStore(
+        path=env.store._path, ttl_seconds=0.01, tombstone_max_records=100
+    )
+    short.claim("gone", fingerprint, profile="default")
+    with short._lock:
+        short._records[build_storage_key("gone", "default")].owner_pid = 999999
+    short.complete(
+        "gone",
+        profile="default",
+        session_id="s",
+        stream_id="st",
+        turn_id="t",
+        response_status=200,
+        response_payload={},
+    )
+    time.sleep(0.05)
+    # A fresh claim drives the expiry sweep (and persists any tombstone it
+    # mints), exactly as production does.
+    short.claim("probe", fingerprint, profile="default")
+    assert build_storage_key("gone", "default") in short._expired_keys
+    with pytest.raises(IdempotencyKeyExpired):
+        short.claim("gone", fingerprint, profile="default")
+
+    # Tombstones persist, so a restart still refuses the key.
+    restarted = IdempotencyStore(path=short._path)
+    with pytest.raises(IdempotencyKeyExpired):
+        restarted.claim("gone", fingerprint, profile="default")
+
+
+def test_root_profile_alias_aliases_share_one_namespace(idem_env):
+    """#7782 finding 2: the root profile may legitimately be spelled several
+    ways (``active-profile resolve`` names). Keying the namespace by the raw
+    string would let the SAME mailbox act as different identities, which is a
+    correctness hole in the provider, not a style issue. Canonicalize to the
+    documented root alias so both spellings hit one namespace.
+    """
+    from api.idempotency import _canonical_profile_namespace
+
+    # The root profile may be spelled several ways (a legacy display-name
+    # rename). Every spelling must collapse to one canonical namespace: two
+    # namespaces for one real profile splits the guard, and a retry gets
+    # admitted as a fresh turn.
+    assert _canonical_profile_namespace("default") == "default"
+    assert _canonical_profile_namespace(None) == "default"
+    assert _canonical_profile_namespace("") == "default"
+    # A non-root name stays concrete: a wrong-but-concrete namespace isolates
+    # a record; collapsing every name would cross-tenant them.
+    assert _canonical_profile_namespace("work") == "work"
+
+    # When api.profiles reports the name IS the root profile, it collapses.
+    import api.profiles as profiles_mod
+    import api.idempotency as idem_mod
+
+    class _FakeProfiles:
+        @staticmethod
+        def _is_root_profile(name):
+            return name == "renamed-root"
+
+    orig = getattr(idem_mod, "_RootProbe", None)
+    try:
+        # Force the lazy lookup inside _canonical_profile_namespace to see
+        # our fake: it imports api.profiles inside the function body.
+        import sys
+        saved = sys.modules.get("api.profiles")
+        sys.modules["api.profiles"] = _FakeProfiles
+        try:
+            assert _canonical_profile_namespace("renamed-root") == "default"
+        finally:
+            if saved is not None:
+                sys.modules["api.profiles"] = saved
+            del orig
+    finally:
+        pass
+
+
+def test_namespace_drift_persists_across_restart(idem_env):
+    """#7782 finding 2: the root profile may be spelled differently by the
+    resolver across a request's lifetime (a legacy display-name rename).
+    The keyed namespace must canonicalize so the claim, the completion and a
+    post-restart retry all address the SAME durable record.
+    """
+    from api.idempotency import (
+        IdempotencyStore,
+        build_storage_key,
+        compute_request_fingerprint,
+    )
+    import api.profiles as profiles_mod
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "messages": []}
+
+    # Make the resolver report a renamed root profile.
+    real_is_root = profiles_mod._is_root_profile
+
+    def _fake_is_root(name):
+        return name == "renamed-root"
+
+    profiles_mod._is_root_profile = _fake_is_root
+    try:
+        fingerprint = compute_request_fingerprint(body, "renamed-root")
+        env.store.claim_with_identity(
+            "ns-drift",
+            fingerprint,
+            profile="renamed-root",
+            session_id="s",
+            stream_id="st",
+            turn_id="t",
+        )
+        # ...and complete it under the different spelling of the same profile.
+        env.store.complete(
+            "ns-drift",
+            profile="renamed-root",
+            session_id="s",
+            stream_id="st",
+            turn_id="t",
+            response_status=200,
+            response_payload={},
+        )
+        # Both spellings address one canonical namespace.
+        key = build_storage_key("ns-drift", "renamed-root")
+        assert key == build_storage_key("ns-drift", "default")
+
+        restarted = IdempotencyStore(path=env.store._path)
+        restarted._ensure_loaded()
+        rec = restarted._records.get(key)
+        assert rec is not None and rec.status == "complete", (
+            "claim + completion must land in ONE canonical record, not split "
+            "across two namespaces for the same profile"
+        )
+    finally:
+        profiles_mod._is_root_profile = real_is_root

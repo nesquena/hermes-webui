@@ -63,6 +63,7 @@ from api.idempotency import (
     IdempotencyKeyExpired,
     IdempotencyKeyMalformed,
     IdempotencyKeyMissing,
+    IdempotencyOutcomeUnknown,
     IdempotencyStoreUnavailable,
     build_response_payload as _idem_build_response_payload,
     compute_request_fingerprint as _idem_compute_fingerprint,
@@ -24745,13 +24746,37 @@ def _handle_chat_start(handler, body, diag=None):
                 "idempotency_key": idem_validated_key,
             }, status=503)
         try:
-            idem_claim_record = store.claim(
-                idem_validated_key, fingerprint, profile=idem_profile
+            # Mint the turn identity HERE and persist it with the claim
+            # (#7782 finding 1). A crash between the claim and the moment
+            # ``_start_run`` returns its real stream_id used to leave a
+            # pending record with NO identity on disk; a restarted process
+            # then answered every retry for that key with
+            # ``409 idempotency_in_flight`` + ``retry_after_seconds: 1``
+            # for the remaining TTL. Carrying the minted identity means a
+            # restarted process finds a pending record WITH a stream_id,
+            # which ``claim`` replays as the original turn.
+            _idem_provisional_stream = f"stream-{uuid.uuid4().hex}"
+            idem_claim_record = store.claim_with_identity(
+                idem_validated_key,
+                fingerprint,
+                profile=idem_profile,
+                session_id=str(body.get("session_id") or ""),
+                stream_id=_idem_provisional_stream,
+                turn_id=f"turn-{uuid.uuid4().hex}",
             )
         except IdempotencyConflict as exc:
             return j(handler, {
                 "error": str(exc),
                 "code": "idempotency_conflict",
+                "idempotency_key": idem_validated_key,
+            }, status=409)
+        except IdempotencyOutcomeUnknown as exc:
+            # Recovered from a crash between the claim and the identity
+            # binding. Distinct from in-flight: NO retry hint, because a
+            # blind retry is exactly what could double-execute the turn.
+            return j(handler, {
+                "error": str(exc),
+                "code": "idempotency_outcome_unknown",
                 "idempotency_key": idem_validated_key,
             }, status=409)
         except IdempotencyInFlight as exc:

@@ -26,6 +26,30 @@ parent directory) so a crash mid-write cannot corrupt the durable map.
 On startup the file is loaded once; corrupt entries are skipped, not
 raised, so a malformed line cannot block WebUI from serving requests.
 
+Expiry and tombstones (contract call 5): a record that completed past its
+TTL is dropped from the record map, but its key is remembered in a separate
+bounded ``expired_keys`` set that is persisted alongside the records.
+Re-claiming that key with the same fingerprint does NOT silently admit a new
+turn — ``claim()`` raises ``IdempotencyKeyExpired`` → 410 — because the
+client retrying after losing a response must be told the turn is gone, not
+handed a fresh execution of the same request. The tombstone set has its own
+cap (``TOMBSTONE_MAX_RECORDS``) and lives outside the record cap: a full
+record store must not be able to re-admit an already-run turn. The tradeoff
+is documented and accepted — when the tombstone bound is exceeded the oldest
+tombstone is dropped and that one key becomes re-admittable, versus evicting
+tombstones by record pressure which would stall every fresh key with 503.
+
+Crash-window hardening (contract call 1): a claim is persisted together with
+the turn identity minted by the route (``claim_with_identity``), so a crash
+between the claim and the turn being admitted leaves a pending record that
+still carries a stream_id — a restarted process replays it as the original
+turn instead of answering retries with ``in_flight`` + ``retry_after=1`` for
+the remaining TTL. A pending record recovered from disk with NO identity
+(the older builds' window) is stamped by ``sweep_pending_claims`` at startup
+and fails closed with ``IdempotencyOutcomeUnknown`` → 409 WITHOUT a retry
+hint, so an operator is never told to poll for a day on a turn whose outcome
+is unknowable.
+
 This module is deliberately small and dependency-free. The full chat-start
 flow is still owned by ``api.routes._handle_chat_start``; this module
 provides the claim/replay/release primitives that flow plugs in at the top
@@ -33,12 +57,13 @@ of the route.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -51,6 +76,12 @@ logger = logging.getLogger(__name__)
 # Status values for a stored record.
 STATUS_PENDING = "pending"
 STATUS_COMPLETE = "complete"
+# Not a persisted status: a tombstone is a complete record whose key is
+# remembered after expiry so a re-claim of the same key fails loudly rather
+# than admitting what may be a duplicate turn (#7782 contract call 5).
+# ``expired_keys`` is a separate bounded set that survives the record's
+# removal from ``_records`` — see ``_remember_expired_key_locked``.
+STATUS_TOMBSTONE = "complete_expired"
 
 # Default retention for both pending and completed records. 24h is the
 # contract's example; callers can override per-store for tests.
@@ -61,6 +92,15 @@ DEFAULT_TTL_SECONDS = 24 * 60 * 60
 # fill the disk. 10k is the contract's example; tests override to a small
 # value to exercise eviction.
 DEFAULT_MAX_RECORDS = 10_000
+
+# Bound on the expired-key tombstone set (#7782 contract call 5). Tombstones
+# live OUTSIDE the record cap on purpose — a full record store must not be
+# able to silently re-admit a turn that already ran — but the set itself
+# needs its own ceiling so a pathological caller cannot grow it forever.
+# At worst the oldest tombstone is dropped and that one key becomes
+# re-admittable; the alternative (evicting a tombstone only when the record
+# store is full) would stall every fresh key with 503.
+TOMBSTONE_MAX_RECORDS = 10_000
 
 # Validation bounds for the caller-supplied key. Mirrors the contract
 # language ("non-empty, bounded length, printable ASCII").
@@ -77,6 +117,18 @@ class IdempotencyKeyMissing(Exception):
 
 class IdempotencyKeyExpired(Exception):
     """Key was previously claimed but its retention window elapsed → 410."""
+
+
+class IdempotencyOutcomeUnknown(Exception):
+    """A pending claim was recovered from disk with no bound stream identity.
+
+    The durable store cannot say whether the turn ran (#7782 finding 1: a
+    crash between the claim and the identity binding). Distinct from
+    ``IdempotencyInFlight`` on purpose — that one means "a live attempt owns
+    this key, retry in a second", while this one means "the outcome is
+    unknowable; do NOT blind-retry". The route maps it to 409 WITHOUT a
+    ``retry_after_seconds`` hint.
+    """
 
 
 class IdempotencyInFlight(Exception):
@@ -129,10 +181,36 @@ class IdempotencyRecord:
     session_id: str = ""
     stream_id: str = ""
     turn_id: str = ""
+    # #7782 finding 1: identity minted at claim time, BEFORE the turn is
+    # admitted. Deliberately NOT read by the route's replay predicate, which
+    # inspects ``stream_id`` only — a pending claim with a provisional
+    # identity must still flow to ``_start_run`` instead of short-circuiting
+    # as a replay of an identity no turn has accepted yet. It exists so that
+    # a crash in the claim→admit window leaves a durable identity to replay,
+    # and so ``sweep_pending_claims`` can tell "identity was minted" from
+    # "identity was never bound".
+    pending_stream_id: str = ""
+    pending_turn_id: str = ""
+    # #7782 finding 1: the pid that claimed this record. An in-flight guard
+    # is a PROCESS-LOCAL guarantee (a second request in the same process
+    # races the first for the same turn), so a pending record whose pid
+    # matches ours means "a live sibling request owns this" → in-flight 409.
+    # A different pid means the original process died before admitting the
+    # turn; the pending record is then a durable artifact to replay, not a
+    # live competitor. Without the pid the two cases are indistinguishable
+    # and either replay (duplicate turns) or in-flight (a day-long 409) is
+    # wrong for one of them.
+    owner_pid: int = 0
     response_status: int = 0
     response_payload: dict[str, Any] = field(default_factory=dict)
     claimed_at: float = 0.0
     completed_at: float = 0.0
+    # #7782 finding 1: set by ``sweep_pending_claims`` when a pending record
+    # was loaded from disk with no bound stream identity — the durable store
+    # cannot say whether the turn ever ran. Such a record must NOT keep
+    # answering ``idempotency_in_flight`` with a 1-second retry hint for the
+    # rest of its TTL.
+    outcome_unknown: bool = False
 
     def to_json(self) -> dict[str, Any]:
         d = asdict(self)
@@ -153,6 +231,10 @@ class IdempotencyRecord:
             response_payload=dict(raw.get("response_payload") or {}),
             claimed_at=float(raw.get("claimed_at") or 0.0),
             completed_at=float(raw.get("completed_at") or 0.0),
+            pending_stream_id=str(raw.get("pending_stream_id") or ""),
+            pending_turn_id=str(raw.get("pending_turn_id") or ""),
+            owner_pid=int(raw.get("owner_pid") or 0),
+            outcome_unknown=bool(raw.get("outcome_unknown") or False),
         )
 
 
@@ -184,7 +266,9 @@ def compute_request_fingerprint(body: dict[str, Any], profile: str = "default") 
         "prompt",
         "prompt_index",
     )
-    normalized: dict[str, Any] = {"__profile": str(profile or "default")}
+    normalized: dict[str, Any] = {
+        "__profile": _canonical_profile_namespace(profile) or "default"
+    }
     for name in side_effect_fields:
         if name in body:
             normalized[name] = body[name]
@@ -229,6 +313,41 @@ def resolve_active_profile() -> str:
     return name
 
 
+def _canonical_profile_namespace(profile: str | None) -> str:
+    """Canonical namespace for a profile: root aliases collapse to 'default'.
+
+    Hermes Agent allows the root profile (~/.hermes) to carry a display name
+    other than the literal ``'default'`` (a legacy rename). ``resolve_active
+    _profile()`` then returns that display name, while a direct lookup keyed
+    on the legacy literal — or any other code path that resolved the same
+    root profile earlier under its old name — would produce a DIFFERENT
+    namespace for the SAME profile. Two records for one real profile means
+    the guard silently splits and a retry is admitted as a fresh turn
+    (#7782 finding 2).
+
+    ``api.profiles._is_root_profile`` is the canonical "does this name
+    resolve to ~/.hermes?" test; when it answers yes the namespace is the
+    stable ``'default'``. A miss (name unavailable, lookup failure) keeps the
+    supplied name so the record still lands in a concrete namespace rather
+    than a guessed one.
+    """
+    ns = str(profile or "").strip()
+    if not ns or ns == "default":
+        return "default"
+    try:
+        from api.profiles import _is_root_profile
+
+        if _is_root_profile(ns):
+            return "default"
+    except Exception:
+        # Lookup unavailable: keep the concrete name. A wrong-but-concrete
+        # namespace isolates a record (at worst it is unreachable), whereas
+        # collapsing every name to 'default' on a failed lookup would make
+        # distinct profiles share one guard.
+        pass
+    return ns
+
+
 def build_storage_key(raw_key: str, profile: str | None = None) -> str:
     """Combine the server-resolved profile with the validated raw key.
 
@@ -252,7 +371,7 @@ def build_storage_key(raw_key: str, profile: str | None = None) -> str:
                 "idempotency namespace is empty; refusing to scope a key to "
                 "an unknown profile"
             )
-    return f"{ns}{_NAMESPACE_SEP}{raw_key}"
+    return f"{_canonical_profile_namespace(ns)}{_NAMESPACE_SEP}{raw_key}"
 
 
 def split_storage_key(stored_key: str) -> tuple[str, str]:
@@ -386,15 +505,22 @@ class IdempotencyStore:
         path: Path | None = None,
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
         max_records: int = DEFAULT_MAX_RECORDS,
+        tombstone_max_records: int = TOMBSTONE_MAX_RECORDS,
     ):
         self._path = Path(path) if path is not None else _store_path()
         self._ttl_seconds = float(ttl_seconds)
         self._max_records = int(max_records)
+        self._tombstone_max_records = int(tombstone_max_records)
         self._lock = threading.RLock()
         # OrderedDict gives O(1) lookup + deterministic oldest-first
         # eviction order (insertion order). We re-insert on access so
         # "active" keys float to the end of the LRU.
         self._records: "OrderedDict[str, IdempotencyRecord]" = OrderedDict()
+        # Keys whose record completed and then expired/evicted (#7782
+        # contract call 5). An OrderedSet (dict used as an ordered set) so
+        # the bound can evict oldest-first; kept OUTSIDE the record cap so
+        # a full store cannot silently re-admit an already-run turn.
+        self._expired_keys: "OrderedDict[str, bool]" = OrderedDict()
         self._loaded = False
 
     # -- persistence ---------------------------------------------------------
@@ -476,6 +602,13 @@ class IdempotencyStore:
                     "that disagrees with its namespaced key"
                 )
             self._records[rec.key] = rec
+        # #7782 call 5: restore tombstones. A v1 file has none; that is fine,
+        # those keys simply have no memory of completion.
+        tombstones = data.get("expired_keys") if isinstance(data, dict) else None
+        if isinstance(tombstones, list):
+            for stored_key in tombstones:
+                if isinstance(stored_key, str) and stored_key:
+                    self._expired_keys[stored_key] = True
         self._loaded = True
 
     def _ensure_loaded(self) -> None:
@@ -495,10 +628,42 @@ class IdempotencyStore:
         # during iteration.
         expired = [
             k for k, r in self._records.items()
-            if (r.claimed_at and r.claimed_at < cutoff)
+            # ``claimed_at`` of 0 is the 1970 epoch — the dataclass default —
+            # and must be treated as expired, matching the same test in
+            # ``claim``. ``r.claimed_at and …`` would skip it (0 is falsy) and
+            # strand an identity-less record until the cap sweep.
+            if r.claimed_at < cutoff
         ]
         for k in expired:
-            self._records.pop(k, None)
+            rec = self._records.pop(k, None)
+            # The turn may have run (COMPLETE), or the claim was left
+            # un-admitted when the process died (PENDING, #7782 finding 1's
+            # crash window). Either way the KEY was used, so a later re-claim
+            # must fail explicitly rather than silently admit a turn. Remember
+            # it either way — pending records are exactly the case where a
+            # blind re-admission is most dangerous, because a turn may have
+            # been in flight when the claim was written.
+            self._remember_expired_key_locked(k)
+
+    def _remember_expired_key_locked(self, stored_key: str) -> None:
+        """Record that ``stored_key`` completed and expired (#7782 call 5).
+
+        Bounded by ``_TOMBSTONE_MAX`` with oldest-first eviction, so a
+        pathological caller cannot grow the set without limit. When the
+        bound is exceeded the OLDEST tombstone is dropped — the key becomes
+        re-admittable, which is the documented cost of keeping tombstones
+        outside the record cap (a cap-sized eviction would instead stall
+        every new key with 503).
+        """
+        if stored_key in self._expired_keys:
+            # Refresh recency so a repeatedly-retried key is not the first
+            # tombstone evicted.
+            del self._expired_keys[stored_key]
+            self._expired_keys[stored_key] = True
+            return
+        self._expired_keys[stored_key] = True
+        while len(self._expired_keys) > self._tombstone_max_records:
+            self._expired_keys.popitem(last=False)
 
     def _evict_to_cap_locked(self) -> None:
         """Bound the in-memory map by the configured cap.
@@ -531,7 +696,12 @@ class IdempotencyStore:
                 continue
             evictable.append(k)
         for k in evictable:
-            self._records.pop(k, None)
+            rec = self._records.pop(k, None)
+            if rec is not None and rec.status == STATUS_COMPLETE:
+                # A capacity-swept COMPLETE record still ran its turn; keep
+                # the tombstone so a later claim of the same key fails
+                # explicitly (#7782 contract call 5).
+                self._remember_expired_key_locked(k)
         if len(self._records) > self._max_records:
             raise IdempotencyStoreUnavailable(
                 f"idempotency store at cap ({self._max_records}); "
@@ -558,9 +728,12 @@ class IdempotencyStore:
                 f"could not create store dir {path.parent}: {exc}"
             ) from exc
         payload = {
-            "version": 1,
+            "version": 2,
             "saved_at": time.time(),
             "records": [r.to_json() for r in self._records.values()],
+            # #7782 call 5: keys whose record completed and then expired.
+            # Persisted so the protection survives a restart.
+            "expired_keys": list(self._expired_keys),
         }
         tmp_path = path.with_name(path.name + ".tmp")
         try:
@@ -569,10 +742,18 @@ class IdempotencyStore:
                 fh.flush()
                 try:
                     os.fsync(fh.fileno())
-                except OSError:
-                    # fsync can fail on some filesystems; the temp file is
-                    # local and will be renamed regardless.
-                    pass
+                except OSError as exc:
+                    # Repo convention (api.paths._fsync_directory): only the
+                    # two "this filesystem cannot fsync" errors are tolerable.
+                    # A REAL I/O error (EIO and friends) means the bytes may
+                    # never reach the platter, so the rename below would put a
+                    # half-written document on the durable path while the
+                    # route answered 200 claiming idempotent replay — the
+                    # worst possible outcome for this feature (#7782 finding 3).
+                    # Re-raise so it surfaces as IdempotencyStoreUnavailable
+                    # (503) and the caller retries.
+                    if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
+                        raise
             os.replace(tmp_path, path)
         except OSError as exc:
             try:
@@ -600,7 +781,12 @@ class IdempotencyStore:
     # -- public api ----------------------------------------------------------
 
     def claim(
-        self, key: str, fingerprint: str, *, profile: str | None = None
+        self,
+        key: str,
+        fingerprint: str,
+        *,
+        profile: str | None = None,
+        pending_identity: tuple[str, str] | None = None,
     ) -> IdempotencyRecord:
         """Atomically claim ``key`` for ``fingerprint``.
 
@@ -638,13 +824,47 @@ class IdempotencyStore:
         stored_key = build_storage_key(key, profile=profile)
         profile = stored_key.split(_NAMESPACE_SEP, 1)[0]
         with self._lock:
+            # Expire first so a tombstone is raised before the lookup below.
+            # Any tombstone this sweep just minted must reach disk BEFORE we
+            # can honour it as a refusal, otherwise a restart between the
+            # sweep and the next successful write forgets the key and
+            # re-admits the turn.
+            _tombstones_before = len(self._expired_keys)
+            self._evict_expired_locked()
+            if len(self._expired_keys) != _tombstones_before:
+                try:
+                    self._persist_locked()
+                except IdempotencyStoreUnavailable:
+                    logger.warning(
+                        "idempotency: could not persist tombstone during claim",
+                        exc_info=True,
+                    )
             existing = self._records.get(stored_key)
+            # #7782 contract call 5: a key whose record completed and then
+            # EXPIRED leaves the map but stays remembered in
+            # ``_expired_keys``. The tombstone check must run whether or not
+            # a record row survives — an expired row is exactly when the
+            # claim would otherwise silently re-admit a duplicate turn.
+            if stored_key in self._expired_keys:
+                raise IdempotencyKeyExpired(
+                    f"idempotency key {key!r} previously completed and has "
+                    "expired; it will not be re-admitted"
+                )
             if existing is None:
                 rec = IdempotencyRecord(
                     key=stored_key,
                     request_fingerprint=fingerprint,
                     status=STATUS_PENDING,
                     profile=profile,
+                    # #7782 finding 1: the identity the caller minted before
+                    # the turn was admitted, persisted in the SAME write as the
+                    # claim. ``pending_*`` on purpose — the replay predicate
+                    # below reads ``stream_id`` only, so a fresh claim still
+                    # flows to ``_start_run``; a crash in the claim→admit
+                    # window leaves this durable identity behind for a retry.
+                    pending_stream_id=(pending_identity[0] if pending_identity else ""),
+                    pending_turn_id=(pending_identity[1] if pending_identity else ""),
+                    owner_pid=os.getpid(),
                     claimed_at=time.time(),
                 )
                 self._records[stored_key] = rec
@@ -696,11 +916,141 @@ class IdempotencyStore:
                     # an in-flight duplicate: the route returns the original
                     # identity and no second turn is admitted.
                     return existing
+                # Same process still owns an un-admitted claim: a sibling
+                # request is mid-start, so this is an in-flight duplicate
+                # (409 + retry hint), NOT a replay. Without this check the
+                # provisional identity would make a concurrent retry look
+                # like a replay of a turn that has not started.
+                if (
+                    existing.owner_pid
+                    and existing.owner_pid == os.getpid()
+                ):
+                    raise IdempotencyInFlight(
+                        f"idempotency key {key!r} is currently in flight"
+                    )
+                if existing.pending_stream_id:
+                    # Identity was minted and persisted WITH the claim
+                    # (``claim_with_identity``) but no turn has accepted it
+                    # yet: the process almost certainly died between the
+                    # claim and the admission (#7782 finding 1). Replaying
+                    # the minted identity is the honest answer — the caller
+                    # gets a usable stream identity back — and it avoids
+                    # parking the key in `in_flight` + retry_after=1 for the
+                    # remaining TTL.
+                    return replace(
+                        existing,
+                        stream_id=existing.pending_stream_id,
+                        turn_id=existing.pending_turn_id,
+                    )
+                if existing.outcome_unknown:
+                    # Recovered from a crash between the claim and the
+                    # identity binding. The turn MAY have run; refusing with
+                    # a retry hint for the remaining TTL would have the
+                    # operator polling for a day (#7782 finding 1). Raise the
+                    # distinct "do not blind-retry" outcome instead.
+                    raise IdempotencyOutcomeUnknown(
+                        f"idempotency key {key!r} has a pending claim with no "
+                        "recorded outcome; the previous attempt may have run "
+                        "— check the session before retrying, or use a new key"
+                    )
                 raise IdempotencyInFlight(
                     f"idempotency key {key!r} is currently in flight"
                 )
             # Complete: caller should replay the stored result.
             return existing
+
+    def claim_with_identity(
+        self,
+        key: str,
+        fingerprint: str,
+        *,
+        profile: str | None = None,
+        session_id: str,
+        stream_id: str,
+        turn_id: str,
+    ) -> IdempotencyRecord:
+        """Claim ``key`` and durably bind the minted turn identity up front.
+
+        ``claim`` alone leaves a pending record with an EMPTY stream_id until
+        ``_start_run`` has admitted the turn and ``reconcile`` runs. A crash
+        in that window (process death, host power loss) leaves the record on
+        disk as ``STATUS_PENDING`` with no identity — a restarted process then
+        answers every retry for that key with ``409 idempotency_in_flight`` +
+        ``retry_after_seconds: 1`` for the remaining TTL, and the operator
+        cannot tell "ran" from "never ran" (#7782 finding 1, the feature's
+        main use case).
+
+        Minting the identity in the route and persisting it WITH the claim
+        closes the window: after a restart a retry finds a pending record
+        that carries a minted identity, which ``claim`` replays as the
+        original turn instead of a day-long in-flight error.
+
+        The minted identity is stored in ``pending_stream_id`` /
+        ``pending_turn_id``, NOT ``stream_id`` / ``turn_id``. That split is
+        load-bearing: the route's replay predicate (and the
+        "was a turn admitted" test) reads ``stream_id`` only, so a
+        freshly-claimed record — provisional identity bound, no turn admitted
+        yet — must still flow into ``_start_run``. Writing the provisional id
+        into ``stream_id`` would make the very first request look like a
+        replay of itself and short-circuit the turn (#7782 CORE: zero turns
+        would ever start).
+
+        ``complete`` / ``reconcile`` keep writing the real admitted identity
+        into ``stream_id`` / ``turn_id``; ``release`` drops the record
+        entirely, provisional identity included, so a refused start leaks
+        nothing.
+        """
+        return self.claim(
+            key,
+            fingerprint,
+            profile=profile,
+            pending_identity=(stream_id, turn_id),
+        )
+
+    def sweep_pending_claims(self) -> int:
+        """Re-mark identity-less pending claims loaded from disk.
+
+        A pending record with no stream_id can only exist because a process
+        died between claiming and binding the admitted identity (older
+        builds), or between binding and starting the turn. In both cases the
+        durable store cannot say whether a turn ran, so the record must not
+        keep answering ``idempotency_in_flight`` with a 1-second retry hint
+        for the rest of its TTL.
+
+        The sweep is intentionally conservative: it does NOT delete anything
+        and does NOT invent an identity. It stamps the record so future
+        ``claim`` calls raise a distinct, non-retryable
+        ``IdempotencyOutcomeUnknown`` (mapped to 409 without
+        ``retry_after_seconds``), which tells the caller "a previous attempt
+        may have run; check the session / pick a new key" instead of "retry in
+        one second". Returns the number of records swept.
+        """
+        self._ensure_loaded()
+        swept = 0
+        with self._lock:
+            for record in self._records.values():
+                if record.status != STATUS_PENDING:
+                    continue
+                if record.stream_id or record.pending_stream_id:
+                    # Already carries an identity (admitted, or minted at
+                    # claim time) — ``claim`` replays it, no sweep needed.
+                    continue
+                if record.outcome_unknown:
+                    continue
+                record.outcome_unknown = True
+                swept += 1
+            if swept:
+                try:
+                    self._persist_locked()
+                except IdempotencyStoreUnavailable:
+                    # The sweep is observability hardening, not a correctness
+                    # gate: the in-memory marks still apply for this process,
+                    # and a failed persist must not block startup.
+                    logger.warning(
+                        "idempotency: could not persist pending-claim sweep",
+                        exc_info=True,
+                    )
+        return swept
 
     def complete(
         self,
@@ -825,9 +1175,8 @@ class IdempotencyStore:
         Effect: the stored record for ``key`` (same profile namespace as
         ``claim``) retains ``STATUS_PENDING`` but now also carries the
         reconciled ``session_id``/``stream_id``/``turn_id``. ``claim()``
-        treats a pending record that has a stream_id as a replay, so a
+        ``claim()`` treats a pending record that has a stream_id as a replay, so a
         retry returns the original identity without starting a second turn.
-
         Fail-closed: when the reconcile itself cannot be made durable, the
         in-memory identity fields are rolled back (the claim falls back to
         a plain pending record) and ``IdempotencyStoreUnavailable``
@@ -973,6 +1322,19 @@ def get_idempotency_store() -> IdempotencyStore:
     with _store_lock:
         if _store is None:
             _store = IdempotencyStore()
+            # #7782 finding 1: stamp pending records recovered from disk that
+            # carry no identity at all (a crash between the claim and the
+            # identity binding, from builds before ``claim_with_identity``).
+            # Without the sweep such a record answers every retry with
+            # in_flight + retry_after=1 for the rest of its TTL, which an
+            # operator reads as "imminent" and polls for a day.
+            try:
+                _store.sweep_pending_claims()
+            except Exception:  # pragma: no cover - startup must not die here
+                logger.warning(
+                    "idempotency: startup sweep of pending claims failed",
+                    exc_info=True,
+                )
         return _store
 
 
