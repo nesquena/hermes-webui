@@ -52,6 +52,7 @@ def test_finalizing_response_preserves_browser_live_stream():
     predicate = source[source.index('function _steerFallbackIsDeadRun('):source.index('function _steerOwnerStreamIsCurrent(')]
     script = r'''
 const assert=require('node:assert/strict');
+const _steerUncertainBySid=new Map(),_steerDraftRevision=()=>0;
 const S={session:{session_id:'s',active_stream_id:'run'},activeStreamId:'run',busy:true,pendingFiles:[]};
 const INFLIGHT={s:{stream_id:'run'}},inp={value:''};
 const $=()=>inp,t=x=>x,showToast=()=>{};

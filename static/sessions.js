@@ -40,6 +40,11 @@ const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
+// Bumped on every non-empty draft save, so callers can tell whether a newer
+// draft was saved for a session since they last looked.
+const _composerDraftRevBySid = new Map();
+function _composerDraftRevision(sid) { return _composerDraftRevBySid.get(sid) || 0; }
+function _bumpComposerDraftRevision(sid) { _composerDraftRevBySid.set(sid, _composerDraftRevision(sid) + 1); }
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
 
 function _composerDraftFileSignature(file) {
@@ -225,6 +230,7 @@ function _saveComposerDraft(sid, text, files) {
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
+    _bumpComposerDraftRevision(sid);
   }
   _draftSaveTimer = setTimeout(() => {
     api('/api/session/draft', {
@@ -267,6 +273,7 @@ function _saveComposerDraftNow(sid, text, files) {
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
+    _bumpComposerDraftRevision(sid);
   }
   // Most chat switches leave an empty composer. Avoid putting the switch path
   // behind a network POST unless there is new local draft content or an existing
@@ -343,6 +350,21 @@ function _clearComposerDraft(sid, text, files) {
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, '', []);
   }).catch(() => {});
+}
+
+// Clear sid's saved draft only if it still equals text/files (server-side
+// compare-and-clear), so a newer draft saved meanwhile is kept.
+function _clearComposerDraftIfUnchanged(sid, text, files) {
+  if (!sid) return Promise.resolve(false);
+  const ifFiles = _composerDraftFilesForPersist(files);
+  return api('/api/session/draft', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sid, text: '', files: [], if_text: String(text || ''), if_files: ifFiles }),
+  }).then((r) => {
+    if (r && r.mismatch) return false;
+    _rememberComposerDraftPayloadState(sid, '', []);
+    return true;
+  }).catch(() => false);
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
