@@ -1,4 +1,4 @@
-name: Conversation lifecycle (informational)
+name: Conversation lifecycle
 
 # Scoped to the code this browser gate actually exercises — the chat
 # render/streaming surface — so it doesn't spin up playwright+chromium on
@@ -15,6 +15,9 @@ on:
       - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
       - 'tests/browser_reconnect_scene_redraw.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_transparent_fade_mutations.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -28,6 +31,9 @@ on:
       - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
       - 'tests/browser_reconnect_scene_redraw.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_transparent_fade_mutations.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -36,8 +42,6 @@ jobs:
   live-to-final:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Keep existing proof rows informational; reconnect regressions fail CI.
-    continue-on-error: ${{ matrix.name != 'reconnect-scene-redraw' }}
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +56,15 @@ jobs:
             script: tests/browser_historical_transcript_hydration.py
           - name: reconnect-scene-redraw
             script: tests/browser_reconnect_scene_redraw.py
+            browsers: chromium
+          - name: live-scene-energy
+            script: tests/browser_live_scene_energy.py
+            browsers: chromium
+          - name: progress-animation
+            script: tests/browser_progress_animation.py
+            browsers: chromium
+          - name: transparent-fade-mutations
+            script: tests/browser_transparent_fade_mutations.py
             browsers: chromium
     steps:
       - uses: actions/checkout@v4

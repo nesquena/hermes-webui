@@ -434,8 +434,8 @@ def test_changed_text_after_finalized_row_rebuilds_from_full_authoritative_text(
 @pytest.mark.skipif(NODE is None, reason="node is required for anchor prose incremental harness tests")
 def test_tool_boundary_sealing_updates_row_to_completed_for_finalize():
     messages_source = _messages_js_source()
-    assert "_upsertAnchorProcessProse(pendingDisplayTextBeforeTool,{sealed:true})" in messages_source
-    assert "_upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true})" in messages_source
+    assert "_upsertAnchorProcessProse(pendingDisplayTextBeforeTool,{sealed:true,render:false})" in messages_source
+    assert "_upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true,render:false})" in messages_source
     assert "status:options.sealed?'completed':'running'" in messages_source
     data = _run_scenario("tool_boundary_completes_row")
     assert data["finalizeCount"] == 1
