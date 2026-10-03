@@ -6325,6 +6325,13 @@ function _renderWorkspaceForm({ name, path, isEdit }){
           </div>
           ${pathHint}
         </div>
+        ${isEdit ? '' : `
+        <div class="detail-form-row">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="workspaceFormAsProject">
+            <span>${esc(t('workspace_as_hermes_project') || 'Register as Hermes Project (shared with Desktop/CLI)')}</span>
+          </label>
+        </div>`}
         <div id="workspaceFormError" class="detail-form-error" style="display:none"></div>
       </form>
     </div>`;
@@ -6368,6 +6375,19 @@ async function saveWorkspaceForm(){
       showToast(t('workspace_renamed') || t('workspace_added'));
       renderWorkspacesPanel(_workspaceList);
       openWorkspaceDetail(targetPath);
+      return;
+    }
+    const asProjectEl = $('workspaceFormAsProject');
+    const asProject = asProjectEl ? asProjectEl.checked : false;
+    if (asProject) {
+      const data = await api('/api/workspaces/create_project', { method:'POST', body: JSON.stringify({ path, name, create: true }) });
+      _workspaceList = data.workspaces || [];
+      _workspacePreFormDetail = null;
+      renderWorkspacesPanel(_workspaceList);
+      const proj = data.project || {};
+      showToast(proj.error ? (t('error_prefix') + proj.error) : (t('workspace_project_created') || 'Hermes Project created'));
+      const added = _workspaceList.find(w => w.path === path) || _workspaceList[_workspaceList.length - 1];
+      if (added) openWorkspaceDetail(added.path);
       return;
     }
     const data = await api('/api/workspaces/add', { method:'POST', body: JSON.stringify({ path }) });

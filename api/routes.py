@@ -14991,6 +14991,14 @@ def handle_get(handler, parsed) -> bool:
             wss = load_workspaces(profile=active_profile)
         except TypeError:
             wss = load_workspaces()
+        # #5763 read slice: surface the profile's authoritative Hermes Projects
+        # store (projects.db) in the picker. Fail-safe: no DB / error => the
+        # local workspaces.json list unchanged.
+        try:
+            from api.projects_bridge import merge_hermes_projects
+            wss = merge_hermes_projects(wss)
+        except Exception:
+            logger.debug("projects.db workspace merge skipped", exc_info=True)
         try:
             lw = get_last_workspace(profile=active_profile)
         except TypeError:
@@ -17532,6 +17540,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/workspaces/remove":
         return _handle_workspace_remove(handler, body)
+
+    if parsed.path == "/api/workspaces/create_project":
+        return _handle_workspace_create_project(handler, body)
 
     if parsed.path == "/api/workspaces/rename":
         return _handle_workspace_rename(handler, body)
@@ -27985,21 +27996,113 @@ def _handle_workspace_add(handler, body):
     return j(handler, {"ok": True, "workspaces": wss})
 
 
+def _handle_workspace_create_project(handler, body):
+    """Create a Hermes Project (projects.db) AND a WebUI workspace in one step.
+
+    #5763 write slice: the WebUI "new project" flow registers the project in
+    the profile's authoritative projects.db (visible to Desktop/CLI) instead of
+    only the local picker list. If the path is already a registered workspace
+    the projects.db registration still runs (idempotent on duplicate folder).
+    """
+    path_str = _strip_surrounding_quotes(body.get("path", "").strip())
+    name = _strip_surrounding_quotes(body.get("name", "").strip())
+    auto_create = body.get("create", False)
+    if not path_str:
+        return bad(handler, "path is required")
+    try:
+        from api.workspace import _remote_terminal_workspace_candidate, _resolve_path
+        from api.profiles import get_active_profile_name
+        active_profile = get_active_profile_name()
+        remote_candidate = _remote_terminal_workspace_candidate(path_str, profile=active_profile)
+        candidate = _resolve_path(path_str, profile=active_profile)
+    except (ValueError, OSError, RuntimeError) as e:
+        return bad(handler, f"Invalid path: {_sanitize_error(e)}")
+    if remote_candidate is not None:
+        return bad(handler, "Remote terminal paths cannot be registered as Hermes Projects")
+    if _is_blocked_system_path(candidate):
+        _home = _home_path()
+        if not (_home != Path("/") and (candidate == _home or _is_within(candidate, _home))):
+            return bad(handler, f"Path points to a system directory: {candidate}")
+    # Fail BEFORE any side effect (mkdir, local save) when the native Projects
+    # manager is unreachable — a fresh profile with no projects.db is fine (the
+    # native manager initializes it), but no-manager installs must not be left
+    # with an orphan directory and a half-saved workspace.
+    from api.projects_bridge import projects_write_supported
+    if not projects_write_supported():
+        return bad(handler, "Hermes Projects are not available for this install (hermes_cli not reachable)")
+    if auto_create:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except (OSError, PermissionError) as e:
+            return bad(handler, f"Could not create directory: {_sanitize_error(e)}")
+    try:
+        p = validate_workspace_to_add(path_str, profile=active_profile)
+    except ValueError as e:
+        return bad(handler, str(e))
+    project_name = name or p.name
+    # 1) Register in projects.db (authoritative store shared with Desktop/CLI).
+    from api.projects_bridge import create_hermes_project
+    try:
+        project = create_hermes_project(str(p), project_name)
+    except ValueError as e:
+        # Path already belongs to another project: not fatal for the workspace
+        # half of the operation — surface it but continue.
+        project = {"error": str(e)}
+    except RuntimeError as e:
+        # Directory may exist from auto_create above, but no workspace was
+        # saved and no project registered: the operation is cleanly retryable.
+        return bad(handler, _sanitize_error(e))
+    # 2) Ensure the local picker list has it too (harmless if the read bridge
+    # already surfaces it; save_workspaces dedupe keeps this cheap).
+    from api.projects_bridge import merge_hermes_projects
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
+    if not any(w["path"] == str(p) for w in wss):
+        wss.append({"path": str(p), "name": project_name})
+        try:
+            save_workspaces(wss, profile=active_profile)
+        except TypeError:
+            save_workspaces(wss)
+    try:
+        merged = merge_hermes_projects(load_workspaces(profile=active_profile))
+    except Exception:
+        merged = wss
+    return j(handler, {"ok": True, "project": project, "workspaces": merged})
+
+
 def _handle_workspace_remove(handler, body):
     path_str = body.get("path", "").strip()
     if not path_str:
         return bad(handler, "path is required")
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
+    # Resolve once and use the same string for the local filter and the DB
+    # archive: the bridge normalizes (abspath/expanduser) while the local
+    # filter was an exact match, so a "~/x" or trailing-slash variant could
+    # archive the shared project while leaving the local entry behind.
+    import os as _os
+    resolved_path = _os.path.abspath(_os.path.expanduser(path_str)).rstrip("/\\")
     try:
         wss = load_workspaces(profile=active_profile)
     except TypeError:
         wss = load_workspaces()
-    wss = [w for w in wss if w["path"] != path_str]
+    def _same_path(a: str, b: str) -> bool:
+        return _os.path.abspath(_os.path.expanduser(str(a).strip())).rstrip("/\\") == resolved_path
+    wss = [w for w in wss if not _same_path(w["path"], path_str)]
     try:
         save_workspaces(wss, profile=active_profile)
     except TypeError:
         save_workspaces(wss)
+    # #5763 read bridge: projects.db re-appends its projects on every list
+    # poll, so removing the local workspace alone makes the delete appear to
+    # do nothing. Archive the owning DB project too (fail-safe, never raises).
+    try:
+        from api.projects_bridge import archive_hermes_project
+        archive_hermes_project(resolved_path)
+    except Exception:
+        logger.debug("workspace remove: project archive failed for %s", resolved_path)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -28019,11 +28122,32 @@ def _handle_workspace_rename(handler, body):
             w["name"] = name
             break
     else:
-        return bad(handler, "Workspace not found", 404)
+        # Not in the local list: a DB-only project (created from Desktop/CLI)
+        # still appears in the picker via the read bridge — rename it in the
+        # DB, which is authoritative for the name of a path it owns.
+        from api.projects_bridge import merge_hermes_projects, rename_hermes_project
+        result = rename_hermes_project(path_str, name)
+        if not result.get("renamed"):
+            return bad(handler, "Workspace not found", 404)
+        try:
+            merged = merge_hermes_projects(load_workspaces(profile=active_profile))
+        except TypeError:
+            merged = merge_hermes_projects(load_workspaces())
+        except Exception:
+            merged = wss
+        return j(handler, {"ok": True, "workspaces": merged})
     try:
         save_workspaces(wss, profile=active_profile)
     except TypeError:
         save_workspaces(wss)
+    # #5763 read bridge: projects.db is authoritative for the name of a path
+    # it owns, so a local-only rename reverts on the next poll. Propagate to
+    # the DB (fail-safe, never raises).
+    try:
+        from api.projects_bridge import rename_hermes_project
+        rename_hermes_project(path_str, name)
+    except Exception:
+        logger.debug("workspace rename: project rename failed for %s", path_str)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -28044,13 +28168,30 @@ def _handle_workspace_reorder(handler, body):
     except TypeError:
         wss = load_workspaces()
     by_path = {w["path"]: w for w in wss}
-    # Build reordered list: given order first, then any omitted entries
+    # DB-only projects (projects.db, not in workspaces.json) appear in the
+    # picker via the read bridge; without a local row their dragged position
+    # cannot persist and the response silently drops them. Materialize a local
+    # row for any requested path the DB owns.
+    from api.projects_bridge import load_hermes_project_workspaces, merge_hermes_projects
+    import os as _os
+    def _norm(p: str) -> str:
+        return _os.path.abspath(_os.path.expanduser(str(p).strip())).rstrip("/\\")
+    db_by_path = {}
+    try:
+        db_by_path = {_norm(e["path"]): e for e in load_hermes_project_workspaces()}
+    except Exception:
+        pass
     reordered = []
     seen = set()
     for p in paths:
         p = p.strip()
         if p in by_path and p not in seen:
             reordered.append(by_path[p])
+            seen.add(p)
+        elif p not in seen and _norm(p) in db_by_path:
+            entry = db_by_path[_norm(p)]
+            row = {"path": entry["path"], "name": entry["name"]}
+            reordered.append(row)
             seen.add(p)
     # Append any workspaces not mentioned (safety net)
     for w in wss:
@@ -28061,7 +28202,13 @@ def _handle_workspace_reorder(handler, body):
     except TypeError:
         # Legacy signature (test doubles with single-arg lambdas, older forks).
         save_workspaces(reordered)
-    return j(handler, {"ok": True, "workspaces": reordered})
+    # Return the merged view so DB-only entries the caller never mentioned
+    # still appear (the picker renders this response directly).
+    try:
+        merged = merge_hermes_projects(reordered)
+    except Exception:
+        merged = reordered
+    return j(handler, {"ok": True, "workspaces": merged})
 
 
 def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
