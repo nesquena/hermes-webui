@@ -723,7 +723,9 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
-def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
+def get_config_for_profile_home(
+    profile_home: "Path | str | None", *, isolate_config_override: bool = False,
+) -> dict:
     """Return the config dict for an explicit profile home directory.
 
     The streaming agent runs on a detached worker thread that does NOT inherit
@@ -740,8 +742,14 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     the path the ambient resolver would pick (the common single-profile case),
     we return the cached ``get_config()`` to preserve in-memory overrides used
     by tests and runtime callers, and to honour an authoritative
-    ``HERMES_CONFIG_PATH`` override. Only when the session's profile home
-    diverges from the ambient path do we read the session profile's file
+    ``HERMES_CONFIG_PATH`` override. Session defaults and Gateway workers pass
+    ``isolate_config_override=True`` so a named profile never uses an override
+    outside its own home, even when request-local context selects that profile;
+    in that mode the root profile always uses an override that is not under
+    ``<root>/profiles``, whichever named profile is process-active.
+    Settings/workspace callers retain their ambient read/write authority.
+    When the session's profile home diverges from the ambient path or its
+    isolated override check rejects the ambient file, we read the profile file
     directly — a pure read with no global cache mutation, so it is race-free
     across concurrent sessions on different profiles. Divergent profiles stay
     isolated: a nonexistent home returns ``{}`` and an existing home without a
@@ -763,9 +771,27 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     # the aliased home would be bypassed in favor of a direct — wrong — read.
     target = _cfg_safe_resolve(target)
     try:
-        from api.profiles import get_active_hermes_home
+        from api.profiles import get_active_hermes_home, get_hermes_home_for_profile
 
-        if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
+        root_home = _cfg_safe_resolve(get_hermes_home_for_profile("default"))
+        override = os.getenv("HERMES_CONFIG_PATH")
+        override_path = _cfg_safe_resolve(Path(override).expanduser()) if override else None
+        # An external override is the root profile's config whichever named
+        # profile is process-active, unless it lives under a named profile home.
+        if (
+            isolate_config_override and override_path is not None
+            and target == root_home
+            and not override_path.is_relative_to(root_home / "profiles")
+        ):
+            return get_config()
+        override_matches = (
+            not isolate_config_override
+            or override_path is None
+            or target == root_home
+            or override_path.is_relative_to(target)
+        )
+        active_home = _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser())
+        if override_matches and active_home == target:
             return get_config()
     except Exception:
         pass
@@ -775,7 +801,11 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     # whose directory doesn't physically exist yet (fresh install, monkeypatched
     # cfg) must still resolve through get_config(), not return {} (#4516 gate).
     try:
-        if _cfg_safe_resolve(_get_config_path().parent) == target:
+        config_path = _cfg_safe_resolve(_get_config_path())
+        if config_path.parent == target or (
+            isolate_config_override and target != root_home
+            and config_path.is_relative_to(target)
+        ):
             return get_config()
     except Exception:
         pass
@@ -5938,14 +5968,48 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def resolve_session_reasoning_effort(
+    config_data,
+    *,
+    session_effort=None,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Resolve the effort used by one WebUI session for its next turn.
+
+    ``Session.reasoning_effort`` is authoritative when present, including the
+    empty string (provider default). Legacy sessions store ``None`` and inherit
+    the active profile's CLI-compatible ``agent.reasoning_effort`` value.
+    """
+    cfg = config_data if isinstance(config_data, dict) else {}
+    agent_cfg = cfg.get("agent", {}) if isinstance(cfg, dict) else {}
+    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    if session_effort is not None:
+        effort_raw = session_effort
+    return coerce_reasoning_effort_for_model(
+        effort_raw,
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
+_REASONING_EFFORT_UNSET = object()
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    effort_override=_REASONING_EFFORT_UNSET,
 ) -> dict:
-    """Return current reasoning configuration from the active profile's
-    config.yaml — the same source of truth the CLI reads from.
+    """Return current reasoning configuration for a model.
+
+    The active profile's config.yaml is the default (and remains the CLI source
+    of truth). ``effort_override`` lets a WebUI session supply its durable
+    per-session selection without changing capability resolution.
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
@@ -5956,6 +6020,8 @@ def get_reasoning_status(
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
     effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    if effort_override is not _REASONING_EFFORT_UNSET:
+        effort_raw = effort_override
 
     resolve_model = model_id
     resolve_provider = provider_id

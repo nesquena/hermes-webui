@@ -417,9 +417,7 @@ class TestReasoningConfigHelpers:
 # ── api/streaming.py — AIAgent receives reasoning_config ──────────────────────
 
 class TestStreamingReasoningWiring:
-    """Confirm api/streaming.py reads agent.reasoning_effort from config and
-    passes parsed reasoning_config to AIAgent (so effort changes take effect
-    on the next session)."""
+    """Confirm streaming resolves and passes the session's reasoning config."""
 
     def test_streaming_reads_reasoning_effort_from_config(self):
         src = read('api/streaming.py')
@@ -427,9 +425,14 @@ class TestStreamingReasoningWiring:
             "api/streaming.py must import parse_reasoning_effort to translate "
             "config.yaml agent.reasoning_effort into AIAgent reasoning_config"
         )
-        assert 'coerce_reasoning_effort_for_model' in src, (
-            "api/streaming.py must clamp/drop unsupported model-specific effort "
-            "levels before sending reasoning_config to the provider"
+        assert 'resolve_session_reasoning_effort' in src, (
+            "api/streaming.py must resolve the session preference through the "
+            "shared model-aware helper before sending it to the provider"
+        )
+        config_src = read('api/config.py')
+        assert 'coerce_reasoning_effort_for_model' in config_src, (
+            "the shared session effort resolver must clamp/drop unsupported "
+            "model-specific effort levels"
         )
         assert "reasoning_config" in src and "'reasoning_config' in _agent_params" in src, (
             "api/streaming.py must guard the reasoning_config kwarg with "

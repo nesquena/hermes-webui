@@ -61,7 +61,7 @@ from api.config import (
     warm_models_catalog_provenance_if_cold,
     load_settings,
     parse_reasoning_effort,
-    coerce_reasoning_effort_for_model,
+    resolve_session_reasoning_effort,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
@@ -12396,16 +12396,14 @@ def _run_agent_streaming(
             except Exception:
                 _max_tokens_cfg = None
 
-            # CLI-parity reasoning effort: read agent.reasoning_effort from the
-            # active profile's config.yaml (the same key the CLI writes via
-            # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
-            # the key is absent or invalid, pass None → agent uses its default.
+            # Prefer the session-owned effort so switching conversations restores
+            # the same runtime setting shown by the composer. Legacy sessions
+            # without that metadata continue to inherit the profile/CLI value.
             try:
-                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
-                _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
-                _effort = coerce_reasoning_effort_for_model(
-                    _effort_raw,
-                    resolved_model,
+                _effort = resolve_session_reasoning_effort(
+                    _cfg,
+                    session_effort=getattr(_session_meta, 'reasoning_effort', None),
+                    model_id=resolved_model,
                     provider_id=resolved_provider,
                     base_url=resolved_base_url,
                 )

@@ -14767,19 +14767,42 @@ def handle_get(handler, parsed) -> bool:
         return handle_transcribe_capability(handler)
 
     if parsed.path == "/api/reasoning":
-        # Current reasoning config (shared source of truth with the CLI —
-        # reads display.show_reasoning and agent.reasoning_effort from
-        # the active profile's config.yaml).
+        # Current reasoning config. The active profile config remains the
+        # CLI-compatible default; session_id selects a durable WebUI override.
         query = parse_qs(parsed.query)
         model_id = (query.get("model", [""])[0] or "").strip() or None
         provider_id = (query.get("provider", [""])[0] or "").strip() or None
         base_url = (query.get("base_url", [""])[0] or "").strip() or None
+        session_id = (query.get("session_id", [""])[0] or "").strip() or None
+        effort_kwargs = {}
+        if session_id:
+            if not _session_id_visible_to_request_profile(handler, session_id):
+                return True
+            try:
+                reasoning_session = get_session(session_id, metadata_only=True)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            session_effort = getattr(reasoning_session, "reasoning_effort", None)
+            if session_effort is None:
+                # Legacy session: fall back to the session profile's config,
+                # the same source both backends resolve at run time.
+                from api.profiles import get_hermes_home_for_profile
+
+                profile_cfg = get_config_for_profile_home(
+                    get_hermes_home_for_profile(getattr(reasoning_session, "profile", None)),
+                    isolate_config_override=True,
+                )
+                agent_cfg = profile_cfg.get("agent") if isinstance(profile_cfg, dict) else None
+                if isinstance(agent_cfg, dict):
+                    session_effort = agent_cfg.get("reasoning_effort")
+            effort_kwargs["effort_override"] = session_effort
         return j(
             handler,
             get_reasoning_status(
                 model_id=model_id,
                 provider_id=provider_id,
                 base_url=base_url,
+                **effort_kwargs,
             ),
         )
 
@@ -16354,6 +16377,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace=session.workspace,
                 model=session.model,
                 model_provider=session.model_provider,
+                reasoning_effort=getattr(session, "reasoning_effort", None),
                 messages=copy.deepcopy(session.messages),
                 tool_calls=copy.deepcopy(session.tool_calls),
                 # Reset ephemeral / per-session-instance flags. Duplicating an
@@ -16497,9 +16521,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/reasoning":
         # CLI-parity /reasoning handler — writes to the same config.yaml keys
-        # the CLI uses (display.show_reasoning, agent.reasoning_effort) so a
-        # preference set via WebUI is honoured in the terminal REPL and vice
-        # versa.  Body is one of:
+        # the CLI uses and, when session_id is supplied, records the session
+        # override so conversation switches restore it. The profile default
+        # set via WebUI is still honoured in the terminal REPL and vice versa.
+        # Body is one of:
         #   {"display": "show"|"hide"|"on"|"off"}   → display.show_reasoning
         #   {"effort":  "none"|"minimal"|"low"|"medium"|"high"|"xhigh"}
         #                                            → agent.reasoning_effort
@@ -16517,15 +16542,30 @@ def handle_post(handler, parsed) -> bool:
                 model_id = str(body.get("model") or "").strip() or None
                 provider_id = str(body.get("provider") or "").strip() or None
                 base_url = str(body.get("base_url") or "").strip() or None
-                return j(
-                    handler,
-                    set_reasoning_effort(
-                        effort,
-                        model_id=model_id,
-                        provider_id=provider_id,
-                        base_url=base_url,
-                    ),
+                session_id = str(body.get("session_id") or "").strip() or None
+                reasoning_session = None
+                if session_id:
+                    try:
+                        reasoning_session = _get_or_materialize_session(session_id)
+                    except KeyError:
+                        return bad(handler, "Session not found", 404)
+                    except PermissionError:
+                        return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
+                status = set_reasoning_effort(
+                    effort,
+                    model_id=model_id,
+                    provider_id=provider_id,
+                    base_url=base_url,
                 )
+                if reasoning_session is not None:
+                    with _get_session_agent_lock(session_id):
+                        reasoning_session.reasoning_effort = str(effort or "").strip().lower()
+                        reasoning_session.save()
+                    # Cache eviction can commit agent lifecycle state and may do
+                    # provider I/O, so keep it outside the session mutation lock.
+                    from api.config import _evict_session_agent
+                    _evict_session_agent(session_id)
+                return j(handler, status)
             return bad(handler, "reasoning: must supply 'display' or 'effort'")
         except ValueError as e:
             return bad(handler, str(e))
@@ -17274,6 +17314,7 @@ def handle_post(handler, parsed) -> bool:
             workspace=source.workspace,
             model=source.model,
             model_provider=getattr(source, "model_provider", None),
+            reasoning_effort=getattr(source, "reasoning_effort", None),
             profile=getattr(source, "profile", None),
             title=branch_title,
             messages=forked_messages,
@@ -25636,6 +25677,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 workspace=getattr(source, "workspace", get_last_workspace()),
                 model=getattr(source, "model", None),
                 model_provider=getattr(source, "model_provider", None),
+                reasoning_effort=getattr(source, "reasoning_effort", None),
                 messages=[],
                 tool_calls=[],
                 pinned=False,
@@ -30700,10 +30742,20 @@ def _handle_session_import(handler, body):
     except (TypeError, ValueError) as e:
         return bad(handler, str(e))
     model = body.get("model", DEFAULT_MODEL)
+    reasoning_effort = body.get("reasoning_effort")
+    if reasoning_effort is not None:
+        reasoning_effort = str(reasoning_effort or "").strip().lower()
+        if (
+            reasoning_effort
+            and reasoning_effort != "none"
+            and reasoning_effort not in api_config.VALID_REASONING_EFFORTS
+        ):
+            return bad(handler, "Invalid reasoning_effort")
     s = Session(
         title=title,
         workspace=workspace,
         model=model,
+        reasoning_effort=reasoning_effort,
         messages=messages,
         tool_calls=strip_public_internal_fields(raw_tool_calls),
         profile=get_active_profile_name(),
