@@ -26,6 +26,11 @@
 
 ### Performance
 
+- **The all-profiles session list no longer computes every profile's skill counts.** Listing
+  sessions across all profiles (`/api/sessions?all_profiles=1`) called the profile-picker builder
+  only to learn the profile names, which also counted every profile's skills. It now adds the
+  active profile, the root profile and one entry per directory under the profiles root directly.
+  The scanned profiles, their labels and the cache key are unchanged. (#7973 by @ybai08, part of #7940)
 - **Reconnect, settle, cancel and undo no longer re-download the whole transcript.** Six recovery
   paths (offline/bfcache refresh, stream-end settle, cancel sync, `/compress` preflight, `/retry` and
   `/undo`) sent a bare `GET /api/session` that re-walked, re-redacted and re-serialized every row. The
@@ -69,6 +74,17 @@
 
 ### Fixed
 
+- **Clarify questions work with Agents that pass the batch as `questions=`.** Some Hermes Agent builds call the
+  WebUI clarify callback as `callback("", None, questions=[...])` instead of `callback([...])`. The adapter only
+  recognised the positional form, so it showed an empty single question and returned a plain string the Agent
+  could not map back to its questions. It now accepts the batch from `questions=` too; the positional batch and the
+  legacy `callback(question, choices)` forms are unchanged. (#7980 by @HarukiTakehata)
+- **Hermes Desktop files WebUI sessions under their workspace instead of "Home".** The Agent creates the
+  `state.db` row for a WebUI turn but only stamps `cwd` for CLI sources. WebUI now writes the session's
+  workspace into `sessions.cwd` through the Agent's `update_session_cwd` when the workspace changes and at
+  the end of every turn. It only updates an existing row whose source is `webui` (never a CLI-owned row),
+  runs off the request path so a busy `state.db` never delays a turn, and is skipped on Agents without
+  `update_session_cwd`. It does not depend on the `sync_to_insights` setting. (#7918 by @AndreaB321)
 - **Foldables, tablets and narrow windows (641-900px) get a usable layout.** In that band the workspace files toggle
   did nothing (the panel stayed hidden), tapping the toggle while the panel was open could leave it stuck open, and the
   conversation sidebar squeezed the chat. The files panel now opens as a slide-over from the right (300px, the pattern
@@ -200,6 +216,11 @@
   off-screen when closed, so tabbing from the composer walked into its invisible buttons and could
   open the hidden file picker. The closed drawer is now out of the tab order and ignores taps; the
   slide animation and the open drawer are unchanged. Thanks @happy5318. (#7866, closes #7713)
+
+- **The conversation-lifecycle check catches a reload that drops the terminal row's clock again.** The minute-boundary
+  flake fix compared the settled and reloaded terminal rows with the trailing clock stripped, so a reload that lost
+  the clock entirely also passed. The check now compares the row label and requires a clock on both sides, while
+  still allowing the clock value to differ, and it rejects empty row ids. Test-only. Thanks @happy5318. (#7808)
 
 - **The conversation-lifecycle browser check no longer flakes at a minute boundary.** It compared a
   settled terminal row's text with the same row after a reload, and the trailing rendered clock

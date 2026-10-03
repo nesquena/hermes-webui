@@ -16854,6 +16854,18 @@ def handle_post(handler, parsed) -> bool:
                 close_terminal(body["session_id"])
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
+            # Keep state.db's cwd in step with the new workspace so clients that
+            # group by cwd (Hermes Desktop) move the session with it. No-op when
+            # the session has no state.db row yet (never sent a message).
+            # Background: SessionDB retries for ~20 s on a busy state.db and the
+            # response must not wait for optional metadata.
+            try:
+                from api.state_sync import sync_session_cwd_background
+                sync_session_cwd_background(
+                    lambda _sid=s.session_id: _current_cwd_sync_target(_sid)
+                )
+            except Exception:
+                logger.debug("Failed to schedule session cwd sync after workspace update")
         set_last_workspace(new_ws, profile=getattr(s, "profile", None))
         return j(
             handler,
@@ -26427,6 +26439,24 @@ def _normalize_chat_attachments(raw_attachments):
     return normalized
 
 
+def _current_cwd_sync_target(sid):
+    """Resolve ``(session_id, workspace, profile)`` for a delayed cwd sync.
+
+    Runs when the background write executes, not when it is scheduled. A
+    ``Session`` captured at schedule time can be replaced in ``SESSIONS`` (LRU
+    eviction, disk-ahead reload, metadata-stub upgrade), so the current object
+    is looked up by id under the per-session agent lock, the same way the
+    streaming teardown does. Returns ``None`` (skip the write) when the session
+    no longer resolves.
+    """
+    with _get_session_agent_lock(sid):
+        try:
+            cur = get_session(sid)
+        except KeyError:
+            return None
+        return (cur.session_id, cur.workspace, getattr(cur, "profile", None))
+
+
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
     stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
@@ -26595,6 +26625,16 @@ def _handle_chat_sync(handler, body):
                 persist_user_message=msg,
             )
     finally:
+        # Same as the streaming worker's teardown: mirror the workspace into the
+        # Agent-created state.db row on every exit, including a raised turn.
+        try:
+            from api.state_sync import sync_session_cwd_background
+
+            sync_session_cwd_background(
+                lambda _sid=s.session_id: _current_cwd_sync_target(_sid)
+            )
+        except Exception:
+            logger.debug("Failed to schedule session cwd sync", exc_info=True)
         with _ENV_LOCK:
             if old_cwd is None:
                 os.environ.pop("TERMINAL_CWD", None)

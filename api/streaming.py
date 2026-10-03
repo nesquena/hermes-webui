@@ -11532,13 +11532,18 @@ def _run_agent_streaming(
         def _clarify_callback(*args, **kwargs):
             """Accept both Hermes Agent clarify callback contracts.
 
-            Current agents call ``callback(questions)`` and expect a
-            ``{answers, outcome, notice?}`` dict; older agents call
-            ``callback(question, choices)`` and expect the answer string.
+            Current agents pass normalized questions either as the sole
+            positional argument or through ``questions=`` beside legacy
+            positional slots, and expect an ``{answers, outcome, notice?}``
+            dict. Older agents call ``callback(question, choices)`` and expect
+            the answer string.
             """
-            if len(args) == 1 and not kwargs and isinstance(args[0], (list, tuple)):
+            questions = kwargs.get('questions')
+            if not isinstance(questions, (list, tuple)):
+                questions = args[0] if len(args) == 1 and not kwargs else None
+            if isinstance(questions, (list, tuple)):
                 return _clarify_batch_reply(
-                    args[0],
+                    questions,
                     lambda question, choices: _clarify_ask_one(
                         question, choices, session_id, cancel_event
                     ),
@@ -15156,6 +15161,33 @@ def _run_agent_streaming(
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
+        # Mirror the workspace into state.db sessions.cwd on EVERY exit (success,
+        # provider error, exception, cancel): the Agent creates the row during
+        # run_conversation() but only stamps cwd for CLI sources, so Desktop
+        # filed WebUI sessions under "Home". Never creates a row, and only
+        # touches rows whose source is "webui".
+        # The worker-held ``s`` may be a detached snapshot (cancel admitted a
+        # successor, or /api/session/update moved the workspace while this
+        # worker unwound), so the CURRENT session is resolved under the
+        # canonical lock when the write runs, failing closed when it cannot be
+        # resolved. The write itself runs in the background: SessionDB retries
+        # for up to ~20 s on a busy state.db and must not delay cleanup (the
+        # run stays registered until then and the next send would get a 409).
+        if s is not None and agent is not None:
+            try:
+                from api.state_sync import sync_session_cwd_background
+                _cwd_lock = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
+
+                def _resolve_cwd_target(_s=s, _lock=_cwd_lock):
+                    with _lock:
+                        _cur = _resolve_current_session_for_write(_s)
+                        if _cur is None:
+                            return None
+                        return (_cur.session_id, _cur.workspace, getattr(_cur, 'profile', None))
+
+                sync_session_cwd_background(_resolve_cwd_target)
+            except Exception:
+                logger.debug("Failed to schedule session cwd sync", exc_info=True)
         _clear_thread_env()  # TD1: always clear thread-local context
         if _streaming_cron_profile_home_token is not None:
             _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)

@@ -2627,7 +2627,8 @@ async function newSession(flash, options={}){
       if(_dirP&&typeof _dirP.catch==='function') _dirP.catch(()=>{});
     }
     // Refresh sidebar to include the newly created session (#3874).
-    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    // Force the new row/highlight to paint even while the sidebar is hovered.
+    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session',{force:true})).catch(()=>{})}
     }finally{
       _setNewSessionPending(false);
       if(focusRestoredComposerAfterAbort
