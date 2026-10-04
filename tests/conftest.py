@@ -176,6 +176,16 @@ os.environ['HERMES_WEBUI_STATE_DIR'] = str(TEST_STATE_DIR)
 os.environ['HERMES_WEBUI_DEFAULT_WORKSPACE'] = str(TEST_WORKSPACE)
 os.environ['HERMES_HOME'] = str(TEST_STATE_DIR)
 os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
+# The real hermes-agent keeps its dependency state under the active HERMES_HOME.
+# With the temp home above, a test server that boots the agent's store
+# interpreter finds nothing committed. Its lazy source-update path then synced
+# a full environment INTO the test home and republished the SHARED install's
+# launchers (``hermes-agent/.hermes/bin/hermes``) against the temp interpreter.
+# Those launchers broke once the temp dir was removed. Lazy installs stay off
+# here, and the server runs the committed environment's own venv interpreter
+# (see VENV_PYTHON below), so tests never sync dependencies or rewrite
+# production launchers.
+os.environ['HERMES_DISABLE_LAZY_INSTALLS'] = '1'
 # Hermes Agent sessions may inherit HERMES_CONFIG_PATH pointing at the live
 # ~/.hermes/config.yaml.  Override it before any product modules are imported so
 # tests that read/write config.yaml stay inside the isolated test home.
@@ -405,6 +415,39 @@ def _discover_python(agent_dir) -> str:
 
 HERMES_AGENT = _discover_agent_dir()
 VENV_PYTHON  = _discover_python(HERMES_AGENT)
+
+
+def _committed_agent_venv_python(agent_dir, python):
+    """The agent's PM-committed venv interpreter under the real ~/.hermes, else None.
+
+    Read-only: asks the agent's own resolver with the production home. It
+    never syncs or installs anything.
+    """
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; "
+            "from pm.environments import committed_venv; "
+            "v = committed_venv(Path(sys.argv[1]).resolve()); print(v or '')")
+    try:
+        out = subprocess.run(
+            [python, '-I', '-c', code, str(agent_dir)],
+            env={'HERMES_HOME': str(_PROD_HERMES_HOME), 'HOME': str(HOME), 'PATH': os.environ.get('PATH', '')},
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    candidate = pathlib.Path(out) / 'bin' / 'python' if out else None
+    return str(candidate) if candidate is not None and candidate.exists() else None
+
+
+# A bare store interpreter (not a venv) has no packages of its own; booting the
+# agent with it under the temp HERMES_HOME triggers the dependency sync and
+# launcher republish described above. Use the committed venv interpreter.
+if HERMES_AGENT and not (pathlib.Path(VENV_PYTHON).parent.parent / 'pyvenv.cfg').is_file():
+    _committed_python = _committed_agent_venv_python(HERMES_AGENT, VENV_PYTHON)
+    if _committed_python:
+        VENV_PYTHON = _committed_python
+        # Tests that spawn the agent directly read HERMES_WEBUI_PYTHON. Keep them on
+        # the same committed interpreter as the server.
+        os.environ['HERMES_WEBUI_PYTHON'] = VENV_PYTHON
 
 # Work dir: agent dir if found, else repo root
 WORKDIR = str(HERMES_AGENT) if HERMES_AGENT else str(REPO_ROOT)
