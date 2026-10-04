@@ -1949,6 +1949,7 @@ def _should_retry_silent_failure(
     reasoning_produced: bool = False,
     tool_limit_reached: bool = False,
     compression_rotated: bool = False,
+    echoed_context: bool = False,
 ) -> bool:
     """Return True when a turn failed *silently* and deserves one retry.
 
@@ -1970,6 +1971,10 @@ def _should_retry_silent_failure(
     compression (the retry machinery would target the stale parent session).
     Only a turn that produced nothing at all — no tool call, no tool result, no
     reasoning, no tool-limit exit, no compression rotation — is retried.
+
+    ``echoed_context`` covers the attempt that handed the pre-turn context back
+    byte-for-byte: re-sending it to the same provider reproduces it, so there is
+    nothing to retry.
     """
     return (
         not last_err
@@ -1980,6 +1985,7 @@ def _should_retry_silent_failure(
         and not reasoning_produced
         and not tool_limit_reached
         and not compression_rotated
+        and not echoed_context
     )
 
 
@@ -1988,10 +1994,11 @@ def _current_turn_tool_activity(previous_context, result_messages) -> bool:
 
     Scans the current-turn suffix for a tool result row, an assistant
     ``tool_calls`` payload, or a live ``_partial_tool_calls`` marker. When the
-    last attempt's messages are not a simple extension of the previous context
-    the check falls back to the whole list: over-reporting tool activity only
-    suppresses a retry (the safe direction), while under-reporting would replay
-    a side effect that already happened.
+    result does not extend the previous context the check falls back to the
+    whole list: over-reporting tool activity only suppresses a retry (the safe
+    direction), while under-reporting would replay a side effect that already
+    happened. When the result matches the previous context exactly there is no
+    suffix of its own — the worker's live tool-progress signal covers that case.
     """
     messages = list(result_messages or [])
     previous = list(previous_context or [])
@@ -2021,6 +2028,27 @@ def _turn_produced_reasoning(reasoning_segments, reasoning_buffer) -> bool:
             return True
     buffer = reasoning_buffer[0] if reasoning_buffer else ''
     return bool(isinstance(buffer, str) and buffer.strip())
+
+
+def _current_turn_produced_a_row(previous_context, result_messages) -> bool:
+    """Return True when the attempt's result carries at least one row of its own.
+
+    A result that is byte-for-byte the pre-turn context means the provider
+    handed back exactly what it was given. There is no candidate turn to
+    replay, and re-sending the identical request to the same provider
+    reproduces the identical result — which is also why the retry's own
+    acceptance check ("the retry must add an answer the seed did not hold")
+    would reject it. Skip the retry rather than spend a provider call on it.
+    """
+    messages = list(result_messages or [])
+    previous = list(previous_context or [])
+    if not previous:
+        return bool(messages)
+    if len(messages) < len(previous):
+        return True
+    if _messages_have_prefix(messages, previous):
+        return len(messages) > len(previous)
+    return True
 
 
 def _silent_retry_added_a_new_answer(result, previous_context) -> bool:
@@ -14810,6 +14838,9 @@ def _run_agent_streaming(
                         tool_limit_reached=bool(_tool_limit_reached),
                         compression_rotated=(
                             _compression_continuation_session_id is not None
+                        ),
+                        echoed_context=not _current_turn_produced_a_row(
+                            _previous_context_messages, _all_result_messages,
                         ),
                     )
                     if _is_quota:

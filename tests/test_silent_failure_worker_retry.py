@@ -85,6 +85,7 @@ class _LiveToolProgressAgent:
 
     instances = []
     result_messages = []
+    emit_tool_progress = True
 
     def __init__(self, **kwargs):
         self.session_id = kwargs.get("session_id")
@@ -105,7 +106,7 @@ class _LiveToolProgressAgent:
 
     def run_conversation(self, **_kwargs):
         self.runs += 1
-        if self.tool_progress_callback is not None:
+        if self.emit_tool_progress and self.tool_progress_callback is not None:
             self.tool_progress_callback("tool.started", "shell", "", "{}")
         return {"messages": [dict(row) for row in self.result_messages]}
 
@@ -136,6 +137,26 @@ def test_persisted_tool_rows_do_not_replay_the_turn(worker_scene, monkeypatch):
     )
     tool_rows = [row for row in scene.session.messages if row.get("role") == "tool"]
     assert len(tool_rows) == 1, "the tool round must not be executed a second time"
+
+
+def test_an_echoed_transcript_is_not_retried(worker_scene, monkeypatch):
+    """A result identical to the pre-turn context is not a retryable cut."""
+    scene = worker_scene
+    echoed = [_user_row(), {"role": "assistant", "content": "Earlier answer"}]
+    scene.session.messages = [dict(row) for row in echoed]
+    scene.session.context_messages = [dict(row) for row in echoed]
+    _LiveToolProgressAgent.instances = []
+    _LiveToolProgressAgent.result_messages = echoed
+    _LiveToolProgressAgent.emit_tool_progress = False
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _LiveToolProgressAgent)
+    try:
+        scene.run()
+    finally:
+        _LiveToolProgressAgent.emit_tool_progress = True
+
+    assert [agent.runs for agent in _LiveToolProgressAgent.instances] == [1], (
+        "re-sending an identical context cannot change the result"
+    )
 
 
 def test_tool_limit_exit_keeps_its_own_card(worker_scene):

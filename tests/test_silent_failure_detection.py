@@ -14,6 +14,7 @@ from api.streaming import (
     _has_new_assistant_reply,
     _should_retry_silent_failure,
     _current_turn_tool_activity,
+    _current_turn_produced_a_row,
     _turn_produced_reasoning,
 )
 
@@ -249,9 +250,46 @@ class TestShouldRetrySilentFailure:
         assert self._retry(compression_rotated=True) is False
         assert self._retry(compression_rotated=False) is True
 
-    def test_the_four_new_guards_default_to_permissive(self):
+    def test_an_echoed_context_blocks_the_retry_only_when_present(self):
+        """Re-sending a byte-identical context reproduces a byte-identical result."""
+        assert self._retry(echoed_context=True) is False
+        assert self._retry(echoed_context=False) is True
+
+    def test_the_new_guards_default_to_permissive(self):
         """The guards are opt-in: the pre-existing gate shape is unchanged."""
         assert self._retry() is True
+
+
+# ── Echoed-context probe ─────────────────────────────────────────────────────
+
+class TestCurrentTurnProducedARow:
+    """Does the attempt's result carry a row of its own?"""
+
+    def test_an_identical_transcript_reports_no_row(self):
+        previous = [_msg("user", "q"), _msg("assistant", "a")]
+        assert _current_turn_produced_a_row(previous, list(previous)) is False
+
+    def test_an_extended_transcript_reports_a_row(self):
+        previous = [_msg("user", "q")]
+        messages = previous + [_msg("assistant", "a")]
+        assert _current_turn_produced_a_row(previous, messages) is True
+
+    def test_an_empty_previous_context_reports_a_row_when_anything_came_back(self):
+        assert _current_turn_produced_a_row([], [_msg("user", "q")]) is True
+
+    def test_nothing_at_all_reports_no_row(self):
+        assert _current_turn_produced_a_row([], []) is False
+        assert _current_turn_produced_a_row(None, None) is False
+
+    def test_a_shrunk_transcript_is_not_an_echo(self):
+        """A compacted result is not the input handed back."""
+        previous = [_msg("user", "q"), _msg("assistant", "a")]
+        assert _current_turn_produced_a_row(previous, previous[:1]) is True
+
+    def test_a_diverged_transcript_is_not_an_echo(self):
+        previous = [_msg("user", "q"), _msg("assistant", "a")]
+        diverged = [_msg("user", "q"), _msg("assistant", "a different answer")]
+        assert _current_turn_produced_a_row(previous, diverged) is True
 
 
 # ── Current-turn tool activity ───────────────────────────────────────────────
