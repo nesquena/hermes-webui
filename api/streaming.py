@@ -34,6 +34,8 @@ from api.config import (
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
+    stream_owned_registries,
+    release_stream_owned_registries,
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
@@ -10611,17 +10613,13 @@ def _run_agent_streaming(
                     backend=WEBUI_LOCAL_CHAT_BACKEND,
                 )
     if q is None:
-        # The stream was cancelled before the worker started; the route layer
-        # already registered the stream owner, so release it here to avoid
-        # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
-        unregister_stream_owner(stream_id)
-        try:
-            clear_session_writeback_owner_if_owned(session_id, stream_id)
-        except Exception:
-            logger.debug(
-                "Failed to clear session writeback owner for stream %s", stream_id,
-                exc_info=True,
-            )
+        # The stream was cancelled (or cleared as an orphan) before this worker
+        # was admitted, so no teardown finally will ever run for it: release
+        # EVERY registry the route layer registered for the stream, not just the
+        # owner and writeback rows. STREAM_GOAL_RELATED is written before worker
+        # admission (api/routes.py `_start_chat_stream_for_session`), so a
+        # pre-start cancellation otherwise strands it for the process lifetime.
+        release_stream_owned_registries(stream_id, session_id=session_id)
         return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
@@ -15211,14 +15209,14 @@ def _run_agent_streaming(
         # restore above.
         _reset_turn_session_identity(_turn_session_identity_tokens)
         with STREAMS_LOCK:
-            STREAMS.pop(stream_id, None)
-            CANCEL_FLAGS.pop(stream_id, None)
-            AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
-            STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
-            STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
-            STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
-            STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
-            STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
+            # ONE list for every per-stream registry (#7302 re-gate): this is the
+            # same tuple the chat/start orphan recovery releases, so a registry
+            # added later cannot be popped here and forgotten there (or the
+            # reverse). Per-registry cleanup notes (partial text #893, reasoning
+            # #1361 §A, tool calls #1361 §B, goal flag #1932, event id stage-364)
+            # live with the registries in api/config.py.
+            for _stream_registry in stream_owned_registries():
+                _stream_registry.pop(stream_id, None)
             unregister_active_run(stream_id)
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).

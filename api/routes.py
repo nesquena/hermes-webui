@@ -22419,6 +22419,25 @@ def _handle_session_sse_stream(handler, parsed):
                 _sse_keepalive(handler)
                 continue
             if payload is None:
+                # End-of-stream sentinel: the channel was deliberately closed
+                # (SessionChannel.close(), reaper or owner). Simply returning here
+                # does NOT end the response: under HTTP/1.1 keep-alive, with no
+                # Content-Length and no chunked framing, the server keeps the
+                # socket open, the browser's EventSource never sees EOF and stays
+                # attached to a channel the reaper already removed -- silently
+                # missing every later event (the "tab stops receiving updates"
+                # defect this change fixes). Flag the socket so the server closes
+                # it after this handler returns and the client reconnects onto the
+                # replacement channel. The #3103 note still holds: never advertise
+                # `Connection: close` up front (reconnect storms); this applies
+                # only to a deliberate end-of-channel.
+                try:
+                    handler.close_connection = True
+                except Exception:
+                    logger.debug(
+                        "session-stream: could not flag socket close for %s", sid,
+                        exc_info=True,
+                    )
                 break
             event_name, data = payload
             _sse(handler, event_name, data)
@@ -24208,6 +24227,29 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+def _pending_turn_in_registration_window(session) -> bool:
+    """Return whether a pending turn is still inside its registration grace window.
+
+    ``active_stream_id`` is published before the SSE channel is registered and
+    before the worker lands in ``ACTIVE_RUNS``, so a very fresh pending turn must
+    keep blocking duplicate chat/start requests even though neither registry
+    shows anything yet. Past the grace window a pending turn is no evidence of a
+    live worker: it is what a crashed turn leaves behind.
+    """
+    if not getattr(session, "pending_user_message", None):
+        return False
+    try:
+        from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
+        grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
+    except Exception:
+        grace_seconds = 30.0
+    try:
+        pending_started_at = float(getattr(session, "pending_started_at", None) or 0)
+    except Exception:
+        pending_started_at = 0.0
+    return bool(pending_started_at and time.time() - pending_started_at < grace_seconds)
+
+
 def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     """Return whether an active_stream_id still owns this session's next turn.
 
@@ -24215,32 +24257,96 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     very fresh pending turn must also block duplicate chat_start requests. If we
     only check STREAMS here, a second request can race through the registration
     gap and overwrite the sidecar owner.
+
+    STREAMS membership alone is not evidence of a live turn: the entry is only
+    removed by the worker's own finalization, so a hard-killed or wedged worker
+    leaves it behind and every later chat/start for that session is refused with
+    ``409 session already has an active stream`` — for hours, since the SSE
+    channel reaper never touches this registry. The authoritative liveness check
+    is ``ACTIVE_RUNS`` (keyed by ``stream_id``, unregistered in the worker's
+    outer ``finally``); the fresh-pending guard covers the window between stream
+    registration and worker registration. When a stream is registered, no worker
+    is live and no pending turn is inside that window, it is an orphan: drop it
+    from both registries and let the caller admit a fresh turn.
     """
     if not stream_id:
         return False
+    orphan_released = False
     with STREAMS_LOCK:
         if stream_id in STREAMS:
-            return True
+            try:
+                with ACTIVE_RUNS_LOCK:
+                    worker_alive = stream_id in (ACTIVE_RUNS or {})
+            except Exception:
+                # Fail closed: an unreadable liveness registry must not be
+                # mistaken for proof of an orphan.
+                return True
+            if worker_alive:
+                return True
+            if _pending_turn_in_registration_window(session):
+                return True
+            # Confirmed orphan. Clear the WHOLE stream-owned state, not just the
+            # registry entry: a crashed or wedged worker never reaches its own
+            # teardown, so this stream's agent instance / cancel flag / partial
+            # and reasoning text / live tool calls / goal marker / last event id
+            # would otherwise stay allocated for the life of the process -- one
+            # stale set per recovered orphan. The set and the lock mirror the
+            # canonical teardown (api/streaming.py, api/gateway_chat.py).
+            # STREAMS_LOCK is already held and threading.Lock is not reentrant,
+            # so the entries are removed directly instead of by re-entering a
+            # helper. Lock order stays STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK,
+            # the order the rest of the lifecycle uses (never the reverse).
+            from api import config as _live_config
+            _orphan_session_id = getattr(session, "session_id", None)
+            # ONE call releases every registry the stream owns
+            # (the shared stream_owned_registries() list + both owner registries) -- the single
+            # teardown entry point, so this path can never clear a hand-picked
+            # subset again. The session writeback entry is compare-and-clear: a
+            # successor admitted after this orphan keeps its registry claim.
+            # STREAMS_LOCK is already held and threading.Lock is not reentrant.
+            try:
+                _live_config.release_stream_owned_registries(
+                    stream_id,
+                    session_id=_orphan_session_id,
+                    streams_lock_held=True,
+                )
+            except Exception:
+                logger.debug(
+                    "chat/start: could not release the stream-owned registries "
+                    "for orphan %s",
+                    stream_id,
+                    exc_info=True,
+                )
+            logger.info(
+                "chat/start: cleared orphaned stream %s for session %s "
+                "(no live worker, no pending turn in the registration window)",
+                stream_id,
+                _orphan_session_id or "?",
+            )
+            orphan_released = True
+    if orphan_released:
+        # Gateway-owned rows (run lifecycle / run id / endpoint) live in
+        # api/gateway_chat.py and are released through their no-op-safe
+        # lifecycle/waiter path, which must NOT run nested under STREAMS_LOCK:
+        # the canonical Gateway teardown releases that lock before the same step.
+        try:
+            from api.gateway_chat import release_gateway_stream_state
+
+            release_gateway_stream_state(stream_id)
+        except Exception:
+            logger.debug(
+                "chat/start: could not release the Gateway state for orphan %s",
+                stream_id,
+                exc_info=True,
+            )
+        return False
     try:
-        from api import config as _live_config
-        with _live_config.ACTIVE_RUNS_LOCK:
-            if stream_id in (_live_config.ACTIVE_RUNS or {}):
+        with ACTIVE_RUNS_LOCK:
+            if stream_id in (ACTIVE_RUNS or {}):
                 return True
     except Exception:
         pass
-    if getattr(session, "pending_user_message", None):
-        try:
-            from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
-            grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
-        except Exception:
-            grace_seconds = 30.0
-        try:
-            pending_started_at = float(getattr(session, "pending_started_at", None) or 0)
-        except Exception:
-            pending_started_at = 0.0
-        if pending_started_at and time.time() - pending_started_at < grace_seconds:
-            return True
-    return False
+    return _pending_turn_in_registration_window(session)
 
 
 def _local_agent_worker_kwargs(*, model_provider, goal_related: bool, moa_config) -> dict:
