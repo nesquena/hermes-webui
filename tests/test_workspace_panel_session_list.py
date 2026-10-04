@@ -181,18 +181,17 @@ class TestProjectDotPlacement:
             "ellipsis truncation. Dot must live in titleRow instead."
         )
 
-    def test_dot_placed_between_title_and_timestamp(self):
-        """The dot is appended AFTER title.appendChild and BEFORE ts append
-        — that ordering puts the dot between the title and the timestamp
-        in the flex row."""
+    def test_dot_placed_between_title_group_and_timestamp(self):
+        """The dot is appended after the constrained title/tag group and before
+        the timestamp, keeping all three as ordered flex-row siblings."""
         body = _extract_js_function_body(SESSIONS_JS, "_renderOneSession")
-        title_pos = body.find("titleRow.appendChild(title);")
+        title_group_pos = body.find("titleRow.appendChild(titleGroup);")
         dot_pos = body.find("titleRow.appendChild(dot);")
         ts_pos = body.find("titleRow.appendChild(ts);")
-        assert title_pos >= 0 and dot_pos >= 0 and ts_pos >= 0
-        assert title_pos < dot_pos < ts_pos, (
-            f"Order must be title → dot → ts in the title row "
-            f"(positions: {title_pos}, {dot_pos}, {ts_pos})"
+        assert title_group_pos >= 0 and dot_pos >= 0 and ts_pos >= 0
+        assert title_group_pos < dot_pos < ts_pos, (
+            f"Order must be title group → dot → ts in the title row "
+            f"(positions: {title_group_pos}, {dot_pos}, {ts_pos})"
         )
 
     def test_session_time_uses_flex_flow_not_absolute(self):
@@ -257,17 +256,17 @@ class TestProjectDotPlacement:
         padding-right selector. Touch devices (iPad, phone) see hover:none so
         they skip the @media (hover:hover) block below. Mouse devices see
         hover:hover and get the padding-right on hover.
-        streaming/unread/needs-attention/focus-within/menu-open expand to 40px for all devices."""
+        streaming/unread/needs-attention/keyboard-focus/menu-open expand to 40px for all devices."""
         # Touch-safe combined rule (no :hover in this one)
         sel = (
             ".session-item.streaming,.session-item.unread,"
             ".session-item.needs-attention,"
-            ".session-item:focus-within,"
+            ".session-item:has(:focus-visible),"
             ".session-item.menu-open"
         )
         idx = STYLE_CSS.find(sel)
         assert idx >= 0, (
-            "Combined streaming/unread/focus-within/menu-open padding rule not found"
+            "Combined streaming/unread/keyboard-focus/menu-open padding rule not found"
         )
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
         assert "padding-right:40px" in rule
