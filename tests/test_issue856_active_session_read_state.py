@@ -3,7 +3,24 @@
 from pathlib import Path
 
 
-MESSAGES_JS = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text(encoding="utf-8")
+REPO = Path(__file__).resolve().parents[1]
+MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+
+
+def _function_body(src: str, signature: str) -> str:
+    start = src.index(signature)
+    brace = src.index("{", start)
+    depth = 0
+    for i in range(brace, len(src)):
+        ch = src[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError(f"could not find body for {signature}")
 
 
 def test_messages_js_defines_active_session_viewed_helper():
@@ -51,3 +68,24 @@ def test_restore_and_error_paths_mark_active_session_as_viewed():
     assert "_markSessionViewed(activeSid" in error_block, (
         "_handleStreamError() must mark the active session as viewed"
     )
+
+
+def test_active_server_idle_row_overrides_stale_local_busy_sidebar_state():
+    effective = _function_body(SESSIONS_JS, "function _isSessionEffectivelyStreaming(s)")
+    idle_guard = _function_body(SESSIONS_JS, "function _isActiveSessionIdleForSidebar(s)")
+
+    assert "if (_isActiveSessionIdleForSidebar(s)) return false;" in effective
+    assert "_isSessionLocallyStreaming(s)" in effective
+
+    assert "S.session.session_id !== s.session_id" in idle_guard
+    assert "!_isServerIdleSessionRow(s)" in idle_guard
+    assert "stale local" in idle_guard
+    assert "S.busy flag must not keep the active sidebar row yellow forever (#856)" in idle_guard
+
+
+def test_optimistic_send_start_window_is_not_mistaken_for_stale_yellow_dot():
+    idle_guard = _function_body(SESSIONS_JS, "function _isActiveSessionIdleForSidebar(s)")
+
+    assert "typeof _sendInProgress !== 'undefined'" in idle_guard
+    assert "_sendInProgress && s.session_id === _sendInProgressSid" in idle_guard
+    assert "return false;" in idle_guard
