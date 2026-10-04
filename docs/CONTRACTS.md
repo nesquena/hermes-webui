@@ -106,6 +106,15 @@ contributor guidance; it does not change runtime behavior or CI gates.
   retarget or transient resolve fallback is always observed on the next call.
   Start here before widening this cache's scope or adding a similar
   call-scoped cache elsewhere (#7636).
+- [`docs/architecture/gateway-dual-store-display-merge.md`](architecture/gateway-dual-store-display-merge.md):
+  current contract for the chronological-union branch of
+  `_merged_session_messages_for_display()`: why a gateway-backed turn exists in
+  both the Agent store and the WebUI sidecar, which copy survives, the
+  identity checks that must hold before two rows are treated as one turn, and
+  the asymmetric lanes that decide whether display metadata, semantic payload,
+  or `api_content` may travel between them. Start here before changing
+  transcript dedupe, cross-store reconciliation, or anything that pairs rows
+  from the two stores (#7349).
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,
