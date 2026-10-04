@@ -659,6 +659,7 @@ def main() -> None:
         from api.background_process import start_drain_thread
         if start_drain_thread():
             print('[ok] bg_task_complete drain thread started', flush=True)
+        from api.gateway_delegation_wakeup import start_gateway_delegation_poller; start_gateway_delegation_poller()
     except Exception as e:
         print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
 
