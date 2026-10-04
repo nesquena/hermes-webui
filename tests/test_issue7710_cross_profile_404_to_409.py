@@ -74,6 +74,12 @@ def helper_scope():
         "get_session": lambda sid, metadata_only=True: scope["_resolve"](sid),
         # is_safe_session_id — accept anything that looks like a sid.
         "is_safe_session_id": lambda sid: bool(sid) and len(str(sid)) < 256,
+        # Isolation short-circuit (#6870): default OFF so the tests below keep
+        # driving the #7710 409/404 contract. Flipped on in the isolated test.
+        "_is_isolated_profile_mode": lambda: False,
+        "_is_profile_agnostic_session_id": lambda sid: str(sid or "").startswith(
+            "claude_code_"
+        ),
     }
     return scope
 
@@ -174,3 +180,61 @@ def test_source_emits_409_not_404_in_helper() -> None:
         "keep the 404 for the None-profile branch so the frontend "
         "self-heal still fires for actually-missing sids"
     )
+
+
+# ---------------------------------------------------------------------------
+# Isolated profile mode (#6870) — the 409 must not disclose a hidden transcript
+# ---------------------------------------------------------------------------
+
+
+def test_isolated_agnostic_id_returns_404_before_the_store_is_read(helper_scope) -> None:
+    """Under isolation a profile-agnostic id MUST 404 instead of 409.
+
+    The 409 names the owning profile, which would confirm both that the hidden
+    Claude Code transcript exists and who owns it. The rule is decided from the
+    id, so a stale sidecar is never read.
+    """
+    handler = _FakeHandler()
+    reads: list[str] = []
+
+    def _resolve(sid):
+        reads.append(sid)
+        return _FakeSession(profile="alpha")
+
+    helper_scope["_resolve"] = _resolve
+    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h: False
+    helper_scope["_is_isolated_profile_mode"] = lambda: True
+
+    _exec_helper(helper_scope)
+    fn = helper_scope["_session_id_visible_to_request_profile"]
+    assert fn(handler, "claude_code_abc123") is False
+    assert handler.writes == [(404, "Session not found")]
+    assert reads == []
+
+
+def test_isolated_agnostic_id_respects_emit_error_false(helper_scope) -> None:
+    """The exemption probe still gets a silent False under isolation."""
+    handler = _FakeHandler()
+    helper_scope["_resolve"] = lambda sid: _FakeSession(profile="alpha")
+    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h: False
+    helper_scope["_is_isolated_profile_mode"] = lambda: True
+
+    _exec_helper(helper_scope)
+    fn = helper_scope["_session_id_visible_to_request_profile"]
+    assert fn(handler, "claude_code_abc123", emit_error=False) is False
+    assert handler.writes == []
+
+
+def test_isolated_ordinary_id_keeps_the_409(helper_scope) -> None:
+    """Negative control: isolation does not flatten ordinary cross-profile 409s."""
+    handler = _FakeHandler()
+    helper_scope["_resolve"] = lambda sid: _FakeSession(profile="alpha")
+    helper_scope["_session_visible_to_active_profile"] = lambda session_profile, _h: False
+    helper_scope["_is_isolated_profile_mode"] = lambda: True
+
+    _exec_helper(helper_scope)
+    fn = helper_scope["_session_id_visible_to_request_profile"]
+    assert fn(handler, "sess-1") is False
+    status, body = handler.writes[0]
+    assert status == 409
+    assert body["code"] == "session_profile_mismatch"

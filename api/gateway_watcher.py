@@ -347,6 +347,30 @@ class GatewayWatcher:
                 except Exception:
                     logger.debug("Failed to send sentinel to dead subscriber")
 
+    def _attribute_owning_profile(self, sessions: list) -> list:
+        """Stamp this watcher's profile onto rows projected from its state.db.
+
+        The projection reads exactly one profile's ``state.db``, so its rows
+        never needed to name a profile. But ``/api/sessions/gateway/stream``
+        scopes every pushed event to the connection's active profile, and
+        ``_profiles_match`` coerces a missing profile to ``'default'`` — so
+        unstamped rows are dropped under every named profile and gateway
+        sessions silently stop updating live (#6889).
+
+        Only rows with no ``profile`` key are stamped: an explicit
+        ``profile: None`` marks a profile-agnostic external-agent row (Claude
+        Code / Codex) whose sidebar exemption must not be overwritten.
+        """
+        profile = str(self.profile_name or "").strip()
+        if not profile:
+            return sessions
+        return [
+            dict(row, profile=profile)
+            if isinstance(row, dict) and "profile" not in row
+            else row
+            for row in sessions
+        ]
+
     def _poll_once(self, *, now: float | None = None) -> bool:
         """Run one change-detection pass and report whether projection ran.
 
@@ -386,6 +410,7 @@ class GatewayWatcher:
         sessions = _get_agent_sessions_from_db(db_path)
         if sessions is None:
             return False
+        sessions = self._attribute_owning_profile(sessions)
         current_hash = _snapshot_hash(sessions)
         with self._sub_lock:
             if admission_epoch != self._subscriber_epoch or not self._subscribers:
