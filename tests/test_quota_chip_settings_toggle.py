@@ -90,3 +90,35 @@ def test_quota_chip_localized_in_all_locales():
     js = I18N.read_text(encoding="utf-8")
     assert js.count("settings_label_quota_chip:") == 15, "12 locales expected"
     assert js.count("settings_desc_quota_chip:") == 15, "12 locales expected"
+
+
+def test_quota_chip_description_copy_matches_actual_behavior():
+    """Gate-cert #7203 blocker 7/8 regression: the settings description must
+    not claim a >=1400px viewport rule (no such rule exists) or say the chip
+    is hidden in compact/burger mode (the value relocates into the composer
+    menu instead). Applies to every maintained locale."""
+    import re
+
+    src = I18N.read_text(encoding="utf-8")
+    entries = re.findall(r"settings_desc_quota_chip:\s*(['\"])(.*?)\1", src)
+    assert entries, "no settings_desc_quota_chip strings found in i18n.js"
+    # 15 locales: en + 14 maintained translations
+    assert len(entries) == 15, f"expected 15 locale entries, found {len(entries)}"
+    for _quote, value in entries:
+        assert "1400" not in value, (
+            f"stale viewport-width claim (>=1400px) in locale copy: {value[:80]}..."
+        )
+        assert "burger" not in value.lower(), (
+            f"stale 'hidden in burger mode' claim in locale copy: {value[:80]}..."
+        )
+        menu_words = ("menu", "メニュー", "菜单", "選單", "메뉴", "меню", "menü", "menú", "nabídk")
+        assert any(word in value.lower() for word in menu_words), (
+            f"description must say where the value relocates on narrow layouts: {value[:80]}..."
+        )
+
+    html = INDEX.read_text(encoding="utf-8")
+    m = re.search(
+        r'data-i18n="settings_desc_quota_chip">([^<]+)</div>', html)
+    assert m, "settings_desc_quota_chip div missing from index.html"
+    assert "1400" not in m.group(1)
+    assert "burger" not in m.group(1).lower()
