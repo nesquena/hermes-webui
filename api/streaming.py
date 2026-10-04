@@ -3327,6 +3327,337 @@ def _extract_gateway_routing_metadata(agent, result, requested_model=None, reque
     return None
 
 
+def _normalized_runtime_provider_id(provider_id) -> str:
+    """Canonical lowercase provider id ('' when unknown), shared by both sides.
+
+    Accepts the WebUI ``@provider`` spelling as well as the Agent's bare
+    ``agent.provider`` so the requested and served halves of the identity are
+    compared in one namespace. The two sides are spelled by different
+    authorities — the WebUI resolver (``_canonicalise_provider_id``) and the
+    Agent's own alias tables (``hermes_cli.models`` folds ``ollama``→``custom``
+    and ``x-ai``→``xai``, ``hermes_cli.providers`` additionally folds
+    ``openai``→``openrouter`` and ``kimi-coding``→``kimi-for-coding``) — so a
+    raw pass through only one table can leave the SAME provider under two
+    different ids and manufacture a cross-provider "switch" out of a spelling
+    variant. Fold through every available table to a fixed point (the Agent's
+    own ``_context_route_mismatch`` composes the same two normalizers; the
+    groups converge, verified against both full tables). When the Agent tree
+    is not importable, the WebUI table alone still applies on both sides, and
+    the caller's comparison stays fail-closed on unknowns.
+    """
+    from api.config import _canonicalise_provider_id
+
+    provider = str(provider_id or "").strip().lstrip("@").strip().lower()
+    if not provider:
+        return ""
+    normalizers = []
+    for module_name in ("hermes_cli.models", "hermes_cli.providers"):
+        try:
+            module = __import__(module_name, fromlist=["normalize_provider"])
+            normalizers.append(module.normalize_provider)
+        except Exception:
+            pass
+    normalizers.append(_canonicalise_provider_id)
+    for _ in range(8):
+        folded = provider
+        for normalize in normalizers:
+            try:
+                folded = str(normalize(folded) or folded).strip().lower()
+            except Exception:
+                pass
+        if not folded or folded == provider:
+            break
+        provider = folded
+    return provider
+
+
+def _bare_model_id(model_id, provider_id=None) -> str:
+    """Strip a routing hint without discarding identity-bearing model data.
+
+    The requested model is often carried with a WebUI routing hint
+    (``@openai-codex:gpt-5.6-sol``, or ``@custom:<slug>:model`` with two colons)
+    while the served model is stamped bare from ``agent.model``. Comparing the
+    raw strings would report a "switch" for what is the same model written two
+    different ways. Slash namespaces and colon tags after the hint are part of
+    the model identity. When the provider is known, only that exact
+    ``@<provider>:`` prefix is removed (no grammar guess). Returns '' for
+    empty/None input so callers fail closed.
+    """
+    from api.config import _parse_provider_qualified_model_id
+
+    model = str(model_id or "").strip()
+    if not model:
+        return ""
+    provider = _normalized_runtime_provider_id(provider_id)
+    if provider:
+        prefix = f"@{provider}:"
+        if model.lower().startswith(prefix):
+            qualified = _parse_provider_qualified_model_id(model)
+            if qualified is None:
+                return model[len(prefix):].strip()
+            parsed_model, parsed_provider = qualified
+            if _normalized_runtime_provider_id(parsed_provider) == provider:
+                # The hint names exactly this provider: strip that exact
+                # prefix (no grammar guess).
+                return model[len(prefix):].strip()
+            # The hint carries MORE provider structure than the bare provider
+            # id (e.g. ``@custom:kimi-coding:k3-256k`` against provider
+            # ``custom``): trust the shared parser, not a blind prefix strip.
+            return parsed_model.strip()
+    qualified = _parse_provider_qualified_model_id(model)
+    if qualified:
+        # The shared parser identifies the complete routing prefix. Keep the
+        # complete bare model: later colons are model tags (for example ``:8b``).
+        model = qualified[0]
+    return model.strip()
+
+
+def _runtime_model_normalizer():
+    """The Agent's constructor-time model normalizer, or None when unavailable."""
+    try:
+        from hermes_cli.model_normalize import normalize_model_for_provider
+    except Exception:
+        return None
+    return normalize_model_for_provider
+
+
+def _normalized_runtime_identity(model_id, provider_id=None) -> tuple[str, str]:
+    """``(provider, model)`` identity as the Agent runtime would spell it.
+
+    ``AIAgent.__init__`` rewrites the configured model through
+    ``hermes_cli.model_normalize.normalize_model_for_provider`` (dots to
+    hyphens for Anthropic, retired DeepSeek aliases, vendor prefixes for
+    aggregators ...), so a served ``claude-sonnet-4-6`` is the very same
+    runtime identity as a requested ``claude-sonnet-4.6``. Both halves of a
+    comparison go through the same normalizer so spelling variants can never
+    manufacture a switch. Returns ``('', '')``-style empties for unknown input.
+    """
+    provider = _normalized_runtime_provider_id(provider_id)
+    bare = _bare_model_id(model_id, provider)
+    if bare and provider:
+        normalize = _runtime_model_normalizer()
+        if normalize is not None:
+            try:
+                bare = str(normalize(bare, provider) or bare)
+            except Exception:
+                pass
+    return provider, bare.strip().lower()
+
+
+def _agent_fallback_provenance(agent) -> bool:
+    """True only when the Agent itself reports that a fallback runtime is active.
+
+    ``try_activate_fallback`` sets ``_provider_fallback_active`` when it swaps
+    the client/model/provider in place; ``restore_primary_runtime`` clears it
+    at the start of the next turn once the primary is back (it stays set while
+    the turn is genuinely served by the fallback, including cooldown turns).
+    Constructor-time fallback is represented separately by the WebUI-owned
+    ``_webui_init_fallback_requested_identity`` marker. That marker is written
+    only immediately after construction, when a configured fallback chain,
+    the Agent's init fallback flag, and a different effective runtime jointly
+    prove the switch. ``_fallback_activated`` is deliberately NOT accepted on
+    its own: later it is also used for restore bookkeeping and user-initiated
+    model switches. The WebUI never infers a fallback from model spellings.
+    """
+    if agent is None:
+        return False
+    if getattr(agent, "_provider_fallback_active", None) is True:
+        return True
+    init_identity = getattr(agent, "_webui_init_fallback_requested_identity", None)
+    return (
+        isinstance(init_identity, tuple)
+        and len(init_identity) == 2
+        and bool(init_identity[1])
+    )
+
+
+def _capture_init_fallback_provenance(agent, requested_model, requested_provider, fallback_chain) -> bool:
+    """Record a constructor-time local fallback only when it is fully proven.
+
+    Hermes Agent may consume ``fallback_model`` while its constructor probes
+    providers. In that path ``_provider_fallback_active`` is not set and the
+    Agent's ``_primary_runtime`` snapshot already describes the fallback, so
+    post-run state alone cannot recover the requested identity. This helper is
+    called only at the constructor boundary, where all three facts are known:
+    a fallback chain was supplied, the constructor reports fallback activation,
+    and its effective normalized runtime differs from the requested one.
+
+    The generic ``_fallback_activated`` bit is never trusted elsewhere. Unknown
+    identities and notation-only differences fail closed.
+    """
+    if agent is None or not fallback_chain:
+        return False
+    if getattr(agent, "_fallback_activated", None) is not True:
+        return False
+    requested_identity = _normalized_runtime_identity(requested_model, requested_provider)
+    used_model = str(getattr(agent, "model", "") or "").strip()
+    used_provider = str(getattr(agent, "provider", "") or "").strip()
+    if not requested_identity[1] or not _local_model_switch(
+        requested_model,
+        used_model,
+        requested_provider,
+        used_provider,
+    ):
+        return False
+    try:
+        agent._webui_init_fallback_requested_identity = requested_identity
+    except Exception:
+        return False
+    return True
+
+
+def _bare_model_id_candidates(model_id, provider_id=None) -> list[str]:
+    """All plausible bare readings of an ambiguous ``@custom:A:B:...`` id.
+
+    ``A:B`` can be an endpoint host:port authority slug (``mymachine:11434``,
+    including single-label LAN hostnames the shared parser does not recognize)
+    or ``A`` can be a named provider slug whose model itself starts with a
+    numeric segment (``frontier-gw`` serving ``11434:llama3:8b``). A single
+    parse must guess which; switch detection must not — EXCEPT when the shared
+    grammar itself commits: when ``A:B`` passes
+    ``_custom_slug_rest_looks_like_host_port`` (dotted/localhost/IP host +
+    valid port), the route hint identifies the endpoint and the model is what
+    follows, so the slug-only alternate is dropped and cannot mask a genuine
+    switch (Greptile P1 follow-up 2026-09-18: ``@custom:my.gw:11434:llama3:8b``
+    served by the DISTINCT model ``11434:llama3:8b`` must surface). Returns the
+    primary ``_bare_model_id`` reading plus the surviving alternate split(s),
+    lowercased, deduplicated. Mirror of
+    ``static/ui.js::_bareModelIdCandidates``.
+    """
+    from api.config import _custom_slug_rest_looks_like_host_port
+
+    primary = _bare_model_id(model_id, provider_id)
+    out = [primary.lower()] if primary else []
+    model = str(model_id or "").strip()
+    if _normalized_runtime_provider_id(provider_id):
+        # Known provider provenance: the exact prefix was removed, there is
+        # nothing to guess about.
+        return out
+    if not model.lower().startswith("@custom:"):
+        return out
+    rest = model[len("@custom:"):]
+    first = rest.find(":")
+    if first < 0:
+        return out
+    host = rest[:first]
+    after_host = rest[first + 1:]
+    second = after_host.find(":")
+    port = after_host[:second] if second >= 0 else ""
+    port_ok = bool(port) and port.isdigit() and 1 <= int(port) <= 65535
+    if port_ok and _custom_slug_rest_looks_like_host_port(f"{host}:{port}"):
+        # Grammar-confirmed endpoint reading: the shared parser routes this id
+        # as host:port + model, so switch detection must read it the same way.
+        # The slug-only reading (port consumed as a numeric-leading model
+        # segment) is dropped: it could otherwise mask a real switch.
+        endpoint_model = after_host[second + 1:]
+        if endpoint_model and endpoint_model.lower() not in out:
+            out.append(endpoint_model.lower())
+        return out
+    # Non-dotted host (or non-port second segment): still intrinsically
+    # ambiguous. Keep BOTH readings — slug-only alternate and endpoint
+    # alternate — and let callers stay silent when any candidate matches.
+    if after_host and after_host.lower() not in out:
+        out.append(after_host.lower())
+    if port_ok:
+        endpoint_model = after_host[second + 1:]
+        if endpoint_model and endpoint_model.lower() not in out:
+            out.append(endpoint_model.lower())
+    return out
+
+
+def _local_model_switch(requested_model, used_model, requested_provider=None, used_provider=None) -> bool:
+    """True only when a turn was demonstrably served by a different runtime identity.
+
+    Backs the footer notice for *local* ``fallback_providers`` switches, which
+    produce no gateway routing metadata at all (so ``model_changed`` from
+    ``_normalize_gateway_routing_metadata`` never fires for them). The
+    identity is the complete normalized ``(provider, model)`` pair: the
+    constructor-normalized primary runtime versus the post-run effective
+    runtime. A different provider serving the same bare model IS a switch; the
+    same provider serving a spelling variant of the same model is NOT.
+
+    This helper only compares identities. Callers must additionally gate on
+    ``_agent_fallback_provenance(agent)`` so that a normal turn can never be
+    reported as a fallback. Fails closed: when either side is unknown, return
+    False rather than claim a switch that cannot be proven.
+    """
+    requested_provider_id = _normalized_runtime_provider_id(requested_provider)
+    used_provider_id = _normalized_runtime_provider_id(used_provider)
+    if not _bare_model_id(requested_model, requested_provider_id) or not _bare_model_id(used_model, used_provider_id):
+        return False
+    if requested_provider_id and used_provider_id and requested_provider_id != used_provider_id:
+        # Complete provenance on both sides and the providers differ: another
+        # provider served the turn, even if it serves the same bare model.
+        return True
+    provider_id = requested_provider_id or used_provider_id
+    if provider_id:
+        # Same provider (or provider known on one side only): both spellings
+        # are run through that provider's constructor normalizer so a dot/
+        # hyphen or retired-alias variant can never read as a switch.
+        requested_identity = _normalized_runtime_identity(requested_model, provider_id)
+        used_identity = _normalized_runtime_identity(used_model, provider_id)
+        return requested_identity != used_identity
+    # _bare_model_id removes only the @provider: routing notation. Everything
+    # left, including a slash namespace, is model identity: ``gpt-4`` and
+    # ``my-local/gpt-4`` must therefore remain distinct in either direction.
+    # For ids without provider provenance the ``@custom:A:B`` shape is
+    # ambiguous (endpoint host:port or slug + numeric-leading model): compare
+    # the FULL candidate sets and declare a switch only when no reading of the
+    # requested id matches any reading of the served id.
+    requested_candidates = _bare_model_id_candidates(requested_model)
+    used_candidates = _bare_model_id_candidates(used_model)
+    if not requested_candidates or not used_candidates:
+        return False
+    return not (set(requested_candidates) & set(used_candidates))
+
+
+def _primary_runtime_identity(agent, requested_model, requested_provider) -> tuple[str, str]:
+    """Constructor-normalized primary identity the turn was asked to run on.
+
+    Prefer the WebUI's constructor-boundary snapshot for an init-time fallback,
+    then the Agent's own ``_primary_runtime`` snapshot: the latter is taken after
+    ``AIAgent.__init__`` normalized model and provider and is refreshed by
+    ``switch_model``, so it is the exact identity ``restore_primary_runtime``
+    returns to after a fallback. Fall back to the WebUI-resolved pair when
+    the snapshot is unavailable (fake or legacy agents).
+    """
+    init_identity = getattr(agent, '_webui_init_fallback_requested_identity', None)
+    if (
+        isinstance(init_identity, tuple)
+        and len(init_identity) == 2
+        and init_identity[1]
+    ):
+        return init_identity
+    rt = getattr(agent, '_primary_runtime', None)
+    if isinstance(rt, dict) and str(rt.get('model') or '').strip():
+        return _normalized_runtime_identity(rt.get('model'), rt.get('provider') or requested_provider)
+    return _normalized_runtime_identity(requested_model, requested_provider)
+
+
+def _local_fallback_switch(agent, requested_model, requested_provider, used_model, used_provider) -> bool:
+    """Decide whether the LOCAL fallback notice applies to this turn.
+
+    Two independent proofs are required, so neither spelling variants nor a
+    provider-only difference on a normal turn can ever manufacture a notice:
+
+    1. real runtime provenance: the Agent reports a fallback runtime is active
+       (``_agent_fallback_provenance``);
+    2. the constructor-normalized primary identity differs from the post-run
+       effective ``(provider, model)`` identity (``_local_model_switch``).
+
+    The primary identity is read from ``agent._primary_runtime`` (the snapshot
+    ``restore_primary_runtime`` returns to); when that snapshot is missing or
+    already equals the effective runtime, the WebUI-resolved pair is compared
+    instead. Fails closed on any unknown.
+    """
+    if not _agent_fallback_provenance(agent):
+        return False
+    primary_provider, primary_model = _primary_runtime_identity(agent, requested_model, requested_provider)
+    if primary_model and _local_model_switch(primary_model, used_model, primary_provider, used_provider):
+        return True
+    return _local_model_switch(requested_model, used_model, requested_provider, used_provider)
+
+
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
@@ -12477,6 +12808,12 @@ def _run_agent_streaming(
             _cache_new_agent = False
             if ephemeral:
                 agent = _AIAgent(**_agent_kwargs)
+                _capture_init_fallback_provenance(
+                    agent,
+                    resolved_model,
+                    resolved_provider,
+                    _fallback_resolved,
+                )
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
                 from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
@@ -12586,6 +12923,12 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     agent = _AIAgent(**_agent_kwargs)
+                    _capture_init_fallback_provenance(
+                        agent,
+                        resolved_model,
+                        resolved_provider,
+                        _fallback_resolved,
+                    )
                     _cache_new_agent = True
 
             if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):
@@ -13900,10 +14243,37 @@ def _run_agent_streaming(
                 # #6068: the served model must be read AFTER agent.run — the agent
                 # mutates agent.model when a fallback fires, so the pre-run
                 # resolved_model would mis-attribute exactly the turns where
-                # attribution matters most.
-                # The configured selection is not proof that it served this turn.
+                # attribution matters most. The configured selection is not proof
+                # that it served this turn, so a missing observation stays unknown.
                 _observed_model = getattr(agent, 'model', None)
                 _used_model = _observed_model.strip() if isinstance(_observed_model, str) else None
+                # The model the user actually asked for, captured BEFORE the run
+                # mutated agent.model. Same source the gateway path uses as
+                # requested_model, so both paths compare the same value.
+                _requested_model_for_switch = resolved_model or model
+                # Provider halves of the same two identities: the provider the
+                # agent was constructed for, and the provider that actually
+                # served (agent.provider is swapped in place by a fallback too).
+                _requested_provider_for_switch = _normalized_runtime_provider_id(resolved_provider)
+                _used_provider = _normalized_runtime_provider_id(
+                    getattr(agent, 'provider', None) or resolved_provider
+                )
+                # LOCAL fallback notice decision, made ONCE for both the
+                # persisted turn and the live usage payload. Gateway turns own
+                # their own model_changed flag; otherwise the notice requires
+                # the Agent's real fallback-active provenance AND a different
+                # normalized (provider, model) identity — never a spelling
+                # variant of the same model.
+                _local_fallback_switched = bool(
+                    not _gateway_routing
+                    and _local_fallback_switch(
+                        agent,
+                        _requested_model_for_switch,
+                        _requested_provider_for_switch,
+                        _used_model,
+                        _used_provider,
+                    )
+                )
                 if _gateway_routing:
                     s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
@@ -13922,6 +14292,17 @@ def _run_agent_streaming(
                                 _dm['_firstTokenMs'] = _ttft_ms
                             if _used_model:
                                 _dm['_usedModel'] = _used_model
+                                if _used_provider:
+                                    _dm['_usedProvider'] = _used_provider
+                                # Stamp the requested identity alongside the
+                                # served one so the footer can surface a LOCAL
+                                # fallback switch after a reload. Presence of
+                                # _requestedModel IS the switch verdict: the
+                                # renderer never re-derives it from spellings.
+                                if _local_fallback_switched:
+                                    _dm['_requestedModel'] = _requested_model_for_switch
+                                    if _requested_provider_for_switch:
+                                        _dm['_requestedProvider'] = _requested_provider_for_switch
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -14311,6 +14692,15 @@ def _run_agent_streaming(
                 usage['ttft_ms'] = _ttft_ms
             if _used_model:
                 usage['used_model'] = _used_model
+                if _used_provider:
+                    usage['used_provider'] = _used_provider
+                # Live counterpart of the stamped _requestedModel /
+                # _requestedProvider: lets the streaming footer surface a local
+                # fallback switch without waiting for a reload.
+                if _local_fallback_switched:
+                    usage['requested_model'] = _requested_model_for_switch
+                    if _requested_provider_for_switch:
+                        usage['requested_provider'] = _requested_provider_for_switch
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.
