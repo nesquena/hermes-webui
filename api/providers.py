@@ -2676,8 +2676,15 @@ def get_providers() -> dict[str, Any]:
             import re as _re
             if _re.match(r'^[a-z][a-z0-9_-]{0,63}$', pid):
                 try:
+                    from api.aws_imds import suppress_ec2_imds_probe
                     from hermes_cli.auth import get_auth_status as _gas
-                    status = _gas(pid)
+                    # Sibling of the models-catalog rebuild guard: for the
+                    # ``bedrock`` provider this lands in botocore's credential
+                    # chain, which stalls on the link-local EC2 metadata
+                    # endpoint off-EC2. No-op when IMDS is genuinely reachable.
+                    # See api/aws_imds.py.
+                    with suppress_ec2_imds_probe("providers auth status"):
+                        status = _gas(pid)
                     if isinstance(status, dict) and status.get("logged_in"):
                         has_key = True
                         # Constrain key_source to a known-safe closed set
