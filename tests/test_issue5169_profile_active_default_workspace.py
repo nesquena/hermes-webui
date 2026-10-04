@@ -22,13 +22,13 @@ and the real filesystem resolution from a named profile's last_workspace.txt.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
 import api.profiles as profiles
 import api.routes as routes
 import api.workspace as workspace
-import api.config as config_mod
 
 
 def _capture_j(monkeypatch):
@@ -143,10 +143,12 @@ def test_profile_active_default_workspace_falls_back_to_config_workspace(monkeyp
     # Neutralize the global last_workspace.txt fallback so this test exercises the
     # config.yaml tier deterministically regardless of the runner's real state dir.
     monkeypatch.setattr(workspace, "_GLOBAL_LW_FILE", tmp_path / "nonexistent-global-lw.txt")
-    # No last_workspace.txt on disk -> resolver consults the profile config.yaml.
-    # _profile_default_workspace() does `from api.config import get_config`, so the
-    # patch must land on api.config (the lookup happens at call time).
-    monkeypatch.setattr(config_mod, "get_config", lambda: {"workspace": resolved_cfg_ws})
+    # Exercise the owned disk config through the production snapshot reader,
+    # without conftest's authoritative default-home config override.
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    (profile_home / "config.yaml").write_text(
+        json.dumps({"workspace": resolved_cfg_ws}), encoding="utf-8"
+    )
 
     profiles.set_request_profile("work")
     try:
@@ -195,8 +197,12 @@ def test_profile_active_default_workspace_ignores_global_last_workspace(monkeypa
     # The global last-workspace file DOES exist (and is valid) — the named-profile
     # resolver must still ignore it.
     monkeypatch.setattr(workspace, "_GLOBAL_LW_FILE", global_lw)
-    # No profile-scoped last_workspace.txt on disk -> resolver consults config.yaml.
-    monkeypatch.setattr(config_mod, "get_config", lambda: {"workspace": resolved_cfg_ws})
+    # No profile last_workspace.txt: use its actual config through the production
+    # reader rather than substituting the old mutable get_config seam.
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    (profile_home / "config.yaml").write_text(
+        json.dumps({"workspace": resolved_cfg_ws}), encoding="utf-8"
+    )
 
     profiles.set_request_profile("work")
     try:
