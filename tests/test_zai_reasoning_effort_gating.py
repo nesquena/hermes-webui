@@ -158,7 +158,7 @@ def test_classification_none_for_non_glm_on_zai():
 # ── supports_thinking_toggle: chip visibility contract ──────────────────────────
 
 
-def _reasoning_status(model_id, provider_id="zai"):
+def _reasoning_status(model_id, provider_id: str | None = "zai"):
     """Helper: call get_reasoning_status with a stub config so it does not depend
     on the active profile's config.yaml."""
     import unittest.mock as mock
@@ -228,6 +228,15 @@ def test_non_zai_status_toggle_defaults_to_effort_capability():
     assert st2["supports_reasoning_effort"] is False
 
 
+def test_qualified_zai_context_is_reused_for_coercion_and_status(monkeypatch):
+    monkeypatch.setattr(cfg, "_models_dev_reasoning_efforts", lambda *_args: [])
+    qualified = "@zai:glm-5.1"
+    assert cfg.coerce_reasoning_effort_for_model("high", qualified) == ""
+    status = _reasoning_status(qualified, provider_id=None)
+    assert status["supported_efforts"] == []
+    assert status["supports_thinking_toggle"] is True
+
+
 # ── Aliases resolve through the same gate ────────────────────────────────────────
 
 @pytest.mark.parametrize("alias", ["glm", "z-ai", "z.ai", "zhipu"])
@@ -268,10 +277,10 @@ def test_aggregator_providers_keep_family_reasoning(model_id, provider_id):
 def test_non_glm_model_on_zai_provider_unaffected():
     # A non-GLM model id routed through the zai provider must not be gated
     # by the GLM-specific branch — the gate keys on "glm" in the bare id, so
-    # non-GLM models fall through unchanged. (The OpenAI-family ceiling does NOT
-    # fire here because that branch is keyed on provider, not model family.)
+    # non-GLM models bypass the GLM-specific branch. The GPT-5 ceiling is still
+    # model-scoped across serving lanes, so older GPT-5 cannot retain max/ultra.
     efforts = cfg.resolve_model_reasoning_efforts("gpt-5", provider_id="zai")
-    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh", "max"}
+    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh"}
 
 
 # ── Coercion agrees with advertising (UI/coercion invariant) ─────────────────────
@@ -444,7 +453,7 @@ def test_set_reasoning_effort_still_rejects_invalid():
             cfg.set_reasoning_effort("banana", model_id="glm-4.6", provider_id="zai")
 
 
-@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
 def test_set_reasoning_effort_still_accepts_valid_levels(effort):
     """Regression guard: all valid levels + none must still save correctly."""
     import unittest.mock as mock
