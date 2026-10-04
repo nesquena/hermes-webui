@@ -208,6 +208,28 @@ screenshots. This gate tests page reconstruction, journal-cursor resume, and
 subsequent fixture SSE updates. It does not test a real provider/network or PWA
 service-worker cache behavior.
 
+### Same-session background transcript refresh
+
+A visibility/focus refresh may replace `S.messages` with a bounded session tail
+only when the requested window can contain every loaded row plus rows appended
+while the tab was away. If that width exceeds the server-advertised
+`msg_limit` ceiling, the client uses the bare full-transcript request so the
+replacement cannot silently discard older loaded rows.
+
+Paginated responses can clip hidden tool-result rows independently of that
+window width. When a clipped row has the same explicit identity as a complete
+row already held by the browser, the client restores the complete content and
+paints the bounded response immediately. It then starts a generation-fenced
+full-transcript retry as an optional background fidelity upgrade. An unrelated
+clipped row does not authorize that retry, and a failed or stalled retry must
+not replace the pane with “Failed to load messages” or delay the bounded
+refresh. Executable coverage lives in
+`tests/test_reload_window_full_transcript_regression.py`:
+
+```bash
+./scripts/test.sh tests/test_reload_window_full_transcript_regression.py
+```
+
 ### Streaming reader intent
 
 While a response is still streaming, scroll upward with a trackpad or wheel to
