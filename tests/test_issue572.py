@@ -1,19 +1,19 @@
-"""Tests for issue #572: onboarding must not fire or overwrite config for
-providers not in the quick-setup list (minimax-cn, deepseek, xai, etc.).
+"""Tests for issue #572: protect configured providers outside the wizard setup
+list (ollama-cloud, xai, and similar providers) from being overwritten by the
+first-run wizard.
 
-Root cause: _provider_api_key_present() only knew about the four providers in
-_SUPPORTED_PROVIDER_SETUPS.  For any other provider it returned False, causing
-chat_ready=False, which made the wizard fire even when the user was fully
-configured.  The second part of the fix ensures _saveOnboardingProviderSetup()
-in the frontend also skips the POST when current_is_oauth is set.
+MiniMax-CN is now in _SUPPORTED_PROVIDER_SETUPS, so it follows the supported
+setup path: an incomplete configuration keeps onboarding visible so the user
+can provide a key, and it is not presented as an OAuth-only provider.
 
 Covers:
-  1. _provider_api_key_present returns True for minimax-cn when
-     MINIMAX_CN_API_KEY is in env (via hermes_cli.auth.get_auth_status)
+  1. _provider_api_key_present handles supported MiniMax-CN keys and the
+     hermes_cli fallback for unsupported providers
   2. _status_from_runtime gives chat_ready=True for minimax-cn with a key set
-  3. get_onboarding_status returns completed=True for a fully-configured
-     unsupported provider when config.yaml exists
-  4. The hermes_cli import failure path is safe (falls back gracefully)
+  3. get_onboarding_status keeps configured unsupported providers completed
+     while leaving incomplete MiniMax-CN setup visible
+  4. current_is_oauth distinguishes MiniMax-CN from unsupported providers
+  5. The hermes_cli import failure path is safe (falls back gracefully)
 """
 from __future__ import annotations
 
@@ -54,28 +54,22 @@ def _call_provider_api_key_present(provider: str, cfg: dict = None, env_values: 
 
 
 # ---------------------------------------------------------------------------
-# 1. _provider_api_key_present via hermes_cli fallback
+# 1. _provider_api_key_present: supported setup and hermes_cli fallback
 # ---------------------------------------------------------------------------
 
-class TestProviderApiKeyPresentFallback:
+class TestProviderApiKeyPresent:
 
-    def test_minimax_cn_logged_in_returns_true(self):
-        """minimax-cn: if hermes_cli.auth.get_auth_status returns logged_in, must be True."""
-        with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
-            "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
-        }):
-            with _inject_hermes_cli_auth({"logged_in": True}):
-                result = _call_provider_api_key_present("minimax-cn")
-                assert result is True
+    def test_unsupported_provider_logged_in_returns_true(self):
+        """An unsupported provider authenticated through hermes_cli is ready."""
+        with _inject_hermes_cli_auth({"logged_in": True}):
+            result = _call_provider_api_key_present("ollama-cloud")
+            assert result is True
 
     def test_unsupported_provider_logged_out_returns_false(self):
         """Unsupported provider with no key → False, no crash."""
-        with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
-            "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
-        }):
-            with _inject_hermes_cli_auth({"logged_in": False}):
-                result = _call_provider_api_key_present("deepseek")
-                assert result is False
+        with _inject_hermes_cli_auth({"logged_in": False}):
+            result = _call_provider_api_key_present("ollama-cloud")
+            assert result is False
 
     def test_hermes_cli_import_failure_is_safe(self):
         """If hermes_cli is unavailable, falls back silently to False."""
@@ -87,18 +81,21 @@ class TestProviderApiKeyPresentFallback:
                 raise ImportError("hermes_cli not available")
             return real_import(name, *args, **kwargs)
 
-        with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
-            "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
-        }):
-            with mock.patch("builtins.__import__", side_effect=_block_hermes_cli):
-                result = _call_provider_api_key_present("minimax-cn")
-                assert result is False  # safe fallback
+        with mock.patch("builtins.__import__", side_effect=_block_hermes_cli):
+            result = _call_provider_api_key_present("ollama-cloud")
+            assert result is False  # safe fallback
 
     def test_supported_provider_still_works_without_fallback(self):
         """openrouter with env key must still succeed via the original path."""
-        from api.onboarding import _provider_api_key_present, _SUPPORTED_PROVIDER_SETUPS
+        from api.onboarding import _provider_api_key_present
         env_values = {"OPENROUTER_API_KEY": "sk-test"}
         result = _provider_api_key_present("openrouter", {}, env_values)
+        assert result is True
+
+    def test_minimax_cn_env_key_uses_supported_setup_path(self):
+        """MiniMax-CN reads its key directly from the supported setup metadata."""
+        env_values = {"MINIMAX_CN_API_KEY": "sk-test"}
+        result = _call_provider_api_key_present("minimax-cn", env_values=env_values)
         assert result is True
 
     def test_inline_api_key_in_cfg_still_works(self):
@@ -109,10 +106,10 @@ class TestProviderApiKeyPresentFallback:
 
 
 # ---------------------------------------------------------------------------
-# 2. _status_from_runtime: unsupported provider with key → chat_ready=True
+# 2. _status_from_runtime: supported and unsupported provider readiness
 # ---------------------------------------------------------------------------
 
-class TestStatusFromRuntimeUnsupportedProvider:
+class TestStatusFromRuntimeProviderReadiness:
 
     def _run(self, provider: str, model: str, api_key_present: bool, oauth_present: bool = False):
         from api.onboarding import _status_from_runtime
@@ -133,14 +130,19 @@ class TestStatusFromRuntimeUnsupportedProvider:
         assert result["provider_ready"] is True
         assert result["setup_state"] == "ready"
 
-    def test_deepseek_with_key_gives_chat_ready(self):
-        """deepseek + api key → chat_ready."""
-        result = self._run("deepseek", "deepseek-chat", api_key_present=True)
+    def test_unsupported_provider_with_key_gives_chat_ready(self):
+        """An unsupported provider with an API key is ready."""
+        result = self._run("ollama-cloud", "ollama-cloud-model", api_key_present=True)
         assert result["chat_ready"] is True
 
     def test_unsupported_provider_no_key_no_oauth_gives_not_ready(self):
         """No key, no oauth → provider_ready=False."""
-        result = self._run("minimax-cn", "MiniMax-M2.7", api_key_present=False, oauth_present=False)
+        result = self._run(
+            "ollama-cloud",
+            "ollama-cloud-model",
+            api_key_present=False,
+            oauth_present=False,
+        )
         assert result["chat_ready"] is False
         assert result["provider_ready"] is False
 
@@ -151,15 +153,16 @@ class TestStatusFromRuntimeUnsupportedProvider:
 
 
 # ---------------------------------------------------------------------------
-# 3. get_onboarding_status: minimax-cn fully configured → completed=True
+# 3. get_onboarding_status: supported and unsupported providers
 # ---------------------------------------------------------------------------
 
-class TestOnboardingStatusUnsupportedProvider:
+class TestOnboardingStatusProviderSetup:
 
     def _make_status(self, chat_ready: bool, provider: str = "minimax-cn"):
         import api.onboarding as mod
         fake_config_path = pathlib.Path("/tmp/_test_572_config.yaml")
-        cfg = {"model": {"provider": provider, "default": "MiniMax-M2.7"}}
+        model = "MiniMax-M2.7" if provider == "minimax-cn" else "ollama-cloud-model"
+        cfg = {"model": {"provider": provider, "default": model}}
         runtime = {
             "chat_ready": chat_ready,
             "provider_configured": True,
@@ -167,7 +170,7 @@ class TestOnboardingStatusUnsupportedProvider:
             "setup_state": "ready" if chat_ready else "provider_incomplete",
             "provider_note": "test",
             "current_provider": provider,
-            "current_model": "MiniMax-M2.7",
+            "current_model": model,
             "current_base_url": None,
             "env_path": "/tmp/.env",
         }
@@ -184,7 +187,7 @@ class TestOnboardingStatusUnsupportedProvider:
         ):
             return mod.get_onboarding_status()
 
-    def test_minimax_cn_chat_ready_skips_wizard(self):
+    def test_minimax_cn_chat_ready_completes_onboarding(self):
         """minimax-cn + chat_ready=True + config.yaml exists → wizard must NOT fire."""
         result = self._make_status(chat_ready=True)
         assert result["completed"] is True, (
@@ -192,26 +195,32 @@ class TestOnboardingStatusUnsupportedProvider:
             "config.yaml + chat_ready=True must auto-complete onboarding regardless of provider."
         )
 
-    def test_minimax_cn_not_ready_skips_wizard(self):
-        """minimax-cn + chat_ready=False → wizard still skipped for non-wizard providers.
-
-        The onboarding wizard has no minimax-cn option — showing it would only confuse
-        the user or let them accidentally overwrite their config with an OpenAI/Anthropic
-        provider.  For any provider not in _SUPPORTED_PROVIDER_SETUPS, onboarding is
-        auto-completed as long as provider_configured is True, regardless of chat_ready.
-        Users on non-wizard providers with no API key should fix credentials via
-        Settings → Providers, not via the first-run wizard.  (#1020)
-        """
+    def test_minimax_cn_not_ready_requires_setup(self):
+        """minimax-cn + chat_ready=False keeps the setup step visible for a key."""
         result = self._make_status(chat_ready=False)
+        assert result["completed"] is False, (
+            "Onboarding was completed for an incomplete MiniMax-CN setup; "
+            "the wizard must remain available so the user can provide a key."
+        )
+
+    def test_unsupported_provider_not_ready_skips_wizard(self):
+        """A configured provider outside the setup registry still skips the wizard."""
+        result = self._make_status(chat_ready=False, provider="ollama-cloud")
         assert result["completed"] is True, (
-            "Wizard fired for minimax-cn user with provider_configured=True! "
-            "Non-wizard providers must auto-complete onboarding because the wizard "
-            "cannot configure them and would silently overwrite their config."
+            "Wizard fired for a configured unsupported provider; "
+            "non-wizard providers must keep the issue #572 protection."
+        )
+
+    def test_current_is_oauth_not_set_for_minimax_cn(self):
+        """MiniMax-CN uses the API-key setup path, not the OAuth-only path."""
+        result = self._make_status(chat_ready=True)
+        assert result["setup"]["current_is_oauth"] is False, (
+            "current_is_oauth must be False for the supported MiniMax-CN setup"
         )
 
     def test_current_is_oauth_set_for_unsupported_provider(self):
-        """setup.current_is_oauth must be True for minimax-cn (not in quick-setup list)."""
-        result = self._make_status(chat_ready=True)
+        """setup.current_is_oauth remains True for a provider outside the setup registry."""
+        result = self._make_status(chat_ready=True, provider="ollama-cloud")
         assert result["setup"]["current_is_oauth"] is True, (
             "current_is_oauth should be True for providers not in _SUPPORTED_PROVIDER_SETUPS"
         )

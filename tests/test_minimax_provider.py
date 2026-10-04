@@ -247,6 +247,22 @@ def test_minimax_cn_key_can_be_managed_from_provider_settings():
     assert _PROVIDER_ENV_VAR.get('minimax-cn') == 'MINIMAX_CN_API_KEY'
 
 
+# ── Live model discovery ─────────────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    ("provider", "expected_url"),
+    [
+        ("minimax", "https://api.minimax.io/v1/models"),
+        ("minimax-cn", "https://api.minimaxi.com/v1/models"),
+    ],
+)
+def test_minimax_live_model_fallback_url(provider, expected_url):
+    """MiniMax live discovery must use the matching regional API endpoint."""
+    from api.routes import _OPENAI_COMPAT_ENDPOINTS
+
+    assert f"{_OPENAI_COMPAT_ENDPOINTS[provider]}/models" == expected_url
+
+
 # ── Model routing ─────────────────────────────────────────────────────────────
 
 def test_provider_hint_minimax_m2_7():
