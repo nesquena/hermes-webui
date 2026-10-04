@@ -727,6 +727,29 @@ function clearWorkspaceTreeSkeleton(){
   if(tree.querySelector('.skeleton-tree')) tree.innerHTML = '';
 }
 
+const _WORKSPACE_PREFETCH_CONCURRENCY=6;
+const _WORKSPACE_PREFETCH_TIMEOUT_MS=8000;
+
+async function _prefetchExpandedWorkspaceDirs(sessionId, treeGen, pending){
+  for(let offset=0;offset<pending.length;offset+=_WORKSPACE_PREFETCH_CONCURRENCY){
+    const batch=pending.slice(offset,offset+_WORKSPACE_PREFETCH_CONCURRENCY);
+    const results=await Promise.all(batch.map(dirPath=>{
+      const route=_workspaceRouteForPath(dirPath,'list');
+      if(!route) return Promise.resolve({dirPath,entries:[]});
+      return api(route,{
+        timeoutMs:_WORKSPACE_PREFETCH_TIMEOUT_MS,
+        timeoutToast:false,
+        retries:0,
+      })
+        .then(dc=>({dirPath,entries:dc.entries||[]}))
+        .catch(()=>({dirPath,entries:[]}));
+    }));
+    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
+    if(typeof renderFileTree==='function') renderFileTree();
+  }
+}
+
 async function loadDir(path, opts={}){
   const preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
@@ -765,15 +788,7 @@ async function loadDir(path, opts={}){
     if(!path||path==='.'||refreshExpanded){
       const expanded=S._expandedDirs||new Set();
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
-      if(pending.length){
-        const results=await Promise.all(pending.map(dirPath=>
-          api(_workspaceRouteForPath(dirPath, 'list'))
-            .then(dc=>({dirPath,entries:dc.entries||[]}))
-            .catch(()=>({dirPath,entries:[]}))
-        ));
-        if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
-        for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
-      }
+      if(pending.length) void _prefetchExpandedWorkspaceDirs(sessionId,treeGen,pending);
       if(expanded.size>0)renderFileTree();
     }
     if(!preservePreview&&typeof clearPreview==='function'){
