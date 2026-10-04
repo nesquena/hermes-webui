@@ -10,7 +10,12 @@ that historical assistant messages don't mask a silent provider failure.
 
 import pytest
 
-from api.streaming import _has_new_assistant_reply, _should_retry_silent_failure
+from api.streaming import (
+    _has_new_assistant_reply,
+    _should_retry_silent_failure,
+    _current_turn_tool_activity,
+    _turn_produced_reasoning,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -214,3 +219,109 @@ class TestShouldRetrySilentFailure:
                 last_err='', assistant_added=False, token_sent=False,
                 error_type=error_type,
             ) is False
+
+    # ── Work already done must not be replayed ───────────────────────────
+
+    def _retry(self, **overrides):
+        kwargs = dict(
+            last_err='', assistant_added=False, token_sent=False,
+            error_type='no_response',
+        )
+        kwargs.update(overrides)
+        return _should_retry_silent_failure(**kwargs)
+
+    def test_tool_activity_blocks_the_retry_only_when_present(self):
+        """A turn that ran a tool already produced side effects."""
+        assert self._retry(tool_activity=True) is False
+        assert self._retry(tool_activity=False) is True
+
+    def test_reasoning_blocks_the_retry_only_when_present(self):
+        assert self._retry(reasoning_produced=True) is False
+        assert self._retry(reasoning_produced=False) is True
+
+    def test_tool_limit_exit_blocks_the_retry_only_when_present(self):
+        """The tool-iteration limit owns its own card; do not shadow it."""
+        assert self._retry(tool_limit_reached=True) is False
+        assert self._retry(tool_limit_reached=False) is True
+
+    def test_compression_rotation_blocks_the_retry_only_when_present(self):
+        """After a rotation the retry would target the stale parent session."""
+        assert self._retry(compression_rotated=True) is False
+        assert self._retry(compression_rotated=False) is True
+
+    def test_the_four_new_guards_default_to_permissive(self):
+        """The guards are opt-in: the pre-existing gate shape is unchanged."""
+        assert self._retry() is True
+
+
+# ── Current-turn tool activity ───────────────────────────────────────────────
+
+class TestCurrentTurnToolActivity:
+    """The retry gate's tool-activity probe."""
+
+    def test_tool_result_row_in_the_tail_is_activity(self):
+        previous = [_msg("user", "q")]
+        messages = previous + [
+            _msg("assistant", ""),
+            {"role": "tool", "tool_call_id": "call_1", "content": "done"},
+        ]
+        assert _current_turn_tool_activity(previous, messages) is True
+
+    def test_assistant_tool_calls_in_the_tail_is_activity(self):
+        previous = [_msg("user", "q")]
+        messages = previous + [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+        ]
+        assert _current_turn_tool_activity(previous, messages) is True
+
+    def test_a_fully_consumed_prefix_carries_no_per_turn_evidence(self):
+        """Tool rows already inside the previous context are not this turn's.
+
+        A turn whose tool rows are already persisted arrives with an empty
+        suffix, and the rows are indistinguishable from an earlier turn's. The
+        worker's per-turn guard for that case is the live tool-progress signal
+        (`_live_tool_calls`), which the gate ORs in; the message scan must not
+        claim the whole transcript as current-turn work, or a silent turn in a
+        tool-using session could never be retried.
+        """
+        previous = [
+            _msg("user", "q"),
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "done"},
+        ]
+        assert _current_turn_tool_activity(previous, list(previous)) is False
+
+    def test_a_clean_tail_reports_no_activity(self):
+        previous = [_msg("user", "q")]
+        messages = previous + [_msg("assistant", "answer")]
+        assert _current_turn_tool_activity(previous, messages) is False
+
+    def test_non_matching_history_falls_back_to_the_whole_list(self):
+        """Over-reporting suppresses a retry (safe); under-reporting replays work."""
+        previous = [_msg("assistant", "unrelated")]
+        messages = [_msg("user", "q"), {"role": "tool", "content": "done"}]
+        assert _current_turn_tool_activity(previous, messages) is True
+
+    def test_empty_inputs_report_no_activity(self):
+        assert _current_turn_tool_activity([], []) is False
+        assert _current_turn_tool_activity(None, None) is False
+
+
+# ── Reasoning probe ──────────────────────────────────────────────────────────
+
+class TestTurnProducedReasoning:
+    """The retry gate's reasoning probe."""
+
+    def test_blank_segments_are_not_reasoning(self):
+        assert _turn_produced_reasoning({0: '', 1: '   '}, ['']) is False
+
+    def test_a_non_blank_segment_is_reasoning(self):
+        assert _turn_produced_reasoning({0: 'thinking...'}, ['']) is True
+
+    def test_an_unflushed_buffer_reads_as_reasoning(self):
+        """The tail of a reasoning stream can still sit in the buffer."""
+        assert _turn_produced_reasoning({}, ['pending']) is True
+
+    def test_no_inputs_report_no_reasoning(self):
+        assert _turn_produced_reasoning({}, ['']) is False
+        assert _turn_produced_reasoning(None, None) is False

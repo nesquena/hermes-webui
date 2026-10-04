@@ -1945,6 +1945,10 @@ def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
 
 def _should_retry_silent_failure(
     *, last_err, assistant_added: bool, token_sent: bool, error_type: str,
+    tool_activity: bool = False,
+    reasoning_produced: bool = False,
+    tool_limit_reached: bool = False,
+    compression_rotated: bool = False,
 ) -> bool:
     """Return True when a turn failed *silently* and deserves one retry.
 
@@ -1958,13 +1962,99 @@ def _should_retry_silent_failure(
     owns it), when the turn did add an assistant reply, when text was already
     streamed (a retry would duplicate it), or when the classifier pinned a
     different cause (auth / quota / cancelled).
+
+    The four extra guards keep the retry off turns that *did* work, just not
+    visibly: a turn that ran a tool (its side effects already happened, and the
+    retry would replay them), produced reasoning, exited on the tool-iteration
+    limit (that has its own card), or rotated the session through context
+    compression (the retry machinery would target the stale parent session).
+    Only a turn that produced nothing at all — no tool call, no tool result, no
+    reasoning, no tool-limit exit, no compression rotation — is retried.
     """
     return (
         not last_err
         and not assistant_added
         and not token_sent
         and error_type == 'no_response'
+        and not tool_activity
+        and not reasoning_produced
+        and not tool_limit_reached
+        and not compression_rotated
     )
+
+
+def _current_turn_tool_activity(previous_context, result_messages) -> bool:
+    """Return True when the current turn touched a tool.
+
+    Scans the current-turn suffix for a tool result row, an assistant
+    ``tool_calls`` payload, or a live ``_partial_tool_calls`` marker. When the
+    last attempt's messages are not a simple extension of the previous context
+    the check falls back to the whole list: over-reporting tool activity only
+    suppresses a retry (the safe direction), while under-reporting would replay
+    a side effect that already happened.
+    """
+    messages = list(result_messages or [])
+    previous = list(previous_context or [])
+    if previous and _messages_have_prefix(messages, previous):
+        tail = messages[len(previous):]
+    else:
+        tail = messages
+    for row in tail:
+        if not isinstance(row, dict):
+            continue
+        if row.get('role') == 'tool':
+            return True
+        if row.get('tool_calls') or row.get('_partial_tool_calls'):
+            return True
+    return False
+
+
+def _turn_produced_reasoning(reasoning_segments, reasoning_buffer) -> bool:
+    """Return True when the attempt emitted any non-blank reasoning text.
+
+    ``reasoning_segments`` is a message-index → accumulated text map; a key
+    created for a message that never carried text must not count as reasoning,
+    or a legitimate silent turn would be denied its retry.
+    """
+    for segment in (reasoning_segments or {}).values():
+        if isinstance(segment, str) and segment.strip():
+            return True
+    buffer = reasoning_buffer[0] if reasoning_buffer else ''
+    return bool(isinstance(buffer, str) and buffer.strip())
+
+
+def _silent_retry_added_a_new_answer(result, previous_context) -> bool:
+    """Return True when a silent retry produced an answer the seed did not hold.
+
+    A provider cut often replays the transcript: the retry hands back a copy of
+    a previous turn's assistant message. ``_self_heal_result_succeeded`` accepts
+    any trailing assistant text, so without this check the turn would settle on
+    the old answer and the user would read it as the reply to the message they
+    just sent. Only an assistant row whose text is not already present in the
+    pre-retry context counts as a recovery.
+    """
+    if not isinstance(result, dict):
+        return False
+    messages = list(result.get('messages') or [])
+    previous = list(previous_context or [])
+    if previous and _messages_have_prefix(messages, previous):
+        tail = messages[len(previous):]
+    else:
+        tail = messages
+    seen = set()
+    for row in previous:
+        if not isinstance(row, dict) or row.get('role') != 'assistant':
+            continue
+        text = _normalize_user_text(_message_text(row.get('content')))
+        if text:
+            seen.add(text)
+    for row in tail:
+        if not isinstance(row, dict) or row.get('role') != 'assistant':
+            continue
+        text = _normalize_user_text(_message_text(row.get('content')))
+        if text and text not in seen:
+            return True
+    return False
 
 
 def _preferred_agent_display_name() -> str:
@@ -14698,13 +14788,29 @@ def _run_agent_streaming(
                     # A silent turn (nothing produced AND nothing raised: the
                     # provider closed the stream with zero content and no error
                     # to classify) is a transient provider failure too. Retry it
-                    # once below, reusing the credential self-heal machinery,
-                    # instead of dropping the user's turn with a dead-end card.
+                    # once, instead of dropping the user's turn with a dead-end
+                    # card. The gate is deliberately narrow: a turn that ran a
+                    # tool, produced reasoning, exited on the tool-iteration
+                    # limit or rotated the session through compression did work
+                    # and must not be replayed.
                     _is_silent_no_response = _should_retry_silent_failure(
                         last_err=_last_err,
                         assistant_added=_assistant_added,
                         token_sent=_token_sent,
                         error_type=_classification['type'],
+                        tool_activity=(
+                            _current_turn_tool_activity(
+                                _previous_context_messages, _all_result_messages,
+                            )
+                            or bool(_live_tool_calls)
+                        ),
+                        reasoning_produced=_turn_produced_reasoning(
+                            _reasoning_segments, _reasoning_buffer,
+                        ),
+                        tool_limit_reached=bool(_tool_limit_reached),
+                        compression_rotated=(
+                            _compression_continuation_session_id is not None
+                        ),
                     )
                     if _is_quota:
                         _err_label = _classification['label']
@@ -14712,54 +14818,66 @@ def _run_agent_streaming(
                         _err_hint = _classification['hint']
                     elif (_is_auth or _is_silent_no_response) and not _self_healed:
                         # ── Credential self-heal on 401 (#1401), plus a one-shot
-                        # retry on a silent no-response turn (nothing streamed,
-                        # no error to classify) ──
-                        # Before emitting the error, try re-reading credentials
-                        # and retrying once with a fresh agent.
+                        # retry on a silent no-response turn ──
+                        # Before emitting the error, retry once with a fresh
+                        # agent: the 401 path re-reads credentials first, the
+                        # silent path reuses the runtime already resolved for
+                        # this turn.
                         _heal_result = None
                         _heal_stale_classification = None
                         if _is_silent_no_response:
-                            # This retry is not a credential refresh, so if it
-                            # also comes back empty the error card must keep the
-                            # pre-retry classification ("no response from the
-                            # provider") instead of the auth wording the
-                            # heal-failure path below would otherwise apply.
-                            _heal_stale_classification = _classification
-                        # Bind the session's profile so the self-heal re-resolve
-                        # AND the custom-provider override below read one
-                        # profile-owned snapshot (finding #3): otherwise a named
-                        # profile's endpoint pairs with the default profile's key.
-                        from api import profiles as _profiles_api
-                        with _profiles_api.profile_scope_for_detached_worker(
-                            _resolved_profile_name, "credential self-heal", logger_override=logger
-                        ):
-                            if _alias_route is not None:
-                                # Re-read the alias's own credential source: the
-                                # original route would resend the stale key.
-                                _alias_heal = _attempt_model_alias_credential_self_heal(
-                                    provider_context, model, session_id, _agent_lock,
-                                    target_model=resolved_model,
-                                )
-                                _heal_rt = None
-                                if _alias_heal is not None:
-                                    _alias_route, _heal_rt = _alias_heal
-                            else:
-                                _heal_rt = _attempt_credential_self_heal(
-                                    resolved_provider or '', session_id, _agent_lock,
-                                    target_model=resolved_model,
-                                )
+                            # A silent cut is a transient provider failure, not
+                            # a credential problem: reuse the current runtime.
+                            # Routing it through the credential self-heal would
+                            # re-read auth.json, evict the session's cached
+                            # agent and drain the credential-pool cache for a
+                            # failure that has nothing to do with credentials —
+                            # and on an env-key setup with no auth.json it
+                            # returns None, silently skipping the retry.
+                            _heal_rt = _rt
+                        else:
+                            # Bind the session's profile so the self-heal re-resolve
+                            # AND the custom-provider override below read one
+                            # profile-owned snapshot (finding #3): otherwise a named
+                            # profile's endpoint pairs with the default profile's key.
+                            from api import profiles as _profiles_api
+                            with _profiles_api.profile_scope_for_detached_worker(
+                                _resolved_profile_name, "credential self-heal", logger_override=logger
+                            ):
+                                if _alias_route is not None:
+                                    # Re-read the alias's own credential source: the
+                                    # original route would resend the stale key.
+                                    _alias_heal = _attempt_model_alias_credential_self_heal(
+                                        provider_context, model, session_id, _agent_lock,
+                                        target_model=resolved_model,
+                                    )
+                                    _heal_rt = None
+                                    if _alias_heal is not None:
+                                        _alias_route, _heal_rt = _alias_heal
+                                else:
+                                    _heal_rt = _attempt_credential_self_heal(
+                                        resolved_provider or '', session_id, _agent_lock,
+                                        target_model=resolved_model,
+                                    )
                         if _heal_rt is not None:
-                            _heal_reason = 'credential refresh' if _is_auth else 'silent no-response'
-                            logger.info('[webui] self-heal: retrying stream after %s', _heal_reason)
-                            # Rebuild runtime variables from the refreshed resolve
-                            _rt = _heal_rt
-                            resolved_api_key = _heal_rt.get('api_key')
-                            if not resolved_provider:
-                                resolved_provider = _heal_rt.get('provider')
-                            resolved_base_url = _runtime_preferred_base_url(
-                                _heal_rt, resolved_provider, configured_base_url,
-                                session_requested_provider=_session_requested_provider,
-                            )
+                            if _is_silent_no_response:
+                                logger.info('[webui] self-heal: retrying stream after a silent no-response turn')
+                            else:
+                                logger.info('[webui] self-heal: retrying stream after credential refresh')
+                                # Rebuild runtime variables from the refreshed
+                                # resolve. The silent path skips this: nothing
+                                # changed, `_heal_rt` IS the dict this turn
+                                # already resolved, and re-deriving here could
+                                # only clobber a value the initial resolve could
+                                # not fill (an empty runtime dict).
+                                _rt = _heal_rt
+                                resolved_api_key = _heal_rt.get('api_key')
+                                if not resolved_provider:
+                                    resolved_provider = _heal_rt.get('provider')
+                                resolved_base_url = _runtime_preferred_base_url(
+                                    _heal_rt, resolved_provider, configured_base_url,
+                                    session_requested_provider=_session_requested_provider,
+                                )
                             # Preserve the session's original pre-canonicalization
                             # provider identity (captured at first resolve) so a
                             # named custom:slug retry can still select its exact
@@ -14904,6 +15022,13 @@ def _run_agent_streaming(
                                     _active_turn_identity,
                                     msg_text,
                                 )
+                                if _heal_ok and _is_silent_no_response:
+                                    # A replayed transcript is not a recovery:
+                                    # the retry must hand back an answer the
+                                    # pre-retry context did not already hold.
+                                    _heal_ok = _silent_retry_added_a_new_answer(
+                                        _heal_result, _heal_context_messages,
+                                    )
                             except Exception as _retry_exc:
                                 logger.warning(
                                     '[webui] self-heal: retry also failed: %s', _retry_exc,
@@ -14941,6 +15066,28 @@ def _run_agent_streaming(
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
                                 _assistant_added = True  # prevent re-entering guard
+                        if (
+                            _is_silent_no_response
+                            and not _assistant_added
+                            and _heal_stale_classification is None
+                        ):
+                            # The retry's own failure owns the final card: a
+                            # 429 / quota / terminal verdict on the second
+                            # attempt must not be reported as the first
+                            # attempt's silent "no response from provider",
+                            # while a retry that also came back empty keeps
+                            # exactly that no-response wording.
+                            _retry_err = (
+                                getattr(agent, '_last_error', None)
+                                or (_heal_result or {}).get('error')
+                                or ''
+                            )
+                            _heal_stale_classification = _classify_provider_error(
+                                str(_retry_err) if _retry_err else '',
+                                _retry_err,
+                                silent_failure=not bool(_retry_err),
+                                result=_heal_result,
+                            )
                         if not _assistant_added:
                             # Self-heal didn't apply or retry failed — emit error.
                             if _heal_stale_classification is not None:
