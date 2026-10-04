@@ -645,7 +645,7 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
         config.AGENT_INSTANCES[stream_id] = mock_agent
         config.STREAM_PARTIAL_TEXT[stream_id] = 'stale partial snapshot'
 
-        assert cancel_stream(stream_id) is True
+        assert cancel_stream(stream_id)["cancelled"] is True
 
         msgs = models.SESSIONS[sid].messages
         assert msgs == [

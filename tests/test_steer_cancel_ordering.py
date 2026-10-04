@@ -108,7 +108,7 @@ def test_cancel_snapshot_claims_stream_before_later_steer(scene, monkeypatch, re
                 assert not guidance.done()
         finally:
             release.set()
-        assert cancel.result(timeout=5) is True
+        assert cancel.result(timeout=5) == {"cancelled": True, "persistence_failed": False, "stream_id": "run"}
         assert guidance.result(timeout=5) == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
     assert held_at_publication == [True]
     agent.steer.assert_not_called()
@@ -157,7 +157,7 @@ def test_steer_claimed_first_enqueues_before_cancel(scene, registered):
         finally:
             release.set()
         assert guidance.result(timeout=5)["accepted"] is True
-        assert cancel.result(timeout=5) is True
+        assert cancel.result(timeout=5) == {"cancelled": True, "persistence_failed": False, "stream_id": "run"}
     assert order == ["steer", "cancel"]
 
 
@@ -225,7 +225,7 @@ def test_cache_only_steer_is_atomic_with_stop(scene, monkeypatch, gap):
         try:
             assert reached.wait(5), "steer never reached the requested gap"
             assert lock.owner is None, "steer must not pause while holding the stream lock"
-            assert streaming.cancel_stream("run") is True
+            assert streaming.cancel_stream("run") == {"cancelled": True, "persistence_failed": False, "stream_id": "run"}
         finally:
             release.set()
         result = guidance.result(timeout=5)

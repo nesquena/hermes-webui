@@ -150,7 +150,7 @@ def test_stop_after_registration_before_cache_or_invocation(worker_scene, monkey
             release.set()
         future.result(timeout=12)
         if stop_future is not None:
-            assert stop_future.result(timeout=12) is True
+            assert stop_future.result(timeout=12)["cancelled"] is True
 
     prior_runs = 1 if path in ("returned", "exception") else 0
     if cancellation == "none":
@@ -239,7 +239,7 @@ def test_cache_publication_and_registration_exclude_competing_stop(worker_scene,
             release.set()
         worker.result(timeout=12)
         if stop is not None:
-            assert stop.result(timeout=12) is True
+            assert stop.result(timeout=12)["cancelled"] is True
     assert interrupted_state[0] == (True, True), "Stop did not see coherent cache/lifecycle publication"
     assert "run" not in scene.calls
     assert "original" not in cache
