@@ -163,8 +163,16 @@ function _escapeGrantStore(){
   return S._escapeGrants;
 }
 
-function _normalizeWorkspaceRelPath(path){
-  let raw = String(path || '').trim().replace(/\\/g, '/');
+function _normalizeWorkspaceRelPath(path, preserveExact=false){
+  let raw = String(path || '');
+  if(raw.includes('://') || raw.includes('\0') || raw.startsWith('~/') || /^[A-Za-z]:/.test(raw)) return '';
+  if(preserveExact){
+    if(!raw || raw === '.' || raw.startsWith('/') || raw.includes('\\')) return '';
+    const exactParts=raw.split('/');
+    if(exactParts.some(part=>!part||part==='.'||part==='..')) return '';
+    return raw;
+  }
+  raw = raw.trim().replace(/\\/g, '/');
   if(!raw || raw === '.') return '.';
   if(raw.startsWith('/')) return '';
   const parts = [];
@@ -259,11 +267,45 @@ function _workspaceRouteForPath(path, kind, opts={}){
 }
 
 function _workspaceRouteForPathRel(path, kind, opts={}){
-  if(!S.session) return '';
-  const normalizedPath = _normalizeWorkspaceRelPath(path);
-  const grant = _workspaceEscapeGrantForPath(normalizedPath);
-  const sessionId = encodeURIComponent(S.session.session_id);
-  const params = new URLSearchParams({session_id:S.session.session_id, path:normalizedPath || '.'});
+  const ownerScalar = typeof _artifactScalarString === 'function'
+    ? _artifactScalarString
+    : (value) => (typeof value === 'string' ? value.trim() : '');
+  const resolveOwner = typeof _artifactOwnerFromOptions === 'function'
+    ? _artifactOwnerFromOptions
+    : (candidate) => {
+      const owner = candidate && typeof candidate === 'object' ? candidate.owner : null;
+      const ownerSessionId = ownerScalar(owner && owner.session_id)
+        || ownerScalar(candidate && candidate.session_id)
+        || ownerScalar(S && S.session && S.session.session_id);
+      if(!ownerSessionId) return null;
+      const explicitRoot = ownerScalar(owner && owner.workspace_root);
+      const sessionRoot = ownerScalar(S && S.session && S.session.workspace);
+      return {
+        session_id: ownerSessionId,
+        workspace_root: (explicitRoot || sessionRoot || '').replace(/\/+$/,''),
+      };
+    };
+  const owner = resolveOwner(opts);
+  if(!owner) return '';
+  const preserveExact = !!opts._preserveArtifactPath;
+  let normalizedPath = _normalizeWorkspaceRelPath(path, preserveExact);
+  if(preserveExact && kind === 'list' && path === '.') normalizedPath = '.';
+  if(preserveExact && !normalizedPath) return '';
+  const ownerSessionId = owner.session_id;
+  const activeSessionId = S.session ? S.session.session_id : null;
+  const activeWorkspaceRoot = ownerScalar(S.session && S.session && S.session.workspace).replace(/\/+$/,'');
+  const ownerWorkspaceRoot = ownerScalar(owner.workspace_root);
+  const workspaceRootsMatch = !ownerWorkspaceRoot && !activeWorkspaceRoot
+    ? true
+    : ownerWorkspaceRoot === activeWorkspaceRoot;
+  const grant = ownerSessionId &&
+    ownerSessionId === activeSessionId &&
+    workspaceRootsMatch
+    ? _workspaceEscapeGrantForPath(normalizedPath)
+    : null;
+  const sessionId = encodeURIComponent(ownerSessionId);
+  const routePath = preserveExact ? normalizedPath : (normalizedPath || '.');
+  const params = new URLSearchParams({session_id:ownerSessionId, path:routePath});
   if(grant){
     params.set('token', grant.token);
     if(kind === 'raw' && opts.download) params.set('download', '1');
@@ -272,15 +314,15 @@ function _workspaceRouteForPathRel(path, kind, opts={}){
     if(kind === 'read') return `/api/escape/file/read?${params.toString()}`;
     if(kind === 'raw') return `/api/escape/file/raw?${params.toString()}`;
   }
-  if(kind === 'list') return `/api/list?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
-  if(kind === 'read') return `/api/file?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
+  if(kind === 'list') return `/api/list?session_id=${sessionId}&path=${encodeURIComponent(routePath)}`;
+  if(kind === 'read') return `/api/file?session_id=${sessionId}&path=${encodeURIComponent(routePath)}`;
   if(kind === 'raw'){
     const extra = [];
     if(opts.download) extra.push('download=1');
     // Inline previews intentionally preserve a literal &inline=1 marker in this file.
     if(opts.inline) extra.push('inline=1');
     const suffix = extra.length ? `&${extra.join('&')}` : '';
-    return `/api/file/raw?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}${suffix}`;
+    return `/api/file/raw?session_id=${sessionId}&path=${encodeURIComponent(routePath)}${suffix}`;
   }
   return '';
 }
@@ -424,8 +466,8 @@ const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|_
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
 
 function _normalizeArtifactPath(path){
-  if(!path) return '';
-  path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+  if(typeof path!=='string' || !path) return '';
+  path = path.trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
   if(!path || path.length > 240 || path.includes('://')) return '';
   // Canonicalize workspace-relative prefixes so a file-tree open ("foo.md") and a
   // tool arg recorded as "./foo.md" or "~/foo.md" compare equal for mutation
@@ -436,6 +478,173 @@ function _normalizeArtifactPath(path){
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
   if(!/[./]/.test(path)) return '';
   return path;
+}
+
+function _artifactScalarString(value){
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function _artifactToolName(value){
+  const name = _artifactScalarString(value);
+  return name ? name.replace(/^functions\./,'') : '';
+}
+
+function _artifactOwnerFromCurrentSession(){
+  if(!S.session || typeof S.session.session_id !== 'string') return null;
+  const sessionId = S.session.session_id.trim();
+  if(!sessionId) return null;
+  const workspaceRoot = _artifactScalarString(S.session.workspace);
+  return {
+    session_id: sessionId,
+    workspace_root: workspaceRoot ? workspaceRoot.replace(/\/+$/,'') : '',
+  };
+}
+
+function _artifactOwnerFromContext(owner){
+  if(!owner || typeof owner !== 'object') return null;
+  const sessionId = _artifactScalarString(owner.session_id);
+  if(!sessionId) return null;
+  const workspaceRoot = _artifactScalarString(owner.workspace_root);
+  return {
+    session_id: sessionId,
+    workspace_root: workspaceRoot ? workspaceRoot.replace(/\/+$/,'') : '',
+  };
+}
+
+function _artifactOwnerFromOptions(opts){
+  if(opts && typeof opts === 'object' && Object.prototype.hasOwnProperty.call(opts, 'owner')){
+    return _artifactOwnerFromContext(opts.owner);
+  }
+  return _artifactOwnerFromCurrentSession();
+}
+
+function _artifactOwnerMatchesSession(owner){
+  const active = _artifactOwnerFromCurrentSession();
+  if(!owner || !active || owner.session_id !== active.session_id) return false;
+  if(owner.workspace_root) return owner.workspace_root === active.workspace_root;
+  return true;
+}
+
+let _workspaceOpenGeneration = 0;
+function _nextWorkspaceOpenGeneration(){
+  _workspaceOpenGeneration += 1;
+  return _workspaceOpenGeneration;
+}
+
+// Native preview elements keep loading after JavaScript returns from openFile().
+// Clear every browser-owned sink synchronously when an owner is replaced or a
+// preview is closed, so a previous session cannot finish into the shared pane.
+function _clearNativePreviewSinks(opts={}){
+  if(!opts || opts.bumpGeneration !== false) _workspaceOpenGeneration += 1;
+  const lookup=(id)=>typeof $ === 'function' ? $(id) : null;
+  const clearElement = (node, isMedia=false) => {
+    if(!node) return;
+    if(isMedia && typeof node.pause === 'function'){
+      try{ node.pause(); }catch(_){ }
+    }
+    for(const prop of ['onload','onerror','onloadeddata','oncanplay','onabort','onstalled']){
+      try{ node[prop]=null; }catch(_){ }
+    }
+    try{
+      if(typeof node.removeAttribute === 'function') node.removeAttribute('src');
+    }catch(_){ }
+    try{ node.src=''; }catch(_){ }
+    if(isMedia && typeof node.load === 'function'){
+      try{ node.load(); }catch(_){ }
+    }
+  };
+  clearElement(lookup('previewImg'));
+  clearElement(lookup('previewPdfFrame'));
+  clearElement(lookup('previewHtmlIframe'));
+  const mediaWrap=lookup('previewMediaWrap');
+  if(mediaWrap){
+    let mediaNodes=[];
+    try{
+      mediaNodes=typeof mediaWrap.querySelectorAll === 'function'
+        ? [...mediaWrap.querySelectorAll('audio,video')]
+        : [];
+    }catch(_){ }
+    for(const node of mediaNodes) clearElement(node,true);
+    try{ mediaWrap.innerHTML=''; }catch(_){ }
+  }
+}
+
+// Session replacement normally happens before the deferred workspace refresh.
+// Observe that shared state transition so native sinks are invalidated in the
+// same synchronous turn, even before clearPreview()/openFile() gets a chance to
+// run. The data contract stays unchanged; this only fences browser resources.
+let _workspaceSessionOwnerKey = null;
+let _workspaceSessionOwnerSession = null;
+let _workspaceSessionOwnerFenceInstalled = false;
+function _workspaceSessionOwnerKeyFor(session){
+  if(!session || typeof session !== 'object') return '';
+  const sessionId = _artifactScalarString(session.session_id);
+  if(!sessionId) return '';
+  const workspaceRoot = _artifactScalarString(session.workspace).replace(/\/+$/,'');
+  return `${sessionId}\u0000${workspaceRoot}`;
+}
+function _workspaceSessionOwnerCurrent(){
+  if(_workspaceSessionOwnerFenceInstalled) return _workspaceSessionOwnerSession;
+  if(typeof S !== 'undefined' && S && typeof S === 'object') return S.session;
+  return null;
+}
+function _transitionActiveSessionWorkspaceOwner(nextSession, opts={}){
+  const current = _workspaceSessionOwnerCurrent();
+  const hasWorkspaceRoot = !!(
+    opts && typeof opts === 'object'
+    && Object.prototype.hasOwnProperty.call(opts, 'workspaceRoot')
+  );
+  const next = hasWorkspaceRoot
+    ? (current && typeof current === 'object'
+      ? {...current, workspace: opts.workspaceRoot}
+      : null)
+    : nextSession;
+  const nextKey = _workspaceSessionOwnerKeyFor(next);
+  // An empty key means that there is no active owner (for example the blank
+  // page). Do not bump for an initial owner bind, but do invalidate an existing
+  // owner when it is cleared or replaced in either tuple dimension.
+  if(_workspaceSessionOwnerKey && _workspaceSessionOwnerKey !== nextKey){
+    _clearNativePreviewSinks();
+  }
+  // The owner key is updated only after the old native sinks are fenced. The
+  // shared session object is then published through the getter installed below,
+  // so callers cannot observe a new root with the old generation.
+  _workspaceSessionOwnerKey = nextKey;
+  _workspaceSessionOwnerSession = next;
+  if(!_workspaceSessionOwnerFenceInstalled && typeof S !== 'undefined' && S && S.session !== next){
+    S.session = next;
+  }
+  return next;
+}
+function _installWorkspaceSessionOwnerFence(){
+  if(typeof S === 'undefined' || !S || typeof S !== 'object') return;
+  const descriptor=Object.getOwnPropertyDescriptor(S,'session');
+  if(!descriptor || descriptor.configurable===false || descriptor.get || descriptor.set) return;
+  _workspaceSessionOwnerSession=descriptor.value;
+  _workspaceSessionOwnerFenceInstalled=true;
+  _workspaceSessionOwnerKey=_workspaceSessionOwnerKeyFor(_workspaceSessionOwnerSession);
+  try{
+    Object.defineProperty(S,'session',{
+      configurable:true,
+      enumerable:descriptor.enumerable,
+      get(){ return _workspaceSessionOwnerSession; },
+      set(next){
+        _transitionActiveSessionWorkspaceOwner(next);
+      },
+    });
+  }catch(_){
+    _workspaceSessionOwnerFenceInstalled=false;
+    _workspaceSessionOwnerKey=null;
+  }
+}
+
+function _normalizeTypedArtifactPath(path){
+  if(typeof path!=='string') return '';
+  const value=path;
+  if(!value||value.length>512||value.includes('://')||/[\\\0]/.test(value)||value.startsWith('/')||value.startsWith('~/')||/^[A-Za-z]:/.test(value)) return '';
+  const parts=value.split('/');
+  if(parts.some(part=>!part||part==='.'||part==='..')) return '';
+  return value;
 }
 
 function _artifactCandidatesFromText(text){
@@ -462,7 +671,19 @@ function _artifactCandidatesFromText(text){
 
 function _artifactCandidatesFromToolCall(tc){
   if(!tc) return [];
-  const name = String(tc.name || '').replace(/^functions\./,'');
+  const artifactScalarString = typeof _artifactScalarString === 'function'
+    ? _artifactScalarString
+    : (value) => (typeof value === 'string' ? value.trim() : '');
+  const normalizeToolName = (value) => {
+    const name = artifactScalarString(value);
+    if(typeof _artifactToolName === 'function'){
+      try{
+        return _artifactToolName(value);
+      }catch(_){}
+    }
+    return name ? name.replace(/^functions\./,'') : '';
+  };
+  const name = normalizeToolName(tc.name);
   const args = tc.arguments || tc.args || tc.input || {};
   const result = tc.result || tc.output || tc.snippet || '';
   const out = [];
@@ -482,6 +703,88 @@ function _artifactCandidatesFromToolCall(tc){
   if(!out.length && ARTIFACT_MUTATION_TOOLS.has(name)){
     const argsText = typeof args === 'string' ? args : JSON.stringify(args || {});
     for(const a of _artifactCandidatesFromText(argsText)) out.push(a);
+  }
+  return out;
+}
+
+// Session artifact discovery is intentionally broad. The final-answer list is
+// stricter: it only accepts successful, structured write-tool evidence owned
+// by this turn.
+function turnArtifactReferencesFromToolCall(tc){
+  if(!tc||tc.is_error) return [];
+  const artifactScalarString = typeof _artifactScalarString === 'function'
+    ? _artifactScalarString
+    : (value) => (typeof value === 'string' ? value.trim() : '');
+  const normalizeToolName = (value) => {
+    const name = artifactScalarString(value);
+    if(typeof _artifactToolName === 'function'){
+      try{
+        return _artifactToolName(value);
+      }catch(_){}
+    }
+    return name ? name.replace(/^functions\./,'') : '';
+  };
+  const mutationTools = (typeof ARTIFACT_MUTATION_TOOLS === 'object' && ARTIFACT_MUTATION_TOOLS instanceof Set)
+    ? ARTIFACT_MUTATION_TOOLS
+    : new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
+  const normalizeArtifactPath = typeof _normalizeArtifactPath === 'function'
+    ? _normalizeArtifactPath
+    : (path) => {
+      if(typeof path !== 'string' || !path) return '';
+      const trimmed = path.trim().replace(/[`"'<>),.;:]+$/g,'').replace(/^[`"'(<]+/g,'');
+      if(!trimmed || trimmed.length>240 || trimmed.includes('://')) return '';
+      const cleaned = trimmed.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
+      if(!cleaned) return '';
+      if(typeof ARTIFACT_IGNORE_RE === 'object' && ARTIFACT_IGNORE_RE && ARTIFACT_IGNORE_RE.test(cleaned)) return '';
+      if(!(/[./]/.test(cleaned))) return '';
+      return cleaned;
+    };
+  const name=normalizeToolName(tc.name);
+  if(!mutationTools.has(name)) return [];
+  const allowArtifactCallIdFallback = name === 'patch';
+  const explicitToolCallId = artifactScalarString(tc.tool_call_id || tc.id);
+  const completionSessionId = artifactScalarString(tc.session_id);
+  const completionToolCallId = artifactScalarString(
+    explicitToolCallId
+    || tc.tid
+    || (allowArtifactCallIdFallback ? (() => {
+      const artifacts = Array.isArray(tc.artifacts) ? tc.artifacts : [];
+      for(const artifact of artifacts){
+        const toolCallId = artifactScalarString(artifact && artifact.tool_call_id);
+        if(toolCallId) return toolCallId;
+      }
+      return '';
+    })() : '')
+  );
+  if(!completionToolCallId) return [];
+  const seen=new Set();
+  const out=[];
+  for(const artifact of Array.isArray(tc.artifacts)?tc.artifacts:[]){
+    if(!artifact||typeof artifact!=='object') continue;
+    if(typeof artifact.path !== 'string' || typeof artifact.workspace_root !== 'string') continue;
+    const path=_normalizeTypedArtifactPath(artifact.path);
+    const workspaceRoot=artifact.workspace_root.replace(/\/+$/,'');
+    const toolCallId=artifactScalarString(artifact.tool_call_id);
+    const toolName=normalizeToolName(artifact.tool_name);
+    const key=`${workspaceRoot}\u0000${path}`;
+    if(
+      !path
+      || !workspaceRoot
+      || !toolCallId
+      || toolName!==name
+      || toolCallId!==completionToolCallId
+      || seen.has(key)
+    ) continue;
+    seen.add(key);
+    const descriptor={
+      path,
+      workspace_root:workspaceRoot,
+      tool_call_id:toolCallId,
+      tool_name:toolName,
+    };
+    const artifactSessionId = artifactScalarString(artifact.session_id) || completionSessionId;
+    if(artifactSessionId) descriptor.session_id=artifactSessionId;
+    out.push(descriptor);
   }
   return out;
 }
@@ -514,7 +817,11 @@ async function refreshOpenPreviewIfMutated(){
   if(typeof _previewDirty!=='undefined'&&_previewDirty) return;
   if(!_isOpenPreviewPathMutated()) return;
   if(!_previewCurrentPath||!S.session) return;
-  await openFile(_previewCurrentPath, { bustCache: true });
+  await openFile(_previewCurrentPath, {
+    bustCache: true,
+    owner: _previewOwner,
+    _preserveArtifactPath: _previewPreserveArtifactPath,
+  });
 }
 
 function collectSessionArtifacts(){
@@ -619,38 +926,95 @@ function projectSessionArtifactsForOwner(sessionId){
 async function _workspacePathExists(path){
   if(!S.session||!path) return false;
   const parts=String(path).replace(/\\/g,'/').split('/').filter(Boolean);
-  const name=parts.pop();
+  const opts=arguments.length>1 ? (arguments[1] || {}) : {};
+  const owner = _artifactOwnerFromOptions(opts);
+  if(!owner) return false;
+  const normalizedPath=String(path).replace(/\\/g,'/');
+  const normalizedParts=parts;
+  const name=normalizedParts.pop();
   if(!name) return false;
-  const dir=parts.length?parts.join('/'):'.';
-  const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
-  return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
+  const dir=normalizedParts.length?normalizedParts.join('/'):'.';
+  const route = _workspaceRouteForPathRel(dir,'list',{
+    owner,
+    _preserveArtifactPath: !!opts._preserveArtifactPath,
+  });
+  if(!route) return false;
+  const data=await api(route);
+  return (data.entries||[]).some(entry=>entry&&((entry.path===normalizedPath)||entry.name===name));
+}
+
+function _artifactOwnerFromArtifactValue(value){
+  if(!value||typeof value!=='object' || Array.isArray(value)) return null;
+  const explicit = _artifactOwnerFromContext(value.owner);
+  if(explicit) return explicit;
+  if(typeof value.session_id === 'string' && typeof value.workspace_root === 'string'){
+    return {
+      session_id: value.session_id,
+      workspace_root: value.workspace_root.replace(/\/+$/,''),
+    };
+  }
+  return null;
 }
 
 async function openArtifactPath(path){
-  if(!path) return;
-  switchWorkspacePanelTab('files');
-  // Normalize backslash separators to '/' first — Windows absolute paths
-  // (e.g. "D:\workspace\dir\file") otherwise break prefix-strip and the
-  // /api/list existence check (which splits on '/').
-  let rel = String(path).replace(/\\/g,'/').replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
-  // Strip workspace prefix so /api/list receives a workspace-relative path.
-  const ws = (S.session && S.session.workspace || '').replace(/\\/g,'/');
-  if(ws){
-    const normWs = ws.replace(/\/+$/,'') + '/';
-    if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
-    else if(rel === ws.replace(/\/+$/,'')) rel = '.';
+  const artifact = path && typeof path === 'object' && !Array.isArray(path) ? path : null;
+  const legacyString = !artifact;
+  let pathValue = typeof path === 'string'
+    ? path
+    : artifact && typeof artifact.path === 'string'
+      ? artifact.path
+      : '';
+  // Artifacts-panel rows predate typed descriptors and may carry an absolute
+  // workspace path returned by the legacy list route. Keep that route usable;
+  // strict descriptor validation below remains reserved for typed artifacts.
+  // The legacy path is also where Windows backslash separators are accepted;
+  // typed Final Answer descriptors stay fail-closed on malformed separators.
+  if(legacyString){
+    pathValue = String(pathValue).replace(/\\/g,'/').replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
+    const workspaceRoot = String(S&&S.session&&S.session.workspace||'')
+      .replace(/\\/g,'/').replace(/\/+$/,'');
+    if(workspaceRoot && (pathValue===workspaceRoot || pathValue.startsWith(`${workspaceRoot}/`))){
+      pathValue = pathValue.slice(workspaceRoot.length).replace(/^\/+/, '') || '.';
+    }
   }
-  if(!rel) rel = '.';
+  const owner = artifact
+    ? _artifactOwnerFromArtifactValue(artifact)
+    : _artifactOwnerFromCurrentSession();
+  const rel = legacyString && pathValue === '.'
+    ? '.'
+    : _normalizeTypedArtifactPath(pathValue);
+  if(!rel || !owner) return;
+  if(typeof _artifactOwnerMatchesSession === 'function' && !_artifactOwnerMatchesSession(owner)) return;
+  const generation = _nextWorkspaceOpenGeneration();
+  const ownerStillActive = () => typeof _artifactOwnerMatchesSession === 'function'
+    ? generation===_workspaceOpenGeneration && _artifactOwnerMatchesSession(owner)
+    : generation===_workspaceOpenGeneration;
+  if(!ownerStillActive()) return;
+  // Invalidate any native sink from the previous preview before an async
+  // existence check. The open generation above is the authoritative token for
+  // this request, so clearing the sinks must not advance it a second time.
+  if(typeof _clearNativePreviewSinks === 'function'){
+    _clearNativePreviewSinks({bumpGeneration:false});
+  }
+  // Artifact links are an explicit request to inspect a file. A closed
+  // workspace panel must expand before openFile paints the preview, otherwise
+  // the file is selected behind an invisible right-hand column.
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  if(!ownerStillActive()) return;
+  switchWorkspacePanelTab('files');
+  if(!ownerStillActive()) return;
   try{
-    if(!(await _workspacePathExists(rel))){
-      setStatus(t('file_open_failed'));
+    if(!ownerStillActive()) return;
+    if(!(await _workspacePathExists(rel,{owner,_preserveArtifactPath:true}))){
+      if(ownerStillActive()) setStatus(t('file_open_failed'));
       return;
     }
   }catch(_){
-    setStatus(t('file_open_failed'));
+    if(ownerStillActive()) setStatus(t('file_open_failed'));
     return;
   }
-  openFile(rel);
+  if(!ownerStillActive()) return;
+  await openFile(rel,{owner,_openGeneration:generation,_preserveArtifactPath:true});
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
@@ -750,7 +1114,14 @@ async function loadDir(path, opts={}){
     );
     if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
     if(data.workspace_recovered&&data.workspace){
-      S.session.workspace=String(data.workspace);
+      const recoveredWorkspace=String(data.workspace);
+      if(typeof _transitionActiveSessionWorkspaceOwner==='function'){
+        _transitionActiveSessionWorkspaceOwner(null,{workspaceRoot:recoveredWorkspace});
+      }else{
+        // Keep standalone loadDir() extraction tests usable; the production
+        // workspace script always installs the canonical owner helper first.
+        S.session={...S.session,workspace:recoveredWorkspace};
+      }
       S._dirCache={};
       _restoreExpandedDirs();
       if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
@@ -945,11 +1316,17 @@ function forceRenderMarkdownPreview(){
   // non-dirty state and cached content that belongs to the current file.
   if(_previewDirty || $('previewEditArea').style.display!=='none') return;
   if(!_previewRawContent || _previewRawContentPath!==_previewCurrentPath) return;
-  openFile(_previewCurrentPath,{forceRichMarkdown:true});
+  openFile(_previewCurrentPath,{
+    forceRichMarkdown:true,
+    owner:_previewOwner,
+    _preserveArtifactPath:_previewPreserveArtifactPath,
+  });
   setStatus('Markdown rendered for this file.');
 }
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
+let _previewOwner = null;  // immutable session/workspace owner captured at open time
+let _previewPreserveArtifactPath = false;  // retain typed descriptor path semantics
 let _previewCurrentMode = '';  // 'code' | 'csv' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
 let _previewServerEditable = null;  // backend editability metadata when available
@@ -1097,54 +1474,164 @@ function _prismLanguageForPath(path){
 }
 
 async function openFile(path, opts={}){
-  if(!S.session)return;
+  const resolveOwner = typeof _artifactOwnerFromOptions === 'function'
+    ? _artifactOwnerFromOptions
+    : (candidate) => {
+      const owner = candidate && typeof candidate === 'object' ? candidate.owner : null;
+      const sessionId = (() => {
+        const candidateSession = candidate && (
+          (candidate.owner && candidate.owner.session_id) ||
+          candidate.session_id
+        );
+        if(typeof candidateSession === 'string'){
+          const id = candidateSession.trim();
+          if(id) return id;
+        }
+        const session = S && S.session && (S.session.session_id || S.session.session_id);
+        return typeof session === 'string' ? session.trim() : '';
+      })();
+      if(!sessionId) return null;
+      return {
+        session_id: sessionId,
+        workspace_root: '',
+      };
+    };
+  const owner = resolveOwner(opts);
+  if(!path || typeof path !== 'string' || !owner) return;
+  const normalizeWorkspacePath = typeof _normalizeWorkspaceRelPath === 'function'
+    ? _normalizeWorkspaceRelPath
+    : (value) => {
+      let raw=String(value||'').trim().replace(/\\/g,'/');
+      if(raw.includes('://') || raw.includes('\0') || raw.startsWith('~/') || /^[A-Za-z]:/.test(raw)) return '';
+      if(!raw||raw==='.') return '.';
+      if(raw.startsWith('/')) return '';
+      const parts=[];
+      for(const part of raw.split('/')){
+        if(!part||part==='.') continue;
+        if(part==='..'){
+          if(parts.length) parts.pop(); else return '';
+          continue;
+        }
+        parts.push(part);
+      }
+      return parts.join('/')||'.';
+    };
+  const hasMalformedSegments = path.split('/').some(part=>!part||part==='.'||part==='..');
+  const typedPath = opts&&opts._preserveArtifactPath
+    ? (typeof _normalizeTypedArtifactPath === 'function' ? _normalizeTypedArtifactPath(path) : '')
+    : (hasMalformedSegments ? '' : normalizeWorkspacePath(path));
+  if(!typedPath) return;
+  path = typedPath;
+  if(typeof _artifactOwnerMatchesSession === 'function' && !_artifactOwnerMatchesSession(owner)) return;
+  const nextGeneration = typeof _nextWorkspaceOpenGeneration === 'function'
+    ? _nextWorkspaceOpenGeneration
+    : () => 1;
+  const currentGeneration = () => typeof _workspaceOpenGeneration === 'number'
+    ? _workspaceOpenGeneration
+    : generation;
+  const generation = Number.isInteger(opts&&opts._openGeneration)
+    ? opts._openGeneration
+    : nextGeneration();
+  const openFileOwner = owner;
+  const ownerStillActive = () => typeof _artifactOwnerMatchesSession === 'function'
+    ? generation===currentGeneration() && _artifactOwnerMatchesSession(openFileOwner)
+    : generation===currentGeneration();
+  if(!ownerStillActive()) return;
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
   const cacheBust=bustCache?`&_=${Date.now()}`:'';
+  const routeOpts={...opts, owner};
+  delete routeOpts._openGeneration;
+
+  // A direct file open is another owner transition point (the artifact path
+  // path already invalidates its sinks before the existence request). Clear all
+  // native sinks without advancing this call's captured generation.
+  if(typeof _clearNativePreviewSinks === 'function'){
+    _clearNativePreviewSinks({bumpGeneration:false});
+  }
 
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
-    downloadFile(path);
+    if(!ownerStillActive()) return;
+    downloadFile(path, routeOpts);
     return;
   }
 
+  if(!ownerStillActive()) return;
   _previewServerEditable = null;
   _previewSaveRoute = '/api/file/save';
   _previewOfficeFormat = '';
   _previewPreviewKind = '';
 
+  if(!ownerStillActive()) return;
   $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;
+  _previewOwner = {
+    session_id: openFileOwner.session_id,
+    workspace_root: openFileOwner.workspace_root || '',
+  };
+  const nativePreviewToken=Object.freeze({
+    generation,
+    session_id:openFileOwner.session_id,
+    workspace_root:openFileOwner.workspace_root || '',
+    path,
+  });
+  const nativePreviewStillActive=()=>ownerStillActive()
+    && nativePreviewToken.generation===currentGeneration()
+    && _previewCurrentPath===nativePreviewToken.path
+    && !!_previewOwner
+    && _previewOwner.session_id===nativePreviewToken.session_id
+    && (_previewOwner.workspace_root||'')===nativePreviewToken.workspace_root;
+  _previewPreserveArtifactPath = !!(opts && opts._preserveArtifactPath);
+  if(!ownerStillActive()) return;
   renderFileBreadcrumb(path);
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
+    if(!nativePreviewStillActive()) return;
     showPreview('image');
-    const url=_workspaceRouteForPath(path, 'raw') + cacheBust;
+    if(!nativePreviewStillActive()) return;
+    const url=_workspaceRouteForPath(path, 'raw', routeOpts) + cacheBust;
+    if(!nativePreviewStillActive()) return;
     $('previewImg').alt=path;
+    if(!nativePreviewStillActive()) return;
     $('previewImg').src=url;
-    $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
+    if(!nativePreviewStillActive()) return;
+    $('previewImg').onerror=()=>{ if(!nativePreviewStillActive()) return; setStatus(t('image_load_failed')); };
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
+    if(!nativePreviewStillActive()) return;
     showPreview(mode);
-    const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
+    if(!nativePreviewStillActive()) return;
+    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true}) + cacheBust;
+    if(!nativePreviewStillActive()) return;
     const wrap=$('previewMediaWrap');
+    if(!nativePreviewStillActive()) return;
     if(wrap){
       wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
         ? _mediaPlayerHtml(mode,url,path.split('/').pop()||path)
         : `<${mode} src="${url.replace(/"/g,'%22')}" controls preload="metadata"></${mode}>`;
+      if(!nativePreviewStillActive()) return;
       if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
     }
   } else if(PDF_EXTS.has(ext)){
+    if(!nativePreviewStillActive()) return;
     showPreview('pdf');
-    const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
+    if(!nativePreviewStillActive()) return;
+    const legacyRawUrl = _workspaceRouteForPath(path, 'raw', {inline:true});
+    const url=(routeOpts.owner
+      ? _workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true})
+      : legacyRawUrl) + cacheBust;
+    if(!nativePreviewStillActive()) return;
     const frame=$('previewPdfFrame');
     if(frame){
       frame.src=''; // clear first to avoid stale content
+      if(!nativePreviewStillActive()) return;
       frame.src=url;
+      if(!nativePreviewStillActive()) return;
       frame.title=`PDF preview: ${path.split('/').pop()||path}`;
     }
   } else if(MD_EXTS.has(ext)){
@@ -1155,11 +1642,14 @@ async function openFile(path, opts={}){
       // here (_previewCurrentPath was just assigned above), so guard on the
       // dedicated _previewRawContentPath instead — otherwise a force-render after a
       // file switch could re-render the previous file's cached content.
+      if(!ownerStillActive()) return;
       const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
         ? {content:_previewRawContent}
-        : await api(_workspaceRouteForPath(path, 'read'));
+        : await api(_workspaceRouteForPath(path, 'read', routeOpts));
+      if(!ownerStillActive()) return;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
+      if(!ownerStillActive()) return;
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
         showPreview('code');
         $('previewCode').textContent=data.content;
@@ -1167,8 +1657,12 @@ async function openFile(path, opts={}){
         setStatus(largeMarkdownPlainTextStatus(data.content));
         return;
       }
+      if(!ownerStillActive()) return;
       renderMarkdownPreviewContent(data);
-    }catch(e){setStatus(t('file_open_failed'));}
+    }catch(e){
+      if(!ownerStillActive()) return;
+      setStatus(t('file_open_failed'));
+    }
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1178,32 +1672,45 @@ async function openFile(path, opts={}){
     // still prevents the preview from navigating the parent, accessing cookies,
     // or reading other origin data. If a stricter mode is needed, remove
     // allow-scripts (or add sandbox="") to disable all JS execution.
+    if(!nativePreviewStillActive()) return;
     showPreview('html');
-    const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
+    if(!nativePreviewStillActive()) return;
+    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true}) + cacheBust;
+    if(!nativePreviewStillActive()) return;
     const iframe=$('previewHtmlIframe');
     if(iframe){
       iframe.src=''; // clear first to avoid stale content
+      if(!nativePreviewStillActive()) return;
       iframe.src=url;
     }
   } else if(ext==='.csv'){
     try{
-      const data=await api(_workspaceRouteForPath(path, 'read'));
+      if(!ownerStillActive()) return;
+      const data=await api(_workspaceRouteForPath(path, 'read', routeOpts));
+      if(!ownerStillActive()) return;
       if(data.binary){
-        downloadFile(path);
+        if(!ownerStillActive()) return;
+        downloadFile(path, routeOpts);
         return;
       }
+      if(!ownerStillActive()) return;
       if(renderCsvPreviewContent(path, data.content)) return;
+      if(!ownerStillActive()) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
-      downloadFile(path);
+      if(!ownerStillActive()) return;
+      downloadFile(path, routeOpts);
     }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
-      const data=await api(_workspaceRouteForPath(path, 'read'));
+      if(!ownerStillActive()) return;
+      const data=await api(_workspaceRouteForPath(path, 'read', routeOpts));
+      if(!ownerStillActive()) return;
       if(data.binary){
         // Server flagged this as binary content
-        downloadFile(path);
+        if(!ownerStillActive()) return;
+        downloadFile(path, routeOpts);
         return;
       }
       if(data.preview_kind==='office'){
@@ -1214,24 +1721,30 @@ async function openFile(path, opts={}){
         _previewOfficeFormat = data.office_format || '';
         _previewSaveRoute = data.preview_kind==='office' ? '/api/file/office-save' : '/api/file/save';
       }
+      if(!ownerStillActive()) return;
       renderCodePreviewContent(path, data.content);
   }catch(e){
+      if(!ownerStillActive()) return;
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
+        if(!ownerStillActive()) return;
         _clearWorkspaceEscapeGrant(grant.path);
+        if(!ownerStillActive()) return;
         showToast(t('external_link_grant_expired') || t('file_open_failed'), 5000, 'error');
         return;
       }
       // If it's a 400/too-large error, offer download instead
-      downloadFile(path);
+      if(!ownerStillActive()) return;
+      downloadFile(path, routeOpts);
     }
   }
 }
 
-function downloadFile(path){
-  if(!S.session)return;
+function downloadFile(path, opts={}){
+  const owner = _artifactOwnerFromOptions(opts);
+  if(!path || typeof path !== 'string' || !owner) return;
   // Trigger browser download via the raw file endpoint with content-disposition attachment
-  const url=_workspaceRouteForPath(path, 'raw', {download:true});
+  const url=_workspaceRouteForPath(path, 'raw', {...opts, owner, download:true});
   const filename=path.split('/').pop();
   const a=document.createElement('a');
   a.href=url;a.download=filename;
@@ -1280,11 +1793,26 @@ function renderFileBreadcrumb(filePath) {
 }
 
 function openInBrowser(){
-  if(!_previewCurrentPath||!S.session) return;
-  const url=_workspaceRouteForPath(_previewCurrentPath, 'raw', {inline:true});
+  if(!_previewCurrentPath||!S.session||!_previewOwner) return;
+  if(!_artifactOwnerMatchesSession(_previewOwner)) return;
+  const url=_workspaceRouteForPath(_previewCurrentPath, 'raw', {
+    inline:true,
+    owner:_previewOwner,
+    _preserveArtifactPath:_previewPreserveArtifactPath,
+  });
+  if(!url) return;
   window.open(url,'_blank','noopener');
 }
 // openInBrowser keeps the helper-based raw path, which expands to an explicit &inline=1 URL.
+
+function downloadPreviewFile(){
+  if(!_previewCurrentPath||!_previewOwner) return;
+  if(!_artifactOwnerMatchesSession(_previewOwner)) return;
+  downloadFile(_previewCurrentPath, {
+    owner:_previewOwner,
+    _preserveArtifactPath:_previewPreserveArtifactPath,
+  });
+}
 
 async function copyPreviewRelativePath(){
   if(!_previewCurrentPath) return;
@@ -1503,6 +2031,8 @@ function _bindWorkspaceOsUploadDropTarget(el, destDir) {
     await uploadOsDropToWorkspace(e.dataTransfer, destDir);
   });
 }
+
+_installWorkspaceSessionOwnerFence();
 
 // Drag-and-drop files onto workspace file tree
 if (typeof document !== 'undefined') {
