@@ -1049,7 +1049,6 @@ async function cmdTerminal(){
     // System-minted session (#6022): opening the terminal auto-creates a
     // session — explicit worktree:false so the config default can't leak.
     await newSession(false, {worktree: false});
-    if(typeof renderSessionList==='function') await renderSessionList();
   }
   if(!S.session||!S.session.workspace){
     showToast(t('terminal_no_workspace_title'),2600,'warning');
@@ -1061,8 +1060,9 @@ async function cmdTerminal(){
 
 async function cmdNew(){
   if(typeof clearCompressionUi==='function') clearCompressionUi();
+  // newSession() refreshes the sidebar itself; a second awaited render only
+  // queued another full list read in front of the focus (#7996).
   await newSession();
-  await renderSessionList();
   $('msg').focus();
   showToast(t('new_session'));
 }
@@ -1592,7 +1592,7 @@ async function cmdStop(){
 }
 
 async function cmdGoal(args){
-  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session){await newSession();}
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=S.session.session_id;
   try{

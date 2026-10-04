@@ -2163,7 +2163,9 @@ $('btnNewChat').onclick=async()=>{
      && await _restoreRememberedNewChatDraftSession()){
     await renderSessionList();closeMobileSidebar();$('msg').focus();return;
   }
-  await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+  // newSession() schedules the sidebar refresh itself; awaiting another here
+  // queued a second full list read in front of the composer focus (#7936).
+  await newSession();closeMobileSidebar();$('msg').focus();
 };
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
@@ -2577,7 +2579,8 @@ document.addEventListener('keydown',async e=>{
     // a long generation to finish before they could start something new — exactly
     // the moment they want to switch context. newSession() leaves the in-flight
     // stream running on its own session; the user just gets a fresh blank one.
-    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+    // As in $('btnNewChat').onclick: newSession() owns the sidebar refresh.
+    await newSession();closeMobileSidebar();$('msg').focus();
   }
   // Cmd/Ctrl+, opens/closes Settings (VS Code convention).
   // Fire globally — like VS Code, don't skip text inputs.
