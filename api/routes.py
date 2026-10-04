@@ -26577,6 +26577,7 @@ def _handle_chat_sync(handler, body):
                 _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
+                _deduplicate_context_messages,
                 _find_active_turn_checkpoint_index,
                 _merge_display_messages_after_agent_result,
                 _resolve_active_turn_authority,
@@ -26610,17 +26611,29 @@ def _handle_chat_sync(handler, body):
 
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
+            # The EXACT projection handed to the Agent, threaded to the settle's
+            # replay dedupe. ``result["messages"]`` is the full conversation
+            # (this projection + the current turn), so without it the dedupe
+            # cannot prove which rows the current turn owns and could append
+            # sanitizer-rewritten historical rows beside the raw history
+            # (#7237 review data-regression finding, nesquena-hermes
+            # 2026-09-23).
+            _run_conversation_projected_history = _sanitize_messages_for_agent(
+                _previous_context_messages,
+                cfg=get_config(),
+                effective_model=_model,
+                effective_provider=_provider,
+                effective_base_url=_base_url,
+            )
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_agent(
-                    _previous_context_messages,
-                    cfg=get_config(),
-                    effective_model=_model,
-                    effective_provider=_provider,
-                    effective_base_url=_base_url,
-                ),
+                # Threaded to the settle's replay dedupe so only rows the
+                # current turn owns are appended when the replayed prefix
+                # diverges from the raw context (#7237 review
+                # data-regression finding).
+                conversation_history=_run_conversation_projected_history,
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
@@ -26697,11 +26710,36 @@ def _handle_chat_sync(handler, body):
         _assign_stable_message_ids(
             _result_messages, _previous_messages, _previous_context_messages
         )
-        _next_context_messages = _dedupe_replayed_context_messages(
-            _previous_context_messages,
-            _next_context_messages,
-            msg,
-        )
+        if result.get("messages"):
+            # Call-scoped protection (#7237 review blocker 1,
+            # nesquena-hermes 2026-09-28): the dedupe RETURNS the protected
+            # rows it proved; the sync route consumes them in THIS call by
+            # passing them into the identity dedupe — the old module global
+            # was never read here, so a settle that proved current-turn rows
+            # could have them collapsed as duplicates on the sync path.
+            _next_context_messages, _proven_rows = _dedupe_replayed_context_messages(
+                _previous_context_messages,
+                _next_context_messages,
+                msg,
+                projected_history=_run_conversation_projected_history,
+            )
+            s.context_messages = _deduplicate_context_messages(
+                _next_context_messages,
+                protected_rows=_proven_rows,
+            )
+        else:
+            # The Agent produced NO rows for this turn. The previous fallback
+            # (``result.get("messages") or _previous_context_messages``) left
+            # the raw pre-turn context substituted as the settle input; with
+            # the exact sent projection ``[]`` that whole substituted raw
+            # history was then treated as the current-turn output and the
+            # settle returned ``previous_context + previous_context``
+            # (#7237 review residual 2, nesquena-hermes 2026-09-27). Settle
+            # an empty Agent result as a no-op for model context — the same
+            # contract the streaming ``_settle_result_messages`` applies —
+            # keeping exactly one raw-history copy with no loss or
+            # duplication.
+            _next_context_messages = list(_previous_context_messages)
         if _active_turn_identity.get("token"):
             _next_context_messages = _settle_current_turn_boundary(
                 _previous_context_messages,

@@ -216,6 +216,14 @@ jobs:
           python -m pip install --upgrade pip
           # Office parsers stay optional at runtime; CI installs them explicitly for the workspace preview tests.
           pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio pytest-shard python-docx openpyxl python-pptx playwright
+          # cryptography is a direct requirement (requirements.txt: passkey/WebAuthn
+          # and OIDC). It used to arrive transitively via `pip install "mcp<2"`
+          # (mcp 1.30 pulls pyjwt[crypto]), but the resolver can legitimately
+          # pick an older mcp (e.g. 1.9.4) that does NOT carry it — the
+          # test_auth_oidc / test_passkey_auth suites then fail at collection.
+          # Install it explicitly so the matrix no longer depends on which mcp
+          # build the resolver happens to choose.
+          pip install "cryptography>=42.0"
           # ruff is installed so tests/test_ruff_forward_lint.py runs its E9/F821
           # tree-clean assertions in-suite (mirrors how eslint is available for
           # tests/test_static_js_runtime_lint.py). If install fails the test
