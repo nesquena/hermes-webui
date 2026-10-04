@@ -144,12 +144,64 @@ def main():
                                         result:document.querySelector('#liveAssistantTurn').textContent.includes('LATER RESULT')};
                                     }""",{'sid':sid,'stream':stream_id})
                                     assert updated=={'rows':expected+1,'result':True},updated
-                                    switched=page.evaluate("""async sid=>{
+                                    switched=page.evaluate("""async ({sid,stream,expected})=>{
                                       await loadSession('idle-fixture');
-                                      await loadSession(sid);
-                                      return {rows:document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role="tool"]').length,
-                                        result:document.querySelector('#liveAssistantTurn').textContent.includes('LATER RESULT')};
-                                    }""",sid)
+                                      const idleTurn=document.querySelector('#liveAssistantTurn');
+                                      if(S.session.session_id!=='idle-fixture'||S.activeStreamId||
+                                        (idleTurn&&(idleTurn.querySelectorAll('[data-anchor-row-role="tool"]').length||
+                                          idleTurn.textContent.includes('LATER RESULT')))){
+                                        throw new Error('idle switch retained the previous live scene');
+                                      }
+                                      const sourceOffset=fixtureSources.length;
+                                      const original=window._deferActiveSessionSceneRestoreAndAttach;
+                                      let restorePromise;
+                                      window._deferActiveSessionSceneRestoreAndAttach=function(targetSid,targetStream,...args){
+                                        const pending=original.call(this,targetSid,targetStream,...args);
+                                        if(targetSid===sid&&targetStream===stream) restorePromise=pending;
+                                        return pending;
+                                      };
+                                      const deadline=performance.now()+5000;
+                                      const bounded=(promise,label)=>new Promise((resolve,reject)=>{
+                                        const timer=setTimeout(()=>reject(new Error(label+' timeout')),Math.max(0,deadline-performance.now()));
+                                        Promise.resolve(promise).then(value=>{clearTimeout(timer);resolve(value);},error=>{clearTimeout(timer);reject(error);});
+                                      });
+                                      let restored;
+                                      try{
+                                        await bounded(loadSession(sid),'switch-back load');
+                                        if(!restorePromise) throw new Error('missing owned deferred restore');
+                                        restored=await bounded(restorePromise,'owned deferred restore');
+                                        if(!restored||!restored.attached||!restored.restoreResult?.restoredAnchorScene){
+                                          throw new Error('owned deferred restore did not restore and attach the scene');
+                                        }
+                                      }finally{
+                                        window._deferActiveSessionSceneRestoreAndAttach=original;
+                                      }
+                                      let source;
+                                      while(performance.now()<deadline){
+                                        source=fixtureSources.slice(sourceOffset).find(s=>{
+                                          const url=new URL(s.url,location.href);
+                                          return url.pathname.endsWith('/api/chat/stream')&&
+                                            url.searchParams.get('stream_id')===stream&&s.readyState===1;
+                                        });
+                                        if(source) break;
+                                        await new Promise(r=>setTimeout(r,10));
+                                      }
+                                      if(!source) throw new Error('switch-back stream source was not attached');
+                                      const turn=document.querySelector('#liveAssistantTurn');
+                                      return {
+                                        sid:S.session&&S.session.session_id,
+                                        stream:S.activeStreamId,
+                                        sessionStream:S.session&&S.session.active_stream_id,
+                                        anchorRows:turn&&turn.querySelectorAll('[data-anchor-scene-row="1"][data-anchor-row-role="tool"]').length,
+                                        rows:turn&&turn.querySelectorAll('[data-anchor-row-role="tool"]').length,
+                                        result:!!(turn&&turn.textContent.includes('LATER RESULT')),
+                                        attached:!!source,
+                                      };
+                                    }""",{'sid':sid,'stream':stream_id,'expected':expected})
+                                    assert switched['sid']==sid and switched['stream']==stream_id and switched['sessionStream']==stream_id,switched
+                                    assert switched['anchorRows']>=expected,switched
+                                    assert switched['attached'],switched
+                                    switched={k:switched[k] for k in ('rows','result')}
                                     assert switched==updated,switched
                                 artifact=os.environ.get('SCREENSHOT_DIR')
                                 if artifact:
