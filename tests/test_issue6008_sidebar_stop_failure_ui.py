@@ -62,13 +62,12 @@ def test_stop_callers_gate_success_toasts_on_cancel_result():
         "elseshowToast(t('cancel_failed'),null,'error');"
     ) in compact_commands
     assert (
-        "if(awaitcancelStream('slash-interrupt'))showToast(t('cmd_interrupt_confirm'),2000);"
+        "if(awaitcancelStream(cancelReason))showToast(t(confirmToastKey),2000);"
         "elseshowToast(t('cancel_failed'),null,'error');"
     ) in compact_commands
-    assert (
-        "if(awaitcancelStream('busy-interrupt'))showToast(t('busy_interrupt_confirm'),2000);"
-        "elseshowToast(t('cancel_failed'),null,'error');"
-    ) in compact_messages
+    assert "cancelReason='busy-interrupt'" in compact_commands
+    assert "_tryInterrupt(msg,'cmd_interrupt_confirm','slash-interrupt')" in compact_commands
+    assert "await_tryInterrupt(text)" in compact_messages
     assert (
         "if(awaitcancelSessionStream(session))showToast(t('stream_stopped'));"
         "elseshowToast(t('cancel_failed'),null,'error');"
