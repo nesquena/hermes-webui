@@ -93,6 +93,23 @@ parent's workspace binding. Clients without this handling must reload the
 session before retrying. Server wakeups, regeneration semantics and Gateway
 routing are not silently retargeted by this recovery path.
 
+## Model context at Agent turn admission
+
+When the Agent supports `conversation_history_loader`, initial and credential
+self-heal invocations pass the same deferred, provider-aware context reconciler.
+The Agent calls it after acquiring its durable turn lease: read the profile's
+active model context again, reconcile against the owner projection, then apply
+the normal provider sanitizer. Do not replace model-only payloads with display
+rows or trust a snapshot loaded before admission. Unavailable durable state aborts
+before inference. A continuation different from the accepted WebUI session is
+refused rather than silently moving its workspace or replaying its input.
+Admission requires a verifiable compression anchor when retaining a compressed
+local projection: an ambiguous append-only fallback must not borrow the fresh
+SQLite revision. This failure preserves the transcript and refuses inference;
+legacy/display readers retain their existing append-only behavior.
+Older Agents retain the existing invocation contract through signature detection;
+that compatibility fallback does not certify cross-surface freshness.
+
 ## Goals
 
 - Define the state layers involved in active and recovered WebUI turns.
