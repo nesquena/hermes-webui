@@ -24317,6 +24317,11 @@ def _start_regeneration_stream_locked(
             "goal_related": goal_related,
         }
         worker_kwargs["regeneration"] = True
+        # #7170: same dispatch-time session-profile config snapshot as the
+        # normal /api/chat/start path — the detached gateway worker must not
+        # resolve config on its own thread (ambient profile leak).
+        from api.gateway_chat import _gateway_session_owner_cfg
+        worker_kwargs["session_cfg"] = _gateway_session_owner_cfg(s)
     else:
         worker_kwargs = _local_agent_worker_kwargs(
             model_provider=model_provider,
@@ -24857,6 +24862,45 @@ def _start_chat_stream_for_session(
                         from api.gateway_chat import _mark_gateway_run_starting
 
                         _mark_gateway_run_starting(stream_id)
+                        # #7170: capture the session-owning profile's config
+                        # snapshot at dispatch time (the request thread) and hand
+                        # it to the detached gateway worker, which uses it for
+                        # per-model reasoning override selection and
+                        # model-capability coercion. The worker cannot resolve
+                        # config itself — a detached thread has no per-request
+                        # profile context and would read the process-global
+                        # profile instead.
+                        from api.gateway_chat import (
+                            _gateway_session_api_key,
+                            _gateway_session_base_url,
+                            _gateway_session_owner_cfg,
+                        )
+
+                        worker_kwargs["session_cfg"] = _gateway_session_owner_cfg(s)
+                        # #7170 round-7 P1: capture the session-owning profile's
+                        # Gateway API key on this same request thread.
+                        # ``_gateway_api_key()`` reads ``os.environ``, which holds
+                        # the AMBIENT process-active profile's key — pairing that
+                        # with the session's gateway URL either fails auth or sends
+                        # the wrong credential to the wrong endpoint. The worker
+                        # prefers the captured value and only falls back to the env
+                        # read for legacy direct callers. A failure here lands in
+                        # the surrounding launch try/except, which already runs the
+                        # same cleanup contract as a thread-start failure.
+                        worker_kwargs["session_api_key"] = _gateway_session_api_key(s)
+                        # #7170 round-7 follow-up (greptile 2026-09-26 P1
+                        # "Gateway key crosses endpoints"): capture the
+                        # session-owning profile's Gateway base URL on this same
+                        # request thread. ``_gateway_base_url`` reads
+                        # ``os.environ`` first, which holds the AMBIENT
+                        # process-active profile's
+                        # ``HERMES_WEBUI_GATEWAY_BASE_URL`` — pairing that with the
+                        # session's captured API key either fails auth or sends the
+                        # session profile's bearer token to the wrong gateway. The
+                        # worker prefers the captured ``session_base_url`` and only
+                        # falls back to ``_gateway_base_url(cfg)`` for legacy
+                        # direct callers.
+                        worker_kwargs["session_base_url"] = _gateway_session_base_url(s)
                     thr = threading.Thread(
                         target=worker_target,
                         args=(s.session_id, msg, model, workspace, stream_id, attachments),
