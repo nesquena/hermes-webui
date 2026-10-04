@@ -15,6 +15,18 @@
 
 ---
 
+## Cancelled-journal recovery combinations
+
+Run `./scripts/test.sh tests/test_cancel_recovery_properties.py tests/test_cancel_restart_journal_recovery.py`.
+Use isolated `HERMES_HOME`, `HERMES_BASE_HOME`, `HERMES_CONFIG_PATH`, and
+`HERMES_WEBUI_STATE_DIR` directories. Seed `782920261003` selects 128 of 768
+lifecycle combinations and covers all 156 pairwise axis combinations. The tests
+exercise the real eager/deferred checkpoint, Stop, journal, restart, cold/cached
+load, and next-send history builders. They preserve native image and tool payloads,
+reject ambiguous or malformed ownership, and check rollback and repeated-load
+idempotence, with capacity cases up to 17 hooks and 64 tool cards. This coverage
+does not certify external provider execution or filesystem crash durability.
+
 ## Session-scoped media authorization
 
 Run `./scripts/test.sh tests/test_media_inline.py tests/test_media_session_preview_auth.py`.

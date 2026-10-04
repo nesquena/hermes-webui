@@ -74,6 +74,126 @@ individually valid rows can reach disk out of order and the session replay
 reader must reject them as noncontiguous. This does not change caller-supplied
 sequence semantics, cross-process ownership, or failed-write recovery.
 
+
+## Cancelled journal-only restart recovery
+
+When Stop has no in-memory assistant partial to persist, the cancellation marker
+may carry a bounded exact-stream run-journal recovery hook. The hook does not
+continue or replay provider execution; it only makes already-emitted durable
+prose, display reasoning, and tool activity recoverable after process loss.
+
+The worker registry remains authoritative while the cancelling worker is known
+live. Registry absence in the same process is not sufficient because stale-run
+reclamation can remove bookkeeping before a wedged worker physically exits.
+The marker therefore records its creating process instance: the same process may
+consume a nonempty hook only after that journal is explicitly terminal, while a
+new process instance may recover a nonterminal durable tail because the old
+writer cannot survive the interpreter restart.
+
+Recovery is owned by the marker's exact stream and exact active-turn token.
+Stop stamps that token onto the owning display user row and the exact matching
+provider-context user row before the hook becomes durable. Journal-only cancelled
+owners are provisional (`_recovered: true`), so Stop without an answer does not
+send that prompt to the provider on the next turn. Stop computes the saved
+in-memory partial first: when one exists, it does not create a provisional owner
+or mutate provider context for journal recovery. The existing saved-partial
+history projection retains the saved user turn and assistant output rather than
+replacing them with an unanswered recovery boundary. Exact-owner context recovery
+clears the provisional flag only after model-visible assistant output is
+recovered; display-only thinking and errors do not promote the owner. The
+visible cancelled prompt remains in the transcript. Rows reconstructed
+after a restart are placed before that cancellation marker and before any
+persisted successor turn. Provider-context projection is inserted only after a
+unique matching token; compression that removed the owner fails closed for
+provider context while visible transcript recovery may still succeed. Display
+ordinals, content, timestamps, or tool equality are not cross-layer ownership
+evidence. The hook is retired only in the same successful session save that
+commits the recovered projection; a failed save restores the in-memory hook for
+a later retry.
+
+Cancelled journal rows are created display-only (`_recovered_display_only:
+true`). Only a unique exact-token provider-context owner and successful answer
+insertion authorize removing that flag. Missing or duplicate context owners
+retain visible output but cannot feed empty-context next-send replay or manual
+compression. Display-only reasoning and tool anchors retain that flag.
+
+Session-sidecar run-journal recovery consumers, including same-process terminal admission,
+validate the complete durable run before materializing any row: exact session,
+run and event identity, strictly integer sequences starting at 1 without gaps or
+duplicates, and terminal metadata matching the actual event. A foreign,
+noncontiguous, semantically invalid or newline-terminated malformed row anywhere
+in the run yields no recovered rows and no terminal authority. Only an
+unterminated, unparseable JSON fragment at EOF (including an incomplete trailing
+UTF-8 codepoint) may be discarded while retaining the validated contiguous
+prefix. A valid final JSON row without a newline still requires all identity and
+terminal checks; arbitrary invalid UTF-8 is not a torn-tail exemption. A torn
+terminal fragment grants no terminal authority: same-process Stop admission
+still requires a real validated terminal row in the prefix.
+
+Authoritative restart and Stop recovery read the durable journal incrementally
+without the client replay endpoint's 4 MiB / 4,096-row limits. Long answers and
+large terminal session snapshots must remain recoverable. Client
+`read_session_run_events` retains those limits and its existing rejection
+behavior. Ordinary journal inspection reads remain unchanged; recovery opts into
+identity validation without making client replay capacity a durability limit.
+
+Journal-recovered segments retain `_recovered_from_run_journal` provenance,
+without the live `_partial` snapshot marker: distinct equal-text segments and
+their tool owner indexes must survive cold loading unchanged. Cancelled-sidecar
+display ownership recognizes that provenance before an error carrier. Tool
+completion searches all unfinished exact IDs before falling back to the latest
+same-name start that originally had no ID; an ID-bearing start is never a
+name-only fallback for another completion ID.
+
+A full session read may try multiple eligible cancellation hooks, newest first,
+when earlier selections yield no output. Each hook keeps its own attempt and age
+budget and is visited at most once per read; live, same-process nonterminal,
+and still-arriving hooks do not consume that budget. One successful recovery
+ends the pass. A failed cancellation save restores the projection and ends the
+pass before any stale marker reference can be reused.
+
+Interrupted-hook scans bypass only assistant rows carrying the explicit
+`_recovered_from_cancel_journal: true` provenance stamped by successful exact-stream
+cancellation recovery. Other recovered and ordinary assistant turns retain the
+existing stopping boundary; a stream ID alone does not authorize bypass.
+Interrupted output recovered behind a later display user enters provider history
+only when its display owner uniquely matches a context user through a shared
+stable identity (turn token, message ID, state.db row ID, or message UID, kept in
+separate namespaces), or through a unique exact timestamp, normalized source,
+and display-equivalent text. Legacy integer-truncated times may match a finite
+fractional time only when one side is integer-typed; two distinct fractional
+times remain distinct. Both endpoints must be unique across both projections,
+so an integer matching two same-second candidates does not establish ownership.
+A missing context token may use only that unique fallback pair; context-only or
+conflicting tokens still fail closed. New stale repairs retain the exact pending
+time and stamp its active-turn token before projecting the recovered user row.
+Text comparison removes only a leading workspace
+tag and a terminal attachment suffix and extracts known native text parts; it
+never rewrites provider payloads or image bytes. Contradictory/malformed identities,
+reused shared identities, and conflicting API content or attachments carried by
+both projections fail closed. Missing, null, or empty-string source metadata has
+the legacy WebUI default; non-string source values, including falsy values, never
+authorize provider-context insertion. Context-only API content and display-only attachment
+descriptors do not defeat ownership. The next context user must likewise uniquely
+match an authoritative later display turn token. A surviving owner without a context successor must be the context tail and
+still requires a token-bearing later display turn; compression summaries or
+unowned context suffixes do not prove an insertion boundary. Recovery inserts exact-stream output before that next user,
+retaining existing native tool call/result blocks together; truncated display tool
+metadata never becomes a provider call. Only inserted model-visible assistant
+output promotes the proven recovered question out of its provisional state;
+reasoning-only/tool-display/error recovery does not. This placement and hook retirement commit
+in one save, with in-memory rollback on failure. Empty, compressed, duplicate or
+ambiguous/tokenless ownership stays display-only (`_recovered_display_only: true`),
+including during empty-context seeding and Agent/API replay sanitization. It must
+not be appended as the newer turn's answer.
+Latest-turn interrupted output retains its existing provider-context projection.
+Display deduplication stays within the selected interrupted user/marker window;
+that window is not provider-context ownership evidence. Reordering moves only
+the selected stream's rows, and tools retain their exact display owner after
+both movement and terminal-marker removal. Cancelled provider context remains
+exact-token owned; no cross-turn context ownership is inferred from text,
+timestamps, or display ordinals.
+
 ## Inactive compression continuation recovery
 
 The Agent profile's SQLite compression lineage owns the canonical continuation,
