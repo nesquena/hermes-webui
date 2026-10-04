@@ -1,0 +1,386 @@
+[
+  {
+    "state": "before",
+    "width": 1280,
+    "rows": [
+      {
+        "input": "[bad](https://broken.test/path [Good](https://good.test/path)",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path [Good](https://good.test/path"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ]
+      },
+      {
+        "input": "[bad](https://broken.test/path\t[Good](https://good.test/a b.pdf \"Title\")",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path\t[Good](https://good.test/a b.pdf"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/a b.pdf"
+          }
+        ]
+      },
+      {
+        "input": "[Good](https://good.test/a[part](name)",
+        "live": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ],
+        "settled": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ]
+      }
+    ],
+    "page_errors": []
+  },
+  {
+    "state": "before",
+    "width": 768,
+    "rows": [
+      {
+        "input": "[bad](https://broken.test/path [Good](https://good.test/path)",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path [Good](https://good.test/path"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ]
+      },
+      {
+        "input": "[bad](https://broken.test/path\t[Good](https://good.test/a b.pdf \"Title\")",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path\t[Good](https://good.test/a b.pdf"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/a b.pdf"
+          }
+        ]
+      },
+      {
+        "input": "[Good](https://good.test/a[part](name)",
+        "live": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ],
+        "settled": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ]
+      }
+    ],
+    "page_errors": []
+  },
+  {
+    "state": "before",
+    "width": 390,
+    "rows": [
+      {
+        "input": "[bad](https://broken.test/path [Good](https://good.test/path)",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path [Good](https://good.test/path"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ]
+      },
+      {
+        "input": "[bad](https://broken.test/path\t[Good](https://good.test/a b.pdf \"Title\")",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path\t[Good](https://good.test/a b.pdf"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/a b.pdf"
+          }
+        ]
+      },
+      {
+        "input": "[Good](https://good.test/a[part](name)",
+        "live": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ],
+        "settled": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ]
+      }
+    ],
+    "page_errors": []
+  },
+  {
+    "state": "after",
+    "width": 1280,
+    "rows": [
+      {
+        "input": "[bad](https://broken.test/path [Good](https://good.test/path)",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ]
+      },
+      {
+        "input": "[bad](https://broken.test/path\t[Good](https://good.test/a b.pdf \"Title\")",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/a b.pdf"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/a b.pdf"
+          }
+        ]
+      },
+      {
+        "input": "[Good](https://good.test/a[part](name)",
+        "live": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ],
+        "settled": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ]
+      }
+    ],
+    "page_errors": []
+  },
+  {
+    "state": "after",
+    "width": 768,
+    "rows": [
+      {
+        "input": "[bad](https://broken.test/path [Good](https://good.test/path)",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ]
+      },
+      {
+        "input": "[bad](https://broken.test/path\t[Good](https://good.test/a b.pdf \"Title\")",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/a b.pdf"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/a b.pdf"
+          }
+        ]
+      },
+      {
+        "input": "[Good](https://good.test/a[part](name)",
+        "live": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ],
+        "settled": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ]
+      }
+    ],
+    "page_errors": []
+  },
+  {
+    "state": "after",
+    "width": 390,
+    "rows": [
+      {
+        "input": "[bad](https://broken.test/path [Good](https://good.test/path)",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ]
+      },
+      {
+        "input": "[bad](https://broken.test/path\t[Good](https://good.test/a b.pdf \"Title\")",
+        "live": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/a b.pdf"
+          }
+        ],
+        "settled": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/a b.pdf"
+          }
+        ]
+      },
+      {
+        "input": "[Good](https://good.test/a[part](name)",
+        "live": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ],
+        "settled": [
+          {
+            "text": "Good",
+            "href": "https://good.test/a[part](name"
+          }
+        ]
+      }
+    ],
+    "page_errors": []
+  }
+]
