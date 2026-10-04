@@ -26,21 +26,29 @@ const fs = require('fs');
 const ui = fs.readFileSync(process.argv[2], 'utf8');
 
 function extractFunc(name, opts = {}) {
-  const re = new RegExp('function\\s+' + name + '\\s*\\(');
-  const start = ui.search(re);
-  if (start < 0) {
-    if (opts.optional) return '';
-    throw new Error(name + ' not found');
-  }
-  let i = ui.indexOf('{', start);
-  let depth = 1;
-  i++;
-  while (depth > 0 && i < ui.length) {
-    if (ui[i] === '{') depth++;
-    else if (ui[i] === '}') depth--;
+  const fnRe = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = ui.search(fnRe);
+  if (start >= 0) {
+    let i = ui.indexOf('{', start);
+    let depth = 1;
     i++;
+    while (depth > 0 && i < ui.length) {
+      if (ui[i] === '{') depth++;
+      else if (ui[i] === '}') depth--;
+      i++;
+    }
+    return ui.slice(start, i);
   }
-  return ui.slice(start, i);
+  // Declaration extractor (#6657 review): top-level const/let bindings that
+  // ui.js ships as single lines (_PY_WS_CLASS, the slug regexes,
+  // _dynamicProviderIds). Re-spelled var so sloppy-mode eval'd functions can
+  // reach them. Listing a binding without this path silently skipped it —
+  // dead setup that claimed coverage the driver never had.
+  const declRe = new RegExp('^(?:const|let)\\s+' + name + '=.*$', 'm');
+  const decl = ui.match(declRe);
+  if (decl) return decl[0].replace(/^(?:const|let)\s+/, 'var ');
+  if (opts.optional) return '';
+  throw new Error(name + ' not found');
 }
 
 const calls = {syncModelChip: 0, renderModelDropdown: 0, positionModelDropdown: 0, fetches: []};
@@ -157,14 +165,25 @@ function fetch(url, opts) { calls.fetches.push({url: String(url), body: opts && 
 for (const name of [
   'assistantDisplayName',
   '_topbarLoadedMessageCount', '_topbarMessageMetaText',
-  '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
+  '_PY_WS_CLASS', '_CUSTOM_SLUG_TRIM_RE', '_CUSTOM_SLUG_HOST_REJECT_RE',
+  '_customSlugIsEndpointAuthority', '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId', '_dynamicProviderIds',
+  '_clientProviderAuthorityForModel', '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId', '_qualifiedCustomIdNeedsBackendAuthority',
+  '_getOptionProviderId', '_providerFromModelValue',
+  '_modelPickerOptionIdentity', '_deduplicateModelPickerOptions',
+  '_modelStateForSelect', '_storedModelProvider',
   '_findModelInDropdown', '_refreshOpenModelDropdown', '_applyModelToDropdown',
   '_addLiveModelsToSelect',
   '_modelStateFromAppliedDropdown', '_persistSessionModelCorrection',
   '_applySessionModelFallback', 'syncTopbar'
 ]) {
   const src = extractFunc(name, {optional: name !== 'syncTopbar'});
-  if (src) eval(src);
+  if (!src) continue;
+  // Both paths of extractFunc (function bodies AND const/let declarations)
+  // re-spell the binding as var before returning, so every name here is
+  // eval'd the same way — no per-name branches to silently skip an entry.
+  eval(src);
 }
 
 const args = JSON.parse(process.argv[3]);
