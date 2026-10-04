@@ -6148,11 +6148,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
+    // Stream-local titles survive the delayed done/fade rebind after compression.
+    const _pendingTitleUpdates=new Map();
+    const _pendingTitleExpectedCurrent=new Map();
     source.addEventListener('title',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
-      applySessionTitleUpdate(activeSid, d.title);
+      const targetSid=d.target_session_id||activeSid;
+      _pendingTitleUpdates.set(targetSid, d.title);
+      _pendingTitleExpectedCurrent.set(targetSid, d.expectedCurrent);
+      // Pass the server-declared previous title as expectedCurrent: after a
+      // compression rotation or SSE reattach, the open session's title is the
+      // malformed persisted value and nothing is remembered provisionally, so
+      // a bare listener-style call would be refused and the recovered title
+      // would only appear after a full reload (#7318 re-gate).
+      applySessionTitleUpdate(targetSid, d.title, {expectedCurrent:d.expectedCurrent});
     });
 
     source.addEventListener('title_status',e=>{
@@ -6348,6 +6359,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          if(_pendingTitleUpdates.has(completedSid)){
+            applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
+            _pendingTitleUpdates.delete(completedSid);
+            _pendingTitleExpectedCurrent.delete(completedSid);
+          }
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
