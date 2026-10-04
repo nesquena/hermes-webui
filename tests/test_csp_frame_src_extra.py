@@ -93,6 +93,6 @@ def test_csp_frame_src_does_not_affect_connect_src(monkeypatch):
     policy = Handler.csp_report_only_policy()
     # frame-extra present in frame-src ...
     assert "frame-src 'self' https://dash.example.com;" in policy
-    # ... and NOT leaked into connect-src (which ends at cdn.jsdelivr.net).
+    # ... and NOT leaked into connect-src.
     connect_seg = policy.split("connect-src", 1)[1].split(";", 1)[0]
     assert "dash.example.com" not in connect_seg
