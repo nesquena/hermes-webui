@@ -1,5 +1,7 @@
 """Tests for model-aware reasoning effort chip visibility."""
 
+import pytest
+
 from api import config as cfg
 
 
@@ -431,14 +433,24 @@ def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
     assert status["reasoning_effort"] != "max"
 
 
-def test_max_effort_degrades_to_xhigh_for_gemini():
+def test_max_effort_degrades_to_top_supported_for_gemini():
     # Gemini's native ladder tops out below 'max'; its adapter would silently
-    # treat an unknown 'max' as medium. A stored/CLI 'max' must degrade to xhigh
-    # (the highest supported), not fall through to a worse level. (#4627 gate)
+    # treat an unknown 'max' as medium. A stored/CLI 'max' must degrade to the
+    # HIGHEST SUPPORTED level, not fall through to a worse one. (#4627 gate)
+    #
+    # That top level is 'high', not 'xhigh': Google documents
+    # minimal/low/medium/high and Gemini has no 'xhigh' either. This assertion
+    # previously read 'xhigh' because the ladder itself advertised one — the
+    # invariant ("degrade to the top of the real ladder") is unchanged, the
+    # ladder is simply accurate now.
     for model in ("gemini-3-pro", "gemini-3-flash"):
         assert cfg.coerce_reasoning_effort_for_model(
             "max", model_id=model, provider_id="gemini"
-        ) == "xhigh", f"{model} max must degrade to xhigh"
+        ) == "high", f"{model} max must degrade to the top supported level"
+        # And the degraded value must be a level the ladder actually offers.
+        assert "high" in cfg.resolve_model_reasoning_efforts(
+            model, provider_id="gemini"
+        ), model
 
 
 def test_max_effort_degrades_to_xhigh_for_pre_adaptive_anthropic():
@@ -593,4 +605,263 @@ def test_qwen_prefixed_alias_reasoning_detection():
         assert cfg._candidate_supports_reasoning(model) is True, (
             f"{model} must remain reasoning-capable (DeepSeek-R1 hybrid, "
             f"Qwen 2.x must not shadow the DeepSeek detector)"
+        )
+def test_grok_rejects_disable_reasoning():
+    """Grok 4.5/4.6 have an effort ladder but no off position.
+
+    xAI rejects `reasoning_effort:"none"` on these builds, and the native
+    endpoint silently ignores it and leaves reasoning on — so a "None" choice
+    would either error or lie about what the model is doing. The capability is
+    per-model and separate from "should a control be rendered at all": Grok 4.3
+    accepts disabling and keeps its None (see
+    `test_grok_disable_capability_is_per_model_not_a_blanket_prefix`).
+    """
+    for model_id in ("grok-4.6", "grok-4.5"):
+        assert cfg.supports_disable_reasoning(model_id) is False, model_id
+        assert cfg.coerce_reasoning_effort_for_model("none", model_id) == "", model_id
+
+    # The ladder itself must survive: this is about the off position only.
+    assert {"low", "medium", "high"} <= set(
+        cfg.resolve_model_reasoning_efforts("grok-4.6")
+    )
+    for level in ("low", "medium", "high"):
+        assert cfg.coerce_reasoning_effort_for_model(level, "grok-4.6") == level
+
+    # `grok-4-fast-reasoning` reasons natively but exposes NO effort dial, so
+    # it has no ladder at all — a different condition from "ladder without an
+    # off position", and not evidence about the disable capability.
+    assert cfg.resolve_model_reasoning_efforts("grok-4-fast-reasoning") == []
+
+
+def test_models_with_an_off_position_keep_none():
+    """The negative side of the gate: don't over-restrict.
+
+    A fix that hides "None" everywhere would break the Z.AI GLM thinking
+    toggle, whose entire control is the on/off pair.
+    """
+    assert cfg.supports_disable_reasoning("glm-4.6", "zai") is True
+    assert cfg.coerce_reasoning_effort_for_model("none", "glm-4.6", provider_id="zai") == "none"
+
+    assert cfg.supports_disable_reasoning("claude-opus-5") is True
+    assert cfg.coerce_reasoning_effort_for_model("none", "claude-opus-5") == "none"
+
+    # GLM-4.7 forces thinking on: it has no off position either.
+    assert cfg.supports_disable_reasoning("glm-4.7", "zai") is False
+
+
+def test_capability_probe_does_not_mutate_core_globals():
+    """The probe must answer without touching shared module state.
+
+    An earlier probe installed `mock.patch.object` stand-ins for the core's
+    token and fetch helpers. `patch.object` restores whatever the attribute
+    held when it was ENTERED, so two concurrent probes interleaving as
+    A-enter, B-enter, A-exit, B-exit left B writing A's probe lambda back as
+    the permanent value — permanently collapsing core catalog discovery to a
+    synthetic probe model. The server is threaded, so this was reachable.
+    """
+    try:
+        import hermes_cli.models as copilot_models
+    except ImportError:
+        pytest.skip("hermes_cli not available")
+
+    watched = (
+        "github_model_reasoning_efforts",
+        "fetch_github_model_catalog",
+        "_resolve_copilot_catalog_api_key",
+        "_cached_copilot_reasoning_token",
+    )
+    before = {
+        name: getattr(copilot_models, name, None)
+        for name in watched
+    }
+
+    for _ in range(5):
+        cfg._copilot_core_reads_catalog_unprompted(copilot_models)
+
+    for name in watched:
+        assert getattr(copilot_models, name, None) is before[name], (
+            f"{name} was replaced by the capability probe"
+        )
+
+
+def test_copilot_ladders_survive_without_hermes_cli(monkeypatch):
+    """No installed core at all must not suppress the Copilot controls.
+
+    The wire-agreement gate exists to avoid rendering a control the runtime
+    will silently ignore. When no core is importable there is no runtime to
+    disagree with — a standalone WebUI, or CI — so the heuristic is the only
+    answer available and must stand.
+
+    This is a real regression that reached CI: the first version of the gate
+    imported hermes_cli and failed closed, which erased every Copilot ladder
+    in an environment that has no core installed, `gpt-5.5` included.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_hermes_cli(name, *args, **kwargs):
+        if name.startswith("hermes_cli"):
+            raise ImportError("simulated: no hermes_cli installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_hermes_cli)
+
+    for model_id, provider_id in (
+        ("gpt-5.5", "copilot"),
+        ("gpt-5.5", "github-copilot"),
+        ("gemini-3.6-flash", "copilot"),
+        ("claude-opus-5", "copilot"),
+    ):
+        efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id=provider_id)
+        assert efforts, (
+            f"{model_id} via {provider_id}: the ladder vanished with no core "
+            "installed — the wire-agreement gate must not fire when there is "
+            "no runtime to disagree with"
+        )
+        assert {"low", "medium", "high"} <= set(efforts), (model_id, efforts)
+
+
+def test_grok_disable_capability_is_per_model_not_a_blanket_prefix():
+    """Only the Grok builds that reject `none` lose it — 4.3 keeps working.
+
+    A blanket `grok` prefix-deny is a silent regression, not a cosmetic one:
+    with `None` removed, the installed xAI transport defaults reasoning back
+    on at medium, so a user who picks "None" on Grok 4.3 silently gets medium
+    reasoning. The Agent core records the live verification: grok-4.5 rejects
+    `reasoning_effort: "none"` "unlike grok-4.3", and 4.6 is its successor.
+    """
+    # Verified to REJECT disabling.
+    for model_id in ("grok-4.5", "grok-4.6", "x-ai/grok-4.6"):
+        assert cfg.supports_disable_reasoning(model_id) is False, model_id
+        assert cfg.coerce_reasoning_effort_for_model("none", model_id) == "", model_id
+
+    # Verified to ACCEPT disabling — must keep None.
+    for model_id in ("grok-4.3", "grok-3-mini", "x-ai/grok-4.3"):
+        assert cfg.supports_disable_reasoning(model_id) is True, model_id
+        assert cfg.coerce_reasoning_effort_for_model("none", model_id) == "none", model_id
+
+    # The effort ladder itself is unaffected on both sides.
+    for model_id in ("grok-4.3", "grok-4.6"):
+        assert {"low", "medium", "high"} <= set(
+            cfg.resolve_model_reasoning_efforts(model_id)
+        ), model_id
+
+
+@pytest.mark.parametrize(
+    "model_id,is_gemini",
+    [
+        # Real Gemini ids, at every nesting depth.
+        ("gemini-3.6-flash", True),
+        ("google/gemini-2.5-pro", True),
+        ("vertex/gemini-3-pro-preview", True),
+        ("gemini", True),
+        # Models that merely CONTAIN the word — an unrestricted substring
+        # match clamped these to Gemini's ladder and dropped xhigh/max.
+        ("notgemini-deepseek-r1", False),
+        ("acme-gemini-router/deepseek-r1", False),
+        ("gemini-router/deepseek-r1", False),
+        ("deepseek-r1", False),
+    ],
+)
+def test_gemini_detection_matches_model_shaped_segments(model_id, is_gemini):
+    assert cfg._is_gemini_id(model_id) is is_gemini, model_id
+
+
+def test_non_gemini_model_named_like_gemini_keeps_its_full_ladder():
+    """The misclassification had a visible cost: levels silently disappeared."""
+    efforts = cfg.resolve_model_reasoning_efforts(
+        "notgemini-deepseek-r1", provider_id="custom:litellm"
+    )
+    # Whatever the heuristic decides, it must NOT be Gemini's clamped ladder.
+    assert efforts != ["minimal", "low", "medium", "high"], efforts
+
+
+def test_native_gemini_offers_only_levels_the_adapter_distinguishes():
+    """Every offered native level must produce a distinct wire request.
+
+    The installed adapter collapses efforts when building `thinkingConfig`:
+    Gemini 2.5 maps every level to `{"includeThoughts": True}`, 3.x Pro maps
+    minimal/low/medium to `low`, and 3.x Flash maps minimal/low to `low`.
+    Offering an aliased level lets a user pick a depth that never reaches the
+    model. Asserted against the adapter's own function so this test tracks the
+    runtime rather than a copy of its rules.
+    """
+    try:
+        from agent.transports.chat_completions import (
+            _build_gemini_thinking_config as build,
+        )
+    except ImportError:
+        pytest.skip("agent transport not available")
+
+    for model_id in (
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-3.1-pro-preview",
+        "gemini-3-pro-preview",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+    ):
+        ladder = cfg.resolve_model_reasoning_efforts(model_id, provider_id="gemini")
+        wires = [repr(build(model_id, {"effort": lv})) for lv in ladder]
+        assert len(set(wires)) == len(ladder), (
+            f"{model_id}: native ladder {ladder} collapses to "
+            f"{len(set(wires))} distinct request(s) — aliased levels offered"
+        )
+
+    # Gemini 2.5 distinguishes nothing, so it must offer no intensity control.
+    assert cfg.resolve_model_reasoning_efforts("gemini-2.5-pro", provider_id="gemini") == []
+
+
+def test_aggregator_gemini_keeps_the_published_ladder():
+    """Only the NATIVE path is narrowed — aggregators skip that adapter."""
+    assert cfg.resolve_model_reasoning_efforts(
+        "google/gemini-2.5-pro", provider_id="openrouter"
+    ) == ["low", "medium", "high"]
+    assert cfg.resolve_model_reasoning_efforts(
+        "gemini-3.6-flash", provider_id="custom:litellm"
+    ) == ["minimal", "low", "medium", "high"]
+
+
+@pytest.mark.parametrize(
+    ("model_id", "capable"),
+    [
+        # A date stamp must not be absorbed into the version number. These are
+        # `grok-4` plus a date, which a bare `startswith("grok-4-5")` reads as
+        # the effort-capable 4.5 build -- the composer would then offer levels
+        # the model rejects and the request fails.
+        ("grok-4-520250101", False),
+        ("grok-4-620250101", False),
+        ("grok-4-320250101", False),
+        ("grok-4-20250101", False),
+        # Genuinely dated capable builds must keep their ladder: the guard is
+        # about the version boundary, not about rejecting dates.
+        ("grok-4.5-20250101", True),
+        ("grok-4.6-20250101", True),
+        ("grok-3-mini-20250101", True),
+        # Undated baselines, unchanged.
+        ("grok-4", False),
+        ("grok-3", False),
+        ("grok-4.5", True),
+        ("grok-4.6", True),
+        ("grok-4.3", True),
+    ],
+)
+def test_grok_version_prefix_does_not_absorb_date_stamps(model_id, capable):
+    """Effort capability is decided on a version boundary, not a raw prefix.
+
+    Mirrors the `(?!\\d)` date-stamp guard the Claude branch already applies:
+    the character after a matched version prefix must not be a digit, or an
+    aggregator id like `grok-4-520250101` silently promotes `grok-4` to 4.5.
+    """
+    normalized = model_id.replace(".", "-")
+    assert cfg._grok_supports_effort(normalized) is capable, (model_id, capable)
+
+    efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id="custom:newapi")
+    if capable:
+        assert efforts, f"{model_id} should expose a ladder"
+        assert "xhigh" not in efforts and "max" not in efforts, (model_id, efforts)
+    else:
+        assert efforts == [], (
+            f"{model_id} rejects reasoning_effort but a ladder was offered: {efforts}"
         )
