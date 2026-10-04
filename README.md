@@ -278,6 +278,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
   (`default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`, `charizard`,
   `sienna`, `catppuccin`, `nous`, `geist-contrast` / Geist Contrast)
 - Switch via Settings -> Appearance (instant live preview) or `/theme <theme-or-skin>`
+- Tint the browser and installed-app icon in Settings -> Appearance to distinguish multiple Hermes agents
 - Persists across reloads (server-side in settings.json + localStorage for flicker-free loading)
 - Skins use `data-skin` plus CSS variables; dark mode resolves through the
   `.dark` class, not a `data-theme` custom-theme axis — see [THEMES.md](THEMES.md)
