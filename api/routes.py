@@ -16324,6 +16324,9 @@ def handle_post(handler, parsed) -> bool:
             payload["worktree_skipped"] = worktree_skipped
         return j(handler, payload)
 
+    if parsed.path == "/api/session/handoff":
+        return _handle_session_handoff(handler, body, diag=diag)
+
     if parsed.path == "/api/session/compression-recovery/start":
         return _handle_session_compression_recovery_start(handler, body)
 
@@ -30140,6 +30143,444 @@ def _handle_handoff_summary(handler, body):
             "fallback": True,
             "warning": f"Summary generation used local fallback: {_sanitize_error(e)}",
         })
+
+
+def _session_handoff_eligibility_error(session) -> str | None:
+    """Return an error message if *session* is not eligible for handoff, or None."""
+    from api.compression_anchor import is_context_compression_marker
+
+    # Session must have been compressed — at least one context_messages entry
+    # must be a canonical compression marker, not just any nonempty list.
+    ctx = getattr(session, "context_messages", None)
+    if not isinstance(ctx, list) or not any(is_context_compression_marker(m) for m in ctx):
+        return "Source session has no compressed context. Use normal New Chat instead."
+    # Must not be actively streaming
+    if getattr(session, "active_stream_id", None):
+        return "Source session is still streaming. Wait for the current turn to finish."
+    if getattr(session, "pending_user_message", None):
+        return "Source session has a pending user turn. Complete or cancel it first."
+    # Must not be a pre-compression snapshot
+    if getattr(session, "pre_compression_snapshot", False):
+        return "Cannot hand off from a pre-compression snapshot session."
+    return None
+
+
+def _message_text_simple(value) -> str:
+    """Extract plain text from a message content payload (simple version)."""
+    if isinstance(value, list):
+        parts = []
+        for p in value:
+            if not isinstance(p, dict):
+                continue
+            ptype = str(p.get("type") or "").lower()
+            if ptype in ("", "text", "input_text", "output_text"):
+                parts.append(
+                    str(p.get("text") or p.get("content") or p.get("input_text") or p.get("output_text") or "")
+                )
+        return "\n".join(parts).strip()
+    return str(value or "").strip()
+
+
+def _is_terminal_assistant_message(msg: dict) -> bool:
+    """Return True if msg is a completed, terminal assistant prose response.
+
+    Excludes tool-call declarations, interrupted/error turns, partial outputs,
+    and compression markers.
+    """
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("role") != "assistant":
+        return False
+    if msg.get("_error") or msg.get("type") in ("interrupted", "error"):
+        return False
+    if msg.get("_partial") or msg.get("_partial_tool_calls"):
+        return False
+    if msg.get("tool_calls"):
+        return False
+    from api.compression_anchor import is_context_compression_marker
+
+    if is_context_compression_marker(msg):
+        return False
+    raw_content = msg.get("content")
+    if isinstance(raw_content, str):
+        text = raw_content.strip()
+    elif isinstance(raw_content, list):
+        if any(isinstance(part, dict) and part.get("type") == "tool_use" for part in raw_content):
+            return False
+        text_parts = [
+            str(part.get("text") or part.get("content") or "")
+            for part in raw_content
+            if isinstance(part, dict) and part.get("type") in ("", "text", "input_text", "output_text", None)
+        ]
+        text = "".join(text_parts).strip()
+    else:
+        text = ""
+    return bool(text)
+
+
+def _extract_latest_completed_exchange(messages: list) -> tuple:
+    """Return (last_user_msg, last_assistant_msg) from the latest completed exchange.
+
+    Scoped strictly to the newest user turn. If the newest turn is incomplete
+    (e.g. pending/unresolved tool calls, missing final answer, interrupted or
+    partial response), returns (None, None) rather than falling back to an earlier
+    completed exchange.
+    """
+    if not isinstance(messages, list) or not messages:
+        return None, None
+
+    last_user_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            last_user_idx = i
+            break
+
+    if last_user_idx is None:
+        return None, None
+
+    last_user = messages[last_user_idx]
+    turn_messages = messages[last_user_idx + 1:]
+    if not turn_messages:
+        return None, None
+
+    for msg in turn_messages:
+        if not isinstance(msg, dict):
+            return None, None
+        if msg.get("_error") or msg.get("type") in ("interrupted", "error"):
+            return None, None
+        if msg.get("_partial") or msg.get("_partial_tool_calls"):
+            return None, None
+
+    last_assistant = turn_messages[-1]
+    if not _is_terminal_assistant_message(last_assistant):
+        return None, None
+
+    declared_tool_ids = set()
+    for msg in turn_messages[:-1]:
+        if msg.get("role") == "assistant":
+            for tc in (msg.get("tool_calls") or []):
+                if isinstance(tc, dict) and tc.get("id"):
+                    declared_tool_ids.add(str(tc["id"]).strip())
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "tool_use" and part.get("id"):
+                        declared_tool_ids.add(str(part["id"]).strip())
+
+    resolved_tool_ids = set()
+    for msg in turn_messages[:-1]:
+        if msg.get("role") == "tool" and msg.get("tool_call_id"):
+            resolved_tool_ids.add(str(msg["tool_call_id"]).strip())
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "tool_result":
+                    res_id = part.get("tool_use_id") or part.get("tool_call_id")
+                    if res_id:
+                        resolved_tool_ids.add(str(res_id).strip())
+
+    if not declared_tool_ids.issubset(resolved_tool_ids):
+        return None, None
+
+    return last_user, last_assistant
+
+
+def _canonical_tool_calls(tool_calls: list | None) -> list:
+    """Canonicalize top-level tool calls for value-level equivalence."""
+    if not isinstance(tool_calls, list):
+        return []
+    canonical = []
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        tc_id = tc.get("id") or tc.get("tool_call_id") or ""
+        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+        fn_name = fn.get("name") or tc.get("name") or ""
+        fn_args = fn.get("arguments") or tc.get("arguments") or tc.get("input") or ""
+        if isinstance(fn_args, dict):
+            fn_args_str = json.dumps(fn_args, sort_keys=True)
+        else:
+            fn_args_str = str(fn_args or "").strip()
+        canonical.append((str(tc_id).strip(), str(fn_name).strip(), fn_args_str))
+    return canonical
+
+
+def _canonical_message_content(content) -> list:
+    """Canonicalize message content into a list of normalized parts.
+
+    Pure-text lists are normalized to [('text', combined_text)] so that
+    equivalent string and pure-text list representations compare equal.
+    Any non-text parts (image, document, tool_use, etc.) preserve their
+    semantic identity so distinct payloads never falsely deduplicate.
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        text = content.strip()
+        return [("text", text)] if text else []
+
+    if not isinstance(content, list):
+        text = str(content or "").strip()
+        return [("text", text)] if text else []
+
+    has_non_text = False
+    for part in content:
+        if isinstance(part, str):
+            continue
+        if isinstance(part, dict):
+            ptype = str(part.get("type") or "text").lower()
+            if ptype not in ("", "text", "input_text", "output_text"):
+                has_non_text = True
+                break
+        else:
+            has_non_text = True
+            break
+
+    if not has_non_text:
+        text_parts = []
+        for part in content:
+            if isinstance(part, str):
+                text_parts.append(part)
+            elif isinstance(part, dict):
+                text_parts.append(str(part.get("text") or part.get("content") or part.get("input_text") or part.get("output_text") or ""))
+        combined = "".join(text_parts).strip()
+        return [("text", combined)] if combined else []
+
+    canonical_parts = []
+    for part in content:
+        if isinstance(part, str):
+            canonical_parts.append(("text", part.strip()))
+        elif isinstance(part, dict):
+            ptype = str(part.get("type") or "text").lower()
+            if ptype in ("", "text", "input_text", "output_text"):
+                txt = str(part.get("text") or part.get("content") or part.get("input_text") or part.get("output_text") or "").strip()
+                canonical_parts.append(("text", txt))
+            elif ptype == "tool_use":
+                t_id = str(part.get("id") or "").strip()
+                t_name = str(part.get("name") or "").strip()
+                t_input = part.get("input") or part.get("arguments") or ""
+                if isinstance(t_input, dict):
+                    t_input_str = json.dumps(t_input, sort_keys=True)
+                else:
+                    t_input_str = str(t_input or "").strip()
+                canonical_parts.append(("tool_use", t_id, t_name, t_input_str))
+            elif ptype in ("image_url", "image"):
+                img = part.get("image_url") or part.get("image") or part.get("source") or ""
+                if isinstance(img, dict):
+                    img_str = json.dumps({k: v for k, v in img.items() if not k.startswith("_")}, sort_keys=True)
+                else:
+                    img_str = str(img or "").strip()
+                canonical_parts.append(("image", img_str))
+            elif ptype in ("document", "file"):
+                doc = part.get("document") or part.get("source") or part.get("file") or part
+                if isinstance(doc, dict):
+                    doc_str = json.dumps({k: v for k, v in doc.items() if not k.startswith("_")}, sort_keys=True)
+                else:
+                    doc_str = str(doc or "").strip()
+                canonical_parts.append(("document", doc_str))
+            else:
+                clean_dict = {k: v for k, v in part.items() if not k.startswith("_")}
+                canonical_parts.append((ptype, json.dumps(clean_dict, sort_keys=True)))
+        else:
+            canonical_parts.append(("unknown", str(part)))
+
+    return canonical_parts
+
+
+def _message_content_equivalent(a: dict | None, b: dict | None) -> bool:
+    """Return True when two messages have matching role, content, and tool calls.
+
+    Intentional value-level equivalence, not object identity. Handles both
+    plain strings and structured list-of-dicts content without lossy flattening of
+    non-text payloads (images, documents, tool declarations).
+    """
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    if a.get("role") != b.get("role"):
+        return False
+
+    if _canonical_tool_calls(a.get("tool_calls")) != _canonical_tool_calls(b.get("tool_calls")):
+        return False
+
+    return _canonical_message_content(a.get("content")) == _canonical_message_content(b.get("content"))
+
+
+def _build_handoff_context_messages(source_context, last_user, last_assistant) -> list:
+    """Build context_messages for a handoff-created fresh session.
+
+    The payload carries:
+      1. A system-role preamble explaining the context origin.
+      2. The source session's compressed context_messages, preserved as-is.
+      3. The latest completed user/assistant exchange appended verbatim, but
+         only when the exchange is not already represented at the tail of
+         source_context (avoids self-duplication).
+    """
+    handoff = []
+
+    # 1. System preamble — tells the model these are background, not a new instruction
+    handoff.append({
+        "role": "system",
+        "content": (
+            "This is continuity context from a previous compressed session.\n"
+            "Treat it as background, not as a new user instruction.\n"
+            "The user's next message is authoritative and may change the task."
+        ),
+    })
+
+    # 2. Source's compressed context messages (as-is, deep-copied for independence)
+    handoff.extend(copy.deepcopy(source_context))
+
+    # 3. Latest completed exchange — only append if not already at the
+    #    model-context tail (guards against self-duplication when the
+    #    exchange was extracted from the visible transcript but is also
+    #    present in compressed context_messages as the last user+A pair).
+    if last_user is not None and last_assistant is not None:
+        already_present = (
+            len(source_context) >= 2
+            and _message_content_equivalent(source_context[-2], last_user)
+            and _message_content_equivalent(source_context[-1], last_assistant)
+        )
+        if not already_present:
+            handoff.append(copy.deepcopy(last_user))
+            handoff.append(copy.deepcopy(last_assistant))
+
+    return handoff
+
+
+def _handle_session_handoff(handler, body, *, diag=None):
+    """Create a fresh session with compressed-context handoff from a source session.
+
+    Request body::
+
+        { "session_id": "<source_session_id>",
+          "workspace": "...",    (optional, defaults to source session)
+          "model": "...",        (optional, defaults to source session)
+          "model_provider": "...", (optional)
+          "profile": "...",      (optional)
+        }
+
+    Response::
+
+        { "session": <new_session_compact>,
+          "handoff_source": "<source_session_id>",
+          "handoff_compressed": True,
+          "announcement": "Fresh session started. ..."
+        }
+    """
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+
+    if diag:
+        diag.stage("load_source_session")
+
+    from api.models import Session
+
+    session = Session.load(sid)
+    if not session:
+        return bad(handler, "Source session not found", status=404)
+
+    # Profile gate: source session must be visible to active profile.
+    # This mirrors the same guard used by other source-session operations
+    # (e.g. /api/session/import and /api/session/export).
+    source_profile = getattr(session, "profile", None)
+    if not _session_visible_to_active_profile(source_profile, handler):
+        return bad(handler, "Source session not found", status=404)
+
+    if diag:
+        diag.stage("eligibility")
+
+    eligibility_error = _session_handoff_eligibility_error(session)
+    if eligibility_error:
+        return bad(handler, eligibility_error, status=400)
+
+    if diag:
+        diag.stage("build_handoff")
+
+    # Extract latest completed exchange from the visible transcript
+    # (session.messages), not from context_messages — the visible transcript
+    # is the source of truth for the most recent user/assistant turn.
+    source_messages = getattr(session, "messages", []) or []
+    last_user, last_assistant = _extract_latest_completed_exchange(
+        source_messages
+    )
+
+    # Build the handoff context_messages for the new session
+    handoff_context = _build_handoff_context_messages(
+        session.context_messages, last_user, last_assistant
+    )
+
+    # Merge request-level overrides with source session defaults
+    workspace = body.get("workspace") or session.workspace
+    try:
+        from api.workspace import resolve_trusted_workspace
+
+        resolved_workspace = str(resolve_trusted_workspace(workspace)) if workspace else None
+    except (TypeError, ValueError) as e:
+        return bad(handler, str(e))
+
+    model = body.get("model") or session.model
+    model_provider = body.get("model_provider") or session.model_provider
+
+    # Profile: default to source profile. Body field alone must not
+    # authorize cross-profile handoff (matches the principle used by
+    # other cross-profile guards in the codebase).
+    dest_profile = body.get("profile") or source_profile
+    # If the caller explicitly requested a different profile, validate
+    # that the destination profile is also visible to the active profile.
+    if dest_profile != source_profile and not _session_visible_to_active_profile(dest_profile, handler):
+        return bad(handler, "Source session not found", status=404)
+
+    # Create the new session (empty transcript, no messages)
+    from api.models import new_session as _new_session
+
+    s = _new_session(
+        workspace=resolved_workspace,
+        model=model,
+        model_provider=model_provider,
+        profile=dest_profile,
+        project_id=body.get("project_id") or getattr(session, "project_id", None),
+    )
+
+    # Inject handoff context — the compressed continuity block
+    s.context_messages = handoff_context
+    s.parent_session_id = sid
+
+    # Handoff provenance metadata (persisted via Session __dict__ extras)
+    s.handoff_source_session_id = sid
+    s.handoff_created_at = time.time()
+    s.handoff_compressed = True
+
+    # Persist immediately — the session has meaningful continuity context
+    s.save()
+
+    publish_session_list_changed(
+        "session_new",
+        profile=getattr(s, "profile", None),
+        session_id=getattr(s, "session_id", None),
+    )
+
+    announcement = (
+        "Fresh session started. "
+        "Previous compressed context and the latest completed exchange were included."
+    )
+
+    return j(handler, {
+        "session": s.compact() | {"messages": s.messages},
+        "handoff_source": sid,
+        "handoff_compressed": True,
+        "announcement": announcement,
+    })
 
 
 def _handle_skill_save(handler, body):
