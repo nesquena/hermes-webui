@@ -159,6 +159,74 @@ class TestPluginModelProvidersSettings:
         env_text = (tmp_path / ".env").read_text(encoding="utf-8")
         assert "YANDEX_API_KEY=test-yandex-key-abcdef" in env_text
 
+    def test_underscore_plugin_id_keeps_provider_card_and_key_mapping(self, monkeypatch, tmp_path):
+        import api.config as config
+        import api.providers as provider_api
+
+        profile = SimpleNamespace(
+            name="acme_cloud",
+            display_name="Acme Cloud",
+            env_vars=("ACME_CLOUD_API_KEY",),
+            auth_type="api_key",
+            aliases=(),
+        )
+        fake_providers = types.ModuleType("providers")
+        fake_providers.list_providers = lambda: [profile]
+        monkeypatch.setitem(sys.modules, "providers", fake_providers)
+        invalidate_plugin_model_provider_cache()
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.delenv("ACME_CLOUD_API_KEY", raising=False)
+        monkeypatch.setattr(
+            provider_api,
+            "get_config",
+            lambda: {"model": {"provider": "gemini"}, "providers": {}},
+        )
+        monkeypatch.setattr(
+            config,
+            "_get_config_path",
+            lambda: tmp_path / "config.yaml",
+        )
+
+        fake_cli = types.ModuleType("hermes_cli")
+        fake_cli.__path__ = []
+        fake_models = types.ModuleType("hermes_cli.models")
+        fake_models.list_available_providers = lambda: []
+        fake_models.provider_model_ids = lambda _provider_id: []
+        fake_auth = types.ModuleType("hermes_cli.auth")
+        fake_auth.get_auth_status = lambda _provider_id: {}
+        monkeypatch.setitem(sys.modules, "hermes_cli", fake_cli)
+        monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+        monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+
+        provider_api.invalidate_providers_cache()
+        try:
+            card = next(
+                row for row in provider_api.get_providers()["providers"]
+                if row["display_name"] == "Acme Cloud"
+            )
+            assert card["id"] == "acme_cloud"
+            assert card["configurable"] is True
+
+            saved = provider_api.set_provider_key(
+                "acme_cloud", "test-acme-cloud-key-12345"
+            )
+            assert saved["ok"] is True
+            assert saved["provider"] == "acme_cloud"
+            assert "ACME_CLOUD_API_KEY=test-acme-cloud-key-12345" in (
+                tmp_path / ".env"
+            ).read_text(encoding="utf-8")
+
+            removed = provider_api.remove_provider_key("acme_cloud")
+            assert removed["ok"] is True
+            assert removed["provider"] == "acme_cloud"
+            assert "ACME_CLOUD_API_KEY=" not in (
+                tmp_path / ".env"
+            ).read_text(encoding="utf-8")
+        finally:
+            provider_api.invalidate_providers_cache()
+            config.invalidate_models_cache()
+            invalidate_plugin_model_provider_cache()
+
 
 class TestPluginOnlyExcludesStaticProviders:
     def test_bundled_agent_profiles_are_not_plugin_only(self, monkeypatch):

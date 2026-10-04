@@ -295,7 +295,7 @@ def test_load_pool_copilot_ambient_key_source_only_remains_hidden(monkeypatch, t
 
 
 def test_load_pool_alias_provider_key_is_resolved(monkeypatch, tmp_path):
-    """load_pool path: aliased pool keys should resolve to canonical provider ids."""
+    """load_pool path: credential-pool groups keep their WebUI provider IDs."""
     auth_payload = {
         "version": 1,
         "providers": {},
@@ -315,8 +315,8 @@ def test_load_pool_alias_provider_key_is_resolved(monkeypatch, tmp_path):
 
     result = _call_get_available_models(monkeypatch, tmp_path, auth_payload, with_load_pool=True)
     groups = _group_by_provider(result)
-    assert "Gemini" in groups, f"Expected Gemini in {list(groups)}"
-    assert "Google" not in groups, f"Aliased provider key should not render under raw alias name: {list(groups)}"
+    assert "Google" in groups, f"Expected Google in {list(groups)}"
+    assert "Gemini" not in groups, f"Credential-pool identity should not create a duplicate group: {list(groups)}"
 
 
 def test_load_pool_explicit_credential_shows_provider(monkeypatch, tmp_path):
@@ -426,29 +426,27 @@ def test_copilot_mixed_pool_prefixed_models(monkeypatch, tmp_path):
     assert all(mid.startswith("@copilot:") for mid in model_ids), model_ids
 
 
-def test_auth_store_active_provider_alias_is_resolved(monkeypatch, tmp_path):
-    """active_provider read from auth.json must be alias-normalized.
+def test_auth_store_active_provider_preserves_webui_identity(monkeypatch, tmp_path):
+    """active_provider read from auth.json must preserve WebUI identity.
 
-    Regression: previously the alias table was applied only to config.yaml's
-    active_provider, so an aliased name in auth.json (e.g. 'google') would
-    not match the canonical pid ('gemini') and the prefixing logic would
-    add an unwanted '@gemini:' prefix to the active provider's models.
+    The Agent alias is reserved for the final Agent boundary; the WebUI must
+    keep the configured Google identity and avoid prefixing active models.
     """
     auth_payload = {
         "version": 1,
         "providers": {},
-        # Aliased name: 'google' → 'gemini' per _PROVIDER_ALIASES.
+        # Google is a WebUI identity even though the Agent uses another alias.
         "active_provider": "google",
         "credential_pool": {},
     }
 
     result = _call_get_available_models(monkeypatch, tmp_path, auth_payload)
     groups = _group_by_provider(result)
-    # Gemini should appear under its canonical display name and its model
+    # Google should appear under its WebUI display name and its model
     # ids should NOT be prefixed (it's the active provider).
-    assert "Gemini" in groups, f"Expected Gemini in {list(groups)}"
-    model_ids = [m["id"] for m in groups["Gemini"]]
-    assert model_ids, "Gemini group should have models"
+    assert "Google" in groups, f"Expected Google in {list(groups)}"
+    model_ids = [m["id"] for m in groups["Google"]]
+    assert model_ids, "Google group should have models"
     assert not any(mid.startswith("@") for mid in model_ids), (
         f"Active provider models must not be prefixed; got {model_ids}"
     )
@@ -551,9 +549,7 @@ def test_format_ollama_label_no_variant():
 
 
 def test_fallback_path_resolves_alias_when_load_pool_unavailable(monkeypatch, tmp_path):
-    """When agent.credential_pool can't be imported, the manual-inspection
-    branch must still canonicalize pool keys so aliased names (e.g. 'google')
-    end up under their canonical provider id ('gemini')."""
+    """The manual-inspection branch preserves WebUI ids from auth-store keys."""
     _install_fake_hermes_cli(monkeypatch)
     # Ensure agent.credential_pool is not importable so the fallback branch runs.
     monkeypatch.setitem(sys.modules, "agent.credential_pool", None)
@@ -594,12 +590,8 @@ def test_fallback_path_resolves_alias_when_load_pool_unavailable(monkeypatch, tm
         config._cfg_mtime = old_mtime
 
     groups = _group_by_provider(result)
-    assert "Gemini" in groups, (
-        f"Fallback path must resolve 'google' -> 'gemini'; got {list(groups)}"
-    )
-    assert "Google" not in groups, (
-        f"Raw alias name must not leak when fallback path runs; got {list(groups)}"
-    )
+    assert "Google" in groups, f"Fallback path must preserve 'google'; got {list(groups)}"
+    assert "Gemini" not in groups, f"Fallback path must not create Gemini from Google; got {list(groups)}"
 
 
 # ── New tests for credential-pool changes (code-review #4247 follow-ups) ──
