@@ -423,6 +423,58 @@ const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|_
 // Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
 
+// A path string is Windows-style when it starts with a drive letter ("C:/" or
+// "C:\") or a backslash UNC root ("\\server\share"). A forward-slash "//"
+// prefix is deliberately NOT evidence of Windows — POSIX permits "//" at the
+// start of a path (maintainer review #5752, edges 2-3).
+function _isWindowsStylePath(p){
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+// Strip the S.session.workspace prefix so an absolute tool path and a relative
+// preview path compare equal ("/Users/x/ws/foo.py" vs "foo.py", #5747).
+// Path flavor is decided from the workspace STRING, never from the candidate:
+// a POSIX workspace may legally contain backslashes (so its string is never
+// rewritten) and treats drive/UNC lookalikes as plain file names; a Windows
+// workspace folds separators and strips case-insensitively. Returns the
+// stripped path when under the workspace, otherwise the input unchanged —
+// callers decide what "outside the workspace" means (mutation tracking fails
+// closed, display keeps the raw path).
+function _stripWorkspacePrefix(path){
+  if(typeof S==='undefined' || !S.session || !S.session.workspace) return path;
+  const ws = String(S.session.workspace);
+  // Flavor must be known BEFORE normalizing: a POSIX workspace root may
+  // contain a literal backslash, so its string is never rewritten
+  // (maintainer re-gate #5752, blocker 3).
+  const isWindows = _isWindowsStylePath(ws);
+  const normWs = (isWindows ? ws.replace(/\\/g,'/') : ws).replace(/\/+$/,'') + '/';
+  const normPath = isWindows ? path.replace(/\\/g,'/') : path;
+  if(isWindows){
+    if(normPath.toLowerCase().startsWith(normWs.toLowerCase()))
+      return normPath.slice(normWs.length);
+  } else if(normPath.startsWith(normWs)){
+    return normPath.slice(normWs.length);
+  }
+  return path;
+}
+
+// Resolve "." and ".." segments of a workspace-relative path. Returns null
+// when the path escapes the workspace root (a leading ".."), which callers
+// must treat as fail-closed; in-workspace segments ("a/../b.py") canonicalize
+// to their resolved form so they still match a preview (maintainer re-gate
+// #5752, blocker 2).
+function _canonicalizeRelativePath(path){
+  const out = [];
+  for(const part of String(path).split('/')){
+    if(!part || part === '.') continue;
+    if(part === '..'){
+      if(!out.length) return null;
+      out.pop();
+    } else out.push(part);
+  }
+  return out.join('/');
+}
+
 function _normalizeArtifactPath(path){
   if(!path) return '';
   path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
@@ -433,8 +485,58 @@ function _normalizeArtifactPath(path){
   // preview stale (#3262 / pre-release regression-gate finding).
   path = path.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   if(!path) return '';
+  // Path flavor is decided ONCE from the workspace, never per candidate: a
+  // POSIX workspace must treat "C:/foo.py" and leading-backslash lookalikes
+  // as legal POSIX file names (maintainer re-gate #5752, blocker 1), so they
+  // survive repeated normalization instead of being mis-read as Windows
+  // absolutes on a second pass.
+  const ws = (typeof S!=='undefined' && S.session) ? S.session.workspace : null;
+  const isWindows = !!ws && _isWindowsStylePath(String(ws));
+  if(!ws){
+    // No workspace authority: no absolute path can ever match a relative
+    // preview path, so reject every unambiguous absolute flavor before
+    // relative canonicalization (maintainer re-gate #5752). A bare leading
+    // backslash ("\foo.py") is ambiguous on POSIX, so it survives.
+    if(path.startsWith('/') || _isWindowsStylePath(path)) return '';
+  } else if(isWindows){
+    const normPath = path.replace(/\\/g,'/');
+    // Rooted detection runs on the folded form: a single leading backslash
+    // ("\foo.py") is a Windows root-relative absolute, and drive-relative
+    // ("C:foo.py") is a Windows absolute without a separator — both must fail
+    // closed rather than survive as workspace-relative candidates.
+    const rooted = _isWindowsStylePath(path) || normPath.startsWith('/')
+      || /^[A-Za-z]:[^\\/]/.test(path);
+    if(rooted){
+      // Strip the workspace prefix so they compare equal to relative preview
+      // paths (#5747). An absolute path not under the workspace can never
+      // match a relative preview path — bail out to avoid false candidates.
+      const stripped = _stripWorkspacePrefix(normPath);
+      if(stripped === normPath) return '';
+      path = stripped;
+    } else {
+      // Windows-relative paths still fold separators so "foo\bar.py" matches
+      // a "foo/bar.py" preview.
+      path = normPath;
+    }
+  } else if(path.startsWith('/')){
+    // POSIX absolute (or no workspace set): strip the workspace prefix; an
+    // absolute path outside the workspace can never match a relative preview
+    // path — bail out to avoid false candidates.
+    const stripped = _stripWorkspacePrefix(path);
+    if(stripped === path) return '';
+    path = stripped;
+  }
+  // An absolute input that lexically starts under the workspace but resolves
+  // outside it (e.g. "/ws/../outside/x.py") must fail closed; in-workspace
+  // ".." segments ("/ws/a/../b.py") canonicalize so they still match.
+  const canon = _canonicalizeRelativePath(path);
+  if(!canon) return '';
+  path = canon;
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
-  if(!/[./]/.test(path)) return '';
+  // No bare-name rejection here: structured mutator args and patch headers can
+  // legitimately name extension-less root files (Makefile, LICENSE,
+  // Dockerfile), and rejecting them made valid previews unmatchable
+  // (maintainer review #5752, edge 1).
   return path;
 }
 
@@ -580,11 +682,9 @@ function renderSessionArtifacts(){
     return;
   }
   // Strip workspace prefix for display so long absolute paths don't clutter the list.
-  const ws = S.session && S.session.workspace;
-  const normWs = ws ? ws.replace(/\/+$/,'') + '/' : '';
   const displayPath = (p) => {
-    if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
-    return p;
+    const rel = _stripWorkspacePrefix(p);
+    return rel !== p ? rel : p;
   };
   const splitArtifactDisplayPath = (path) => {
     const slash = path.lastIndexOf('/');
@@ -636,9 +736,8 @@ async function openArtifactPath(path){
   // Strip workspace prefix so /api/list receives a workspace-relative path.
   const ws = (S.session && S.session.workspace || '').replace(/\\/g,'/');
   if(ws){
-    const normWs = ws.replace(/\/+$/,'') + '/';
-    if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
-    else if(rel === ws.replace(/\/+$/,'')) rel = '.';
+    rel = _stripWorkspacePrefix(rel);
+    if(rel === ws.replace(/\/+$/,'')) rel = '.';
   }
   if(!rel) rel = '.';
   try{
@@ -784,6 +883,13 @@ async function loadDir(path, opts={}){
       }
     }else if(preservePreview){
       await refreshOpenPreviewIfMutated();
+      // #5747: renderFileTree() (ui.js) unconditionally restores box.style.display=''
+      // which makes fileTree visible alongside an open previewArea — both are flex:1
+      // in a flex-direction:column right panel, so they split the panel 50/50 (half-screen).
+      // When preserving a preview, re-hide the fileTree so only the preview shows.
+      if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){
+        const ft=$('fileTree'); if(ft) ft.style.display='none';
+      }
     }
     // Fetch git info for workspace root (non-blocking)
     if(!path||path==='.') _refreshGitBadge();
