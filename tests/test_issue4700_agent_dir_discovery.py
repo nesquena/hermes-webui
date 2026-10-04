@@ -16,6 +16,7 @@ def _isolate_discovery_inputs(config, monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("HERMES_WEBUI_AGENT_DIR", raising=False)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("HERMES_WEBUI_PYTHON", str(tmp_path / "missing-python"))
     monkeypatch.setattr(config, "HOME", tmp_path / "home")
     monkeypatch.setattr(config, "_DEFAULT_HERMES_HOME", tmp_path / "default-hermes-home")
     monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "webui-repo")
