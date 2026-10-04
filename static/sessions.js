@@ -2698,6 +2698,11 @@ async function loadSession(sid){
       return;
     }
     const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
+    // Drop the completed assistant only once its content has been preserved
+    // into a live row (drop-and-replace, never drop-then-maybe-empty).  If
+    // the live assistant has no text yet, the completed assistant is still
+    // the authoritative response and must not be removed — dropping it
+    // would lose the settled answer before any live row can take over.
     if(liveTailPrepared){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
@@ -3879,6 +3884,22 @@ function _sameTranscriptMessage(a,b){
   if(!(a&&b)) return false;
   const role=String(a.role||'');
   if(role!==String(b.role||'')) return false;
+  const aId=a.id, bId=b.id;
+  if(aId && bId){
+    if(aId === bId) return true;
+    return false;
+  }
+  const aTs=(a.timestamp||a._ts||0), bTs=(b.timestamp||b._ts||0);
+  if(aTs && bTs && role==='user'){
+    // Timestamp equality alone can over-match two genuinely different user
+    // messages submitted within the same millisecond. Require normalized
+    // user-text equality IN ADDITION to the timestamp match.
+    if(aTs !== bTs) return false;
+    const sameText=_messageComparableText(a)===_messageComparableText(b);
+    if(sameText) return true;
+    return _normalizeUserTranscriptText(_messageComparableText(a))===
+      _normalizeUserTranscriptText(_messageComparableText(b));
+  }
   const aText=_messageComparableText(a);
   const bText=_messageComparableText(b);
   if(aText===bText) return true;
@@ -3908,6 +3929,30 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
   if(!candidate||String(candidate.role||'')!=='user') return false;
   const existing=_currentTailUserMessage(messages);
   return !!(existing&&_sameTranscriptMessage(existing,candidate));
+}
+
+// _currentTailUserMessage stops at a completed (non-live) assistant because
+// the pending-user recovery path must NOT match a pending turn to a previous
+// turn's user. The INFLIGHT merge context is different: when the `done` event
+// was lost, the base may legitimately end with a completed assistant that
+// belongs to the SAME turn the inflight is re-supplying, and the reverse scan
+// must walk past it to find the current-turn user for dedup (#6649 greptile P2).
+function _hasInflightTailUserDuplicate(messages,candidate){
+  if(!candidate||String(candidate.role||'')!=='user') return false;
+  const list=Array.isArray(messages)?messages:[];
+  for(let i=list.length-1;i>=0;i--){
+    const msg=list[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user'){
+      if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+      return !!_sameTranscriptMessage(msg,candidate);
+    }
+    // Skip past live rows, tool rows, and completed (non-live) assistants
+    // so the scan reaches the current-turn user behind them.
+    if(msg._live||String(msg.role||'')==='tool'||String(msg.role||'')==='assistant') continue;
+    return false;
+  }
+  return false;
 }
 
 // Keep pending-user recovery ordering identical across load, reconnect, and
@@ -4196,20 +4241,96 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
   if(!live) return false;
   const liveText=_messageComparableText(live);
   const persistedText=_currentTurnAssistantText(baseMessages);
-  if(persistedText){
+  // The persisted tail is only authoritative for the CURRENT turn when the
+  // base transcript also carries the current turn's user. In deferred
+  // session-save mode the base can end with the PREVIOUS turn's settled
+  // user+assistant while the current user + live partial exist only in the
+  // INFLIGHT snapshot. Reconciling the live row to that previous answer and
+  // letting the merge text-dedupe it away would make the current response
+  // disappear (#6649 greptile P1, "Current response can disappear").
+  const firstLiveIdx=inflight.findIndex(m=>m&&m._live);
+  let turnUser=null;
+  for(let i=firstLiveIdx-1;i>=0;i--){
+    const msg=inflight[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user'){turnUser=msg;break;}
+    if(String(msg.role||'')==='tool') continue;
+    break;
+  }
+  const settledBelongsToCurrentTurn=!!(turnUser&&_hasInflightTailUserDuplicate(baseMessages,turnUser));
+  if(persistedText&&settledBelongsToCurrentTurn){
     const compactPersisted=_compactTranscriptText(persistedText);
     const compactLive=_compactTranscriptText(liveText);
     if(!liveText || persistedText.startsWith(liveText)){
+      // Persisted carries text the live row does not have yet (empty live, or
+      // live is an exact prefix): backfill so the drop-and-replace in
+      // loadSession keeps the fuller copy.
       live.content=persistedText;
     }else if(liveText.startsWith(persistedText)){
+      // The live text is a STRICT EXTENSION of the persisted copy: the Agent
+      // persists the assistant tool-call row eagerly while the turn keeps
+      // streaming, so the persisted text can legitimately be a prefix of the
+      // live text ("Preparing export" -> "Preparing export\n\nExport is
+      // ready"). That is progress, never a staleness signal — keep the live
+      // content. Falling through to the superseded-block below would roll the
+      // user-visible text back to the older prefix and then drop the live row
+      // (#6649 maintainer review 2026-10-01: live text rolls back on a
+      // running tool turn).
       const extra=liveText.slice(persistedText.length).trim();
       if(extra&&compactPersisted.includes(_compactTranscriptText(extra))){
+        // The extra text is already covered inside the persisted copy (the
+        // stream merely re-emitted it after the persisted snapshot): the
+        // persisted copy remains authoritative.
         live.content=persistedText;
       }
     }else if(compactPersisted===compactLive){
       live.content=persistedText;
     }
   }
+  // If a settled response exists in the base, only return true when the
+  // live row now reflects the SAME text. Returning true with genuinely
+  // different text would let the loadSession drop remove the authoritative
+  // settled response and leave only the stale partial stream in the
+  // restored transcript (#6649 greptile P1).
+  //
+  // Also reconcile the live row's content to the persisted text (same style
+  // as the backfill branches above) so the subsequent
+  // _mergeInflightTailMessages call's _sameTranscriptMessage text equality
+  // dedupes the stale live partial away instead of appending it as a second
+  // assistant row. Without this in-place reconciliation the settled
+  // response and the divergent live partial coexist on screen (#6649
+  // greptile P1 follow-up: "Stale response remains visible" — the settled
+  // row survives the drop but the merge then appends the stale partial
+  // beside it). The _supersededBySettled marker covers the case where the
+  // live row carries its own distinct id: _sameTranscriptMessage's id-first
+  // comparison would fail the text-equality dedupe and re-append the row, so
+  // the merge drops flagged rows outright.
+  //
+  // When the base does NOT contain the current turn's user (deferred save),
+  // persistedText describes a PREVIOUS turn: never touch the live content,
+  // never drop base rows, and let the merge append the live turn as-is.
+  if(persistedText && settledBelongsToCurrentTurn && _messageComparableText(live) !== persistedText){
+    // A strict live extension of the same turn's persisted text is progress,
+    // not staleness: the Agent persists the assistant tool-call row eagerly
+    // while the turn keeps streaming, so the persisted text can be a prefix
+    // of the live text. Keep the live content, mark the covered persisted
+    // row for replacement (never mark the LIVE row superseded), and let the
+    // caller's drop-and-replace keep the fuller copy (#6649 maintainer review
+    // 2026-10-01: without this the visible text rolled back to the older
+    // prefix and the merge dropped the live row entirely).
+    if(liveText.startsWith(persistedText)){
+      live._progressBeyondPersisted=true;
+      return true;
+    }
+    live.content = persistedText;
+    live._supersededBySettled = true;
+    return false;
+  }
+  // Deferred save: the base ends with a PREVIOUS turn's settled tail, not a
+  // superseded copy of the current live turn. Returning true would make the
+  // loadSession drop remove that previous answer — never drop base rows when
+  // the persisted tail doesn't belong to the current turn.
+  if(persistedText && !settledBelongsToCurrentTurn) return false;
   return !!_messageComparableText(live);
 }
 
@@ -4223,15 +4344,49 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
   if(firstLiveIdx<0) return base;
   let start=firstLiveIdx;
   if(firstLiveIdx>0&&inflight[firstLiveIdx-1]&&inflight[firstLiveIdx-1].role==='user') start=firstLiveIdx-1;
-  const tail=inflight.slice(start).filter(m=>m&&m.role);
+  const tail=inflight.slice(start).filter(m=>m&&m.role&&!m._supersededBySettled);
   const merged=[...base];
+  // Assistant candidates may only be deduped against rows that come AFTER
+  // the latest user message, never against an earlier turn's settled
+  // assistant. The previous merged.slice(-Math.max(5,tail.length+2)) window
+  // ran back ACROSS the latest user row, so an earlier turn's identical
+  // assistant text ("Done.", "Sounds good.", a repeated status line) counted
+  // as a duplicate of the CURRENT live reply — which then was never pushed,
+  // hiding the current reply when returning to an active deferred-save
+  // session (#6649 maintainer review 2026-10-01).
+  //
+  // The base may legitimately END with a completed assistant of the SAME
+  // turn when the `done` event was lost, so the scan walks past trailing
+  // assistant/tool/live rows to find the turn's user boundary — the same
+  // same-turn allowance _hasInflightTailUserDuplicate already relies on. That
+  // keeps the same-turn settled-response suppression: a settled row sitting
+  // after the current-turn user is still checked, so a stale live partial is
+  // still deduped away, just never against a PREVIOUS turn's answer.
+  //
+  // The boundary is advanced when the current-turn user itself is pushed
+  // (deferred save: the user row is new to the base), so the live reply that
+  // follows can never be compared against rows belonging to a previous turn.
+  let boundary=-1;
+  for(let i=merged.length-1;i>=0;i--){
+    const msg=merged[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user'){boundary=i;break;}
+    if(msg._live||String(msg.role||'')==='tool'||String(msg.role||'')==='assistant') continue;
+    boundary=i;
+    break;
+  }
+  const isAfterCurrentUser=(existing,idx)=>boundary<0||idx>boundary;
+  const push=(row)=>{merged.push(row);return merged.length-1;};
   for(const msg of tail){
     let candidate=msg;
     if(!candidate) continue;
     const duplicate=String(candidate.role||'')==='user'
-      ? _hasCurrentTailUserDuplicate(merged,candidate)
-      : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
-    if(!duplicate) merged.push(candidate);
+      ? _hasInflightTailUserDuplicate(merged,candidate)
+      : merged.some((existing,idx)=>isAfterCurrentUser(existing,idx)&&_sameTranscriptMessage(existing,candidate));
+    if(!duplicate){
+      if(String(candidate.role||'')==='user') boundary=push(candidate);
+      else push(candidate);
+    }
   }
   return merged;
 }
