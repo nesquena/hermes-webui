@@ -103,6 +103,7 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
         PANELS_JS[
             PANELS_JS.index("let _profilesCache = null;") : PANELS_JS.index("async function _profileSwitchPanelLoad(){")
         ],
+        _function_body(PANELS_JS, "function _profileDisplayLabel("),
         _function_body(PANELS_JS, "function renderProfileDropdown(data) {"),
         _function_body(PANELS_JS, "function toggleProfileDropdown(e) {"),
         _function_body(PANELS_JS, "function closeProfileDropdown() {"),
