@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Headless browser gate: a fresh chat focuses the composer without waiting for the
-session list (#7936).
+session list (#7936, /new in #7996, and the first message in #8004).
 
 WHY THIS EXISTS
   `newSession()` already schedules the sidebar refresh in the background. The
@@ -10,9 +10,11 @@ WHY THIS EXISTS
   only after the first one's `/api/sessions` and `/api/projects` reads finish.
   On a long session list that held the composer for seconds.
 
-WHAT IT CHECKS, for the button and for Cmd/Ctrl+K
-  - with every `/api/sessions` response held, the composer is focused and the
-    new blank conversation is current;
+WHAT IT CHECKS, for the button, Cmd/Ctrl+K, the /new command, and sending the
+first message with no conversation open
+  - with every `/api/sessions` response held, the composer is focused (for /new,
+    its toast is shown; for the first message, `POST /api/chat/start` is sent)
+    and the new conversation is current;
   - one fresh-chat action issues one session-list read;
   - once the held reads are released, the new conversation's sidebar row appears.
 
@@ -27,7 +29,7 @@ USAGE
   (Requires: playwright + chromium.)
 
 EXIT CODES
-  0 — both paths passed
+  0 — every path passed
   1 — a check failed (regression)
   2 — environment/setup failure (server didn't boot, playwright missing, etc.)
 """
@@ -75,11 +77,44 @@ def _wait_until(page, expression, timeout_ms):
 
 
 def _start_fresh_chat(page, trigger):
+    """Start a fresh chat via ``trigger``; return failure lines for the driver itself."""
     if trigger == "button":
         page.click("#btnNewChat")
+    elif trigger == "slash":
+        # The first slash command after page load starts the skill, bundle and agent
+        # metadata loaders; each one re-opens the autocomplete when it lands, which can
+        # swallow the second Enter. Warm them first so the typed sequence is
+        # deterministic (the race is in this driver, not in /new).
+        page.evaluate(
+            "() => Promise.all([loadSkillCommands(), loadBundleCommands(),"
+            " loadAgentCommandMetadata()])"
+        )
+        # As typed: the first Enter takes the open autocomplete, the second sends.
+        page.click("#msg")
+        page.keyboard.type("/new")
+        if not _wait_until(page, "!!document.querySelector('.cmd-dropdown.open')", FOCUS_TIMEOUT_MS):
+            return ["  [slash] the /new autocomplete never opened"]
+        page.keyboard.press("Enter")
+        if not _wait_until(page, "!document.querySelector('.cmd-dropdown.open')", FOCUS_TIMEOUT_MS):
+            return ["  [slash] the autocomplete did not close after taking /new"]
+        page.keyboard.press("Enter")
+    elif trigger == "send":
+        page.click("#msg")
+        page.keyboard.type("hello there")
+        page.keyboard.press("Enter")
     else:
         page.evaluate("document.activeElement && document.activeElement.blur()")
         page.keyboard.press("Meta+k" if sys.platform == "darwin" else "Control+k")
+    return []
+
+
+def _done(trigger):
+    """What the trigger shows once it has finished. /new is typed in the composer,
+    so focus alone proves nothing there: its toast comes after the same await."""
+    focused = "!!(document.activeElement && document.activeElement.id === 'msg')"
+    if trigger == "slash":
+        return focused + " && $('toast').dataset.toastMessage === t('new_session')"
+    return focused
 
 
 def _check(browser, trigger):
@@ -96,11 +131,15 @@ def _check(browser, trigger):
         return [f"  [{trigger}] the app did not initialize"]
     time.sleep(SETTLE_SECONDS)
 
-    # A current conversation with a message, so New Chat creates a new one.
-    page.evaluate(
-        "async () => { if (!S.session) { await newSession(); }"
-        " S.messages = [{role: 'user', content: 'earlier turn'}]; }"
-    )
+    if trigger == "send":
+        # A fresh page with no conversation open: the first message creates one.
+        page.evaluate("() => { S.session = null; S.messages = []; }")
+    else:
+        # A current conversation with a message, so New Chat creates a new one.
+        page.evaluate(
+            "async () => { if (!S.session) { await newSession(); }"
+            " S.messages = [{role: 'user', content: 'earlier turn'}]; }"
+        )
     before = page.evaluate("S.session && S.session.session_id")
     page.evaluate("document.activeElement && document.activeElement.blur()")
     time.sleep(SETTLE_SECONDS)
@@ -108,12 +147,31 @@ def _check(browser, trigger):
     held = []
     page.route("**/api/sessions*", lambda route: held.append(route)
                if _is_session_list(route.request.url) else route.continue_())
+    chat_starts = []
+    page.on("request", lambda r: chat_starts.append(r.url)
+            if r.method == "POST" and urlsplit(r.url).path == "/api/chat/start" else None)
 
-    _start_fresh_chat(page, trigger)
-    focused = "!!(document.activeElement && document.activeElement.id === 'msg')"
-    if not _wait_until(page, focused, FOCUS_TIMEOUT_MS):
+    driver_failures = _start_fresh_chat(page, trigger)
+    reads_before_done = None
+    if driver_failures:
+        finished = True
+        failures.extend(driver_failures)
+    elif trigger == "send":
+        deadline = time.time() + FOCUS_TIMEOUT_MS / 1000
+        while not chat_starts and time.time() < deadline:
+            page.wait_for_timeout(100)
+        finished = bool(chat_starts)
+        # The send's own stream refreshes the list again afterwards; what matters
+        # is what was read before the message went out.
+        reads_before_done = len(held)
+    else:
+        finished = _wait_until(page, _done(trigger), FOCUS_TIMEOUT_MS)
+    if not finished:
+        what = {"slash": "composer focused, toast shown", "send": "message sent"}.get(
+            trigger, "composer focused"
+        )
         failures.append(
-            f"  [{trigger}] composer not focused within {FOCUS_TIMEOUT_MS} ms "
+            f"  [{trigger}] not finished ({what}) within {FOCUS_TIMEOUT_MS} ms "
             f"while the session list was held ({len(held)} list read(s) held)"
         )
     after = page.evaluate("S.session && S.session.session_id")
@@ -131,8 +189,9 @@ def _check(browser, trigger):
             break
     page.unroute("**/api/sessions*")
 
-    if len(held) != 1:
-        failures.append(f"  [{trigger}] {len(held)} session-list reads for one fresh chat, expected 1")
+    reads = len(held) if reads_before_done is None else reads_before_done
+    if reads != 1:
+        failures.append(f"  [{trigger}] {reads} session-list reads for one fresh chat, expected 1")
     if after:
         try:
             page.wait_for_selector(f'[data-sid="{after}"]', timeout=FOCUS_TIMEOUT_MS)
@@ -141,7 +200,7 @@ def _check(browser, trigger):
     for err in errors:
         failures.append(f"  [{trigger}] pageerror: {err}")
     if not failures:
-        print(f"OK  {trigger} — focused with the list held, {len(held)} list read, row shown")
+        print(f"OK  {trigger} — done with the list held, {reads} list read, row shown")
     ctx.close()
     return failures
 
@@ -189,7 +248,7 @@ def main():
             browser = pw.chromium.launch(
                 headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
-            for trigger in ("button", "shortcut"):
+            for trigger in ("button", "shortcut", "slash", "send"):
                 failures.extend(_check(browser, trigger))
             browser.close()
 

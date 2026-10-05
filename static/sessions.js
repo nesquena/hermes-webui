@@ -9197,10 +9197,55 @@ function renderSessionListFromCache(){
   const unpinned=orderedSessions.filter(s=>!s.pinned);
   // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
-  // Collapse state persisted in localStorage
-  let _groupCollapsed={};
-  try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
-  const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
+  // Collapse state: in-memory authority, localStorage as best-effort
+  // persistence. If the write fails (quota, blocked storage) the toggle must
+  // still take effect for this session instead of silently reverting (#7953).
+  if(!window.__hermesDateGroupCollapsed) window.__hermesDateGroupCollapsed={};
+  if(!window.__hermesDateGroupPending) window.__hermesDateGroupPending=new Set();
+  const _groupCollapsed=window.__hermesDateGroupCollapsed;
+  const _pending=window.__hermesDateGroupPending;
+  // localStorage is the shared cross-tab authority. A local toggle is only a
+  // PENDING override until its snapshot is successfully written; that write
+  // releases the key so a newer successful choice from another tab wins on
+  // the next read. A failed write keeps the key pending so the local intent
+  // still takes effect for this session (#7953).
+  const _readStoredCollapsed=()=>{
+    // Distinguish a valid snapshot (possibly empty/cleared) from an
+    // unavailable or malformed read: only a valid one may change state.
+    let raw=null;
+    try{ raw=localStorage.getItem('hermes-date-groups-collapsed'); }catch(e){ return null; }
+    if(raw===null||raw==='') return {};
+    // A valid snapshot must be a JSON object. Non-object roots (string,
+    // number, boolean, array) route through the malformed-read fallback:
+    // `k in fresh` in the merge throws on them and kills the render after
+    // the list has already been cleared. Stored `null` is a valid empty
+    // snapshot (everything expanded).
+    try{ const v=JSON.parse(raw); if(v===null) return {}; return (typeof v==='object'&&!Array.isArray(v))?v:null; }catch(e){ return null; }
+  };
+  const _mergeStoredCollapsed=()=>{
+    const fresh=_readStoredCollapsed();
+    if(fresh===null) return; // unavailable/malformed: keep fallback + pending
+    for(const k in fresh){ if(!_pending.has(k)) _groupCollapsed[k]=fresh[k]; }
+    // A valid snapshot (even an empty/cleared one) also removes non-pending
+    // keys it no longer contains; a merge that only adds/updates would keep
+    // stale collapses visible.
+    for(const k in _groupCollapsed){
+      if(!(k in fresh) && !_pending.has(k)) delete _groupCollapsed[k];
+    }
+  };
+  _mergeStoredCollapsed();
+  const _saveCollapsed=()=>{
+    _mergeStoredCollapsed();
+    try{
+      localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));
+      // The complete intended snapshot is persisted: release the pending
+      // overrides so another tab's newer successful choice can win next read.
+      _pending.clear();
+    }catch(e){
+      // Failed write: keep the keys pending so the local intent survives.
+      if(typeof console!=='undefined'&&console.warn) console.warn('hermes: date-group collapse state could not be persisted', e);
+    }
+  };
   // Group sessions by date
   const groups=[];
   let curLabel=null,curItems=[];
@@ -9293,6 +9338,7 @@ function renderSessionListFromCache(){
       const isCollapsed=body.style.display==='none';
       body.style.display=isCollapsed?'':'none';
       caret.classList.toggle('collapsed',!isCollapsed);
+      _pending.add(g.label);
       _groupCollapsed[g.label]=!isCollapsed;
       _saveCollapsed();
       renderSessionListFromCache();
