@@ -524,11 +524,32 @@ def test_skill_usage_table_overflow_trio_stays_together():
     half of the fix (card min-width floor, table overflow scroller, or the
     shared head/row min-width) silently reintroduces the card overflow bug
     on narrow screens, so the trio is asserted as a unit."""
-    # 1) The card that hosts the table must be allowed to shrink below its
-    #    intrinsic grid width, or the table can never overflow-scroll locally.
+    # 1) Above the 640px breakpoint the card must NOT pin a min-width floor.
+    #    The cards are grid items in `.insights-row{grid-template-columns:1fr
+    #    1fr}`; a base `min-width:0` removes the intrinsic minimum that let the
+    #    Models card claim the width it needs, collapsing the columns and
+    #    hiding Cost/Share behind an overlay scrollbar on desktop/tablet
+    #    (Insights content width 700-900px). The shrink allowance belongs to
+    #    the <=640px single-column cascade only, where the table owns the
+    #    scroll. See maintainer re-gate on PR #6775 (desktop/tablet regression).
     card_line = [l for l in STYLE_CSS.splitlines() if l.startswith(".insights-card{")][0]
-    assert "min-width:0" in card_line, (
-        f".insights-card must carry min-width:0 so the grid item can shrink; got: {card_line}"
+    assert "min-width:0" not in card_line, (
+        f"base .insights-card must NOT pin min-width:0 (desktop/tablet column "
+        f"collapse); got: {card_line}"
+    )
+    mobile_marker = "/* ── Mobile layout for Token Breakdown + Models"
+    assert mobile_marker in STYLE_CSS, "Issue #2104 mobile rules should exist in CSS"
+    m_start = STYLE_CSS.find(mobile_marker)
+    m_section = STYLE_CSS[m_start:STYLE_CSS.find("/* ── Checkpoints", m_start)]
+    m_idx = m_section.find(".insights-usage-grid .insights-card")
+    assert m_idx != -1, (
+        "the <=640px cascade must style .insights-usage-grid .insights-card "
+        "with min-width:0 so the table can shrink and own its scroll"
+    )
+    m_brace = m_section.find("{", m_idx)
+    m_block = m_section[m_brace + 1:m_section.find("}", m_brace)]
+    assert "min-width:0" in m_block or "min-width: 0" in m_block, (
+        f"mobile .insights-usage-grid .insights-card must carry min-width:0; got: {m_block!r}"
     )
 
     # 2) The table owns a local horizontal scroller (display:block so the
