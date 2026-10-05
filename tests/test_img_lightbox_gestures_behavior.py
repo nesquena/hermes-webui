@@ -1,11 +1,12 @@
 """Source-level secondary guards for image-lightbox gestures.
 
 The behavioral proof now lives in ``test_img_lightbox_gestures_composed.py``,
-which mounts the real lightbox inside a JSDOM and drives its registered
-listeners. This file keeps cheap source locks as a secondary regression net
-so a marker regression fails fast without spinning the harness.
+which drives the real lightbox in Chromium (Playwright) through the listeners
+the application registers. This file keeps cheap source locks as a secondary
+regression net so a marker regression fails fast without launching a browser.
 
-No ``eval(`` is used here — the threat scan flags that pattern as SUSPICIOUS.
+No dynamic code evaluation is used here — the threat scan treats that pattern
+as SUSPICIOUS.
 """
 
 from pathlib import Path
@@ -86,6 +87,7 @@ class TestKeyboardAndButton:
     def test_fit_button_geometry_and_focus_scoped_to_rule(self):
         rule = _fit_rule()
         assert "min-height:44px" in rule, "fit rule must have min-height:44px"
+        assert "min-width:44px" in rule, "fit rule must have min-width:44px"
         assert "height:44px" in rule, "fit rule must have height:44px"
         css = STYLE.read_text(encoding="utf-8")
         assert ".img-lightbox-fit:focus-visible" in css
