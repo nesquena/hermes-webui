@@ -1473,21 +1473,66 @@ def _provider_models_are_discovered_catalog(provider_cfg: object) -> bool:
     )
 
 
-def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
-    """Return picker option rows from supported config allowlist shapes."""
-    labels: dict[str, str] = {}
-    if isinstance(raw_models, list):
-        for item in raw_models:
-            if not isinstance(item, dict):
-                continue
+def _configured_model_label_overrides(raw_models: object) -> dict[str, str]:
+    """Return ONLY operator-supplied labels from a config allowlist, by model id.
+
+    Label provenance, kept separate from ``_configured_model_options`` on
+    purpose. That function synthesizes ``label == id`` when the operator supplied
+    none, which erases the difference between::
+
+        models: ["model-a"]                              # no label chosen
+        models: [{"id": "model-a", "label": "model-a"}]  # label chosen, == id
+
+    Callers deciding whether a configured label should beat an endpoint-derived
+    or title-cased label must ask here rather than compare ``label != id``: a
+    nonblank ``label`` key is authoritative even when it equals the id, and a
+    bare-string entry never yields an override so the derived (title-cased) label
+    still wins for it (#6657, greptile api/config.py:7293).
+
+    Mirrors ``_configured_model_ids``' first-occurrence contract across BOTH
+    shapes: every list item — bare string or dict — claims its candidate id
+    in ``seen`` before label authority is decided, so a later duplicate dict
+    can never supply a label for an id the ids walker already accepted as a
+    bare string. Only the winning first occurrence contributes an override,
+    and only when it is a dict with a nonblank ``label``. The mapping
+    (``models:`` as a dict) shape carries no labels at all.
+    """
+    overrides: dict[str, str] = {}
+    if not isinstance(raw_models, list):
+        return overrides
+    seen: set[str] = set()
+    for item in raw_models:
+        if isinstance(item, dict):
             candidate = item.get("id") or item.get("model") or item.get("name")
-            model_id = str(candidate or "").strip()
-            if not model_id or model_id in labels:
-                continue
-            label = str(item.get("label") or model_id).strip() or model_id
-            labels[model_id] = label
+            can_carry_label = True
+        else:
+            # A bare-string entry never carries a label, but it still claims
+            # the id so an ignored later duplicate cannot contribute one
+            # (deep-review 2026-08-20, api/config.py:1401-1435).
+            candidate = item
+            can_carry_label = False
+        model_id = str(candidate or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        if not can_carry_label:
+            continue
+        label = str(item.get("label") or "").strip()
+        if label:
+            overrides[model_id] = label
+    return overrides
+
+
+def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
+    """Return picker option rows from supported config allowlist shapes.
+
+    A row's ``label`` falls back to its ``id`` when the operator supplied none,
+    so a row on its own cannot tell you whether a label was chosen — use
+    ``_configured_model_label_overrides`` when that provenance matters.
+    """
+    overrides = _configured_model_label_overrides(raw_models)
     return [
-        {"id": model_id, "label": labels.get(model_id, model_id)}
+        {"id": model_id, "label": overrides.get(model_id) or model_id}
         for model_id in _configured_model_ids(raw_models)
     ]
 
@@ -1635,13 +1680,32 @@ def _canonicalise_provider_id(name: object) -> str:
 
 
 def _normalize_base_url_for_match(value: object) -> str:
+    """Comparable form of a base URL; the raw lowercased URL when unparseable.
+
+    ``urlparse`` raises ``ValueError("Invalid IPv6 URL")`` for an authority with
+    mismatched brackets (``http://[::1/v1``, ``http://a]b/v1``). Every caller is
+    on a request path — provider resolution (``_resolve_configured_provider_id``),
+    the catalog build, and the #3837 probe-key check — so one fat-fingered or
+    hostile ``base_url`` in config must not 500 the request (#6657 review).
+
+    The fallback is the raw lowercased URL, NOT ``""``, and that choice is
+    load-bearing: the #3837 gate hands the stored LM Studio key to a probe only
+    when the caller-supplied base URL normalizes to the configured one, and it
+    compares the two results directly without an emptiness guard. Collapsing
+    every unparseable URL to ``""`` would make any two of them compare equal and
+    open that gate; distinct raw URLs stay distinct, so the comparison remains
+    fail-closed and only a genuinely identical URL still matches.
+    """
     url = str(value or "").strip().rstrip("/")
     if not url:
         return ""
-    parsed_url = urlparse(url if "://" in url else f"http://{url}")
-    scheme = (parsed_url.scheme or "http").lower()
-    netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
-    path = parsed_url.path.rstrip("/")
+    try:
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+        scheme = (parsed_url.scheme or "http").lower()
+        netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
+        path = parsed_url.path.rstrip("/")
+    except ValueError:
+        return url.lower()
     if not parsed_url.netloc:
         path = ""
     return f"{scheme}://{netloc}{path}"
@@ -1656,19 +1720,45 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     same base URL, those endpoint slugs are just UI routing hints and should
     resolve back to the configured provider rather than requiring a CUSTOM_* API
     key.
+
+    ``host`` is whatever ``urlparse().hostname`` yields, so every reg-name shape
+    is producible — a single-label Docker/LAN name (``llm``), a dotted DNS name
+    (``ollama.internal``) and an IPv4 literal alike. The
+    ``custom:<host>:<port>`` spelling is the authority form recognised by
+    ``_parse_provider_qualified_model_id``; keep the two in step (#6657).
+
+    IPv6 (explicit contract): ``urlparse`` strips the URL's brackets, so a raw
+    ``custom:::1:11434`` spelling is genuinely ambiguous — ``::1:11434`` is
+    itself a valid IPv6 address. The bracketed ``custom:[::1]:11434`` form is
+    therefore the one the qualified-ID grammar parses, and it is emitted first
+    here. The unbracketed spellings stay in the set for backwards-compatible
+    *matching* only (this set feeds membership checks, never new IDs).
+
+    A base URL whose authority cannot be parsed derives NO slugs (it matches
+    nothing) rather than raising: ``urlparse``/``.port`` raise ``ValueError`` for
+    a malformed authority (``http://gw:notaport``, ``http://[::1``,
+    ``http://gw:99999999``), and this set feeds request-path membership checks in
+    ``resolve_model_provider`` and ``_known_custom_provider_slugs``. One bad
+    ``base_url`` anywhere in config must not break routing for every other id.
     """
     url = str(value or "").strip().rstrip("/")
     if not url:
         return set()
-    parsed_url = urlparse(url if "://" in url else f"http://{url}")
-    host = (parsed_url.hostname or "").strip().lower()
+    try:
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+        host = (parsed_url.hostname or "").strip().lower()
+        port = parsed_url.port
+    except ValueError:
+        return set()
     if not host:
         return set()
-    port = parsed_url.port
     if port is None:
         scheme = (parsed_url.scheme or "http").lower()
         port = 443 if scheme == "https" else 80
-    return {f"custom:{host}:{port}", f"custom:{host}-{port}"}
+    slugs = {f"custom:{host}:{port}", f"custom:{host}-{port}"}
+    if ":" in host:
+        slugs.add(f"custom:[{host}]:{port}")
+    return slugs
 
 
 _LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
@@ -2652,60 +2742,212 @@ def _base_url_points_at_local_server(base_url: str) -> bool:
         return False
 
 
-def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
-    """True when ``custom:<rest>`` is an endpoint-style slug ``host:port``.
+_CUSTOM_ENDPOINT_PORT_RE = re.compile(r"^[0-9]{1,5}$")
+# Characters a URL authority's host can never contain, so a slug segment holding
+# any of them is not a host token. Everything else (single-label Docker names,
+# dotted DNS names, IPv4 literals, IDN/punycode) is accepted — see
+# _custom_slug_rest_is_endpoint_authority.
+_CUSTOM_ENDPOINT_HOST_REJECT_RE = re.compile(r"[\s:/?#@\[\]]")
 
-    WebUI sometimes derives ``custom:10.8.71.41:8080`` from ``base_url`` authority.
-    The #1776 peel must not treat that middle colon as part of an eaten model
-    segment — otherwise ``@custom:10.8.71.41:8080:Qwen3`` wrongly becomes model
-    ``8080:Qwen3``.
+
+def _custom_slug_rest_is_endpoint_authority(rest: str) -> bool:
+    """True when ``custom:<rest>`` is an endpoint authority slug ``host:port``.
+
+    This is the ONE grammar for the endpoint-derived half of a custom provider
+    slug — not a name-shape heuristic. It accepts exactly what the producer
+    ``_custom_endpoint_slugs_for_base_url`` can emit:
+
+    * ``port``  — 1-5 ASCII digits, 1..65535.
+    * ``host``  — any nonempty token containing no character that a URL
+      authority host cannot contain (no whitespace, ``:``, ``/``, ``?``, ``#``,
+      ``@``, ``[``, ``]``), not starting with ``-`` or ``.`` and not ending with
+      ``-``. A TRAILING dot IS accepted: ``ollama.internal.`` is a legal
+      root-anchored FQDN and ``urlparse`` hands it back verbatim, so the producer
+      can emit ``custom:ollama.internal.:8443``. That covers a single-label
+      Docker/LAN name (``llm``), a dotted DNS name (``ollama.internal``), an
+      IPv4 literal (``10.8.71.41``) and ``localhost`` alike.
+    * ``host`` — OR a bracketed literal whose contents are a real IPv6 address
+      (``[::1]``, ``[fe80::1%eth0]``). Brackets alone do not qualify:
+      ``[dead:beef]`` and ``[not-ipv6]`` are rejected, and the ``static/ui.js``
+      mirror rejects them too, so a picker label can never disagree with the
+      route the backend resolves (#6657).
+
+    The earlier form of this predicate required an IP literal, ``localhost`` or
+    a dot, which rejected the producer's own single-label output: a config
+    ``base_url`` of ``http://llm:8080/v1`` yields slug ``custom:llm:8080``, and
+    ``@custom:llm:8080:qwen3`` then mis-peeled into provider ``custom:llm`` with
+    model ``8080:qwen3`` (#6657).
+
+    IPv6 (explicit contract): an UNBRACKETED IPv6 authority is rejected. It is
+    irreducibly ambiguous — in ``::1:11434`` the tail is either a port or the
+    last IPv6 hextet, and ``::1:11434`` is a valid address on its own. Bracket
+    it (``custom:[::1]:11434``), which is the spelling
+    ``_custom_endpoint_slugs_for_base_url`` emits for IPv6 hosts.
+
+    The #1776 peel in ``_parse_provider_qualified_model_id`` must not treat the
+    authority's middle colon as part of an eaten model segment.
     """
     rest = str(rest or "").strip()
     if ":" not in rest:
         return False
     host, port_s = rest.rsplit(":", 1)
-    if not host or ":" in host:
+    if not host:
         return False
-    if not port_s.isdigit():
+    if not _CUSTOM_ENDPOINT_PORT_RE.match(port_s):
         return False
-    try:
-        port_n = int(port_s)
-    except ValueError:
+    if not (1 <= int(port_s) <= 65535):
         return False
-    if not (1 <= port_n <= 65535):
-        return False
-    try:
-        import ipaddress
+    if host.startswith("[") and host.endswith("]"):
+        inner = host[1:-1].split("%", 1)[0]
+        if not inner:
+            return False
+        try:
+            import ipaddress
 
-        ipaddress.ip_address(host)
-        return True
-    except ValueError:
-        pass
-    hl = host.lower()
-    if hl == "localhost":
-        return True
-    # Typical DNS hostname used as proxy slug (contains at least one label dot).
-    if "." in host:
-        return True
-    return False
+            return ipaddress.ip_address(inner).version == 6
+        except ValueError:
+            return False
+    if _CUSTOM_ENDPOINT_HOST_REJECT_RE.search(host):
+        return False
+    return not (host.startswith("-") or host.endswith("-") or host.startswith("."))
 
 
-def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
+def _known_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
+    """Custom-provider slug union (named + endpoint-derived), lowercased.
+
+    Union of the name-derived slugs (``custom_providers[].name``) and the
+    endpoint-derived authority slugs for every configured ``base_url`` plus the
+    active ``model.base_url``. ``_parse_provider_qualified_model_id`` consults
+    this set in TWO tiers (deep-review 2026-08-18, route-vs-display): the
+    name-derived slugs FIRST — the catalog emits every configured row under
+    its named ``provider_id``, so a named slug is authoritative over any
+    endpoint-derived alias — and the endpoint-derived half second, only when
+    no named slug matches. That keeps ``@custom:gw:8080:free`` resolving to a
+    configured ``custom:gw`` (model ``8080:free``), while an endpoint-only
+    provider (no ``name``) at ``http://gw:8080`` still resolves through
+    ``custom:gw:8080`` (model ``free``). #6657.
+    """
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    slugs: set[str] = set(_named_custom_provider_slugs(source))
+    for entry in _custom_provider_entries(source):
+        slugs |= _custom_endpoint_slugs_for_base_url(entry.get("base_url"))
+    model_cfg = source.get("model") if isinstance(source, dict) else None
+    if isinstance(model_cfg, dict):
+        slugs |= _custom_endpoint_slugs_for_base_url(model_cfg.get("base_url"))
+    return {slug.lower() for slug in slugs if slug}
+
+
+def _parse_provider_qualified_model_id(
+    model_id: str,
+    config_obj: dict | None = None,
+) -> tuple[str, str] | None:
     """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
 
-    The provider segment can contain colons for named custom providers, while
-    the model segment can also contain colons for tags such as ``:free``.
-    Keep this parser shared with ``resolve_model_provider`` so any caller that
-    compares route-hinted model lanes uses the same grammar.
+    THE qualified-ID grammar. Keep this parser shared with
+    ``resolve_model_provider`` — and with its ``static/ui.js`` mirror
+    ``_customModelFromQualifiedId`` — so every caller that compares route-hinted
+    model lanes agrees on where the provider ends and the model begins::
+
+        @<provider>:<model>
+        <provider> := <plain-id>                  # "openrouter", "ollama"
+                    | custom:<name-slug>          # colon-free, per
+                                                  #   _custom_provider_slug_from_name
+                    | custom:<host>:<port>        # endpoint authority, per
+                                                  #   _custom_slug_rest_is_endpoint_authority
+        <model>    := any nonempty string, colons allowed (":free", ":0", ":32b")
+
+    Resolution order for a ``custom:`` hint:
+
+    1. Longest prefix that is an authoritative NAMED provider slug
+       (``_named_custom_provider_slugs``). The catalog emits every configured
+       row under its named ``provider_id`` (``custom:<name>``), so a named
+       slug is authoritative over any longer endpoint-derived alias — the
+       resolver must not route to a provider the picker never showed
+       (#5511/#6817 route-hijack class, deep-review 2026-08-18).
+    2. Longest prefix that is an endpoint-derived authority slug
+       (``_known_custom_provider_slugs``), only when no named slug matched —
+       endpoint-only providers (no ``name``) keep routing through
+       ``custom:<host>:<port>``.
+    3. Generic slash lane, on the fallback path no tier claimed: when the
+       pre-tag segment after ``custom:`` contains ``/``, the whole remainder
+       is the model under the bare ``custom`` provider — a slug can never
+       contain ``/``, so ``@custom:ollamacloud/qwen3.5:397b`` keeps
+       ``ollamacloud/qwen3.5:397b`` whole (deep-review 2026-09-27).
+    4. Otherwise the shape grammar above: rsplit at the last colon, then peel one
+       segment back unless what remains after ``custom:`` is an endpoint
+       authority.
+
+    The ``custom:`` prefix test is case-SENSITIVE in both steps, and in the
+    ``static/ui.js`` mirror (``rawId.startsWith('@custom:')``). Every ``@custom:``
+    id is server-generated in lowercase, and one half of this function matching
+    case-insensitively while the other did not would route ``@CUSTOM:`` ids down
+    two different grammars.
+
+    ``config_obj`` defaults to the live ``cfg``; pass one to parse against a
+    specific config snapshot.
     """
     candidate = str(model_id or "").strip()
     if not candidate.startswith("@") or ":" not in candidate:
         return None
     inner = candidate[1:]
+    # Only a hint with an extra colon beyond ``custom:<slug>:<model>`` is
+    # ambiguous, so the config lookup is skipped (and stays free) otherwise.
+    if inner.startswith("custom:") and inner.count(":") >= 3:
+        segments = inner.split(":")
+        # Longest provider prefix first; a provider must leave a model
+        # behind. ``cut >= 2`` skips the bare ``custom`` root, which prefixes
+        # every id here and so disambiguates nothing (it is never a member of
+        # the slug set either — every entry starts with ``custom:``).
+        #
+        # TWO TIERS, not one union (deep-review 2026-08-18, route-vs-display):
+        # named/catalog provider slugs are authoritative and are matched
+        # FIRST. The catalog emits every configured row under its named
+        # provider_id, so resolving the same id to a longer endpoint-derived
+        # alias would send the model to a provider the picker never showed
+        # (#5511/#6817 route-hijack class). Endpoint-derived aliases
+        # (``custom:<host>:<port>``) are consulted only when NO named slug
+        # matches, which keeps endpoint-only providers (no ``name``) routing
+        # through their endpoint authority.
+        named_slugs = _named_custom_provider_slugs(config_obj)
+        if named_slugs:
+            for cut in range(len(segments) - 1, 1, -1):
+                prefix = ":".join(segments[:cut])
+                bare = ":".join(segments[cut:])
+                if bare and prefix.lower() in named_slugs:
+                    return bare, prefix
+        known_slugs = _known_custom_provider_slugs(config_obj)
+        if known_slugs:
+            for cut in range(len(segments) - 1, 1, -1):
+                prefix = ":".join(segments[:cut])
+                bare = ":".join(segments[cut:])
+                if bare and prefix.lower() in known_slugs:
+                    return bare, prefix
+    # Generic slash lane — the fallback path (deep-review 2026-09-27, #6657
+    # defect 3), reached by every ``custom:`` hint no configured slug tier
+    # claimed: 2-colon ids like ``@custom:ollamacloud/qwen3.5:397b`` (the
+    # tier block above never runs for them) and multi-colon ids no tier
+    # matched. The trigger is a ``/`` in the FIRST segment (before the first
+    # colon): a slug can never contain ``/`` (the name-derived slug regex
+    # and the endpoint host reject class both exclude it), and the #7240
+    # producer emits ``/``-bearing model ids on the plain lane WITHOUT the
+    # ``@`` prefix — so such an id was never ``<slug>:<model>`` and the
+    # whole remainder after ``custom:`` is the model under the bare
+    # ``custom`` provider, never an rsplit into provider
+    # ``custom:ollamacloud/qwen3.5`` with model ``397b``. A slash in a LATER
+    # segment keeps the #1776 peel: ``@custom:omni:kg/stepfun/...:free``
+    # resolves under ``custom:omni`` (named tier first when configured),
+    # and endpoint authorities keep vendor-slash models via the endpoint
+    # tier or the peel — ``@custom:gw:8080:vendor/qwen:free`` stays under
+    # ``custom:gw:8080``.
+    if inner.startswith("custom:"):
+        _rest = inner[len("custom:"):]
+        _first_colon = _rest.find(":")
+        if _first_colon > 0 and "/" in _rest[:_first_colon]:
+            return _rest, "custom"
     provider_hint, bare_model = inner.rsplit(":", 1)
     if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
         _slug_rest = provider_hint[len("custom:"):]
-        if not _custom_slug_rest_looks_like_host_port(_slug_rest):
+        if not _custom_slug_rest_is_endpoint_authority(_slug_rest):
             provider_hint, extra = provider_hint.rsplit(":", 1)
             bare_model = f"{extra}:{bare_model}"
     elif (provider_hint not in _PROVIDER_MODELS
@@ -7236,6 +7478,17 @@ def _static_models_catalog_without_live_probes() -> dict:
                 )
             detected_providers.add(provider_slug)
 
+            # Preserve the operator-supplied label from config
+            # (custom_providers[].models[].label). Falling back to
+            # _get_label_for_model() title-cases the raw id and mangles
+            # namespaced Bedrock ids like "us.anthropic.claude-opus-4-8" into
+            # "Us.anthropic.claude Opus 4 8". _configured_model_label_overrides
+            # reads provenance off the raw config items, so a clean label such as
+            # "Claude Opus 4.8" survives, an explicit label that happens to equal
+            # the id is still honoured, and a bare-string entry keeps falling
+            # through to the derived label instead of rendering its raw id.
+            _label_map = _configured_model_label_overrides(entry.get("models"))
+
             configured_ids: list[str] = []
             model_id = str(entry.get("model") or "").strip()
             if model_id:
@@ -7245,7 +7498,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                     configured_ids.append(configured_id)
 
             for configured_id in configured_ids:
-                label = _get_label_for_model(configured_id, [])
+                label = _label_map.get(configured_id) or _get_label_for_model(
+                    configured_id, []
+                )
                 if provider_slug == "custom":
                     custom_group_models.append({"id": configured_id, "label": label})
                 else:
@@ -9693,11 +9948,58 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 api_key=api_key,
                 trusted_base_urls=tuple(_trusted_custom_bases),
             )
+            provider_key = provider.lower()
             for auto_model in _active_endpoint_models:
                 auto_detected_models.append(auto_model)
-                provider_key = provider.lower()
                 auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
                 detected_providers.add(provider_key)
+
+            # Label authority for the ACTIVE endpoint's live rows (deep-review
+            # 2026-09-27, #6657 defect 1). ``auto_detected_models_by_provider``
+            # is keyed by provider id: an unnamed active endpoint stores its
+            # rows under the bare ``custom`` key, and those rows reach the
+            # Custom picker group via the provider-specific list — a
+            # configured allowlist that only feeds the GLOBAL
+            # ``auto_detected_models`` fallback list never beats them. (Rows
+            # under a NAMED slug key pass through the named-entry loop
+            # below, which already applies ``_cp_label_map``.) The merge is
+            # scoped to that bare-``custom`` topology and reads ONLY unnamed
+            # ``custom_providers[]`` entries — a named entry's labels are
+            # consumed on its own named path, so they can never double-voice
+            # the generic Custom group. ``provider`` is read after the
+            # loopback/private sniff above, so the key matches the key the
+            # rows were stored under in the loop above. First-entry
+            # authority stays with the existing first-occurrence walkers
+            # (``_seen_custom_ids`` / ``_configured_model_ids``); this merge
+            # never reorders or re-decides which entry owns a label.
+            _active_cfg_label_map: dict[str, str] = {}
+            if provider_key == "custom":
+                _active_base_norm = _normalize_base_url_for_match(base_url)
+                for _map_entry in _custom_provider_entries(cfg):
+                    if str(_map_entry.get("name") or "").strip():
+                        continue
+                    _entry_base_norm = _normalize_base_url_for_match(
+                        _map_entry.get("base_url")
+                    )
+                    if not _entry_base_norm or not _active_base_norm:
+                        continue
+                    if _entry_base_norm != _active_base_norm:
+                        # An unnamed entry for a DIFFERENT endpoint must never
+                        # voice labels here: both entries advertise the same
+                        # model with different labels, and setdefault() below
+                        # would keep whichever entry config lists first —
+                        # overriding the ACTIVE endpoint's live row with an
+                        # INACTIVE entry's label (#6657 re-review defect 1).
+                        continue
+                    for _mid, _lbl in _configured_model_label_overrides(
+                        _map_entry.get("models")
+                    ).items():
+                        _active_cfg_label_map.setdefault(_mid, _lbl)
+            if _active_cfg_label_map:
+                for _row in auto_detected_models_by_provider.get(provider_key, []):
+                    _row_id = str(_row.get("id") or "").strip()
+                    if _row_id in _active_cfg_label_map:
+                        _row["label"] = _active_cfg_label_map[_row_id]
 
         _custom_providers_cfg = cfg.get("custom_providers", [])
         _named_custom_groups: dict = {}
@@ -9711,6 +10013,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
+
+                # Config label map: honor operator-supplied labels
+                # (custom_providers[].models[].label) instead of title-casing
+                # the raw id, which mangles namespaced Bedrock ids like
+                # "us.anthropic.claude-opus-4-8" -> "Us.anthropic.claude Opus 4 8"
+                # (and ".../-v1:0" -> "0"). Built per entry BEFORE the live-row
+                # loop so a prewarmed/probed duplicate of a configured model gets
+                # the operator label, not the endpoint's (deep-review 2026-08-13).
+                # _configured_model_label_overrides reads provenance off the raw
+                # config items, so an explicit label equal to the model id keeps
+                # its authority over the endpoint label while a bare-string entry
+                # contributes nothing and still falls through (#6657).
+                _cp_label_map = _configured_model_label_overrides(_cp.get("models"))
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
                 _cp_api_key = str(_cp.get("api_key") or "").strip()
@@ -9782,7 +10097,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         if active_provider != _slug and not _cp_option_id.startswith("@"):
                             _cp_option_id = f"@{_slug}:{_cp_option_id}"
                         _named_custom_groups[_slug][1].append(
-                            {"id": _cp_option_id, "label": _live_model.get("label") or _get_label_for_model(_live_id, [])}
+                            {
+                                "id": _cp_option_id,
+                                "label": _cp_label_map.get(_live_id)
+                                or _live_model.get("label")
+                                or _get_label_for_model(_live_id, []),
+                            }
                         )
 
                 # Collect configured model IDs as a fallback/sticky entry after live discovery.
@@ -9797,7 +10117,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
                     if _cp_model and _dedup_key not in _seen_custom_ids:
-                        _cp_label = _get_label_for_model(_cp_model, [])
+                        # Same label authority as the live loop above: an
+                        # operator label must survive a live rebuild that
+                        # never returned the model — without this lookup the
+                        # fallback row title-cases the raw id and the cold
+                        # catalog and the rebuilt catalog disagree (#6657).
+                        _cp_label = _cp_label_map.get(_cp_model) or _get_label_for_model(
+                            _cp_model, []
+                        )
                         _seen_custom_ids.add(_dedup_key)
                         if _slug:
                             detected_providers.add(_slug)

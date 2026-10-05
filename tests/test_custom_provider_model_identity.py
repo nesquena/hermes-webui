@@ -24,6 +24,14 @@ function extract(name){
   }
   throw new Error('unterminated '+name);
 }
+function extractConst(name){
+  // Single-line top-level const, re-spelled var so sloppy-mode eval'd
+  // functions can reach it (same trick as test_custom_provider_label_grammar).
+  const re=new RegExp('^const '+name+'=.*$','m');
+  const m=src.match(re);
+  if(!m) throw new Error('missing '+name);
+  return m[0].replace(/^const /,'var ');
+}
 class Node {
   constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.parentElement=null;this._value='';this.textContent='';this.id='';}
   appendChild(child){child.parentElement=this;this.children.push(child);return child;}
@@ -44,10 +52,24 @@ const document={createElement:tag=>new Node(tag)};
 const window={_configuredModelBadges:{},_activeProvider:'custom:cpa'};
 const S={session:null};
 const _dynamicModelLabels={};
+const _dynamicProviderIds={};
 const _liveModelFetchPending=new Set();
 const $=()=>null;
 const getModelLabel=value=>value;
 const syncModelChip=()=>{};
+// The identity heuristics delegate to the shared two-half parser
+// (deep-review 2026-09-27), which needs the endpoint-authority predicate
+// and its module-level regexes in scope first.
+eval(extractConst('_PY_WS_CLASS'));
+eval(extractConst('_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConst('_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval(extract('_customSlugIsEndpointAuthority'));
+eval(extract('_parseQualifiedCustomId'));
+eval(extract('_optionDeclaredProviderId'));
+eval(extract('_clientProviderAuthorityForModel'));
+eval(extract('_persistedProviderAuthorityForModel'));
+eval(extract('_dynamicProviderAuthorityForQualifiedCustomId'));
+eval(extract('_qualifiedCustomIdNeedsBackendAuthority'));
 for(const name of ['_getOptionProviderId','_providerFromModelValue','_modelPickerOptionIdentity','_deduplicateModelPickerOptions','_modelStateForSelect','_findModelInDropdown','_refreshOpenModelDropdown','_applyModelToDropdown','_ensureModelOptionInDropdown','_addLiveModelsToSelect']) eval(extract(name));
 function makeSelect(selected){
   const sel=new Node('select');sel.id='modelSelect';
@@ -146,3 +168,113 @@ def test_hinted_bare_id_fallback_refuses_ambiguous_match(tmp_path):
     assert payload["ambiguous"] is None
     # Exact routed match is unaffected by the fallback path (#6944 fix intact).
     assert payload["exact"] == "@custom:tok:z-ai/glm-5.2"
+
+
+# The #6657 authority chain is deliberately composed: picker state is persisted
+# and staged for the session, then the exact outgoing chat payload is built.
+# This catches a null authority being re-inferred at any boundary.
+_AUTHORITY_CHAIN_DRIVER = r"""
+const fs=require('fs');
+const ui=fs.readFileSync(process.argv[2],'utf8');
+const messages=fs.readFileSync(process.argv[3],'utf8');
+function extract(source,name){
+  const start=source.indexOf('function '+name+'(');
+  if(start<0) throw new Error('missing '+name);
+  let i=source.indexOf('{',start), depth=0;
+  for(;i<source.length;i++){
+    if(source[i]==='{') depth++;
+    else if(source[i]==='}'&&--depth===0) return source.slice(start,i+1);
+  }
+  throw new Error('unterminated '+name);
+}
+function extractConst(name){
+  const match=ui.match(new RegExp('^const '+name+'=.*$','m'));
+  if(!match) throw new Error('missing '+name);
+  return match[0].replace(/^const /,'var ');
+}
+eval(extractConst('_PY_WS_CLASS'));
+eval(extractConst('_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConst('_CUSTOM_SLUG_HOST_REJECT_RE'));
+let _dynamicProviderIds={};
+const memory=()=>{const values=new Map();return {
+  getItem:key=>values.has(key)?values.get(key):null,
+  setItem:(key,value)=>values.set(key,String(value)),
+  removeItem:key=>values.delete(key),
+  clear:()=>values.clear(),
+};};
+const localStorage=memory(), sessionStorage=memory();
+const MODEL_STATE_KEY='hermes-webui-model-state';
+const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
+const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
+let selected=null;
+function $(id){return id==='modelSelect'?selected:null;}
+let S={session:null};
+for(const name of [
+  '_optionDeclaredProviderId','_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId','_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel','_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority','_getOptionProviderId',
+  '_providerFromModelValue','_modelStateForSelect','_storedModelProvider',
+  '_readPersistedModelState','_writePersistedModelState','_pendingSessionModelKey',
+  '_rememberPendingSessionModel','_readPendingSessionModel','_modelProviderForSend'
+]) eval(extract(ui,name));
+for(const name of ['_chatPayloadModel','_chatPayloadModelProvider','_chatPayloadModelState']) eval(extract(messages,name));
+function option(value,provider){return {value,dataset:provider?{provider}:{},parentElement:null};}
+function select(value,provider){const opt=provider?option(value,provider):null;return {
+  value,options:opt?[opt]:[],selectedOptions:opt?[opt]:[]
+};}
+function roundTrip(value,provider){
+  selected=select(value,provider);
+  S={session:null};
+  const state=_modelStateForSelect(selected,value);
+  _writePersistedModelState(state.model,state.model_provider);
+  _rememberPendingSessionModel('s',state.model,state.model_provider);
+  S={session:{model:state.model,model_provider:state.model_provider}};
+  return {state,persisted:_readPersistedModelState(),pending:_readPendingSessionModel('s'),payload:_chatPayloadModelState()};
+}
+const ambiguous='@custom:gw:8080:free';
+_dynamicProviderIds={};
+const noAuthority=roundTrip(ambiguous,null);
+_dynamicProviderIds={};
+const exactNamed=roundTrip(ambiguous,'custom:gw');
+localStorage.clear();sessionStorage.clear();
+localStorage.setItem(MODEL_STATE_KEY,JSON.stringify({model:ambiguous,model_provider:'custom:gw:8080'}));
+selected=select(ambiguous,null);S={session:null};_dynamicProviderIds={'custom:gw':true};
+const hydratedNamed={state:_modelStateForSelect(selected,ambiguous),provider:_modelProviderForSend(ambiguous)};
+_dynamicProviderIds={};
+const hostPort=roundTrip('@custom:llm:8080:qwen3','custom:llm:8080');
+const ipv6=roundTrip('@custom:[::1]:11434:qwen3','custom:[::1]:11434');
+console.log(JSON.stringify({noAuthority,exactNamed,hydratedNamed,hostPort,ipv6}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not in PATH")
+def test_qualified_custom_authority_survives_persistence_pending_and_chat_payload(tmp_path):
+    driver = tmp_path / "authority_chain_driver.js"
+    driver.write_text(_AUTHORITY_CHAIN_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(UI_JS), str(REPO_ROOT / "static" / "messages.js")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+
+    for key in ("state", "persisted", "pending", "payload"):
+        assert payload["noAuthority"][key] == {
+            "model": "@custom:gw:8080:free",
+            "model_provider": None,
+        }
+    for key in ("state", "persisted", "pending", "payload"):
+        assert payload["exactNamed"][key] == {
+            "model": "8080:free",
+            "model_provider": "custom:gw",
+        }
+    assert payload["hydratedNamed"] == {
+        "state": {"model": "8080:free", "model_provider": "custom:gw"},
+        "provider": "custom:gw",
+    }
+    for scenario, provider in (("hostPort", "custom:llm:8080"), ("ipv6", "custom:[::1]:11434")):
+        for key in ("state", "persisted", "pending", "payload"):
+            assert payload[scenario][key] == {"model": "qwen3", "model_provider": provider}

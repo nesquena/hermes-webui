@@ -15,7 +15,7 @@ def test_temporary_configured_model_option_carries_provider_badge():
 def test_model_state_reads_provider_from_option_dataset_before_optgroup():
     """selectModelFromDropdown() adds temporary options outside optgroups."""
 
-    start = UI_JS.index("function _getOptionProviderId(opt)")
-    body = UI_JS[start : UI_JS.index("function _providerFromModelValue", start)]
-    assert "if(opt.dataset && opt.dataset.provider) return opt.dataset.provider;" in body
-    assert body.index("opt.dataset && opt.dataset.provider") < body.index("const group=opt.parentElement")
+    start = UI_JS.index("function _optionDeclaredProviderId(opt)")
+    body = UI_JS[start : UI_JS.index("function _clientProviderAuthorityForModel", start)]
+    assert "if(opt.dataset&&opt.dataset.provider) return String(opt.dataset.provider||'').trim();" in body
+    assert body.index("opt.dataset&&opt.dataset.provider") < body.index("const group=opt.parentElement")

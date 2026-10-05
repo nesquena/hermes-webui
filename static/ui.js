@@ -3229,6 +3229,17 @@ window.addEventListener('visibilitychange',()=>{
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
+// Authoritative provider ids the server reported in /api/models group metadata,
+// lowercased and used as a lookup set. _customModelFromQualifiedId prefers the
+// longest match here over the shape grammar so a `custom:<host>:<port>` endpoint
+// slug and a named `custom:<slug>` provider are never confused (#6657).
+// populateModelDropdown() is the only writer, but it is NOT the only source of
+// optgroups: _addLiveModelsToSelect() creates a `(live)` optgroup for a provider
+// it never registers here. That stays consistent only because the same loop
+// writes `_dynamicModelLabels[mid]` for every live option, and getModelLabel()
+// short-circuits on that map before it ever consults the grammar — so a live
+// model never reaches the id-shape fallback that would need this set.
+let _dynamicProviderIds={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
@@ -3240,58 +3251,116 @@ const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
 // When a preferred provider is supplied, duplicate normalized IDs prefer that
 // provider's option so Settings/profile rehydration doesn't snap back to the
 // first colliding entry.
+// When the picker has not hydrated, a qualified custom id may be genuinely
+// ambiguous: `@custom:gw:8080:free` can mean endpoint `custom:gw:8080` +
+// `free`, or configured named provider `custom:gw` + `8080:free`. The backend
+// has config-backed named-slug authority; the browser must not invent a
+// different route from endpoint shape alone (#6657 re-review).
+function _optionDeclaredProviderId(opt){
+  if(!opt) return '';
+  if(opt.dataset&&opt.dataset.provider) return String(opt.dataset.provider||'').trim();
+  const group=opt.parentElement;
+  if(group&&group.tagName==='OPTGROUP'&&group.dataset&&group.dataset.provider){
+    return String(group.dataset.provider||'').trim();
+  }
+  return '';
+}
+function _clientProviderAuthorityForModel(value,sel,matchAnyOption=true,preferSession=false){
+  const model=String(value||'').trim();
+  if(!model) return '';
+  const session=S&&S.session?S.session:null;
+  const sessionProvider=session&&String(session.model||'').trim()===model&&session.model_provider
+    ?String(session.model_provider).trim():'';
+  if(preferSession&&sessionProvider) return sessionProvider;
+  if(sel&&sel.options){
+    const selected=sel.selectedOptions&&sel.selectedOptions[0];
+    if(selected&&String(selected.value||'')===model){
+      const selectedProvider=_optionDeclaredProviderId(selected);
+      if(selectedProvider) return selectedProvider;
+    }
+    if(matchAnyOption){
+      const opt=Array.from(sel.options).find(o=>String(o.value||'')===model);
+      const declared=_optionDeclaredProviderId(opt);
+      if(declared) return declared;
+    }
+  }
+  if(sessionProvider) return sessionProvider;
+  return '';
+}
+function _persistedProviderAuthorityForModel(value){
+  const model=String(value||'').trim();
+  if(!model) return '';
+  try{
+    const persisted=_readPersistedModelState();
+    if(persisted&&String(persisted.model||'').trim()===model&&persisted.model_provider){
+      return String(persisted.model_provider).trim();
+    }
+  }catch(_){}
+  return '';
+}
+function _dynamicProviderAuthorityForQualifiedCustomId(value){
+  const raw=String(value||'');
+  if(!raw.startsWith('@custom:')) return '';
+  const segs=('custom:'+raw.slice('@custom:'.length)).split(':');
+  for(let cut=segs.length-1;cut>=2;cut--){
+    const prefix=segs.slice(0,cut).join(':');
+    const tail=segs.slice(cut).join(':');
+    if(tail&&_dynamicProviderIds[prefix.toLowerCase()]) return prefix;
+  }
+  return '';
+}
+function _qualifiedCustomIdNeedsBackendAuthority(value){
+  const raw=String(value||'');
+  if(!raw.startsWith('@custom:')) return false;
+  const rest=raw.slice('@custom:'.length);
+  if(rest.indexOf(':')<0) return false;
+  // An id is ambiguous when ANY @custom:<host>:<port> prefix can claim the
+  // provider half while leaving a nonempty model remainder — not just the
+  // one immediately before the last colon. `@custom:gw:8080:free:32b` has
+  // `gw:8080` (an endpoint authority) leaving `free:32b` as the model, so it
+  // is exactly as undecidable pre-hydration as `@custom:gw:8080:free`, even
+  // though the final-colon hint `gw:8080:free` is not a host:port (#6657).
+  // Longest-viable-prefix order: the backend's resolver tries named slugs
+  // first, then endpoint slugs, over every cut, and only the config knows
+  // which tier exists — so any viable endpoint cut means "ask the backend".
+  const inner='custom:'+rest;
+  const segs=inner.split(':');
+  if(segs.length<4) return false;  // needs >= 4: custom + >=2 provider + >=1 model
+  for(let cut=2;cut<=segs.length-1;cut++){
+    const prefix=segs.slice(0,cut).join(':');
+    const tail=segs.slice(cut).join(':');
+    if(tail && prefix.startsWith('custom:')
+        && _customSlugIsEndpointAuthority(prefix.slice('custom:'.length))) return true;
+  }
+  return false;
+}
 function _getOptionProviderId(opt){
   if(!opt) return '';
-  if(opt.dataset && opt.dataset.provider) return opt.dataset.provider;
-  const group=opt.parentElement;
-  if(group && group.tagName==='OPTGROUP' && group.dataset && group.dataset.provider){
-    return group.dataset.provider;
-  }
+  const declared=_optionDeclaredProviderId(opt);
+  if(declared) return String(declared).trim();
   const value=String(opt.value||'');
   if(value.startsWith('@') && value.includes(':')){
-    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
-    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
-    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    // Shared qualified-ID grammar (mirror of api/config.py:
+    // _parse_provider_qualified_model_id via _parseQualifiedCustomId) — the
+    // provider half comes from the SAME parse the backend route and the
+    // label use, so a pre-hydration identity cannot disagree with the
+    // catalog (#6657). Covers endpoint authorities (custom:llm:8080),
+    // bracketed IPv6, named slugs and the generic slash lane.
     if(value.startsWith('@custom:')){
-      const afterCustom=value.substring('@custom:'.length);
-      const parts=afterCustom.split(':');
-      if(parts.length>=3 && /^\d+$/.test(parts[1])){
-        const port=parseInt(parts[1], 10);
-        const host=parts[0];
-        const hl=host.toLowerCase();
-        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
-          return 'custom:'+host+':'+parts[1];
-        }
-      }
-      const firstColon=afterCustom.indexOf(':');
-      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
-      return 'custom:'+afterCustom;
+      return _parseQualifiedCustomId(value).provider;
     }
     // Other @provider:model — provider is up to first colon
     return value.slice(1,value.indexOf(':'));
   }
   return '';
 }
-function _providerFromModelValue(modelId){
+function _providerFromModelValue(modelId, providerAuthority=''){
   const value=String(modelId||'').trim();
   if(value.startsWith('@')&&value.includes(':')){
-    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
-    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
-    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    // Same shared grammar as _getOptionProviderId — one parse for state,
+    // send and identity (#6657).
     if(value.startsWith('@custom:')){
-      const afterCustom=value.substring('@custom:'.length);
-      const parts=afterCustom.split(':');
-      if(parts.length>=3 && /^\d+$/.test(parts[1])){
-        const port=parseInt(parts[1], 10);
-        const host=parts[0];
-        const hl=host.toLowerCase();
-        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
-          return 'custom:'+host+':'+parts[1];
-        }
-      }
-      const firstColon=afterCustom.indexOf(':');
-      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
-      return 'custom:'+afterCustom;
+      return _parseQualifiedCustomId(value,providerAuthority).provider;
     }
     // Other @provider:model — provider is up to first colon
     return value.slice(1,value.indexOf(':'));
@@ -3306,19 +3375,9 @@ function _modelPickerOptionIdentity(modelId, providerId){
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
       value=value.substring(exactPrefix.length);
     }else if(value.startsWith('@custom:')){
-      const afterCustom=value.substring('@custom:'.length);
-      const parts=afterCustom.split(':');
-      let splitAt=-1;
-      if(parts.length>=3 && /^\d+$/.test(parts[1])){
-        const port=parseInt(parts[1], 10);
-        const host=parts[0];
-        const hl=host.toLowerCase();
-        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
-          splitAt=parts[0].length + 1 + parts[1].length;
-        }
-      }
-      if(splitAt<0) splitAt=afterCustom.indexOf(':');
-      value=splitAt>=0 ? afterCustom.substring(splitAt+1) : afterCustom;
+      // Same shared grammar — the identity keeps the model half of the ONE
+      // parse shared with label, state and send (#6657).
+      value=_parseQualifiedCustomId(value).model;
     }else{
       value=value.substring(value.indexOf(':')+1);
     }
@@ -3366,11 +3425,23 @@ function _providerDefersMissingModelFallback(providerId){
 function _modelStateForSelect(sel, modelId){
   const value=String(modelId||'').trim();
   if(!value) return {model:'',model_provider:null};
-  const explicitProvider=_providerFromModelValue(value);
+  const selected=sel&&sel.options
+    ?Array.from(sel.options).find(o=>String(o.value||'')===value)
+    :null;
+  // Current dropdown/session and catalog authority outrank persisted browser
+  // state: persistence may contain an endpoint-shaped pre-hydration guess that
+  // the hydrated named catalog now disproves (#6657).
+  const clientAuthority=_clientProviderAuthorityForModel(value,sel)
+    ||_dynamicProviderAuthorityForQualifiedCustomId(value)
+    ||_persistedProviderAuthorityForModel(value);
+  // Do not persist a frontend endpoint-shape guess when neither the dropdown,
+  // session nor persisted state can authorize it. Preserve the qualified id and
+  // let the backend's config-aware named-slug parser select the route.
+  if(!clientAuthority&&_qualifiedCustomIdNeedsBackendAuthority(value)){
+    return {model:value,model_provider:null};
+  }
+  const explicitProvider=_providerFromModelValue(value,clientAuthority);
   if(explicitProvider){
-    const selected=sel&&sel.options
-      ?Array.from(sel.options).find(o=>String(o.value||'')===value)
-      :null;
     const routedModel=selected&&selected.dataset&&selected.dataset.model;
     // Read the provider from the matched option's authoritative data-provider
     // rather than re-parsing the value at its LAST colon: a colon-bearing model
@@ -3406,12 +3477,12 @@ function _modelStateForSelect(sel, modelId){
   // on every turn, bricking it with a "Provider 'X'…no API key" error for a
   // provider the session never used.
   let opt=null;
-  const selected=sel&&sel.selectedOptions&&sel.selectedOptions[0];
+  const selectedOption=sel&&sel.selectedOptions&&sel.selectedOptions[0];
   // Prefer the currently-selected option ONLY when it actually is the requested
   // model — this preserves the user's exact pick in the same-value/different-
   // provider collision case (two providers offering the same model id).
-  if(selected&&String(selected.value||'')===value){
-    opt=selected;
+  if(selectedOption&&String(selectedOption.value||'')===value){
+    opt=selectedOption;
   }else if(sel&&sel.options){
     opt=Array.from(sel.options).find(o=>String(o.value||'')===value)||null;
   }
@@ -3427,32 +3498,18 @@ function _captureModelDropdownSelection(sel){
   return {model:String(sel.value||''),model_provider:null};
 }
 function _modelProviderForSend(modelId){
-  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
-  if(sessionProvider) return sessionProvider;
   const model=String(modelId||'').trim();
   if(!model) return null;
-  const explicitProvider=typeof _providerFromModelValue==='function'
-    ? _providerFromModelValue(model)
-    : '';
-  if(explicitProvider) return explicitProvider;
   const sel=typeof $==='function' ? $('modelSelect') : null;
-  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
-    try{
-      const dropdownState=_modelStateForSelect(sel,sel.value);
-      if(dropdownState&&String(dropdownState.model||'').trim()===model){
-        return dropdownState.model_provider||null;
-      }
-    }catch(_){}
-  }
-  if(typeof _readPersistedModelState==='function'){
-    try{
-      const persisted=_readPersistedModelState();
-      if(persisted&&String(persisted.model||'').trim()===model){
-        return persisted.model_provider||null;
-      }
-    }catch(_){}
-  }
-  return null;
+  // Browser-held identity is authoritative before any raw-id inference. This
+  // preserves a configured named slug during boot, when endpoint shape alone
+  // cannot distinguish `custom:gw` + `8080:free` from `custom:gw:8080` + `free`.
+  const clientAuthority=_clientProviderAuthorityForModel(model,sel,false,true)
+    ||_dynamicProviderAuthorityForQualifiedCustomId(model)
+    ||_persistedProviderAuthorityForModel(model);
+  if(clientAuthority) return clientAuthority;
+  if(_qualifiedCustomIdNeedsBackendAuthority(model)) return null;
+  return _providerFromModelValue(model)||null;
 }
 function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   if(!sel) return null;
@@ -3490,15 +3547,22 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
 function _providerQualifiedModelValueForSelect(sel, modelId){
   return _modelStateForSelect(sel,modelId).model;
 }
+function _storedModelProvider(value, modelProvider, argumentCount){
+  // Passing a second argument is intentional authority: null means "defer this
+  // qualified custom id to the backend", not "guess again from its spelling".
+  if(argumentCount>=2) return modelProvider?String(modelProvider).trim():null;
+  return _providerFromModelValue(value)||null;
+}
 function _readPersistedModelState(){
   try{
     const raw=localStorage.getItem(MODEL_STATE_KEY);
     if(raw){
       const parsed=JSON.parse(raw);
       if(parsed&&parsed.model){
+        const hasProvider=Object.prototype.hasOwnProperty.call(parsed,'model_provider');
         return {
           model:String(parsed.model||''),
-          model_provider:parsed.model_provider?String(parsed.model_provider):(_providerFromModelValue(parsed.model)||null),
+          model_provider:_storedModelProvider(parsed.model,parsed.model_provider,hasProvider?2:1),
         };
       }
     }
@@ -3509,7 +3573,7 @@ function _readPersistedModelState(){
 }
 function _writePersistedModelState(model, modelProvider){
   const value=String(model||'').trim();
-  const provider=modelProvider?String(modelProvider).trim():(_providerFromModelValue(value)||null);
+  const provider=_storedModelProvider(value,modelProvider,arguments.length);
   if(!value){
     localStorage.removeItem('hermes-webui-model');
     localStorage.removeItem(MODEL_STATE_KEY);
@@ -3531,7 +3595,7 @@ function _rememberPendingSessionModel(sessionId, model, modelProvider){
   const sid=String(sessionId||'').trim();
   const value=String(model||'').trim();
   if(!sid||!value) return;
-  const provider=modelProvider?String(modelProvider).trim():(_providerFromModelValue(value)||null);
+  const provider=_storedModelProvider(value,modelProvider,arguments.length);
   try{
     sessionStorage.setItem(_pendingSessionModelKey(sid), JSON.stringify({
       model:value,
@@ -3557,9 +3621,10 @@ function _readPendingSessionModel(sessionId){
       sessionStorage.removeItem(_pendingSessionModelKey(sid));
       return null;
     }
+    const hasProvider=!!(parsed&&Object.prototype.hasOwnProperty.call(parsed,'model_provider'));
     return {
       model,
-      model_provider:parsed&&parsed.model_provider?String(parsed.model_provider):(_providerFromModelValue(model)||null),
+      model_provider:_storedModelProvider(model,parsed&&parsed.model_provider,hasProvider?2:1),
     };
   }catch(_){
     try{sessionStorage.removeItem(_pendingSessionModelKey(sid));}catch(__){}
@@ -3823,7 +3888,17 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
 function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  const requestedProvider=String(preferredProviderId||_providerFromModelValue(modelId)||'').trim();
+  // (#6657 re-gate) An ambiguous `@custom:` id must not pick up a
+  // shape-guessed provider here. Without real authority — an explicit
+  // preferredProviderId, a configured badge, or a hydrated catalog hit — the
+  // temporary option keeps provider null and the FULL qualified id as its
+  // value, so the backend's config-aware resolver splits it. The gate lives
+  // on requestedProvider (it feeds _applyModelToDropdown and the data-model
+  // stamp), not only on the final dataset.provider line, or the guess leaks
+  // back through both and hydration never revisits it.
+  const shapeProvider=_providerFromModelValue(modelId);
+  const ambiguous=_qualifiedCustomIdNeedsBackendAuthority(modelId);
+  const requestedProvider=String(preferredProviderId||(ambiguous?'':shapeProvider)||'').trim();
   const applied=_applyModelToDropdown(modelId,sel,requestedProvider||null);
   if(applied){
     const appliedState=typeof _modelStateForSelect==='function'
@@ -3846,7 +3921,22 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(badge&&badge.provider) opt.dataset.provider=badge.provider;
   if(rawBadge&&rawBadge.provider) opt.dataset.provider=rawBadge.provider;
   if(requestedProvider) opt.dataset.model=bareModel;
-  const provider=requestedProvider||(badge&&badge.provider)||(rawBadge&&rawBadge.provider)||_providerFromModelValue(value)||'';
+  // Authority gate for the temporary option's provider stamp (#6657 re-gate):
+  // hydration never revisits these dataset fields, and
+  // _clientProviderAuthorityForModel reads them back as authority for BOTH
+  // the persisted state and the outgoing payload — a stamped shape guess here
+  // sent `custom:gw:8080` as model_provider for a `custom:gw` + `8080:free`
+  // pick, and the backend resolved the same id the other way. Stamp only real
+  // authority: an explicit preferredProviderId (requestedProvider), a
+  // configured badge, a hydrated _dynamicProviderIds hit (mirroring the
+  // catalog is agreement, not a guess), or a shape parse with no
+  // endpoint-vs-named ambiguity (_qualifiedCustomIdNeedsBackendAuthority is
+  // exactly that ambiguity question). The ambiguous leftover keeps provider
+  // null and the FULL qualified id as the model half so the backend's
+  // config-aware resolver splits it.
+  const provider=requestedProvider||(badge&&badge.provider)||(rawBadge&&rawBadge.provider)
+    ||_dynamicProviderAuthorityForQualifiedCustomId(value)
+    ||(_qualifiedCustomIdNeedsBackendAuthority(value)?'':_providerFromModelValue(value)||'');
   if(provider) opt.dataset.provider=provider;
   sel.appendChild(opt);
   sel.value=value;
@@ -3976,10 +4066,14 @@ async function populateModelDropdown(opts={}){
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
+    _dynamicProviderIds={};
     for(const g of groups){
       const og=document.createElement('optgroup');
       og.label=g.provider;
-      if(g.provider_id) og.dataset.provider=g.provider_id;
+      if(g.provider_id){
+        og.dataset.provider=g.provider_id;
+        _dynamicProviderIds[String(g.provider_id).toLowerCase()]=true;
+      }
       if(g.models_endpoint_error){
         const errorKey=g.provider_id||g.provider||'';
         og.dataset.modelsEndpointError=JSON.stringify(g.models_endpoint_error);
@@ -7735,6 +7829,156 @@ function _stripDottedModelPrefix(bare){
   if (i === 0) return value;
   return segs.slice(i).join('.').replace(/:\d+$/, '');
 }
+
+// Python's whitespace set, spelled out once. JS is NOT a drop-in replacement
+// here: JS's \s and String.trim() both include U+FEFF and both omit the C0
+// separators \x1C-\x1F and \x85, so delegating to each language's own idea of
+// "whitespace" is itself a source of grammar drift — Python called the host
+// "a<U+FEFF>b" an authority and JS did not. One class covers the edge trim AND the
+// interior reject because Python's re \s and str.strip() sets are identical over
+// every code point (verified 0..0x10FFFF). #6657.
+const _PY_WS_CLASS='\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
+// Mirror of str.strip() on the slug rest.
+const _CUSTOM_SLUG_TRIM_RE=new RegExp('^['+_PY_WS_CLASS+']+|['+_PY_WS_CLASS+']+$','g');
+// Mirror of api/config.py:_CUSTOM_ENDPOINT_HOST_REJECT_RE — characters a URL
+// authority host can never contain.
+const _CUSTOM_SLUG_HOST_REJECT_RE=new RegExp('['+_PY_WS_CLASS+':/?#@\\[\\]]');
+
+function _customSlugIsEndpointAuthority(rest){
+  // Mirror of api/config.py:_custom_slug_rest_is_endpoint_authority — THE
+  // grammar for the endpoint-derived half of a custom provider slug, not a
+  // name-shape heuristic. An endpoint authority slug (host:port) must never be
+  // split as a model tag: @custom:localhost:1234:qwen3 has model "qwen3", not
+  // "1234:qwen3".
+  //   port -> 1-5 ASCII digits, 1..65535
+  //   host -> any nonempty token with no character a URL authority host cannot
+  //           hold, and not starting with '-' or '.' nor ending with '-'. A
+  //           TRAILING dot is accepted (a root-anchored FQDN is legal and the
+  //           producer can emit it). Covers single-label Docker/LAN names
+  //           ("llm", from base_url http://llm:8080/v1), dotted DNS names,
+  //           IPv4 literals and "localhost" alike. Requiring an IP/dot/localhost
+  //           rejected the producer's own single-label output (#6657).
+  //   host -> OR a bracketed literal whose contents are a real IPv6 address
+  //           ("[::1]", "[fe80::1%eth0]"). Brackets alone are NOT enough:
+  //           "[dead:beef]" and "[not-ipv6]" are rejected on both sides, so the
+  //           label and the resolved route cannot disagree (#6657).
+  // IPv6 (explicit contract): an UNBRACKETED IPv6 authority is rejected —
+  // "::1:11434" is irreducibly ambiguous (valid address on its own, or address
+  // + port). The backend emits the bracketed spelling for IPv6 hosts.
+  rest=String(rest||'').replace(_CUSTOM_SLUG_TRIM_RE,'');  // == str(rest or "").strip()
+  if(!rest.includes(':')) return false;
+  const idx=rest.lastIndexOf(':');
+  const host=rest.slice(0,idx), portS=rest.slice(idx+1);
+  if(!host) return false;
+  if(!/^[0-9]{1,5}$/.test(portS)) return false;
+  const portN=parseInt(portS,10);
+  if(!(portN>=1 && portN<=65535)) return false;
+  if(host.startsWith('[') && host.endsWith(']')){
+    // Mirrors ipaddress.ip_address(inner).version == 6 on the backend: 8 hextets
+    // of 1-4 hex digits, at most one '::' elision standing for >=1 all-zero
+    // hextets, and an optional dotted-quad IPv4 tail worth 2 hextets.
+    const isIPv6=(text)=>{
+      if(!text.includes(':')) return false;
+      const elide=text.indexOf('::');
+      if(elide!==text.lastIndexOf('::')) return false;
+      const head=elide<0?text:text.slice(0,elide);
+      const tail=elide<0?'':text.slice(elide+2);
+      const headG=head?head.split(':'):[];
+      const tailG=tail?tail.split(':'):[];
+      const groups=headG.concat(tailG);
+      if(!groups.length) return elide===0;  // "::" is all zeros
+      // A dotted quad is legal only as the LAST textual piece of the address, so
+      // it lives in head only when there is no elision: "::ffff:1.2.3.4" and
+      // "1:2:3:4:5:6:1.2.3.4" are addresses, "1.2.3.4::" is not.
+      const quadSlot=(elide<0||tailG.length)?groups.length-1:-1;
+      let count=0;
+      for(let i=0;i<groups.length;i++){
+        if(i===quadSlot && groups[i].includes('.')){
+          // IPv4 tail: worth 2 hextets, so it only fits where 2 still remain.
+          const quad=groups[i].split('.');
+          if(quad.length!==4) return false;
+          if(!quad.every(o=>/^(0|[1-9][0-9]{0,2})$/.test(o) && Number(o)<=255)) return false;
+          count+=2;
+          continue;
+        }
+        if(!/^[0-9A-Fa-f]{1,4}$/.test(groups[i])) return false;
+        count+=1;
+      }
+      // Without an elision every hextet is spelled out; with one, it must stand
+      // for at least one hextet.
+      return elide<0?count===8:count<=7;
+    };
+    return isIPv6(host.slice(1,-1).split('%')[0]);
+  }
+  if(_CUSTOM_SLUG_HOST_REJECT_RE.test(host)) return false;
+  return !(host.startsWith('-') || host.endsWith('-') || host.startsWith('.'));
+}
+
+function _parseQualifiedCustomId(rawId, providerAuthority=''){
+  // ONE split for a @custom:<provider>:<model> id into both halves — mirror of
+  // api/config.py: _parse_provider_qualified_model_id (order documented there).
+  // A matching client authority (dropdown/session/persisted state) takes
+  // precedence over shape inference; only the backend can settle an otherwise
+  // ambiguous named-slug vs endpoint spelling before catalog hydration.
+  const authoritativeProvider=String(providerAuthority||'').trim();
+  const authoritativePrefix=authoritativeProvider ? `@${authoritativeProvider}:` : '';
+  if(authoritativePrefix&&String(rawId||'').toLowerCase().startsWith(authoritativePrefix.toLowerCase())){
+    return {provider:authoritativeProvider,model:String(rawId).slice(authoritativePrefix.length)};
+  }
+  // Consumers needing only the model keep _customModelFromQualifiedId; the
+  // state/send identity paths (_getOptionProviderId, _providerFromModelValue,
+  // _modelPickerOptionIdentity) consume BOTH halves from here so a pre-
+  // hydration parse can never disagree with the backend route (#6657):
+  //   1. authoritative provider id the server reported (_dynamicProviderIds)
+  //   2. generic slash lane — a slug never contains '/', so a '/' in the
+  //      pre-tag segment puts the WHOLE remainder under provider `custom`
+  //      (@custom:ollamacloud/qwen3.5:397b -> custom / ollamacloud/qwen3.5:397b)
+  //   3. shape grammar: last-colon rsplit, peeling one segment back unless the
+  //      slug rest is an endpoint authority (_customSlugIsEndpointAuthority)
+  const rest=rawId.slice('@custom:'.length);
+  const firstColon=rest.indexOf(':');
+  if(firstColon<0){
+    // Legacy "<slug>/<model>" form (no provider colon): the leading segment
+    // is vendor hierarchy, not a provider — strip it for the model half,
+    // exactly as this function always has (#3360).
+    if(rest.includes('/')) return {provider:'custom', model:rest.slice(rest.indexOf('/')+1)||rawId};
+    return {provider:'custom', model:rest};
+  }
+  // Generic slash lane: a slug never contains '/', so a slash-bearing FIRST
+  // segment was never <slug>:<model> — the whole remainder is the model
+  // under bare `custom` (mirror of the backend fallback lane).
+  if(rest.slice(0,firstColon).includes('/')) return {provider:'custom', model:rest};
+  const inner='custom:'+rest;
+  const segs=inner.split(':');
+  for(let cut=segs.length-1;cut>=2;cut--){
+    const prefix=segs.slice(0,cut).join(':');
+    const tail=segs.slice(cut).join(':');
+    if(tail && _dynamicProviderIds[prefix.toLowerCase()]) return {provider:prefix, model:tail};
+  }
+  let providerHint=inner.slice(0,inner.lastIndexOf(':'));
+  let bare=inner.slice(inner.lastIndexOf(':')+1);
+  if(providerHint.startsWith('custom:') && providerHint.split(':').length-1>=2){
+    const slugRest=providerHint.slice('custom:'.length);
+    if(!_customSlugIsEndpointAuthority(slugRest)){
+      const extraColon=providerHint.lastIndexOf(':');
+      const extra=providerHint.slice(extraColon+1);
+      providerHint=providerHint.slice(0,extraColon);
+      bare=extra+':'+bare;
+    }
+  }
+  return {provider:providerHint, model:bare};
+}
+
+function _customModelFromQualifiedId(rawId){
+  // Shared qualified-ID grammar — mirror of api/config.py:
+  // _parse_provider_qualified_model_id (see its docstring for the grammar).
+  // The provider segment may itself contain colons (host:port endpoints) and
+  // the model segment may too (":free" tags), so a blind first/last-colon split
+  // misparses both. The split itself lives in _parseQualifiedCustomId so the
+  // label half and the state/send identity half consume the SAME parse.
+  return _parseQualifiedCustomId(rawId).model||rawId;
+}
+
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
   const rawId=String(modelId||'');
@@ -7758,30 +8002,15 @@ function getModelLabel(modelId){
   //   @custom:omni:kg/stepfun/step-3.7-flash:free    -> kg/stepfun/step-3.7-flash:free
   //   @custom:qwen397b-64k                           -> qwen397b-64k
   if(rawId.startsWith('@custom:')){
-    const rest=rawId.slice('@custom:'.length);
-    const sep=rest.indexOf(':');
-    if(sep<0) return rest||rawId;
-    // A provider slug is a config key or a host:port authority — it never
-    // contains a `/`. A slash-bearing first segment is therefore the model
-    // itself in the plain custom lane (`@custom:ollamacloud/qwen3.5:397b`
-    // must render the whole remainder, not just `397b`), mirroring the
-    // `/`-means-routable rule api/config.py applies when building ids.
-    if(rest.slice(0,sep).includes('/')) return rest||rawId;
-    let model=rest.slice(sep+1);
-    // Endpoint-style slug (`custom:10.8.71.41:8080:model`): the `:port` belongs
-    // to the provider segment, mirroring the host:port slug check in
-    // api/config.py, so it is consumed before the model label starts.
-    const portMatch=/^(\d{1,5}):/.exec(model);
-    if(portMatch){
-      const port=Number(portMatch[1]);
-      if(port>=1&&port<=65535){
-        const host=rest.slice(0,sep).toLowerCase();
-        if(host==='localhost'||host.includes('.')||/^\d{1,3}(\.\d{1,3}){3}$/.test(host)){
-          model=model.slice(portMatch[0].length);
-        }
-      }
-    }
-    return model||rawId;
+    // The shared qualified-ID grammar (mirror of api/config.py:
+    // _parse_provider_qualified_model_id) answers every shape here — named
+    // providers, endpoint authorities (single-label Docker/LAN hosts like
+    // `llm:8080`, dotted DNS, IPv4, bracketed IPv6), colon-bearing model tags
+    // and the authoritative provider-id prefixes from /api/models — so the
+    // inline host-shape check upstream's #6884 era parser used (which rejected
+    // short hostnames and unbracketed-ambiguous IPv6) is replaced by it. One
+    // grammar for label and route: they can no longer disagree (#6657).
+    return _customModelFromQualifiedId(rawId);
   }
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3 (legacy)','meta-llama/llama-4-scout':'Llama 4 Scout'};
