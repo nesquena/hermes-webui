@@ -5643,6 +5643,58 @@ def _marker_reuse_index(session, stream_id: str | None) -> int | None:
     return None
 
 
+def _pending_turn_marker_present(session, stream_id) -> bool:
+    """#7167: True when this stream's pending turn is already fully recovered.
+
+    A stale-pending repair is re-run on every cache-miss read, so the same
+    dead stream can be repaired several times in one session's life. Once a
+    pass has replayed the journal and left the interruption marker, the
+    transcript for that turn is DONE — the prompt is materialized, the
+    journaled output is there, and the marker closes the turn.
+
+    Materiality is not provable by row position in that shape, and that is the
+    point: neither of the caller's predicates can affirmatively identify the
+    row. ``_latest_user`` stops at whichever user row happens to be last, but
+    the pending row now sits *before* the journaled answer and the marker, so
+    after the first cycle the "latest user" belongs to an older turn. The
+    token-bound check cannot help either when ``pending_started_at`` was never
+    persisted on this path. The consequence was a dangling prompt: each repeat
+    re-appended the recovered user row *after* the marker, leaving the chat
+    reading as unanswered.
+
+    So the durable evidence is the pair, recorded per stream:
+
+    1. this stream owns an interruption marker (explicit stream identity, via
+       ``_marker_reuse_index`` — an identity-less or foreign marker proves
+       nothing and is never accepted); and
+    2. the pending prompt already has a user row at or before that marker.
+
+    Both halves are required. A bare marker is NOT sufficient: the same stream
+    can legitimately submit the same prompt text again later, and that fresh
+    turn's prompt must be materialized even though an interrupted turn with
+    identical text sits earlier in the transcript. Requiring the row to be at
+    or before the marker is what distinguishes "this turn was already
+    recovered" from "an older turn with the same text was".
+
+    Text-only matching is safe here *because* it is anchored to the marker:
+    the gate can only ever suppress a prompt whose row sits inside a turn this
+    stream already closed, and the alternative — a dangling prompt after the
+    marker — is the bug being fixed.
+    """
+    marker_idx = _marker_reuse_index(session, stream_id)
+    if marker_idx is None:
+        return False
+    pending_text = getattr(session, 'pending_user_message', None)
+    if not pending_text:
+        return False
+    for message in (session.messages or [])[: marker_idx + 1]:
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        if _message_matches_pending_text(message, pending_text):
+            return True
+    return False
+
+
 def _apply_core_sync_or_error_marker(
     session,
     core_path,
@@ -5764,30 +5816,43 @@ def _apply_core_sync_or_error_marker(
                 _stream_id,
             )
             return True
-        if not _tail_user_already_checkpointed:
-            # #6366 re-gate: when the durable transcript has already
-            # advanced past this pending turn into a newer settled
-            # user/assistant boundary, the recovery path must NOT
-            # append a recovered user row + ``_partial`` clone +
-            # journal replay + generic no-response error after the
-            # valid final answer. The tail-only check above misses
-            # that case (the tail is a newer assistant row that can
-            # never match the pending user checkpoint). Clear only
-            # the stale pending fields and return; the transcript is
-            # already correct and durable.
-            if _transcript_already_advanced_past_pending(session):
-                session.active_stream_id = None
-                session.pending_user_message = None
-                session.pending_attachments = []
-                session.pending_started_at = None
-                session.pending_user_source = None
-                session.save(touch_updated_at=touch_updated_at)
-                logger.info(
-                    "Session %s: cleared stale pending state for stream %s — transcript already advanced past this turn",
-                    sid,
-                    _stream_id,
-                )
-                return True
+        # #6366 re-gate: when the durable transcript has already
+        # advanced past this pending turn into a newer settled
+        # user/assistant boundary, the recovery path must NOT
+        # append a recovered user row + ``_partial`` clone +
+        # journal replay + generic no-response error after the
+        # valid final answer. This is a pure CLEANUP path — it must run
+        # regardless of the append gate below, because "the transcript
+        # already advanced past this turn" is itself proof that the turn's
+        # row exists somewhere earlier. Gating it on materiality made the
+        # already-checkpointed case fall through to the append branch and
+        # duplicate a turn that is visibly finished.
+        if _transcript_already_advanced_past_pending(session):
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.pending_user_source = None
+            session.save(touch_updated_at=touch_updated_at)
+            logger.info(
+                "Session %s: cleared stale pending state for stream %s — transcript already advanced past this turn",
+                sid,
+                _stream_id,
+            )
+            return True
+        # #7167 re-gate: the prompt may only be APPENDED when neither it nor
+        # its turn is already in the transcript. The textual tail check alone
+        # cannot see that case — after the first cycle the pending row sits
+        # *before* the journaled answer and the marker, so the tail is the
+        # marker itself, which no user-row predicate can match. Appending then
+        # left a dangling prompt AFTER the interruption marker and the chat
+        # reads as unanswered. ``_already_checkpointed`` covers the tail case;
+        # ``_pending_turn_marker_present`` covers the already-repaired turn.
+        # Both are conservative: when neither proves materiality, the prompt
+        # is recovered rather than dropped.
+        if not _tail_user_already_checkpointed and not (
+            _already_checkpointed or _pending_turn_marker_present(session, _stream_id)
+        ):
             _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
         else:
             recovered = {

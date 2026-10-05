@@ -95,6 +95,38 @@ def _repair_five_times(sid, stream_id, hermes_home, previous_messages=None, prev
     return session
 
 
+def _token_journal(sid: str, stream_id: str) -> None:
+    """One journaled token and no terminal event: the interrupted-turn shape."""
+    append_run_event(sid, stream_id, "token", {"text": "hello"})
+
+
+def _shapes(session: Session) -> list[str]:
+    """Compact transcript shape for a probe table."""
+    out = []
+    for m in session.messages:
+        role = m.get("role")
+        content = str(m.get("content") or "")
+        out.append(f"{role}:{content[:24]!r}")
+    return out
+
+
+def _probe_repair(sid: str, stream_id: str, hermes_home, cycles: int = 5):
+    """Run repair cycles, capturing the transcript shape after each one."""
+    current = None
+    session = None
+    seen = []
+    for _cycle in range(cycles):
+        session = _make_session(sid, stream_id, previous_messages=current)
+        assert _apply_core_sync_or_error_marker(
+            session,
+            hermes_home / "sessions" / f"session_{sid}.json",
+            stream_id_for_recheck=stream_id,
+        ) is True
+        current = session.messages
+        seen.append(_shapes(session))
+    return session, seen
+
+
 def test_repeated_repair_does_not_duplicate_content(hermes_home):
     """Five repair cycles must leave ONE recovered answer row, not five."""
     sid = "regate_p1_content"
@@ -198,12 +230,135 @@ def test_fresh_current_turn_answer_is_never_suppressed(hermes_home):
     ]
     assert len(live_rows) == 1, "the pre-existing live answer row must survive"
     assert recovered_rows[0] is not live_rows[0]
-    # No duplicated prompt pile-up either: the prompt stays at a single
-    # checkpointed row plus the original one.
-    assert _count(session, "crash-turn prompt", "user") == 2
+    # No duplicated prompt pile-up: the prompt is materialized exactly once.
+    # It used to land twice — the second copy appended AFTER the interruption
+    # marker, which is exactly the dangling-prompt defect #7167's re-gate
+    # describes (the chat then reads as though the prompt was never answered).
+    assert _count(session, "crash-turn prompt", "user") == 1
+    # ...and the interruption marker stays last, never the recovered prompt.
+    assert str(session.messages[-1].get("content") or "").startswith(
+        "**Response interrupted"
+    )
 
 
-# ─── #7167 re-gate: tool cards must be idempotent at the stale-pending caller ───
+# ─── #7167 re-gate: repeated repair must end with the marker LAST ───────────
+
+
+def test_repeated_repair_leaves_marker_last_never_a_dangling_prompt(hermes_home):
+    """Repeated same-stream repair must not leave a dangling prompt.
+
+    The maintainer's probe (three repair/save/reload cycles, one journaled
+    token) produced:
+
+    | cycle | this PR                                | master |
+    | 0     | old, reply, prompt, hello, [interrupted] | same   |
+    | 1     | …, [interrupted], **new prompt**        | grows by 3 rows |
+    | 2     | stable                                 | grows by 3 rows |
+
+    The PR fixed master's runaway growth but left the dangling prompt: the
+    recovered user row was re-appended AFTER the interruption marker, so the
+    chat reads as though the user's prompt was never answered.
+
+    Root cause: the append gate was a textual check on the transcript's LAST
+    message. After the first cycle the pending prompt's row sits *before* the
+    journaled answer and the marker — so the tail is the marker, which no
+    user-row predicate can match, and the gate says "append" forever.
+
+    The fix adds the token-bound materiality proof and a marker-anchored
+    recovery check to the gate, and lifts the #6366 cleanup out of it so an
+    already-finished turn still clears its pending state instead of falling
+    through to the append branch.
+    """
+    sid = "regate_p3_dangling_prompt"
+    stream_id = "dead-stream-dangling"
+    _token_journal(sid, stream_id)
+
+    session, seen = _probe_repair(sid, stream_id, hermes_home, cycles=3)
+
+    # Marker is the LAST row, in every cycle from the first onward.
+    for cycle, shape in enumerate(seen):
+        assert shape[-1].startswith("assistant:'**Response interrupted"), (
+            f"cycle {cycle} must end with the interruption marker, got {shape[-1]!r}"
+        )
+        marker_idx = len(shape) - 1
+        prompt_rows = [
+            i for i, row in enumerate(shape)
+            if row.startswith("user:'crash-turn prompt'")
+        ]
+        # The prompt must exist exactly once, always BEFORE the marker. A copy
+        # after it is the dangling prompt this test pins.
+        assert prompt_rows, f"cycle {cycle} lost the user prompt: {shape}"
+        assert all(i < marker_idx for i in prompt_rows), (
+            f"cycle {cycle} appended a prompt after the marker: {shape}"
+        )
+        assert len(prompt_rows) == 1, (
+            f"cycle {cycle} duplicated the prompt: {prompt_rows}"
+        )
+    # Stable from cycle 1 — the rows added by cycle 0 are never re-added.
+    assert seen[1] == seen[2]
+
+    # Exactly one recovered prompt row in the final session.
+    assert _count(session, "crash-turn prompt", "user") == 1
+
+
+def test_already_repaired_turn_still_clears_stale_pending_state(hermes_home):
+    """A finished turn must clear pending state, not duplicate itself.
+
+    The #6366 cleanup (transcript already advanced past this turn) used to sit
+    *inside* the append gate. gating that cleanup on materiality made the
+    already-checkpointed case fall through to the append branch, duplicating a
+    turn that is visibly finished — the exact regression its own docstring
+    warns about. It is now a pure cleanup path that runs before the gate.
+    """
+    sid = "regate_p3_completed_turn"
+    stream_id = "dead-stream-completed"
+    started_at = 1_700_009_999.5
+
+    session = Session(
+        session_id=sid,
+        title="completed per turn journal",
+        messages=[
+            {
+                "role": "user",
+                "content": "summarise the diff",
+                "timestamp": int(started_at),
+                "_source": "webui",
+                "attachments": [],
+                "_active_turn_token": f"{stream_id}:{started_at:.17g}",
+            },
+            {"role": "assistant", "content": "The diff adds a guard."},
+        ],
+        pending_user_message="summarise the diff",
+        pending_started_at=started_at,
+        pending_user_source="webui",
+        pending_attachments=[],
+        active_stream_id=stream_id,
+    )
+    before = [dict(m) for m in session.messages]
+
+    from api.run_journal import append_run_event
+    from api.turn_journal import append_turn_journal_event_for_stream
+
+    append_run_event(sid, stream_id, "token", {"text": "The diff adds a guard."})
+    # The turn journal recorded the exact-stream terminal completion.
+    append_turn_journal_event_for_stream(
+        sid,
+        stream_id,
+        {"event": "completed", "created_at": 1_700_000_000.0},
+    )
+
+    assert (
+        _apply_core_sync_or_error_marker(
+            session,
+            hermes_home / "sessions" / f"session_{sid}.json",
+            stream_id_for_recheck=stream_id,
+        )
+        is True
+    )
+    # The transcript is untouched and the pending state is gone.
+    assert session.messages == before
+    assert session.pending_user_message is None
+    assert session.active_stream_id is None
 
 
 def _tool_journal(sid: str, stream_id: str) -> None:
