@@ -41,6 +41,8 @@ def clean_registry():
         store._RETIRED_LOG.clear()
         store._ROLLBACK_RECEIPTS.clear()
         store._RETIRED_GENERATIONS.clear()
+        store._TOMBSTONES.clear()
+        store._GENERATION = 0
     store._PENDING_GOAL_FILE.unlink(missing_ok=True)
     yield
     with store._LOCK:
@@ -48,6 +50,7 @@ def clean_registry():
         PENDING_GOAL_CONTINUATION_RECORDS.clear()
         store._ROLLBACK_RECEIPTS.clear()
         store._RETIRED_GENERATIONS.clear()
+        store._TOMBSTONES.clear()
     store._PENDING_GOAL_FILE.unlink(missing_ok=True)
 
 
@@ -112,23 +115,51 @@ class TestReceiptSurvivesUnrelatedTraffic:
         # ...and the real owner still can.
         assert store.pop_goal_continuation_rollback_receipt(sid, "att-1") is not None
 
-    def test_receipts_stay_bounded_with_a_per_session_cap(self, clean_registry):
-        """Bounded storage without global-FIFO eviction of live attempts."""
+    def test_receipts_stay_bounded_without_evicting_a_live_attempt(self, clean_registry):
+        """Bounded storage WITHOUT count-cap eviction of live attempts.
+
+        The per-session cap is gone. It was the round-6 scenario: one session
+        leaking many attempts evicted the in-flight one's receipt, and the
+        rejected-start rollback then consumed ``false`` (running as an ordinary
+        turn) instead of restoring the goal. The bound is now per-receipt TTL,
+        which cannot touch an attempt that is still in flight.
+        """
         from api import goal_continuation_store as store
 
-        # One session leaking many attempts: the per-session cap holds.
+        # One session leaking many attempts. NOTE: ``arm`` drops the session's
+        # older receipts by design (a fresh intent supersedes the older one, so
+        # its rollback would resurrect a superseded generation), so the count
+        # ends at 1 -- that is not eviction, it is supersession.
         sid = "sess-leaky"
         for i in range(store._MAX_ROLLBACK_RECEIPTS_PER_SESSION + 6):
             store.arm_pending_goal_continuation(sid, PROMPT, continuation_id=f"tok-{i}")
             assert store.consume_pending_goal_continuation(sid, PROMPT, f"tok-{i}", f"att-{i}")
-        live = [k for k in store._ROLLBACK_RECEIPTS if k[0] == sid]
-        assert len(live) <= store._MAX_ROLLBACK_RECEIPTS_PER_SESSION
-        # Many distinct sessions: the global backstop holds.
+        assert [k for k in store._ROLLBACK_RECEIPTS if k[0] == sid] == [(sid, "att-9")]
+
+        # The real in-flight pressure is 65 DISTINCT starts in flight (one chat
+        # start per session, serialised by the session agent lock). None of
+        # them may evict another, which is what the round-6 probe pins.
         for j in range(store._MAX_ROLLBACK_RECEIPTS + 40):
             other = f"sess-bulk-{j}"
             store.arm_pending_goal_continuation(other, PROMPT, continuation_id=f"tb-{j}")
-            assert store.consume_pending_goal_continuation(other, PROMPT, f"tb-{j}", f"ab-{j}")
-        assert len(store._ROLLBACK_RECEIPTS) <= store._MAX_ROLLBACK_RECEIPTS
+            assert store.consume_pending_goal_continuation(
+                other, PROMPT, f"tb-{j}", f"ab-{j}"
+            )
+        assert len(store._ROLLBACK_RECEIPTS) == store._MAX_ROLLBACK_RECEIPTS + 41
+        # Every one of them is still claimable by its own attempt.
+        assert store.pop_goal_continuation_rollback_receipt("sess-bulk-0", "ab-0") is not None
+        assert store.pop_goal_continuation_rollback_receipt(
+            "sess-bulk-64", "ab-64"
+        ) is not None
+
+        # Age everything past the TTL: the sweep bounds memory again.
+        with store._LOCK:
+            for rec in store._ROLLBACK_RECEIPTS.values():
+                rec["_receipt_minted_at"] = (
+                    store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 1
+                )
+            store._sweep_expired_receipts_unlocked()
+        assert len(store._ROLLBACK_RECEIPTS) == 0
 
     def test_retire_drops_the_sessions_receipts(self, clean_registry):
         """A retired intent leaves no claimable receipt behind."""

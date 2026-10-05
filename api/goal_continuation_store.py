@@ -39,19 +39,37 @@ logger = logging.getLogger("api.goal_continuation_store")
 
 _PENDING_GOAL_FILE = STATE_DIR / "pending_goal_continuations.json"
 _FILE_VERSION = 2
+# Bounded diagnostics: the retired log is a ring of recent retirements.
 _MAX_RETIRED_LOG = 64
-# Bounded rollback receipts: one per in-flight chat start, keyed by start
-# attempt. A slot is only occupied between a consume and either its
-# rejected-start rollback or the successful launch that follows it, so with
-# launch-time discard this can never accumulate. The cap is a backstop, not the
-# primary bound: eviction is per session (a full deque must never silently
-# steal ANOTHER session's in-flight receipt).
-_MAX_ROLLBACK_RECEIPTS = 64
-# Receipts kept per session. A single session can only have one chat start in
-# flight (the session agent lock serialises them), so a handful is generous;
-# the per-session cap is what actually protects an in-flight receipt.
-_MAX_ROLLBACK_RECEIPTS_PER_SESSION = 4
+# Registry file layout v3: ``tombstones`` carry the generation at which each
+# session's intent was explicitly retired (``/goal clear``, session delete,
+# expiry). Kept DURABLY, not in memory, because an in-process counter cannot
+# survive the two orderings #7862 round 6 pins:
+#
+#   - 64 unrelated retirements dropped a session's in-memory stamp, so a late
+#     rejected-start rollback restored a goal the user had already cleared;
+#   - after a restart ``_GENERATION`` counts from 0 again while a restored
+#     record still carries its old generation (41), so ``record.generation <=
+#     retired_at`` compared a fresh generation against a stale one and the
+#     clear was silently forgotten.
+#
+# A tombstone is monotonic per session and compared by generation, so it can
+# never go stale in the way a bounded in-memory dict could. Bounded like the
+# other log sections.
+_MAX_TOMBSTONES = 512
+# A rollback receipt's slot is never count-capped: see
+# ``_sweep_expired_receipts_unlocked``. These constants remain only as
+# documentation of the bounds that USED to evict live receipts.
+_MAX_ROLLBACK_RECEIPTS = 64  # historical global cap — removed
+_MAX_ROLLBACK_RECEIPTS_PER_SESSION = 4  # historical per-session cap — removed
 _MAX_INTENT_AGE_SECONDS = 24 * 60 * 60  # stale disk intent must not survive forever
+# A rollback receipt's TTL. Circular by design: it is only claimed by the ONE
+# attempt that minted it, and that attempt either launches (discarding it) or
+# rolls back (claiming it) within the same request. Anything older than this
+# outlived its attempt, which is a defect -- so it is dropped on the next
+# record, and the drop is logged. TTL is per-receipt and therefore cannot
+# evict another session's live attempt no matter how much traffic arrives.
+_ROLLBACK_RECEIPT_TTL_SECONDS = 15 * 60
 
 # One owner lock: in-memory mutation + durable snapshot are a single critical
 # section, so two writer threads can never interleave different generations.
@@ -77,8 +95,14 @@ _ROLLBACK_RECEIPTS: "dict[tuple[str, str], dict]" = {}
 # can tell the difference between "nothing happened" and "the user cancelled
 # this" -- without it, a late rejected-start rollback resurrected a goal the
 # user had already cleared (#7862 round 5). Bounded like the other diagnostics.
-_MAX_RETIRED_GENERATIONS = 64
+_MAX_RETIRED_GENERATIONS = 64  # legacy in-memory mirror; tombstones are durable
 _RETIRED_GENERATIONS: "dict[str, int]" = {}
+# Durable clear tombstones, {session_id: generation}. Restored at startup and
+# re-written on every accepted mutation, so "/goal clear" survives BOTH a
+# restart and unlimited unrelated retirements -- the two orderings the
+# in-memory dict could not (#7862 round 6). Compared against a receipt's own
+# generation, never against the live counter, so it cannot go stale.
+_TOMBSTONES: "dict[str, int]" = {}
 
 
 def _next_generation_unlocked() -> int:
@@ -94,47 +118,68 @@ def _drop_rollback_receipt_unlocked(sid: str) -> None:
         del _ROLLBACK_RECEIPTS[key]
 
 
-def _evict_overflow_receipts_unlocked() -> None:
-    """Enforce the global receipt backstop WITHOUT touching live attempts.
+def _receipt_minted_at(record: dict) -> float:
+    """When a receipt was minted, for TTL sweeps. Never raises."""
+    try:
+        return float(record.get("_receipt_minted_at") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
-    Only reached when the registry somehow holds more than
-    ``_MAX_ROLLBACK_RECEIPTS`` receipts (a leaked receipt for a session that
-    never launched nor rolled back). The oldest entries are dropped -- and this
-    is logged, because a receipt that outlives its attempt is a real defect, not
-    a routine eviction. Crucially, this runs AFTER the per-session cap, so an
-    in-flight attempt (which holds one of the per-session slots for its
-    session) is the last thing to go, never collateral of unrelated traffic.
+
+def _sweep_expired_receipts_unlocked() -> int:
+    """Drop receipts whose attempt is long gone; return how many were dropped.
+
+    A receipt is claimed by exactly one start attempt, and that attempt either
+    discards it on a successful launch or claims it on a rejected start -- both
+    inside the same request. A receipt that outlives ``_ROLLBACK_RECEIPT_TTL_SECONDS``
+    therefore cannot belong to a live attempt, so dropping it is safe.
+
+    This is the ONLY eviction. There is deliberately no global count cap and no
+    per-session count cap that could drop a LIVE attempt's receipt: with 65
+    starts in flight for one session, a per-session cap of 4 silently evicted
+    the in-flight attempt's receipt, and its rejected-start rollback then found
+    nothing to claim and fell back to a bare marker the retry could not match
+    (#7862 round 6). Sweeping on age instead of on count makes that impossible
+    -- the cost of a leaked receipt is bounded memory, not a lost goal.
+
+    Callers must hold ``_LOCK``.
     """
-    overflow = len(_ROLLBACK_RECEIPTS) - _MAX_ROLLBACK_RECEIPTS
-    if overflow <= 0:
-        return
-    for key in list(_ROLLBACK_RECEIPTS)[:overflow]:
-        del _ROLLBACK_RECEIPTS[key]
-    logger.warning(
-        "Rolled back %d stale goal-continuation receipt(s) past the %d cap",
-        overflow,
-        _MAX_ROLLBACK_RECEIPTS,
-    )
+    now = time.time()
+    expired = [
+        key
+        for key, record in _ROLLBACK_RECEIPTS.items()
+        if now - _receipt_minted_at(record) > _ROLLBACK_RECEIPT_TTL_SECONDS
+    ]
+    for key in expired:
+        _ROLLBACK_RECEIPTS.pop(key, None)
+    if expired:
+        logger.warning(
+            "Rolled back %d goal-continuation receipt(s) that outlived their start attempt (ttl=%ds)",
+            len(expired),
+            _ROLLBACK_RECEIPT_TTL_SECONDS,
+        )
+    return len(expired)
 
 
 def _record_rollback_receipt_unlocked(sid: str, record: dict, attempt_id: str) -> None:
     """Store a rollback receipt for one start attempt; callers hold ``_LOCK``."""
     attempt = str(attempt_id or "") or "attempt"
-    _ROLLBACK_RECEIPTS[(sid, attempt)] = dict(record)
-    # Per-session cap first: a session with one chat start in flight keeps its
-    # slot, so unrelated sessions can never push it out.
-    session_keys = [k for k in _ROLLBACK_RECEIPTS if k[0] == sid]
-    if len(session_keys) > _MAX_ROLLBACK_RECEIPTS_PER_SESSION:
-        for key in session_keys[: len(session_keys) - _MAX_ROLLBACK_RECEIPTS_PER_SESSION]:
-            del _ROLLBACK_RECEIPTS[key]
-    _evict_overflow_receipts_unlocked()
+    stored = dict(record)
+    stored["_receipt_minted_at"] = time.time()
+    # Keyed by start attempt, so an in-flight attempt's receipt has its own
+    # slot no matter how much unrelated traffic arrives.
+    _ROLLBACK_RECEIPTS[(sid, attempt)] = stored
+    _sweep_expired_receipts_unlocked()
 
 
 def _write_registry_unlocked(records: dict, *, context: str = "") -> None:
     """Atomically persist the full registry (unique tmp + fsync + replace).
 
-    Lock-free; callers must hold ``_LOCK``. Never raises: failures are
-    recorded in ``_LAST_WRITE_ERROR`` and surfaced by
+    Writes ``records`` AND the durable tombstones in one payload: a clear must
+    land on the same snapshot as the state it cleared, otherwise a crash
+    between the two writes reintroduces exactly the resurrection #7862 round 6
+    is about. Lock-free; callers must hold ``_LOCK``. Never raises: failures
+    are recorded in ``_LAST_WRITE_ERROR`` and surfaced by
     ``durability_diagnostics()`` so durability claims stay observable.
     """
     global _LAST_WRITE_ERROR
@@ -148,6 +193,7 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> None:
                 "version": _FILE_VERSION,
                 "generation": _GENERATION,
                 "records": records,
+                "tombstones": dict(_TOMBSTONES),
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -184,12 +230,17 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> None:
                 pass
 
 
-def _load_file_raw() -> dict:
-    """Lock-free read of the on-disk registry -> {session_id: record}.
+def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int]]":
+    """Lock-free read of the on-disk registry -> (records, tombstones).
 
-    Missing file -> {}; corrupt/unexpected -> {} with the parse failure
-    recorded in ``_LAST_LOAD_ERROR`` (never raises). A v1 list-of-strings
-    file is upgraded in memory to records with a blank prompt.
+    Missing file -> ({}, {}); corrupt/unexpected -> ({}, {}) with the parse
+    failure recorded in ``_LAST_LOAD_ERROR`` (never raises). A v1
+    list-of-strings file is upgraded in memory to records with a blank prompt.
+
+    A v2 file has no ``tombstones`` section; its in-memory stamps were lost
+    with the process that wrote it, so an old clear simply cannot be honoured
+    after an upgrade. That is the pre-round-6 behaviour and is not a
+    regression -- the v3 writer is what makes clears durable.
     """
     global _LAST_LOAD_ERROR
     _LAST_LOAD_ERROR = None
@@ -197,11 +248,11 @@ def _load_file_raw() -> dict:
         raw = _PENDING_GOAL_FILE.read_text(encoding="utf-8")
         data = json.loads(raw)
     except FileNotFoundError:
-        return {}
+        return {}, {}
     except (OSError, ValueError) as exc:
         _LAST_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
         logger.warning("Goal continuation registry unreadable: %s", _LAST_LOAD_ERROR)
-        return {}
+        return {}, {}
     if isinstance(data, dict):
         file_generation = int(data.get("generation") or 0)
         raw_records = data.get("records")
@@ -209,7 +260,16 @@ def _load_file_raw() -> dict:
             _LAST_LOAD_ERROR = (
                 f"registry has no records mapping ({type(raw_records).__name__})"
             )
-            return {}
+            return {}, {}
+        raw_tombstones = data.get("tombstones")
+        if not isinstance(raw_tombstones, dict):
+            raw_tombstones = {}
+        tombstones: "dict[str, int]" = {}
+        for sid, gen in raw_tombstones.items():
+            try:
+                tombstones[str(sid)] = int(gen or 0)
+            except (TypeError, ValueError):
+                continue
         out: dict[str, dict] = {}
         for sid, rec in raw_records.items():
             if not isinstance(rec, dict):
@@ -221,7 +281,7 @@ def _load_file_raw() -> dict:
                 "reason": str(rec.get("reason") or "goal_continue"),
                 "continuation_id": str(rec.get("continuation_id") or ""),
             }
-        return out
+        return out, tombstones
     if isinstance(data, list):
         # v1 format: a bare list of session ids. Upgrade in memory: blank
         # prompt (the old format never carried text); generation is assigned
@@ -236,15 +296,23 @@ def _load_file_raw() -> dict:
             }
             for sid in data
             if isinstance(sid, str) and sid
-        }
+        }, {}
     _LAST_LOAD_ERROR = f"unexpected registry shape: {type(data).__name__}"
-    return {}
+    return {}, {}
 
 
 def load_pending_goal_continuations() -> dict:
     """Return the durable records {session_id: record} (locked, never raises)."""
     with _LOCK:
-        return _load_file_raw()
+        records, _tombstones = _load_file_raw()
+        return records
+
+
+def load_goal_continuation_tombstones() -> dict:
+    """Return the durable clear tombstones {session_id: generation}."""
+    with _LOCK:
+        _records, tombstones = _load_file_raw()
+        return dict(tombstones)
 
 
 def arm_pending_goal_continuation(
@@ -279,7 +347,13 @@ def arm_pending_goal_continuation(
         # retirement stamp is cleared too: this arm IS the new intent, so a
         # rejected start for it is exactly what a rollback is for.
         _drop_rollback_receipt_unlocked(sid)
+        # A fresh arm supersedes an older clear: the tombstone is dropped so a
+        # rejected start for THIS intent can roll back normally. Clearing it
+        # (rather than leaving it) is what keeps the tombstone's meaning narrow
+        # -- "the intent as of generation N was cancelled" -- instead of "this
+        # session is cancelled forever".
         _RETIRED_GENERATIONS.pop(sid, None)
+        _TOMBSTONES.pop(sid, None)
         PENDING_GOAL_CONTINUATION.add(sid)
         PENDING_GOAL_CONTINUATION_RECORDS[sid] = {
             "prompt": prompt,
@@ -320,10 +394,15 @@ def retire_pending_goal_continuation(
         # intent that no longer exists, and keeping them only invites a claim
         # that the generation guard below would then have to refuse.
         _drop_rollback_receipt_unlocked(sid)
+        # Durable tombstone: the clear must outlive this process AND any number
+        # of unrelated retirements, so it is written to the same snapshot as
+        # the state it cleared. The in-memory stamp below stays as the
+        # same-process fast path.
         _RETIRED_GENERATIONS.pop(sid, None)
         _RETIRED_GENERATIONS[sid] = generation
-        while len(_RETIRED_GENERATIONS) > _MAX_RETIRED_GENERATIONS:
-            del _RETIRED_GENERATIONS[next(iter(_RETIRED_GENERATIONS))]
+        _TOMBSTONES[sid] = max(generation, int(_TOMBSTONES.get(sid) or 0))
+        while len(_TOMBSTONES) > _MAX_TOMBSTONES:
+            _TOMBSTONES.pop(next(iter(_TOMBSTONES)))
         # A fresh arm is NOT a retirement, so the session's generation stamp is
         # left alone: an older receipt must stay blocked.
         _write_registry_unlocked(
@@ -571,8 +650,18 @@ def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
             # arming drops the session's receipts, so any live record here
             # is by construction newer.)
             return False
-        retired_at = _RETIRED_GENERATIONS.get(sid)
-        if retired_at is not None and int(record.get("generation") or 0) <= retired_at:
+        # Durable tombstone check: has this session's intent been explicitly
+        # retired since this receipt was minted? ``_TOMBSTONES`` is loaded from
+        # disk and survives both a restart and unlimited unrelated
+        # retirements, unlike the in-memory stamp that the 64-entry window
+        # dropped (#7862 round 6).
+        tombstone = _TOMBSTONES.get(sid)
+        legacy_stamp = _RETIRED_GENERATIONS.get(sid)
+        retired_at = max(
+            int(tombstone or 0),
+            int(legacy_stamp or 0),
+        )
+        if retired_at and int(record.get("generation") or 0) <= retired_at:
             # The intent this receipt describes was explicitly retired
             # (``/goal clear``, session delete, expiry) AFTER it was consumed
             # but BEFORE this rollback landed. Restoring it now would silently
@@ -606,13 +695,36 @@ def restore_goal_continuations() -> int:
 
     Merges BOTH ``PENDING_GOAL_CONTINUATION`` and
     ``PENDING_GOAL_CONTINUATION_RECORDS`` for every durable record not already
-    live (a live in-memory record always wins over disk). Returns the count of
-    sessions restored. Never raises.
+    live (a live in-memory record always wins over disk), and loads the durable
+    clear tombstones. Returns the count of sessions restored. Never raises.
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
     with _LOCK:
-        disk = _load_file_raw()
+        disk, disk_tombstones = _load_file_raw()
+        # Baseline the generation counter ABOVE every generation on disk
+        # (records and tombstones alike). A cold process counts from 0, so a
+        # restored record carrying generation 41 would otherwise compare as
+        # OLDER than the fresh clear at generation 3 -- and the clear would be
+        # forgotten, resurrecting a goal the user had cancelled (#7862 round 6,
+        # scenario 4). Starting above the persisted maximum makes every later
+        # generation strictly newer than anything a previous process wrote.
+        highest = max(
+            [int(rec.get("generation") or 0) for rec in disk.values()]
+            + [int(gen or 0) for gen in disk_tombstones.values()]
+            + [0]
+        )
+        global _GENERATION
+        if highest > _GENERATION:
+            _GENERATION = highest
+            logger.info(
+                "Goal continuation registry: generation baseline raised to %d from disk",
+                highest,
+            )
+        _TOMBSTONES.clear()
+        _TOMBSTONES.update(disk_tombstones)
+        _RETIRED_GENERATIONS.clear()
+        _RETIRED_GENERATIONS.update(disk_tombstones)
         restored = 0
         for sid, record in disk.items():
             if sid in PENDING_GOAL_CONTINUATION or sid in PENDING_GOAL_CONTINUATION_RECORDS:

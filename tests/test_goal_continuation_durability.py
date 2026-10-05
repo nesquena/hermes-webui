@@ -39,6 +39,8 @@ def clean_registry():
         store._RETIRED_LOG.clear()
         store._ROLLBACK_RECEIPTS.clear()
         store._RETIRED_GENERATIONS.clear()
+        store._TOMBSTONES.clear()
+        store._GENERATION = 0
     store._PENDING_GOAL_FILE.unlink(missing_ok=True)
     for tmp in store._PENDING_GOAL_FILE.parent.glob("pending_goal_continuations.*.tmp"):
         tmp.unlink(missing_ok=True)
@@ -47,6 +49,8 @@ def clean_registry():
         PENDING_GOAL_CONTINUATION.clear()
         PENDING_GOAL_CONTINUATION_RECORDS.clear()
         store._ROLLBACK_RECEIPTS.clear()
+        store._RETIRED_GENERATIONS.clear()
+        store._TOMBSTONES.clear()
         store._RETIRED_GENERATIONS.clear()
     store._PENDING_GOAL_FILE.unlink(missing_ok=True)
 
@@ -625,14 +629,66 @@ class TestRejectedStartRollback:
         assert PENDING_GOAL_CONTINUATION_RECORDS[sid]["prompt"] == "A NEWER continuation prompt."
 
     def test_receipts_are_bounded(self, clean_registry):
-        """The receipt deque never grows without bound."""
+        """Receipts are bounded WITHOUT ever evicting a live attempt's slot.
+
+        The bound is a TTL, not a count cap. With 65 starts in flight for one
+        session, a global (or per-session) count cap silently evicted the
+        in-flight attempt's receipt, and its rejected-start rollback then found
+        nothing to claim and fell back to a bare marker the retry could not
+        match (#7862 round 6, scenario 1). So the count cap is gone: a receipt
+        whose start attempt neither launched nor rolled back is dropped once it
+        is older than ``_ROLLBACK_RECEIPT_TTL_SECONDS``, which no live attempt
+        can be.
+        """
         from api import goal_continuation_store as store
 
         for i in range(store._MAX_ROLLBACK_RECEIPTS + 20):
             sid = f"sess-bound-{i}"
             store.arm_pending_goal_continuation(sid, self.PROMPT)
             store.consume_pending_goal_continuation(sid, self.PROMPT)
-        assert len(store._ROLLBACK_RECEIPTS) <= store._MAX_ROLLBACK_RECEIPTS
+        # Fresh receipts are all still there: nothing was evicted by count.
+        assert len(store._ROLLBACK_RECEIPTS) == store._MAX_ROLLBACK_RECEIPTS + 20
+
+        # Age them past the TTL; the next record's sweep drops them all.
+        with store._LOCK:
+            for key, rec in store._ROLLBACK_RECEIPTS.items():
+                rec["_receipt_minted_at"] = (
+                    store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 1
+                )
+            dropped = store._sweep_expired_receipts_unlocked()
+        assert dropped == store._MAX_ROLLBACK_RECEIPTS + 20
+        assert len(store._ROLLBACK_RECEIPTS) == 0
+
+    def test_a_live_attempt_survives_unrelated_traffic(self, clean_registry):
+        """The in-flight receipt survives any amount of unrelated churn.
+
+        Scenario 1 of the round-6 probe: 65 starts in flight, the first one
+        rejected. The rejection lands on the FIRST attempt, so its receipt must
+        still be claimable after every other start has consumed its own.
+        """
+        from api import goal_continuation_store as store
+
+        sid = "sess-crowded"
+        store.arm_pending_goal_continuation(sid, self.PROMPT, continuation_id="tok-live")
+        assert store.consume_pending_goal_continuation(
+            sid, self.PROMPT, "tok-live", "att-live"
+        )
+        # 64 more DISTINCT starts in flight -- one chat start per session, as
+        # the session agent lock guarantees. (A second arm on THIS session
+        # would drop the earlier receipt by design: a fresh intent supersedes
+        # the older one.)
+        for i in range(65):
+            other = f"sess-bulk-{i}"
+            store.arm_pending_goal_continuation(
+                other, self.PROMPT, continuation_id=f"tb-{i}"
+            )
+            assert store.consume_pending_goal_continuation(
+                other, self.PROMPT, f"tb-{i}", f"ab-{i}"
+            )
+        # The rejected start's rollback can still claim exactly its receipt.
+        receipt = store.pop_goal_continuation_rollback_receipt(sid, "att-live")
+        assert receipt is not None, "the in-flight receipt was evicted"
+        assert receipt.get("continuation_id") == "tok-live"
 
     def test_unrelated_turn_is_not_swallowed_after_restore(self, clean_registry):
         """The restored intent keeps the match-gated consume semantics."""
@@ -680,3 +736,11 @@ class TestRejectedStartRollbackRouteShape:
         # receipt), never the unconditional path it used to be.
         assert window.count("PENDING_GOAL_CONTINUATION.add(s.session_id)") <= 1
         assert "receipt is not None" in window
+        # Round 6: after a store-backed consume there is no legacy fallback at
+        # all. "No receipt" means the receipt is gone, and re-adding a bare
+        # marker resurrects a state the store's consume will refuse to match.
+        # It must be logged, not papered over with a marker.
+        assert "PENDING_GOAL_CONTINUATION.add(s.session_id)" not in window, (
+            "the bare-marker fallback must stay gone after a store-backed consume"
+        )
+        assert "no receipt for attempt" in window

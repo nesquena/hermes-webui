@@ -24745,9 +24745,21 @@ def _start_chat_stream_for_session(
             if receipt is not None:
                 restore_pending_goal_continuation(s.session_id, receipt)
             else:
-                # Legacy marker-only consume (no receipt): keep the old
-                # behaviour so historical markers still round-trip.
-                PENDING_GOAL_CONTINUATION.add(s.session_id)
+                # #7862 round 6: this start CONSUMED the durable record (the
+                # store deleted it, not just the marker), so "no receipt" means
+                # the receipt is gone -- evicted, or already claimed. The legacy
+                # marker-only fallback that used to live here is wrong after a
+                # store-backed consume: the store deliberately refuses to match
+                # a bare marker with no record, so re-adding the marker only
+                # resurrects a state the retry's consume will reject. The goal
+                # loop loses its continuation either way, but a silent bare
+                # marker also masks the defect; log it loudly instead.
+                logger.warning(
+                    "Session %s: goal-continuation rollback found no receipt for attempt %s after a store-backed consume",
+                    s.session_id,
+                    goal_continuation_attempt_id,
+                    exc_info=True,
+                )
         if consumed_bg_task_completion:
             PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
 
