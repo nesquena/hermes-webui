@@ -1009,6 +1009,28 @@ Default toolset list (hardcoded fallback):
 The web UI always runs with the full CLI toolset. There is no per-session toolset
 restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
 
+### 8.1 Custom provider identity (slug)
+
+A `custom_providers[]` entry is keyed by a slug minted from its `name`. That slug
+is the identity handed to the agent (`custom:<slug>`) and the id the model picker
+emits for the entry, so the two must agree or selecting a model does not reach its
+endpoint. Two rules:
+
+- **A name with ASCII identifier characters** (`[a-z0-9._-]`) is slugified by
+  `_custom_provider_slug_from_name()`: lowercase, every run of other characters
+  folded to `-`, so `Proxy Main` -> `custom:proxy-main` and `Foo (Bar)` ->
+  `custom:foo-bar`.
+- **A name with none of them** (e.g. a pure-CJK name such as `晨光鑫遇专用`)
+  keeps its own characters, because the agent's `custom_provider_slug()` does
+  (`_agent_custom_provider_slug` mirrors it). Folding them away emptied the slug,
+  and an empty slug is read as "no provider", so the whole entry vanished from
+  the picker while the CLI kept using it (#8017). The fallback reproduces the
+  agent vocabulary character for character, so a name whose spaces or `:` would
+  normalize differently still resolves to the id the agent minted for it.
+
+The fallback is name-derived, not endpoint-derived: two providers sharing one
+`base_url` are two identities and must stay two entries.
+
 ---
 
 ## 9. Known Bugs and Technical Debt Summary

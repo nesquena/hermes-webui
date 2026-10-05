@@ -1408,6 +1408,27 @@ def _is_known_model_provider(provider_id: str) -> bool:
     return False
 
 
+def _non_ascii_fallback_slug(raw: str) -> str:
+    """Slug for a name whose ASCII identifier characters are all absent.
+
+    A name such as a pure-CJK ``晨光鑫遇专用`` has none of ``[a-z0-9._-]``, so the
+    ASCII slug would be empty and the whole ``custom_providers[]`` entry dropped
+    from the catalog. The Agent resolves such a name to ``custom:<name>`` by
+    keeping its characters (``custom_provider_slug()`` lowercases and folds
+    spaces, nothing else), so stripping them here is what puts the WebUI out of
+    step with the identity the CLI mints — the entry vanishes from the picker
+    while ``hermes`` keeps using it.
+
+    This reproduces that vocabulary CHARACTER FOR CHARACTER, because the picker
+    emits the id the Agent has to resolve: lowercase, ``" "`` -> ``"-"``, and
+    every other character kept. Folding ``:`` or collapsing repeated dashes here
+    would mint an id the Agent does not recognize for the same entry, so
+    selecting such a model would not reach its endpoint. ``raw`` arrives already
+    lowercased and stripped by the caller.
+    """
+    return raw.replace(" ", "-")
+
+
 def _custom_provider_slug_from_name(name: object) -> str:
     raw = str(name or "").strip().lower()
     if not raw:
@@ -1419,6 +1440,11 @@ def _custom_provider_slug_from_name(name: object) -> str:
     # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
     slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)
+    if not slug:
+        # No ASCII identifier characters survived. Falling back to the empty
+        # string drops the entry; keep the name's own characters so the WebUI
+        # mints the same ``custom:<name>`` the Agent resolves it to.
+        slug = _non_ascii_fallback_slug(raw)
     if not slug:
         return ""
     return "custom:" + slug

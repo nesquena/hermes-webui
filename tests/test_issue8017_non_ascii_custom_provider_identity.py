@@ -1,0 +1,367 @@
+"""Regression tests for #8017 — a non-ASCII custom provider name is not dropped.
+
+Reported symptom: a ``custom_providers[]`` entry whose ``name`` contains no ASCII
+characters (a pure-CJK name such as ``晨光鑫遇专用``) slugified to the empty
+string, so the model-catalog builder treated it as "no provider" and skipped the
+whole entry. Its models never appeared in the WebUI picker while the CLI kept
+resolving the same endpoint, with no error or diagnostic on the response.
+
+Root cause: ``_custom_provider_slug_from_name()`` slugifies with an ASCII-only
+character class and returned ``""`` when nothing survived. The entry then lost
+its identity in ``get_available_models()`` (the only place the catalog decides
+which named groups exist), and the group was never built.
+
+The fix keeps the name's own characters when no ASCII identifier character
+survives, so the WebUI mints the same ``custom:<name>`` the Agent resolves it to
+(``_agent_custom_provider_slug`` already folds spaces and keeps such characters).
+A name with ANY ASCII identifier character is unchanged, so existing ASCII
+identities are preserved.
+"""
+
+from __future__ import annotations
+
+import sys
+import types
+
+import pytest
+
+import api.config as config
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_models_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
+    config.invalidate_models_cache()
+    yield
+    config.invalidate_models_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hermes_home(tmp_path, monkeypatch):
+    """Keep the credential path off the real ~/.hermes (#8017 config uses key_env).
+
+    The reported config resolves the key through ``key_env``, so the catalog read
+    reaches the auth store; without an isolated home the run would touch the real
+    ``~/.hermes/auth.json`` (hermes_cli guards against exactly that).
+    """
+    home = tmp_path / "hermes-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+
+
+def _stub_provider_modules(monkeypatch, detected_provider_ids: list[dict]):
+    fake_models = types.ModuleType("hermes_cli.models")
+    fake_models.list_available_providers = lambda: detected_provider_ids
+    fake_auth = types.ModuleType("hermes_cli.auth")
+    fake_auth.get_auth_status = lambda _pid: {"key_source": "config_yaml"}
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+    monkeypatch.setattr(
+        config,
+        "_get_auth_store_path",
+        lambda: config.Path("/tmp/does-not-exist-auth.json"),
+    )
+
+
+def _set_cfg(provider_name: str):
+    """Swap in a config with one custom_providers entry, returning a restore fn.
+
+    The mtime is pinned so get_available_models()'s mtime-guard does not reload
+    the on-disk config over the patch (the same pattern the other catalog tests
+    use — without it the real ~/.hermes config wins and the test is a no-op).
+    """
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    old_path = getattr(config, "_cfg_path", None)
+    config.cfg.clear()
+    config.cfg.update(
+        {
+            "model": {
+                "default": "DeepSeek-V4.1-Flash",
+                "provider": "custom",
+                "base_url": "http://127.0.0.1:8317/v1",
+                "api_key": "${HERMES_CUSTOM_127_0_0_1_8317_API_KEY}",
+            },
+            "custom_providers": [
+                {
+                    "name": provider_name,
+                    "base_url": "http://127.0.0.1:8317/v1",
+                    "key_env": "HERMES_CUSTOM_127_0_0_1_8317_API_KEY",
+                    "model": "DeepSeek-V4.1-Flash",
+                }
+            ],
+        }
+    )
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0
+    config._cfg_path = config._get_config_path()
+    config.invalidate_models_cache()
+
+    def restore():
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
+        config.invalidate_models_cache()
+
+    return restore
+
+
+# ---------------------------------------------------------------------------
+# The producer itself
+# ---------------------------------------------------------------------------
+
+
+def test_non_ascii_name_mints_a_slug_instead_of_the_empty_string():
+    """A name with no ASCII identifier character is not dropped to '' (#8017).
+
+    The empty slug is what the catalog reads as "no provider", so this is the
+    root-cause assertion: the identity must survive the name.
+    """
+    assert (
+        config._custom_provider_slug_from_name("晨光鑫遇专用") == "custom:晨光鑫遇专用"
+    )
+
+
+def test_ascii_names_keep_their_existing_identity():
+    """The fallback must not disturb names that already slugify (regression guard).
+
+    These already produced slugs before the fix; keeping the same output is what
+    stops the change from re-identifying existing ASCII providers.
+    """
+    assert config._custom_provider_slug_from_name("Proxy Main") == "custom:proxy-main"
+    assert config._custom_provider_slug_from_name("Foo (Bar)") == "custom:foo-bar"
+    assert config._custom_provider_slug_from_name("foo-bar") == "custom:foo-bar"
+    # A mixed name keeps its ASCII identity: the fallback only runs when NOTHING
+    # ASCII survived, so this one is slugged exactly as before.
+    assert (
+        config._custom_provider_slug_from_name("晨光鑫遇专用 (cgxy-cpa)")
+        == "custom:cgxy-cpa"
+    )
+
+
+def test_collision_key_matches_the_producer_for_a_non_ascii_name():
+    """The slug key derives from the producer, so a non-ASCII name has one identity.
+
+    ``_custom_provider_slug_key`` is the collision/credential boundary: if it and
+    the producer disagreed the entry could be catalogued under one id and resolved
+    under another.
+    """
+    assert config._custom_provider_slug_key(
+        "晨光鑫遇专用"
+    ) == config._custom_provider_slug_key("custom:晨光鑫遇专用")
+    assert config._custom_provider_slug_key("晨光鑫遇专用") == "晨光鑫遇专用"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "晨光鑫遇专用",  # the reported name: no ASCII at all
+        "晨光 鑫遇",  # one space
+        "晨光  鑫遇",  # two spaces -> two dashes, neither collapsed
+        "晨光:鑫遇",  # a colon
+        "晨光-鑫遇",  # an ASCII dash already present
+        "晨曦·专用",  # a middle dot
+    ],
+)
+def test_fallback_identity_matches_the_agent_vocabulary(name):
+    """The picker's id must be exactly what the Agent mints for the name.
+
+    The picker emits `custom:<slug>` as the id the Agent then has to resolve for
+    that entry, so any divergence means selecting the model does not reach its
+    endpoint. `_agent_custom_provider_slug` is this module's mirror of
+    `hermes_cli.providers.custom_provider_slug()`, so comparing the two is the
+    compatibility check — the fallback must reproduce it character for character,
+    including a name whose spaces or colon would normalize differently.
+    """
+    produced = config._custom_provider_slug_from_name(name)
+    agent = config._agent_custom_provider_slug(name)
+    assert produced == agent
+
+
+def test_two_whitespace_name_and_double_dash_name_do_not_collapse():
+    """The fallback does not collapse dashes or fold characters (#8017).
+
+    ``晨光  鑫遇`` (two spaces) and ``晨光-鑫遇`` (an ASCII dash) are different
+    names and must stay different identities; collapsing repeated dashes or
+    folding other characters would merge them into one entry's id.
+    """
+    assert config._custom_provider_slug_from_name("晨光  鑫遇") == "custom:晨光--鑫遇"
+    assert config._custom_provider_slug_from_name("晨光-鑫遇") == "custom:晨光-鑫遇"
+
+
+# ---------------------------------------------------------------------------
+# The catalog
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_includes_a_non_ascii_only_custom_provider(monkeypatch):
+    """The reported symptom: the entry's models appear under its own group (#8017).
+
+    Before the fix the empty slug meant the named group was never created and
+    ``/api/models`` reported ``groups: []``. The group must now be present with
+    the entry's configured model.
+    """
+    _stub_provider_modules(
+        monkeypatch,
+        [{"id": "custom:晨光鑫遇专用", "authenticated": True}],
+    )
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
+
+    restore = _set_cfg(provider_name="晨光鑫遇专用")
+    try:
+        result = config.get_available_models()
+    finally:
+        restore()
+
+    groups_by_id = {g["provider_id"]: g for g in result["groups"]}
+    assert "custom:晨光鑫遇专用" in groups_by_id, (
+        "a non-ASCII-only custom provider must not be dropped from the catalog; "
+        f"got groups {sorted(groups_by_id)}"
+    )
+    model_ids = [m["id"] for m in groups_by_id["custom:晨光鑫遇专用"]["models"]]
+    assert "DeepSeek-V4.1-Flash" in model_ids
+
+
+def test_catalog_keeps_two_non_ascii_providers_with_one_base_url_separate(monkeypatch):
+    """Two non-ASCII names sharing a base_url stay two identities (#8017).
+
+    The maintainer asked against an endpoint-only fallback for exactly this: a
+    slug derived from the URL would merge these two separately-configured
+    providers, so each must reach the catalog under its own identity.
+    """
+    _stub_provider_modules(
+        monkeypatch,
+        [
+            {"id": "custom:晨光鑫遇专用", "authenticated": True},
+            {"id": "custom:晨曦专用", "authenticated": True},
+        ],
+    )
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
+
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    old_path = getattr(config, "_cfg_path", None)
+    config.cfg.clear()
+    config.cfg.update(
+        {
+            "model": {
+                "default": "DeepSeek-V4.1-Flash",
+                "provider": "custom",
+                "base_url": "http://127.0.0.1:8317/v1",
+            },
+            "custom_providers": [
+                {
+                    "name": "晨光鑫遇专用",
+                    "base_url": "http://127.0.0.1:8317/v1",
+                    "api_key": "sk-a",
+                    "model": "DeepSeek-V4.1-Flash",
+                },
+                {
+                    "name": "晨曦专用",
+                    "base_url": "http://127.0.0.1:8317/v1",
+                    "api_key": "sk-b",
+                    "model": "DeepSeek-V4.1-Flash",
+                },
+            ],
+        }
+    )
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0
+    config._cfg_path = config._get_config_path()
+    config.invalidate_models_cache()
+    try:
+        result = config.get_available_models()
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
+        config.invalidate_models_cache()
+
+    groups_by_id = {g["provider_id"]: g for g in result["groups"]}
+    assert "custom:晨光鑫遇专用" in groups_by_id, f"got groups {sorted(groups_by_id)}"
+    assert "custom:晨曦专用" in groups_by_id, f"got groups {sorted(groups_by_id)}"
+
+
+def test_non_ascii_slug_round_trips_through_qualified_selection(monkeypatch):
+    """A provider-qualified pick of a non-ASCII provider resolves back to it (#8017).
+
+    The slug is the identity handed to the agent (``custom:<slug>``), so even a
+    kept group is useless if selecting a model from it cannot round-trip. This
+    drives the ``@provider:model`` hint the picker emits for a non-active
+    provider through ``resolve_model_provider``.
+    """
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    old_path = getattr(config, "_cfg_path", None)
+    config.cfg.clear()
+    config.cfg.update(
+        {
+            "model": {
+                "default": "DeepSeek-V4.1-Flash",
+                "provider": "openai",
+                "base_url": "https://api.openai.com/v1",
+            },
+            "custom_providers": [
+                {
+                    "name": "晨光鑫遇专用",
+                    "base_url": "http://127.0.0.1:8317/v1",
+                    "api_key": "sk-xxx",
+                    "model": "DeepSeek-V4.1-Flash",
+                }
+            ],
+        }
+    )
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0
+    config._cfg_path = config._get_config_path()
+    try:
+        model, provider, base_url = config.resolve_model_provider(
+            "@custom:晨光鑫遇专用:DeepSeek-V4.1-Flash", explicitly_picked=True
+        )
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
+
+    assert model == "DeepSeek-V4.1-Flash"
+    assert provider == "custom:晨光鑫遇专用"
+    assert base_url == "http://127.0.0.1:8317/v1"
+
+
+def test_catalog_still_includes_an_ascii_custom_provider(monkeypatch):
+    """The ASCII path is unchanged: the fix does not cost the ordinary case (#8017).
+
+    A control for the regression above — same fixture, an ASCII name — so a fix
+    that "keeps the group" by breaking the ASCII path is caught.
+    """
+    _stub_provider_modules(
+        monkeypatch,
+        [{"id": "custom:cgxy-cpa", "authenticated": True}],
+    )
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
+
+    restore = _set_cfg(provider_name="cgxy-cpa")
+    try:
+        result = config.get_available_models()
+    finally:
+        restore()
+
+    groups_by_id = {g["provider_id"]: g for g in result["groups"]}
+    assert "custom:cgxy-cpa" in groups_by_id
+    model_ids = [m["id"] for m in groups_by_id["custom:cgxy-cpa"]["models"]]
+    assert "DeepSeek-V4.1-Flash" in model_ids
