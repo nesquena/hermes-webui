@@ -913,6 +913,53 @@ def test_opt_in_workspace_switch_joins_canonical_new_session_transaction():
     assert result["newSessionInFlight"] is False
 
 
+def _run_queued_workspace_supersession_harness() -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_blank_page_mint_function("switchToWorkspace")}
+        function deferred(){{let resolve;const promise=new Promise(r=>{{resolve=r;}});return {{promise,resolve}};}}
+        const pending=deferred();
+        const heldIntent=_claimContextTransition('held-new-session');
+        _newSessionInFlight=(async()=>{{
+          await heldIntent.previous;
+          try{{return await pending.promise;}}
+          finally{{_newSessionInFlight=null;heldIntent.release();}}
+        }})();
+        const S={{session:{{session_id:'source',workspace:'/workspace-a'}},messages:[{{role:'user'}}],busy:false,_profileSwitchWorkspace:null}};
+        const window={{_newChatOnWorkspaceSwitch:true}};
+        const $=()=>null;
+        let newSessionCalls=0;
+        async function newSession(){{newSessionCalls+=1;S.session={{session_id:'workspace-b',workspace:S._profileSwitchWorkspace}};}}
+        function closeWsDropdown(){{}} function showToast(){{}} function setStatus(){{}}
+        function t(k){{return k;}} function getWorkspaceFriendlyName(p){{return p;}}
+        (async()=>{{
+          const switching=switchToWorkspace('/workspace-b','B');
+          const workspaceClaim=_paneNavigationGeneration;
+          const sidebarClaim=_claimPaneNavigation();
+          S.session={{session_id:'sidebar-c',workspace:'/workspace-c'}};S.messages=[{{role:'user'}}];
+          pending.resolve({{superseded:true}});
+          await switching;
+          process.stdout.write(JSON.stringify({{workspaceClaim,sidebarClaim,newSessionCalls,activeSid:S.session.session_id,workspace:S.session.workspace}}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_queued_workspace_switch_cannot_replace_newer_sidebar_navigation():
+    result = _run_queued_workspace_supersession_harness()
+    assert result["sidebarClaim"] > result["workspaceClaim"]
+    assert result["newSessionCalls"] == 0
+    assert result["activeSid"] == "sidebar-c"
+    assert result["workspace"] == "/workspace-c"
+
+
 
 def _run_double_workspace_context_harness() -> dict:
     node = shutil.which("node")
@@ -1669,6 +1716,7 @@ def test_voice_mode_send_preserves_buffered_transcript_across_new_session_handof
 def _run_profile_switch_settlement_harness(
     *, reject_pending: bool, reject_replacement: bool = False,
     supersede_pane: bool = False, reject_rollback: bool = False,
+    supersede_after_switch: bool = False,
 ) -> dict:
     """Run real switchToProfile through success/failure settlement to completion."""
     node = shutil.which("node")
@@ -1758,6 +1806,7 @@ def _run_profile_switch_settlement_harness(
               return Promise.reject(new Error('rollback failed'));
             }}
             serverProfile=requested;
+            if(requested==='beta'&&{str(supersede_after_switch).lower()})_claimPaneNavigation();
             return Promise.resolve({{
               active:requested,is_default:requested==='default',
               default_model:null,default_workspace:null,
@@ -1850,6 +1899,19 @@ def test_failed_profile_replacement_rolls_back_after_newer_pane_claim():
     assert result["serverProfile"] == "default"
     assert result["activeProfile"] == "default"
     assert result["sessionProfile"] == "default"
+
+
+def test_profile_switch_rolls_back_when_newer_pane_claim_arrives_after_post():
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=False,
+        supersede_after_switch=True,
+    )
+
+    assert result["switched"] is False
+    assert result["apiCalls"] == ["/api/profile/switch", "/api/profile/switch"]
+    assert result["serverProfile"] == "default"
+    assert result["activeProfile"] == "default"
+    assert result["newSessionCalls"] == 0
 
 
 def test_failed_profile_rollback_keeps_committed_authority_and_surfaces_error():
@@ -3836,6 +3898,16 @@ def test_programmatic_send_waits_for_new_session_owner_before_capturing_payload(
     assert duplicate_guard < transition_wait < capture, (
         "a duplicate Voice Mode callback must stop before waiting, while the owning "
         "send must wait for the session transition before capturing payload"
+    )
+
+
+def test_programmatic_send_stops_when_new_session_creation_rejects():
+    start = MESSAGES_JS.index("async function send(){")
+    wait = MESSAGES_JS.index("await _newSessionInFlight", start)
+    capture = MESSAGES_JS.index("_sendInProgress = true", wait)
+    boundary = MESSAGES_JS[wait:capture].replace(" ", "")
+    assert "catch(_){return;}" in boundary, (
+        "a failed New Chat must not let Send continue into the restored old session"
     )
 
 

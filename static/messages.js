@@ -1442,7 +1442,7 @@ async function send(){
     // duplicate producer for the same still-visible composer. Do not queue it.
     if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
     let newSessionResult=null;
-    try{newSessionResult=await _newSessionInFlight;}catch(_){ }
+    try{newSessionResult=await _newSessionInFlight;}catch(_){return;}
     if(_newSessionActionWasSuperseded(newSessionResult))return;
   }
   // Static guards expect _defaultMessageMode to stay near send() while the actual

@@ -2002,6 +2002,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 
 let _contextTransitionGeneration=0;
 let _contextTransitionTail=Promise.resolve();
+let _latestContextTransitionKind='';
 const _CONTEXT_TRANSITION_INTENT=Symbol('context-transition-intent');
 // Context work remains serialized, but an explicit pane choice must take
 // ownership immediately so an older New Chat response cannot reclaim the pane.
@@ -2038,6 +2039,7 @@ function _claimContextTransition(kind){
     previous,
     release,
   };
+  _latestContextTransitionKind=intent.kind;
   _contextTransitionTail=previous.then(()=>settled);
   return intent;
 }
