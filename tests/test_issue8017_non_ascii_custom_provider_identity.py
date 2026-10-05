@@ -167,7 +167,6 @@ def test_collision_key_matches_the_producer_for_a_non_ascii_name():
         "晨光鑫遇专用",  # the reported name: no ASCII at all
         "晨光 鑫遇",  # one space
         "晨光  鑫遇",  # two spaces -> two dashes, neither collapsed
-        "晨光:鑫遇",  # a colon
         "晨光-鑫遇",  # an ASCII dash already present
         "晨曦·专用",  # a middle dot
     ],
@@ -180,11 +179,55 @@ def test_fallback_identity_matches_the_agent_vocabulary(name):
     endpoint. `_agent_custom_provider_slug` is this module's mirror of
     `hermes_cli.providers.custom_provider_slug()`, so comparing the two is the
     compatibility check — the fallback must reproduce it character for character,
-    including a name whose spaces or colon would normalize differently.
+    including a name whose spaces would normalize differently.
     """
     produced = config._custom_provider_slug_from_name(name)
     agent = config._agent_custom_provider_slug(name)
     assert produced == agent
+
+
+def test_a_colon_in_a_name_takes_the_keyless_pre_fix_identity():
+    """A ':' in a non-ASCII name mints no name-derived identity (#8026).
+
+    The qualified-model hint is ``@custom:<name>:<model>``. A name that itself
+    carries a colon gives that string a segment the parser cannot attribute:
+    ``@custom:晨光:鑫遇:model-a`` splits into provider ``custom:晨光`` and model
+    ``鑫遇:model-a``, the endpoint vanishes, and sending fails with
+    ``unowned_custom_provider``. The reviewer's fix returns ``""`` from the
+    fallback so the name takes the pre-fix route, which for a name with no
+    ASCII identifier characters is the empty slug -- the entry is not
+    catalogued, exactly as master behaves today; nothing that worked is broken,
+    and nothing that cannot route is advertised.
+    """
+    assert config._custom_provider_slug_from_name("晨光:鑫遇") == ""
+    # An ASCII name with a colon still folds as it always has.
+    assert config._custom_provider_slug_from_name("Local (127.0.0.1:15721)") == (
+        "custom:local-127.0.0.1-15721"
+    )
+
+
+def test_keyless_non_ascii_providers_do_not_share_one_api_key_env(monkeypatch):
+    """An id with no POSIX-safe characters must not read a shared variable (#8026).
+
+    The old fallback minted ``CUSTOM_API_KEY`` for EVERY id whose characters all
+    sanitized away, so two distinct non-ASCII providers read one env var and the
+    key meant for the first travelled to the second's endpoint as a bearer
+    token. An unnameable id takes the keyless path instead.
+    """
+    monkeypatch.setenv("CUSTOM_API_KEY", "sk-SHARED")
+
+    first_env = config._api_key_env_name("custom:晨光鑫遇专用")
+    second_env = config._api_key_env_name("custom:晨曦专用")
+    # Neither mints a variable at all, so there is no shared var to collide on.
+    assert first_env == ""
+    assert second_env == ""
+    # And the lookup therefore resolves no key for either.
+    assert config._lookup_custom_api_key_env("custom:晨光鑫遇专用") is None
+    assert config._lookup_custom_api_key_env("custom:晨曦专用") is None
+
+    # The ASCII control still mints DISTINCT per-provider names.
+    assert config._api_key_env_name("custom:proxy-a") == "CUSTOM_PROXY_A_API_KEY"
+    assert config._api_key_env_name("custom:proxy-b") == "CUSTOM_PROXY_B_API_KEY"
 
 
 def test_two_whitespace_name_and_double_dash_name_do_not_collapse():

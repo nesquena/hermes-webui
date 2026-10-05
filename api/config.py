@@ -1425,7 +1425,18 @@ def _non_ascii_fallback_slug(raw: str) -> str:
     would mint an id the Agent does not recognize for the same entry, so
     selecting such a model would not reach its endpoint. ``raw`` arrives already
     lowercased and stripped by the caller.
+
+    A ``:`` is the one exception, and it is fatal rather than cosmetic: the
+    qualified-model hint is ``@custom:<name>:<model>``, and a name that itself
+    carries a colon gives that string a segment the parser cannot attribute —
+    ``@custom:晨光:鑫遇:model-a`` splits into provider ``custom:晨光`` and model
+    ``鑫遇:model-a``. The endpoint then vanishes and sending fails with
+    ``unowned_custom_provider``. The ASCII path folds ``:`` for exactly this
+    reason, so a name with one takes the same route rather than keeping its own
+    characters, and returns ``""`` here to fall through to the ASCII slug.
     """
+    if ":" in raw:
+        return ""
     return raw.replace(" ", "-")
 
 
@@ -1437,7 +1448,9 @@ def _custom_provider_slug_from_name(name: object) -> str:
         return raw
     # Keep name-derived custom provider slugs out of the @provider:model colon
     # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
-    # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
+    # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'. The
+    # ASCII substitution folds a ':' to '-' below; the non-ASCII fallback refuses
+    # one too, for the same reason (see its docstring).
     slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)
     if not slug:
@@ -1712,10 +1725,32 @@ _LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
 
 
 def _api_key_env_name(provider_id: object) -> str:
-    """Return the POSIX-safe default API-key env var for a custom provider id."""
-    sanitized = re.sub(r"[^A-Za-z0-9]", "_", str(provider_id or "")).upper().strip("_")
+    """Return the POSIX-safe default API-key env var for a custom provider id.
+
+    The name is derived from the id's DISTINCTIVE part, not the whole string.
+    Every custom-provider id carries the literal ``custom:`` prefix, so the
+    shared prefix is exactly what must not decide the variable name. Deriving
+    from the whole id, a non-ASCII id such as ``custom:晨光鑫遇专用`` sanitizes
+    each CJK character to an underscore and ``strip("_")`` then eats them,
+    leaving only the shared ``custom`` — and ``if not sanitized`` never fires,
+    so EVERY unnameable provider read the same ``CUSTOM_CUSTOM_API_KEY``. One
+    provider's key then travelled as a bearer token to the endpoint the second
+    was configured for.
+
+    Deriving from the part after ``custom:`` leaves nothing to strip for such
+    an id: the distinctive part sanitizes to a run of underscores and strips to
+    empty, so the function returns ``""`` and the caller takes the keyless
+    path. An id the convention cannot name is a provider it cannot carry a key
+    for; minting it a shared variable names somebody else's key instead.
+    """
+    text = str(provider_id or "").strip()
+    if text.lower().startswith("custom:") and ":" in text:
+        distinctive = text.split(":", 1)[1]
+    else:
+        distinctive = text
+    sanitized = re.sub(r"[^A-Za-z0-9]", "_", distinctive).upper().strip("_")
     if not sanitized:
-        sanitized = "CUSTOM"
+        return ""
     if not sanitized.startswith("CUSTOM_"):
         sanitized = f"CUSTOM_{sanitized}"
     return f"{sanitized}_API_KEY"
@@ -1732,6 +1767,11 @@ def _legacy_custom_api_key_env_name(provider_id: object) -> str:
 def _lookup_custom_api_key_env(provider_id: object) -> str | None:
     """Look up sanitized custom-provider env first, then legacy broken shape."""
     env_name = _api_key_env_name(provider_id)
+    if not env_name:
+        # The id has no POSIX-safe characters, so there is no variable that
+        # belongs to THIS provider; any shared one would leak its key to a
+        # different endpoint. Keyless is the honest answer.
+        return None
     api_key = _thread_local_env_value(env_name).strip()
     if api_key:
         return api_key

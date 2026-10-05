@@ -1019,17 +1019,29 @@ endpoint. Two rules:
 - **A name with ASCII identifier characters** (`[a-z0-9._-]`) is slugified by
   `_custom_provider_slug_from_name()`: lowercase, every run of other characters
   folded to `-`, so `Proxy Main` -> `custom:proxy-main` and `Foo (Bar)` ->
-  `custom:foo-bar`.
+  `custom:foo-bar`. A name that has any of those characters is slugified this
+  way even when some of them are stripped in the process: `晨光-鑫遇` keeps its
+  ASCII `-` and is folded to `custom:晨光-鑫遇` — the fallback only runs when
+  `_custom_provider_slug_from_name()` returns nothing, which happens when `-`
+  was the only ASCII character present.
 - **A name with none of them** (e.g. a pure-CJK name such as `晨光鑫遇专用`)
   keeps its own characters, because the agent's `custom_provider_slug()` does
   (`_agent_custom_provider_slug` mirrors it). Folding them away emptied the slug,
   and an empty slug is read as "no provider", so the whole entry vanished from
   the picker while the CLI kept using it (#8017). The fallback reproduces the
-  agent vocabulary character for character, so a name whose spaces or `:` would
-  normalize differently still resolves to the id the agent minted for it.
+  agent vocabulary character for character, so a name whose spaces would
+  normalize differently still resolves to the id the agent minted for it. The
+  one exception is `:`: the qualified-model hint is `@custom:<name>:<model>`, and
+  a name carrying one gives that string a segment the parser cannot attribute,
+  so the endpoint vanishes and sending fails. A name with a `:` therefore takes
+  the ASCII fold (`晨光:鑫遇` -> `custom:晨光-鑫遇`), exactly as an ASCII name
+  with one does.
 
 The fallback is name-derived, not endpoint-derived: two providers sharing one
-`base_url` are two identities and must stay two entries.
+`base_url` are two identities and must stay two entries. The same rule governs
+the API-key env var: `_api_key_env_name()` returns an empty name when an id has
+no POSIX-safe characters, so an unnameable provider takes the keyless path
+rather than every such provider reading one shared `CUSTOM_API_KEY` variable.
 
 ---
 

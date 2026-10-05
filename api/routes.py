@@ -7370,6 +7370,11 @@ def _custom_provider_slug_for_context(name: object) -> str:
 
         return _custom_provider_slug_from_name(name)
     except Exception:
+        # Mirrors _custom_provider_slug_from_name for the import-failure path:
+        # ASCII identifiers slugify with ':' folded out (the @provider:model
+        # grammar cannot carry one), and a name with no ASCII identifier
+        # characters - and no ':' - keeps them so the id matches the one the
+        # Agent resolves. A ':' takes the ASCII fold, same as the main path.
         raw = str(name or "").strip().lower()
         if not raw:
             return ""
@@ -7377,7 +7382,13 @@ def _custom_provider_slug_for_context(name: object) -> str:
             return raw
         slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
         slug = re.sub(r"-{2,}", "-", slug)
-        return f"custom:{slug}" if slug else ""
+        if not slug:
+            if ":" in raw:
+                return ""
+            slug = raw.replace(" ", "-")
+            if not slug:
+                return ""
+        return f"custom:{slug}"
 
 
 def _providers_match_for_context(config_key: object, requested_provider: str) -> bool:
