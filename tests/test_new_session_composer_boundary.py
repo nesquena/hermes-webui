@@ -1014,7 +1014,7 @@ def test_two_workspace_intents_are_serialized_and_latest_wins():
     assert result["backend"]["source-session"] == "/workspace-c"
 
 
-def _run_profile_double_context_harness() -> dict:
+def _run_profile_double_context_harness(*, reject_second: bool = False) -> dict:
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required for the browser behavior harness")
@@ -1022,7 +1022,7 @@ def _run_profile_double_context_harness() -> dict:
         f"""
         {_wait_for_new_session_navigation_function()}
         {_switch_to_profile_function()}
-        function deferred(){{let resolve;const promise=new Promise(r=>{{resolve=r;}});return {{promise,resolve}};}}
+        function deferred(){{let resolve,reject;const promise=new Promise((r,j)=>{{resolve=r;reject=j;}});return {{promise,resolve,reject}};}}
         async function spinUntil(predicate){{for(let i=0;i<200;i++){{if(predicate())return;await Promise.resolve();}}throw new Error('timeout');}}
         const switches=[];const S={{session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},messages:[],activeProfile:'default',activeProfileIsDefault:true,_pendingSessionToolsets:null}};
         let _profileSwitchGeneration=0;let _profileSwitchOpeningExistingSession=false;let _workspacePanelMode='closed';
@@ -1033,6 +1033,7 @@ def _run_profile_double_context_harness() -> dict:
         function api(path,options){{
           if(path!=='/api/profile/switch')throw new Error(`unexpected ${{path}}`);
           const name=JSON.parse(options.body).name;const d=deferred();switches.push({{name,d}});
+          if(name==='default')d.resolve({{active:'default',is_default:true,default_model:null,default_workspace:null}});
           return d.promise;
         }}
         function closeSessionActionMenu(){{}} function _invalidateSessionListRenders(){{}}
@@ -1057,11 +1058,12 @@ def _run_profile_double_context_harness() -> dict:
           for(let i=0;i<20;i++)await Promise.resolve();
           const beforeFirstSettle=switches.map(x=>x.name);
           switches[0].d.resolve({{active:'beta',is_default:false,default_model:null,default_workspace:null}});
-          await spinUntil(()=>switches.length===2);
+          await spinUntil(()=>switches.length===3);
           const betweenSettles=switches.map(x=>x.name);
-          switches[1].d.resolve({{active:'gamma',is_default:false,default_model:null,default_workspace:null}});
+          if({str(reject_second).lower()})switches[2].d.reject(new Error('gamma failed'));
+          else switches[2].d.resolve({{active:'gamma',is_default:false,default_model:null,default_workspace:null}});
           await Promise.all([first,second]);
-          process.stdout.write(JSON.stringify({{beforeFirstSettle,betweenSettles,finalProfile:S.activeProfile,switches:switches.map(x=>x.name)}}));
+          process.stdout.write(JSON.stringify({{beforeFirstSettle,betweenSettles,finalProfile:S.activeProfile,sessionProfile:S.session.profile,switches:switches.map(x=>x.name)}}));
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
@@ -1073,9 +1075,18 @@ def _run_profile_double_context_harness() -> dict:
 def test_two_profile_intents_are_serialized_and_latest_wins():
     result = _run_profile_double_context_harness()
     assert result["beforeFirstSettle"] == ["beta"]
-    assert result["betweenSettles"] == ["beta", "gamma"]
+    assert result["betweenSettles"] == ["beta", "default", "gamma"]
     assert result["finalProfile"] == "gamma"
-    assert result["switches"] == ["beta", "gamma"]
+    assert result["switches"] == ["beta", "default", "gamma"]
+
+
+def test_failed_newer_profile_intent_restores_original_profile():
+    result = _run_profile_double_context_harness(reject_second=True)
+    assert result["beforeFirstSettle"] == ["beta"]
+    assert result["betweenSettles"] == ["beta", "default", "gamma"]
+    assert result["finalProfile"] == "default"
+    assert result["sessionProfile"] == "default"
+    assert result["switches"] == ["beta", "default", "gamma"]
 
 
 def _run_stale_context_repaint_harness(

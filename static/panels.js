@@ -7217,11 +7217,7 @@ async function switchToProfile(name) {
     // next serialized transition. Restore both server and client profile
     // authority before releasing the queue so that action cannot create under
     // the abandoned profile.
-    const newerProfileSwitchQueued=typeof _contextTransitionGeneration==='number'
-      &&intent&&_contextTransitionGeneration>intent.generation
-      &&typeof _latestContextTransitionKind==='string'
-      &&_latestContextTransitionKind==='profile-switch';
-    if(!ownsPane()&&!newerProfileSwitchQueued){
+    if(!ownsPane()){
       try{
         const rollback=await api('/api/profile/switch',{
           method:'POST',body:JSON.stringify({name:_prevProfileName}),timeoutToast:false,
