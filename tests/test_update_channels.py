@@ -26,6 +26,25 @@ def _git(repo, *args):
     )
 
 
+def _local_origin(repo, tmp_path):
+    """Create a bare origin for `repo`, push its refs into it, and return the path.
+
+    These tests deliberately run the real `git fetch` path, but it must stay off
+    the network. Pointing origin at github.com made the module depend on a remote
+    it does not control, and an unauthenticated remote that answers 401 makes the
+    fetch fall back to the session's inherited askpass helper — on a desktop that
+    is a modal "Enter SSH Credentials" dialog.
+    """
+    origin = tmp_path / 'origin.git'
+    subprocess.run(
+        ['git', 'init', '--bare', '-q', str(origin)], check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _git(repo, 'push', '-q', str(origin), '--all')
+    _git(repo, 'push', '-q', str(origin), '--tags')
+    return origin
+
+
 @pytest.fixture
 def channel_repo(tmp_path):
     """A linear repo: 5 batch commits, each tagged exp-v0.52.N; stable promoted
@@ -35,13 +54,13 @@ def channel_repo(tmp_path):
     _git(repo, 'init', '-q')
     _git(repo, 'config', 'user.email', 't@t.co')
     _git(repo, 'config', 'user.name', 'Test')
-    _git(repo, 'remote', 'add', 'origin', 'https://github.com/nesquena/hermes-webui.git')
     for i in range(1, 6):
         _git(repo, 'commit', '-q', '--allow-empty', '-m', f'batch{i}')
         _git(repo, 'tag', f'exp-v0.52.{i}')
     # Promote batch 2 and batch 5 to stable (same commit, same version number).
     _git(repo, 'tag', 'v0.52.2', 'HEAD~3')
     _git(repo, 'tag', 'v0.52.5', 'HEAD')
+    _git(repo, 'remote', 'add', 'origin', str(_local_origin(repo, tmp_path)))
     return repo
 
 
@@ -161,7 +180,11 @@ def test_agent_resolution_identical_under_both_webui_channels(tmp_path, monkeypa
     _git(agent, 'init', '-q')
     _git(agent, 'config', 'user.email', 't@t.co')
     _git(agent, 'config', 'user.name', 'Test')
-    _git(agent, 'remote', 'add', 'origin', 'https://github.com/nesquena/hermes-agent.git')
+    # An origin that cannot supply refs, locally: this test needs the fetch to
+    # fail so the agent leg must resolve from its own tags. A network URL made
+    # the test depend on github.com — and an unauthenticated one that answers 401
+    # makes the update check open a desktop credential dialog.
+    _git(agent, 'remote', 'add', 'origin', str(tmp_path / 'unreachable-origin.git'))
     _git(agent, 'commit', '-q', '--allow-empty', '-m', 'a1')
     _git(agent, 'tag', 'v1.0.0')
     _git(agent, 'commit', '-q', '--allow-empty', '-m', 'a2')
@@ -307,13 +330,13 @@ def stable_pinned_repo(tmp_path):
     _git(repo, 'init', '-q')
     _git(repo, 'config', 'user.email', 't@t.co')
     _git(repo, 'config', 'user.name', 'Test')
-    _git(repo, 'remote', 'add', 'origin', 'https://github.com/nesquena/hermes-webui.git')
     _git(repo, 'commit', '-q', '--allow-empty', '-m', 'v0.52.0 release')
     _git(repo, 'tag', 'v0.52.0')  # stable tag, NO exp tag on this commit
     for i in range(1, 4):
         _git(repo, 'commit', '-q', '--allow-empty', '-m', f'exp batch {i}')
         _git(repo, 'tag', f'exp-v0.52.{i}')
     _git(repo, 'checkout', '-q', 'v0.52.0')  # pin HEAD on the stable release
+    _git(repo, 'remote', 'add', 'origin', str(_local_origin(repo, tmp_path)))
     return repo
 
 

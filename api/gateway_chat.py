@@ -580,6 +580,11 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     }
 
 
+def _gateway_approval_key(payload) -> str:
+    """Stable id for one gateway approval, shared by the status probe and the event relay."""
+    return str(payload.get("approval_id") or payload.get("id") or payload.get("timestamp") or "")
+
+
 def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> None:
     """Auto-approve or surface one runs-API approval request as a WebUI approval card."""
     approval_data = _gateway_runs_approval_event(payload)
@@ -597,6 +602,193 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
     )
     if not auto_approved:
         put_gateway_event("approval", {**(head or approval_data), "pending_count": total})
+
+
+def _note_live_gateway_event(stream_id: str, event_name: str, event_payload: dict) -> None:
+    """Mirror a relayed reasoning/tool event into the per-stream reconnect snapshot."""
+    if event_name == "reasoning":
+        reason_delta = event_payload.get("text")
+        if reason_delta and stream_id in STREAM_REASONING_TEXT:
+            STREAM_REASONING_TEXT[stream_id] += reason_delta
+    elif stream_id in STREAM_LIVE_TOOL_CALLS:
+        if event_name == "tool":
+            STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                "name": event_payload.get("name"),
+                "args": event_payload.get("args") or {},
+                "done": False,
+                **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
+            })
+        elif event_name == "tool_complete":
+            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                if shared_tc.get("done"):
+                    continue
+                if (
+                    event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
+                ) or shared_tc.get("name") == event_payload.get("name"):
+                    shared_tc["done"] = True
+                    shared_tc["is_error"] = bool(event_payload.get("is_error"))
+                    break
+
+
+def _open_gateway_run_events(base_url, headers, run_id, last_seq: int = -1):
+    headers_sse = {**headers, "Accept": "text/event-stream"}
+    if last_seq >= 0:
+        headers_sse["Last-Event-ID"] = str(last_seq)
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/v1/runs/{urllib.parse.quote(run_id, safe='')}/events",
+        headers=headers_sse,
+        method="GET",
+    )
+    return urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs())
+
+
+def _relay_gateway_run_events(
+    resp, session_id, stream_id, run_id, base_url, api_key,
+    *, put_gateway_event, cancel_event, on_seq=None, final_text="", stop_on_truncated=False,
+    surfaced_approval_ids=None, output_is_authoritative=False, approval_is_current=None,
+):
+    """Relay one /v1/runs/{id}/events stream; returns (text or None if cancelled, usage, outcome).
+
+    outcome is "ended", "eof", or "truncated" (the gateway dropped events after our cursor;
+    only returned with ``stop_on_truncated``, otherwise the retained events keep relaying).
+    Relayed payloads carry ``gateway_seq`` so the WebUI run journal records the gateway cursor;
+    ``on_seq`` commits each seq as soon as its event is relayed, so a reconnect never re-emits it.
+    ``surfaced_approval_ids`` is shared with the reattach status probe so one approval surfaces once.
+    ``output_is_authoritative`` lets ``run.completed.output`` replace streamed text (reattach: the
+    Agent may transform its answer after streaming). ``approval_is_current`` drops replayed approvals
+    the Gateway no longer has pending.
+    """
+    usage: dict = {}
+    outcome = "eof"
+    seq = None
+    sse_event = "message"
+
+    def emit(event_name, data):
+        if seq is not None and isinstance(data, dict):
+            data = {**data, "gateway_seq": seq}
+        put_gateway_event(event_name, data)
+
+    def commit():
+        nonlocal seq
+        if seq is not None and on_seq is not None:
+            on_seq(seq)
+        seq = None
+
+    for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
+        if cancel_event.is_set():
+            put_gateway_event("cancel", {"message": "Cancelled by user"})
+            return None, usage, "ended"
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            sse_event = "message"
+            continue
+        if line.startswith("event:"):
+            sse_event = line[6:].strip() or "message"
+            continue
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
+        seq = payload.get("seq") if isinstance(payload.get("seq"), int) else None
+        if payload_event == "replay.truncated":
+            if stop_on_truncated:
+                return final_text, usage, "truncated"
+            logger.info("Gateway replay for run %s truncated; relaying retained events", run_id)
+            sse_event = "message"
+            continue
+        if payload_event == "approval.request":
+            approval_key = _gateway_approval_key(payload)
+            already = surfaced_approval_ids is not None and approval_key in surfaced_approval_ids
+            if not already and (approval_is_current is None or approval_is_current(payload)):
+                if surfaced_approval_ids is not None and approval_key:
+                    surfaced_approval_ids.add(approval_key)
+                _relay_gateway_run_approval(
+                    session_id, run_id, payload, base_url, api_key,
+                    put_gateway_event=emit,
+                )
+            commit()
+            sse_event = "message"
+            continue
+        if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
+            translated = _gateway_tool_progress_event(payload)
+            if translated:
+                event_name, event_payload = translated
+                _note_live_gateway_event(stream_id, event_name, event_payload)
+                emit(event_name, event_payload)
+                if event_name != "reasoning":
+                    update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
+            commit()
+            sse_event = "message"
+            continue
+        if payload_event == "message.delta":
+            delta = str(payload.get("delta") or "")
+            if delta:
+                final_text += delta
+                if stream_id in STREAM_PARTIAL_TEXT:
+                    STREAM_PARTIAL_TEXT[stream_id] += delta
+                emit("token", {"text": delta})
+            commit()
+            sse_event = "message"
+            continue
+        if payload_event == "run.completed":
+            from api.route_approvals import settle_gateway_pending_run
+            settle_gateway_pending_run(
+                session_id,
+                run_id,
+                reason="Gateway run completed before approval resolution",
+            )
+            if payload.get("error"):
+                raise RuntimeError(str(payload["error"]))
+            output = str(payload.get("output") or "")
+            if output and (output_is_authoritative or not final_text):
+                final_text = output
+                if stream_id in STREAM_PARTIAL_TEXT:
+                    STREAM_PARTIAL_TEXT[stream_id] = output
+            usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+            outcome = "ended"
+            commit()
+            sse_event = "message"
+            continue
+        if payload_event == "run.failed":
+            from api.route_approvals import settle_gateway_pending_run
+            settle_gateway_pending_run(
+                session_id,
+                run_id,
+                reason="Gateway run failed before approval resolution",
+            )
+            raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
+        if payload_event == "run.cancelled":
+            from api.route_approvals import settle_gateway_pending_run
+            settle_gateway_pending_run(
+                session_id,
+                run_id,
+                reason="Gateway run was cancelled before approval resolution",
+            )
+            put_gateway_event("cancel", {"message": "Cancelled by gateway"})
+            return None, usage, "ended"
+        reasoning_delta = _gateway_sse_reasoning_delta(payload)
+        if reasoning_delta:
+            if stream_id in STREAM_REASONING_TEXT:
+                STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+            emit("reasoning", {"text": reasoning_delta})
+        delta = _gateway_sse_delta(payload)
+        if delta:
+            final_text += delta
+            if stream_id in STREAM_PARTIAL_TEXT:
+                STREAM_PARTIAL_TEXT[stream_id] += delta
+            emit("token", {"text": delta})
+        usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+        commit()
+    commit()
+    return final_text, usage, outcome
 
 
 def _admit_gateway_run(url_runs, headers, run_body, stream_id) -> str:
@@ -701,132 +893,15 @@ def _run_gateway_runs_api_streaming(
         _finish_gateway_run_starting(stream_id)
         raise
 
-    usage: dict = {}
     _publish_gateway_run_id(stream_id, run_id)
     if on_run_id is not None:
         on_run_id(run_id)
 
-    url_events = f"{base_url.rstrip('/')}/v1/runs/{run_id}/events"
-    headers_sse = dict(headers)
-    headers_sse["Accept"] = "text/event-stream"
-    req_events = urllib.request.Request(url_events, headers=headers_sse, method="GET")
-    final_text = ""
-    sse_event = "message"
-    with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
-        for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
-            if cancel_event.is_set():
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
-                return None, usage
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                sse_event = "message"
-                continue
-            if line.startswith("event:"):
-                sse_event = line[6:].strip() or "message"
-                continue
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                payload = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
-            if payload_event == "approval.request":
-                _relay_gateway_run_approval(
-                    session_id, run_id, payload, base_url, api_key,
-                    put_gateway_event=put_gateway_event,
-                )
-                sse_event = "message"
-                continue
-            if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
-                translated = _gateway_tool_progress_event(payload)
-                if translated:
-                    event_name, event_payload = translated
-                    if event_name == "reasoning":
-                        reason_delta = event_payload.get("text")
-                        if reason_delta and stream_id in STREAM_REASONING_TEXT:
-                            STREAM_REASONING_TEXT[stream_id] += reason_delta
-                    elif stream_id in STREAM_LIVE_TOOL_CALLS:
-                        if event_name == "tool":
-                            STREAM_LIVE_TOOL_CALLS[stream_id].append({
-                                "name": event_payload.get("name"),
-                                "args": event_payload.get("args") or {},
-                                "done": False,
-                                **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
-                            })
-                        elif event_name == "tool_complete":
-                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                                if shared_tc.get("done"):
-                                    continue
-                                if (
-                                    event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
-                                ) or shared_tc.get("name") == event_payload.get("name"):
-                                    shared_tc["done"] = True
-                                    shared_tc["is_error"] = bool(event_payload.get("is_error"))
-                                    break
-                    put_gateway_event(event_name, event_payload)
-                    if event_name != "reasoning":
-                        update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
-                sse_event = "message"
-                continue
-            if payload_event == "message.delta":
-                delta = str(payload.get("delta") or "")
-                if delta:
-                    final_text += delta
-                    if stream_id in STREAM_PARTIAL_TEXT:
-                        STREAM_PARTIAL_TEXT[stream_id] += delta
-                    put_gateway_event("token", {"text": delta})
-                sse_event = "message"
-                continue
-            if payload_event == "run.completed":
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    run_id,
-                    reason="Gateway run completed before approval resolution",
-                )
-                if payload.get("error"):
-                    raise RuntimeError(str(payload["error"]))
-                output = str(payload.get("output") or "")
-                if output and not final_text:
-                    final_text = output
-                    if stream_id in STREAM_PARTIAL_TEXT:
-                        STREAM_PARTIAL_TEXT[stream_id] = output
-                usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
-                sse_event = "message"
-                continue
-            if payload_event == "run.failed":
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    run_id,
-                    reason="Gateway run failed before approval resolution",
-                )
-                raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
-            if payload_event == "run.cancelled":
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    run_id,
-                    reason="Gateway run was cancelled before approval resolution",
-                )
-                put_gateway_event("cancel", {"message": "Cancelled by gateway"})
-                return None, usage
-            reasoning_delta = _gateway_sse_reasoning_delta(payload)
-            if reasoning_delta:
-                if stream_id in STREAM_REASONING_TEXT:
-                    STREAM_REASONING_TEXT[stream_id] += reasoning_delta
-                put_gateway_event("reasoning", {"text": reasoning_delta})
-            delta = _gateway_sse_delta(payload)
-            if delta:
-                final_text += delta
-                if stream_id in STREAM_PARTIAL_TEXT:
-                    STREAM_PARTIAL_TEXT[stream_id] += delta
-                put_gateway_event("token", {"text": delta})
-            usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+    with _open_gateway_run_events(base_url, headers, run_id) as resp:
+        final_text, usage, _outcome = _relay_gateway_run_events(
+            resp, session_id, stream_id, run_id, base_url, api_key,
+            put_gateway_event=put_gateway_event, cancel_event=cancel_event,
+        )
     return final_text, usage
 
 
@@ -898,21 +973,105 @@ def _get_gateway_run_status(base_url: str, api_key: str, run_id: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | None:
+    """Rebuild live text/reasoning/tool state from this stream's run journal; return the replay cursor.
+
+    Relayed rows carry ``gateway_seq``, so the journal is the replay cursor; None (poll only) for rows without one
+    or when the journal cannot be read (an unread journal proves no cursor, so replaying from -1 would duplicate).
+    """
+    from api.run_journal import read_run_events
+
+    try:
+        events = read_run_events(session_id, stream_id).get("events") or []
+    except Exception:
+        logger.debug("Failed to read run journal for reattached stream %s", stream_id, exc_info=True)
+        return None
+    stateful, cursor = [], -1
+    for row in events:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        seq = payload.get("gateway_seq")
+        if row.get("event") in {"token", "reasoning", "tool", "tool_complete"}:
+            if not isinstance(seq, int):
+                return None
+            stateful.append((row["event"], payload))
+        # Every relayed row (approval included) advances the cursor, not just the stateful ones.
+        if isinstance(seq, int):
+            cursor = max(cursor, seq)
+    for name, payload in stateful:
+        if name == "token":
+            STREAM_PARTIAL_TEXT[stream_id] = STREAM_PARTIAL_TEXT.get(stream_id, "") + str(payload.get("text") or "")
+        else:
+            _note_live_gateway_event(stream_id, name, payload)
+    return cursor
+
+
 def _await_gateway_run_result(
     session_id, stream_id, run_id, base_url, api_key,
-    *, put_gateway_event, cancel_event,
+    *, put_gateway_event, cancel_event, resume_seq=None,
 ):
-    """Poll a run started by a previous WebUI process; same return contract as _run_gateway_runs_api_streaming."""
+    """Resume a run started by a previous WebUI process; same return contract as _run_gateway_runs_api_streaming.
+
+    Streams /events from ``resume_seq``; polls run status when replay is truncated, unavailable, or unaligned.
+    """
     from api.route_approvals import settle_gateway_pending_run
 
     _publish_gateway_run_id(stream_id, run_id)
     update_active_run(stream_id, phase="gateway-reattached")
     surfaced_approval_ids: set[str] = set()
     failures = 0
+    last_seq = [resume_seq if resume_seq is not None else -1]
+    streaming = resume_seq is not None
+
+    def approval_is_current(payload):
+        # Auto-approved before the restart leaves no journal row; only the Gateway knows it is settled.
+        try:
+            status = _get_gateway_run_status(base_url, api_key, run_id)
+        except (urllib.error.URLError, OSError, ValueError):
+            return True  # fail open: a stale card 409s, a missing one stalls the run
+        approval = status.get("approval")
+        return (
+            str(status.get("status") or "").strip().lower() == "waiting_for_approval"
+            and isinstance(approval, dict)
+            and _gateway_approval_key(approval) == _gateway_approval_key(payload)
+        )
+
+    def surface_parked_approval(status):
+        approval = status.get("approval")
+        if str(status.get("status") or "").strip().lower() == "waiting_for_approval" and isinstance(approval, dict):
+            approval_key = _gateway_approval_key(approval)
+            if approval_key not in surfaced_approval_ids:
+                surfaced_approval_ids.add(approval_key)
+                _relay_gateway_run_approval(
+                    session_id, run_id, approval, base_url, api_key, put_gateway_event=put_gateway_event,
+                )
+
+    # Poll status before the first blocking /events read: an approval relayed before the restart sits
+    # behind the replay cursor, and a gateway without cursor replay never re-sends it at all.
+    probed = False
     while True:
         if cancel_event.is_set():
             put_gateway_event("cancel", {"message": "Cancelled by user"})
             return None, {}
+        if streaming and probed:
+            try:
+                with _open_gateway_run_events(base_url, _gateway_run_headers(session_id, api_key), run_id, last_seq[0]) as resp:
+                    text, usage, outcome = _relay_gateway_run_events(
+                        resp, session_id, stream_id, run_id, base_url, api_key,
+                        put_gateway_event=put_gateway_event, cancel_event=cancel_event,
+                        on_seq=lambda seq: last_seq.__setitem__(0, seq), final_text=STREAM_PARTIAL_TEXT.get(stream_id, ""),
+                        stop_on_truncated=True, surfaced_approval_ids=surfaced_approval_ids,
+                        output_is_authoritative=True, approval_is_current=approval_is_current,
+                    )
+                if outcome == "ended":
+                    return text, usage
+                if outcome == "truncated":
+                    logger.info("Gateway replay for run %s is truncated past seq %s; polling status", run_id, last_seq[0])
+                    streaming = False
+            except urllib.error.HTTPError:
+                streaming = False  # the status poll below classifies 404/401/403
+            except (urllib.error.URLError, OSError, ValueError):
+                logger.debug("Gateway event stream for run %s dropped; checking status", run_id, exc_info=True)
+        first_probe, probed = not probed, True
         try:
             status = _get_gateway_run_status(base_url, api_key, run_id)
             failures = 0
@@ -928,14 +1087,7 @@ def _await_gateway_run_result(
             cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
             continue
         state = str(status.get("status") or "").strip().lower()
-        approval = status.get("approval")
-        if state == "waiting_for_approval" and isinstance(approval, dict):
-            approval_key = str(approval.get("approval_id") or approval.get("id") or approval.get("timestamp") or "")
-            if approval_key not in surfaced_approval_ids:
-                surfaced_approval_ids.add(approval_key)
-                _relay_gateway_run_approval(
-                    session_id, run_id, approval, base_url, api_key, put_gateway_event=put_gateway_event,
-                )
+        surface_parked_approval(status)
         if state in _GATEWAY_RUN_TERMINAL_STATUSES:
             settle_gateway_pending_run(session_id, run_id, reason=f"Gateway run {state} before approval resolution")
             if state == "cancelled":
@@ -947,7 +1099,8 @@ def _await_gateway_run_result(
             if output and stream_id in STREAM_PARTIAL_TEXT:
                 STREAM_PARTIAL_TEXT[stream_id] = output
             return output, {k: v for k, v in _gateway_stream_usage(status).items() if v}
-        cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
+        if not (streaming and first_probe):
+            cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
 
 
 def resume_gateway_runs_after_restart() -> list[str]:
@@ -1034,7 +1187,17 @@ def _resume_gateway_run_for_session(session) -> bool:
     ).start()
     return True
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _settle_gateway_terminal_error(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    terminal_error,
+    *,
+    persisted_model=None,
+    persisted_model_provider=None,
+):
     from api.streaming import (
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
@@ -1083,8 +1246,12 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             session.messages = []
         session.messages.append(error_message)
         session.workspace = str(workspace)
-        session.model = model
-        session.model_provider = model_provider
+        session.model = persisted_model if persisted_model is not None else model
+        session.model_provider = (
+            persisted_model_provider
+            if persisted_model_provider is not None
+            else model_provider
+        )
         terminal_session_persisted = False
         try:
             session.save()
@@ -1154,6 +1321,8 @@ def _run_gateway_chat_streaming(
     attachments=None,
     *,
     model_provider=None,
+    persisted_model=None,
+    persisted_model_provider=None,
     goal_related=False,
     regeneration=False,
     reattach_run=None,
@@ -1325,6 +1494,7 @@ def _run_gateway_chat_streaming(
                         session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event,
                         cancel_event=cancel_event,
+                        resume_seq=_restore_relayed_gateway_state(session_id, stream_id),
                     )
                 else:
                     final_text, usage = _run_gateway_runs_api_streaming(
@@ -1346,6 +1516,8 @@ def _run_gateway_chat_streaming(
                     model,
                     model_provider,
                     str(exc),
+                    persisted_model=persisted_model,
+                    persisted_model_provider=persisted_model_provider,
                 )
                 if error_payload is None:
                     return
@@ -1521,6 +1693,8 @@ def _run_gateway_chat_streaming(
                 model,
                 model_provider,
                 terminal_error,
+                persisted_model=persisted_model,
+                persisted_model_provider=persisted_model_provider,
             )
             if error_payload is None:
                 return
@@ -1646,8 +1820,12 @@ def _run_gateway_chat_streaming(
             s.pending_started_at = None
             s.pending_user_source = None
             s.workspace = str(workspace)
-            s.model = model
-            s.model_provider = model_provider
+            s.model = persisted_model if persisted_model is not None else model
+            s.model_provider = (
+                persisted_model_provider
+                if persisted_model_provider is not None
+                else model_provider
+            )
 
             def _restore_cancelled_success_writeback():
                 if pending_source == "process_wakeup":

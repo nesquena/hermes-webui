@@ -232,6 +232,14 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 **Why.** WebUI imports `run_agent.AIAgent` into its long-lived Python process. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision. Local Agent-backed actions return a retryable `409 agent_runtime_stale` with `restart_scheduled: false` before accepting a new turn. Gateway- and runner-owned chat keep their existing runtime ownership. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare; losing a previously known revision remains fail-closed.
 
+Revision checks allow up to 10 seconds total across the three local Git reads
+(worktree root, tracked module, and HEAD). Each read receives only the time
+remaining before one monotonic deadline, so slow reads that finish within the
+total budget do not falsely look like a changed runtime. An exhausted budget or
+failed read still blocks a previously identified Git runtime; this does not
+bypass the revision guard or schedule an automatic restart. This is a per-check
+budget, not an end-to-end chat-request timeout; chat admission can check twice.
+
 **Diagnostic.** The stale-runtime response includes `agent_update_state`, also preserved in asynchronous compression error status:
 
 | Value | Observation |
@@ -297,6 +305,59 @@ python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confir
 **Why.** The server-side redirect after login targets `/sessions` (plural), but that path was missing from the explicit SPA-shell allowlist in `handle_get()`. Without auth the bug is invisible because the SPA handles `/sessions` client-side and the server route is never hit — only the server-side post-login redirect exposes it.
 
 **Fix.** `/sessions` is now included alongside `/` and `/index.html` in the set of paths that serve the SPA shell. No configuration change is needed.
+
+---
+
+## Update check reports a Git authentication or fetch failure
+
+**Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or
+`could not read Username`. No terminal or desktop credential prompt appears.
+
+**Why.** Update checks are unattended. WebUI removes inherited askpass, SSH-command, proxy, and Git
+config injection settings; disables checkout-controlled askpass and credential helpers; and forces
+SSH batch mode. Generic and URL-scoped credential helpers from trusted user and system Git config
+remain available when declared directly in the primary system/global files. `include` and
+`includeIf` are not followed for credential helpers, `core.sshCommand`, or `ssh.variant`:
+included files may be checkout-controlled even when Git labels their scope global. Move these
+settings into the main user/system config if needed. The explicit scope reads also work on
+Git versions before 2.26. A trusted user/system `core.sshCommand` is retained with the batch option for
+its trusted or detected SSH variant (`-oBatchMode=yes` for OpenSSH, `-batch` for PuTTY/Plink),
+as is an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
+to the active `git://` remote's host; ordinary `git://` remotes without an applicable override remain
+supported. Push checks follow `branch.<name>.pushRemote`, `remote.pushDefault`,
+`branch.<name>.remote`, then `origin`. Checks cover every selected remote `pushurl`,
+or every `url` when no `pushurl` exists; fetch/pull use only the first fetch URL.
+Any applicable checkout-controlled proxy blocks the entire push before it starts.
+A trusted SSH command is preserved/probed when any actual push destination uses SSH.
+Remote-helper forms such as `ext::`, `ssh::`, and `https::` are rejected because the
+transport prefix names a helper command.
+
+**Diagnostic.** Run the project diagnostic for each checkout named by the update status:
+
+```bash
+python3 scripts/diagnose_update_git.py /path/to/checkout
+```
+
+The diagnostic reads the origin, accepts built-in HTTP(S), SSH, and `git://` remote forms,
+applies the update runner's proxy guard in the original checkout, then probes the captured
+URL outside the checkout so repository-controlled remote helpers and URL rewrites cannot run. It
+reports fixed failure categories instead of relaying Git or credential-helper output, and redacts
+checkout paths, origin paths, URL credentials, tokens, and secret query values.
+
+**Fix.** Configure a non-interactive user/system credential helper for a private HTTPS origin, or use
+an SSH origin with a key already loaded in the SSH agent seen by WebUI. Restart WebUI if necessary so
+it inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic and update check. Custom SSH
+commands must declare or auto-detect as OpenSSH, Plink, PuTTY, or TortoisePlink; Git's `simple` variant
+fails closed. Only SSH destinations trigger the five-second, stdin-disabled `-G`
+configuration probe for custom-named commands; local paths and HTTP(S) never invoke
+the SSH wrapper. The probe uses Git's resolved shell rather than requiring `sh` on PATH;
+only a successful probe enables OpenSSH batch mode. Explicit interactive `BatchMode` options
+(including whitespace forms such as `-o 'BatchMode no'`) fail closed rather than relying on
+a later option to override OpenSSH's first-value semantics. Failed/unknown probes fail closed.
+
+**When to file a bug.** File a WebUI bug if the diagnostic succeeds under the same user and
+environment but the update check still fails, or if either path opens a credential prompt. Include
+only sanitized hosts and errors; do not include credential-bearing URLs, tokens, or private paths.
 
 ---
 

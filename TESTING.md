@@ -15,6 +15,24 @@
 
 ---
 
+## Session-scoped media authorization
+
+Run `./scripts/test.sh tests/test_media_inline.py tests/test_media_session_preview_auth.py`.
+For files outside global media roots, only exact `MEDIA:` paths emitted by
+`assistant` or `tool` messages can grant access through the owning session.
+User, system, developer, unknown, blank, null, and missing roles must not grant
+access. The route-level role matrix covers CSV, diff, patch, Excalidraw, and
+HTML; no-session requests stay denied. The new text-artifact types remain
+download-only with `nosniff`, even when `inline=1` is requested. Hard-denied
+state and secret paths stay denied regardless of message role or session token.
+
+Run `./scripts/test.sh tests/test_media_preview_session_lifetime.py` for lazy
+preview identity across a session switch. CSV, Excalidraw, PDF, and HTML action
+and fallback URLs retain the session and snapshot captured for their fetch,
+including requests started without a session. The Node harness executes the
+real loaders with deferred responses and PDF-ready/timeout callbacks; it does
+not certify browser rendering or real CDN availability.
+
 ## Static JS runtime lint (brick-class regression guard)
 
 Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function
@@ -108,6 +126,13 @@ It is intentionally **credential-free**: it strips every `*_API_KEY` from the
 environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
+
+The same job then runs `tests/browser_new_chat_focus.py`, on the same agent-free
+setup: with every `/api/sessions` response held, New Chat, Cmd/Ctrl+K and the
+typed `/new` command must focus the composer (and `/new` show its toast), and
+the first message typed with no conversation open must be sent; each reads the
+session list once before that, and shows the new row once the list is released
+(#7936, #7996, #8004). Run it locally with `python tests/browser_new_chat_focus.py`.
 
 ## Public conversation lifecycle gate
 
@@ -2053,3 +2078,16 @@ Bridged CLI sessions:
 *Regression gate: tests/test_regressions.py*
 *Run: ./scripts/test.sh*
 *Source: <repo>/*
+
+
+### MEDIA boundary regression checks (#6923)
+
+- Bare local paths and remote path-only URLs preserve every trailing byte,
+  including `.`, `,`, `;`, `:`, `!`, and `?`; those bytes are ambiguous and
+  may be part of the actual filename or URL. Punctuation detaches only when a
+  matching Markdown or quote wrapper proves that it is outside the token.
+- Query and fragment values retain all punctuation, including punctuation-only values.
+- Render `MEDIA:_`, `MEDIA:__`, and `MEDIA:*`: these are local filenames.
+  Matching empty wrappers such as `**MEDIA:**` must remain prose.
+- Recheck settled and safe/fade streaming output across callback boundaries.
+  Automated coverage: renderer behavior, MEDIA consumer parity, and SMD stream tests.

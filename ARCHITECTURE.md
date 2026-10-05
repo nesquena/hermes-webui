@@ -66,7 +66,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
       startup.py           Startup helpers: auto_install_agent_deps()
-      state_sync.py        /insights sync — message_count to the agent's state.db
+      state_sync.py        state.db bridge — opt-in /insights usage/title sync; always mirrors the session workspace into sessions.cwd
       streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
       updates.py           Self-update check and release notes
       upload.py            Multipart parser, file upload handler
