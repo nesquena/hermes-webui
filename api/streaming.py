@@ -10133,6 +10133,53 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     return text[:limit]
 
 
+def _tool_start_occurrence_decision(tool_call_id, start_ids, occurrence_state):
+    """#7653: classify a ``tool.started`` event for a possibly-reused id.
+
+    Providers legitimately reuse tool ids across calls (``call_0`` twice). The
+    second occurrence is a different tool row, not a duplicate event, so a
+    stream-wide seen-ID set must not swallow it — otherwise that row never
+    reaches the UI and its verdict can only ever move onto the first
+    occurrence.
+
+    Returns one of:
+
+      * ``'suppress'`` — a genuine duplicate start for an occurrence that has
+        not completed yet (the case the original guard was written for);
+      * ``'rearm'``    — a NEW occurrence of an id this stream already saw and
+        whose previous occurrence already completed;
+      * ``'fresh'``    — the first time this stream sees the id.
+
+    Pure function of its arguments so the decision is directly testable
+    without driving the whole ``_run_agent_streaming`` generator.
+    """
+    occ = occurrence_state.get(tool_call_id) if tool_call_id else None
+    awaiting = bool(occ is not None and occ.get('awaiting_complete'))
+    if tool_call_id and awaiting:
+        return 'suppress'
+    if tool_call_id and tool_call_id in start_ids:
+        return 'rearm'
+    return 'fresh'
+
+
+def _tool_complete_occurrence_decision(tool_call_id, complete_ids, occurrence_state):
+    """#7653: classify a completion for a possibly-reused id.
+
+    Returns ``'duplicate'`` only when the id already completed AND nothing is
+    awaiting a completion for it — i.e. a repeated completion of an
+    already-settled occurrence. A completion arriving after a re-armed start is
+    a NEW occurrence and must settle.
+    """
+    occ = occurrence_state.get(tool_call_id) if tool_call_id else None
+    awaiting = bool(occ is not None and occ.get('awaiting_complete'))
+    duplicate = bool(
+        tool_call_id
+        and tool_call_id in complete_ids
+        and not awaiting
+    )
+    return 'duplicate' if duplicate else 'settle'
+
+
 def _emit_tool_complete_to_mirrors_and_sse(
     *,
     tool_call_id,
@@ -13331,6 +13378,11 @@ def _run_agent_streaming(
             # ``"error"`` key name and a guardrail_refusal read both stay
             # correctly classified as the Agent intended.
             _authoritative_is_error_by_tid = {}
+            # #7653: per-id occurrence state for the stream-level seen-ID guards.
+            # A completed id is re-armed (`awaiting_complete=False`) so a later
+            # call that reuses the same id emits its own start/completion
+            # instead of being swallowed as a duplicate event.
+            _live_tool_event_seen_ids = {}
             # #7358 round 7 (re-gate 9/23): FIFO queue of no-ID verdicts
             # staged from ``tool_progress_callback`` events that lack
             # ``cb_kwargs['tool_call_id']`` (the live path on Hermes Agent
@@ -13664,8 +13716,57 @@ def _run_agent_streaming(
                 _unbound_reasoning_idx[0] = None
                 try:
                     _record_live_tool_start(tool_call_id, name, args)
-                    if tool_call_id and tool_call_id not in _live_tool_event_start_ids:
+                    # #7653: a provider may legitimately REUSE a tool id across
+                    # calls (`call_0` emitted twice). The second occurrence is a
+                    # different tool row, not a duplicate event, so the seen-ID
+                    # guard must not swallow it — otherwise its card never
+                    # reaches the UI and its verdict can only ever move onto
+                    # the first occurrence. Track occurrence state instead of a
+                    # bare membership set: an id whose previous occurrence is
+                    # still awaiting completion keeps suppressing (that is the
+                    # genuine duplicate-event case the guard was written for),
+                    # while an id whose previous occurrence already completed is
+                    # re-armed so the next occurrence emits its own start.
+                    _start_verdict = _tool_start_occurrence_decision(
+                        tool_call_id,
+                        _live_tool_event_start_ids,
+                        _live_tool_event_seen_ids,
+                    )
+                    if _start_verdict == 'suppress':
+                        pass  # genuine duplicate start for an unfinished occurrence
+                    elif _start_verdict == 'rearm':
+                        # Re-armed after a completion: a NEW occurrence of an id
+                        # this stream has already seen. Emit its own start row
+                        # and mark this occurrence as awaiting its completion so
+                        # a duplicate start for the SAME occurrence still
+                        # suppresses (the case the guard was written for).
+                        _live_tool_event_seen_ids[tool_call_id] = {
+                            'awaiting_complete': True,
+                        }
+                        _live_tool_calls.append({
+                            'name': name,
+                            'args': args if isinstance(args, dict) else {},
+                            'tid': tool_call_id,
+                        })
+                        if stream_id in STREAM_LIVE_TOOL_CALLS:
+                            STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                                'name': name,
+                                'done': False,
+                                'tid': tool_call_id,
+                            })
+                        put('tool', {
+                            'event_type': 'tool.started',
+                            'name': name,
+                            'preview': None,
+                            'args': _tool_args_snapshot(args),
+                            'tid': tool_call_id,
+                        })
+                    else:
                         _live_tool_event_start_ids.add(tool_call_id)
+                        if tool_call_id:
+                            _live_tool_event_seen_ids[tool_call_id] = {
+                                'awaiting_complete': True,
+                            }
                         _live_tool_calls.append({
                             'name': name,
                             'args': args if isinstance(args, dict) else {},
@@ -13706,8 +13807,25 @@ def _run_agent_streaming(
                     # _build_partial_message persists the shared
                     # mirror through _partial_tool_calls.
                     seen_ids = _live_tool_event_complete_ids
-                    if tool_call_id and tool_call_id not in seen_ids:
+                    # #7653: a reused id's LATER occurrence must still settle.
+                    # Suppress only while this occurrence's own id is the one
+                    # that has not yet completed, i.e. a duplicate completion
+                    # for an occurrence already settled — not a second call
+                    # that simply reuses the same id.
+                    _duplicate_completion = (
+                        _tool_complete_occurrence_decision(
+                            tool_call_id,
+                            seen_ids,
+                            _live_tool_event_seen_ids,
+                        ) == 'duplicate'
+                    )
+                    if tool_call_id and not _duplicate_completion:
                         seen_ids.add(tool_call_id)
+                        # Re-arm for a possible later occurrence of the same id.
+                        if tool_call_id:
+                            _live_tool_event_seen_ids[tool_call_id] = {
+                                'awaiting_complete': False,
+                            }
                         # #7358 round 5 (re-gate 9/22): prefer the Agent's
                         # authoritative ``is_error`` (captured by on_tool
                         # before the structured-callback suppression) over
