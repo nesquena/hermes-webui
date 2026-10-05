@@ -217,7 +217,15 @@ async function _restoreRememberedNewChatDraftSession(requiredWorkspace=null, sti
     // starts a fresh chat in the deleted workspace).
     if (requiredWorkspace && session.workspace !== requiredWorkspace) return false;
     if (stillOwnsPane && !stillOwnsPane()) return false;
-    await loadSession(sid, {skipLineageResolve:true});
+    await loadSession(sid, {
+      skipLineageResolve:true,
+      // A delete-triggered replacement owns this exact load. Tell its caller
+      // which generation loadSession allocated so the load does not supersede
+      // itself, while any later sidebar navigation still does.
+      onLoadClaim:generation=>{
+        if(stillOwnsPane) stillOwnsPane(null,generation);
+      },
+    });
     return !!(S.session && S.session.session_id === sid);
   } catch (_) {
     if (stillOwnsPane && !stillOwnsPane()) return false;
@@ -2296,6 +2304,7 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
+  if(typeof opts.onLoadClaim==='function') opts.onLoadClaim(_loadGeneration);
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
@@ -9955,13 +9964,16 @@ function _deleteNewChatOwnerSnapshot(){
   };
 }
 
-function _deleteNewChatOwnerIsCurrent(owner,newSessionGeneration=null){
+function _deleteNewChatOwnerIsCurrent(owner,newSessionGeneration=null,loadGeneration=null){
   if(!owner) return true;
   const expectedNewSessionGeneration=newSessionGeneration===null
     ? owner.newSessionGeneration
     : newSessionGeneration;
+  const expectedLoadGeneration=loadGeneration===null
+    ? owner.loadGeneration
+    : loadGeneration;
   return !S.session
-    && _loadSessionGeneration===owner.loadGeneration
+    && _loadSessionGeneration===expectedLoadGeneration
     && _deleteNewChatProfileGeneration()===owner.profileGeneration
     && (Number.isSafeInteger(S._newSessionIntentGeneration)?S._newSessionIntentGeneration:0)===expectedNewSessionGeneration
     && (S.activeProfile||'default')===owner.activeProfile;
@@ -9983,11 +9995,14 @@ function _showEmptyConversationAfterDelete(){
 
 async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=null){
   let ownedNewSessionGeneration=null;
-  const stillOwnsPane=(newSessionGeneration=null)=>{
+  let ownedLoadGeneration=null;
+  const stillOwnsPane=(newSessionGeneration=null,loadGeneration=null)=>{
     if(newSessionGeneration!==null) ownedNewSessionGeneration=newSessionGeneration;
+    if(loadGeneration!==null) ownedLoadGeneration=loadGeneration;
     return _deleteNewChatOwnerIsCurrent(
       owner,
       ownedNewSessionGeneration===null?null:ownedNewSessionGeneration,
+      ownedLoadGeneration===null?null:ownedLoadGeneration,
     );
   };
   if(typeof _restoreRememberedNewChatDraftSession==='function'

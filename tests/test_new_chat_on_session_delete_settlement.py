@@ -90,6 +90,10 @@ let releaseDraft = null;
 const createWorkspaces = [];
 globalThis.api = async (url, options = {}) => {
   if (url.startsWith('/api/session?')) {
+    if (scenario === 'draft-load-failure') return {session:{
+      session_id:'remembered', message_count:0, title:'New Chat', profile:'default',
+      composer_draft:{text:'draft',files:[]}, workspace:'/ws/A',
+    }};
     return await new Promise(resolve => {
       releaseDraft = () => resolve({session:{
         session_id:'remembered', message_count:0, title:'New Chat', profile:'default',
@@ -113,6 +117,11 @@ globalThis.api = async (url, options = {}) => {
     }});
   });
 };
+globalThis.loadSession = async (_sid, options = {}) => {
+  const generation = ++_loadSessionGeneration;
+  if (typeof options.onLoadClaim === 'function') options.onLoadClaim(generation);
+  if (scenario === 'draft-load-failure') throw new Error('remembered draft load failed');
+};
 
 eval(extract('_profileMatchesActiveProfile'));
 eval(extract('_isRestorableNewChatDraftSession'));
@@ -128,6 +137,9 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
 
 (async () => {
   if (scenario.startsWith('new-chat-during-draft-')) {
+    localStorage.setItem(NEW_CHAT_DRAFT_SESSION_KEY, 'remembered');
+  }
+  if (scenario === 'draft-load-failure') {
     localStorage.setItem(NEW_CHAT_DRAFT_SESSION_KEY, 'remembered');
   }
   let ordinary = null;
@@ -156,6 +168,9 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
   } else if (scenario === 'ordinary-b-pending-during-delete-a') {
     releaseCreate();
     await ordinary;
+  } else if (scenario === 'draft-load-failure') {
+    while (!releaseCreate) await new Promise(resolve => setTimeout(resolve, 0));
+    releaseCreate();
   }
   const result = await pending;
   process.stdout.write(JSON.stringify({
@@ -222,6 +237,16 @@ def test_failed_post_leaves_blank_root_instead_of_deleted_session_route(driver):
     assert result["busy"] is False
     assert result["activeStreamId"] is None
     assert result["sendButtonUpdates"] > 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_failed_remembered_draft_load_falls_back_to_fresh_chat(driver):
+    result = _run(driver, "draft-load-failure")
+    assert result["activeSid"] == "created-A"
+    assert result["createWorkspaces"] == ["/ws/A"]
+    assert result["profileWorkspace"] is None
+    assert result["superseded"] is False
+    assert result["failed"] is False
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

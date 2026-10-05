@@ -86,7 +86,7 @@ def test_restore_helper_validates_candidate_with_session_metadata():
     assert "_isRestorableNewChatDraftSession(session, true)" in SESSIONS_JS, (
         "candidate must have a non-empty server-side composer_draft before restore"
     )
-    assert "await loadSession(sid, {skipLineageResolve:true});" in SESSIONS_JS, (
+    assert "await loadSession(sid, {" in SESSIONS_JS and "skipLineageResolve:true" in SESSIONS_JS, (
         "helper should load the exact hidden empty draft session"
     )
 
