@@ -102,13 +102,22 @@ def main():
                                 while not page.evaluate("typeof loadSession==='function' && S._bootReady === true"):
                                     assert time.monotonic()<deadline, ('boot timeout', errors)
                                     page.wait_for_timeout(50)
-                                page.evaluate("""mode=>{
-                                  window._chatActivityDisplayMode=mode;window._showThinking=true;
+                                page.evaluate('mode => _pickChatActivityDisplayMode(mode)',mode)
+                                deadline=time.monotonic()+30
+                                while not page.evaluate("""mode=>{
+                                  const status=document.getElementById('settingsAppearanceAutosaveStatus');
+                                  return window._chatActivityDisplayMode===mode&&
+                                    !!(status&&status.classList.contains('is-saved'));
+                                }""",mode):
+                                    assert time.monotonic()<deadline, ('settings autosave timeout', mode, errors)
+                                    page.wait_for_timeout(50)
+                                page.evaluate("""()=>{
+                                  window._showThinking=true;
                                   window._simplifiedToolCalling=true;
                                   window.redrawCount=0;
                                   const render=window._renderLiveAnchorActivitySceneForStream;
                                   window._renderLiveAnchorActivitySceneForStream=function(...args){window.redrawCount++;return render(...args);};
-                                }""",mode)
+                                }""")
                                 measured=page.evaluate("""async sid=>{
                                   const t=performance.now();await loadSession(sid);
                                   const loadMs=performance.now()-t;
@@ -116,7 +125,8 @@ def main():
                                   while(!fixtureSources.some(s=>s.url.includes('api/chat/stream?'))&&performance.now()<deadline){
                                     await new Promise(r=>setTimeout(r,10));
                                   }
-                                  return {ms:loadMs,redraws:window.redrawCount,
+                                  return {ms:loadMs,actualMode:window._chatActivityDisplayMode,
+                                    redraws:window.redrawCount,
                                     tools:document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role="tool"]').length,
                                     busy:S.busy,
                                     sources:fixtureSources.filter(s=>s.url.includes('api/chat/stream?')).map(s=>s.url)};
@@ -127,6 +137,7 @@ def main():
                                 results.append(result)
                                 if not os.environ.get('MEASURE_BASELINE'):
                                     assert measured['redraws']<=2,result
+                                assert measured['actualMode']==mode,result
                                 expected=0 if mode=='hide_all_activity' else tool_count
                                 assert measured['tools']==expected,result
                                 assert measured['busy'],result
