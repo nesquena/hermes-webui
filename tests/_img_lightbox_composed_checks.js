@@ -366,6 +366,89 @@
       assert_(currentLb() === null, "an undragged stage click must close the lightbox");
     });
 
+    await run("viewport_click_retargeted_image_press", bucket, async function () {
+      // Pointer capture retargets the click produced by a real mouse press on
+      // image pixels to the viewport (mouseup is captured, so the click target
+      // becomes the closest common ancestor). A press on the image must not
+      // therefore be mistaken for a letterbox press (maintainer gate recheck of
+      // #6896, 2026-10-06).
+      var box = await openBox(IMG_W, IMG_H);
+      var size = vpSize(box.vp);
+      var rect = box.vp.getBoundingClientRect();
+      var cx = rect.left + size.w / 2;
+      var cy = rect.top + size.h / 2;
+      var cv = box.cv.getBoundingClientRect();
+      assert_(cx >= cv.left && cx <= cv.right && cy >= cv.top && cy <= cv.bottom,
+        "fixture: the stage centre must lie on the image");
+      pointer(box.cv, "pointerdown", cx, cy, 1);
+      assert_(box.z.pressOnImage === true, "a press on image pixels must be recorded as such");
+      pointer(box.vp, "pointerup", cx, cy, 1);
+      // The retargeted click: target is the viewport, coordinates are on the image.
+      box.vp.dispatchEvent(new MouseEvent("click", {
+        bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy,
+      }));
+      for (var i = 0; i < 30 && currentLb(); i++) await sleep(20);
+      assert_(currentLb() !== null, "a retargeted click from an image press must not close the lightbox");
+
+      // Letterbox control: a press above the fitted image still dismisses.
+      closeLightbox();
+      var fresh = await openBox(IMG_W, IMG_H);
+      var fsize = vpSize(fresh.vp);
+      var frect = fresh.vp.getBoundingClientRect();
+      var fcv = fresh.cv.getBoundingClientRect();
+      var lx = frect.left + fsize.w / 2;
+      var ly = frect.top + 6;
+      assert_(ly < fcv.top - 4, "fixture: expected a letterbox band above the image");
+      pointer(fresh.vp, "pointerdown", lx, ly, 1);
+      assert_(fresh.z.pressOnImage === false, "a press on the letterbox must not count as image pixels");
+      pointer(fresh.vp, "pointerup", lx, ly, 1);
+      fresh.vp.dispatchEvent(new MouseEvent("click", {
+        bubbles: true, cancelable: true, composed: true, clientX: lx, clientY: ly,
+      }));
+      for (var j = 0; j < 30 && currentLb(); j++) await sleep(20);
+      assert_(currentLb() === null, "a letterbox press must still close the lightbox");
+    });
+
+    await run("keyboard_modifier_shortcuts_untouched", bucket, async function () {
+      var box = await openBox(IMG_W, IMG_H);
+      var base = box.z.scale;
+      // Ctrl/Meta/Alt combinations belong to the browser: they must not be
+      // prevented and must not zoom the image (maintainer gate recheck of
+      // #6896, 2026-10-06). An in-page recorder added after the lightbox
+      // handler observes the decision it made.
+      var seen = [];
+      var rec = function (e) {
+        seen.push({ key: e.key, ctrl: e.ctrlKey, meta: e.metaKey, alt: e.altKey, prevented: e.defaultPrevented });
+      };
+      document.addEventListener("keydown", rec);
+      try {
+        var combos = [
+          { key: "+", ctrl: true }, { key: "=", ctrl: true }, { key: "-", ctrl: true }, { key: "_", ctrl: true },
+          { key: "+", meta: true }, { key: "-", meta: true },
+          { key: "f", ctrl: true },
+        ];
+        for (var i = 0; i < combos.length; i++) {
+          var c = combos[i];
+          document.dispatchEvent(new KeyboardEvent("keydown", {
+            key: c.key, ctrlKey: !!c.ctrl, metaKey: !!c.meta, altKey: !!c.alt,
+            bubbles: true, cancelable: true, composed: true,
+          }));
+          approx(box.z.scale, base, 1e-9, "modified key '" + c.key + "' must not zoom the lightbox");
+        }
+        for (var j = 0; j < seen.length; j++) {
+          assert_(seen[j].prevented === false,
+            "a browser shortcut (ctrl=" + seen[j].ctrl + " meta=" + seen[j].meta + " key=" + seen[j].key + ") must stay unprevented");
+        }
+        // Control: the unmodified shortcuts still work.
+        key("+");
+        assert_(box.z.scale > base, "control: an unmodified '+' must still zoom");
+        key("f");
+        approx(box.z.scale, box.z.fitScale, 1e-6, "control: an unmodified 'f' must still reset to fit");
+      } finally {
+        document.removeEventListener("keydown", rec);
+      }
+    });
+
     // 5. Review follow-ups (greptile 2026-10-05): a second pointer must not
     // take the pan over, the document-wide shortcuts must not hijack typing
     // in a background field, focus must move into the dialog, and a failed

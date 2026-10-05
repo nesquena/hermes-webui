@@ -2629,6 +2629,7 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     pinchStartX: 0,
     pinchStartY: 0,
     pinching: false,
+    pressOnImage: false,
     scale: 1,
     viewport,
     x: 0,
@@ -2782,7 +2783,29 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     viewport.classList.remove('is-panning');
   }
 
+  // Whether a viewport point lands on the transformed canvas — i.e. on the
+  // image's own pixels rather than the letterboxed stage around it. Needed
+  // because pointer capture retargets the trusted click produced by a real
+  // mouse press on image pixels to the viewport (mouseup is captured, so the
+  // click's target is the closest common ancestor, the viewport), which made
+  // `e.target === viewport` also match a click on the image and dismissed the
+  // dialog (maintainer gate recheck of #6896, 2026-10-06).
+  function _imgPointOnCanvas(x, y) {
+    if(!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    if(!canvas || typeof canvas.getBoundingClientRect !== 'function') return false;
+    const r = canvas.getBoundingClientRect();
+    if(!(r.width > 0) || !(r.height > 0)) return false;
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  }
+
   function _imgOnPointerDown(e) {
+    // Record where the press landed BEFORE pointer capture is taken: this is
+    // the only reliable "is this interaction on the image?" signal, because
+    // the capture retargets the follow-up click to the viewport (see
+    // _onViewportClick). e.target here is still the real hit element, and the
+    // geometric hit-test covers browsers that do not retarget.
+    state.pressOnImage = !!((e.target && e.target !== viewport) ||
+      _imgPointOnCanvas(Number(e.clientX), Number(e.clientY)));
     if(state.pinching) return;
     if(e.button != null && e.button !== 0) return;
     if(state.dragging) return;
@@ -2826,7 +2849,9 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
 
   function _onViewportClick(e) {
     const wasDragged = state.dragged;
+    const pressOnImage = state.pressOnImage;
     state.dragged = false;
+    state.pressOnImage = false;
     // Suppress the browser's post-drag click (pointerdown+up on the same
     // element closes the lightbox right after a pan) and clicks on the
     // transformed canvas (image pixels). An undragged click on the
@@ -2834,7 +2859,17 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     // handler so clicking empty space around a fitted image still closes
     // the dialog — the img is pointer-events:none, so clicks on visible
     // pixels target the canvas while letterboxed clicks target the viewport.
-    if(wasDragged || e.target !== viewport){
+    //
+    // The click's target alone cannot decide that: the pointer capture taken
+    // in _imgOnPointerDown retargets the click of a real mouse press on image
+    // pixels to the viewport, so `e.target === viewport` also matched clicks
+    // on the image and the dialog dismissed itself (maintainer gate recheck of
+    // #6896, 2026-10-06). Fall back to the recorded press origin and to a
+    // hit-test of the click point against the transformed canvas.
+    const onImage = pressOnImage ||
+      (e.target && e.target !== viewport) ||
+      _imgPointOnCanvas(Number(e.clientX), Number(e.clientY));
+    if(wasDragged || onImage){
       if(e.stopPropagation) e.stopPropagation();
     }
   }
@@ -3030,6 +3065,12 @@ function _openImgLightboxWithNav(src, alt, images, index) {
       const tag = String(tgt.tagName || '').toLowerCase();
       if(tgt.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select') return;
     }
+    // Never hijack a browser/OS shortcut: Ctrl/Meta + '+'/'='/'-'/'_' is the
+    // browser's own page zoom (Ctrl+F is find-in-page, Alt/⌘+Arrow is history
+    // navigation), so leave those combinations unprevented and let the
+    // unmodified image controls below keep working (maintainer gate recheck of
+    // #6896, 2026-10-06).
+    if(e.ctrlKey || e.metaKey || e.altKey) return;
     if(e.key==='f' || e.key==='F'){ if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); return; }
     if(e.key==='+' || e.key==='='){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1.25); return; }
     if(e.key==='-' || e.key==='_'){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1/1.25); return; }

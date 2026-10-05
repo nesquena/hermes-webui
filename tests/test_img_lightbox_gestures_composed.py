@@ -173,6 +173,181 @@ class TestComposedReviewFollowups:
         _check(composed.desktop, "img_error_keeps_zoom_drops_stale_geometry")
 
 
+# Trusted-input regressions for the 2026-10-06 maintainer gate certificate.
+# These use Playwright's own input pipeline (real mouse/keyboard events), which
+# is the only way to exercise the browser's click retargeting under pointer
+# capture and the browser's own shortcut defaults -- dispatched synthetic
+# events miss both (the gate note says synthetic clicks that explicitly choose
+# a canvas target do not reproduce it).
+_LB_RECTS_JS = """
+() => {
+  const lb = document.querySelector('.img-lightbox');
+  if (!lb) return null;
+  const vp = lb.querySelector('.img-lightbox-viewport');
+  const cv = lb.querySelector('.img-lightbox-canvas');
+  const v = vp.getBoundingClientRect();
+  const c = cv.getBoundingClientRect();
+  const vpBox = { left: v.left, top: v.top, width: v.width, height: v.height };
+  const cvBox = { left: c.left, top: c.top, width: c.width, height: c.height };
+  const inCanvas = (p) => !!p && p.x >= cvBox.left && p.x <= cvBox.left + cvBox.width
+    && p.y >= cvBox.top && p.y <= cvBox.top + cvBox.height;
+  const margin = 6;
+  let letter = null;
+  if (cvBox.top - vpBox.top > margin * 2) {
+    letter = { x: vpBox.left + vpBox.width / 2, y: vpBox.top + margin };
+  } else if ((vpBox.top + vpBox.height) - (cvBox.top + cvBox.height) > margin * 2) {
+    letter = { x: vpBox.left + vpBox.width / 2, y: vpBox.top + vpBox.height - margin };
+  } else if (cvBox.left - vpBox.left > margin * 2) {
+    letter = { x: vpBox.left + margin, y: vpBox.top + vpBox.height / 2 };
+  } else if ((vpBox.left + vpBox.width) - (cvBox.left + cvBox.width) > margin * 2) {
+    letter = { x: vpBox.left + vpBox.width - margin, y: vpBox.top + vpBox.height / 2 };
+  }
+  const image = { x: cvBox.left + cvBox.width / 2, y: cvBox.top + cvBox.height / 2 };
+  return {
+    viewport: vpBox,
+    canvas: cvBox,
+    image,
+    letterbox: letter,
+    imageHitsCanvas: inCanvas(image),
+    letterboxHitsCanvas: inCanvas(letter),
+  };
+}
+"""
+
+_THUMB_SVG = (
+    "data:image/svg+xml;base64,"
+    "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MDAi"
+    "IGhlaWdodD0iNDUwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxs"
+    "PSIjM2E3Ii8+PC9zdmc+"
+)
+
+
+class TestComposedTrustedInput:
+    """The two 2026-10-06 gate blockers, driven with real Chromium input."""
+
+    @staticmethod
+    def _open_from_thumbnail(page):
+        """Open the production lightbox the way a user does: a real click on a
+        rendered message thumbnail (the gate's own entrypoint)."""
+        page.evaluate(
+            """(src) => {
+                const old = document.getElementById('gate-thumb');
+                if (old) old.remove();
+                const im = document.createElement('img');
+                im.id = 'gate-thumb';
+                im.className = 'msg-media-img';
+                im.src = src;
+                im.style.cssText = 'position:fixed;left:8px;top:48px;width:160px;height:90px;z-index:9000';
+                document.body.appendChild(im);
+                const old2 = document.querySelector('.img-lightbox');
+                if (old2) old2.remove();
+            }""",
+            _THUMB_SVG,
+        )
+        page.click("#gate-thumb")
+        page.wait_for_function(
+            "() => { const lb = document.querySelector('.img-lightbox'); "
+            "return !!lb && !!lb._zoom && lb._zoom.boxW > 0; }",
+            timeout=15000,
+        )
+        data = page.evaluate(_LB_RECTS_JS)
+        assert data is not None, "the thumbnail click must open the lightbox"
+        return data
+
+    @staticmethod
+    def _is_open(page):
+        return page.evaluate("() => document.querySelector('.img-lightbox') !== null")
+
+    def test_trusted_click_on_image_pixels_keeps_the_lightbox_open(self, composed):
+        page = composed.desktop_page
+        data = self._open_from_thumbnail(page)
+        assert data["imageHitsCanvas"] is True, "fixture: the image centre is off the canvas"
+        img = data["image"]
+        page.mouse.click(img["x"], img["y"])
+        page.wait_for_timeout(80)
+        assert self._is_open(page), (
+            "a trusted mouse click on the rendered image dismissed the lightbox "
+            "(pointer capture retargets the click to the viewport)"
+        )
+
+    def test_trusted_letterbox_click_still_dismisses(self, composed):
+        page = composed.desktop_page
+        data = self._open_from_thumbnail(page)
+        assert data["letterbox"] is not None, "fixture: no letterbox area around the image"
+        assert data["letterboxHitsCanvas"] is False, "fixture: the letterbox point is on the image"
+        box = data["letterbox"]
+        page.mouse.click(box["x"], box["y"])
+        page.wait_for_timeout(300)
+        assert not self._is_open(page), "a trusted click on the letterbox must still dismiss the lightbox"
+
+    def test_trusted_drag_then_click_keeps_the_lightbox_open(self, composed):
+        page = composed.desktop_page
+        data = self._open_from_thumbnail(page)
+        img = data["image"]
+        page.mouse.move(img["x"], img["y"])
+        page.mouse.down()
+        page.mouse.move(img["x"] + 60, img["y"] + 30, steps=6)
+        page.mouse.up()  # the browser emits a real click after the drag
+        page.wait_for_timeout(80)
+        assert self._is_open(page), "the post-drag click must not dismiss the lightbox"
+
+    def test_trusted_browser_zoom_shortcuts_are_not_hijacked(self, composed):
+        page = composed.desktop_page
+        data = self._open_from_thumbnail(page)
+        assert data["imageHitsCanvas"] is True
+        page.evaluate(
+            """() => {
+                if (window.__gateKeyRec) document.removeEventListener('keydown', window.__gateKeyRec);
+                window.__gateKeys = [];
+                window.__gateKeyRec = (e) => {
+                    window.__gateKeys.push({
+                        key: e.key, ctrl: e.ctrlKey, meta: e.metaKey, alt: e.altKey,
+                        prevented: e.defaultPrevented,
+                    });
+                };
+                document.addEventListener('keydown', window.__gateKeyRec);
+            }"""
+        )
+        scale_of = (
+            "() => { const lb = document.querySelector('.img-lightbox'); "
+            "return (lb._zoom && lb._zoom.scale) || 0; }"
+        )
+        try:
+            before = page.evaluate(scale_of)
+            page.keyboard.press("Control+Equal")
+            page.keyboard.press("Control+Minus")
+            after = page.evaluate(scale_of)
+            assert after == before, (
+                f"Ctrl+Equal / Ctrl+Minus must not change the lightbox zoom "
+                f"(scale {before} -> {after}); those belong to the browser"
+            )
+            recorded = page.evaluate("() => window.__gateKeys || []")
+            modified = [r for r in recorded if r["ctrl"] or r["meta"]]
+            assert modified, "the trusted Ctrl shortcuts never reached the document"
+            assert all(r["prevented"] is False for r in modified), (
+                "a browser zoom shortcut must stay unprevented: " + repr(modified)
+            )
+            # Control: the unmodified shortcuts still drive the image.
+            page.keyboard.press("Equal")
+            assert page.evaluate(scale_of) > before, "an unmodified '=' must still zoom in"
+            page.keyboard.press("Minus")
+            assert page.evaluate(scale_of) == before, "an unmodified '-' must still zoom out"
+        finally:
+            page.evaluate(
+                "() => { if (window.__gateKeyRec) document.removeEventListener('keydown', window.__gateKeyRec); }"
+            )
+
+
+class TestComposedGate20261006:
+    """The in-page synthetic halves of the same two gate blockers."""
+
+    def test_retargeted_click_from_an_image_press_does_not_dismiss(self, composed):
+        _check(composed.desktop, "viewport_click_retargeted_image_press")
+
+    def test_browser_shortcut_modifiers_are_left_alone(self, composed):
+        _check(composed.desktop, "keyboard_modifier_shortcuts_untouched")
+
+
 class TestComposedI18n:
     def test_zh_locale_renders_fit_text_title_aria(self, composed):
         _check(composed.desktop, "locale_zh_renders")

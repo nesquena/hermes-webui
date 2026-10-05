@@ -221,11 +221,21 @@ class TestBackdropDismissalPreserved:
         letterboxed area must bubble to the lightbox backdrop handler
         (lb.onclick -> _closeImgLightbox). Unconditionally stopping
         propagation here regressed close-on-backdrop for small/portrait
-        images, so suppression must be conditional on a prior drag or on a
-        non-viewport target (the transformed canvas)."""
+        images, so suppression must be conditional on a prior drag or on the
+        interaction belonging to the image pixels.
+
+        The click's target alone cannot decide that: pointer capture (taken in
+        _imgOnPointerDown) retargets the trusted click of a real mouse press on
+        image pixels to the viewport, so the decision also uses the recorded
+        press origin and a hit-test of the click point against the transformed
+        canvas (maintainer gate recheck of #6896, 2026-10-06)."""
         src = UI.read_text(encoding="utf-8")
         assert "const wasDragged = state.dragged;" in src
-        assert "if(wasDragged || e.target !== viewport){" in src
+        assert "const pressOnImage = state.pressOnImage;" in src
+        assert "state.pressOnImage = !!((e.target && e.target !== viewport) ||" in src
+        assert "function _imgPointOnCanvas(x, y) {" in src
+        assert "const onImage = pressOnImage ||" in src
+        assert "if(wasDragged || onImage){" in src
         assert "if(e.stopPropagation) e.stopPropagation();" in src
         # Backdrop close handler must still be wired on the lightbox root.
         assert "lb.onclick = () => _closeImgLightbox(lb);" in src

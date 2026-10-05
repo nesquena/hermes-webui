@@ -56,12 +56,57 @@ class TestDismissalSemantics:
     def test_viewport_click_suppresses_only_dragged_or_canvas_clicks(self):
         src = UI.read_text(encoding="utf-8")
         assert "const wasDragged = state.dragged;" in src
-        assert "if(wasDragged || e.target !== viewport){" in src
+        assert "const pressOnImage = state.pressOnImage;" in src
+        assert "const onImage = pressOnImage ||" in src
+        assert "function _imgPointOnCanvas(x, y) {" in src
+        assert "state.pressOnImage = !!((e.target && e.target !== viewport) ||" in src
         assert "e.stopPropagation" in src
 
     def test_image_is_pointer_events_none(self):
         css = STYLE.read_text(encoding="utf-8")
         assert "pointer-events:none" in css
+
+
+class TestMaintainerGate20261006:
+    """Source locks for the 2026-10-06 gate-certification fixes on #6896.
+
+    The behavioural proof lives in ``test_img_lightbox_gestures_composed.py``
+    (real Chromium input). These locks keep a marker regression failing fast
+    without launching a browser.
+    """
+
+    def test_pointer_capture_retargeting_is_compensated(self):
+        src = UI.read_text(encoding="utf-8")
+        # The press origin is recorded before the capture is taken...
+        assert "state.pressOnImage = !!((e.target && e.target !== viewport) ||" in src
+        # ...and the click decision falls back to it plus a geometric hit-test
+        # of the transformed canvas, because pointer capture retargets the
+        # trusted click on image pixels to the viewport.
+        start = src.index("function _onViewportClick(e) {")
+        end = src.index("function _imgTouchDist(", start)
+        body = src[start:end]
+        assert "function _imgPointOnCanvas(x, y) {" in src
+        assert "const onImage = pressOnImage ||" in body
+        assert "_imgPointOnCanvas(Number(e.clientX), Number(e.clientY))" in body
+        assert "if(wasDragged || onImage){" in body
+        # The old target-only test is gone: it treated a retargeted image click
+        # as a letterbox press and dismissed the dialog.
+        assert "e.target !== viewport){" not in body
+
+    def test_browser_shortcut_modifiers_are_not_hijacked(self):
+        src = UI.read_text(encoding="utf-8")
+        start = src.index("// Single keyboard handler")
+        end = src.index("document.addEventListener('keydown', lb._keyHandler);", start)
+        body = src[start:end]
+        guard_at = body.index("if(e.ctrlKey || e.metaKey || e.altKey) return;")
+        for shortcut in (
+            "e.key==='f' || e.key==='F'",
+            "e.key==='+' || e.key==='='",
+            "e.key==='-' || e.key==='_'",
+        ):
+            assert guard_at < body.index(shortcut), (
+                f"the modifier guard must precede the {shortcut} shortcut"
+            )
 
 
 class TestKeyboardAndButton:
