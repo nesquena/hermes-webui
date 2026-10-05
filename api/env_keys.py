@@ -28,6 +28,8 @@ there is a reason to add a re-authentication gate for it (#7815).
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
+from pathlib import Path
 from urllib.parse import unquote
 
 from api.helpers import bad, j
@@ -108,40 +110,95 @@ def _canonical_profile_name(name: str) -> str:
 
 
 def _profile_scope(profile):
-    """Enter ``profile``'s scope for the agent's env reader/writer.
+    """Enter ``profile``'s HOME scope for the agent's env reader/writer.
 
     ``profile`` is always the AUTHORIZED profile for the request (see
-    :func:`_authorized_profile`) — never a query parameter. A scope that
-    cannot be constructed is an error the caller must see: the previous
-    behaviour returned a no-op context, which let a request answer against
-    the process's launch/home ``.env`` (i.e. the DEFAULT profile) instead of
-    the caller's — a silent cross-profile mutation reported as success
-    (#7870 review, "wrong-home default").
+    :func:`_authorized_profile`) — never a query parameter.
+
+    The scope is the task-local ``HERMES_HOME`` override in
+    ``hermes_constants``: the reader/writer both resolve their target through
+    ``get_env_path() -> get_hermes_home()`` at call time, so the override
+    reaches them without touching any process-level state.
+
+    The obvious alternative — ``hermes_cli.web_server_profiles._profile_scope``
+    — is unusable here. Its ``_config_profile_scope`` calls
+    ``activate_multi_profile_hosting()`` for any non-launch home, which is a
+    **process-global, one-way** switch: once a single WebUI request for another
+    profile's home flips it, ``agent.secret_scope.get_secret`` fails closed and
+    every concurrent unscoped read raises ``UnscopedSecretError`` — including
+    the chat turns this very server is serving. It also swaps the skills
+    modules' module-level ``HERMES_HOME``/``SKILLS_DIR`` under a lock. The
+    WebUI never enables multiplexing on master, so a custom-key admin request
+    must not be able to flip it for the whole process.
+
+    The requested profile is NEVER the launch profile by construction
+    (:func:`_authorized_profile` renames root to ``default`` and refuses an
+    unresolvable binding), so the override only ever redirects a ``.env`` read
+    or write into the caller's own home.
+
+    A scope that cannot be constructed is an error the caller must see: the
+    previous behaviour returned a no-op context, which let a request answer
+    against the process's launch/home ``.env`` (i.e. the DEFAULT profile)
+    instead of the caller's — a silent cross-profile mutation reported as
+    success (#7870 review, "wrong-home default").
 
     Raises ``EnvKeyProfileError`` on any binding failure.
     """
     if not profile:
         raise EnvKeyProfileError("no profile to scope the .env access to")
 
-    class _NoScope:
-        def __enter__(self):
-            return None
-
-        def __exit__(self, *exc):
-            return False
-
     try:
-        from hermes_cli.web_server_profiles import _profile_scope as _scope
-    except Exception:
-        raise EnvKeyProfileError(
-            "the agent profile binding is unavailable; refusing to touch a .env"
-        ) from None
-    try:
-        return _scope(profile)
+        from api.profiles import get_hermes_home_for_profile
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
     except Exception as exc:
         raise EnvKeyProfileError(
-            f"could not bind the {profile!r} profile scope: {exc}"
+            f"the agent profile binding is unavailable; refusing to touch a .env: {exc}"
         ) from exc
+
+    try:
+        home = Path(get_hermes_home_for_profile(profile)).expanduser().resolve()
+    except Exception as exc:
+        raise EnvKeyProfileError(
+            f"could not resolve the {profile!r} profile home: {exc}"
+        ) from exc
+
+    # Fail closed on a home that is not provably THIS profile's own.
+    #
+    # ``get_hermes_home_for_profile`` falls back to the base (default) home for
+    # a name it cannot resolve — correct for config *reads* that want "best
+    # effort", fatal here: the write would land in the DEFAULT profile's .env
+    # and be reported as the caller's. That is the exact "wrong-home default"
+    # failure this PR already fixed once, now reachable again through the new
+    # resolver, so it has to be rejected rather than trusted.
+    #
+    # The check is structural, not a comparison against the process home: a
+    # named profile's home lives under ``profiles/<name>`` by construction, so
+    # the name must be the last path component of the resolved home. A fallback
+    # to the base home therefore fails here, and so does a resolver that maps
+    # two names onto one directory.
+    if _canonical_profile_name(profile) != "default":
+        if home.name != _canonical_profile_name(profile):
+            raise EnvKeyProfileError(
+                f"the {profile!r} profile resolved to {home}, which is not its "
+                f"own home; refusing to touch a .env"
+            )
+    if not str(home) or home == Path(home.anchor):
+        raise EnvKeyProfileError(
+            f"the {profile!r} profile resolved to an unusable home {home!r}"
+        )
+
+    @contextmanager
+    def _scoped_home():
+        token = set_hermes_home_override(str(home))
+        try:
+            yield home
+        finally:
+            reset_hermes_home_override(token)
+
+    return _scoped_home()
 
 
 def _active_profile_env(profile=None):
@@ -271,12 +328,26 @@ def handle_env_keys_put(handler, parsed, body: dict) -> bool:
             # success response now means the write is observable on disk, not
             # merely that no exception escaped.
             save_env_value(name, value)
-            if _active_profile_env(profile)[0] is None or name not in (
-                _active_profile_env(profile)[0] or {}
-            ):
+            # The read-back MUST stay inside the scope. ``_active_profile_env``
+            # re-enters the profile's home itself, but doing it here means the
+            # verification observes the SAME ``.env`` the writer just touched
+            # even if the scope's home override is ever narrowed — and it keeps
+            # the proof adjacent to the write it has to vouch for.
+            stored, _read_err = _active_profile_env(profile)
+            if stored is None or name not in stored:
                 return bad(
                     handler,
                     f"the writer did not store {name} in the {profile!r} profile .env",
+                    status=409,
+                )
+            if stored.get(name) != value:
+                # The key exists but with a DIFFERENT value: a managed writer
+                # refused the replacement and left the previous one in place.
+                # Answering ok:true here would report the new secret as stored
+                # while the old one is still live.
+                return bad(
+                    handler,
+                    f"{name} was not updated in the {profile!r} profile .env",
                     status=409,
                 )
     except EnvKeyProfileError as exc:
@@ -329,16 +400,28 @@ def handle_env_key_delete(handler, name: str, parsed=None) -> bool:
     try:
         with _profile_scope(profile):
             remove_env_value(name)
-        # Prove the key is gone from the AUTHORIZED profile's .env rather than
-        # trusting the writer's return (a managed refusal returns False, and
-        # the old code answered ok:true anyway).
-        after, _err = _active_profile_env(profile)
-        if after is not None and name in after:
-            return bad(
-                handler,
-                f"{name} is still present in the {profile!r} profile .env",
-                status=409,
-            )
+            # Prove the key is gone from the AUTHORIZED profile's .env rather
+            # than trusting the writer's return (a managed refusal returns
+            # False, and the old code answered ok:true anyway). The read-back
+            # stays inside the scope so it observes the same file the writer
+            # just touched.
+            after, _read_err = _active_profile_env(profile)
+            if after is None:
+                # The read-back itself failed: the delete is UNVERIFIED. A
+                # read failure used to fall through to ok:true, reporting a
+                # removal nobody confirmed.
+                return bad(
+                    handler,
+                    f"could not verify {name} was removed from the "
+                    f"{profile!r} profile .env",
+                    status=409,
+                )
+            if name in after:
+                return bad(
+                    handler,
+                    f"{name} is still present in the {profile!r} profile .env",
+                    status=409,
+                )
     except EnvKeyProfileError as exc:
         return bad(handler, f"Profile scope unavailable: {exc}", status=503)
     except Exception as exc:

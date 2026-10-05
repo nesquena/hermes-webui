@@ -42,6 +42,13 @@ class _RealWriter:
     returns whether anything was removed — matching
     ``hermes_cli.config`` — so the handlers' return-value handling is
     exercised for real.
+
+    The writer resolves its target the way the installed agent does:
+    ``get_env_path() -> get_hermes_home() / ".env"``, and ``get_hermes_home()``
+    prefers the **task-local contextvar override** over ``HERMES_HOME``. The
+    scope under test must therefore be verified through the same channel the
+    real reader/writer uses, not through a private back door the production
+    code never touches.
     """
 
     def __init__(self, root):
@@ -50,13 +57,21 @@ class _RealWriter:
         self.calls: list[tuple[str, str, str]] = []
         self._managed = {"PROVIDER_API_KEY"}  # writer refuses, does not raise
 
+    def _home(self) -> str | None:
+        from hermes_constants import get_hermes_home_override
+
+        override = get_hermes_home_override()
+        if override:
+            return override
+        import os
+
+        return os.environ.get("HERMES_HOME", "") or None
+
     def _path(self, profile: str):
         return self.root / profile / ".env"
 
     def load_env(self) -> dict[str, str]:
-        import os
-
-        home = os.environ.get("HERMES_HOME", "")
+        home = self._home()
         path = self.root / home / ".env" if home else None
         if path is None or not path.exists():
             return {}
@@ -74,9 +89,9 @@ class _RealWriter:
             self.refusals.append(key)
             return None
         self.calls.append(("save", key, value))
-        import os
-
-        home = os.environ.get("HERMES_HOME", "")
+        home = self._home()
+        if not home:
+            raise AssertionError("save_env_value reached no scoped home")
         p = self.root / home / ".env"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"{key}={value}\n", encoding="utf-8")
@@ -84,20 +99,26 @@ class _RealWriter:
 
     def remove_env_value(self, key: str) -> bool:
         self.calls.append(("remove", key, ""))
-        import os
-
-        home = os.environ.get("HERMES_HOME", "")
-        p = self.root / home / ".env"
-        if p.exists() and f"{key}=" in p.read_text(encoding="utf-8"):
+        home = self._home()
+        p = self.root / home / ".env" if home else None
+        if p is not None and p.exists() and f"{key}=" in p.read_text(encoding="utf-8"):
             p.write_text("", encoding="utf-8")
             return True
         return False
 
 
 def _install_real_shaped_agent(monkeypatch, writer: _RealWriter):
-    """Install a config module + a REAL env-var profile-scope context manager."""
-    import os
+    """Install a config module shaped like the agent's, plus a real-shaped
+    ``hermes_cli.web_server_profiles`` whose ``_profile_scope`` reproduces the
+    process-global side effect the production code must NOT trigger.
 
+    ``_config_profile_scope`` calls ``activate_multi_profile_hosting()`` for
+    any non-launch home, a one-way process-global switch that makes
+    ``agent.secret_scope.get_secret`` fail closed for every later unscoped
+    read. Any test that enters this scope therefore records the activation, so
+    a regression that imports it again is caught by assertion, not by
+    reasoning about the import.
+    """
     fake_cli = types.ModuleType("hermes_cli")
     fake_config = types.ModuleType("hermes_cli.config")
     fake_config.load_env = writer.load_env  # type: ignore[attr-defined]
@@ -105,22 +126,38 @@ def _install_real_shaped_agent(monkeypatch, writer: _RealWriter):
     fake_config.remove_env_value = writer.remove_env_value  # type: ignore[attr-defined]
     fake_cli.config = fake_config  # type: ignore[attr-defined]
 
+    activations: list[str] = []
+
+    fake_policy = types.ModuleType("tui_gateway.launch_profile_policy")
+    fake_policy.activate_multi_profile_hosting = (  # type: ignore[attr-defined]
+        lambda: activations.append("multi-profile")
+    )
+    monkeypatch.setitem(sys.modules, "tui_gateway.launch_profile_policy", fake_policy)
+
     fake_scope_mod = types.ModuleType("hermes_cli.web_server_profiles")
 
     class _RealProfileScope:
-        """The installed agent's shape: set HERMES_HOME for the duration."""
+        """The installed agent's shape: scope HERMES_HOME for the duration.
+
+        Also records the activation because the real ``_config_profile_scope``
+        performs one for every non-launch home.
+        """
 
         def __init__(self, profile: str):
             self._profile = profile
             self._saved = None
+            activations.append(profile)
 
         def __enter__(self):
-            self._saved = os.environ.get("HERMES_HOME")
+            import os
 
+            self._saved = os.environ.get("HERMES_HOME")
             os.environ["HERMES_HOME"] = self._profile
             return self
 
         def __exit__(self, *exc):
+            import os
+
             if self._saved is None:
                 os.environ.pop("HERMES_HOME", None)
             else:
@@ -138,6 +175,7 @@ def _install_real_shaped_agent(monkeypatch, writer: _RealWriter):
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_config)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", fake_scope_mod)
+    return activations
 
 
 class _Handler:
@@ -188,7 +226,7 @@ def env(monkeypatch, tmp_path):
     import api.profiles as profiles
 
     writer = _RealWriter(tmp_path / "homes")
-    _install_real_shaped_agent(monkeypatch, writer)
+    activations = _install_real_shaped_agent(monkeypatch, writer)
     mod = importlib.reload(env_keys)
 
     # The active profile is WebUI's authorization source; drive it directly.
@@ -199,12 +237,31 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         profiles, "get_active_profile_name", lambda: state["name"], raising=False
     )
+    # The scope resolves the profile's home through WebUI's OWN resolver
+    # (api.profiles.get_hermes_home_for_profile), which must not mutate any
+    # process state. Point it at the per-profile homes this fixture creates so
+    # the real override path is exercised end to end. The resolver keeps its
+    # real contract — a name it cannot resolve falls back to the BASE (default)
+    # home rather than raising — which is exactly why the production code has
+    # to reject a home that is not provably the caller's own.
+    _known = {"alpha", "beta"}
+
+    def _fake_home_for(name):
+        if not name or name not in _known:
+            return tmp_path / "homes" / "default"  # the real fallback
+        return tmp_path / "homes" / name
+
+    monkeypatch.setattr(
+        profiles, "get_hermes_home_for_profile", _fake_home_for, raising=False
+    )
     monkeypatch.setattr(
         mod,
         "_authorized_profile",
         lambda: mod._canonical_profile_name(state["name"]),
     )
-    return SimpleNamespace(mod=mod, writer=writer, state=state)
+    return SimpleNamespace(
+        mod=mod, writer=writer, state=state, activations=activations
+    )
 
 
 def _keys(env, handler, path="/api/env/keys", query=""):
@@ -344,3 +401,134 @@ def test_root_alias_resolves_to_default(env):
         assert env.mod._canonical_profile_name("beta") == "beta"
     finally:
         profiles._is_root_profile = original
+
+
+# ── round-2 regressions: the scope's side effects and its proof ─────────────
+
+
+def test_scope_never_activates_process_wide_multi_profile_hosting(env):
+    """A custom-key request must not flip the whole process.
+
+    The obvious scope to reuse — ``hermes_cli.web_server_profiles._profile_scope``
+    — calls ``activate_multi_profile_hosting()`` for any non-launch home. That
+    is a process-global, one-way switch: afterwards
+    ``agent.secret_scope.get_secret`` fails closed and every concurrent
+    unscoped read raises ``UnscopedSecretError``, including the chat turns this
+    very server is serving. The WebUI never enables it on master, so a single
+    admin request for another profile's home must not either.
+
+    The fake module records every activation, so a regression that imports the
+    dashboard scope again is caught here rather than in a hard-to-reproduce
+    production failure.
+    """
+    handler = _Handler()
+    _put(env, handler, {"name": "NO_SIDE_EFFECT", "value": "v"})
+    assert handler.status == 200
+    assert env.activations == [], (
+        "the .env scope must not activate process-wide multi-profile hosting: "
+        f"{env.activations}"
+    )
+    _keys(env, handler)
+    assert env.activations == [], "not even a read may flip the process flag"
+
+
+def test_write_verification_reads_the_file_it_wrote(env, tmp_path):
+    """The read-back must observe the SAME ``.env`` the writer touched.
+
+    The scope redirects the task-local ``HERMES_HOME``; reading outside it (as
+    the first version did, after the ``with`` block exited) verified the
+    process's launch ``.env`` — the DEFAULT profile — so a write into B was
+    "confirmed" against A and a failure in B went unreported.
+    """
+    env.state["name"] = "beta"
+    # A's .env already holds the key with a different value: an out-of-scope
+    # read-back would see it present and answer ok:true.
+    a_home = tmp_path / "homes" / "alpha"
+    a_home.mkdir(parents=True, exist_ok=True)
+    (a_home / ".env").write_text("SAME_KEY=old-value\n", encoding="utf-8")
+
+    handler = _Handler()
+    _put(env, handler, {"name": "SAME_KEY", "value": "new-value"})
+    assert handler.status == 200
+
+    b_env = (tmp_path / "homes" / "beta" / ".env").read_text(encoding="utf-8")
+    assert "SAME_KEY=new-value" in b_env, (
+        f"the write must land in the authorized home: {b_env!r}"
+    )
+    a_env = (tmp_path / "homes" / "alpha" / ".env").read_text(encoding="utf-8")
+    assert a_env == "SAME_KEY=old-value\n", (
+        f"the other profile's .env must be byte-for-byte untouched: {a_env!r}"
+    )
+
+
+def test_replaced_value_mismatch_is_not_reported_as_success(env):
+    """A writer that keeps the OLD value must not report the new one stored.
+
+    ``save_env_value`` refuses a managed ``.env`` by returning without raising,
+    so its return value cannot distinguish "wrote it" from "declined". Presence
+    alone is therefore not proof: the key can be there with the PREVIOUS value,
+    and answering ok:true would report a secret as live while the old one still
+    is.
+    """
+    # Seed the key with the old value directly on disk so the writer's refusal
+    # leaves it in place.
+    handler = _Handler()
+    env.writer.calls.clear()
+    # PROVIDER_API_KEY is the fake writer's managed refusal set.
+    seed = env.writer
+    seed._managed.discard("PROVIDER_API_KEY")
+    env.state["name"] = "alpha"
+    _put(env, handler, {"name": "PROVIDER_API_KEY", "value": "first"})
+    assert handler.status == 200
+
+    # Now refuse it and try to replace with a different value.
+    seed._managed.add("PROVIDER_API_KEY")
+    handler2 = _Handler()
+    _put(env, handler2, {"name": "PROVIDER_API_KEY", "value": "second"})
+    assert handler2.status != 200, (
+        "a refused replacement whose old value survives must not report success"
+    )
+    assert handler2.status == 409, f"expected 409, got {handler2.status}"
+
+
+def test_unverifiable_delete_is_not_reported_as_success(env, monkeypatch):
+    """A delete whose read-back fails must not answer ok.
+
+    ``_active_profile_env`` returning ``None`` means the removal is UNVERIFIED;
+    the old code only checked "is the key still there", so a read failure fell
+    through to ok:true and reported a deletion nobody confirmed.
+    """
+    env.state["name"] = "alpha"
+    env.writer.calls.clear()
+
+    def _broken_read(profile=None):
+        return None, ("load", "read-back exploded")
+
+    monkeypatch.setattr(env.mod, "_active_profile_env", _broken_read)
+    handler = _Handler()
+    _delete(env, handler, "ANYTHING")
+    assert handler.status == 409, (
+        f"an unverifiable delete must not report success, got {handler.status}"
+    )
+
+
+def test_unresolvable_profile_home_fails_closed(env, monkeypatch):
+    """A profile whose home is not provably its own must not write.
+
+    ``get_hermes_home_for_profile`` falls back to the BASE (default) home for a
+    name it cannot resolve. Redirecting a write there would land it in the
+    DEFAULT profile's ``.env`` and report it as the caller's — the same
+    "wrong-home default" failure this PR fixed once, now reachable through the
+    new resolver.
+    """
+    env.state["name"] = "ghost"
+    handler = _Handler()
+    _put(env, handler, {"name": "X", "value": "y"})
+    assert handler.status == 503, (
+        f"an unboundable profile must fail closed, got {handler.status}"
+    )
+    assert env.writer.calls == [], "no write may be attempted"
+    # Nothing landed in the fallback (default) home either.
+    assert not (env.writer.root / "default" / ".env").exists() or "X=" not in (
+        env.writer.root / "default" / ".env"
+    ).read_text(encoding="utf-8"), "must not write into the fallback home"
