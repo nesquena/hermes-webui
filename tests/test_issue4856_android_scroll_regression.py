@@ -133,7 +133,7 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
         "low-delta message-pane wheel intent so a gentle trackpad scroll-up is "
         "not swallowed."
     )
-    assert listener.find("return;") < listener.find("if(movedUp){"), (
+    assert listener.find("return;") < listener.find("if(movedUp&&bottomDistance>1){"), (
         "recent render artifact scrolls must return before the movedUp branch "
         "can mark the reader unpinned."
     )
