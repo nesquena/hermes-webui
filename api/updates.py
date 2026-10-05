@@ -28,7 +28,15 @@ from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
-from api.subprocess_utils import windows_hide_flags
+from api.subprocess_utils import (
+    clean_git_env,
+    noninteractive_git_env,
+    noninteractive_git_argv,
+    repository_git_proxy_blocks,
+    sanitize_git_diagnostic,
+    trusted_git_credential_config,
+    windows_hide_flags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +56,7 @@ CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
-_CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
-_GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
-_QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|oauth_token|private_token|client_secret|app_secret|api[_-]?key|token|password|secret|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+
 _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'could not resolve host',
     'failed to connect',
@@ -76,6 +82,29 @@ _GIT_LOCK_SIGNATURES = (
     'another git process seems to be running',
     'unable to create .git/index.lock',
 )
+
+
+def _windows_restart_spawn(args, **kwargs):
+    """Spawn the replacement process for a Windows self-restart."""
+    return subprocess.Popen(args, **kwargs)
+
+
+def _windows_restart_exit(code):
+    """Exit the old process after a Windows replacement is running."""
+    os._exit(code)
+
+
+def _windows_restart_command():
+    """Return the canonical replacement command for the current packaging mode."""
+    if getattr(sys, "frozen", False):
+        return list(sys.argv)
+
+    executable = sys.executable
+    if executable.lower().endswith("python.exe"):
+        windowless_executable = executable[:-4] + "w.exe"
+        if os.path.isfile(windowless_executable):
+            executable = windowless_executable
+    return [executable, str(REPO_ROOT / "server.py")]
 # Lock files we previously enumerated for auto-removal in v2. v2.2 no longer
 # removes anything on the server, so the enumerable list is no longer needed;
 # ``_inventory_locks`` reports whatever ``.git/**/*.lock`` files currently exist
@@ -90,15 +119,7 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
     but strip URL userinfo, common GitHub token shapes, and secret-looking query
     parameter values before any message reaches the update-check API/UI.
     """
-    if not output:
-        return ""
-    sanitized = _CREDENTIAL_IN_URL_RE.sub(r"\1<redacted>@", str(output))
-    sanitized = _GITHUB_TOKEN_RE.sub("<redacted>", sanitized)
-    sanitized = _QUERY_SECRET_RE.sub(r"\1<redacted>", sanitized)
-    sanitized = sanitized.strip()
-    if len(sanitized) > limit:
-        sanitized = sanitized[:limit].rstrip() + "…"
-    return sanitized
+    return sanitize_git_diagnostic(output, limit=limit)
 
 
 def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
@@ -210,19 +231,41 @@ def _run_git(args, cwd, timeout=10):
 
     On failure, returns stderr (or stdout as fallback) so callers can
     surface actionable git error messages instead of empty strings.
+
+    The child gets a scrubbed environment (``clean_git_env``). Update checks run
+    unattended, so inherited desktop askpass helpers must not turn a remote 401
+    into a credential dialog the user never asked for. Credential helpers from
+    system and user config remain available; checkout config cannot add one.
     """
     git_executable = _resolve_git_executable()
     if not git_executable:
         return 'git executable not found', False
+    env = clean_git_env()
+    if repository_git_proxy_blocks(args, cwd, env, executable=git_executable):
+        return 'repository-configured core.gitProxy is not allowed for git:// update remotes', False
+    is_network_command = bool(args and args[0] in {'fetch', 'pull', 'push', 'ls-remote'})
+    credential_config = ()
+    if is_network_command:
+        credential_config = trusted_git_credential_config(
+            cwd,
+            env,
+            executable=git_executable,
+        )
+        env = noninteractive_git_env(cwd, env, executable=git_executable, args=args)
     try:
         r = subprocess.run(
-            [git_executable] + args,
+            noninteractive_git_argv(
+                args,
+                executable=git_executable,
+                credential_config=credential_config,
+            ) if is_network_command else [git_executable] + args,
             cwd=str(cwd),
             capture_output=True,
             text=True,
             timeout=timeout,
             encoding='utf-8',
             errors='replace',
+            env=env,
             creationflags=windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
@@ -1717,9 +1760,9 @@ def _schedule_restart(delay: float = 2.0) -> None:
     loaded on the next request, rather than running with a mix of old and
     new Python modules in sys.modules.
 
-    os.execv() replaces the current process image with a fresh interpreter
-    running the same argv — sessions are preserved on disk, the HTTP port
-    is reclaimed within the delay window, and the client's own
+    The restart replaces the current process image or starts the canonical
+    server entrypoint, depending on platform and packaging mode. Sessions are
+    preserved on disk, the HTTP port is reclaimed within the delay window, and the client's own
     ``setTimeout(() => location.reload(), 2500)`` lands after the restart.
 
     Coordinates with ``_apply_lock``: when the user updates both webui
@@ -1757,84 +1800,47 @@ def _schedule_restart(delay: float = 2.0) -> None:
             try:
                 # Re-exec into the just-pulled image.
                 #
-                # sys.argv[0]'s meaning depends on how the server was launched:
-                #
-                #   * Source checkout (`python server.py` via bootstrap.py /
-                #     ctl.sh / start.sh): sys.argv[0] is the SCRIPT path
-                #     (e.g. "/root/hermes-webui/server.py"), sys.executable is
-                #     the interpreter. CPython treats argv[1] as the script to
-                #     run, so we must pass [sys.executable] + sys.argv.
-                #
-                #   * Frozen/packaged build (PyInstaller, embedded zipapp,
-                #     etc.): sys.argv[0] == sys.executable == <binary>. Passing
-                #     [sys.executable] + sys.argv would re-insert the binary as
-                #     argv[1] — the kernel launches it, the interpreter treats
-                #     the binary itself as the "script" to run, and execv
-                #     effectively becomes a recursive no-op that never reaches
-                #     bind(), leaving the WebUI stuck "offline" after every
-                #     self-update. Pass argv as-is instead.
-                #
-                # Distinguish the two cases with sys.frozen (set by
-                # PyInstaller / zipapp / similar). For source checkouts the
-                # `[sys.executable] + sys.argv` form is the canonical CPython
-                # re-exec idiom (same shape Flask/Django reloaders use) and
-                # is the correct path.
-                #
                 # IMPORTANT: On Windows, os.execv() does NOT replace the
                 # current process — it spawns a new process while the old
                 # one keeps running.  This causes "address already in use"
                 # because the old process still holds the port.  On Windows
-                # we use subprocess.Popen() + os._exit() instead.
+                # we use a detached spawn + exit instead.
                 if sys.platform == 'win32':
-                    import subprocess
-                    if getattr(sys, "frozen", False):
-                        args = sys.argv
-                    else:
-                        args = [sys.executable] + sys.argv
-                    # Prefer pythonw.exe over python.exe so the restarted
-                    # server does not create a visible console window.
-                    # sys.executable may point at python.exe (console
-                    # subsystem); substitute pythonw.exe if it exists
-                    # next to python.exe.
-                    _exe = sys.executable
-                    if _exe.lower().endswith('python.exe'):
-                        _w_exe = _exe[:-4] + 'w.exe'  # python.exe -> pythonw.exe
-                        if os.path.isfile(_w_exe):
-                            if getattr(sys, "frozen", False):
-                                args = sys.argv
-                            else:
-                                args = [_w_exe] + sys.argv
+                    args = _windows_restart_command()
                     # Start new process fully detached with NO console
                     # window.  DETACHED_PROCESS alone is not sufficient
                     # on modern Windows — without CREATE_NO_WINDOW a
                     # python.exe (console-subsystem) child still flashes
                     # an empty terminal window, which the user then
                     # manually kills (taking the WebUI with it).
-                    subprocess.Popen(
-                        args,
-                        cwd=os.getcwd(),
-                        creationflags=(
-                            subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP
-                            | subprocess.CREATE_NO_WINDOW
-                        ),
-                        close_fds=True,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                    try:
+                        _windows_restart_spawn(
+                            args,
+                            cwd=os.getcwd(),
+                            creationflags=(
+                                subprocess.DETACHED_PROCESS
+                                | subprocess.CREATE_NEW_PROCESS_GROUP
+                                | subprocess.CREATE_NO_WINDOW
+                            ),
+                            close_fds=True,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        logger.exception("Windows WebUI restart spawn failed")
+                        return
                     # Exit immediately — the port is released as soon as
                     # this process dies, allowing the new process to bind.
-                    os._exit(0)
+                    _windows_restart_exit(0)
                 else:
                     if getattr(sys, "frozen", False):
                         os.execv(sys.executable, sys.argv)
                     else:
                         os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception:
-                # Last-resort: if execv fails for any reason, just exit so the
-                # process supervisor (start.sh / Docker) restarts us.
-                os._exit(0)
+                # Last-resort: let the process supervisor restart us.
+                _windows_restart_exit(0)
 
     threading.Thread(target=_do, daemon=True).start()
 
@@ -2406,11 +2412,8 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             }
 
     # Schedule a self-restart so the updated code is loaded fresh.  A plain
-    # git pull leaves stale Python modules in sys.modules — agent imports that
-    # reference new symbols (functions, classes) added in the update will fail
-    # on the next request with AttributeError / ImportError.  os.execv() re-
-    # execs the same interpreter with the same argv, picking up the new code
-    # cleanly without requiring the user to restart manually.
+    # git pull leaves stale Python modules in sys.modules. Replacing the process
+    # loads the updated code cleanly without requiring a manual restart.
     #
     # The 2 s delay gives the HTTP response time to flush to the client before
     # the process replaces itself.  The client already does

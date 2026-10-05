@@ -477,6 +477,23 @@ paths are never returned by the status endpoint. If `health_path` is omitted,
 diagnostics use `/health`; if `health_path` is present but invalid, the sidecar is
 skipped rather than probed.
 
+## Remote images (`img-src`)
+
+The default policy allows images only from the WebUI itself plus `data:` and
+`blob:`. Remote `https:` images are blocked so that a model reply cannot make
+the browser contact an arbitrary server just by rendering (#7941). In chat a
+blocked remote image shows as an "Open image · host" link instead. An extension
+page that loads images from another origin needs the operator to allow it:
+
+```bash
+# space-separated http(s) origins; optional *. subdomain wildcard and port.
+export HERMES_WEBUI_CSP_IMG_EXTRA="https://images.example.com https://*.cdn.example.com"
+```
+
+The bare scheme `https:` restores the old allow-everything behaviour. The
+same validation rules as `HERMES_WEBUI_CSP_FRAME_EXTRA` below apply, and the
+allowlist also covers images inside chat replies and public share pages.
+
 ## Embedding an external web app in an iframe
 
 By default the WebUI's Content-Security-Policy only allows it to embed
