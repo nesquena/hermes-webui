@@ -1034,8 +1034,9 @@ endpoint. Two rules:
   one exception is `:`: the qualified-model hint is `@custom:<name>:<model>`, and
   a name carrying one gives that string a segment the parser cannot attribute,
   so the endpoint vanishes and sending fails. A name with a `:` therefore takes
-  the ASCII fold (`晨光:鑫遇` -> `custom:晨光-鑫遇`), exactly as an ASCII name
-  with one does.
+  the ASCII fold, and for a name whose fold is empty that is no identity at all:
+  `晨光:鑫遇` mints nothing and stays uncatalogued, exactly as it does today.
+  Nothing that routes before stops routing; the name simply is not advertised.
 
 The fallback is name-derived, not endpoint-derived: two providers sharing one
 `base_url` are two identities and must stay two entries. The same rule governs

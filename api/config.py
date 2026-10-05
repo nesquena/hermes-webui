@@ -1727,28 +1727,30 @@ _LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
 def _api_key_env_name(provider_id: object) -> str:
     """Return the POSIX-safe default API-key env var for a custom provider id.
 
-    The name is derived from the id's DISTINCTIVE part, not the whole string.
-    Every custom-provider id carries the literal ``custom:`` prefix, so the
-    shared prefix is exactly what must not decide the variable name. Deriving
-    from the whole id, a non-ASCII id such as ``custom:晨光鑫遇专用`` sanitizes
-    each CJK character to an underscore and ``strip("_")`` then eats them,
-    leaving only the shared ``custom`` — and ``if not sanitized`` never fires,
-    so EVERY unnameable provider read the same ``CUSTOM_CUSTOM_API_KEY``. One
-    provider's key then travelled as a bearer token to the endpoint the second
-    was configured for.
+    Two rules, and they are deliberately separate.
 
-    Deriving from the part after ``custom:`` leaves nothing to strip for such
-    an id: the distinctive part sanitizes to a run of underscores and strips to
-    empty, so the function returns ``""`` and the caller takes the keyless
-    path. An id the convention cannot name is a provider it cannot carry a key
-    for; minting it a shared variable names somebody else's key instead.
+    The variable name is derived from the WHOLE id, so ids that differ stay
+    distinct: ``custom:foo`` -> ``CUSTOM_FOO_API_KEY`` and ``custom:custom_foo``
+    -> ``CUSTOM_CUSTOM_FOO_API_KEY``. Deriving it from only the part after
+    ``custom:`` collapses those two onto one variable, which is the same leak in
+    the opposite direction.
+
+    Whether an id is nameable at all is decided by its DISTINCTIVE part. Every
+    custom-provider id carries the literal ``custom:`` prefix, so a prefix-only
+    sanitization leaves just that shared word; for an id whose distinctive part
+    has no POSIX-safe characters (``custom:晨光鑫遇专用``) the function returns
+    ``""`` and the caller takes the keyless path instead of reading a variable
+    that belongs to somebody else. An id the convention cannot name is a
+    provider it cannot carry a key for.
     """
     text = str(provider_id or "").strip()
-    if text.lower().startswith("custom:") and ":" in text:
+    if ":" in text and text.lower().startswith("custom:"):
         distinctive = text.split(":", 1)[1]
     else:
         distinctive = text
-    sanitized = re.sub(r"[^A-Za-z0-9]", "_", distinctive).upper().strip("_")
+    if not re.sub(r"[^A-Za-z0-9]", "", distinctive):
+        return ""
+    sanitized = re.sub(r"[^A-Za-z0-9]", "_", text).upper().strip("_")
     if not sanitized:
         return ""
     if not sanitized.startswith("CUSTOM_"):

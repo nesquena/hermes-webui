@@ -230,6 +230,18 @@ def test_keyless_non_ascii_providers_do_not_share_one_api_key_env(monkeypatch):
     assert config._api_key_env_name("custom:proxy-b") == "CUSTOM_PROXY_B_API_KEY"
 
 
+def test_ids_differing_only_by_the_custom_prefix_do_not_share_a_variable():
+    """The variable name comes from the WHOLE id, so `custom:` must not be stripped.
+
+    Deriving the name from only the part after `custom:` collapses `custom:foo`
+    and `custom:custom_foo` onto one variable, so the second provider would read
+    the first's key -- the same leak as the non-ASCII collision, one shape over.
+    """
+    assert config._api_key_env_name("custom:foo") == "CUSTOM_FOO_API_KEY"
+    assert config._api_key_env_name("custom:custom_foo") == "CUSTOM_CUSTOM_FOO_API_KEY"
+    assert config._api_key_env_name("custom:bar") != config._api_key_env_name("custom:custom_bar")
+
+
 def test_two_whitespace_name_and_double_dash_name_do_not_collapse():
     """The fallback does not collapse dashes or fold characters (#8017).
 
