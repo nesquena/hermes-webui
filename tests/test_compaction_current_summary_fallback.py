@@ -371,6 +371,7 @@ function _postProcessWithAnchorSuppression() {}
 function _formatGatewayModelLabel() { return ''; }
 function _gatewayRoutingFailoverText() { return ''; }
 function _gatewayModelWarningText() { return ''; }
+function _localModelSwitchText() { return ''; }
 function _usedModelTurnChipLabel() { return ''; }
 function _formatTurnDuration() { return ''; }
 function _renderSettledAnchorSceneForMessage() { return false; }

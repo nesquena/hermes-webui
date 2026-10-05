@@ -71,6 +71,35 @@ cache or publish its result to a later subscriber cohort. The subscriber lock
 protects removal, epoch checks and cache commits, but is not held during DB
 reads, so disconnect is not blocked by a slow projection.
 
+## Local fallback model-switch provenance (`done` payload and persisted turns)
+
+When a local `fallback_providers` entry serves a turn (the configured provider
+failed and no LLM **gateway** was involved), the server stamps both model
+identities so clients can surface the switch. This includes a provider selected
+while the Agent is being constructed: at that boundary the server preserves the
+requested identity only when a configured fallback chain, the Agent's init
+fallback signal, and a different normalized effective runtime all agree:
+
+- **Live**: the `done` event's `usage` object carries `used_model` (the model
+  that actually served the turn, read after `agent.run`) and, when the served
+  model genuinely differs from the requested one, `requested_model` (the
+  pre-run model, captured before `agent.model` is mutated by the fallback).
+  A `requested_model` key that is absent/empty means "same model, notation
+  differences only" — clients must not render a switch notice.
+- **Durable**: on reload, the persisted assistant turn carries `_usedModel`,
+  and `_requestedModel` is stamped under the same condition (only when a
+  switch was detected). Gateway-routed turns instead carry
+  `_gatewayRouting.model_changed` with its own requested/used pair and own
+  notice copy.
+
+Model-id comparison rule for `@custom:A:B:model` ids without provider
+provenance (adopted with #7181): `A:B` is read as an endpoint `host:port` when
+`A` is dotted (or `localhost`/an IP) **and** `B` is a valid port (1–65535) —
+the requested model is then `model`. Otherwise both readings (slug + full
+tail, or host:port + model) are plausible and a switch is only declared when
+the served model matches **none** of them. The check fails closed: unknown or
+missing identities never render a switch notice.
+
 ## Heartbeats and proxy behavior
 
 - All long-lived streams emit SSE keepalive comment lines on the
