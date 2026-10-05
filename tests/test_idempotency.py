@@ -1599,9 +1599,7 @@ def test_pending_claim_with_no_identity_is_swept_to_outcome_unknown(idem_env):
     outcome, not `in_flight` + retry_after=1.
     """
     from api.idempotency import (
-        STATUS_PENDING,
         IdempotencyOutcomeUnknown,
-        IdempotencyRecord,
     )
 
     env = idem_env
@@ -1840,7 +1838,6 @@ def test_root_profile_alias_aliases_share_one_namespace(idem_env):
     assert _canonical_profile_namespace("work") == "work"
 
     # When api.profiles reports the name IS the root profile, it collapses.
-    import api.profiles as profiles_mod
     import api.idempotency as idem_mod
 
     class _FakeProfiles:

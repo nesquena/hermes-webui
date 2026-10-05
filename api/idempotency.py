@@ -635,7 +635,7 @@ class IdempotencyStore:
             if r.claimed_at < cutoff
         ]
         for k in expired:
-            rec = self._records.pop(k, None)
+            self._records.pop(k, None)
             # The turn may have run (COMPLETE), or the claim was left
             # un-admitted when the process died (PENDING, #7782 finding 1's
             # crash window). Either way the KEY was used, so a later re-claim
