@@ -18,6 +18,10 @@ Covers the six review-required points:
 6. measured 44x44 touch target and Fit/close non-overlap, on desktop and
    mobile viewports, from the browser's own layout engine
 
+plus the four 2026-10-05 greptile follow-ups (second-pointer pan guard,
+editable-target shortcut guard, focus into the dialog on open, stale
+geometry dropped on a failed load).
+
 The per-check script lives in ``_img_lightbox_composed_checks.js`` and is
 injected into the page; there is no DOM emulation layer and no third-party JS
 package involved. Chromium is provisioned by the CI test job
@@ -151,6 +155,22 @@ class TestComposedFitAndKeyboard:
 
     def test_viewport_click_suppresses_dragged_and_canvas_only(self, composed):
         _check(composed.desktop, "viewport_click_suppression")
+
+
+class TestComposedReviewFollowups:
+    """Regressions for the 2026-10-05 greptile review on this PR."""
+
+    def test_second_pointer_cannot_hijack_the_pan(self, composed):
+        _check(composed.desktop, "pointer_second_pointer_guard")
+
+    def test_keyboard_shortcuts_ignore_an_editable_target(self, composed):
+        _check(composed.desktop, "keyboard_ignores_editable_target")
+
+    def test_focus_moves_into_the_dialog_on_open(self, composed):
+        _check(composed.desktop, "focus_moves_into_dialog")
+
+    def test_failed_load_drops_the_stale_geometry(self, composed):
+        _check(composed.desktop, "img_error_clears_stale_geometry")
 
 
 class TestComposedI18n:

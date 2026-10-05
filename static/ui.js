@@ -2614,6 +2614,7 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     canvas,
     dragOriginX: 0,
     dragOriginY: 0,
+    dragPointerId: null,
     dragStartX: 0,
     dragStartY: 0,
     dragged: false,
@@ -2744,13 +2745,49 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     }
   }
 
+  // A pan belongs to the pointer that started it. A second pointer pressing
+  // the stage mid-gesture must neither re-anchor the drag (that teleports the
+  // image to the new pointer) nor end it by releasing, and only the owning
+  // pointer's move/release may drive the pan — the same guard the sidebar
+  // resize handle carries (greptile review of #6896, 2026-10-05).
+  function _imgOwnsDrag(e) {
+    if(!e || e.pointerId == null) return true;
+    return state.dragPointerId == null || e.pointerId === state.dragPointerId;
+  }
+
+  function _imgOnError() {
+    // A failed load (navigating to a broken/missing image) must not leave the
+    // previous image's stage behind: only _onImgLoad used to clear pendingNav
+    // and refresh the canvas geometry, so the broken image inherited the old
+    // boxW/boxH, the old zoom baseline and the armed one-shot nav flag until
+    // some later image happened to load (and that load then re-fitted instead
+    // of honouring the navigation contract). Drop the stale geometry entirely;
+    // the next successful load rebuilds it from the new natural size
+    // (greptile review of #6896, 2026-10-05).
+    state.pendingNav = false;
+    state.dragging = false;
+    state.dragPointerId = null;
+    state.boxW = 0;
+    state.boxH = 0;
+    state.fitScale = 1;
+    state.scale = 1;
+    state.x = 0;
+    state.y = 0;
+    canvas.style.width = '';
+    canvas.style.height = '';
+    canvas.style.transform = '';
+    viewport.classList.remove('is-panning');
+  }
+
   function _imgOnPointerDown(e) {
     if(state.pinching) return;
     if(e.button != null && e.button !== 0) return;
+    if(state.dragging) return;
     state.dragging = true;
     state.dragged = false;
     state.dragOriginX = Number(e.clientX) || 0;
     state.dragOriginY = Number(e.clientY) || 0;
+    state.dragPointerId = e.pointerId != null ? e.pointerId : null;
     state.dragStartX = state.x;
     state.dragStartY = state.y;
     viewport.classList.add('is-panning');
@@ -2762,6 +2799,7 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
 
   function _imgOnPointerMove(e) {
     if(state.pinching || !state.dragging) return;
+    if(!_imgOwnsDrag(e)) return;
     const dx = (Number(e.clientX) || 0) - state.dragOriginX;
     const dy = (Number(e.clientY) || 0) - state.dragOriginY;
     if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
@@ -2770,9 +2808,16 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     _imgApplyTransform();
   }
 
-  function _imgEndPointerDrag() {
+  function _imgEndPointerDrag(e) {
     if(!state.dragging) return;
+    // A non-owning pointer's release (or leave/cancel) must not kill the
+    // active pan while its owner is still down.
+    if(e && e.pointerId != null && !_imgOwnsDrag(e)) return;
     state.dragging = false;
+    if(state.dragPointerId != null && viewport.releasePointerCapture){
+      try{ viewport.releasePointerCapture(state.dragPointerId); }catch(_){}
+    }
+    state.dragPointerId = null;
     viewport.classList.remove('is-panning');
   }
 
@@ -2889,6 +2934,9 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
   // Always attach onload — a cached/fast image may have taken the sync
   // branch above, but navigation (src swap) still needs the handler.
   img.onload = _onImgLoad;
+  // A failed load has its own handler so the stage never keeps the previous
+  // image's geometry (see _imgOnError).
+  img.onerror = _imgOnError;
 
   return state;
 }
@@ -2899,6 +2947,9 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   lb.setAttribute('role', 'dialog');
   lb.setAttribute('aria-modal', 'true');
   lb.setAttribute('aria-label', alt || 'Image');
+  // Programmatically focusable so opening the dialog moves focus into it
+  // (the document-level shortcuts below then belong to the lightbox).
+  lb.setAttribute('tabindex', '-1');
   // Zoomable stage: viewport (clip + gestures) > canvas (transform) > img.
   const viewport = document.createElement('div');
   viewport.className = 'img-lightbox-viewport';
@@ -2950,6 +3001,16 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   }
   lb.onclick = () => _closeImgLightbox(lb);
   document.body.appendChild(lb);
+  // Move focus into the dialog: without this a user could Tab into the
+  // composer behind the overlay and have `+`, `-`, `f` and the arrow keys
+  // hijacked by the shortcuts below (greptile review of #6896, 2026-10-05).
+  // The previous focus is restored when the lightbox closes.
+  lb._restoreFocus = (document.activeElement && document.activeElement !== document.body)
+    ? document.activeElement
+    : null;
+  if(typeof lb.focus === 'function'){
+    try{ lb.focus({preventScroll: true}); }catch(_){ try{ lb.focus(); }catch(__){} }
+  }
   // Mount zoom gestures AFTER the stage is in the DOM — a synchronously
   // decoded image (data: URL or cache-hit) otherwise measures a 0x0
   // viewport and fit-zooms to a near-zero scale.
@@ -2957,6 +3018,15 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   // Single keyboard handler — reads lb._navX live, no remove/add churn.
   lb._keyHandler = e => {
     if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
+    // Focus is normally inside the dialog, but never hijack typing: the
+    // handler lives on `document`, so a `+`, `-`, `f` or arrow key typed in
+    // an editable field that happens to hold focus must reach that field
+    // unchanged (greptile review of #6896, 2026-10-05).
+    const tgt = e.target;
+    if(tgt){
+      const tag = String(tgt.tagName || '').toLowerCase();
+      if(tgt.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    }
     if(e.key==='f' || e.key==='F'){ if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); return; }
     if(e.key==='+' || e.key==='='){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1.25); return; }
     if(e.key==='-' || e.key==='_'){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1/1.25); return; }
@@ -2988,6 +3058,13 @@ function _navigateLightbox(lb, direction) {
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
   document.removeEventListener('keydown', lb._keyHandler);
+  // Hand focus back to whatever was focused before the dialog opened — the
+  // lightbox moved focus into itself on open (see _openImgLightboxWithNav).
+  if(lb._restoreFocus && typeof lb._restoreFocus.focus === 'function' &&
+     typeof document.contains === 'function' && document.contains(lb._restoreFocus)){
+    try{ lb._restoreFocus.focus({preventScroll: true}); }catch(_){}
+  }
+  lb._restoreFocus = null;
   if(lb._mermaidResizeHandler && window && typeof window.removeEventListener === 'function'){
     window.removeEventListener('resize', lb._mermaidResizeHandler);
   }

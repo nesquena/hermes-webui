@@ -21,6 +21,11 @@
  *   5. selected non-English locale renders the Fit button text/title/aria
  *   6. measured 44x44 touch target and Fit/close non-overlap at desktop and
  *      mobile widths (real getBoundingClientRect, not source strings)
+ *   7. the 2026-10-05 greptile follow-ups: a second pointer cannot take the
+ *      pan over, the document-wide shortcuts never hijack a background
+ *      editable field, focus moves into the dialog on open, and a failed
+ *      image load drops the previous image's geometry (with a recovery
+ *      control proving the stage rebuilds on the next good load)
  */
 (function () {
   "use strict";
@@ -90,14 +95,15 @@
     return { w: Math.max(1, r.width), h: Math.max(1, r.height) };
   }
 
-  function pointer(vp, type, x, y) {
+  function pointer(vp, type, x, y, id) {
+    var pid = id == null ? 1 : id;
     vp.dispatchEvent(new PointerEvent(type, {
       bubbles: true,
       cancelable: true,
       composed: true,
-      pointerId: 1,
+      pointerId: pid,
       pointerType: "mouse",
-      isPrimary: true,
+      isPrimary: pid === 1,
       button: 0,
       buttons: type === "pointerup" ? 0 : 1,
       clientX: x,
@@ -359,7 +365,145 @@
       assert_(currentLb() === null, "an undragged stage click must close the lightbox");
     });
 
-    // 5. Locale rendering of the Fit control.
+    // 5. Review follow-ups (greptile 2026-10-05): a second pointer must not
+    // take the pan over, the document-wide shortcuts must not hijack typing
+    // in a background field, focus must move into the dialog, and a failed
+    // image load must not leave the stage on the previous image's geometry.
+    await run("pointer_second_pointer_guard", bucket, async function () {
+      var box = await openBox(IMG_W, IMG_H);
+      var size = vpSize(box.vp);
+      // Zoom until the image overflows horizontally so a pan has room to move.
+      var guard = 0;
+      while (box.z.boxW * box.z.scale <= size.w && guard++ < 40) key("+");
+      assert_(box.z.boxW * box.z.scale > size.w, "fixture: expected horizontal overflow");
+      var start = { x: size.w / 2, y: size.h / 2 };
+      pointer(box.vp, "pointerdown", start.x, start.y, 1);
+      assert_(box.z.dragging === true, "the first pointer must arm the pan");
+      var originX = box.z.dragOriginX;
+      var startX = box.z.dragStartX;
+      // A second pointer presses the stage mid-pan, far from the first one.
+      pointer(box.vp, "pointerdown", start.x + 200, start.y + 60, 2);
+      approx(box.z.dragOriginX, originX, 0.001, "a second pointer must not replace the drag origin");
+      approx(box.z.dragStartX, startX, 0.001, "a second pointer must not replace the drag start");
+      var beforeX = box.z.x;
+      pointer(box.vp, "pointermove", start.x + 260, start.y + 60, 2);
+      approx(box.z.x, beforeX, 0.001, "a second pointer's move must not pan the image");
+      assert_(box.z.dragging === true, "a second pointer's press must not end the pan");
+      // The owning pointer keeps panning from ITS origin...
+      pointer(box.vp, "pointermove", start.x - 40, start.y, 1);
+      approx(box.z.x, beforeX - 40, 1.5, "the owning pointer must keep panning from its own origin");
+      // ...and only the owning pointer's release ends the drag.
+      pointer(box.vp, "pointerup", start.x + 260, start.y + 60, 2);
+      assert_(box.z.dragging === true, "a non-owning pointer's release must not end the pan");
+      pointer(box.vp, "pointerup", start.x - 40, start.y, 1);
+      assert_(box.z.dragging === false, "the owning pointer's release must end the pan");
+      // The stage must accept a fresh gesture afterwards.
+      pointer(box.vp, "pointerdown", start.x, start.y, 1);
+      pointer(box.vp, "pointermove", start.x - 20, start.y, 1);
+      pointer(box.vp, "pointerup", start.x - 20, start.y, 1);
+      assert_(box.z.dragging === false, "the stage must resume normal panning after the gesture");
+    });
+
+    await run("keyboard_ignores_editable_target", bucket, async function () {
+      var box = await openBox(IMG_W, IMG_H, {
+        images: [
+          { src: svgDataUrl(IMG_W, IMG_H), alt: "first" },
+          { src: svgDataUrl(IMG_W, IMG_H), alt: "second" },
+        ],
+        index: 0,
+      });
+      var base = box.z.scale;
+      var real = document.querySelector(
+        "#composer-input, #composer-textarea, textarea.composer-input, .composer textarea, textarea"
+      );
+      var field = real || document.createElement("textarea");
+      if (!real) {
+        field.style.cssText = "position:fixed;left:-4000px;top:0;width:120px;height:40px";
+        document.body.appendChild(field);
+      }
+      try {
+        field.focus();
+        var keys = ["+", "=", "-", "_", "f", "F"];
+        for (var i = 0; i < keys.length; i++) {
+          field.dispatchEvent(new KeyboardEvent("keydown", {
+            key: keys[i], bubbles: true, cancelable: true, composed: true,
+          }));
+          approx(box.z.scale, base, 1e-9, "key '" + keys[i] + "' typed in an editable field must not zoom the lightbox");
+        }
+        field.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "ArrowRight", bubbles: true, cancelable: true, composed: true,
+        }));
+        assert_(box.lb._navIndex === 0, "ArrowRight typed in an editable field must not navigate the lightbox");
+        field.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "ArrowLeft", bubbles: true, cancelable: true, composed: true,
+        }));
+        assert_(box.lb._navIndex === 0, "ArrowLeft typed in an editable field must not navigate the lightbox");
+        // Control: the same keys at document level (focus inside the dialog)
+        // still drive zoom and navigation.
+        key("+");
+        assert_(box.z.scale > base, "control: document-level '+' must still zoom");
+        key("ArrowRight");
+        assert_(box.lb._navIndex === 1, "control: document-level ArrowRight must still navigate");
+      } finally {
+        field.blur();
+        if (!real && field.parentNode) field.parentNode.removeChild(field);
+      }
+    });
+
+    await run("focus_moves_into_dialog", bucket, async function () {
+      var box = await openBox(IMG_W, IMG_H);
+      assert_(
+        box.lb.getAttribute("tabindex") === "-1",
+        "the dialog must be programmatically focusable (tabindex=-1)"
+      );
+      assert_(
+        document.activeElement === box.lb,
+        "opening the lightbox must move focus into the dialog, got " +
+          (document.activeElement && (document.activeElement.tagName || document.activeElement.nodeName))
+      );
+      assert_(
+        getComputedStyle(box.lb).outlineStyle === "none",
+        "the programmatic container focus must not draw an outline on the backdrop"
+      );
+      // Focus inside the dialog must still drive the shortcuts.
+      var base = box.z.scale;
+      key("+");
+      assert_(box.z.scale > base, "the shortcuts must work while focus sits inside the dialog");
+    });
+
+    await run("img_error_clears_stale_geometry", bucket, async function () {
+      var box = await openBox(IMG_W, IMG_H, {
+        images: [
+          { src: svgDataUrl(IMG_W, IMG_H), alt: "good" },
+          { src: "data:image/png;base64,AAAA", alt: "broken" },
+        ],
+        index: 0,
+      });
+      key("+");
+      key("+");
+      assert_(box.z.scale > box.z.fitScale, "fixture: expected zoom-in before navigating away");
+      key("ArrowRight");
+      assert_(box.lb._navIndex === 1, "navigation must move to the broken image");
+      assert_(box.z.pendingNav === true, "navigation must arm the pending-nav flag");
+      for (var i = 0; i < 180 && box.z.pendingNav; i++) await frame();
+      assert_(box.z.pendingNav === false, "a failed load must clear pendingNav");
+      assert_(
+        box.z.boxW === 0 && box.z.boxH === 0,
+        "a failed load must drop the stale box size, got " + box.z.boxW + "x" + box.z.boxH
+      );
+      assert_(
+        box.cv.style.transform === "",
+        "a failed load must clear the stale transform, got '" + box.cv.style.transform + "'"
+      );
+      assert_(box.z.dragging === false, "a failed load must not leave a drag armed");
+      // Recovery: the next successful load must rebuild the stage.
+      key("ArrowLeft");
+      for (var j = 0; j < 180 && !box.z.boxW; j++) await frame();
+      assert_(box.z.boxW > 0 && box.z.boxH > 0, "a later successful load must restore the box size");
+      assert_(box.z.pendingNav === false, "the recovered load must consume the pending-nav flag");
+    });
+
+    // 6. Locale rendering of the Fit control.
     await run("locale_zh_renders", bucket, async function () {
       window.setLocale("zh");
       var box = await openBox(IMG_W, IMG_H);
@@ -379,7 +523,7 @@
       window.setLocale("en");
     });
 
-    // 6. Measured geometry at the desktop width.
+    // 7. Measured geometry at the desktop width.
     await run("geometry_min_touch_target", bucket, async function () {
       var box = await openBox(IMG_W, IMG_H);
       var fit = box.fitBtn.getBoundingClientRect();

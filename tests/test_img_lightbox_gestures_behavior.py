@@ -103,3 +103,89 @@ class TestResizeCleanup:
         assert "lb._imgZoomResizeHandler" in src
         assert "lb._imgZoomResizeTimer" in src
         assert "window.removeEventListener('resize', lb._imgZoomResizeHandler);" in src
+
+
+class TestReviewFollowups20261005:
+    """Source locks for the 2026-10-05 greptile review follow-ups on #6896.
+
+    The behavioural proof for each of these lives in
+    ``test_img_lightbox_gestures_composed.py`` (real Chromium). These locks keep
+    a marker regression failing fast without launching a browser.
+    """
+
+    def _img_pointer_section(self) -> str:
+        """The lightbox pointer-handler block only (not the Mermaid viewer's)."""
+        src = UI.read_text(encoding="utf-8")
+        start = src.index("function _imgOwnsDrag(e) {")
+        end = src.index("function _onViewportClick(e) {")
+        return src[start:end]
+
+    def test_second_pointer_cannot_take_over_the_pan(self):
+        section = self._img_pointer_section()
+        # A press while a pan is already active is refused, so a second
+        # pointer can never re-anchor dragOrigin/dragStart (which teleported
+        # the image to the new pointer before).
+        assert "if(state.dragging) return;" in section
+        assert "state.dragPointerId = e.pointerId != null ? e.pointerId : null;" in section
+        # Move/end only serve the owning pointer, and the capture is released
+        # with the owning pointer's id when the drag really ends.
+        assert "function _imgOwnsDrag(e) {" in section
+        assert "if(!_imgOwnsDrag(e)) return;" in section
+        assert "viewport.releasePointerCapture" in section
+        assert "state.dragPointerId = null;" in section
+
+    def test_keyboard_shortcuts_ignore_editable_targets(self):
+        src = UI.read_text(encoding="utf-8")
+        start = src.index("// Single keyboard handler")
+        end = src.index("document.addEventListener('keydown', lb._keyHandler);", start)
+        body = src[start:end]
+        # Escape stays first (modal convention), then the editable-target
+        # bail-out must come BEFORE every zoom/navigation shortcut so typing
+        # in a background field is never hijacked.
+        assert "if(e.key==='Escape'){ _closeImgLightbox(lb); return; }" in body
+        assert "tgt.isContentEditable" in body
+        assert "tag === 'input' || tag === 'textarea' || tag === 'select'" in body
+        guard_at = body.index("tgt.isContentEditable")
+        for shortcut in (
+            "e.key==='f' || e.key==='F'",
+            "e.key==='+' || e.key==='='",
+            "e.key==='-' || e.key==='_'",
+            "e.key==='ArrowLeft'",
+        ):
+            assert guard_at < body.index(shortcut), (
+                f"the editable-target guard must precede the {shortcut} shortcut"
+            )
+
+    def test_focus_moves_into_the_dialog_and_is_restored(self):
+        src = UI.read_text(encoding="utf-8")
+        assert "lb.setAttribute('tabindex', '-1');" in src
+        # The dialog grabs focus only after it is in the DOM, and the opener
+        # is remembered for restoration on close.
+        assert src.index("lb._restoreFocus = (") > src.index("document.body.appendChild(lb);")
+        assert "if(typeof lb.focus === 'function')" in src
+        assert "document.contains(lb._restoreFocus)" in src
+        assert "lb._restoreFocus = null;" in src
+        # The container focus must not paint an outline over the backdrop.
+        css = STYLE.read_text(encoding="utf-8")
+        for line in css.splitlines():
+            if line.strip().startswith(".img-lightbox{"):
+                assert "outline:none" in line, ".img-lightbox must not outline its programmatic focus"
+                break
+        else:
+            raise AssertionError(".img-lightbox selector not found in style.css")
+
+    def test_failed_load_clears_the_stale_stage(self):
+        src = UI.read_text(encoding="utf-8")
+        start = src.index("function _imgOnError() {")
+        end = src.index("function _imgOnPointerDown(e) {")
+        body = src[start:end]
+        assert "img.onerror = _imgOnError;" in src
+        for marker in (
+            "state.pendingNav = false;",
+            "state.boxW = 0;",
+            "state.boxH = 0;",
+            "canvas.style.width = '';",
+            "canvas.style.height = '';",
+            "canvas.style.transform = '';",
+        ):
+            assert marker in body, f"_imgOnError must reset {marker}"
