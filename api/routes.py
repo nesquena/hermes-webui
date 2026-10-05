@@ -12486,13 +12486,46 @@ def _handle_insights(handler, parsed) -> bool:
     end_kind = end_meta[0] if end_meta else None
     start_ts_v = start_meta[1] if start_meta else None
     end_ts_v = end_meta[1] if end_meta else None
+    # Platform-range guard for SUPPLIED endpoints, BEFORE any calendar
+    # arithmetic runs.  A pre-epoch calendar date is a perfectly valid
+    # YYYY-MM-DD string (Chromium's <input type=date> submits 0001-01-15
+    # happily) and yields a huge negative epoch.  The end-only default below
+    # then evaluates `date - 30 days` from date.min and raises
+    # `OverflowError: date value out of range` -> HTTP 500.  Reject any
+    # supplied PRE-EPOCH endpoint here (no session predates 1970) and fail
+    # closed to the trailing `days` window - the same fallback an unparseable
+    # endpoint already gets - so no downstream localtime()/mktime()/date
+    # arithmetic can ever see a pre-epoch value.  A supplied endpoint ABOVE
+    # the ceiling is deliberately NOT rejected here: `min(end, now)` clamps a
+    # future end and the post-arithmetic range check below already falls back
+    # for an absurd start, so the documented "valid start + huge end" window
+    # (start..now) keeps working.
+    _PLATFORM_MIN_TS = 0           # 1970-01-01 local (no sessions predate it)
+    if (start_ts_v is not None and start_ts_v < _PLATFORM_MIN_TS) \
+            or (end_ts_v is not None and end_ts_v < _PLATFORM_MIN_TS):
+        start_meta = None
+        end_meta = None
+        start_kind = None
+        end_kind = None
+        start_ts_v = None
+        end_ts_v = None
     now = _time.time()
     start_ts = None
     end_ts = None
 
+    # end_from_clock: True when the EFFECTIVE end is the server clock because
+    # the caller did not pin it to a concrete timestamp - an omitted `end`, or
+    # an explicit endpoint the server clamped down to `now`.  An explicitly
+    # supplied numeric end is NOT clock-derived even when its value happens to
+    # equal `now`: the numeric contract is an exact [start, end) interval, so
+    # it must remain an EXCLUSIVE boundary (gate re-gate: 'explicit numeric
+    # boundaries lose provenance').  The flag is tracked through the swap and
+    # the future clamp below.
+    end_from_clock = False
     if start_ts_v is not None or end_ts_v is not None:
         if end_ts_v is not None:
             end_ts = min(end_ts_v, now)
+            end_from_clock = end_ts_v > now
             if start_ts_v is not None:
                 start_ts = start_ts_v
             else:
@@ -12501,7 +12534,10 @@ def _handle_insights(handler, parsed) -> bool:
                 # Using `end_ts - 30*86400` drifts by the DST offset and can
                 # fall on the wrong calendar date (see gate repro:
                 # end=2026-03-10 in America/New_York → elapsed gives 2026-02-07
-                # instead of the calendar 2026-02-08).
+                # instead of the calendar 2026-02-08).  `end_ts` is guaranteed
+                # inside the platform window here (the guard above rejected any
+                # pre-epoch / out-of-range supplied endpoint), so neither
+                # fromtimestamp() nor the 30-day back-step can underflow.
                 if end_kind == "date":
                     end_day_tmp = _datetime.fromtimestamp(end_ts).date()
                     start_day_tmp = end_day_tmp - _timedelta(days=30)
@@ -12512,20 +12548,40 @@ def _handle_insights(handler, parsed) -> bool:
         else:
             start_ts = start_ts_v
             end_ts = now
+            end_from_clock = True
         if start_ts > end_ts:
             start_ts, end_ts = end_ts, start_ts
             start_kind, end_kind = end_kind, start_kind
+            # The value that lands in the `end` slot is the OLD start, which is
+            # never clock-derived (it is either explicit, or derived from the
+            # end) - so the flag resets and is re-derived by the clamp below.
+            end_from_clock = False
         # A custom window must never extend into the future.  An explicit
         # future `end` is already clamped to now via min(end, now) above,
         # but the swap can re-introduce a future value as the new end - e.g.
         # a future `start` with no `end` becomes [now, future_start].
-        # Clamp the end to now again; if even the window START is at or
-        # after now the whole window lies in the future (every daily bucket
-        # zero-filled), so fail closed to the trailing `days` fallback and
-        # keep the analytics window ending at or before now.
+        # Clamp the end to now again.
         if end_ts > now:
             end_ts = now
-        if start_ts >= now:
+            end_from_clock = True
+        # STRICT-future detection: a window whose effective START lies at or
+        # after the server clock is wholly in the future (every daily bucket
+        # zero-filled), so it fails closed to the trailing `days` fallback and
+        # the analytics window keeps ending at or before now.  The ONE exempt
+        # case is a zero-length window anchored exactly on the clock that the
+        # caller asked for directly - an explicit `start == now` with no future
+        # endpoint to clamp.  That is not a future request: it stays a custom
+        # (zero-length, therefore empty) interval instead of silently serving
+        # the trailing window (gate re-gate: 'explicit numeric boundaries lose
+        # provenance').  A strictly-future start - including a future start
+        # swapped against the implicit clock end - still falls back.
+        clock_zero_window = (
+            start_ts is not None and end_ts is not None
+            and start_ts >= now and end_ts >= now
+            and not (start_ts_v is not None and start_ts_v > now)
+            and not (end_ts_v is not None and end_ts_v > now)
+        )
+        if start_ts >= now and not clock_zero_window:
             start_ts = None
             end_ts = None
         # Clamp both endpoints into the platform-safe localtime range so an
@@ -12571,14 +12627,22 @@ def _handle_insights(handler, parsed) -> bool:
                 cutoff = _time.mktime((start_day.year, start_day.month, start_day.day, 0, 0, 0, 0, 0, -1))
             else:
                 cutoff = start_ts  # exact numeric (or 30-day-derived implicit) start
-            # Whether the effective `end` resolved to the server clock "now":
-            # an omitted / future / after-swap clamped end.  Then it is an
-            # inclusive "up to the server clock" bound (trailing-like): keep
-            # sessions at/behind now, exclude any stamped after.
-            end_is_now = (end_ts == now)
+            # Whether the effective `end` is the server clock.  PROVENANCE, not
+            # value equality: True only when the caller did NOT pin the end to
+            # a concrete timestamp (an omitted end, or one the server clamped
+            # down to now).  A clock-derived end is an inclusive "up to the
+            # server clock" bound (trailing-like): keep sessions at/behind now,
+            # exclude any stamped after.  An explicit NUMERIC end keeps its
+            # exact [start, end) contract even when its value equals now - a
+            # session stamped exactly at that boundary must stay out.
+            end_is_now = end_from_clock
             if end_is_now:
                 end_cutoff = now
-                end_exclusive = False
+                # A zero-length [now, now] window admits nothing (a half-open
+                # interval is empty): explicit `start == now` resolves to an
+                # EMPTY custom interval rather than leaking the trailing-like
+                # inclusive at-now session.
+                end_exclusive = (start_ts is not None and start_ts >= end_ts)
             elif end_kind == "date":
                 # Whole calendar day: exclusive NEXT local midnight (DST-safe).
                 end_cutoff = _time.mktime((end_day + _timedelta(days=1)).timetuple())

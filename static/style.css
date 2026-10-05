@@ -6691,6 +6691,15 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-stat-value{font-size:22px;font-weight:700;color:var(--text);}
 .insights-stat-label{font-size:11px;color:var(--muted);margin-top:4px;}
 .insights-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
+/* Insights absolute-range bar (#6970): ALL layout/visual styles live here so the
+   controls carry NO inline styles.  An inline `background` on the period
+   <select> resets the shared select chevron background-image while
+   `appearance:none` remains, which left the control looking like static text. */
+.insights-range-bar{display:flex;flex-direction:column;gap:8px;padding:12px 12px 6px;}
+.insights-range-bar .insights-period-select{width:100%;}
+#insightsCustomRange{display:none;align-items:center;gap:6px;flex-wrap:wrap;}
+#insightsCustomRange input[type="date"]{flex:1;min-width:106px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px;}
+.insights-range-arrow{color:var(--muted);font-size:12px;}
 .insights-card{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px;}
 .wiki-status-card{margin-bottom:16px;}
 .wiki-status-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}

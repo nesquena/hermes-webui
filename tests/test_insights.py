@@ -1431,8 +1431,8 @@ def test_insights_period_change_preserves_custom_range_and_seeds_default_only_wh
     period_fn = _function_body(PANELS_JS, "insightsPeriodChange")
     assert "!startEl.value && !endEl.value" in period_fn, "must guard seeding on both inputs empty"
     assert "Math.ceil(len / 52)" in PANELS_JS, "panels.js must use Math.ceil(len/52) for >365"
-    assert 'min-width:106px' in INDEX_HTML, "date inputs must have min-width:106px to wrap before clipping"
-    assert INDEX_HTML.count('min-width:106px') >= 2
+    assert 'min-width:106px' in STYLE_CSS, "date inputs must have min-width:106px to wrap before clipping"
+    assert '#insightsCustomRange input[type="date"]{' in STYLE_CSS
     assert "insights_footer_range" in PANELS_JS
     assert "t('insights_footer_range')" in PANELS_JS
     node = shutil.which("node")
@@ -1775,3 +1775,293 @@ def test_insights_absolute_range_state_db_crossing_session_included(monkeypatch,
     ended_bucket = next((d for d in data["daily_tokens"] if d["date"] == ended_day), None)
     assert ended_bucket is not None, f"no bucket for ended day {ended_day}"
     assert ended_bucket["input_tokens"] == 300
+
+
+# ── PR #6970 gate re-gate (2026-09-10): must-fixes 1-4 ───────────────────────
+
+
+def _open_tag_source(html, element_id):
+    """Return the source of the OPEN TAG carrying `element_id` (not the whole
+    element), so attribute assertions cannot be satisfied by a sibling."""
+    idx = html.find(f'id="{element_id}"')
+    assert idx != -1, f"#{element_id} not found"
+    start = html.rfind("<", 0, idx)
+    end = html.find(">", idx)
+    assert start != -1 and end != -1, f"malformed tag for #{element_id}"
+    return html[start:end + 1]
+
+
+def test_insights_period_select_carries_no_inline_visual_style():
+    """Gate must-fix 3: the period <select> must carry NO inline style.
+
+    An inline `background:var(--input-bg)` resets the shared select rule's
+    chevron `background-image` while `appearance:none` remains, so the control
+    rendered as flat static text (real Chromium at that head:
+    master backgroundImage=url(data:image/svg+xml,...) vs PR backgroundImage=none).
+    The old test only asserted the class + stylesheet rule existed, so it
+    false-greened on the inline override.
+    """
+    tag = _open_tag_source(INDEX_HTML, "insightsPeriod")
+    assert "style=" not in tag, f"#insightsPeriod must carry no inline style; got: {tag}"
+    assert 'class="insights-period-select"' in tag
+    assert 'onchange="insightsPeriodChange()"' in tag
+    # The shared select rule still supplies the chevron + appearance reset.
+    shared = STYLE_CSS.split("select{width:100%", 1)
+    assert len(shared) == 2, "the shared select rule (width:100% + chevron) must exist"
+    shared_decl = shared[1].split("}", 1)[0]
+    assert "appearance:none" in shared_decl
+    assert 'background-image:url("data:image/svg+xml' in shared_decl
+    assert "no-repeat" in shared_decl
+    # Full width now comes from the Insights rule instead of an inline style.
+    assert ".insights-range-bar .insights-period-select{width:100%;}" in STYLE_CSS
+
+
+def test_insights_range_bar_layout_lives_in_stylesheet():
+    """The absolute-range bar's layout/visual declarations all live in
+    static/style.css - no inline styles on the bar, the custom-range row, the
+    period select or either date input (gate must-fix 3)."""
+    for eid in ("insightsPeriod", "insightsStart", "insightsEnd"):
+        tag = _open_tag_source(INDEX_HTML, eid)
+        assert "style=" not in tag, f"#{eid} must carry no inline style; got: {tag}"
+    assert 'class="panel-head-sub insights-range-bar"' in INDEX_HTML
+    assert '<div id="insightsCustomRange">' in INDEX_HTML
+    for rule in (
+        ".insights-range-bar{display:flex;flex-direction:column;gap:8px;padding:12px 12px 6px;}",
+        "#insightsCustomRange{display:none;align-items:center;gap:6px;flex-wrap:wrap;}",
+        ".insights-range-arrow{color:var(--muted);font-size:12px;}",
+    ):
+        assert rule in STYLE_CSS, f"missing stylesheet rule: {rule}"
+    assert '#insightsCustomRange input[type="date"]{' in STYLE_CSS
+
+
+def test_insights_date_inputs_have_platform_min_bound():
+    """Gate must-fix 1 (client defense): both date controls refuse pre-epoch
+    dates locally; the server-side range check stays authoritative."""
+    for eid in ("insightsStart", "insightsEnd"):
+        tag = _open_tag_source(INDEX_HTML, eid)
+        assert 'type="date"' in tag
+        assert 'min="1970-01-01"' in tag, f"#{eid} must carry min=1970-01-01"
+
+
+INSIGHTS_RANGE_KEYS = ("insights_custom_range", "insights_start_date", "insights_end_date")
+
+
+def test_insights_range_keys_are_localized_at_runtime():
+    """Gate must-fix 4: the three range keys must resolve to NATIVE strings in
+    every non-English locale at runtime.
+
+    Source-presence assertions false-greened because all 15 bundles contained
+    the keys - with English literals in the 14 non-English ones.  This evaluates
+    the real i18n bundle in node and reads `t()` per locale after setLocale().
+    """
+    import shutil as _shutil
+    import subprocess
+
+    node = _shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+
+    harness = """
+        const fs = require('fs');
+        const vm = require('vm');
+        const src = fs.readFileSync(process.env.I18N_JS, 'utf8');
+        const sandbox = {
+          localStorage: { getItem() { return null; }, setItem() {} },
+          navigator: { language: 'en', languages: ['en'] },
+          document: { documentElement: {}, querySelectorAll() { return []; } },
+          console,
+        };
+        sandbox.window = sandbox;
+        const probe = src + "\\n;globalThis.__probe = (() => {"
+          + "const out = {};"
+          + "for (const loc of Object.keys(LOCALES)) {"
+          + "  setLocale(loc);"
+          + "  out[loc] = {lang: document.documentElement.lang,"
+          + "    vals: ['insights_custom_range','insights_start_date','insights_end_date'].map(k => t(k))};"
+          + "}"
+          + "return JSON.stringify(out);"
+          + "})();";
+        vm.runInNewContext(probe, sandbox);
+        console.log(sandbox.__probe);
+    """
+
+    import os
+    env = dict(os.environ)
+    env["I18N_JS"] = str(pathlib.Path(__file__).parent.parent / "static" / "i18n.js")
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True,
+                          timeout=60, check=False, env=env)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert out["en"]["vals"] == ["Custom range…", "Start date", "End date"]
+    non_english = sorted(l for l in out if l != "en")
+    assert len(non_english) == 14, f"expected 14 non-English locales, got {non_english}"
+    english = out["en"]["vals"]
+    for loc in non_english:
+        assert out[loc]["lang"], f"{loc} did not resolve a document lang (setLocale failed)"
+        vals = out[loc]["vals"]
+        for key, val, en in zip(INSIGHTS_RANGE_KEYS, vals, english, strict=True):
+            assert val and val != key, f"{loc}.{key} fell back to the key itself"
+            assert val != en, f"{loc}.{key} is still the English literal {en!r}"
+
+
+def test_insights_absolute_range_out_of_platform_endpoints_fail_closed(monkeypatch, tmp_path):
+    """Gate must-fix 1: a pre-epoch (or otherwise out-of-platform-range)
+    endpoint used to reach the end-only calendar arithmetic and raise
+    `OverflowError: date value out of range` -> HTTP 500 (reviewer repro:
+    `end=0001-01-15`).  Chromium's <input type=date> submits `0001-01-15`
+    happily.  It must now be rejected BEFORE that arithmetic and fail closed to
+    the trailing window - `_call_insights` asserts the handler returns 200.
+    """
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "today", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+         "estimated_cost": "0.0001", "model": "gpt-x"},
+    ]
+    for q in (
+        "end=0001-01-15",                              # gate repro (Linux path)
+        "start=0001-01-15",
+        "start=0001-01-15&end=0001-01-15",             # both ends pre-epoch
+        "end=1969-12-31",                              # last pre-epoch calendar day
+        "end=-86400",                                  # numeric pre-epoch epoch
+        "start=-62135596800",                          # numeric pre-epoch (year 1)
+        "end=-62135596800",
+    ):
+        data = _call_insights(monkeypatch, tmp_path, entries, query=q, now=now)
+        assert data["mode"] == "trailing", f"{q} must fail closed to the trailing window"
+        assert data["effective_start"] is None and data["effective_end"] is None
+        assert data["total_sessions"] == 1
+
+
+def test_insights_absolute_range_pre_epoch_end_fails_closed_state_db(monkeypatch, tmp_path):
+    """Same platform guard on the state.db/CLI input path."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    state_rows = [
+        {"id": "cli_today", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 10, "output_tokens": 5, "estimated_cost_usd": 0.0001,
+         "started_at": now - 60, "ended_at": now - 60},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, [], state_rows,
+                                        query="end=0001-01-15", now=now)
+    assert data["mode"] == "trailing"
+    assert data["total_sessions"] == 1
+
+
+def test_insights_absolute_range_explicit_start_at_now_is_empty_custom(monkeypatch, tmp_path):
+    """Gate must-fix 2: an explicit numeric `start == now` is NOT a future
+    window - it must stay a CUSTOM (zero-length, therefore empty) interval.
+    The old `start_ts >= now` check discarded custom mode and silently served
+    the trailing window (reviewer repro: `start=now` -> mode=trailing)."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    older = time.mktime((2026, 4, 15, 9, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "older", "updated_at": older, "created_at": older,
+         "message_count": 3, "input_tokens": 1000, "output_tokens": 500,
+         "estimated_cost": "0.1000", "model": "gpt-x"},
+        {"session_id": "at_now", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+         "estimated_cost": "0.0001", "model": "gpt-x"},
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(now)}", now=now)
+    assert data["mode"] == "custom"
+    assert data["effective_start"] == _day(now)
+    assert data["effective_end"] == _day(now)
+    assert data["total_sessions"] == 0
+    assert data["total_input_tokens"] == 0
+
+
+def test_insights_absolute_range_explicit_numeric_end_at_now_stays_exclusive(monkeypatch, tmp_path):
+    """Gate must-fix 2: an explicit numeric `end == now` is an EXACT exclusive
+    boundary - the numeric contract is [start, end) - so a session stamped
+    exactly at that boundary stays OUT.  Provenance was previously inferred
+    from value equality (`end_ts == now`), which made it an inclusive clock
+    bound whenever the requested end happened to equal the server clock."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start = now - 7200
+    entries = [
+        {"session_id": "in_range", "updated_at": start + 60, "created_at": start + 60,
+         "message_count": 2, "input_tokens": 10, "output_tokens": 5,
+         "estimated_cost": "0.0001", "model": "gpt-x"},
+        {"session_id": "at_end", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 999, "output_tokens": 999,
+         "estimated_cost": "0.9999", "model": "gpt-x"},
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(start)}&end={int(now)}", now=now)
+    assert data["mode"] == "custom"
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 10
+
+
+def test_insights_absolute_range_numeric_end_at_now_exclusive_state_db(monkeypatch, tmp_path):
+    """The state.db/CLI input path applies the same exclusive numeric end."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start = now - 7200
+    state_rows = [
+        {"id": "cli_in", "source": "cli", "model": "gpt-5.5", "message_count": 2,
+         "input_tokens": 10, "output_tokens": 5, "estimated_cost_usd": 0.0001,
+         "started_at": start + 60, "ended_at": start + 60},
+        {"id": "cli_at_end", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 999, "output_tokens": 999, "estimated_cost_usd": 0.9999,
+         "started_at": now, "ended_at": now},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, [], state_rows,
+                                        query=f"start={int(start)}&end={int(now)}", now=now)
+    assert data["mode"] == "custom"
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 10
+
+
+def test_insights_absolute_range_end_only_date_uses_calendar_days(monkeypatch, tmp_path):
+    """End-only DATE requests derive the implicit start from CALENDAR days
+    (end_day - 30 days), so the effective window is exactly 31 days regardless
+    of the platform's DST rules.  Committed public regression for the gate's
+    end-only finding (the DST-sensitive half is the New_York test below)."""
+    now = time.mktime((2026, 3, 15, 12, 0, 0, 0, 0, -1))  # after the end date
+    data = _call_insights(monkeypatch, tmp_path, [], query="end=2026-03-10", now=now)
+    assert data["mode"] == "custom"
+    assert data["effective_start"] == "2026-02-08"
+    assert data["effective_end"] == "2026-03-10"
+    assert data["period_days"] == 31
+    assert len(data["daily_tokens"]) == 31
+
+
+def test_insights_absolute_range_end_only_dst_calendar_arithmetic(monkeypatch, tmp_path):
+    """Gate-required committed regression (America/New_York).
+
+    Spring-forward is 2026-03-08, so with `end=2026-03-10` the thirty calendar
+    days before the end start on 2026-02-08.  A fixed `end_ts - 30*86400`
+    subtraction lands one hour earlier - 2026-02-07 23:00 - which would report
+    effective_start=2026-02-07, produce 32 buckets and admit the Feb 7 23:30
+    session.  The gate reproduced exactly that on the uncommitted branch.
+    """
+    import os
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for DST test (not available on Windows)")
+
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        now = time.mktime((2026, 3, 15, 12, 0, 0, 0, 0, -1))          # 2026-03-15 12:00 EDT
+        feb7_late = time.mktime((2026, 2, 7, 23, 30, 0, 0, 0, -1))    # must stay OUT
+        feb8_early = time.mktime((2026, 2, 8, 0, 30, 0, 0, 0, -1))    # must stay IN
+        entries = [
+            {"session_id": "feb7_late", "updated_at": feb7_late, "created_at": feb7_late,
+             "message_count": 1, "input_tokens": 999, "output_tokens": 999,
+             "estimated_cost": "0.9999", "model": "gpt-x"},
+            {"session_id": "feb8_early", "updated_at": feb8_early, "created_at": feb8_early,
+             "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+             "estimated_cost": "0.0001", "model": "gpt-x"},
+        ]
+        data = _call_insights(monkeypatch, tmp_path, entries, query="end=2026-03-10", now=now)
+        assert data["mode"] == "custom"
+        assert data["effective_start"] == "2026-02-08"
+        assert data["effective_end"] == "2026-03-10"
+        assert len(data["daily_tokens"]) == 31
+        assert data["total_sessions"] == 1
+        assert data["total_input_tokens"] == 10
+    finally:
+        os.environ.pop("TZ", None)
+        time.tzset()
