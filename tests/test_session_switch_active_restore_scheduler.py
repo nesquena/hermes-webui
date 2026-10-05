@@ -7,6 +7,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 def _function_body(src: str, name: str) -> str:
@@ -46,6 +47,14 @@ def _extract_function(src: str, name: str) -> str:
     return src[start:i]
 
 
+def _extract_const(src: str, name: str) -> str:
+    start = src.find(f"const {name}")
+    assert start != -1, f"{name} declaration not found"
+    end = src.find(";", start)
+    assert end != -1, f"{name} declaration did not terminate"
+    return src[start : end + 1]
+
+
 def _extract_functions() -> str:
     owner_body = _function_body(SESSIONS_JS, "_isActiveSessionSceneRestoreOwner")
     defer_body = _function_body(SESSIONS_JS, "_deferActiveSessionSceneRestore")
@@ -55,7 +64,9 @@ def _extract_functions() -> str:
         else "return null;"
     )
     return (
-        "let _activeSessionSceneRestorePending = null;\n"
+        _extract_const(MESSAGES_JS, "_PENDING_LIVE_ATTACHES") + "\n"
+        + _extract_function(MESSAGES_JS, "_ownsPendingLiveAttach") + "\n"
+        + "let _activeSessionSceneRestorePending = null;\n"
         "function _isActiveSessionSceneRestoreOwner(sid, activeStreamId, loadGeneration)"
         "{" + owner_body + "}\n"
         "function _activeSessionSceneRestorePendingFor(sid, streamId)"
@@ -432,6 +443,152 @@ global.clearLiveToolCards = () => {};
 global.updateSendBtn = () => {};
 global._scheduleActiveSessionIdleReload = () => {};
 """
+
+
+def _pending_live_attach_functions() -> str:
+    return "\n".join(
+        [
+            _extract_function(MESSAGES_JS, "_pendingLiveAttachIdentity"),
+            _extract_function(MESSAGES_JS, "_claimPendingLiveAttach"),
+            _extract_function(MESSAGES_JS, "_finishPendingLiveAttach"),
+            _extract_function(MESSAGES_JS, "_attachLiveStreamWithOwnership"),
+        ]
+    )
+
+
+def test_idle_cleanup_preserves_pending_attach_after_scene_handoff_and_releases_it():
+    setup = _idle_cleanup_setup() + """
+global.document = { visibilityState: 'visible', hidden: false, addEventListener() {}, removeEventListener() {} };
+global.__raf = [];
+global.__timers = [];
+global.__wiredSources = [];
+global.__constructedSources = [];
+global.requestAnimationFrame = (cb) => { __raf.push(cb); return __raf.length; };
+global.cancelAnimationFrame = () => {};
+global.setTimeout = (fn) => { __timers.push(fn); return __timers.length; };
+global.clearTimeout = () => {};
+class FakeEventSource {
+  constructor(streamId) { this.streamId = streamId; __constructedSources.push(this); }
+}
+
+function resetAttachState(generation = 1) {
+  S = { session: { session_id: 'A', active_stream_id: 'stream-A', pending_user_message: 'prompt' }, activeStreamId: 'stream-A', busy: true };
+  _loadSessionGeneration = generation;
+  INFLIGHT = { A: { streamId: 'stream-A', reattach: true } };
+  _allSessions = [
+    { session_id: 'A', is_streaming: false, active_stream_id: null, pending_user_message: null, has_pending_user_message: false, pending_started_at: null },
+    { session_id: 'B', is_streaming: false, active_stream_id: null, pending_user_message: null, has_pending_user_message: false, pending_started_at: null },
+  ];
+  LIVE_STREAMS = Object.create(null);
+  _sessionStreamingById = new Map();
+  __clearedInflight.length = 0;
+  __raf.length = 0;
+  __timers.length = 0;
+  __wiredSources.length = 0;
+  __constructedSources.length = 0;
+  _activeSessionSceneRestorePending = null;
+}
+
+async function startDeferredAttach(generation = 1) {
+  resetAttachState(generation);
+  let resolveStatus;
+  global.api = () => new Promise(resolve => { resolveStatus = resolve; });
+  let claim;
+  let attachPromise;
+  const scenePromise = _deferActiveSessionSceneRestoreAndAttach(
+    'A', 'stream-A', generation, () => 'restored', () => {
+      const claimed = _claimPendingLiveAttach('A', 'stream-A', {
+        isCurrentOwner: () => _isActiveSessionSceneRestoreOwner('A', 'stream-A', generation),
+        ownerToken: `load-${generation}`,
+        loadGeneration: generation,
+      });
+      assert.strictEqual(claimed.shouldStart, true);
+      claim = claimed.claim;
+      attachPromise = _attachLiveStreamWithOwnership({
+        activeSid: 'A',
+        streamId: 'stream-A',
+        reconnecting: true,
+        ownsAttach: () => _ownsPendingLiveAttach(claim),
+        finishAttach: attached => _finishPendingLiveAttach(claim, attached),
+        statusDecision: status => ({ shouldConnect: !!status.active, replayOnly: false }),
+        replayParamsForAttach: () => '',
+        connectSource: () => new FakeEventSource('stream-A'),
+        wireSource: source => { __wiredSources.push(source); LIVE_STREAMS.A = { streamId: 'stream-A', source }; },
+      });
+      return true; // attachLiveStream exposes the claim synchronously; status remains pending.
+    },
+  );
+  assert.strictEqual(__raf.length, 1);
+  __raf.shift()();
+  assert.strictEqual(__raf.length, 1);
+  __raf.shift()();
+  const sceneResult = await scenePromise;
+  assert.strictEqual(sceneResult.attached, true);
+  assert.strictEqual(_activeSessionSceneRestorePending, null);
+  assert.ok(claim && _PENDING_LIVE_ATTACHES.A === claim);
+  assert.strictEqual(typeof resolveStatus, 'function');
+  return { claim, attachPromise, resolveStatus };
+}
+
+function assertIdleCleanup(sid = 'A') {
+  _reconcileActiveSessionIdleStateFromList(_allSessions);
+  _purgeStaleInflightEntries();
+  assert.strictEqual(INFLIGHT[sid], undefined, `${sid} stale INFLIGHT must be removed`);
+  assert.ok(__clearedInflight.includes(sid), `${sid} stale state must be cleared`);
+}
+"""
+    assertions = """
+const successful = await startDeferredAttach();
+const currentEntry = INFLIGHT.A;
+assert.strictEqual(_activeSessionSceneRestorePending, null, 'two restore frames must hand off and clear the scene token');
+assert.strictEqual(_PENDING_LIVE_ATTACHES.A, successful.claim, 'the async status claim must remain current after handoff');
+assert.strictEqual(_reconcileActiveSessionIdleStateFromList(_allSessions), false, 'idle reconcile must retain the validated pending attach');
+assert.strictEqual(S.busy, true);
+assert.strictEqual(S.activeStreamId, 'stream-A');
+assert.strictEqual(INFLIGHT.A, currentEntry);
+_purgeStaleInflightEntries();
+assert.strictEqual(INFLIGHT.A, currentEntry, 'purge must retain the same pending attach claim');
+successful.resolveStatus({ active: true });
+assert.strictEqual(await successful.attachPromise, true);
+assert.strictEqual(__constructedSources.length, 1);
+assert.strictEqual(__wiredSources.length, 1, 'exactly one EventSource must be wired');
+assert.strictEqual(_PENDING_LIVE_ATTACHES.A, undefined, 'successful attach must finish and remove its claim');
+LIVE_STREAMS.A.source.readyState = 2;
+INFLIGHT.A.reattach = true;
+assertIdleCleanup();
+assert.strictEqual(S.busy, false, 'completed attach must not act as a permanent busy guard');
+
+const unsuccessful = await startDeferredAttach();
+unsuccessful.resolveStatus({ active: false });
+assert.strictEqual(await unsuccessful.attachPromise, false);
+assert.strictEqual(_PENDING_LIVE_ATTACHES.A, undefined, 'unsuccessful status decision must finish the claim');
+assertIdleCleanup();
+
+const stalePane = await startDeferredAttach();
+S = { session: { session_id: 'B', active_stream_id: 'stream-B' }, activeStreamId: 'stream-B', busy: true };
+_loadSessionGeneration = 2;
+assertIdleCleanup('A');
+stalePane.resolveStatus({ active: true });
+assert.strictEqual(await stalePane.attachPromise, false, 'A claim must lose ownership after switching to B');
+assert.strictEqual(_PENDING_LIVE_ATTACHES.A, undefined);
+assert.strictEqual(__wiredSources.length, 0);
+
+const staleAba = await startDeferredAttach();
+_loadSessionGeneration = 2;
+assertIdleCleanup('A');
+staleAba.resolveStatus({ active: true });
+assert.strictEqual(await staleAba.attachPromise, false, 'same-pane ABA claim must fail its old generation');
+assert.strictEqual(_PENDING_LIVE_ATTACHES.A, undefined);
+
+const wrongInflight = await startDeferredAttach();
+INFLIGHT.A.streamId = 'wrong-stream';
+assertIdleCleanup('A');
+wrongInflight.resolveStatus({ active: true });
+assert.strictEqual(await wrongInflight.attachPromise, false, 'cleanup must invalidate attach when INFLIGHT names another stream');
+assert.strictEqual(_PENDING_LIVE_ATTACHES.A, undefined);
+console.log('ok');
+"""
+    _run_script(setup, assertions, _pending_live_attach_functions() + "\n" + _idle_cleanup_functions())
 
 
 def test_idle_list_reconciler_preserves_current_deferred_restore_window():

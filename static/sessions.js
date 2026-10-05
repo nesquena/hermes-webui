@@ -1315,7 +1315,8 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
-  if (_activeSessionSceneRestorePendingFor(sid)) return false;
+  const inflightStreamId=INFLIGHT&&INFLIGHT[sid]?INFLIGHT[sid].streamId:undefined;
+  if (_activeSessionSceneRestorePendingFor(sid,inflightStreamId)) return false;
   // Sidebar idle metadata can beat the terminal frame on the independent chat
   // SSE. Let its exact OPEN transport finish the Anchor handoff; orphaned or
   // disconnected streams still use the existing idle recovery below.
@@ -3646,14 +3647,21 @@ function _isActiveSessionSceneRestoreOwner(sid, activeStreamId, loadGeneration){
 function _activeSessionSceneRestorePendingFor(sid, streamId){
   if(!sid) return null;
   const pending=_activeSessionSceneRestorePending;
-  if(!pending) return null;
-  if(!_isActiveSessionSceneRestoreOwner(pending.sid,pending.streamId,pending.loadGeneration)){
-    if(_activeSessionSceneRestorePending===pending) _activeSessionSceneRestorePending=null;
-    return null;
+  if(pending){
+    if(!_isActiveSessionSceneRestoreOwner(pending.sid,pending.streamId,pending.loadGeneration)){
+      if(_activeSessionSceneRestorePending===pending) _activeSessionSceneRestorePending=null;
+    }else if(String(pending.sid)===String(sid)&&
+      (streamId===undefined||pending.streamId===String(streamId||''))){
+      return pending;
+    }
   }
-  if(String(pending.sid)!==String(sid)) return null;
-  if(streamId!==undefined&&pending.streamId!==String(streamId||'')) return null;
-  return pending;
+  const attachClaim=_PENDING_LIVE_ATTACHES[sid];
+  if(!attachClaim||String(attachClaim.sid)!==String(sid)) return null;
+  if(streamId!==undefined&&String(attachClaim.streamId)!==String(streamId||'')) return null;
+  if(!Number.isFinite(attachClaim.loadGeneration)) return null;
+  if(!_isActiveSessionSceneRestoreOwner(attachClaim.sid,attachClaim.streamId,attachClaim.loadGeneration)) return null;
+  if(!_ownsPendingLiveAttach(attachClaim)) return null;
+  return attachClaim;
 }
 
 function _deferActiveSessionSceneRestore(sid, activeStreamId, loadGeneration, restoreFn){

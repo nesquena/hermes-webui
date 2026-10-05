@@ -36,6 +36,7 @@ def _run_case(operation, transport, *, absent=False, close_after=False):
     script = """
 let _activeSessionSceneRestorePending=null;
 const _loadSessionGeneration=1;
+const _PENDING_LIVE_ATTACHES=Object.create(null);
 const S={session:{session_id:'current',active_stream_id:'turn-1'},busy:true,activeStreamId:'turn-1'};
 const INFLIGHT={current:{streamId:'turn-1',messages:[{role:'assistant',content:'work so far'}]}};
 const original=INFLIGHT.current;

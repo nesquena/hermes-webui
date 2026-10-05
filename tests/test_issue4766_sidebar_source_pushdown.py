@@ -106,6 +106,7 @@ def _extract_stale_inflight_purge_helpers(source_text):
         [
             "let _activeSessionSceneRestorePending = null;",
             "let _loadSessionGeneration = 0;",
+            "const _PENDING_LIVE_ATTACHES=Object.create(null);",
             _extract_function(source_text, "_isActiveSessionSceneRestoreOwner"),
             _extract_function(source_text, "_activeSessionSceneRestorePendingFor"),
             _extract_function(source_text, "_hasOwnedOpenLiveStream"),
