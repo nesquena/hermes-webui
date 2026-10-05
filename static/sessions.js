@@ -81,11 +81,19 @@ function _composerDraftPayloadSignature(text, files) {
   return JSON.stringify({ text: normalizedText, files: normalizedFiles });
 }
 
-function _composerDraftPayloadSignatureForSid(sid) {
+function _composerDraftPayloadForSid(sid) {
   if (typeof S === 'undefined' || !S.session || S.session.session_id !== sid) return null;
-  const draft = S.session.composer_draft || null;
-  if (!draft) return null;
-  return _composerDraftPayloadSignature(draft.text, draft.files);
+  const draft = S.session.composer_draft;
+  if (!draft || typeof draft !== 'object' || Array.isArray(draft)) return null;
+  return {
+    text: typeof draft.text === 'string' ? draft.text : '',
+    files: _composerDraftFilesForPersist(draft.files),
+  };
+}
+
+function _composerDraftPayloadSignatureForSid(sid) {
+  const draft = _composerDraftPayloadForSid(sid);
+  return draft ? _composerDraftPayloadSignature(draft.text, draft.files) : null;
 }
 
 function _suppressComposerDraftRestoreAfterSubmit(sid, text, files) {
@@ -109,6 +117,14 @@ function _suppressComposerDraftRestoreAfterSubmit(sid, text, files) {
     _addSig(_composerDraftPayloadSignature(text, files));  // submitted payload
   } else if (previous && typeof previous === 'object' && Array.isArray(previous.signatures)) {
     previous.signatures.forEach(_addSig);
+  }
+  const extraPayloads = arguments[3];
+  if (Array.isArray(extraPayloads)) {
+    extraPayloads.forEach((payload) => {
+      if (payload && typeof payload === 'object') {
+        _addSig(_composerDraftPayloadSignature(payload.text, payload.files));
+      }
+    });
   }
   _composerDraftRestoreSuppressedUntilBySid.set(
     sid,
@@ -260,9 +276,9 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 }
 
 // Immediate save used before session switches.
-function _saveComposerDraftNow(sid, text, files) {
+function _saveComposerDraftNow(sid, text, files, force=false, clearTimer=true, expectedStreamId, interruptRequest=false) {
   if (!sid) return Promise.resolve();
-  clearTimeout(_draftSaveTimer);
+  if (clearTimer) clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
@@ -271,16 +287,20 @@ function _saveComposerDraftNow(sid, text, files) {
   // Most chat switches leave an empty composer. Avoid putting the switch path
   // behind a network POST unless there is new local draft content or an existing
   // server draft that must be cleared.
-  if (!_composerDraftHasPayload(normalizedText, normalizedFiles)
+  if (!force && !_composerDraftHasPayload(normalizedText, normalizedFiles)
       && S.session && S.session.session_id === sid
       && !_sessionComposerDraftHasPayload(S.session)
       && !_composerDraftKnownPayloadSessions.has(sid)) {
     return Promise.resolve();
   }
-  return api('/api/session/draft', {
+  const body = { session_id: sid, text: normalizedText, files: normalizedFiles };
+  if (expectedStreamId) body.expected_stream_id = String(expectedStreamId);
+  const requestOptions = {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-  }).then(() => {
+    body: JSON.stringify(body),
+  };
+  if (interruptRequest) requestOptions.retries = 0;
+  return api('/api/session/draft', requestOptions).then(() => {
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
   }).catch(() => {});
 }
@@ -343,6 +363,36 @@ function _clearComposerDraft(sid, text, files) {
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, '', []);
   }).catch(() => {});
+}
+
+function _clearComposerDraftIfMatches(sid, text, files, expectedStreamId, interruptRequest=false) {
+  if (!sid) return Promise.resolve({compare_cleared:false});
+  if (S.session && S.session.session_id === sid) clearTimeout(_draftSaveTimer);
+  _clearRememberedNewChatDraftSession(sid);
+  const normalizedText = String(text || '');
+  const normalizedFiles = _composerDraftFilesForPersist(files);
+  _suppressComposerDraftRestoreAfterSubmit(sid, normalizedText, normalizedFiles);
+  const body = {
+    session_id: sid,
+    text: normalizedText,
+    files: normalizedFiles,
+    compare_and_clear: true,
+  };
+  if (expectedStreamId) body.expected_stream_id = String(expectedStreamId);
+  const requestOptions = {
+    method: 'POST',
+    body: JSON.stringify(body),
+  };
+  if (interruptRequest) requestOptions.retries = 0;
+  return api('/api/session/draft', requestOptions).then(result => {
+    if (result && result.compare_cleared === true) {
+      _rememberComposerDraftPayloadState(sid, '', []);
+    } else if (result && result.compare_cleared === false && result.draft) {
+      _clearComposerDraftRestoreSuppression(sid);
+      _rememberComposerDraftPayloadState(sid, result.draft.text, result.draft.files);
+    }
+    return result;
+  }).catch(() => null);
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';

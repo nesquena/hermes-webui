@@ -182,10 +182,13 @@ def test_explicit_cancel_call_sites_pass_a_reason():
         f"found {len(bare)} bare cancelStream() call(s) with no reason — each "
         "explicit call site must pass a provenance reason string."
     )
-    for reason in ("composer-stop", "slash-stop", "slash-interrupt", "busy-interrupt"):
+    for reason in ("composer-stop", "slash-stop"):
         assert f"cancelStream('{reason}')" in combined or f'cancelStream("{reason}")' in combined, (
             f"expected an explicit cancelStream call with reason {reason!r}"
         )
+    assert "cancelStream(cancelReason)" in commands
+    assert "cancelReason='busy-interrupt'" in commands
+    assert "_tryInterrupt(msg,'cmd_interrupt_confirm','slash-interrupt')" in commands
 
 
 # ── Backend invariant that the front-end fix depends on ─────────────────────
