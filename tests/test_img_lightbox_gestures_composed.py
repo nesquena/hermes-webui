@@ -20,7 +20,7 @@ Covers the six review-required points:
 
 plus the four 2026-10-05 greptile follow-ups (second-pointer pan guard,
 editable-target shortcut guard, focus into the dialog on open, stale
-geometry dropped on a failed load).
+geometry dropped — zoom level preserved — on a failed load).
 
 The per-check script lives in ``_img_lightbox_composed_checks.js`` and is
 injected into the page; there is no DOM emulation layer and no third-party JS
@@ -170,7 +170,7 @@ class TestComposedReviewFollowups:
         _check(composed.desktop, "focus_moves_into_dialog")
 
     def test_failed_load_drops_the_stale_geometry(self, composed):
-        _check(composed.desktop, "img_error_clears_stale_geometry")
+        _check(composed.desktop, "img_error_keeps_zoom_drops_stale_geometry")
 
 
 class TestComposedI18n:

@@ -24,8 +24,9 @@
  *   7. the 2026-10-05 greptile follow-ups: a second pointer cannot take the
  *      pan over, the document-wide shortcuts never hijack a background
  *      editable field, focus moves into the dialog on open, and a failed
- *      image load drops the previous image's geometry (with a recovery
- *      control proving the stage rebuilds on the next good load)
+ *      image load drops the previous image's geometry while preserving the
+ *      user's zoom level (with a recovery control proving the stage rebuilds
+ *      — at that zoom — on the next good load)
  */
 (function () {
   "use strict";
@@ -471,22 +472,22 @@
       assert_(box.z.scale > base, "the shortcuts must work while focus sits inside the dialog");
     });
 
-    await run("img_error_clears_stale_geometry", bucket, async function () {
+    await run("img_error_keeps_zoom_drops_stale_geometry", bucket, async function () {
       var box = await openBox(IMG_W, IMG_H, {
         images: [
           { src: svgDataUrl(IMG_W, IMG_H), alt: "good" },
           { src: "data:image/png;base64,AAAA", alt: "broken" },
+          { src: svgDataUrl(IMG_W, IMG_H), alt: "good again" },
         ],
         index: 0,
       });
       key("+");
       key("+");
-      assert_(box.z.scale > box.z.fitScale, "fixture: expected zoom-in before navigating away");
+      var keptScale = box.z.scale;
+      assert_(keptScale > box.z.fitScale, "fixture: expected zoom-in before navigating away");
       key("ArrowRight");
       assert_(box.lb._navIndex === 1, "navigation must move to the broken image");
-      assert_(box.z.pendingNav === true, "navigation must arm the pending-nav flag");
-      for (var i = 0; i < 180 && box.z.pendingNav; i++) await frame();
-      assert_(box.z.pendingNav === false, "a failed load must clear pendingNav");
+      for (var i = 0; i < 180 && box.z.boxW; i++) await frame();
       assert_(
         box.z.boxW === 0 && box.z.boxH === 0,
         "a failed load must drop the stale box size, got " + box.z.boxW + "x" + box.z.boxH
@@ -496,11 +497,21 @@
         "a failed load must clear the stale transform, got '" + box.cv.style.transform + "'"
       );
       assert_(box.z.dragging === false, "a failed load must not leave a drag armed");
-      // Recovery: the next successful load must rebuild the stage.
-      key("ArrowLeft");
+      // The user's zoom level is part of the navigation contract ("keep the
+      // current zoom level when switching images"), so a broken image in the
+      // middle of a sequence must not silently reset it to fit.
+      assert_(box.z.scale === keptScale, "a failed load must not drop the user's zoom level, got " + box.z.scale);
+      // Recovery: navigating onward to a working image rebuilds the stage AND
+      // keeps that zoom level.
+      key("ArrowRight");
+      assert_(box.lb._navIndex === 2, "navigation must continue past the broken image");
       for (var j = 0; j < 180 && !box.z.boxW; j++) await frame();
       assert_(box.z.boxW > 0 && box.z.boxH > 0, "a later successful load must restore the box size");
       assert_(box.z.pendingNav === false, "the recovered load must consume the pending-nav flag");
+      assert_(
+        Math.abs(box.z.scale - keptScale) < 1e-9,
+        "the zoom level must survive the broken image: " + box.z.scale + " vs " + keptScale
+      );
     });
 
     // 6. Locale rendering of the Fit control.

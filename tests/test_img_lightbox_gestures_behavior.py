@@ -189,3 +189,9 @@ class TestReviewFollowups20261005:
             "canvas.style.transform = '';",
         ):
             assert marker in body, f"_imgOnError must reset {marker}"
+        # The user's zoom level belongs to the navigation contract ("keep the
+        # current zoom level when switching images"), so the error path must
+        # drop the geometry WITHOUT resetting state.scale.
+        assert "state.scale = 1;" not in body, (
+            "_imgOnError must not reset the user's zoom level (greptile follow-up)"
+        )

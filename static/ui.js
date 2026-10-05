@@ -2760,17 +2760,20 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     // previous image's stage behind: only _onImgLoad used to clear pendingNav
     // and refresh the canvas geometry, so the broken image inherited the old
     // boxW/boxH, the old zoom baseline and the armed one-shot nav flag until
-    // some later image happened to load (and that load then re-fitted instead
-    // of honouring the navigation contract). Drop the stale geometry entirely;
-    // the next successful load rebuilds it from the new natural size
-    // (greptile review of #6896, 2026-10-05).
+    // some later image happened to load (greptile review of #6896,
+    // 2026-10-05).
+    //
+    // state.scale is deliberately NOT reset: keeping the user's zoom level
+    // across a navigation is this feature's stated contract, so a broken image
+    // in the middle of a sequence must not silently drop it. The next
+    // navigation re-arms pendingNav and the next successful load re-centres at
+    // the preserved scale (greptile follow-up, 2026-10-05).
     state.pendingNav = false;
     state.dragging = false;
     state.dragPointerId = null;
     state.boxW = 0;
     state.boxH = 0;
     state.fitScale = 1;
-    state.scale = 1;
     state.x = 0;
     state.y = 0;
     canvas.style.width = '';
