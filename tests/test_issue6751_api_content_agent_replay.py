@@ -435,7 +435,7 @@ def test_issue6751_sync_chat_agent_receives_original_api_content_bytes(monkeypat
     monkeypatch.setattr(routes, "title_from", models.title_from)
     monkeypatch.setattr(config, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
     monkeypatch.setattr(routes, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: tmp_path)
     monkeypatch.setattr(routes, "load_settings", lambda: {})
     monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
 
@@ -526,7 +526,7 @@ def test_issue6751_json_import_strips_internal_aliases_before_persistence(monkey
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", state_dir / "session_index.json")
     monkeypatch.setattr(models, "SESSIONS", sessions)
     monkeypatch.setattr(routes, "SESSIONS", sessions)
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: tmp_path)
     monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *args, **kwargs: None)
     monkeypatch.setattr(config, "load_settings", lambda: {"api_redact_enabled": False})
@@ -625,7 +625,7 @@ def test_issue6751_json_import_nested_tool_calls_are_removed_at_agent_boundary(
     monkeypatch.setattr(models, "SESSIONS", sessions)
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", state_dir / "session_index.json")
     monkeypatch.setattr(routes, "SESSIONS", sessions)
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: tmp_path)
     monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *args, **kwargs: None)
     monkeypatch.setattr(config, "load_settings", lambda: {"api_redact_enabled": False})
@@ -784,7 +784,7 @@ def test_issue6751_json_import_rejects_non_list_session_tool_calls(monkeypatch, 
     monkeypatch.setattr(models, "SESSIONS", sessions)
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", state_dir / "session_index.json")
     monkeypatch.setattr(routes, "SESSIONS", sessions)
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: tmp_path)
     monkeypatch.setattr(config, "load_settings", lambda: {"api_redact_enabled": False})
     captured = {}
 

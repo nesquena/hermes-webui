@@ -863,6 +863,10 @@ const src = fs.readFileSync('static/panels.js', 'utf8');
 function esc(value) {
   return String(value == null ? '' : value).replace(/[&<>\"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[ch]));
 }
+function jsArg(value) {
+  // Mirrors the ui.js global: panels.js inline handlers call jsArg().
+  return esc(JSON.stringify(String(value == null ? '' : value)));
+}
 const context = {
   console,
   setInterval(){ return 1; },
@@ -879,7 +883,7 @@ const context = {
     };
     return map[key] || key;
   },
-  esc, $(){ return null; }, api(){}, showToast(){}, li(){ return ''; }, S: {}
+  esc, jsArg, $(){ return null; }, api(){}, showToast(){}, li(){ return ''; }, S: {}
 };
 vm.createContext(context);
 vm.runInContext(src, context);

@@ -552,16 +552,77 @@ def test_bare_codex_gpt_runtime_bridge_routes_to_codex(monkeypatch):
     assert base_url is None
 
 
-def test_non_openrouter_slash_model_provider_context_stays_unqualified():
-    """Portal/custom slash IDs must not be blindly wrapped as @provider:model."""
+def test_live_only_codex_model_beats_overlapping_configured_provider(monkeypatch):
+    """Live-only Codex models must not be hijacked by another configured provider."""
     import api.config as config
 
-    runtime_model = config.model_with_provider_context(
-        "anthropic/claude-sonnet-4.6",
-        "nous",
+    monkeypatch.setitem(config.cfg, "model", {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+    })
+    monkeypatch.setitem(config.cfg, "providers", {
+        "shared-relay": {
+            "base_url": "https://relay.example/v1",
+            "models": {"gpt-5.3-codex": {}},
+        }
+    })
+    monkeypatch.setitem(
+        config._PROVIDER_MODELS,
+        "openai-codex",
+        [
+            model for model in config._PROVIDER_MODELS["openai-codex"]
+            if model.get("id") != "gpt-5.3-codex"
+        ],
     )
 
-    assert runtime_model == "anthropic/claude-sonnet-4.6"
+    runtime_model = config.model_with_provider_context(
+        "gpt-5.3-codex", "openai-codex"
+    )
+    resolved = config.resolve_model_provider(runtime_model)
+
+    assert runtime_model == "@openai-codex:gpt-5.3-codex"
+    assert resolved == (
+        "gpt-5.3-codex",
+        "openai-codex",
+        "https://chatgpt.com/backend-api/codex",
+    )
+
+
+def test_non_openrouter_slash_model_provider_context_stays_unqualified():
+    """Portal/custom slash IDs must keep the provider hint when the session
+    provider differs from the profile default (#7333).
+
+    Previously any non-OpenRouter slash ID fell through to a bare passthrough,
+    dropping the session provider — so a Nous portal row
+    (``anthropic/claude-sonnet-4.6`` on the Nous namespace) picked under a
+    foreign default (e.g. xai-oauth) inherited the default provider's base_url
+    and 404'd. The fix emits ``@provider:model`` for known routable providers
+    (portal/static/named-custom) that differ from the configured default.
+    """
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "xai-oauth",
+        "default": "grok-4.6",
+        "base_url": "https://api.x.ai/v1",
+    }
+    config.cfg["providers"] = {}
+    try:
+        runtime_model = config.model_with_provider_context(
+            "anthropic/claude-sonnet-4.6",
+            "nous",
+        )
+        model, provider, base_url = config.resolve_model_provider(runtime_model)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert runtime_model == "@nous:anthropic/claude-sonnet-4.6"
+    assert model == "anthropic/claude-sonnet-4.6"
+    assert provider == "nous"
+    assert base_url != "https://api.x.ai/v1"
 
 
 def test_configured_provider_slash_model_keeps_provider_context():
@@ -1035,9 +1096,9 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
         "_resolve_chat_workspace_with_recovery",
         lambda current, _requested: current.workspace,
     )
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: value)
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
 

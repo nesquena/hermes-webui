@@ -39,7 +39,7 @@ def _fn_body(name: str) -> str:
 
 
 def _strip(model, provider):
-    body = _fn_body("_cronModelBareName")
+    body = _fn_body("_modelBareNameForProvider") + "\n" + _fn_body("_cronModelBareName")
     script = (
         body
         + "\nconst args = "

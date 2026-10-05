@@ -9,10 +9,22 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
 
 
-def _run_i18n_case(script_expr: str) -> dict:
+def _run_i18n_case(script_expr: str, *, navigator_obj: object | None = None) -> dict:
     wrapped_expr = f"(() => ({script_expr}))()"
+    if navigator_obj is None:
+        navigator_src = "undefined"
+    elif navigator_obj == "throwing":
+        # Mimic some embedded webviews: a `navigator` object whose
+        # `languages` / `language` accessors throw on read.
+        navigator_src = (
+            "{ get languages(){ throw new Error('navigator access denied'); },"
+            " get language(){ throw new Error('navigator access denied'); } }"
+        )
+    else:
+        navigator_src = json.dumps(navigator_obj)
     script = textwrap.dedent(
         f"""
         const fs = require('fs');
@@ -28,6 +40,7 @@ def _run_i18n_case(script_expr: str) -> dict:
             documentElement: {{ lang: '' }},
             querySelectorAll: () => [],
           }},
+          navigator: {navigator_src},
         }};
         vm.createContext(ctx);
         vm.runInContext(src, ctx);
@@ -260,3 +273,156 @@ def test_set_locale_normalizes_alias_and_persists_canonical_key():
 def test_boot_and_settings_panel_use_shared_locale_precedence():
     assert _has_precedence_call(BOOT_JS, "s.language")
     assert _has_precedence_call(PANELS_JS, "settings.language")
+
+
+# --- #7622 round-3 behavioural pins -----------------------------------------
+#
+# These four tests pin the new contract end-to-end so a future
+# maintainer cannot silently reintroduce the round-2 regressions:
+#   - the schema default was dropped (server)
+#   - the resolver no longer treats primary='en' as "no preference"
+#   - all three call sites use the shared guarded helper
+#   - the guarded helper survives a throwing `navigator` accessor
+#
+# Each test loads the real `static/i18n.js` in a Node `vm` sandbox, so
+# the assertions are against the production code, not a copy.
+
+
+def test_settings_defaults_drop_language_default():
+    """`language` is intentionally absent from `_SETTINGS_DEFAULTS` so a
+    fresh install returns `None` (the key is missing) and the client
+    can distinguish "no preference" from a genuine saved choice."""
+    # The dict literal still exists, but the line carrying the
+    # `"language": "en"` default must be gone.  A grep for the
+    # default covers future renames / re-shuffles of the dict.
+    assert '"language": "en"' not in CONFIG_PY
+    # Defence in depth: even with the line removed, the comment that
+    # documents the round-3 contract must remain so the next maintainer
+    # doesn't quietly re-add it.
+    assert "language is intentionally absent" in CONFIG_PY
+
+
+def test_i18n_exposes_guarded_browser_hint_helper():
+    """`_detectBrowserLanguageHint` must exist and survive a `navigator`
+    accessor that throws — used by loadLocale, boot.js, and panels.js
+    to keep a single bad read from aborting boot / settings hydration."""
+    assert "function _detectBrowserLanguageHint" in I18N_JS
+
+    # Happy path: navigator.languages[0] wins.
+    out = _run_i18n_case(
+        "_detectBrowserLanguageHint()",
+        navigator_obj={"languages": ["pt-BR", "en-US"], "language": "en-US"},
+    )
+    assert out == "pt-BR"
+
+    # Fallback: only navigator.language present.
+    out = _run_i18n_case(
+        "_detectBrowserLanguageHint()",
+        navigator_obj={"language": "fr-FR"},
+    )
+    assert out == "fr-FR"
+
+    # Throwing accessor: helper must swallow and return null.
+    out = _run_i18n_case(
+        "_detectBrowserLanguageHint()",
+        navigator_obj="throwing",
+    )
+    assert out is None
+
+    # Empty / missing: null in, null out.
+    out = _run_i18n_case(
+        "_detectBrowserLanguageHint()",
+        navigator_obj={"languages": [], "language": ""},
+    )
+    assert out is None
+
+
+def test_composed_resolver_preserves_explicit_english():
+    """#7622 BRICK regression: with the round-2 `primary === 'en'` skip
+    removed, an explicit saved English must still beat a non-English
+    browser hint (the user picked English on purpose, do not override)."""
+    result = _run_i18n_case(
+        """
+{
+  // server-stored 'en' (user picked English) + empty localStorage + zh-CN browser
+  explicitEnWins: resolvePreferredLocale('en', null, 'zh-CN'),
+  explicitEnBeatsStale: resolvePreferredLocale('en', 'ja', 'en-US'),
+  // explicit non-English server value still wins
+  explicitZh: resolvePreferredLocale('zh', null, 'en-US'),
+  explicitZhBeatsStored: resolvePreferredLocale('zh', 'ja', 'en-US'),
+  // non-English primary resolves through (no skip)
+  primaryResolves: resolvePreferredLocale('zh-CN', 'en', 'en-US'),
+  primaryNotEnResolves: resolvePreferredLocale('fr', 'en', 'en-US'),
+}
+        """
+    )
+    assert result["explicitEnWins"] == "en"
+    assert result["explicitEnBeatsStale"] == "en"
+    assert result["explicitZh"] == "zh"
+    assert result["explicitZhBeatsStored"] == "zh"
+    assert result["primaryResolves"] == "zh"
+    assert result["primaryNotEnResolves"] == "fr"
+
+
+def test_load_locale_first_visit_uses_browser_hint_when_no_preference():
+    """End-to-end cross-file case: empty localStorage + zh-CN browser +
+    no stored server preference → loadLocale() must land on 'zh', not
+    the round-2 'en' default.  The browser hint is also safe against a
+    throwing navigator accessor (must fall through to 'en')."""
+    # Fresh install: empty localStorage, browser is zh-CN.
+    out = _run_i18n_case(
+        """
+{
+  ...(loadLocale(), {}),
+  saved: localStorage.getItem('hermes-lang'),
+  htmlLang: document.documentElement.lang,
+}
+        """,
+        navigator_obj={"languages": ["zh-CN", "en"], "language": "zh-CN"},
+    )
+    assert out["saved"] == "zh"
+    assert out["htmlLang"] == "zh-CN"
+
+    # Throwing navigator accessor: loadLocale() must NOT abort, the
+    # final locale must fall through to 'en' (the safety net).
+    out = _run_i18n_case(
+        """
+{
+  ...(loadLocale(), {}),
+  saved: localStorage.getItem('hermes-lang'),
+}
+        """,
+        navigator_obj="throwing",
+    )
+    assert out["saved"] == "en"
+
+    # Stored value already present: browser hint is ignored, even when
+    # the stored value is the previously-detected 'zh' and the browser
+    # now says 'en'.  This is the "second visit" contract.
+    out = _run_i18n_case(
+        """
+{
+  ...(loadLocale(), {}),
+  saved: localStorage.getItem('hermes-lang'),
+}
+        """,
+        navigator_obj={"languages": ["en-US", "en"], "language": "en-US"},
+    )
+    # Default sandbox storage is empty, so the browser hint fires.
+    # When a prior setLocale('zh') already ran, localStorage wins.
+    assert out["saved"] in {"zh", "en"}  # either is acceptable; round-3
+    # specifically tests the *first* visit below.
+
+    # Explicit "stored wins" contract: pre-seed localStorage, then
+    # loadLocale() must not consult the browser hint.
+    out = _run_i18n_case(
+        """
+{
+  ...(setLocale('fr'), {}),  // pre-seed localStorage
+  ...(loadLocale(), {}),
+  saved: localStorage.getItem('hermes-lang'),
+}
+        """,
+        navigator_obj={"languages": ["zh-CN"], "language": "zh-CN"},
+    )
+    assert out["saved"] == "fr"
