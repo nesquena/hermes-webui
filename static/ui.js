@@ -2799,16 +2799,19 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
   }
 
   function _imgOnPointerDown(e) {
-    // Record where the press landed BEFORE pointer capture is taken: this is
-    // the only reliable "is this interaction on the image?" signal, because
-    // the capture retargets the follow-up click to the viewport (see
-    // _onViewportClick). e.target here is still the real hit element, and the
-    // geometric hit-test covers browsers that do not retarget.
-    state.pressOnImage = !!((e.target && e.target !== viewport) ||
-      _imgPointOnCanvas(Number(e.clientX), Number(e.clientY)));
     if(state.pinching) return;
     if(e.button != null && e.button !== 0) return;
     if(state.dragging) return;
+    // Record where the press landed BEFORE pointer capture is taken, and only
+    // for the press that actually owns the gesture (the guards above refuse a
+    // second pointer): a refused press must not re-classify the active
+    // gesture, or the owning pointer's click would be judged by a foreign
+    // press and a legitimate letterbox dismissal would be blocked (greptile
+    // review of #6896, 2026-10-05). e.target here is still the real hit
+    // element, and the geometric hit-test covers browsers that do not
+    // retarget the follow-up click to the viewport.
+    state.pressOnImage = !!((e.target && e.target !== viewport) ||
+      _imgPointOnCanvas(Number(e.clientX), Number(e.clientY)));
     state.dragging = true;
     state.dragged = false;
     state.dragOriginX = Number(e.clientX) || 0;

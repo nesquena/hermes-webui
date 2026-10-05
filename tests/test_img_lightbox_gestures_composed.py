@@ -233,14 +233,23 @@ class TestComposedTrustedInput:
             """(src) => {
                 const old = document.getElementById('gate-thumb');
                 if (old) old.remove();
+                // Tear the previous dialog down through its own close path so
+                // its document keydown listener and window resize handler are
+                // removed: removing the node directly would leave those
+                // listeners live and make later tests order-dependent
+                // (greptile review of #6896, 2026-10-05).
+                const prev = document.querySelector('.img-lightbox');
+                if (prev) {
+                    try { window._closeImgLightbox(prev); } catch (_) {}
+                    if (prev.parentNode) prev.parentNode.removeChild(prev);
+                }
+                window.__gateKeys = [];
                 const im = document.createElement('img');
                 im.id = 'gate-thumb';
                 im.className = 'msg-media-img';
                 im.src = src;
                 im.style.cssText = 'position:fixed;left:8px;top:48px;width:160px;height:90px;z-index:9000';
                 document.body.appendChild(im);
-                const old2 = document.querySelector('.img-lightbox');
-                if (old2) old2.remove();
             }""",
             _THUMB_SVG,
         )
@@ -343,6 +352,9 @@ class TestComposedGate20261006:
 
     def test_retargeted_click_from_an_image_press_does_not_dismiss(self, composed):
         _check(composed.desktop, "viewport_click_retargeted_image_press")
+
+    def test_second_pointer_cannot_block_a_letterbox_dismissal(self, composed):
+        _check(composed.desktop, "second_pointer_cannot_block_dismissal")
 
     def test_browser_shortcut_modifiers_are_left_alone(self, composed):
         _check(composed.desktop, "keyboard_modifier_shortcuts_untouched")

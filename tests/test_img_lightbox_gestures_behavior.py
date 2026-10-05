@@ -79,6 +79,18 @@ class TestMaintainerGate20261006:
         src = UI.read_text(encoding="utf-8")
         # The press origin is recorded before the capture is taken...
         assert "state.pressOnImage = !!((e.target && e.target !== viewport) ||" in src
+        # ...and only for the press that owns the gesture: the guards must come
+        # first, otherwise a refused second pointer re-classifies the active
+        # gesture and can block a letterbox dismissal (greptile review of
+        # #6896, 2026-10-05).
+        start = src.index("function _imgOnPointerDown(e) {")
+        end = src.index("function _imgOnPointerMove(e) {", start)
+        down = src[start:end]
+        guard_at = down.index("if(state.dragging) return;")
+        record_at = down.index("state.pressOnImage = !!((e.target && e.target !== viewport) ||")
+        assert guard_at < record_at, (
+            "the gesture-ownership guards must precede the press-origin recording"
+        )
         # ...and the click decision falls back to it plus a geometric hit-test
         # of the transformed canvas, because pointer capture retargets the
         # trusted click on image pixels to the viewport.

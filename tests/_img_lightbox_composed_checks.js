@@ -409,6 +409,32 @@
       assert_(currentLb() === null, "a letterbox press must still close the lightbox");
     });
 
+    await run("second_pointer_cannot_block_dismissal", bucket, async function () {
+      // A refused second pointer must not re-classify the active gesture: if it
+      // overwrote the recorded press origin, the owning pointer's letterbox
+      // click would look like an image click and the user could not dismiss the
+      // dialog (greptile review of #6896, 2026-10-05).
+      var box = await openBox(IMG_W, IMG_H);
+      var size = vpSize(box.vp);
+      var rect = box.vp.getBoundingClientRect();
+      var fcv = box.cv.getBoundingClientRect();
+      var lx = rect.left + size.w / 2;
+      var ly = rect.top + 6;
+      assert_(ly < fcv.top - 4, "fixture: expected a letterbox band above the image");
+      pointer(box.vp, "pointerdown", lx, ly, 1);
+      assert_(box.z.pressOnImage === false, "fixture: the dismissal press starts on the letterbox");
+      pointer(box.cv, "pointerdown", fcv.left + fcv.width / 2, fcv.top + fcv.height / 2, 2);
+      assert_(box.z.pressOnImage === false, "a refused second pointer must not overwrite the press origin");
+      assert_(box.z.dragging === true, "fixture: the first pointer must still own the gesture");
+      pointer(box.vp, "pointerup", lx, ly, 1);
+      box.vp.dispatchEvent(new MouseEvent("click", {
+        bubbles: true, cancelable: true, composed: true, clientX: lx, clientY: ly,
+      }));
+      for (var i = 0; i < 30 && currentLb(); i++) await sleep(20);
+      assert_(currentLb() === null, "the owning pointer's letterbox click must still dismiss the lightbox");
+      pointer(box.vp, "pointerup", fcv.left + fcv.width / 2, fcv.top + fcv.height / 2, 2);
+    });
+
     await run("keyboard_modifier_shortcuts_untouched", bucket, async function () {
       var box = await openBox(IMG_W, IMG_H);
       var base = box.z.scale;
