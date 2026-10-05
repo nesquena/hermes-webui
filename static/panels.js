@@ -6494,7 +6494,8 @@ async function promptWorkspacePath(){
 
 async function switchToWorkspace(path,name){
   const contextIntent=arguments[2];
-  const startsNewChatBoundary=window._newChatOnWorkspaceSwitch===true
+  const startsNewChatBoundary=typeof window!=='undefined'
+    &&window._newChatOnWorkspaceSwitch===true
     &&S.session&&S.session.workspace&&path&&path!==S.session.workspace
     &&Array.isArray(S.messages)&&S.messages.length>0;
   let paneNavigationGeneration=arguments[3]!=null?arguments[3]
