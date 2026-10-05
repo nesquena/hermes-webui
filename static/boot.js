@@ -59,6 +59,7 @@ async function cancelStream(reason){
     else setStatus('');
     // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
     // distinguish reasons — keep the toast generic and short.
+    if(typeof _clearPendingPromptsForSession==='function') _clearPendingPromptsForSession(sid);
     if(typeof showToast==='function') showToast('Stream is no longer active',2000);
   }
   return respOk;
@@ -91,6 +92,9 @@ async function cancelSessionStream(session){
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
   }
+  if(typeof _clearPendingPromptsForSession==='function') _clearPendingPromptsForSession(sid);
+  if(typeof stopApprovalPollingForSession==='function') stopApprovalPollingForSession(sid);
+  if(typeof stopClarifyPollingForSession==='function') stopClarifyPollingForSession(sid);
   if(typeof _approvalSessionId!=='undefined' && _approvalSessionId===sid){
     stopApprovalPolling();
     hideApprovalCard(true);
@@ -396,6 +400,14 @@ function syncWorkspacePanelUI(){
 }
 
 function toggleMobileSidebar(){
+  // At >=641px the sidebar is the real desktop column, not the phone drawer.
+  // Route through toggleSidebar() so the click produces the persistent
+  // expanded/collapsed state instead of the drawer's temporary `mobile-open`
+  // class: that class is cleared by the next _applySidebarState() run, and on
+  // tablets/foldables a same-width resize happens constantly (on-screen
+  // keyboard, browser toolbar collapsing, split-screen), so the sidebar used
+  // to close by itself right after the user opened it.
+  if(_isDesktopWidth()){toggleSidebar();return;}
   const sidebar=document.querySelector('.sidebar');
   if(!sidebar)return;
   const isOpen=sidebar.classList.contains('mobile-open');
@@ -526,6 +538,54 @@ function _isSidebarCollapsed(){
   return document.querySelector('.layout')?.classList.contains('sidebar-collapsed')||false;
 }
 
+// Tri-state sidebar collapse preference.
+//   '1'  = user explicitly collapsed the sidebar  -> collapsed everywhere
+//   '0'  = user explicitly opened the sidebar     -> open everywhere
+//   null = no explicit preference -> collapsed ONLY in the compact desktop
+//          band (641-900px, foldable/tablet inner screens) so the chat isn't
+//          squeezed by the 300px sidebar; open everywhere else (including
+//          phones <641px, which use the mobile slide-in drawer instead).
+// This is the single source of truth used by boot restore, bfcache restore,
+// and viewport-change handling so all paths agree on the default.
+function _sidebarShouldCollapse(){
+  let pref=null;
+  try{pref=localStorage.getItem(_SIDEBAR_COLLAPSED_KEY);}catch(_){pref=null;}
+  if(pref==='1') return true;
+  if(pref==='0') return false;
+  // No explicit preference: default collapsed only in the compact desktop band
+  // (641-900px). _isDesktopWidth() gates out phones (<641px) so the desktop
+  // sidebar-collapsed class is never applied to the mobile slide-in drawer.
+  return _isDesktopWidth() && _isCompactWorkspaceViewport();
+}
+
+// Shared non-persisting reconciliation of sidebar state. Calculates the
+// desired state via _sidebarShouldCollapse() and applies it to the DOM:
+//   1. when at desktop width, clear any mobile drawer state (mobile-open,
+//      mobile-panel-drawer, mobile-session-page, overlay) so the mobile
+//      classes cannot block the desktop collapse selector (:not(.mobile-open));
+//   2. apply the desktop sidebar-collapsed class ONLY while
+//      _isDesktopWidth() is true — an explicit stored '1' is left in
+//      localStorage untouched so it still applies at the next desktop-width
+//      transition, but a derived compact default is never persisted;
+//   3. synchronize ARIA after the final class state.
+// Used by boot restore, window resize, and bfcache restore so the lifecycle
+// paths cannot drift apart.
+function _applySidebarState(){
+  const layout=document.querySelector('.layout');
+  if(!layout) return;
+  const desktop=_isDesktopWidth();
+  if(desktop){
+    // Leaving phone widths: clear mobile drawer ownership so the desktop
+    // collapse selector (.sidebar:not(.mobile-open)) can take effect.
+    closeMobileSidebar();
+    layout.classList.toggle('sidebar-collapsed', _sidebarShouldCollapse());
+  } else {
+    // Phone width: mobile drawer owns the sidebar; clear desktop ownership.
+    layout.classList.remove('sidebar-collapsed');
+  }
+  if(typeof _syncSidebarAria==='function') _syncSidebarAria();
+}
+
 function _syncSidebarAria(){
   // Mirror the open/collapsed state on the active rail button via aria-expanded
   // so screen readers announce the toggle. Open=true, collapsed=false.
@@ -562,13 +622,7 @@ function expandSidebar(){
 (function _restoreSidebarState(){
   try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
   if(!_isDesktopWidth())return;
-  try{
-    if(localStorage.getItem(_SIDEBAR_COLLAPSED_KEY)==='1'){
-      const layout=document.querySelector('.layout');
-      if(layout)layout.classList.add('sidebar-collapsed');
-    }
-  }catch(_){}
-  _syncSidebarAria();
+  _applySidebarState();
 })();
 // ── Boot-time tab visibility ────────────────────────────────────────────────
 // Apply hidden tabs from localStorage. The primary flash-prevention is an
@@ -600,6 +654,15 @@ function closeMobileWorkspacePanelFromChat(e){
   if(!_isCompactWorkspaceViewport()||_workspacePanelMode==='closed') return;
   const panel=document.querySelector('.rightpanel');
   if(panel&&panel.contains(e.target)) return;
+  // Don't close when the tap target is a workspace-panel toggle control — let
+  // that button's own onclick (toggleWorkspacePanel) handle open/close. Without
+  // this, tapping the folder toggle while the panel is open fires pointerdown
+  // here (closing the panel) and then the button's click reopens it, leaving
+  // the panel stuck open.
+  const t=e.target&&e.target.closest
+    ? e.target.closest('#btnWorkspacePanelToggle, #btnWorkspacePanelEdgeToggle, .workspace-toggle-btn, .mobile-files-btn')
+    : null;
+  if(t) return;
   closeWorkspacePanel();
 }
 function toggleWorkspacePanel(force){
@@ -619,6 +682,10 @@ function mobileSwitchPanel(name){
   if(name==='chat'){
     closeMobileSidebar();
   } else {
+    // Same reason as toggleMobileSidebar(): above 640px reveal the real
+    // expanded sidebar rather than a drawer state that the next resize (or
+    // _applySidebarState()) would immediately drop.
+    if(_isDesktopWidth()){expandSidebar();return;}
     const sidebar=document.querySelector('.sidebar');
     if(sidebar){
       sidebar.classList.remove('mobile-session-page');
@@ -1901,7 +1968,7 @@ window.renderTranscript=function(container, messages, opts){
       fetch(new URL('api/tts', document.baseURI || location.href).href, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, voice, rate, pitch})
+        body: JSON.stringify({text: clean, voice, rate, pitch, engine: 'edge'})
       })
       .then(r => {
         if(!r.ok) throw new Error('TTS request failed: ' + r.status);
@@ -2096,7 +2163,9 @@ $('btnNewChat').onclick=async()=>{
      && await _restoreRememberedNewChatDraftSession()){
     await renderSessionList();closeMobileSidebar();$('msg').focus();return;
   }
-  await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+  // newSession() schedules the sidebar refresh itself; awaiting another here
+  // queued a second full list read in front of the composer focus (#7936).
+  await newSession();closeMobileSidebar();$('msg').focus();
 };
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
@@ -2388,9 +2457,29 @@ window._isImeEnter=_isImeEnter;
 function _hasFinePointerCoexisting(){
   try{ return matchMedia('(any-pointer:fine)').matches; }catch(_){ return false; }
 }
+// Detect phone software keyboards without undoing #3076's hardware-input
+// guard for tablets. Some iOS Safari versions report (any-pointer:fine) on a
+// plain iPhone, so phone UAs bypass that unreliable signal. Tablets and
+// touch-capable desktop UAs still require a coarse pointer with no fine pointer.
+function _isTouchOnlyDevice(){
+  const ua=navigator.userAgent||'';
+  if(/iPhone|iPod/i.test(ua)) return true;
+  if(/Android.*Mobile/i.test(ua)) return true;
+  try{
+    return matchMedia('(pointer:coarse)').matches&&!_hasFinePointerCoexisting();
+  }catch(_){}
+  return false;
+}
 function _isNumpadEnter(e){
   return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
 }
+// Initialise _sendKey synchronously from the localStorage cache so the keydown
+// handler below has the correct value before the async /api/settings call
+// (line ~3231) resolves. Without this, on slow mobile networks the race window
+// leaves _sendKey=undefined, _mobileDefault evaluates false, and plain Enter
+// falls through to the `else { send() }` branch — sending the message instead
+// of inserting a newline (issue: mobile Enter sends on fresh page load).
+try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -2424,9 +2513,8 @@ $('msg').addEventListener('keydown',e=>{
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
     const isNumpadEnter=_isNumpadEnter(e);
-    const _mobileDefault=matchMedia('(pointer:coarse)').matches
-      &&!_hasFinePointerCoexisting()
-      &&window._sendKey==='enter';
+    const _mobileDefault=_isTouchOnlyDevice()
+      &&(window._sendKey==='enter'||typeof window._sendKey==='undefined');
     if(window._sendKey==='shift+enter'){
       if(e.shiftKey){e.preventDefault();send();}
     } else if(window._sendKey==='ctrl+enter'||_mobileDefault){
@@ -2491,7 +2579,8 @@ document.addEventListener('keydown',async e=>{
     // a long generation to finish before they could start something new — exactly
     // the moment they want to switch context. newSession() leaves the in-flight
     // stream running on its own session; the user just gets a fresh blank one.
-    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+    // As in $('btnNewChat').onclick: newSession() owns the sidebar refresh.
+    await newSession();closeMobileSidebar();$('msg').focus();
   }
   // Cmd/Ctrl+, opens/closes Settings (VS Code convention).
   // Fire globally — like VS Code, don't skip text inputs.
@@ -2611,6 +2700,14 @@ function applyEmptyStatePanelPref(){
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
+  // Re-apply the sidebar state on viewport change (e.g. foldable unfold:
+  // phone 640px -> inner 804px, or desktop -> inner). The shared apply helper
+  // clears mobile drawer ownership when entering desktop width (so the mobile
+  // classes cannot block the desktop collapse selector), applies the tri-state
+  // default, and syncs ARIA — all without persisting anything to localStorage.
+  try{
+    if(typeof _applySidebarState==='function') _applySidebarState();
+  }catch(_){}
   if(!window.visualViewport) _forceMobileViewportReflow();
 });
 
@@ -2649,30 +2746,77 @@ if(window.visualViewport){
       if(saved) targetEl.style.width = saved + 'px';
     }
 
-    let startX=0, startW=0;
+    let startX=0, startW=0, activePointer=null, fallbackDoc=false;
+    const endResize=()=>{
+      if(activePointer===null) return;
+      const id=activePointer;
+      activePointer=null;
+      try{ handle.releasePointerCapture(id); }catch(_){}
+      if(fallbackDoc){
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        document.removeEventListener('pointercancel', onCancel);
+        fallbackDoc=false;
+      }
+      handle.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      const w=parseInt(targetEl.style.width,10);
+      if(Number.isFinite(w)){ try{ localStorage.setItem(storageKey, w); }catch(_){} }
+    };
+    const onMove = ev=>{
+      if(activePointer===null || ev.pointerId!==activePointer) return;
+      ev.preventDefault();
+      const delta = edge==='right' ? ev.clientX - startX : startX - ev.clientX;
+      const newW = Math.min(maxW, Math.max(minW, startW + delta));
+      targetEl.style.width = newW + 'px';
+    };
+    const onUp = ev=>{
+      if(activePointer===null || (ev.pointerId!==undefined && ev.pointerId!==activePointer)) return;
+      endResize();
+    };
+    // Cancel/revoke events from OTHER pointers (a pen or touch contact
+    // elsewhere) must not end this drag; only the active pointer's own
+    // cancel does. Window blur still ends the drag unconditionally.
+    const onCancel = ev=>{
+      if(activePointer===null || ev.pointerId!==activePointer) return;
+      endResize();
+    };
 
-    handle.addEventListener('mousedown', e=>{
-      e.preventDefault();
-      startX = e.clientX;
+    handle.addEventListener('pointerdown', ev=>{
+      if(ev.pointerType==='touch') return;
+      // A second pointer pressing the handle mid-drag must not take the drag
+      // over: without this guard the new press replaces the active pointer and
+      // starting width, the original pointer's move/release is ignored, and the
+      // panel unexpectedly follows the second pointer (greptile review of the
+      // merged #7954 fix).
+      if(activePointer!==null) return;
+      ev.preventDefault();
+      activePointer=ev.pointerId;
+      startX = ev.clientX;
       startW = targetEl.getBoundingClientRect().width;
       handle.classList.add('dragging');
       document.body.classList.add('resizing');
-
-      const onMove = ev=>{
-        const delta = edge==='right' ? ev.clientX - startX : startX - ev.clientX;
-        const newW = Math.min(maxW, Math.max(minW, startW + delta));
-        targetEl.style.width = newW + 'px';
-      };
-      const onUp = ()=>{
-        handle.classList.remove('dragging');
-        document.body.classList.remove('resizing');
-        localStorage.setItem(storageKey, parseInt(targetEl.style.width));
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      // Pointer capture keeps move/up routed to the handle even when the
+      // pointer leaves the window, so a release can never be lost (#7954).
+      let captured=false;
+      try{ handle.setPointerCapture(ev.pointerId); captured=true; }catch(_){ captured=false; }
+      if(!captured){
+        // Capture is unavailable or threw: without a document-level fallback
+        // the drag would stall the moment the pointer leaves this handle, and
+        // the drag state would stick (the #7954 regression this must avoid).
+        fallbackDoc=true;
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+        document.addEventListener('pointercancel', onCancel);
+      }
     });
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onCancel);
+    // The platform can still revoke capture (tab switch, OS gesture); that
+    // must end the drag instead of leaving the panel stuck to the cursor.
+    handle.addEventListener('lostpointercapture', onCancel);
+    window.addEventListener('blur', endResize);
   }
 
   // Run after DOM ready (called from boot)
@@ -3431,8 +3575,17 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
     if(typeof setLocale==='function'){
+      // #7622 (round 3): the settings payload's `s.language` is
+      // absent (None) for a fresh install, so an explicit non-empty
+      // value is the user's genuine saved choice.  The browser
+      // navigator hint is now read via the guarded
+      // `_detectBrowserLanguageHint()` helper (round-3 finding 2) so
+      // a throwing `navigator` accessor in some embedded webviews
+      // can no longer abort this branch and reset loaded preferences.
+      // The fallback ternary preserves the pre-#7622 boot behaviour
+      // when neither helper is in scope (defence in depth).
       const _lang=typeof resolvePreferredLocale==='function'
-        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
+        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
         : (s.language || localStorage.getItem('hermes-lang') || 'en');
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
@@ -3842,7 +3995,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       }
       S._bootReady=true;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
-    catch(e){localStorage.removeItem('hermes-webui-session');}
+    catch(_){/* loadSession owns targeted 404 cleanup; retain unrelated saved sessions */}
   }
   // no saved session - show empty state, wait for user to hit +
   S._bootReady=true;
@@ -3852,7 +4005,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
-  await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+  // A route-only 404 can leave another saved session available for the next boot.
+  if(!localStorage.getItem('hermes-webui-session')) await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
@@ -3907,16 +4061,15 @@ window.addEventListener('pageshow', async (event) => {
   }
   // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
   if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
-  // Re-sync sidebar collapse state from localStorage. bfcache restored the
-  // frozen DOM but another tab may have toggled the sidebar in the meantime.
-  if (typeof _isSidebarCollapsed === 'function' && typeof toggleSidebar === 'function') {
-    try {
-      const _want = localStorage.getItem('hermes-webui-sidebar-collapsed') === '1';
-      const _have = _isSidebarCollapsed();
-      if (_want !== _have) toggleSidebar(_want);
-      if (typeof _syncSidebarAria === 'function') _syncSidebarAria();
-    } catch (_) {}
-  }
+  // Re-sync sidebar state after bfcache restore. bfcache restored the frozen
+  // DOM but another tab may have toggled the sidebar in the meantime. The
+  // shared apply helper clears mobile drawer ownership when at desktop width,
+  // applies the tri-state default, and syncs ARIA — all without persisting
+  // anything to localStorage (so a derived compact-band default never leaks
+  // into widths above 900px).
+  try{
+    if(typeof _applySidebarState==='function') _applySidebarState();
+  }catch(_){}
 });
 
 async function shutdownServer() {

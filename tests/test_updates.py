@@ -3,7 +3,9 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -797,6 +799,69 @@ def test_run_git_returns_exit_code_when_no_output(tmp_path):
 
     assert ok is False
     assert 'status 1' in out
+
+
+def test_run_git_never_launches_an_interactive_credential_prompt(tmp_path, monkeypatch):
+    """A background update check must not be able to open a credential prompt.
+
+    Reported symptom: the WebUI was checking for updates from a desktop session,
+    so the git child inherited ``SSH_ASKPASS=/usr/bin/ksshaskpass`` and
+    ``DISPLAY``. Its ``git fetch`` reached an origin that answered 401, git fell
+    back to the inherited askpass helper, and a modal "Enter SSH Credentials"
+    window appeared on the user's desktop while the check blocked.
+
+    Bind the test to that scene: serve a 401 the way an HTTPS remote does,
+    install an askpass helper that records being run, and assert the helper is
+    never executed. The fetch itself must fail closed instead of prompting.
+    """
+    marker = tmp_path / 'askpass-was-invoked'
+    helper = tmp_path / 'askpass-helper.sh'
+    helper.write_text(
+        f'#!/bin/sh\ntouch "{marker}"\necho placeholder-credential\n', encoding='utf-8'
+    )
+    helper.chmod(0o755)
+    # The environment a desktop WebUI session hands to its children.
+    monkeypatch.setenv('GIT_ASKPASS', str(helper))
+    monkeypatch.setenv('SSH_ASKPASS', str(helper))
+    monkeypatch.setenv('SSH_ASKPASS_REQUIRE', 'prefer')
+    monkeypatch.setenv('DISPLAY', ':0')
+    monkeypatch.delenv('GIT_TERMINAL_PROMPT', raising=False)
+
+    requests_seen = []
+
+    class _AuthRequiredHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib handler naming
+            requests_seen.append(self.path)
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', 'Basic realm="git"')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(('127.0.0.1', 0), _AuthRequiredHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        _git(repo, 'init', '-q')
+        _git(
+            repo, 'remote', 'add', 'origin',
+            f'http://127.0.0.1:{server.server_address[1]}/origin.git',
+        )
+        out, ok = updates._run_git(['fetch', 'origin'], repo, timeout=30)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert requests_seen, (
+        'the fetch never reached the 401 remote, so this test proves nothing'
+    )
+    assert not marker.exists(), (
+        f'the update check launched an interactive credential helper: {out!r}'
+    )
+    assert ok is False, out
 
 
 def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):

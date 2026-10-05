@@ -291,6 +291,13 @@ class TestLiveModelsCustomProviderFallback:
                     "model": "gpt-5.5",
                     "models": {"gpt-5.5-mini": {}},
                     "base_url": "https://right.codes/codex/v1",
+                    # dict-shaped ``models`` is per-model metadata (Agent setup
+                    # flow) and only narrows the live catalog when discovery is
+                    # explicitly off — the new #7165 contract. This test still
+                    # wants provider-scoping (no sibling leak), so pin the
+                    # catalog via ``discover_models: false`` instead of relying
+                    # on the removed dict-as-allowlist behavior.
+                    "discover_models": False,
                 },
                 {
                     "name": "infini-ai",
@@ -308,7 +315,7 @@ class TestLiveModelsCustomProviderFallback:
         resp = self._call_live_models(monkeypatch, cfg, "custom:rightcode-codex")
 
         assert resp["provider"] == "custom:rightcode-codex"
-        assert [m["id"] for m in resp["models"]] == ["gpt-5.5", "gpt-5.5-mini"]
+        assert [m["id"] for m in resp["models"]] == ["gpt-5.5-mini"]
 
     def test_bare_custom_fallback_ignores_named_custom_provider_models(self, monkeypatch):
         """Bare custom only represents unnamed custom entries, not named siblings."""

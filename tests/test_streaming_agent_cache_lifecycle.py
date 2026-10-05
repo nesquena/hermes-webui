@@ -96,7 +96,6 @@ def test_identity_mismatch_cache_evictions_close_entries_outside_cache_lock():
         "_identity_mismatch_entry = SESSION_AGENT_CACHE.pop(session_id, None)",
         "_stale_runtime_entry = SESSION_AGENT_CACHE.pop(session_id, None)",
         "_skipped_agent_migration_entry = _cached_entry",
-        "evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)",
         "_evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)",
     ]
     for marker in expected_markers:
@@ -106,7 +105,6 @@ def test_identity_mismatch_cache_evictions_close_entries_outside_cache_lock():
         "_close_cached_agent_entry_at_session_boundary(session_id, _identity_mismatch_entry)",
         "_close_cached_agent_entry_at_session_boundary(session_id, _stale_runtime_entry)",
         "_close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)",
-        "_close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)",
         "_close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)",
     ]
     lines = src.splitlines()

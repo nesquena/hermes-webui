@@ -7,7 +7,11 @@ document.addEventListener('DOMContentLoaded', function () {
   var input = document.getElementById('pw');
   var passkeyBtn = document.getElementById('passkey-login');
 
-  if (!form || !input) return;
+  // #7056: the password input is absent on a passwordless deployment (OIDC-only,
+  // or passkey-only). The form itself still renders and carries the i18n data
+  // attributes, and the passkey button below must still be wired up, so only the
+  // form is required here — every password-specific path is guarded individually.
+  if (!form) return;
 
   var invalidPw = form.getAttribute('data-invalid-pw') || 'Invalid password';
   var connFailed = form.getAttribute('data-conn-failed') || 'Connection failed';
@@ -59,6 +63,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
   async function doLogin(e) {
     e.preventDefault();
+    // No password input on a passwordless deployment: nothing to submit.
+    if (!input) return;
     var pw = input.value;
     hideErr();
     try {
@@ -147,12 +153,14 @@ document.addEventListener('DOMContentLoaded', function () {
     passkeyBtn.addEventListener('click', doPasskeyLogin);
   }
 
-  input.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      doLogin(e);
-    }
-  });
+  if (input) {
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        doLogin(e);
+      }
+    });
+  }
 
   // On page load, probe the server so we can distinguish "can't reach server"
   // (Tailscale off, wrong network) from "session expired / need to log in".

@@ -41,12 +41,13 @@ class TestRootWorkspaceUnblocked:
         assert "'/etc'" in src or 'Path("/etc")' in src or "Path('/etc')" in src
         assert "'/proc'" in src or 'Path("/proc")' in src or "Path('/proc')" in src
 
-    def test_split_guard_present(self):
-        src = read("api/streaming.py")
-        assert "'\\n\\n[Attached files:' in msg_text" in src, (
-            "base_text split must guard against missing '[Attached files:' "
-            "to avoid empty-string on plain messages"
-        )
+    def test_attached_files_suffix_is_optional(self):
+        from api.models import _strip_attached_files_marker
+
+        assert _strip_attached_files_marker("Plain message") == "Plain message"
+        assert _strip_attached_files_marker(
+            "Question\n\n[Attached files: photo.png]"
+        ) == "Question"
 
 
 # ── Group B: custom_providers visibility ─────────────────────────────────────
