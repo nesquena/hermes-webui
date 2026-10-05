@@ -28,14 +28,45 @@ def _function_body(src: str, name: str) -> str:
     return src[brace + 1 : i - 1]
 
 
+def _extract_function(src: str, name: str) -> str:
+    start = src.find(f"function {name}(")
+    assert start != -1, f"{name}() not found"
+    close_paren = src.find(")", start)
+    brace = src.find("{", close_paren)
+    assert close_paren != -1 and brace != -1, f"{name}() signature not found"
+    depth = 1
+    i = brace + 1
+    while i < len(src) and depth:
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"{name}() did not close"
+    return src[start:i]
+
+
 def _extract_functions() -> str:
     owner_body = _function_body(SESSIONS_JS, "_isActiveSessionSceneRestoreOwner")
     defer_body = _function_body(SESSIONS_JS, "_deferActiveSessionSceneRestore")
+    pending_body = (
+        _function_body(SESSIONS_JS, "_activeSessionSceneRestorePendingFor")
+        if "function _activeSessionSceneRestorePendingFor(" in SESSIONS_JS
+        else "return null;"
+    )
     return (
+        "let _activeSessionSceneRestorePending = null;\n"
         "function _isActiveSessionSceneRestoreOwner(sid, activeStreamId, loadGeneration)"
         "{" + owner_body + "}\n"
+        "function _activeSessionSceneRestorePendingFor(sid, streamId)"
+        "{" + pending_body + "}\n"
         "function _deferActiveSessionSceneRestore(sid, activeStreamId, loadGeneration, restoreFn)"
         "{" + defer_body + "}\n"
+        + (
+            _extract_function(SESSIONS_JS, "_deferActiveSessionSceneRestoreAndAttach") + "\n"
+            if "function _deferActiveSessionSceneRestoreAndAttach(" in SESSIONS_JS
+            else ""
+        )
     )
 
 
@@ -53,11 +84,11 @@ def _run_node(script: str) -> str:
     return proc.stdout.strip()
 
 
-def _run_script(setup: str, assertions: str) -> None:
+def _run_script(setup: str, assertions: str, extra_functions: str = "") -> None:
     body = _extract_functions()
     constants = "var _ACTIVE_SESSION_SCENE_RESTORE_HIDDEN_TIMEOUT_MS = 250;\n"
     wrapped_assertions = f";(async () => {{\n{assertions}\n}})();"
-    script = "const assert = require('assert');\n" + constants + "\n" + body + "\n" + setup + "\n" + wrapped_assertions
+    script = "const assert = require('assert');\n" + constants + "\n" + body + "\n" + extra_functions + "\n" + setup + "\n" + wrapped_assertions
     output = _run_node(script)
     assert "ok" in output
 
@@ -99,11 +130,13 @@ global.requestAnimationFrame = (cb) => {
 };
 global.cancelAnimationFrame = () => {};
 let timeoutCalls = [];
-global.setTimeout = (fn) => {
-  timeoutCalls.push(fn);
-  return 999;
+let clearedTimeouts = [];
+global.setTimeout = (fn, ms) => {
+  const timer = { fn, ms, id: timeoutCalls.length + 1 };
+  timeoutCalls.push(timer);
+  return timer.id;
 };
-global.clearTimeout = () => {};
+global.clearTimeout = (id) => { clearedTimeouts.push(id); };
 global.__calls = [];
 
 const restore = () => {
@@ -116,7 +149,7 @@ const restore = () => {
 const p = _deferActiveSessionSceneRestore(state.sid, state.stream, state.gen, restore);
 assert.strictEqual(rAFQueue.length, 1);
 assert.deepStrictEqual(__calls, []);
-assert.deepStrictEqual(timeoutCalls, []);
+assert.strictEqual(timeoutCalls.length, 1, 'visible first-frame request must arm bounded fallback');
 
 const frame1 = rAFQueue.shift();
 frame1();
@@ -127,9 +160,11 @@ const frame2 = rAFQueue.shift();
 frame2();
 
 return p.then((value) => {
+  timeoutCalls[0].fn();
   assert.strictEqual(value, 'ok');
   assert.deepStrictEqual(__calls, ['restored']);
   assert.strictEqual(rAFQueue.length, 0);
+  assert.deepStrictEqual(clearedTimeouts, [timeoutCalls[0].id]);
   console.log('ok');
 });
 """
@@ -307,6 +342,271 @@ return _deferActiveSessionSceneRestore(state.sid, state.stream, state.gen, resto
   assert.deepStrictEqual(__calls, []);
   console.log('ok');
 });
+"""
+    _run_script(setup, assertions)
+
+
+def test_visible_stalled_raf_fallback_restores_then_attaches_once_and_cleans_up():
+    setup = """
+const state = { sid: 'bench-sid', stream: 'bench-stream', gen: 7 };
+global.S = { session: { session_id: state.sid, active_stream_id: state.stream }, activeStreamId: state.stream };
+global._loadSessionGeneration = state.gen;
+const listeners = new Map();
+let removedListeners = [];
+global.document = {
+  visibilityState: 'visible', hidden: false,
+  addEventListener(type, fn) { listeners.set(type, fn); },
+  removeEventListener(type, fn) { removedListeners.push([type, fn]); },
+};
+const rAFQueue = [];
+let cancelledFrames = [];
+global.requestAnimationFrame = (cb) => { rAFQueue.push(cb); return rAFQueue.length; };
+global.cancelAnimationFrame = (id) => { cancelledFrames.push(id); };
+const timers = [];
+let clearedTimers = [];
+global.setTimeout = (fn, ms) => { const timer = { fn, ms, id: timers.length + 1 }; timers.push(timer); return timer.id; };
+global.clearTimeout = (id) => { clearedTimers.push(id); };
+global.__calls = [];
+"""
+    assertions = """
+let settled = false;
+let result;
+const pending = _deferActiveSessionSceneRestoreAndAttach(
+  state.sid, state.stream, state.gen,
+  () => { __calls.push('restore'); throw new Error('restore failed'); },
+  () => { __calls.push('attach'); return true; },
+);
+pending.then((value) => { settled = true; result = value; });
+for (const timer of timers.slice()) timer.fn();
+await Promise.resolve();
+await Promise.resolve();
+assert.deepStrictEqual(__calls, ['restore', 'attach'], 'stalled visible rAF must fall back to restore and attach');
+assert.strictEqual(settled, true);
+assert.deepStrictEqual(result, { restoreResult: undefined, attached: true });
+assert.strictEqual(timers.length, 1);
+assert.strictEqual(timers[0].ms, 250);
+assert.deepStrictEqual(clearedTimers, []);
+assert.strictEqual(removedListeners.length, 1);
+assert.strictEqual(cancelledFrames.length, 1);
+assert.strictEqual(_activeSessionSceneRestorePendingFor(state.sid, state.stream), null);
+for (const frame of rAFQueue) frame();
+timers[0].fn();
+await Promise.resolve();
+assert.deepStrictEqual(__calls, ['restore', 'attach'], 'late frame/timer must not repeat restore or attach');
+console.log('ok');
+"""
+    _run_script(setup, assertions)
+
+
+def _idle_cleanup_functions() -> str:
+    names = (
+        "_isServerIdleSessionRow",
+        "_reconcileActiveSessionIdleStateFromList",
+        "_purgeStaleInflightEntries",
+        "_hasOwnedOpenLiveStream",
+    )
+    return "\n".join(_extract_function(SESSIONS_JS, name) for name in names)
+
+
+def _idle_cleanup_setup() -> str:
+    return """
+global.S = { session: { session_id: 'A', active_stream_id: 'stream-A', pending_user_message: 'prompt' }, activeStreamId: 'stream-A', busy: true };
+global._loadSessionGeneration = 1;
+global._sendInProgress = false;
+global._sendInProgressSid = null;
+global._sessionListSourceById = new Map();
+global._allSessionsScope = null;
+global._sessionStreamingById = new Map();
+global._allSessions = [
+  { session_id: 'A', is_streaming: false, active_stream_id: null, pending_user_message: null, has_pending_user_message: false, pending_started_at: null },
+  { session_id: 'B', is_streaming: false, active_stream_id: null, pending_user_message: null, has_pending_user_message: false, pending_started_at: null },
+];
+global.INFLIGHT = { A: { streamId: 'stream-A', reattach: true }, B: { streamId: 'other-stream', reattach: true } };
+global.LIVE_STREAMS = Object.create(null);
+global.__clearedInflight = [];
+global.clearInflightState = (sid) => { __clearedInflight.push(sid); };
+global._forgetObservedStreamingSession = () => {};
+global.hideApprovalCard = () => {};
+global.hideLiveRunStatus = () => {};
+global.clearLiveToolCards = () => {};
+global.updateSendBtn = () => {};
+global._scheduleActiveSessionIdleReload = () => {};
+"""
+
+
+def test_idle_list_reconciler_preserves_current_deferred_restore_window():
+    setup = _idle_cleanup_setup() + """
+global.document = { visibilityState: 'visible', hidden: false, addEventListener() {}, removeEventListener() {} };
+global.requestAnimationFrame = (cb) => { global.__raf.push(cb); return global.__raf.length; };
+global.cancelAnimationFrame = () => {};
+global.setTimeout = (fn) => { global.__timers.push(fn); return global.__timers.length; };
+global.clearTimeout = () => {};
+global.__raf = [];
+global.__timers = [];
+"""
+    assertions = """
+const pending = _deferActiveSessionSceneRestore('A', 'stream-A', 1, () => 'restored');
+assert.strictEqual(_reconcileActiveSessionIdleStateFromList(_allSessions), false);
+assert.strictEqual(S.busy, true, 'idle reconciliation must retain current scheduled work');
+assert.strictEqual(S.activeStreamId, 'stream-A');
+assert.strictEqual(INFLIGHT.A.streamId, 'stream-A');
+assert.deepStrictEqual(__clearedInflight, []);
+for (let i = 0; i < __raf.length; i++) __raf[i]();
+return pending.then(() => {
+  assert.strictEqual(_reconcileActiveSessionIdleStateFromList(_allSessions), true, 'ordinary cleanup resumes after scheduler completion');
+  assert.strictEqual(S.busy, false);
+  assert.strictEqual(INFLIGHT.A, undefined);
+  assert.strictEqual(_activeSessionSceneRestorePendingFor('A', 'stream-A'), null);
+  console.log('ok');
+});
+"""
+    _run_script(setup, assertions, _idle_cleanup_functions())
+
+
+def test_idle_row_purge_preserves_only_matching_pending_stream_then_purges_after_window():
+    setup = _idle_cleanup_setup() + """
+global.document = { visibilityState: 'visible', hidden: false, addEventListener() {}, removeEventListener() {} };
+global.requestAnimationFrame = (cb) => { global.__raf.push(cb); return global.__raf.length; };
+global.cancelAnimationFrame = () => {};
+global.setTimeout = (fn) => { global.__timers.push(fn); return global.__timers.length; };
+global.clearTimeout = () => {};
+global.__raf = [];
+global.__timers = [];
+"""
+    assertions = """
+const pending = _deferActiveSessionSceneRestore('A', 'stream-A', 1, () => 'restored');
+_purgeStaleInflightEntries();
+assert.strictEqual(INFLIGHT.A && INFLIGHT.A.streamId, 'stream-A', 'purge must preserve the pending scheduler-owned stream');
+assert.strictEqual(INFLIGHT.B, undefined, 'purge must still remove an unrelated idle session');
+assert.deepStrictEqual(__clearedInflight, ['B']);
+for (let i = 0; i < __raf.length; i++) __raf[i]();
+return pending.then(() => {
+  S.busy = true;
+  S.activeStreamId = 'stream-A';
+  S.session.active_stream_id = 'stream-A';
+  INFLIGHT.A.reattach = true;
+  _purgeStaleInflightEntries();
+  assert.strictEqual(INFLIGHT.A, undefined, 'completed scheduler must not preserve stale idle work via busy or reattach flags');
+  assert.strictEqual(_activeSessionSceneRestorePendingFor('A', 'stream-A'), null);
+  assert.deepStrictEqual(__clearedInflight, ['B', 'A']);
+  console.log('ok');
+});
+"""
+    _run_script(setup, assertions, _idle_cleanup_functions())
+
+
+def test_pending_restore_does_not_preserve_inflight_from_another_stream():
+    setup = _idle_cleanup_setup() + """
+global.document = { visibilityState: 'visible', hidden: false, addEventListener() {}, removeEventListener() {} };
+global.requestAnimationFrame = (cb) => { global.__raf.push(cb); return global.__raf.length; };
+global.cancelAnimationFrame = () => {};
+global.setTimeout = (fn) => { global.__timers.push(fn); return global.__timers.length; };
+global.clearTimeout = () => {};
+global.__raf = [];
+global.__timers = [];
+global.INFLIGHT = { A: { streamId: 'stream-A', reattach: true } };
+"""
+    assertions = """
+const pending = _deferActiveSessionSceneRestore('A', 'stream-A', 1, () => 'restored');
+INFLIGHT.A.streamId = 'older-stream';
+_purgeStaleInflightEntries();
+assert.strictEqual(INFLIGHT.A, undefined, 'pending restore for stream-A must not retain an older INFLIGHT stream');
+assert.deepStrictEqual(__clearedInflight, ['A']);
+assert.ok(_activeSessionSceneRestorePendingFor('A', 'stream-A'), 'the current scheduler owner itself remains pending');
+for (let i = 0; i < __raf.length; i++) __raf[i]();
+assert.strictEqual(await pending, 'restored');
+console.log('ok');
+"""
+    _run_script(setup, assertions, _idle_cleanup_functions())
+
+
+def test_pending_restore_cleanup_fails_closed_after_session_stream_or_generation_changes():
+    setup = _idle_cleanup_setup() + """
+global.document = { visibilityState: 'visible', hidden: false, addEventListener() {}, removeEventListener() {} };
+global.__raf = [];
+global.__timers = [];
+global.requestAnimationFrame = (cb) => { __raf.push(cb); return __raf.length; };
+global.cancelAnimationFrame = () => {};
+global.setTimeout = (fn) => { __timers.push(fn); return __timers.length; };
+global.clearTimeout = () => {};
+"""
+    assertions = """
+for (const mismatch of ['session', 'stream', 'generation']) {
+  _activeSessionSceneRestorePending = null;
+  S = { session: { session_id: 'A', active_stream_id: 'stream-A' }, activeStreamId: 'stream-A', busy: true };
+  _loadSessionGeneration = 1;
+  INFLIGHT = { A: { streamId: 'stream-A', reattach: true } };
+  __clearedInflight.length = 0;
+  const frameIndex = __raf.length;
+  const pending = _deferActiveSessionSceneRestore('A', 'stream-A', 1, () => 'restored');
+  if (mismatch === 'session') S.session.session_id = 'B';
+  if (mismatch === 'stream') { S.activeStreamId = 'new-stream'; S.session.active_stream_id = 'new-stream'; }
+  if (mismatch === 'generation') _loadSessionGeneration = 2;
+  _purgeStaleInflightEntries();
+  assert.strictEqual(INFLIGHT.A, undefined, mismatch + ' mismatch must restore ordinary stale cleanup');
+  assert.deepStrictEqual(__clearedInflight, ['A']);
+  assert.strictEqual(_activeSessionSceneRestorePendingFor('A', 'stream-A'), null);
+  __raf[frameIndex]();
+  assert.strictEqual(await pending, undefined);
+}
+console.log('ok');
+"""
+    _run_script(setup, assertions, _idle_cleanup_functions())
+
+
+def test_old_same_session_scheduler_completion_cannot_clear_newer_pending_work():
+    setup = """
+const state = { sid: 'A', stream: 'stream-A', gen: 1 };
+global.S = { session: { session_id: state.sid, active_stream_id: state.stream }, activeStreamId: state.stream };
+global._loadSessionGeneration = state.gen;
+global.document = { visibilityState: 'visible', hidden: false, addEventListener() {}, removeEventListener() {} };
+global.__raf = [];
+global.__timers = [];
+global.requestAnimationFrame = (cb) => { __raf.push(cb); return __raf.length; };
+global.cancelAnimationFrame = () => {};
+global.setTimeout = (fn) => { __timers.push(fn); return __timers.length; };
+global.clearTimeout = () => {};
+"""
+    assertions = """
+const old = _deferActiveSessionSceneRestore('A', 'stream-A', 1, () => 'old');
+const newer = _deferActiveSessionSceneRestore('A', 'stream-A', 1, () => 'new');
+__raf[0]();
+assert.strictEqual(await old, undefined, 'superseded restore should lose ownership');
+assert.ok(_activeSessionSceneRestorePendingFor('A', 'stream-A'), 'old completion must not remove the newer same-session token');
+__raf[1]();
+__raf[2]();
+assert.strictEqual(await newer, 'new');
+assert.strictEqual(_activeSessionSceneRestorePendingFor('A', 'stream-A'), null);
+console.log('ok');
+"""
+    _run_script(setup, assertions)
+
+
+def test_old_aba_completion_cannot_clear_newer_generation_pending_work():
+    setup = """
+const state = { sid: 'A', stream: 'stream-A', gen: 1 };
+global.S = { session: { session_id: state.sid, active_stream_id: state.stream }, activeStreamId: state.stream };
+global._loadSessionGeneration = state.gen;
+global.document = { visibilityState: 'visible', hidden: false, addEventListener() {}, removeEventListener() {} };
+global.__raf = [];
+global.__timers = [];
+global.requestAnimationFrame = (cb) => { __raf.push(cb); return __raf.length; };
+global.cancelAnimationFrame = () => {};
+global.setTimeout = (fn) => { __timers.push(fn); return __timers.length; };
+global.clearTimeout = () => {};
+"""
+    assertions = """
+const old = _deferActiveSessionSceneRestore('A', 'stream-A', 1, () => 'old');
+_loadSessionGeneration = 2;
+const newer = _deferActiveSessionSceneRestore('A', 'stream-A', 2, () => 'new');
+__raf[0]();
+assert.strictEqual(await old, undefined);
+assert.strictEqual(_activeSessionSceneRestorePendingFor('A', 'stream-A').loadGeneration, 2);
+__raf[1]();
+__raf[2]();
+assert.strictEqual(await newer, 'new');
+assert.strictEqual(_activeSessionSceneRestorePendingFor('A', 'stream-A'), null);
+console.log('ok');
 """
     _run_script(setup, assertions)
 

@@ -1315,6 +1315,7 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
+  if (_activeSessionSceneRestorePendingFor(sid)) return false;
   // Sidebar idle metadata can beat the terminal frame on the independent chat
   // SSE. Let its exact OPEN transport finish the Anchor handoff; orphaned or
   // disconnected streams still use the existing idle recovery below.
@@ -1408,20 +1409,24 @@ function _purgeStaleInflightEntries() {
     if (S.session.session_id !== sid) return false;
     const streamId = String(inflightValue.streamId || '').trim();
     if (!streamId) return false;
-  const ownerStreamIds = [];
-  if (S.activeStreamId) ownerStreamIds.push(String(S.activeStreamId).trim());
-  if (S.session.active_stream_id) ownerStreamIds.push(String(S.session.active_stream_id).trim());
-  if (!ownerStreamIds.length) return false;
-  if (ownerStreamIds.some((ownerStreamId) => ownerStreamId !== streamId)) return false;
-  if (S.busy !== true) return false;
-  return true;
-};
+    const ownerStreamIds = [];
+    if (S.activeStreamId) ownerStreamIds.push(String(S.activeStreamId).trim());
+    if (S.session.active_stream_id) ownerStreamIds.push(String(S.session.active_stream_id).trim());
+    if (!ownerStreamIds.length) return false;
+    if (ownerStreamIds.some((ownerStreamId) => ownerStreamId !== streamId)) return false;
+    if (S.busy !== true) return false;
+    return true;
+  };
   for (const sid of Object.keys(INFLIGHT)) {
     // #4354: purge stale INFLIGHT even for a hung/idle session, BUT skip the one
     // session actively mid-send (#2689 start-race) — during /api/chat/start the
     // server row is briefly idle while the client owns the optimistic INFLIGHT
     // entry; purging it here would drop the in-flight turn's local state.
     if (typeof _sendInProgress !== 'undefined' && _sendInProgress && sid === _sendInProgressSid) {
+      continue;
+    }
+    const inflightValue = INFLIGHT[sid];
+    if (inflightValue && inflightValue.streamId && _activeSessionSceneRestorePendingFor(sid, inflightValue.streamId)) {
       continue;
     }
     // The sidebar render must not purge what the idle reconciler preserved.
@@ -3621,6 +3626,7 @@ function _afterSessionFirstPaint(fn, delayMs=0){
 }
 
 const _ACTIVE_SESSION_SCENE_RESTORE_HIDDEN_TIMEOUT_MS = 1200;
+let _activeSessionSceneRestorePending = null;
 
 function _hasRenderedLiveAnchorActivityScene(){
   const liveTurn=document.getElementById('liveAssistantTurn');
@@ -3637,8 +3643,25 @@ function _isActiveSessionSceneRestoreOwner(sid, activeStreamId, loadGeneration){
   return true;
 }
 
+function _activeSessionSceneRestorePendingFor(sid, streamId){
+  if(!sid) return null;
+  const pending=_activeSessionSceneRestorePending;
+  if(!pending) return null;
+  if(!_isActiveSessionSceneRestoreOwner(pending.sid,pending.streamId,pending.loadGeneration)){
+    if(_activeSessionSceneRestorePending===pending) _activeSessionSceneRestorePending=null;
+    return null;
+  }
+  if(String(pending.sid)!==String(sid)) return null;
+  if(streamId!==undefined&&pending.streamId!==String(streamId||'')) return null;
+  return pending;
+}
+
 function _deferActiveSessionSceneRestore(sid, activeStreamId, loadGeneration, restoreFn){
   if(!sid||!activeStreamId||typeof restoreFn!=='function') return Promise.resolve(undefined);
+  const pendingRestore=_isActiveSessionSceneRestoreOwner(sid,activeStreamId,loadGeneration)
+    ? {sid:String(sid),streamId:String(activeStreamId),loadGeneration}
+    : null;
+  if(pendingRestore) _activeSessionSceneRestorePending=pendingRestore;
   return new Promise((resolve)=>{
     let invoked = false;
     let done = false;
@@ -3646,10 +3669,18 @@ function _deferActiveSessionSceneRestore(sid, activeStreamId, loadGeneration, re
     let raf2Id = null;
     let fallbackTimerId = null;
     let visibilityHandler = null;
+    const ownsPendingRestore=()=>Boolean(
+      pendingRestore&&
+      _activeSessionSceneRestorePending===pendingRestore&&
+      _isActiveSessionSceneRestoreOwner(sid,activeStreamId,loadGeneration)
+    );
 
     const complete = (value) => {
       if (done) return;
       done = true;
+      if(pendingRestore&&_activeSessionSceneRestorePending===pendingRestore){
+        _activeSessionSceneRestorePending=null;
+      }
       if (raf1Id !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(raf1Id);
       if (raf2Id !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(raf2Id);
       if (fallbackTimerId !== null && typeof clearTimeout === 'function') {
@@ -3664,7 +3695,7 @@ function _deferActiveSessionSceneRestore(sid, activeStreamId, loadGeneration, re
     const invoke = () => {
       if (invoked) return;
       invoked = true;
-      if (!_isActiveSessionSceneRestoreOwner(sid, activeStreamId, loadGeneration)) {
+      if (!ownsPendingRestore()) {
         complete(undefined);
         return;
       }
@@ -3699,7 +3730,7 @@ function _deferActiveSessionSceneRestore(sid, activeStreamId, loadGeneration, re
 
     const frame1 = () => {
       if(done || invoked) return;
-      if (!_isActiveSessionSceneRestoreOwner(sid, activeStreamId, loadGeneration)) {
+      if (!ownsPendingRestore()) {
         complete(undefined);
         return;
       }
@@ -3730,9 +3761,7 @@ function _deferActiveSessionSceneRestore(sid, activeStreamId, loadGeneration, re
       document.hidden !== true
     ) {
       raf1Id = requestAnimationFrame(frame1);
-      if (raf1Id === null) {
-        scheduleFallback();
-      }
+      scheduleFallback();
       return;
     }
     scheduleFallback();

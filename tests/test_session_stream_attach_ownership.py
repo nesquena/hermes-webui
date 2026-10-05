@@ -79,10 +79,17 @@ def _messages_owner_script() -> str:
 
 
 def _sessions_restore_script() -> str:
+    pending_helper = (
+        _extract_function(SESSIONS_JS, "_activeSessionSceneRestorePendingFor")
+        if "function _activeSessionSceneRestorePendingFor(" in SESSIONS_JS
+        else "function _activeSessionSceneRestorePendingFor(){ return null; }"
+    )
     return "\n".join(
         [
             _extract_const(SESSIONS_JS, "_ACTIVE_SESSION_SCENE_RESTORE_HIDDEN_TIMEOUT_MS"),
+            "let _activeSessionSceneRestorePending = null;",
             _extract_function(SESSIONS_JS, "_isActiveSessionSceneRestoreOwner"),
+            pending_helper,
             _extract_function(SESSIONS_JS, "_deferActiveSessionSceneRestore"),
             _extract_function(SESSIONS_JS, "_deferActiveSessionSceneRestoreAndAttach"),
         ]
