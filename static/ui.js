@@ -5752,7 +5752,16 @@ async function populateModelDropdown(opts={}){
       }
 
       if(grouped.size===0&&data&&data.default_model){
-        addModel(data.active_provider||'configured',data.default_model);
+        // #7777 round-3 SHOULD-FIX 2: nothing eligible survived the exclude
+        // policy, so the last-resort default must honour it too. Re-adding it
+        // unconditionally is what brought an excluded default back into a new
+        // chat — the row the user just hid became the only selectable model.
+        // When it is excluded the caller's empty-groups handling renders the
+        // explicit no-eligible-models state instead.
+        if(!(typeof _modelIsPickerExcluded==='function'
+             &&_modelIsPickerExcluded(data.default_model,data.active_provider||'configured'))){
+          addModel(data.active_provider||'configured',data.default_model);
+        }
       }
 
       const groups=[];
@@ -5779,6 +5788,47 @@ async function populateModelDropdown(opts={}){
       if(willRetry){
         _modelCatalogFallbackRetried=true;
         populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
+        return;
+      }
+      // #7777 round-3 SHOULD-FIX 2: an empty catalog must not leave the
+      // previous options in place. Leaving them lets a new chat send a model
+      // that is no longer offered at all — and when every id is excluded, the
+      // very model the user excluded is what survives, because the old rows
+      // were rendered before the policy existed.
+      //
+      // Only the minimal/static builder used to set ``no_eligible_models``,
+      // while the normal builder returned ``groups: []`` with no flag, so
+      // this branch never ran for it. The flag now comes from every builder
+      // (api/config.py), and the browser ALSO treats an empty catalog under
+      // an active policy as the same state, so an older server payload
+      // cannot resurrect the stale-option path.
+      const _hasPolicy=!!(window._pickerExcludes&&Object.keys(window._pickerExcludes).length);
+      if(data&&(data.no_eligible_models||_hasPolicy)){
+        sel.innerHTML='';
+        _dynamicModelLabels={};
+        window._modelCatalogGroups=[];
+        // Nothing is eligible: a real <select> keeps its FIRST (excluded)
+        // option selected, and the next send would then use exactly the
+        // model the user hid. Clear the selection first, then re-apply the
+        // one documented exception (the RUNNING session's own model) so the
+        // picker never disagrees with `_chatPayloadModelState()`.
+        sel.value='';
+        const _emptySession=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
+        if(_emptySession&&_emptySession.model&&typeof _ensureModelOptionInDropdown==='function'){
+          const _sessionOption=_ensureModelOptionInDropdown(
+            _emptySession.model,sel,_emptySession.model_provider||null,
+            {allowExcludedForActiveSession:true});
+          if(_sessionOption) sel.value=_sessionOption;
+        }
+        if(sel.id==='modelSelect'&&typeof syncModelChip==='function') syncModelChip();
+        const emptyHint=$('modelEmptyHint');
+        if(emptyHint){
+          emptyHint.textContent=typeof t==='function'
+            ?t('model_picker_empty_excluded','No models available — every model is excluded by the current picker policy.')
+            :'No models available — every model is excluded by the current picker policy.';
+          emptyHint.style.display='block';
+        }
+        return null;
       }
       return; // no server groups and no configured fallback
     }

@@ -8925,14 +8925,16 @@ def _load_models_cache_from_disk() -> dict | None:
                 if isinstance(cache.get("aliases"), dict)
                 else _model_aliases_from_config()
             ),
-            # #7777 round-3 MUST-FIX 1: the strict loader must restore the
-            # policy the save path persisted, or a disk-cache hit hands the
-            # browser a catalog with no ``picker_excludes`` attached —
-            # ``populateModelDropdown`` then resets
-            # ``window._pickerExcludes`` to ``{}`` and re-injects a model the
-            # live build filtered out. A file written by a pre-fix release has
-            # no stored map, so rebuild it from the same settings source the
-            # live builders use.
+            # #7777 round-3 MUST-FIX 1: the disk cache used to persist and
+            # rebuild only the older payload fields, so a cache hit returned
+            # no ``picker_excludes``. The browser's ``populateModelDropdown``
+            # reads that field to install its own copy of the policy, and an
+            # absent one resets ``window._pickerExcludes`` to ``{}`` — after
+            # a restart a hidden model was re-injected and selected. The
+            # fingerprint already covers the policy, so this file is
+            # guaranteed congruent with current settings; restore the stored
+            # map (or rebuild it from the same source) so a disk-cache boot
+            # behaves exactly like a live build.
             "picker_excludes": (
                 cache["picker_excludes"]
                 if isinstance(cache.get("picker_excludes"), dict)
@@ -9376,17 +9378,13 @@ def _save_models_cache_to_disk(
     so this is safe — at worst we write one cache file that gets rejected
     once on the next boot.
 
-    The commit is fenced (#7481 review). Two overlapping publishers used to
-    pick the SAME ``.<pid>.tmp`` path, so the newer writer's rename could be
-    undone by the older writer's still-open descriptor, leaving stale-but-valid
-    JSON as the durable catalog; and there was no re-check between the in-memory
-    generation decision and the rename. So the temp file is unique per build, and
-    the rename is taken under ``_models_cache_disk_commit_lock`` after
-    re-validating that this build is still the newest allocated generation and is
-    still publishing for the sources it read. A superseded or re-sourced commit
-    discards its temp file and leaves the durable catalog to the build that won.
-    ``_source_fingerprint`` records the fingerprint the build READ, so the file
-    can never claim provenance it did not have.
+    #7777 round-3 MUST-FIX 1: ``picker_excludes`` is persisted alongside the
+    other payload fields. Without it a disk-cache hit returned a catalog the
+    browser accepted as complete but with no policy attached, so
+    ``populateModelDropdown`` reset ``window._pickerExcludes`` to ``{}`` and
+    re-injected a model the live build had filtered out — the resurrection
+    only became visible after a restart, which is why the in-memory path
+    never showed it.
     """
     global _models_disk_committed_seq
     tmp = None
@@ -9405,14 +9403,6 @@ def _save_models_cache_to_disk(
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
-            # #7777 round-3 MUST-FIX 1: ``picker_excludes`` is persisted
-            # alongside the other payload fields. Without it a disk-cache hit
-            # returned a catalog the browser accepted as complete but with no
-            # policy attached, so ``populateModelDropdown`` reset
-            # ``window._pickerExcludes`` to ``{}`` and re-injected a model the
-            # live build had filtered out — the resurrection only became
-            # visible after a restart, which is why the in-memory path never
-            # showed it.
             "picker_excludes": (
                 cache["picker_excludes"]
                 if isinstance(cache.get("picker_excludes"), dict)
@@ -11763,7 +11753,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # 12. Include model aliases so the WebUI frontend can resolve them.
         model_aliases = _model_aliases_from_config()
 
-        return _annotate_fast_tier_model_groups({
+        _normal_payload = {
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": _build_configured_model_badges(),
@@ -11774,7 +11764,25 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # (boot default, previous pick, synthesized fallback rows)
             # server-side filtering never sees.
             "picker_excludes": _picker_excludes_payload(),
-        })
+        }
+        # #7777 round-3 SHOULD-FIX 2: only the minimal/static builder used to
+        # set ``no_eligible_models``. With one configured model fully
+        # excluded, the normal builder returns ``groups: []`` with no flag,
+        # so the browser's empty-groups handling fell through and KEPT the
+        # previous (now-excluded) option selected — the next send then used
+        # it. Set the same explicit flag here so the browser renders an
+        # empty picker and reconciles the active session instead. Gated on a
+        # policy that actually removed something, so an install with no
+        # providers at all is not mislabelled as an exclusion outcome.
+        _active_excludes_here = get_picker_excludes(active_provider)
+        if not groups and _active_excludes_here:
+            _normal_payload["no_eligible_models"] = True
+            logger.debug(
+                "normal models catalog: every candidate is excluded by the "
+                "per-provider picker policy (#7507/#7777); flagging "
+                "no_eligible_models",
+            )
+        return _annotate_fast_tier_model_groups(_normal_payload) or _normal_payload
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
     # Mark that a build may be in progress BEFORE acquiring the lock.

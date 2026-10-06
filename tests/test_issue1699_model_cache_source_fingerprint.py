@@ -142,8 +142,10 @@ def test_disk_models_cache_still_loads_when_auth_and_config_sources_are_unchange
     result = config.get_available_models()
 
     # The disk-cache hit reconstructs `aliases` from current config (the save
-    # path doesn't persist aliases); no config aliases here, so it's {}.
-    assert result == {**fresh_opencode, "aliases": {}}
+    # path doesn't persist aliases); no config aliases here, so it's {}. The
+    # #7777 fix also restores `picker_excludes` from the same settings store —
+    # none configured in this fixture, so it is the empty map.
+    assert result == {**fresh_opencode, "aliases": {}, "picker_excludes": {}}
 
 
 def test_memory_models_cache_invalidates_when_static_catalog_changes(tmp_path, monkeypatch):
