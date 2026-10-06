@@ -103,6 +103,21 @@ _RETIRED_GENERATIONS: "dict[str, int]" = {}
 # in-memory dict could not (#7862 round 6). Compared against a receipt's own
 # generation, never against the live counter, so it cannot go stale.
 _TOMBSTONES: "dict[str, int]" = {}
+# Durable continuation-handoff tokens (#7862 round 7, finding 2). A consume
+# deletes the durable record and keeps the in-memory rollback receipt, so a
+# process loss between that delete and
+# ``_prepare_chat_start_session_for_stream`` writing ``pending_user_message``
+# left NOTHING durable: a cold restore found zero records and the retry ran as
+# an ordinary turn. A handoff token records that an admitted attempt owns a
+# known pending start, so the crash seam is reconcilable instead of invisible.
+#
+# Keyed by (session id, start attempt id) like the receipts, guarded by the
+# same ``_LOCK``, and DUABLY persisted in the same file section as the
+# intentions it hands off, so a cold restore can re-adopt it. Deliberately
+# named apart from #7855's ``PENDING_GOAL_CONTINUATION_RECORDS`` family to
+# keep the two PRs' symbols from colliding at merge.
+_CONTINUATION_HANDOFF_TOKENS: "dict[tuple[str, str], dict]" = {}
+_MAX_CONTINUATION_HANDOFFS = 64
 
 
 def _next_generation_unlocked() -> int:
@@ -126,30 +141,58 @@ def _receipt_minted_at(record: dict) -> float:
         return 0.0
 
 
+def _receipt_last_claimed_at(record: dict) -> float:
+    """When a live attempt last RECLAIMED its receipt. Never raises.
+
+    Distinct from the mint time: a start attempt can legitimately take longer
+    than the TTL (a slow provider handshake, a registration callback that is
+    still waiting on its worker). Reclaiming refreshes this field, which is
+    the attempt positively reporting "I am still live".
+    """
+    try:
+        return float(record.get("_receipt_reclaimed_at") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _sweep_expired_receipts_unlocked() -> int:
     """Drop receipts whose attempt is long gone; return how many were dropped.
 
-    A receipt is claimed by exactly one start attempt, and that attempt either
-    discards it on a successful launch or claims it on a rejected start -- both
-    inside the same request. A receipt that outlives ``_ROLLBACK_RECEIPT_TTL_SECONDS``
-    therefore cannot belong to a live attempt, so dropping it is safe.
+    #7862 round 7 (finding 3): elapsed age ALONE is not evidence that an
+    attempt ended. The route carries no chat-start deadline, so a live
+    registration callback whose worker is slow can hold a receipt past the TTL
+    while its attempt is still very much running; sweeping it made the
+    rejection un-restorable and turned the matching retry into an ordinary
+    turn.
 
-    This is the ONLY eviction. There is deliberately no global count cap and no
-    per-session count cap that could drop a LIVE attempt's receipt: with 65
-    starts in flight for one session, a per-session cap of 4 silently evicted
-    the in-flight attempt's receipt, and its rejected-start rollback then found
-    nothing to claim and fell back to a bare marker the retry could not match
-    (#7862 round 6). Sweeping on age instead of on count makes that impossible
-    -- the cost of a leaked receipt is bounded memory, not a lost goal.
+    The sweep therefore uses the more recent of the mint and the last claim,
+    and an attempt that wants to be certain of survival reclaims its slot
+    (``reclaim_goal_continuation_receipt``). A receipt that nobody has
+    reclaimed past the TTL still goes, so storage stays bounded -- the bound
+    is now backed by an attempt's own liveness report instead of by a clock
+    alone.
+
+    There is still deliberately no global count cap and no per-session count
+    cap: with 65 starts in flight for one session, a per-session cap of 4
+    silently evicted the in-flight attempt's receipt (#7862 round 6).
 
     Callers must hold ``_LOCK``.
     """
     now = time.time()
-    expired = [
-        key
-        for key, record in _ROLLBACK_RECEIPTS.items()
-        if now - _receipt_minted_at(record) > _ROLLBACK_RECEIPT_TTL_SECONDS
-    ]
+    expired = []
+    for key, record in _ROLLBACK_RECEIPTS.items():
+        # #7862 round 7 (finding 3): age is only conclusive when the attempt
+        # has stopped reporting itself live. ``reclaim_goal_continuation_receipt``
+        # refreshes this receipt's liveness, so whichever of the mint and the
+        # last reclaim is NEWER is the stronger signal and dominates age. A
+        # receipt nobody has reclaimed past the TTL is therefore an attempt that
+        # stopped reporting, which is the abandonment this sweep takes as
+        # conclusive -- the same bound round 6 established, without treating a
+        # still-running start as finished.
+        if now - max(_receipt_minted_at(record), _receipt_last_claimed_at(record)) > (
+            _ROLLBACK_RECEIPT_TTL_SECONDS
+        ):
+            expired.append(key)
     for key in expired:
         _ROLLBACK_RECEIPTS.pop(key, None)
     if expired:
@@ -159,6 +202,113 @@ def _sweep_expired_receipts_unlocked() -> int:
             _ROLLBACK_RECEIPT_TTL_SECONDS,
         )
     return len(expired)
+
+
+def reclaim_goal_continuation_receipt(session_id: str, attempt_id: str = "") -> bool:
+    """Report that this start attempt is still live; keep its receipt.
+
+    #7862 round 7 (finding 3). The receipt's TTL is a bound for receipts whose
+    attempt is gone, not a deadline the route enforces -- the chat path has no
+    corresponding timeout, so a live attempt may span it. This is the positive
+    liveness signal that closes that gap: the attempt calls it, the receipt's
+    clock resets, and only a receipt nobody ever reclaims is swept.
+
+    Returns True when a live receipt was refreshed. Never raises into the chat
+    path.
+    """
+    sid = str(session_id or "").strip()
+    attempt = str(attempt_id or "").strip()
+    if not sid:
+        return False
+    with _LOCK:
+        if attempt:
+            keys = [(sid, attempt)] if (sid, attempt) in _ROLLBACK_RECEIPTS else []
+        else:
+            keys = [k for k in _ROLLBACK_RECEIPTS if k[0] == sid]
+        if not keys:
+            return False
+        for key in keys:
+            record = _ROLLBACK_RECEIPTS[key]
+            record["_receipt_reclaimed_at"] = time.time()
+        return True
+
+
+def _record_continuation_handoff_unlocked(sid: str, record: dict, attempt_id: str) -> None:
+    """Store a durable handoff for one start attempt; callers hold ``_LOCK``.
+
+    #7862 round 7 (finding 2): the record a consume popped must have a durable
+    owner before the start is admitted, so a crash between the consume and the
+    pending-start write cannot strand the intent with no recoverable evidence.
+    """
+    attempt = str(attempt_id or "") or "attempt"
+    stored = dict(record)
+    stored["_handoff_attempt_id"] = attempt
+    _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = stored
+    while len(_CONTINUATION_HANDOFF_TOKENS) > _MAX_CONTINUATION_HANDOFFS:
+        _CONTINUATION_HANDOFF_TOKENS.pop(next(iter(_CONTINUATION_HANDOFF_TOKENS)))
+
+
+def pop_goal_continuation_handoff(
+    session_id: str, attempt_id: str = ""
+) -> Optional[dict]:
+    """Claim and remove this start attempt's durable handoff token.
+
+    Returns the record the attempt handed off (prompt, generation,
+    continuation id) or None when there is none. Used by the rejected-start
+    rollback to restore a MATCHABLE intent, and by a cold restore to re-adopt
+    an intent whose start was lost with the process. Never raises into the
+    chat path.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    attempt = str(attempt_id or "").strip()
+    with _LOCK:
+        if attempt:
+            key = (sid, attempt)
+        else:
+            session_keys = [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]
+            key = session_keys[0] if session_keys else None
+        if key is None or key not in _CONTINUATION_HANDOFF_TOKENS:
+            return None
+        claimed = dict(_CONTINUATION_HANDOFF_TOKENS.pop(key))
+        claimed.pop("_handoff_attempt_id", None)
+        claimed.pop("_receipt_minted_at", None)
+        claimed.pop("_receipt_reclaimed_at", None)
+        claimed["attempt_id"] = key[1]
+        return claimed
+
+
+def discard_goal_continuation_handoff(session_id: str, attempt_id: str = "") -> None:
+    """Discharge this start attempt's handoff once its launch SUCCEEDED.
+
+    #7862 round 7 (finding 2): the discharge is DURABLE, not just in-memory.
+    A launch that succeeded owns the turn, so the handoff must stop being
+    evidence of an interrupted start -- if it stayed in the registry payload, a
+    later cold restore would resurrect a continuation that already ran. The in-memory
+    entry and the registry snapshot commit together, exactly like the receipt
+    discard that mirrors it on the same paths.
+
+    Never raises into the chat path.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    attempt = str(attempt_id or "").strip()
+    with _LOCK:
+        had = bool(attempt and (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS)
+        if attempt:
+            _CONTINUATION_HANDOFF_TOKENS.pop((sid, attempt), None)
+        else:
+            for key in [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]:
+                del _CONTINUATION_HANDOFF_TOKENS[key]
+        if had:
+            _write_registry_unlocked(
+                PENDING_GOAL_CONTINUATION_RECORDS,
+                context=f"handoff-discharge sid={sid}",
+            )
 
 
 def _record_rollback_receipt_unlocked(sid: str, record: dict, attempt_id: str) -> None:
@@ -172,7 +322,7 @@ def _record_rollback_receipt_unlocked(sid: str, record: dict, attempt_id: str) -
     _sweep_expired_receipts_unlocked()
 
 
-def _write_registry_unlocked(records: dict, *, context: str = "") -> None:
+def _write_registry_unlocked(records: dict, *, context: str = "") -> bool:
     """Atomically persist the full registry (unique tmp + fsync + replace).
 
     Writes ``records`` AND the durable tombstones in one payload: a clear must
@@ -181,6 +331,13 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> None:
     is about. Lock-free; callers must hold ``_LOCK``. Never raises: failures
     are recorded in ``_LAST_WRITE_ERROR`` and surfaced by
     ``durability_diagnostics()`` so durability claims stay observable.
+
+    The RETURN VALUE is #7862 round 7: True only when ``os.replace`` actually
+    swapped the payload into ``_PENDING_GOAL_FILE``. A caller must treat
+    ``False`` as "this mutation did NOT become durable" -- a consume whose
+    snapshot failed used to return "consumed" anyway, which dropped the
+    in-memory record while the old bytes stayed on disk, so a restart restored
+    a claimable record for a turn that had already been spent.
     """
     global _LAST_WRITE_ERROR
     _LAST_WRITE_ERROR = None
@@ -194,6 +351,19 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> None:
                 "generation": _GENERATION,
                 "records": records,
                 "tombstones": dict(_TOMBSTONES),
+                # #7862 round 7 (finding 2): the admitted-start handoffs, so a
+                # crash between the consume and the pending-start write leaves
+                # durable evidence of the continuations that were already spent
+                # in memory. Internal bookkeeping keys are stripped first.
+                "continuation_handoffs": {
+                    f"{sid}\u0000{attempt}": {
+                        k: v
+                        for k, v in rec.items()
+                        if not k.startswith("_receipt_")
+                        and k != "_handoff_attempt_id"
+                    }
+                    for (sid, attempt), rec in _CONTINUATION_HANDOFF_TOKENS.items()
+                },
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -209,12 +379,14 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> None:
             os.fsync(fh.fileno())
         os.replace(tmp_name, _PENDING_GOAL_FILE)
         tmp_name = None  # os.replace consumed the tmp path
+        return True
     except Exception as exc:
         _LAST_WRITE_ERROR = f"{type(exc).__name__}: {exc}"
         logger.warning(
             "Failed to persist goal continuation registry (context=%s, generation=%d): %s",
             context or "-", _GENERATION, exc,
         )
+        return False
     finally:
         # Only unlink when the tmp was NOT consumed by a successful
         # os.replace; a consumed path (tmp_name=None) has nothing to clean.
@@ -230,17 +402,18 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> None:
                 pass
 
 
-def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int]]":
-    """Lock-free read of the on-disk registry -> (records, tombstones).
+def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int], dict[tuple[str, str], dict]]":
+    """Lock-free read of the on-disk registry -> (records, tombstones, handoffs).
 
-    Missing file -> ({}, {}); corrupt/unexpected -> ({}, {}) with the parse
-    failure recorded in ``_LAST_LOAD_ERROR`` (never raises). A v1
+    Missing file -> ({}, {}, {}); corrupt/unexpected -> empty mappings with the
+    parse failure recorded in ``_LAST_LOAD_ERROR`` (never raises). A v1
     list-of-strings file is upgraded in memory to records with a blank prompt.
 
-    A v2 file has no ``tombstones`` section; its in-memory stamps were lost
-    with the process that wrote it, so an old clear simply cannot be honoured
-    after an upgrade. That is the pre-round-6 behaviour and is not a
-    regression -- the v3 writer is what makes clears durable.
+    ``handoffs`` are the #7862 round 7 (finding 2) admitted-start tokens: each
+    is the consumption an in-flight chat start already spent, so a process that
+    died between the consume and the pending-start write can still re-adopt the
+    intent instead of restoring nothing. A v3 file has no such section; nothing
+    can be re-adopted for it, which is the pre-round-7 behaviour.
     """
     global _LAST_LOAD_ERROR
     _LAST_LOAD_ERROR = None
@@ -248,11 +421,11 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int]]":
         raw = _PENDING_GOAL_FILE.read_text(encoding="utf-8")
         data = json.loads(raw)
     except FileNotFoundError:
-        return {}, {}
+        return {}, {}, {}
     except (OSError, ValueError) as exc:
         _LAST_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
         logger.warning("Goal continuation registry unreadable: %s", _LAST_LOAD_ERROR)
-        return {}, {}
+        return {}, {}, {}
     if isinstance(data, dict):
         file_generation = int(data.get("generation") or 0)
         raw_records = data.get("records")
@@ -260,7 +433,7 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int]]":
             _LAST_LOAD_ERROR = (
                 f"registry has no records mapping ({type(raw_records).__name__})"
             )
-            return {}, {}
+            return {}, {}, {}
         raw_tombstones = data.get("tombstones")
         if not isinstance(raw_tombstones, dict):
             raw_tombstones = {}
@@ -270,6 +443,22 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int]]":
                 tombstones[str(sid)] = int(gen or 0)
             except (TypeError, ValueError):
                 continue
+        handoffs: "dict[tuple[str, str], dict]" = {}
+        raw_handoffs = data.get("continuation_handoffs")
+        if isinstance(raw_handoffs, dict):
+            for key, rec in raw_handoffs.items():
+                if not isinstance(rec, dict):
+                    continue
+                sid, _, attempt = str(key).partition("\u0000")
+                if not sid or not attempt:
+                    continue
+                handoffs[(sid, attempt)] = {
+                    "prompt": str(rec.get("prompt") or ""),
+                    "generation": int(rec.get("generation") or file_generation),
+                    "created_at": float(rec.get("created_at") or time.time()),
+                    "reason": str(rec.get("reason") or "goal_continue"),
+                    "continuation_id": str(rec.get("continuation_id") or ""),
+                }
         out: dict[str, dict] = {}
         for sid, rec in raw_records.items():
             if not isinstance(rec, dict):
@@ -281,7 +470,7 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int]]":
                 "reason": str(rec.get("reason") or "goal_continue"),
                 "continuation_id": str(rec.get("continuation_id") or ""),
             }
-        return out, tombstones
+        return out, tombstones, handoffs
     if isinstance(data, list):
         # v1 format: a bare list of session ids. Upgrade in memory: blank
         # prompt (the old format never carried text); generation is assigned
@@ -296,22 +485,22 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int]]":
             }
             for sid in data
             if isinstance(sid, str) and sid
-        }, {}
+        }, {}, {}
     _LAST_LOAD_ERROR = f"unexpected registry shape: {type(data).__name__}"
-    return {}, {}
+    return {}, {}, {}
 
 
 def load_pending_goal_continuations() -> dict:
     """Return the durable records {session_id: record} (locked, never raises)."""
     with _LOCK:
-        records, _tombstones = _load_file_raw()
+        records, _tombstones, _handoffs = _load_file_raw()
         return records
 
 
 def load_goal_continuation_tombstones() -> dict:
     """Return the durable clear tombstones {session_id: generation}."""
     with _LOCK:
-        _records, tombstones = _load_file_raw()
+        _records, tombstones, _handoffs = _load_file_raw()
         return dict(tombstones)
 
 
@@ -320,13 +509,18 @@ def arm_pending_goal_continuation(
     continuation_prompt: str = "",
     reason: str = "goal_continue",
     continuation_id: str = "",
-) -> None:
+) -> bool:
     """Arm durable intent for one session: mutate + snapshot under ONE lock.
 
     Adds the session to ``PENDING_GOAL_CONTINUATION`` AND stores the canonical
     continuation prompt + generation in ``PENDING_GOAL_CONTINUATION_RECORDS``,
     then persists. Never raises into the chat path; write failures are
     observable via ``durability_diagnostics()``.
+
+    Returns True only when the snapshot was durably replaced. A False return
+    means the intent is NOT durable (the registry bytes on disk predate this
+    arm), so a caller that needs to claim durability must not pretend the arm
+    landed (#7862 round 7).
 
     ``continuation_id`` is the opaque token the ``goal_continue`` SSE event
     hands the browser so the queued automatic continuation can be matched by
@@ -337,7 +531,7 @@ def arm_pending_goal_continuation(
 
     sid = str(session_id or "").strip()
     if not sid:
-        return
+        return False
     prompt = "" if continuation_prompt is None else str(continuation_prompt)
     with _LOCK:
         generation = _next_generation_unlocked()
@@ -362,7 +556,7 @@ def arm_pending_goal_continuation(
             "reason": reason,
             "continuation_id": str(continuation_id or ""),
         }
-        _write_registry_unlocked(
+        return _write_registry_unlocked(
             PENDING_GOAL_CONTINUATION_RECORDS,
             context=f"arm sid={sid} reason={reason}",
         )
@@ -371,18 +565,23 @@ def arm_pending_goal_continuation(
 def retire_pending_goal_continuation(
     session_id: str,
     reason: str = "consumed",
-) -> None:
+) -> bool:
     """Retire durable intent for exactly one session (mutate + snapshot).
 
     Removes the session from the marker set AND deletes its on-disk record, so
     a later startup/repair can never re-arm a consumed continuation. The
     reason is appended to the bounded ``_RETIRED_LOG`` diagnostics.
+
+    Returns True only when the snapshot was durably replaced. #7862 round 7:
+    a ``False`` return means the record is gone from memory but still claimable
+    on disk, so a caller must NOT report a durable retirement -- the clearing
+    operation has to surface the failure instead of claiming success.
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
     sid = str(session_id or "").strip()
     if not sid:
-        return
+        return False
     with _LOCK:
         generation = _next_generation_unlocked()
         PENDING_GOAL_CONTINUATION.discard(sid)
@@ -405,13 +604,14 @@ def retire_pending_goal_continuation(
             _TOMBSTONES.pop(next(iter(_TOMBSTONES)))
         # A fresh arm is NOT a retirement, so the session's generation stamp is
         # left alone: an older receipt must stay blocked.
-        _write_registry_unlocked(
+        committed = _write_registry_unlocked(
             PENDING_GOAL_CONTINUATION_RECORDS,
             context=f"retire sid={sid} reason={reason}",
         )
         _RETIRED_LOG.append(
             {"session_id": sid, "reason": reason, "at": time.time()}
         )
+        return committed
 
 
 def normalize_continuation_text(value: str) -> str:
@@ -511,7 +711,13 @@ def consume_pending_goal_continuation(
     let unrelated successful starts evict an in-flight receipt). A start that
     succeeds must call ``discard_goal_continuation_rollback_receipt``.
 
-    Returns True when the intent was consumed. Never raises into the chat path.
+    If the turn is not the continuation this is a no-op and the intent stays
+    pending; if the turn IS the continuation but the durable removal cannot be
+    committed, the intent is left in place as well and the return is False, so
+    the caller must not acknowledge the consumption.
+
+    Returns True when the intent was consumed AND durably removed. Never raises
+    into the chat path.
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
@@ -542,11 +748,24 @@ def consume_pending_goal_continuation(
             return False
         _next_generation_unlocked()
         PENDING_GOAL_CONTINUATION.discard(sid)
-        PENDING_GOAL_CONTINUATION_RECORDS.pop(sid, None)
-        _write_registry_unlocked(
+        popped = PENDING_GOAL_CONTINUATION_RECORDS.pop(sid)
+        if not _write_registry_unlocked(
             PENDING_GOAL_CONTINUATION_RECORDS,
             context=f"consume sid={sid}",
-        )
+        ):
+            # #7862 round 7 (CORE): the durable removal did NOT commit. Put the
+            # in-memory state back so this process still describes the intent,
+            # and refuse the admission: admitting a turn whose removal is not
+            # durable means the old registry bytes stay on disk and a restart
+            # restores a claimable record after the turn was already spent.
+            PENDING_GOAL_CONTINUATION.add(sid)
+            PENDING_GOAL_CONTINUATION_RECORDS[sid] = popped
+            logger.warning(
+                "Refused to consume goal continuation for session %s: the "
+                "durable record could not be removed",
+                sid,
+            )
+            return False
         _RETIRED_LOG.append({"session_id": sid, "reason": "consumed", "at": time.time()})
         # Keep the popped record as a rollback receipt: a chat start that is
         # rejected AFTER the consume (stream-registration / worker-start
@@ -557,6 +776,28 @@ def consume_pending_goal_continuation(
         # dropped by ``discard_goal_continuation_rollback_receipt`` (a launch
         # that succeeded) or when a newer intent is armed for the same session.
         _record_rollback_receipt_unlocked(sid, record, attempt_id)
+        # #7862 round 7 (finding 2): the same admission leaves a DURABLE handoff.
+        # A consume deletes the durable record, and the rollback receipt is
+        # in-memory only -- so a process loss between here and
+        # ``_prepare_chat_start_session_for_stream`` would strand the intent
+        # with no recoverable evidence at all (cold restore: zero records, and
+        # the retry classified as an ordinary turn). The handoff token is what
+        # makes that seam crash-reconcilable: the writer persists it in the
+        # registry payload, so a cold restore can still re-adopt the recorded
+        # continuation. It is discharged on the successful launch paths
+        # (``discard_goal_continuation_handoff``).
+        _record_continuation_handoff_unlocked(sid, record, attempt_id)
+        if not _write_registry_unlocked(
+            PENDING_GOAL_CONTINUATION_RECORDS,
+            context=f"consume-handoff sid={sid}",
+        ):
+            # The handoff is not durable; drop it so no path believes it is.
+            _CONTINUATION_HANDOFF_TOKENS.pop((sid, attempt_id), None)
+            logger.warning(
+                "No durable goal-continuation handoff for session %s (attempt %s)",
+                sid,
+                attempt_id,
+            )
         return True
 
 
@@ -695,13 +936,14 @@ def restore_goal_continuations() -> int:
 
     Merges BOTH ``PENDING_GOAL_CONTINUATION`` and
     ``PENDING_GOAL_CONTINUATION_RECORDS`` for every durable record not already
-    live (a live in-memory record always wins over disk), and loads the durable
-    clear tombstones. Returns the count of sessions restored. Never raises.
+    live (a live in-memory record always wins over disk), loads the durable
+    clear tombstones, and adopts the durable continuation handoffs. Returns the
+    count of sessions restored. Never raises.
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
     with _LOCK:
-        disk, disk_tombstones = _load_file_raw()
+        disk, disk_tombstones, disk_handoffs = _load_file_raw()
         # Baseline the generation counter ABOVE every generation on disk
         # (records and tombstones alike). A cold process counts from 0, so a
         # restored record carrying generation 41 would otherwise compare as
@@ -712,6 +954,7 @@ def restore_goal_continuations() -> int:
         highest = max(
             [int(rec.get("generation") or 0) for rec in disk.values()]
             + [int(gen or 0) for gen in disk_tombstones.values()]
+            + [int(gen or 0) for gen in (r.get("generation") or 0 for r in disk_handoffs.values())]
             + [0]
         )
         global _GENERATION
@@ -737,6 +980,32 @@ def restore_goal_continuations() -> int:
             PENDING_GOAL_CONTINUATION.add(sid)
             PENDING_GOAL_CONTINUATION_RECORDS[sid] = record
             restored += 1
+        # #7862 round 7 (finding 2): adopt the durable handoffs. Each one is an
+        # in-flight chat start whose consume already spent the durable record;
+        # if the process died before the pending-start write, this is the ONLY
+        # evidence that the continuation was admitted. Re-arm it so the retry
+        # can still consume it instead of running as an ordinary turn.
+        adopted = 0
+        for (sid, attempt), record in disk_handoffs.items():
+            if sid in PENDING_GOAL_CONTINUATION_RECORDS:
+                continue
+            if (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS:
+                continue
+            _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = dict(record)
+            # The intent itself is gone from disk by construction (the consume
+            # removed it), so restore the record for the matching retry: this
+            # is what makes the handoff reconcilable rather than merely
+            # informative.
+            PENDING_GOAL_CONTINUATION.add(sid)
+            PENDING_GOAL_CONTINUATION_RECORDS[sid] = dict(record)
+            adopted += 1
+            restored += 1
+        if adopted:
+            logger.info(
+                "Goal continuation registry: adopted %d durable continuation handoff(s) "
+                "from an interrupted start",
+                adopted,
+            )
         if restored:
             _write_registry_unlocked(
                 PENDING_GOAL_CONTINUATION_RECORDS,

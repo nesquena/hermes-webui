@@ -2975,8 +2975,10 @@ from api.config import (
 from api import config as api_config
 from api.goal_continuation_store import (
     consume_pending_goal_continuation,
+    discard_goal_continuation_handoff,
     discard_goal_continuation_rollback_receipt,
     pop_goal_continuation_rollback_receipt,
+    reclaim_goal_continuation_receipt,
     restore_pending_goal_continuation,
     retire_pending_goal_continuation,
 )
@@ -24719,6 +24721,16 @@ def _start_chat_stream_for_session(
                 ):
                     goal_related = True
                     consumed_goal_continuation = True
+                    # #7862 round 7 (finding 3): this start is now admitted
+                    # and deliberately in flight between the consume and the
+                    # worker launch, so report it live. The receipt sweep must
+                    # not treat elapsed wall time as evidence that this attempt
+                    # ended: the route has no chat-start deadline, and a slow
+                    # registration callback or provider handshake can outlive
+                    # the TTL while the attempt is still running.
+                    reclaim_goal_continuation_receipt(
+                        s.session_id, goal_continuation_attempt_id
+                    )
             except Exception:
                 logger.debug(
                     "Failed to consume pending goal continuation for session %s",
@@ -24823,6 +24835,12 @@ def _start_chat_stream_for_session(
                         # attempt's receipt has no consumer -- same discard as
                         # the worker-thread start path.
                         discard_goal_continuation_rollback_receipt(
+                            s.session_id, goal_continuation_attempt_id
+                        )
+                        # #7862 round 7: the durable handoff is discharged by
+                        # the same outcome, so a later cold restore cannot
+                        # resurrect a continuation that already ran.
+                        discard_goal_continuation_handoff(
                             s.session_id, goal_continuation_attempt_id
                         )
                     return regeneration_response
@@ -24941,6 +24959,13 @@ def _start_chat_stream_for_session(
                     # receipt out of the registry, whose rejected-start
                     # rollback then degraded to a bare marker the store
                     # refuses to match.
+                    # #7862 round 7: the launch SUCCEEDED, so this attempt's
+                    # durable handoff has no consumer either. Leaving it behind
+                    # would make a later cold restore resurrect a continuation
+                    # that already ran; discharge it exactly like the receipt.
+                    discard_goal_continuation_handoff(
+                        s.session_id, goal_continuation_attempt_id
+                    )
                     discard_goal_continuation_rollback_receipt(
                         s.session_id, goal_continuation_attempt_id
                     )
