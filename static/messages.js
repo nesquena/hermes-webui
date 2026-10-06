@@ -1329,8 +1329,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // Only mutate the VISIBLE composer / staged tray when the failed send belongs
   // to the session the user is currently looking at — otherwise a background
   // send failure would pollute another session's composer. (Codex #5484 catch.)
-  const visibleSid=(S.session&&S.session.session_id)||null;
-  const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);
+  const belongsToVisible=typeof _isSessionCurrentPane==='function'
+    ?_isSessionCurrentPane(sid)
+    :!(sid&&S.session&&S.session.session_id&&sid!==S.session.session_id);
   let restoredVisible=false;
   if(belongsToVisible){
     const inp=$('msg');
@@ -1360,7 +1361,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   if(sid&&typeof _saveComposerDraftNow==='function'){
     const _persist=()=>{
       try{
-        const stillVisible=(S.session&&S.session.session_id)===sid;
+        const stillVisible=typeof _isSessionCurrentPane==='function'
+          ?_isSessionCurrentPane(sid)
+          :(S.session&&S.session.session_id)===sid;
         if(stillVisible){
           const inp=$('msg');
           const liveText=inp?String(inp.value||''):restore;
@@ -1440,7 +1443,11 @@ async function send(){
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();}
+      if(!S.session){
+        const _createdSession=await newSession();
+        if(!_createdSession||!S.session||S.session.session_id!==_createdSession.session_id)return;
+        if(typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(_createdSession.session_id))return;
+      }
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, /yolo, or /stop while the agent is running and have
@@ -1506,6 +1513,32 @@ async function send(){
   }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
+  const _captureSlashPane=()=>({
+    sessionId:S.session&&S.session.session_id||null,
+    loadingSessionId:typeof _loadingSessionId!=='undefined'?_loadingSessionId:null,
+    loadGeneration:typeof _loadSessionGeneration!=='undefined'?_loadSessionGeneration:null,
+  });
+  const _slashPaneStillCurrent=(owner)=>{
+    const currentGeneration=typeof _loadSessionGeneration!=='undefined'?_loadSessionGeneration:null;
+    if(owner.loadGeneration!==null&&currentGeneration!==owner.loadGeneration) return false;
+    if(owner.sessionId){
+      const currentLoadingSessionId=typeof _loadingSessionId!=='undefined'?_loadingSessionId:null;
+      return typeof _isSessionCurrentPane==='function'
+        ?_isSessionCurrentPane(owner.sessionId)
+        :!!(S.session&&S.session.session_id===owner.sessionId
+          &&(!currentLoadingSessionId||currentLoadingSessionId===owner.sessionId));
+    }
+    return !(S.session&&S.session.session_id)
+      &&!(typeof _loadingSessionId!=='undefined'&&_loadingSessionId);
+  };
+  const _ensureSlashSession=async()=>{
+    if(S.session)return true;
+    const _createdSession=await newSession();
+    if(!_createdSession||!S.session||S.session.session_id!==_createdSession.session_id)return false;
+    return typeof _isSessionCurrentPane==='function'
+      ?_isSessionCurrentPane(_createdSession.session_id)
+      :!(typeof _loadingSessionId!=='undefined'&&_loadingSessionId);
+  };
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1518,7 +1551,7 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();}
+        if(!(await _ensureSlashSession()))return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1536,7 +1569,7 @@ async function send(){
     }
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();}
+        if(!(await _ensureSlashSession()))return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1561,11 +1594,13 @@ async function send(){
         if(typeof renderSessionList==='function') await renderSessionList();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      const _agentCmdPane=_captureSlashPane();
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
+      if(!_slashPaneStillCurrent(_agentCmdPane)) return;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();}
+        if(!(await _ensureSlashSession()))return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
@@ -1573,14 +1608,17 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();}
+        if(!(await _ensureSlashSession()))return;
+        const _agentRunPane=_captureSlashPane();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
           _agentOutput=typeof executeAgentCommand==='function'
             ? await executeAgentCommand(text,_agentCmd||{name:_agentCmdName})
             : 'Agent command runtime unavailable in WebUI.';
+          if(!_slashPaneStillCurrent(_agentRunPane))return;
         }catch(e){
+          if(!_slashPaneStillCurrent(_agentRunPane))return;
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
         }
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
@@ -1588,14 +1626,17 @@ async function send(){
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();}
+        if(!(await _ensureSlashSession()))return;
+        const _pluginRunPane=_captureSlashPane();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
           _pluginOutput=typeof executeAgentPluginCommand==='function'
             ? await executeAgentPluginCommand(text,_agentCmd)
             : 'Plugin command runtime unavailable in WebUI.';
+          if(!_slashPaneStillCurrent(_pluginRunPane))return;
         }catch(e){
+          if(!_slashPaneStillCurrent(_pluginRunPane))return;
           _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
         }
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
@@ -1604,39 +1645,48 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();}
+        if(!(await _ensureSlashSession()))return;
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
-          try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
+          const _moaUsagePane=_captureSlashPane();
+          try{const _moaCfgU=await api('/api/commands/moa/resolve');if(!_slashPaneStillCurrent(_moaUsagePane))return;_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){if(!_slashPaneStillCurrent(_moaUsagePane))return;}
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:_moaUsage,_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
+        const _moaResolvePane=_captureSlashPane();
         try{
           await api('/api/commands/moa/resolve');
+          if(!_slashPaneStillCurrent(_moaResolvePane))return;
           _slashDisplayTextOverride=text;
           text=_moaArgs;
           _pendingMoaConfig=true;
         }catch(_e){
+          if(!_slashPaneStillCurrent(_moaResolvePane))return;
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:'MoA unavailable: '+(_e&&_e.message||_e),_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      const _bundleMetadataPane=_captureSlashPane();
       const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
         ? await getBundleCommandMetadata(_parsedCmd.name)
         : null;
+      if(!_slashPaneStillCurrent(_bundleMetadataPane)) return;
       if(_bundleCmd){
+        const _bundleResolvePane=_captureSlashPane();
         try{
           const _bundleResolved=typeof resolveBundleCommand==='function'
             ? await resolveBundleCommand(text,_bundleCmd)
             : null;
+          if(!_slashPaneStillCurrent(_bundleResolvePane))return;
           const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
           if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session){await newSession();}
+          if(!_slashPaneStillCurrent(_bundleResolvePane))return;
+          if(!(await _ensureSlashSession()))return;
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
@@ -1645,10 +1695,34 @@ async function send(){
       }
     }
   }
-  if(!S.session){await newSession();}
+  if(!(await _ensureSlashSession()))return;
 
   const activeSid=S.session.session_id;
+  const _ownsSendPane=()=>_isSessionCurrentPane(activeSid);
+  const _initialSessionTurnIdentity=_captureSessionActiveTurnIdentity(S.session);
   _sendInProgressSid=activeSid;
+  const _submittedText=text;
+  const _submittedSessionWorkspace=S.session.workspace;
+  const _submittedProfile=S.activeProfile||S.session.profile||'default';
+  const _submittedModelState={..._chatPayloadModelState()};
+  const _submittedTranscript=Array.isArray(S.messages)
+    ?S.messages.map(row=>row&&typeof row==='object'?{...row}:row):[];
+  const _submittedPendingPick=typeof _readPendingSessionModel==='function'
+    ?_readPendingSessionModel(activeSid):null;
+  const _submittedDefaultModel=(typeof window!=='undefined'&&window._defaultModel)||'';
+  const _submittedActiveProvider=(typeof window!=='undefined'&&window._activeProvider)||null;
+  const _pendingPickMatch=!!(_submittedPendingPick
+    &&_submittedPendingPick.model===_submittedModelState.model
+    &&String(_submittedPendingPick.model_provider||'')===String(_submittedModelState.model_provider||''));
+  const _submittedCrossProviderPick=!!(_submittedModelState.model
+    &&_submittedModelState.model_provider
+    &&_submittedDefaultModel
+    &&_submittedActiveProvider
+    &&_submittedModelState.model!==_submittedDefaultModel
+    &&String(_submittedModelState.model_provider||'')!==String(_submittedActiveProvider||''));
+  const _submittedPickFlag=_pendingPickMatch||_submittedCrossProviderPick;
+  const _submittedMoaConfig=!!_pendingMoaConfig;
+  const _submittedForcedSkill=_forcedSkillDirectivePending;
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -1685,22 +1759,22 @@ async function send(){
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){if(!_submittedText){if(_ownsSendPane()) setComposerStatus(`Upload error: ${e.message}`);return;}}
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
-  setComposerStatus('');
+  if(_ownsSendPane()) setComposerStatus('');
 
   const uploadedNames=uploaded.map(u=>u.name||u);
   const uploadedPaths=uploaded.map(u=>u&&u.path?u.path:(u&&u.name?u.name:(u&&u.filename?u.filename:u)));
-  let msgText=text;
+  let msgText=_submittedText;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
-  else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
-  if(_forcedSkillDirectivePending){
-    const _pending=_forcedSkillDirectivePending;
+  else if(uploaded.length)msgText=`${_submittedText}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  if(_submittedForcedSkill){
+    const _pending=_submittedForcedSkill;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
+      if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending=null;
       const _directivePayload = await _pending.promise;
-      if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
       if(_directivePayload){
         const _directive = typeof _directivePayload==='string'
           ? _directivePayload
@@ -1718,133 +1792,118 @@ async function send(){
       }
     }
   }
-  if(!msgText){setComposerStatus('Nothing to send');return;}
+  if(!msgText){if(_ownsSendPane()) setComposerStatus('Nothing to send');return;}
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
   // the re-entrant double-send race AND avoid clobbering a draft typed during the
   // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
   // set there; nothing to re-declare here.
-  const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
+  const displayText=_slashDisplayTextOverride||_submittedText||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
-  S.toolCalls=[];  // clear tool calls from previous turn
-  clearLiveToolCards();  // clear any leftover live cards from last turn
-  let optimisticMessages;
-  try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
-    if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
-    if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-    else appendThinking('',{pending:true});
-    // First optimistic pass: make the local user turn visible before /api/chat/start
-    // can save pending state on the server.
-    _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.initial', ()=>{
-      if(typeof upsertActiveSessionForLocalTurn==='function'){
-        upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
-      }
-    });
-    optimisticMessages=[...S.messages];
-    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
-    if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
-    }
-    _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
-      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-    });
-    _runOptionalPreStartUiStep('startApprovalPolling.prestart', ()=>startApprovalPolling(activeSid));
-    _runOptionalPreStartUiStep('startClarifyPolling.prestart', ()=>startClarifyPolling(activeSid));
-    _runOptionalPreStartUiStep('fetchYoloState.prestart', ()=>_fetchYoloState(activeSid));  // sync YOLO pill with backend state
-    S.activeStreamId = null;  // will be set after stream starts
-    _runOptionalPreStartUiStep('updateSendBtn.prestart', ()=>{
-      if(typeof updateSendBtn==='function') updateSendBtn();
-    });
-
-    // Set provisional title from user message immediately so session appears
-    // in the sidebar right away with a meaningful name. /api/chat/start persists
-    // the server-side provisional title and may refine this optimistic text.
-    if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
-      const provisionalTitle=displayText.slice(0,64);
-      _runOptionalPreStartUiStep('applySessionTitleUpdate.provisional', ()=>{
-        applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
-      });
-      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.provisional', ()=>{
+  let optimisticMessages=[..._submittedTranscript,userMsg];
+  if(_ownsSendPane()){
+    try{
+      S.toolCalls=[];  // clear tool calls from previous turn
+      clearLiveToolCards();  // clear any leftover live cards from last turn
+      S.messages.push(userMsg);renderMessages();setBusy(true);
+      if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
+      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+      else appendThinking('',{pending:true});
+      // First optimistic pass: make the local user turn visible before /api/chat/start
+      // can save pending state on the server.
+      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.initial', ()=>{
         if(typeof upsertActiveSessionForLocalTurn==='function'){
-          // Second optimistic pass: carry the provisional title into the cached row
-          // without re-fetching /api/sessions before pending state exists server-side.
-          upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+          upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
         }
       });
-    } else if(typeof upsertActiveSessionForLocalTurn==='function'){
-      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.titled', ()=>{
-        upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+      optimisticMessages=[...S.messages];
+      _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
+        if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
       });
-    } else {
-      _runOptionalPreStartUiStep('renderSessionListFromCache.prestart', ()=>{
-        renderSessionListFromCache();  // ensure it's visible even if already titled
+      _runOptionalPreStartUiStep('startApprovalPolling.prestart', ()=>startApprovalPolling(activeSid));
+      _runOptionalPreStartUiStep('startClarifyPolling.prestart', ()=>startClarifyPolling(activeSid));
+      _runOptionalPreStartUiStep('fetchYoloState.prestart', ()=>_fetchYoloState(activeSid));  // sync YOLO pill with backend state
+      S.activeStreamId = null;  // will be set after stream starts
+      _runOptionalPreStartUiStep('updateSendBtn.prestart', ()=>{
+        if(typeof updateSendBtn==='function') updateSendBtn();
+      });
+
+      // Set provisional title from user message immediately so session appears
+      // in the sidebar right away with a meaningful name. /api/chat/start persists
+      // the server-side provisional title and may refine this optimistic text.
+      if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
+        const provisionalTitle=displayText.slice(0,64);
+        _runOptionalPreStartUiStep('applySessionTitleUpdate.provisional', ()=>{
+          applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
+        });
+        _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.provisional', ()=>{
+          if(typeof upsertActiveSessionForLocalTurn==='function'){
+            // Second optimistic pass: carry the provisional title into the cached row
+            // without re-fetching /api/sessions before pending state exists server-side.
+            upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+          }
+        });
+      } else if(typeof upsertActiveSessionForLocalTurn==='function'){
+        _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.titled', ()=>{
+          upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+        });
+      } else {
+        _runOptionalPreStartUiStep('renderSessionListFromCache.prestart', ()=>{
+          renderSessionListFromCache();  // ensure it's visible even if already titled
+        });
+      }
+    }catch(preStartError){
+      // The user turn must reach /api/chat/start even if local optimistic UI
+      // bookkeeping (render cache, storage quota, sidebar reconciliation, etc.)
+      // throws. Otherwise the pane can show a user bubble + spinner while the
+      // backend never receives the turn.
+      const message=preStartError&&preStartError.message?preStartError.message:String(preStartError||'unknown error');
+      try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
+      if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
+      optimisticMessages=[...S.messages];
+      try{setBusy(true);}catch(_){S.busy=true;}
+      if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
+      S.activeStreamId=null;
+      _runOptionalPreStartUiStep('ensureLiveWorklogShell.fallback',()=>{
+        if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
       });
     }
-  }catch(preStartError){
-    // The user turn must reach /api/chat/start even if local optimistic UI
-    // bookkeeping (render cache, storage quota, sidebar reconciliation, etc.)
-    // throws. Otherwise the pane can show a user bubble + spinner while the
-    // backend never receives the turn.
-    const message=preStartError&&preStartError.message?preStartError.message:String(preStartError||'unknown error');
-    try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
-    if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
-    optimisticMessages=[...S.messages];
-    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
-    try{setBusy(true);}catch(_){S.busy=true;}
-    if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
-    S.activeStreamId=null;
-    if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+  }
+  INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[],activeTurnToken:null};
+  if(typeof saveInflightState==='function'){
+    saveInflightState(activeSid,{streamId:null,messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[],activeTurnToken:null});
   }
 
   // Start the agent via POST, get a stream_id back
   let streamId;
   let postStartData;
-  let modelStateForPostStart;
-  let explicitPickForPostStart;
+  let _submittedTurnIdentity=null;
+  let modelStateForPostStart=_submittedModelState;
+  let profileForPostStart=_submittedProfile;
+  const _explicitPick=_submittedPickFlag;
   try{
-    const _modelState=_chatPayloadModelState();
-    modelStateForPostStart=_modelState;
-    const _pendingPick=(typeof _readPendingSessionModel==='function')
-      ? _readPendingSessionModel(activeSid)
-      : null;
-    const _pendingPickMatch=_pendingPick
-      && _pendingPick.model===_modelState.model
-      && String(_pendingPick.model_provider||'')===String(_modelState.model_provider||'');
-    // ── Persisted cross-provider pick (#3737 follow-up) ──
-    // The onchange marker is consumed after the first send, so subsequent sends
-    // lose explicit_model_pick and the server "repairs" the model back to the
-    // profile default.  When the session has a non-default model from a different
-    // provider than the profile's active provider, treat every send as explicit
-    // so the server honors the user's choice across the entire conversation.
-    const _defaultModel=(typeof window!=='undefined' && window._defaultModel)||'';
-    const _activeProvider=(typeof window!=='undefined' && window._activeProvider)||null;
-    const _isCrossProviderPick = _modelState.model
-      && _modelState.model_provider
-      && _defaultModel
-      && _activeProvider
-      && _modelState.model !== _defaultModel
-      && String(_modelState.model_provider||'') !== String(_activeProvider||'');
-    const _explicitPick = _pendingPickMatch || _isCrossProviderPick;
     // Consume the pending explicit-pick marker for THIS send only. The marker is
     // recorded on modelSelect.onchange and intentionally kept (not cleared on
     // session-update) so it survives the normal pick→update→send flow; clear it here
     // once read so a later send of an unchanged dropdown isn't treated as an explicit
     // pick. (#3739/#3737, Codex catch)
-    if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
-    explicitPickForPostStart=_explicitPick;
+    if(_pendingPickMatch&&typeof _clearPendingSessionModel==='function'){
+      _clearPendingSessionModel(activeSid);
+    }
+    _submittedTurnIdentity=S.session&&S.session.session_id===activeSid
+      ?_captureSessionActiveTurnIdentity(S.session)
+      :_initialSessionTurnIdentity;
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
-      model:_modelState.model,workspace:S.session.workspace,
-      model_provider:_modelState.model_provider,
-      profile:S.activeProfile||S.session.profile||'default',
+      model:_submittedModelState.model,workspace:_submittedSessionWorkspace,
+      model_provider:_submittedModelState.model_provider,
+      profile:profileForPostStart,
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_submittedMoaConfig?true:undefined
     })});
-    _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
@@ -1854,25 +1913,28 @@ async function send(){
     // re-inject the dead id via _sessionIdFromLocation(), then reset to the
     // empty state instead of pushing a confusing error bubble into the chat.
     if(e&&e.status===404){
-      try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-      try{
-        if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());
-        else history.replaceState(null,'',window.location.pathname.replace(/\/session\/[^/]+/,'')+window.location.search);
-      }catch(_){ }
+      const _ownsPane=_ownsSendPane();
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
-      stopApprovalPolling();
-      stopClarifyPolling();
-      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
-      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
-      removeThinking();
-      S.session=null;S.messages=[];
-      setBusy(false);setComposerStatus('');
-      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
-      if(typeof renderMessages==='function') renderMessages();
-      if($('emptyState')) $('emptyState').style.display='';
-      if($('msgInner')) $('msgInner').innerHTML='';
-      if(typeof renderSessionList==='function') void renderSessionList();
+      stopApprovalPollingForSession(activeSid);
+      stopClarifyPollingForSession(activeSid);
+      if(_ownsPane){
+        try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+        try{
+          if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());
+          else history.replaceState(null,'',window.location.pathname.replace(/\/session\/[^/]+/,'')+window.location.search);
+        }catch(_){ }
+        if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+        if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+        removeThinking();
+        S.session=null;S.messages=[];
+        setBusy(false);setComposerStatus('');
+        if(typeof renderMessages==='function') renderMessages();
+        if($('emptyState')) $('emptyState').style.display='';
+        if($('msgInner')) $('msgInner').innerHTML='';
+      }
+      if(_ownsPane&&typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      if(_ownsPane&&typeof renderSessionList==='function') void renderSessionList();
       return;
     }
     if(await _recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise)) return;
@@ -1880,56 +1942,182 @@ async function send(){
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
-      stopApprovalPolling();
-      stopClarifyPolling();
+      stopApprovalPollingForSession(activeSid);
+      stopClarifyPollingForSession(activeSid);
       // Keep the user's attempted turn by queueing it for after the current run.
-      const _retryModelState=_chatPayloadModelState();
-      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'});
+      const _retryModelState=modelStateForPostStart;
+      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:profileForPostStart});
+      if(!_ownsSendPane()){
+        return;
+      }
       updateQueueBadge(activeSid);
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
         await loadSession(activeSid);
-        setComposerStatus('');
+        if(_ownsSendPane()) setComposerStatus('');
         return;
       }catch(_){
         // Fall through to standard error handling if session reload fails.
       }
+      if(!_ownsSendPane()){
+        return;
+      }
     }
 
     delete INFLIGHT[activeSid];
-    stopApprovalPolling();
-    stopClarifyPolling();
-    // Only hide approval card if it belongs to the session that just finished
-    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
-    if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
-    S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    stopApprovalPollingForSession(activeSid);
+    stopClarifyPollingForSession(activeSid);
+    if(_ownsSendPane()){
+      // Only hide approval card if it belongs to the session that just finished
+      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+      removeThinking();
+      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
+      _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    }
     // #5472: the send was rejected before the turn was durably started, so the
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
     // payload) and re-stage files so the user can re-send without retyping.
     _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
-    if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+    if(_ownsSendPane()&&typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
-    if(typeof renderSessionList==='function') void renderSessionList();
+    if(_ownsSendPane()&&typeof renderSessionList==='function') void renderSessionList();
     return;
   }
 
+  if(postStartData&&postStartData.stream_id
+    &&!_acceptedStartMayUpdateSession(activeSid,postStartData,_submittedTurnIdentity)) return;
+  const _loadedSessionOwnsAcceptedStart=!!(_ownsSendPane()&&S.session
+    &&S.session.session_id===activeSid
+    &&S.session.active_stream_id===postStartData?.stream_id
+    &&typeof postStartData?.active_turn_token==='string'
+    &&postStartData.active_turn_token.trim().length>0
+    &&S.session.active_turn_token===postStartData.active_turn_token);
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
-  S.activeStreamId = streamId;
+  if(_ownsSendPane()) S.activeStreamId = streamId;
+  const _activeTurnToken=typeof _opaqueActiveTurnToken==='function'
+    ?_opaqueActiveTurnToken(startData.active_turn_token):null;
+  if(_ownsSendPane()) S.session.active_turn_token=_activeTurnToken;
+  const _stampActiveTurnRows=(messages, preferredRow=null)=>{
+    if(!Array.isArray(messages)||!_activeTurnToken) return null;
+    const _removeRow=(rows,row)=>{
+      if(!row) return;
+      for(let i=rows.length-1;i>=0;i--){
+        if(rows[i]===row) rows.splice(i,1);
+      }
+    };
+    const _findAcceptedPendingProjection=(rows)=>{
+      if(!_loadedSessionOwnsAcceptedStart
+        ||!Number.isFinite(startData.pending_started_at)
+        ||typeof _sameTranscriptMessage!=='function') return null;
+      const matches=rows.filter(row=>row&&row!==userMsg&&row.role==='user'
+        &&row._pending===true
+        &&row._ts===startData.pending_started_at
+        &&_sameTranscriptMessage(row,userMsg));
+      if(matches.length!==1) return null;
+      const owner=matches[0];
+      const ownerToken=_opaqueActiveTurnToken(owner._active_turn_token);
+      if(ownerToken&&ownerToken!==_activeTurnToken) return null;
+      const ownerIndex=rows.indexOf(owner);
+      for(let i=ownerIndex+1;i<rows.length;i++){
+        const row=rows[i];
+        if(!row) continue;
+        if(row.role==='user'
+          &&!(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row))) return null;
+        const isActivity=!!(row._live||row.role==='assistant'||row.role==='tool'
+          ||(typeof _isCanonicalAssistantToolCallEnvelope==='function'
+            &&_isCanonicalAssistantToolCallEnvelope(row)));
+        const rowToken=_opaqueActiveTurnToken(row._active_turn_token);
+        if(isActivity&&rowToken&&rowToken!==_activeTurnToken) return null;
+      }
+      return owner;
+    };
+    const _findCurrentOptimisticRow=(rows)=>{
+      if(!Array.isArray(rows)) return null;
+      const publicOwners=rows.filter(row=>row&&row._active_turn_user===true);
+      if(publicOwners.length){
+        if(!_loadedSessionOwnsAcceptedStart||publicOwners.length!==1
+          ||typeof _pendingActiveTurnUserMessage!=='function') return null;
+        const projection=_findAcceptedPendingProjection(rows);
+        const validationRows=rows.filter(row=>row!==userMsg&&row!==projection);
+        const owner=_pendingActiveTurnUserMessage(validationRows,S.session);
+        if(owner!==publicOwners[0]||String(owner.role||'')!=='user'
+          ||typeof _sameTranscriptMessage!=='function'
+          ||!_sameTranscriptMessage(owner,userMsg)) return null;
+        if(owner!==userMsg) _removeRow(rows,userMsg);
+        if(projection&&projection!==owner) _removeRow(rows,projection);
+        return owner;
+      }
+      const projection=_findAcceptedPendingProjection(rows);
+      if(projection){
+        _removeRow(rows,userMsg);
+        return projection;
+      }
+      const direct=rows.find(row=>row===userMsg);
+      if(direct) return direct;
+      const exact=rows.filter(row=>row&&row.role==='user'
+        &&row._active_turn_token===_activeTurnToken
+        &&(row.timestamp===startData.pending_started_at
+          ||row._ts===startData.pending_started_at));
+      if(exact.length===1) return exact[0];
+      for(let i=rows.length-1;i>=0;i--){
+        const row=rows[i];
+        if(!row) continue;
+        if(row._live) continue;
+        if(row.role==='user'&&row._pending===true&&row._ts===userMsg._ts) return row;
+        if(row.role==='assistant'||row.role==='tool') return null;
+      }
+      return null;
+    };
+    const _insertCurrentOptimisticRow=(rows,row)=>{
+      if(!Array.isArray(rows)||!row||rows.includes(row)) return;
+      const liveIdx=rows.findIndex(item=>item&&item._live);
+      if(liveIdx>=0) rows.splice(liveIdx,0,row);
+      else rows.push(row);
+    };
+    const hasPublicOwner=messages.some(row=>row&&row._active_turn_user===true);
+    let currentRow=_findCurrentOptimisticRow(messages);
+    if(hasPublicOwner&&!currentRow) return null;
+    currentRow=currentRow||preferredRow||userMsg;
+    _insertCurrentOptimisticRow(messages,currentRow);
+    currentRow=_findCurrentOptimisticRow(messages)||currentRow;
+    currentRow._active_turn_token=_activeTurnToken;
+    if(Array.isArray(userMsg.attachments)&&userMsg.attachments.length
+      &&(!Array.isArray(currentRow.attachments)||!currentRow.attachments.length)){
+      currentRow.attachments=[...userMsg.attachments];
+    }
+    return currentRow;
+  };
+  const _stampInflightTurnState=()=>{
+    if(!INFLIGHT[activeSid]){
+      INFLIGHT[activeSid]={messages:optimisticMessages||[...S.messages],uploaded:uploadedNames,toolCalls:[],activeTurnToken:null};
+    }
+    const currentInflight=INFLIGHT[activeSid];
+    if(!Array.isArray(currentInflight.messages)) currentInflight.messages=[];
+    currentInflight.activeTurnToken=_activeTurnToken;
+    currentInflight.streamId=streamId;
+    currentInflight.reattach=!_ownsSendPane();
+    const inflightRow=_stampActiveTurnRows(currentInflight.messages);
+    if(_ownsSendPane()) _stampActiveTurnRows(S.messages,inflightRow);
+    return currentInflight;
+  };
+  _stampInflightTurnState();
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
-  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(_ownsSendPane()){
+    if(typeof updateSendBtn==='function') updateSendBtn();
+  }
   _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
-    const _modelState=modelStateForPostStart || _chatPayloadModelState();
-    const _explicitPick=explicitPickForPostStart;
-    if(startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
+    const _modelState=modelStateForPostStart;
+    const _postStartExplicitPick=_explicitPick;
+    if(_ownsSendPane()&&startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
-    if(startData&&startData.effective_model && S.session){
+    if(_ownsSendPane()&&startData&&startData.effective_model && S.session){
       const _sentModel=_modelState&&_modelState.model;
-      if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
+      if(_postStartExplicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
         showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
       }
       S.session.model=startData.effective_model;
@@ -1938,7 +2126,7 @@ async function send(){
       if(typeof _writePersistedModelState==='function') _writePersistedModelState(startData.effective_model,S.session.model_provider||null);
       if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
       if(typeof syncTopbar==='function') syncTopbar();
-    }else if(startData&&startData.effective_model_provider && S.session){
+    }else if(_ownsSendPane()&&startData&&startData.effective_model_provider && S.session){
       S.session.model_provider=startData.effective_model_provider;
       if(typeof _writePersistedModelState==='function') _writePersistedModelState(S.session.model||'',S.session.model_provider||null);
       if($('modelSelect')&&typeof _applyModelToDropdown==='function') _applyModelToDropdown(S.session.model||'', $('modelSelect'), S.session.model_provider||null);
@@ -1946,46 +2134,47 @@ async function send(){
       if(typeof syncTopbar==='function') syncTopbar();
     }
 
-    if(S.session&&typeof startData.pending_started_at==='number'){
+    if(_ownsSendPane()&&S.session&&typeof startData.pending_started_at==='number'){
       S.session.pending_started_at=startData.pending_started_at;
     }
-    if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-    else if(typeof appendThinking==='function') appendThinking('',{pending:true});
+    if(_ownsSendPane()){
+      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+      else if(typeof appendThinking==='function') appendThinking('',{pending:true});
+    }
     // setBusy(true) already ran with activeStreamId=null; refresh now that we
     // have a stream id so the primary button can switch to Stop (see
     // getComposerPrimaryAction).
-    if(typeof updateSendBtn==='function') updateSendBtn();
-    if(S.session&&S.session.session_id===activeSid){
+    if(_ownsSendPane()){
+      if(typeof updateSendBtn==='function') updateSendBtn();
+    }
+    if(_ownsSendPane()){
       S.session.active_stream_id = streamId;
     }
-    if(S.session&&S.session.session_id===activeSid&&typeof showLiveRunStatus==='function'){
+    if(_ownsSendPane()&&typeof showLiveRunStatus==='function'){
       const _startedAt=typeof startData?.pending_started_at==='number'
         ? startData.pending_started_at
         : (S.session.pending_started_at||Date.now()/1000);
       showLiveRunStatus(activeSid,{startedAt:_startedAt});
     }
-    if(typeof upsertActiveSessionForLocalTurn==='function'){
+    if(_ownsSendPane()&&typeof upsertActiveSessionForLocalTurn==='function'){
       // Third optimistic pass: stream_id is now known, so the row can reconcile
       // against real active-stream metadata before the background refresh lands.
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
     }
-    if(!INFLIGHT[activeSid]){
-      INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
-    }
-    const currentInflight=INFLIGHT[activeSid];
-    markInflight(activeSid, streamId);
+    const currentInflight=_stampInflightTurnState();
+    if(_ownsSendPane()) markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
+      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[],activeTurnToken:currentInflight.activeTurnToken||null,reattach:!!currentInflight.reattach});
     }
     // Refresh session list so background streaming indicators appear immediately for the
     // session that was just started and any others that may already be running.
-    if(typeof renderSessionList === 'function') {
+    if(_ownsSendPane()&&typeof renderSessionList === 'function') {
       void renderSessionList();
     }
   });
 
   // Open SSE stream and render tokens live
-  attachLiveStream(activeSid, streamId, uploadedNames);
+  if(_ownsSendPane()) attachLiveStream(activeSid, streamId, uploadedNames);
 
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
 }
@@ -2002,32 +2191,102 @@ async function startRegeneration(sessionId, regenerationRevision){
   }
   if(userIndex<0)return;
   const retained=Object.assign({},snapshot[userIndex],{_pending:true});
-  S.messages=snapshot.slice(0,userIndex+1);
-  S.messages[userIndex]=retained;
+  const regeneratedMessages=snapshot.slice(0,userIndex+1);
+  regeneratedMessages[userIndex]=retained;
+  S.messages=regeneratedMessages;
   renderMessages();setBusy(true);
   if(typeof ensureLiveWorklogShell==='function')ensureLiveWorklogShell();
   else if(typeof appendThinking==='function')appendThinking('',{pending:true});
   try{
+    const submittedTurnIdentity=_captureSessionActiveTurnIdentity(S.session);
     const response=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:sid,regenerate:true,regeneration_revision:regenerationRevision
     })});
-    if(!S.session||S.session.session_id!==sid)return;
     const streamId=response&&response.stream_id;
     if(!streamId)throw new Error('Regeneration did not start a stream.');
-    S.activeStreamId=streamId;
-    S.session.active_stream_id=streamId;
-    S.session.regeneration_revision=null;
-    if(typeof response.pending_started_at==='number')S.session.pending_started_at=response.pending_started_at;
-    if(response.title&&typeof applySessionTitleUpdate==='function')applySessionTitleUpdate(sid,response.title);
-    if(!INFLIGHT[sid])INFLIGHT[sid]={messages:S.messages.slice(),uploaded:[],toolCalls:[]};
-    markInflight(sid,streamId);
-    if(typeof saveInflightState==='function')saveInflightState(sid,{streamId,messages:S.messages.slice(),uploaded:[],toolCalls:[]});
-    if(typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{startedAt:S.session.pending_started_at||Date.now()/1000});
-    if(typeof updateSendBtn==='function')updateSendBtn();
-    if(typeof renderSessionList==='function')void renderSessionList();
-    attachLiveStream(sid,streamId,[]);
+    if(!_acceptedStartMayUpdateSession(sid,response,submittedTurnIdentity))return;
+    const ownsPane=typeof _isSessionCurrentPane==='function'
+      ?_isSessionCurrentPane(sid)
+      :!!(S.session&&S.session.session_id===sid);
+    const activeTurnToken=typeof _opaqueActiveTurnToken==='function'
+      ?_opaqueActiveTurnToken(response&&response.active_turn_token):null;
+    const loadedMessages=ownsPane&&Array.isArray(S.messages)?S.messages:null;
+    const markerOwners=loadedMessages
+      ?loadedMessages.filter(row=>row&&row._active_turn_user===true):[];
+    let owner=null;
+    if(markerOwners.length){
+      const authorityStartedAt=typeof response.pending_started_at==='number'
+        ?response.pending_started_at
+        :(S.session&&S.session.active_turn_token===activeTurnToken?S.session.pending_started_at:null);
+      const loadedToken=typeof _opaqueActiveTurnToken==='function'
+        ?_opaqueActiveTurnToken(S.session&&S.session.active_turn_token):null;
+      const markedOwner=activeTurnToken&&loadedToken&&loadedToken!==activeTurnToken
+        ?null
+        :(activeTurnToken&&typeof _pendingActiveTurnUserMessage==='function'
+          ?_pendingActiveTurnUserMessage(loadedMessages,{
+            active_turn_token:activeTurnToken,
+            pending_started_at:authorityStartedAt,
+          }):null);
+      if(markedOwner&&markerOwners.length===1&&markedOwner===markerOwners[0]
+        &&String(markedOwner.role||'')==='user'
+        &&typeof _sameTranscriptMessage==='function'
+        &&_sameTranscriptMessage(markedOwner,retained)){
+        owner=markedOwner;
+      }
+    }else if(loadedMessages&&loadedMessages.includes(retained)){
+      owner=retained;
+    }
+    if(!owner&&!markerOwners.length&&loadedMessages){
+      const stableKeys=['message_id','id','local_id'];
+      const stableKey=stableKeys.find(key=>retained[key]!==undefined&&retained[key]!==null);
+      if(stableKey){
+        const matches=loadedMessages.filter(row=>row&&row.role==='user'
+          &&row[stableKey]===retained[stableKey]
+          &&typeof _sameTranscriptMessage==='function'
+          &&_sameTranscriptMessage(row,retained));
+        if(matches.length===1)owner=matches[0];
+      }
+    }
+    const useLoadedMessages=!!(owner&&loadedMessages);
+    const inflightMessages=useLoadedMessages?loadedMessages.slice():regeneratedMessages.slice();
+    if(!useLoadedMessages)owner=retained;
+    if(activeTurnToken)owner._active_turn_token=activeTurnToken;
+    else delete owner._active_turn_token;
+    if(Array.isArray(retained.attachments)&&retained.attachments.length
+      &&(!Array.isArray(owner.attachments)||!owner.attachments.length)){
+      owner.attachments=[...retained.attachments];
+    }
+    if(ownsPane){
+      S.activeStreamId=streamId;
+      S.session.active_stream_id=streamId;
+      S.session.active_turn_token=activeTurnToken;
+      S.session.regeneration_revision=null;
+      if(typeof response.pending_started_at==='number')S.session.pending_started_at=response.pending_started_at;
+      if(response.title&&typeof applySessionTitleUpdate==='function')applySessionTitleUpdate(sid,response.title);
+    }
+    INFLIGHT[sid]={
+      messages:inflightMessages,
+      uploaded:[],
+      toolCalls:[],
+      activeTurnToken,
+      streamId,
+      reattach:!ownsPane,
+    };
+    if(ownsPane)markInflight(sid,streamId);
+    if(typeof saveInflightState==='function')saveInflightState(sid,{
+      streamId,messages:inflightMessages,uploaded:[],toolCalls:[],activeTurnToken,reattach:!ownsPane,
+    });
+    if(ownsPane&&typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{
+      startedAt:S.session.pending_started_at||Date.now()/1000,
+    });
+    if(ownsPane&&typeof updateSendBtn==='function')updateSendBtn();
+    if(ownsPane&&typeof renderSessionList==='function')void renderSessionList();
+    if(ownsPane)attachLiveStream(sid,streamId,[]);
   }catch(error){
-    if(S.session&&S.session.session_id===sid){
+    const ownsPane=typeof _isSessionCurrentPane==='function'
+      ?_isSessionCurrentPane(sid)
+      :!!(S.session&&S.session.session_id===sid);
+    if(ownsPane){
       S.messages=snapshot;delete INFLIGHT[sid];
       if(typeof clearInflightState==='function')clearInflightState(sid);
       removeThinking();renderMessages();setBusy(false);setComposerStatus('');
@@ -2127,6 +2386,7 @@ function closeLiveStream(sessionId, streamId, source){
         messages:INFLIGHT[sessionId].messages||[],
         uploaded:INFLIGHT[sessionId].uploaded||[],
         toolCalls:INFLIGHT[sessionId].toolCalls||[],
+        activeTurnToken:INFLIGHT[sessionId].activeTurnToken||null,
         lastAssistantText:INFLIGHT[sessionId].lastAssistantText||'',
         lastReasoningText:INFLIGHT[sessionId].lastReasoningText||'',
         lastRunJournalSeq:INFLIGHT[sessionId].lastRunJournalSeq||0,
@@ -2187,10 +2447,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _STREAM_NOTIFICATION_BACKGROUND[activeSid]={streamId,wasBackgrounded:_desktopBackgroundedForNotifications};
     }
   }
-  if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
+  const sessionTurnToken=typeof _opaqueActiveTurnToken==='function'
+    ?_opaqueActiveTurnToken(S.session&&S.session.active_turn_token):null;
+  if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[],activeTurnToken:sessionTurnToken};
   else {
     if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
     if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
+    if(!_opaqueActiveTurnToken(INFLIGHT[activeSid].activeTurnToken)){
+      INFLIGHT[activeSid].activeTurnToken=sessionTurnToken;
+    }
   }
   const _priorInflightStreamId=String(INFLIGHT[activeSid].streamId||'');
   if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){
@@ -2410,6 +2675,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       messages:inflight.messages||[],
       uploaded:inflight.uploaded||[...uploaded],
       toolCalls:inflight.toolCalls||[],
+      activeTurnToken:inflight.activeTurnToken||null,
       lastAssistantText:inflight.lastAssistantText||'',
       lastReasoningText:inflight.lastReasoningText||'',
       lastRunJournalSeq:inflight.lastRunJournalSeq||0,
@@ -2587,10 +2853,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       inflight.messages[assistantIdx].content=split.content;
       inflight.messages[assistantIdx].reasoning=split.reasoning||undefined;
       inflight.messages[assistantIdx]._ts=inflight.messages[assistantIdx]._ts||ts;
+      if(typeof _opaqueActiveTurnToken==='function'
+        &&_opaqueActiveTurnToken(inflight.activeTurnToken)){
+        inflight.messages[assistantIdx]._active_turn_token=inflight.activeTurnToken;
+      }
       _throttledPersist();
       return;
     }
-    inflight.messages.push({role:'assistant',content:split.content,reasoning:split.reasoning||undefined,_live:true,_ts:ts});
+    inflight.messages.push({
+      role:'assistant',
+      content:split.content,
+      reasoning:split.reasoning||undefined,
+      _live:true,
+      _ts:ts,
+      _active_turn_token:typeof _opaqueActiveTurnToken==='function'
+        ? _opaqueActiveTurnToken(inflight.activeTurnToken)||undefined
+        : undefined,
+    });
     _throttledPersist();
   }
   function recordActivityBoundary(){
@@ -5569,6 +5848,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       messages:[...S.messages],
       uploaded:[...uploaded],
       toolCalls:[],
+      activeTurnToken:_opaqueActiveTurnToken(S.session&&S.session.active_turn_token),
     });
     if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
     if(!Array.isArray(inflight.messages)) inflight.messages=[...(inflight.messages||[])];
@@ -8277,7 +8557,7 @@ const _SESSION_STREAM_HIDDEN_POLL_MAX_FALSE = 20; // ~2 min at the 6s cadence
 // signal, a poll that fires while another session is in the current pane
 // would attach nothing AND stop polling, leaving the turn invisible until
 // the next user interaction.
-function _attachServerInitiatedStream(sid, streamId, recovered) {
+function _attachServerInitiatedStream(sid, streamId, recovered, activeTurnToken=null) {
   let handedOff = false;
   try {
     streamId = String(streamId || '');
@@ -8290,14 +8570,69 @@ function _attachServerInitiatedStream(sid, streamId, recovered) {
     if (!isCurrent) return false;
     // Already rendering this exact stream — treat as success so the poll
     // stops cleanly (renderer owns the stream from here).
-    if (S.activeStreamId === streamId) return true;
+    const turnToken=typeof _opaqueActiveTurnToken==='function'
+      ?_opaqueActiveTurnToken(activeTurnToken):null;
+    const applyTurnToken=()=>{
+      if(!turnToken) return;
+      if(S.session&&S.session.session_id===sid) S.session.active_turn_token=turnToken;
+      if(typeof INFLIGHT==='undefined') return;
+      if(!INFLIGHT[sid]){
+        INFLIGHT[sid]={
+          messages:Array.isArray(S.messages)?[...S.messages]:[],
+          uploaded:(S.session&&S.session.pending_attachments)||[],
+          toolCalls:[],
+          activeTurnToken:null,
+        };
+      }
+      const inflight=INFLIGHT[sid];
+      inflight.activeTurnToken=turnToken;
+      for(const messages of [S.messages,inflight.messages]){
+        if(!Array.isArray(messages)) continue;
+        for(const row of messages){
+          if(row&&row.role==='assistant'&&row._live) row._active_turn_token=turnToken;
+        }
+      }
+      if(typeof saveInflightState==='function'){
+        saveInflightState(sid,{
+          streamId,
+          messages:inflight.messages||[],
+          uploaded:inflight.uploaded||[],
+          toolCalls:inflight.toolCalls||[],
+          activeTurnToken:inflight.activeTurnToken,
+          lastAssistantText:inflight.lastAssistantText||'',
+          lastReasoningText:inflight.lastReasoningText||'',
+          lastRunJournalSeq:inflight.lastRunJournalSeq||0,
+          lastRunJournalEventId:inflight.lastRunJournalEventId||'',
+          journalReplayFromStart:!!inflight.journalReplayFromStart,
+          anchorActivityScene:inflight.anchorActivityScene||null,
+          currentActivityBurstId:inflight.currentActivityBurstId||0,
+          currentLiveSegmentSeq:inflight.currentLiveSegmentSeq||0,
+          activityBurstAnchors:Array.isArray(inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[],
+          todos:Array.isArray(inflight.todos)?inflight.todos:S.todos,
+          todoStateMeta:inflight.todoStateMeta||S.todoStateMeta||null,
+        });
+      }
+    };
+    applyTurnToken();
     const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
-    if (existingLive && existingLive.streamId === streamId) return true;
+    if (S.activeStreamId === streamId || (existingLive && existingLive.streamId === streamId)) {
+      return true;
+    }
     S.busy = true;
     S.activeStreamId = streamId;
     if (S.session && S.session.session_id === sid) {
       S.session.active_stream_id = streamId;
       if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;
+    }
+    if (typeof INFLIGHT !== 'undefined') {
+      if (!INFLIGHT[sid]) {
+        INFLIGHT[sid]={
+          messages:Array.isArray(S.messages)?[...S.messages]:[],
+          uploaded:(S.session&&S.session.pending_attachments)||[],
+          toolCalls:[],
+          activeTurnToken:null,
+        };
+      }
     }
     if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();
     else if (typeof appendThinking === 'function') appendThinking();
@@ -8403,7 +8738,9 @@ function _startHiddenActiveStreamPoll(sid) {
               _sessionStreamHiddenPollFalseStreamId = streamKey;
               _sessionStreamHiddenPollFalseCount = 0;
             }
-            const attached = _attachServerInitiatedStream(sid, streamId, true);
+            const attached = _attachServerInitiatedStream(
+              sid, streamId, true, d.active_turn_token,
+            );
             if (attached) {
               _stopHiddenActiveStreamPoll();
             } else {
@@ -8616,42 +8953,14 @@ function startSessionStream(sid) {
         // expecting token 0 (which would render a truncated turn). A fresh
         // (non-recovered) frame still attaches from the first token.
         const recovered = !!d.recovered;
-        // Only drive the renderer when this session is the one on screen.
-        const isCurrent = (typeof _isSessionCurrentPane === 'function')
+        if (typeof _isSessionCurrentPane === 'function'
           ? _isSessionCurrentPane(sid)
-          : (S.session && S.session.session_id === sid);
-        if (!isCurrent) return;
-        // A turn is already rendering in this tab (user-initiated, or we
-        // already attached to this very stream). attachLiveStream is
-        // idempotent per (sid, streamId); bail if we're already on it.
-        if (S.activeStreamId === streamId) return;
-        const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
-        if (existingLive && existingLive.streamId === streamId) return;
-        // Mirror the loadSession reattach setup. For a fresh frame the turn
-        // renders from its first token; for a recovered (replay) frame
-        // attachLiveStream reconstructs the in-progress stream.
-        S.busy = true;
-        S.activeStreamId = streamId;
-        if (S.session && S.session.session_id === sid) {
-          S.session.active_stream_id = streamId;
-          if (typeof d.pending_started_at === 'number') S.session.pending_started_at = d.pending_started_at;
-          else if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;
+          : (S.session && S.session.session_id === sid)) {
+          if (S.session && typeof d.pending_started_at === 'number') {
+            S.session.pending_started_at=d.pending_started_at;
+          }
+          _attachServerInitiatedStream(sid,streamId,recovered,d.active_turn_token);
         }
-        if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();
-        else if (typeof appendThinking === 'function') appendThinking();
-        if (typeof updateSendBtn === 'function') updateSendBtn();
-        if (typeof setComposerStatus === 'function') setComposerStatus('');
-        if (typeof syncTopbar === 'function') syncTopbar();
-        if (typeof startApprovalPolling === 'function') startApprovalPolling(sid);
-        if (typeof startClarifyPolling === 'function') startClarifyPolling(sid);
-        if (typeof attachLiveStream === 'function') {
-          attachLiveStream(
-            sid, streamId,
-            (S.session && S.session.pending_attachments) || [],
-            recovered ? {reconnecting: true} : {},
-          );
-        }
-        if (typeof renderSessionList === 'function') void renderSessionList();
       } catch (_) {}
     });
     es.onerror = () => {

@@ -1997,6 +1997,22 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    const _newSessionOwnerSid=S.session&&S.session.session_id||null;
+    const _newSessionOwnerGeneration=typeof _loadSessionGeneration!=='undefined'
+      ?_loadSessionGeneration:null;
+    const _newSessionOwnsPane=()=>{
+      if(typeof _loadSessionGeneration!=='undefined'
+        &&_loadSessionGeneration!==_newSessionOwnerGeneration) return false;
+      if(_newSessionOwnerSid){
+        return typeof _isSessionCurrentPane==='function'
+          ?_isSessionCurrentPane(_newSessionOwnerSid)
+          :!!(S.session&&S.session.session_id===_newSessionOwnerSid
+            &&!(typeof _loadingSessionId!=='undefined'&&_loadingSessionId
+              &&_loadingSessionId!==_newSessionOwnerSid));
+      }
+      return !(S.session&&S.session.session_id)
+        &&!(typeof _loadingSessionId!=='undefined'&&_loadingSessionId);
+    };
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -2100,6 +2116,9 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    if(!_newSessionOwnsPane()) return null;
+    if(typeof _loadSessionGeneration!=='undefined') _loadSessionGeneration++;
+    if(typeof _loadingSessionId!=='undefined') _loadingSessionId=null;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -2183,6 +2202,7 @@ async function newSession(flash, options={}){
     // now that newSession() owns the sole refresh it must force the paint,
     // matching the project "+" path (#5002: "newSession doesn't render; callers must").
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session',{force:true})).catch(()=>{})}
+    return S.session;
   })();
   try{
     return await _newSessionInFlight;
@@ -2325,7 +2345,10 @@ async function loadSession(sid){
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
-  if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
+  if(currentSid!==sid){
+    if(typeof setComposerStatus==='function')setComposerStatus('');
+    if(typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
+  }
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
   // from a prior session or a stray touch event during loading would place them.
@@ -2374,6 +2397,7 @@ async function loadSession(sid){
           messages:Array.isArray(S.messages)?[...S.messages]:[],
           uploaded:[],
           toolCalls:Array.isArray(S.toolCalls)?[...S.toolCalls]:[],
+          activeTurnToken:_opaqueActiveTurnToken(S.session&&S.session.active_turn_token),
         };
       }
       snapshotLiveTurnHtmlForSession(currentSid);
@@ -2698,6 +2722,7 @@ async function loadSession(sid){
         currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
         currentLiveSegmentSeq:Number(stored.currentLiveSegmentSeq||0)||0,
         activityBurstAnchors:Array.isArray(stored.activityBurstAnchors)?stored.activityBurstAnchors:[],
+        activeTurnToken:_opaqueActiveTurnToken(stored.activeTurnToken),
       };
     }
   }
@@ -2720,6 +2745,10 @@ async function loadSession(sid){
     : null;
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
+  const selectedServerJournalSnapshot=!!(serverLiveSnapshot&&liveRecoveryInflight
+    &&liveRecoveryInflight.journalSnapshot===true
+    &&liveRecoveryInflight.streamId===serverLiveSnapshot.streamId
+    &&liveRecoveryInflight.messages===serverLiveSnapshot.messages);
   if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
   else if(hadLiveRecoveryInflight&&activeStreamId){
     delete INFLIGHT[sid];
@@ -2727,6 +2756,81 @@ async function loadSession(sid){
   }
 
   if(INFLIGHT[sid]){
+    const sessionTurnToken=_opaqueActiveTurnToken(
+      S.session&&(S.session.active_turn_token??S.session.activeTurnToken),
+    );
+    const inflight=INFLIGHT[sid];
+    const inflightToken=_opaqueActiveTurnToken(inflight.activeTurnToken);
+    const inflightStreamId=inflight.streamId;
+    const exactLoadedStream=!!(sessionTurnToken&&typeof activeStreamId==='string'
+      &&activeStreamId.trim().length&&activeStreamId===S.session.active_stream_id
+      &&inflightStreamId===activeStreamId
+      &&(!inflightToken||inflightToken===sessionTurnToken));
+    if(exactLoadedStream&&selectedServerJournalSnapshot){
+      const snapshotMessages=Array.isArray(inflight.messages)?inflight.messages:[];
+      const snapshotToolCalls=Array.isArray(inflight.toolCalls)?inflight.toolCalls:[];
+      const hasContradictorySnapshotIdentity=[...snapshotMessages,...snapshotToolCalls].some(row=>{
+        const rowToken=_opaqueActiveTurnToken(row&&row._active_turn_token);
+        return !!(rowToken&&rowToken!==sessionTurnToken);
+      });
+      if(!hasContradictorySnapshotIdentity){
+        inflight.activeTurnToken=sessionTurnToken;
+        snapshotMessages.forEach(row=>{
+          if(!row||row._journal_snapshot!==true||row._live!==true
+            ||(row.role!=='assistant'&&row.role!=='tool')) return;
+          if(!_opaqueActiveTurnToken(row._active_turn_token)) row._active_turn_token=sessionTurnToken;
+        });
+        snapshotToolCalls.forEach(row=>{
+          if(!row||row._journal_snapshot!==true||row._live!==true) return;
+          if(!_opaqueActiveTurnToken(row._active_turn_token)) row._active_turn_token=sessionTurnToken;
+        });
+      }
+    }
+    if(exactLoadedStream){
+      const pendingText=String(S.session.pending_user_message||'').trim();
+      const rows=Array.isArray(inflight.messages)?inflight.messages:[];
+      const pendingUsers=rows.filter(row=>row&&row.role==='user'&&row._pending===true
+        &&!(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row)));
+      const candidate=pendingUsers.length===1?pendingUsers[0]:null;
+      let lastUser=null;
+      for(let i=rows.length-1;i>=0;i--){
+        const row=rows[i];
+        if(row&&row.role==='user'
+          &&!(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row))){
+          lastUser=row;
+          break;
+        }
+      }
+      const candidateToken=_opaqueActiveTurnToken(candidate&&candidate._active_turn_token);
+      let suffixIsCurrent=true;
+      if(candidate){
+        for(let i=rows.indexOf(candidate)+1;i<rows.length;i++){
+          const row=rows[i];
+          if(!row) continue;
+          if(row.role==='user'
+            &&!(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row))){
+            suffixIsCurrent=false;
+            break;
+          }
+          const isActivity=!!(row._live||row.role==='assistant'||row.role==='tool'
+            ||(typeof _isCanonicalAssistantToolCallEnvelope==='function'
+              &&_isCanonicalAssistantToolCallEnvelope(row)));
+          const rowToken=_opaqueActiveTurnToken(row._active_turn_token);
+          if(isActivity&&rowToken&&rowToken!==sessionTurnToken){
+            suffixIsCurrent=false;
+            break;
+          }
+        }
+      }
+      if(candidate&&candidate===lastUser&&pendingText
+        &&(!candidateToken||candidateToken===sessionTurnToken)
+        &&suffixIsCurrent
+        &&typeof _sameTranscriptMessage==='function'
+        &&_sameTranscriptMessage(candidate,{role:'user',content:pendingText})){
+        candidate._active_turn_token=sessionTurnToken;
+        inflight.activeTurnToken=sessionTurnToken;
+      }
+    }
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
     const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
     S.toolCalls=[];
@@ -2746,11 +2850,12 @@ async function loadSession(sid){
       _rearmActiveSessionStream();
       return;
     }
-    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
+    const activeTurnToken=sessionTurnToken;
+    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages,activeTurnToken,S.session);
     if(liveTailPrepared){
-      S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+      S.messages=_dropCurrentTurnAssistantMessages(S.messages,activeTurnToken,S.session);
     }
-    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
+    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,activeTurnToken,S.session);
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
@@ -3937,26 +4042,93 @@ function _sameTranscriptMessage(a,b){
   return false;
 }
 
-function _currentTailUserMessage(messages){
+function _opaqueActiveTurnToken(value){
+  return typeof value==='string'&&value.trim().length?value:null;
+}
+
+function _currentTailUserMessage(messages,candidateStart,candidateTimestamp,candidate,activeTurnToken){
   const list=Array.isArray(messages)?messages:[];
+  let crossedActivity=false;
+  const candidateToken=_opaqueActiveTurnToken(candidate&&candidate._active_turn_token);
+  const authoritativeToken=_opaqueActiveTurnToken(activeTurnToken);
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg) continue;
     if(String(msg.role||'')==='user'){
       // Compaction rows are synthetic user-role markers, not submitted turns.
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+      const existingToken=_opaqueActiveTurnToken(msg._active_turn_token);
+      if(crossedActivity){
+        if(!authoritativeToken||candidateToken!==authoritativeToken
+          ||existingToken!==authoritativeToken) return null;
+        const matchingUsers=list.filter(row=>row&&String(row.role||'')==='user'
+          &&_opaqueActiveTurnToken(row._active_turn_token)===authoritativeToken);
+        if(matchingUsers.length!==1) return null;
+      }
       return msg;
     }
-    if(msg._live||String(msg.role||'')==='tool') continue;
+    if(msg._live){
+      if(!authoritativeToken||candidateToken!==authoritativeToken
+        ||_opaqueActiveTurnToken(msg._active_turn_token)!==authoritativeToken) return null;
+      crossedActivity=true;
+      continue;
+    }
+    if((typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
+      ||String(msg.role||'')==='tool'){
+      if(Object.prototype.hasOwnProperty.call(msg,'_active_turn_token')){
+        if(!authoritativeToken||msg._active_turn_token!==authoritativeToken) return null;
+      }else if(authoritativeToken){
+        return null;
+      }else if(typeof _isTailActivityOwnedByCandidateTurn!=='function'
+        ||!_isTailActivityOwnedByCandidateTurn(msg,candidateStart,candidateTimestamp)) return null;
+      crossedActivity=true;
+      continue;
+    }
     return null;
   }
   return null;
 }
 
-function _hasCurrentTailUserDuplicate(messages,candidate){
+function _hasCurrentTailUserDuplicate(messages,candidate,activeTurnToken,session){
   if(!candidate||String(candidate.role||'')!=='user') return false;
-  const existing=_currentTailUserMessage(messages);
-  return !!(existing&&_sameTranscriptMessage(existing,candidate));
+  const token=_opaqueActiveTurnToken(activeTurnToken);
+  if(!token||_opaqueActiveTurnToken(candidate._active_turn_token)!==token) return false;
+  const list=Array.isArray(messages)?messages:[];
+  const markerOwners=list.filter(row=>row&&row._active_turn_user===true);
+  let existing=null;
+  if(markerOwners.length){
+    const sessionToken=_opaqueActiveTurnToken(
+      session&&(session.active_turn_token??session.activeTurnToken),
+    );
+    if(markerOwners.length!==1||sessionToken!==token
+      ||typeof _pendingActiveTurnUserMessage!=='function') return false;
+    const markedOwner=_pendingActiveTurnUserMessage(list,session);
+    if(!markedOwner||markedOwner!==markerOwners[0]||String(markedOwner.role||'')!=='user') return false;
+    existing=markedOwner;
+  }else{
+    existing=_currentTailUserMessage(
+      list,
+      candidate._ts,
+      candidate.timestamp,
+      candidate,
+      activeTurnToken,
+    );
+  }
+  if(!existing) return false;
+  const matchingUsers=list.filter(row=>
+    row&&String(row.role||'')==='user'
+    &&_opaqueActiveTurnToken(row._active_turn_token)===token
+  );
+  if(existing._active_turn_user===true){
+    if(matchingUsers.length>1||(matchingUsers.length===1&&matchingUsers[0]!==existing)) return false;
+  }else if(matchingUsers.length!==1||matchingUsers[0]!==existing){
+    return false;
+  }
+  if(Array.isArray(candidate.attachments)&&candidate.attachments.length
+    &&(!Array.isArray(existing.attachments)||!existing.attachments.length)){
+    existing.attachments=[...candidate.attachments];
+  }
+  return true;
 }
 
 // Keep pending-user recovery ordering identical across load, reconnect, and
@@ -3966,11 +4138,43 @@ function _mergePendingSessionMessage(session,messages){
   if(!Array.isArray(messages)) return false;
   const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
   const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
-  const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
+  const suffixHasToken=liveAssistantIdx>=0&&messages.slice(liveAssistantIdx).some(row=>
+    _opaqueActiveTurnToken(row&&row._active_turn_token)
+  );
+  const activeTurnToken=_opaqueActiveTurnToken(
+    session&&(session.active_turn_token??session.activeTurnToken),
+  );
+  const pendingText=String(session&&session.pending_user_message||'').trim();
+  const matchingUsers=activeTurnToken?messages.filter(row=>row&&String(row.role||'')==='user'
+      &&_opaqueActiveTurnToken(row._active_turn_token)===activeTurnToken):[];
+  if(activeTurnToken&&pendingText){
+    const pendingOwner=typeof _pendingActiveTurnUserMessage==='function'
+      ?_pendingActiveTurnUserMessage(messages,session):null;
+    const existing=matchingUsers.length===1
+      ?matchingUsers[0]
+      :(pendingOwner&&pendingOwner._active_turn_user===true?pendingOwner:null);
+    if(existing&&pendingOwner===existing){
+      const pendingAttachments=Array.isArray(session.pending_attachments)
+        ?session.pending_attachments.filter(Boolean):[];
+      if(pendingAttachments.length&&(!Array.isArray(existing.attachments)||!existing.attachments.length)){
+        existing.attachments=[...pendingAttachments];
+      }
+      if(liveAssistantIdx>=0){
+        const existingIdx=messages.indexOf(existing);
+        if(existingIdx>liveAssistantIdx){
+          messages.splice(existingIdx,1);
+          messages.splice(liveAssistantIdx,0,existing);
+        }
+      }
+      return false;
+    }
+  }
+  const pendingSourceMessages=activeTurnToken||suffixHasToken?messages:currentTurnMessages;
+  const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,pendingSourceMessages):null;
   if(!pendingMsg) return false;
-  if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  if(_hasCurrentTailUserDuplicate(pendingSourceMessages,pendingMsg,activeTurnToken,session)) return false;
   if(liveAssistantIdx>=0){
-    const misplacedIdx=messages.findIndex((m,idx)=>
+    const misplacedIdx=activeTurnToken?-1:messages.findIndex((m,idx)=>
       idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
     );
     if(misplacedIdx>=0){
@@ -4005,13 +4209,31 @@ function _compactTranscriptText(text){
   return String(text||'').replace(/\s+/g,' ').trim();
 }
 
-function _dropCurrentTurnAssistantMessages(messages){
+function _dropCurrentTurnAssistantMessages(messages,activeTurnToken,session){
   const list=Array.isArray(messages)?messages:[];
+  const token=_opaqueActiveTurnToken(activeTurnToken);
+  if(!token) return list;
+  const markerOwners=list.filter(row=>row&&row._active_turn_user===true);
+  let markedOwner=null;
+  if(markerOwners.length){
+    const sessionToken=_opaqueActiveTurnToken(
+      session&&(session.active_turn_token??session.activeTurnToken),
+    );
+    if(markerOwners.length!==1||sessionToken!==token
+      ||typeof _pendingActiveTurnUserMessage!=='function') return list;
+    markedOwner=_pendingActiveTurnUserMessage(list,session);
+    if(!markedOwner||markedOwner!==markerOwners[0]) return list;
+  }
   let start=-1;
   for(let i=list.length-1;i>=0;i--){
-    if(list[i]&&list[i].role==='user'){start=i;break;}
+    if(list[i]&&list[i].role==='user'
+      &&!(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(list[i]))){
+      start=i;
+      break;
+    }
   }
-  if(start<0) return list;
+  if(start<0||(_opaqueActiveTurnToken(list[start]._active_turn_token)!==token
+    &&!(markedOwner===list[start]&&list[start]._active_turn_user===true))) return list;
   return list.filter((msg,idx)=>idx<=start||!(msg&&msg.role==='assistant'));
 }
 
@@ -4032,6 +4254,11 @@ function _ensureInflightLiveAssistantMessage(inflight){
       live.content=text;
     }
     if(reasoning&&!live.reasoning) live.reasoning=reasoning;
+    const liveToken=_opaqueActiveTurnToken(live._active_turn_token);
+    const inflightToken=_opaqueActiveTurnToken(inflight.activeTurnToken);
+    if(inflightToken&&(!liveToken||liveToken===inflightToken)){
+      live._active_turn_token=inflightToken;
+    }
     return true;
   }
   inflight.messages.push({
@@ -4040,6 +4267,7 @@ function _ensureInflightLiveAssistantMessage(inflight){
     reasoning:reasoning||undefined,
     _live:true,
     _ts:Date.now()/1000,
+    _active_turn_token:_opaqueActiveTurnToken(inflight.activeTurnToken)||undefined,
   });
   return true;
 }
@@ -4237,9 +4465,36 @@ function _projectInflightMessagesForActivityBursts(inflight){
   return [...messages.slice(0,replaceStartIdx),...projected,...messages.slice(liveIdx+1)];
 }
 
-function _prepareRunningLiveTail(baseMessages,inflightMessages){
+function _prepareRunningLiveTail(baseMessages,inflightMessages,activeTurnToken,session){
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
   const liveMessages=inflight.filter(m=>m&&m.role==='assistant'&&m._live);
+  const token=_opaqueActiveTurnToken(activeTurnToken);
+  if(!token) return false;
+  if(liveMessages.some(msg=>_opaqueActiveTurnToken(msg._active_turn_token)!==token)) return false;
+  const base=Array.isArray(baseMessages)?baseMessages:[];
+  let currentUser=null;
+  for(let i=base.length-1;i>=0;i--){
+    const msg=base[i];
+    if(msg&&msg.role==='user'
+      &&!(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg))){
+      currentUser=msg;
+      break;
+    }
+  }
+  if(!currentUser) return false;
+  let currentUserOwned=_opaqueActiveTurnToken(currentUser._active_turn_token)===token;
+  const markerOwners=base.filter(msg=>msg&&msg._active_turn_user===true);
+  if(markerOwners.length){
+    const sessionToken=_opaqueActiveTurnToken(
+      session&&(session.active_turn_token??session.activeTurnToken),
+    );
+    if(markerOwners.length!==1||sessionToken!==token
+      ||typeof _pendingActiveTurnUserMessage!=='function') return false;
+    const markedOwner=_pendingActiveTurnUserMessage(base,session);
+    if(!markedOwner||markedOwner!==markerOwners[0]||markedOwner!==currentUser) return false;
+    currentUserOwned=true;
+  }
+  if(!currentUserOwned) return false;
   if(liveMessages.length>1) return liveMessages.some(m=>!!_messageComparableText(m));
   const live=liveMessages[0]||null;
   if(!live) return false;
@@ -4262,9 +4517,10 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
   return !!_messageComparableText(live);
 }
 
-function _mergeInflightTailMessages(baseMessages, inflightMessages){
+function _mergeInflightTailMessages(baseMessages, inflightMessages,activeTurnToken,session){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
+  const token=_opaqueActiveTurnToken(activeTurnToken);
   let firstLiveIdx=-1;
   for(let i=0;i<inflight.length;i++){
     if(inflight[i]&&inflight[i]._live){firstLiveIdx=i;break;}
@@ -4277,8 +4533,11 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
   for(const msg of tail){
     let candidate=msg;
     if(!candidate) continue;
+    const candidateToken=_opaqueActiveTurnToken(candidate._active_turn_token);
+    if(String(candidate.role||'')!=='user'
+      &&((token&&candidateToken!==token)||(!token&&candidateToken))) continue;
     const duplicate=String(candidate.role||'')==='user'
-      ? _hasCurrentTailUserDuplicate(merged,candidate)
+      ? _hasCurrentTailUserDuplicate(merged,candidate,activeTurnToken,session)
       : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
     if(!duplicate) merged.push(candidate);
   }

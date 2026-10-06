@@ -31,6 +31,21 @@ def _function_body(src: str, name: str) -> str:
     return src[brace + 1 : i - 1]
 
 
+def _brace_bounded_block(src: str, start: int) -> str:
+    assert start >= 0, "block start not found"
+    brace = src.find("{", start)
+    assert brace != -1, "block opening brace not found"
+    depth = 0
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError("block did not close")
+
+
 def _function_decl(src: str, name: str) -> str:
     marker = f"function {name}("
     start = src.find(marker)
@@ -280,7 +295,7 @@ def test_load_session_reattaches_when_inflight_is_in_memory_and_marked_for_reatt
     # the wrong one. rfind = the substantive restore branch.
     inflight_idx = body.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = body[inflight_idx : inflight_idx + 4200]
+    inflight_block = _brace_bounded_block(body, inflight_idx)
     assert "INFLIGHT[sid].reattach" in inflight_block, (
         "loadSession()'s INFLIGHT branch must gate the SSE reattach on the "
         "reattach flag so closeLiveStream()'s marking flows through"
@@ -347,37 +362,37 @@ const assert = require('assert');
 {helper_src}
 
 let base = [
-  {{role:'user', content:'go'}},
+  {{role:'user', content:'go', _active_turn_token:'turn:1'}},
   {{role:'assistant', content:'First progress.'}},
   {{role:'tool', content:'{{}}'}},
   {{role:'assistant', content:'Second progress.'}},
 ];
 let inflight = [
-  {{role:'user', content:'go'}},
-  {{role:'assistant', _live:true, content:'First progress.\\n\\nSecond progress.\\n\\nSecond progress.'}},
+  {{role:'user', content:'go', _active_turn_token:'turn:1'}},
+  {{role:'assistant', _live:true, _active_turn_token:'turn:1', content:'First progress.\\n\\nSecond progress.\\n\\nSecond progress.'}},
 ];
-assert.strictEqual(_prepareRunningLiveTail(base, inflight), true);
+assert.strictEqual(_prepareRunningLiveTail(base, inflight, 'turn:1'), true);
 assert.strictEqual(inflight[1].content, 'First progress.\\n\\nSecond progress.');
-base = _dropCurrentTurnAssistantMessages(base);
-let merged = _mergeInflightTailMessages(base, inflight);
+base = _dropCurrentTurnAssistantMessages(base, 'turn:1');
+let merged = _mergeInflightTailMessages(base, inflight, 'turn:1');
 assert.strictEqual(merged.filter(m => m.role === 'assistant').length, 1);
 assert.strictEqual(merged[merged.length - 1]._live, true);
 assert.strictEqual(merged[merged.length - 1].content, 'First progress.\\n\\nSecond progress.');
 
 base = [
-  {{role:'user', content:'go'}},
+  {{role:'user', content:'go', _active_turn_token:'turn:1'}},
   {{role:'assistant', content:'First progress.'}},
   {{role:'tool', content:'{{}}'}},
   {{role:'assistant', content:'Second progress.'}},
 ];
 inflight = [
-  {{role:'user', content:'go'}},
-  {{role:'assistant', _live:true, content:'First progress.'}},
+  {{role:'user', content:'go', _active_turn_token:'turn:1'}},
+  {{role:'assistant', _live:true, _active_turn_token:'turn:1', content:'First progress.'}},
 ];
-assert.strictEqual(_prepareRunningLiveTail(base, inflight), true);
+assert.strictEqual(_prepareRunningLiveTail(base, inflight, 'turn:1'), true);
 assert.strictEqual(inflight[1].content, 'First progress.\\n\\nSecond progress.');
-base = _dropCurrentTurnAssistantMessages(base);
-merged = _mergeInflightTailMessages(base, inflight);
+base = _dropCurrentTurnAssistantMessages(base, 'turn:1');
+merged = _mergeInflightTailMessages(base, inflight, 'turn:1');
 assert.strictEqual(merged.filter(m => m.role === 'assistant').length, 1);
 assert.strictEqual(merged[merged.length - 1]._live, true);
 assert.strictEqual(merged[merged.length - 1].content, 'First progress.\\n\\nSecond progress.');
@@ -403,19 +418,20 @@ def test_running_reattach_rebuilds_live_assistant_from_last_text_before_activity
 const assert = require('assert');
 {helper_src}
 
-let base = [{{role:'user', content:'go'}}];
+let base = [{{role:'user', content:'go', _active_turn_token:'turn:1'}}];
 let inflightState = {{
   lastAssistantText:'Recovered progress text.',
   lastReasoningText:'',
-  messages:[{{role:'user', content:'go'}}],
+  activeTurnToken:'turn:1',
+  messages:[{{role:'user', content:'go', _active_turn_token:'turn:1'}}],
 }};
 assert.strictEqual(_ensureInflightLiveAssistantMessage(inflightState), true);
 assert.strictEqual(inflightState.messages.length, 2);
 assert.strictEqual(inflightState.messages[1]._live, true);
 assert.strictEqual(inflightState.messages[1].content, 'Recovered progress text.');
-assert.strictEqual(_prepareRunningLiveTail(base, inflightState.messages), true);
-base = _dropCurrentTurnAssistantMessages(base);
-const merged = _mergeInflightTailMessages(base, inflightState.messages);
+assert.strictEqual(_prepareRunningLiveTail(base, inflightState.messages, 'turn:1'), true);
+base = _dropCurrentTurnAssistantMessages(base, 'turn:1');
+const merged = _mergeInflightTailMessages(base, inflightState.messages, 'turn:1');
 assert.strictEqual(merged.filter(m => m.role === 'assistant').length, 1);
 assert.strictEqual(merged[merged.length - 1]._live, true);
 assert.strictEqual(merged[merged.length - 1].content, 'Recovered progress text.');
@@ -643,6 +659,7 @@ def test_upsert_live_tool_call_preserves_start_seq_for_complete():
         _function_decl(MESSAGES_JS, "_currentLiveToolAnchor"),
         _function_decl(MESSAGES_JS, "_findPendingLiveToolCallIndex"),
         _function_decl(MESSAGES_JS, "upsertLiveToolCall"),
+        _function_decl(SESSIONS_JS, "_opaqueActiveTurnToken"),
     ])
     script = (
         "const assert = require('assert');\n"
@@ -700,6 +717,7 @@ def test_upsert_live_tool_call_complete_matches_by_name_burst_without_tid():
         _function_decl(MESSAGES_JS, "_currentLiveToolAnchor"),
         _function_decl(MESSAGES_JS, "_findPendingLiveToolCallIndex"),
         _function_decl(MESSAGES_JS, "upsertLiveToolCall"),
+        _function_decl(SESSIONS_JS, "_opaqueActiveTurnToken"),
     ])
     script = (
         "const assert = require('assert');\n"
@@ -751,6 +769,7 @@ def test_upsert_flags_orphan_complete_but_not_normal_start_complete():
         _function_decl(MESSAGES_JS, "_currentLiveToolAnchor"),
         _function_decl(MESSAGES_JS, "_findPendingLiveToolCallIndex"),
         _function_decl(MESSAGES_JS, "upsertLiveToolCall"),
+        _function_decl(SESSIONS_JS, "_opaqueActiveTurnToken"),
     ])
     script = (
         "const assert = require('assert');\n"
@@ -856,9 +875,9 @@ def test_load_session_rebuilds_live_tail_before_snapshot_fallback():
     body = _function_body(SESSIONS_JS, "loadSession")
     ensure_pos = body.find("_ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
     inflight_pos = body.find("const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
-    prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);")
-    drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages);")
-    merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);")
+    prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages,activeTurnToken,S.session);")
+    drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages,activeTurnToken,S.session);")
+    merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,activeTurnToken,S.session);")
     restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
     assert ensure_pos != -1 and inflight_pos != -1
     assert prepare_pos != -1
@@ -978,7 +997,7 @@ def test_merge_inflight_tail_preserves_all_segmented_live_progress():
     groups whose burst ids point to those anchors pile up at the bottom.
     """
     assert NODE, "node not on PATH"
-    helper_start = SESSIONS_JS.index("function _currentTailUserMessage")
+    helper_start = SESSIONS_JS.index("function _opaqueActiveTurnToken")
     fn_start = SESSIONS_JS.index("function _mergeInflightTailMessages")
     fn_end = SESSIONS_JS.index("// Load older messages", fn_start)
     tail_user_helpers = SESSIONS_JS[helper_start:fn_start]
@@ -998,7 +1017,7 @@ const inflight = [
   {{role:'assistant', _live:true, content:'second progress', _activityBurstId:2}},
   {{role:'assistant', _live:true, content:'third progress', _activityBurstId:3}},
 ];
-const merged = _mergeInflightTailMessages(base, inflight);
+const merged = _mergeInflightTailMessages(base, inflight, null);
 assert.deepStrictEqual(
   merged.filter(m => m.role === 'assistant').map(m => m.content),
   ['first progress', 'second progress', 'third progress']
@@ -1438,6 +1457,147 @@ assert.strictEqual(_selectLiveRecoveryInflight(null, server, 'stream-1'), server
     )
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_load_session_binds_all_segments_from_exact_server_snapshot():
+    """A server snapshot owns every live segment for its exact active stream.
+
+    The GET projection carries a session token but intentionally omits private
+    row tokens. Loading a snapshot with multiple assistant segments must bind
+    those server-proven rows before the shared tail merge applies its strict
+    per-row token filter. Same-text history and its attachments remain separate.
+    """
+    assert NODE, "node not on PATH"
+    from api.helpers import public_session_projection
+    from api.routes import _runtime_journal_snapshot_for_session_payload
+
+    snapshot = _runtime_journal_snapshot_for_session_payload({
+        "stream_id": "stream-1",
+        "last_seq": 5,
+        "last_event_id": "stream-1:5",
+        "messages": [
+            {"role": "assistant", "content": "tool preface", "_ts": 101, "_live": True},
+            {"role": "assistant", "content": "partial prose", "_ts": 102, "_live": True},
+        ],
+    })
+    session_payload = public_session_projection({
+        "session_id": "sid",
+        "active_stream_id": "stream-1",
+        "active_turn_token": "opaque-active-token",
+        "pending_started_at": 100,
+        "pending_user_message": "same prompt",
+        "pending_attachments": ["current.txt"],
+        "messages": [
+            {"role": "user", "content": "same prompt", "_ts": 10, "attachments": ["older.txt"]},
+            {"role": "assistant", "content": "older reply", "_ts": 11},
+        ],
+        "runtime_journal_snapshot": snapshot,
+    })
+    assert session_payload["runtime_journal_snapshot"]["messages"]
+    assert all("_active_turn_token" not in row for row in session_payload["runtime_journal_snapshot"]["messages"])
+
+    load_start = SESSIONS_JS.index("async function loadSession(sid)")
+    phase_start = SESSIONS_JS.index("  const serverLiveSnapshot=activeStreamId", load_start)
+    phase_end = SESSIONS_JS.index(
+        "    // Refresh todos from cold-load or persisted INFLIGHT before painting.", phase_start
+    )
+    load_phase = SESSIONS_JS[phase_start:phase_end] + "\n  }"
+    helper_names = (
+        "_messageComparableText", "_stripAttachedFilesMarker", "_stripForcedSkillEnvelope",
+        "_normalizeUserTranscriptText", "_sameTranscriptMessage", "_opaqueActiveTurnToken",
+        "_currentTailUserMessage", "_hasCurrentTailUserDuplicate", "_mergePendingSessionMessage",
+        "_currentTurnAssistantText", "_compactTranscriptText", "_dropCurrentTurnAssistantMessages",
+        "_ensureInflightLiveAssistantMessage", "_projectInflightMessagesForActivityBursts",
+        "_prepareRunningLiveTail", "_mergeInflightTailMessages", "_inflightHasVisibleLiveState",
+        "_inflightCanSeedJournalReplay", "_normalizeInflightReplayCursorForReattach",
+        "_serverLiveSnapshotToolId", "_serverLiveSnapshotInflight", "_selectLiveRecoveryInflight",
+    )
+    helpers = "\n".join(_function_decl(SESSIONS_JS, name) for name in helper_names)
+    pending_names = (
+        "_timestampSeconds", "_firstValidTimestampSeconds", "_isTailActivityOwnedByCandidateTurn",
+        "_isCanonicalAssistantToolCallEnvelope", "_pendingCurrentTailUserMessage",
+        "_messageTimestampSeconds", "_activeTurnTokenMatches", "_pendingActiveTurnUserMessage",
+        "msgContent", "_isContextCompactionText", "_isContextCompactionMessage", "getPendingSessionMessage",
+    )
+    pending_helpers = "\n".join(_function_decl(UI_JS, name) for name in pending_names)
+    epsilon_start = UI_JS.index("const _PENDING_ACTIVE_TURN_TS_EPSILON=")
+    epsilon_end = UI_JS.index("\n", epsilon_start)
+    script = r"""
+const assert=require('assert');
+__EPSILON__
+__HELPERS__
+__PENDING_HELPERS__
+const sessionPayload=__SESSION__;
+function _isCurrentLoad(){return true;}
+function clearInflightState(){}
+function clearLiveToolCards(){}
+function _hydrateTodosFromSession(){}
+async function loadFixture(session, localRecovery=null){
+  const sid='sid';
+  const S={session,messages:[],toolCalls:[],busy:false,activeStreamId:null};
+  const INFLIGHT=localRecovery?{[sid]:localRecovery}:{};
+  const activeStreamId=S.session.active_stream_id||null;
+  const _keepStaleUntilLoaded=false,_loadGeneration=1;
+  let renderedMessages=null;
+  function _ensureMessagesLoaded(){
+    S.messages=JSON.parse(JSON.stringify(S.session.messages||[]));
+    return Promise.resolve();
+  }
+  function renderMessages(){renderedMessages=S.messages.slice();}
+  __LOAD_PHASE__
+  renderMessages();
+  if(INFLIGHT[sid]) _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
+  return {messages:S.messages,inflight:INFLIGHT[sid]||null,renderedMessages};
+}
+(async()=>{
+  const loaded=await loadFixture(sessionPayload);
+  const users=loaded.messages.filter(row=>row&&row.role==='user'&&row.content==='same prompt');
+  assert.strictEqual(users.length,2,JSON.stringify(loaded.messages));
+  assert.deepStrictEqual(users[0].attachments,['older.txt']);
+  assert.deepStrictEqual(users[1].attachments,['current.txt']);
+  assert.strictEqual(users[1]._pending,true);
+  assert.deepStrictEqual(loaded.messages.filter(row=>row&&row.role==='assistant').map(row=>row.content),
+    ['older reply','tool preface','partial prose']);
+  assert.strictEqual(loaded.messages[2].role,'user');
+  assert.strictEqual(loaded.messages[3]._live,true);
+  assert.strictEqual(loaded.messages[4]._live,true);
+  assert.deepStrictEqual(loaded.renderedMessages,loaded.messages);
+  assert.strictEqual(loaded.inflight.activeTurnToken,'opaque-active-token');
+  assert.deepStrictEqual(loaded.inflight.messages.filter(row=>row&&row._journal_snapshot)
+    .map(row=>row._active_turn_token),['opaque-active-token','opaque-active-token']);
+  assert.strictEqual(loaded.inflight.lastRunJournalSeq,5);
+
+  const mismatched=JSON.parse(JSON.stringify(sessionPayload));
+  mismatched.runtime_journal_snapshot.stream_id='other-stream';
+  const mismatchLoad=await loadFixture(mismatched);
+  assert.strictEqual(mismatchLoad.inflight.streamId,'other-stream');
+  assert.strictEqual(mismatchLoad.inflight.activeTurnToken,undefined);
+  assert.deepStrictEqual(mismatchLoad.messages.filter(row=>row&&row.role==='assistant').map(row=>row.content),
+    ['older reply'],'a snapshot for another stream must not contribute assistant rows');
+
+  const contradictory={
+    streamId:'stream-1',journalSnapshot:true,lastRunJournalSeq:6,
+    lastAssistantText:'cached snapshot',activeTurnToken:null,
+    messages:[
+      {role:'assistant',content:'foreign identity',_live:true,_journal_snapshot:true,
+       _active_turn_token:'foreign-token'},
+      {role:'assistant',content:'untagged segment',_live:true,_journal_snapshot:true},
+    ],toolCalls:[],uploaded:[],reattach:true,
+  };
+  const contradictionLoad=await loadFixture(sessionPayload,contradictory);
+  assert.strictEqual(contradictionLoad.inflight.activeTurnToken,null);
+  assert.strictEqual(contradictionLoad.inflight.messages[1]._active_turn_token,undefined);
+  assert.deepStrictEqual(contradictionLoad.messages.filter(row=>row&&row.role==='assistant').map(row=>row.content),
+    ['older reply'],'a contradictory local snapshot must not contribute assistant rows');
+})().catch(error=>{console.error(error.stack||error);process.exitCode=1;});
+""".replace("__EPSILON__", UI_JS[epsilon_start:epsilon_end])
+    script = (script
+        .replace("__HELPERS__", helpers)
+        .replace("__PENDING_HELPERS__", pending_helpers)
+        .replace("__SESSION__", json.dumps(session_payload))
+        .replace("__LOAD_PHASE__", load_phase))
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_run_journal_recovery_persists_stream_scoped_event_cursor():

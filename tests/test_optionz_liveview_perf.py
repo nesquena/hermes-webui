@@ -51,7 +51,13 @@ def test_server_turn_streams_to_session_channel(monkeypatch):
     # Patch the heavy turn-start core so the test stays unit-fast: pretend a
     # turn started and return the same dict shape the real function returns.
     def _fake_start_chat_stream_for_session(s, **kwargs):
-        return {"stream_id": fake_stream_id, "session_id": s.session_id, "_status": 200}
+        return {
+            "stream_id": fake_stream_id,
+            "session_id": s.session_id,
+            "pending_started_at": 12.5,
+            "active_turn_token": "opaque-server-token",
+            "_status": 200,
+        }
 
     class _FakeSession:
         session_id = sid
@@ -85,6 +91,8 @@ def test_server_turn_streams_to_session_channel(monkeypatch):
         )
         assert data["stream_id"] == fake_stream_id
         assert data["session_id"] == sid
+        assert data["pending_started_at"] == 12.5
+        assert data["active_turn_token"] == "opaque-server-token"
     finally:
         ch.unsubscribe(q)
         with bp.SESSION_CHANNELS_LOCK:
@@ -102,7 +110,13 @@ def test_server_turn_no_session_channel_is_noop(monkeypatch):
     fake_stream_id = "stream-optz-notab-1"
 
     def _fake_start_chat_stream_for_session(s, **kwargs):
-        return {"stream_id": fake_stream_id, "session_id": s.session_id, "_status": 200}
+        return {
+            "stream_id": fake_stream_id,
+            "session_id": s.session_id,
+            "pending_started_at": 12.5,
+            "active_turn_token": "opaque-server-token",
+            "_status": 200,
+        }
 
     class _FakeSession:
         session_id = sid
@@ -334,6 +348,7 @@ def test_session_sse_on_subscribe_recovers_lost_server_turn_started():
     server-initiated wakeup turn live (needs a hard refresh).
     """
     from api import background_process as bp, config as cfg
+    from api.process_event_utils import build_active_turn_token
 
     sid = "sess-recover-onsub"
     stream_id = "stream-recover-onsub-1"
@@ -352,6 +367,8 @@ def test_session_sse_on_subscribe_recovers_lost_server_turn_started():
         recovery_frame = {
             "session_id": sid,
             "stream_id": recover_stream_id,
+            "pending_started_at": 12.5,
+            "active_turn_token": build_active_turn_token(stream_id, 12.5),
             "source": "subscribe_recovery",
             "recovered": True,
         }
@@ -361,6 +378,9 @@ def test_session_sse_on_subscribe_recovers_lost_server_turn_started():
         assert recovery_frame["stream_id"] == stream_id
         assert recovery_frame["recovered"] is True
         assert recovery_frame["session_id"] == sid
+        assert recovery_frame["active_turn_token"] == build_active_turn_token(
+            stream_id, 12.5
+        )
 
         # And when the session is idle (no live run) the recovery is a no-op
         # — no spurious attach frame for a session with nothing running.
@@ -385,6 +405,7 @@ def test_session_sse_handler_wires_on_subscribe_recovery():
     handler_src = src[handler_ix:handler_ix + 9000]
     assert "active_stream_id_for_session" in handler_src
     assert '"recovered": True' in handler_src
+    assert '"active_turn_token": build_active_turn_token(' in handler_src
     assert "server_turn_started" in handler_src
     # Recovery CALL must come AFTER the channel subscription so a frame emitted
     # between subscribe and recovery is still caught by the queue (no lost-frame
@@ -408,7 +429,7 @@ def test_frontend_recovered_frame_uses_reconnecting_attach():
     assert "d.recovered" in h_src
     assert "reconnecting" in h_src
     # Still reuses the single renderer — no second hand-rolled stream.
-    assert "attachLiveStream" in h_src
+    assert "_attachServerInitiatedStream" in h_src
 
 
 # ---------------------------------------------------------------------------
@@ -774,4 +795,3 @@ def test_loadsession_idle_cleanup_does_not_clobber_concurrent_live_stream():
     assert reread_ix != -1 and branch_ix != -1 and reread_ix < branch_ix, (
         "race-guard re-read must precede the attach/idle branch"
     )
-

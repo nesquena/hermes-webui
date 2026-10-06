@@ -7071,6 +7071,27 @@ function _firstValidTimestampSeconds(...values){
   }
   return null;
 }
+function _isTailActivityOwnedByCandidateTurn(message,...candidateStarts){
+  const candidateStart=_firstValidTimestampSeconds(...candidateStarts);
+  const activityTimestamp=_firstValidTimestampSeconds(message&&message._ts,message&&message.timestamp);
+  return candidateStart!==null&&activityTimestamp!==null&&activityTimestamp>=candidateStart;
+}
+function _isCanonicalAssistantToolCallEnvelope(msg){
+  if(!msg||String(msg.role||'')!=='assistant') return false;
+  const calls=msg.tool_calls;
+  if(!Array.isArray(calls)||calls.length===0) return false;
+  for(const call of calls){
+    if(!call||typeof call!=='object'||Array.isArray(call)) return false;
+    const hasCallId=(typeof call.id==='string'&&call.id.trim().length>0)
+      ||(typeof call.call_id==='string'&&call.call_id.trim().length>0);
+    const fn=call.function;
+    const hasName=(typeof call.name==='string'&&call.name.trim().length>0)
+      ||(fn&&typeof fn==='object'&&!Array.isArray(fn)
+        &&typeof fn.name==='string'&&fn.name.trim().length>0);
+    if(!hasCallId||!hasName) return false;
+  }
+  return true;
+}
 function _transparentEventTimestampSeconds(row, opts){
   opts=opts||{};
   for(const key of ['ts','timestamp','created_at']){
@@ -10003,6 +10024,7 @@ function _compactInflightState(state){
   const todoStateMeta=(state.todoStateMeta&&typeof state.todoStateMeta==='object')?state.todoStateMeta:null;
   return _truncateInflightValue({
     streamId:state.streamId||null,
+    activeTurnToken:state.activeTurnToken??state.active_turn_token??null,
     messages,
     uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
     toolCalls,
@@ -11506,17 +11528,62 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
-function _pendingCurrentTailUserMessage(messages){
+function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimestamp,activeTurnToken){
   const list=Array.isArray(messages)?messages:[];
+  let crossedActivity=false;
+  const authoritativeToken=typeof activeTurnToken==='string'&&activeTurnToken.trim().length
+    ?activeTurnToken:null;
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg) continue;
     if(String(msg.role||'')==='user'){
       // Compaction rows are synthetic user-role markers, not submitted turns.
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+      // A public projection keeps the server-owned active-user marker but
+      // strips the row token. Do not let timestamp-only legacy matching turn
+      // that marker into authority when the session token is unavailable.
+      if(msg._active_turn_user===true
+        &&(!authoritativeToken
+          ||typeof msg._active_turn_token!=='string'
+          ||!msg._active_turn_token.trim().length)) return null;
+      if(authoritativeToken){
+        if(msg._active_turn_token!==authoritativeToken) return null;
+        const matchingUsers=list.filter(row=>row&&String(row.role||'')==='user'
+          &&row._active_turn_token===authoritativeToken);
+        if(matchingUsers.length!==1) return null;
+      }
+      if(crossedActivity){
+        if(authoritativeToken){
+          if(msg._active_turn_token!==authoritativeToken) return null;
+        }else{
+          const rowTimestamp=_messageTimestampSeconds(msg);
+          const candidateTimestampValue=_firstValidTimestampSeconds(candidateStart,candidateTimestamp);
+          if(rowTimestamp===null||candidateTimestampValue===null
+            ||Math.abs(rowTimestamp-candidateTimestampValue)>_PENDING_ACTIVE_TURN_TS_EPSILON) return null;
+        }
+      }
       return msg;
     }
-    if(msg._live||String(msg.role||'')==='tool') continue;
+    if((typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
+      ||String(msg.role||'')==='tool'){
+      if(authoritativeToken){
+        if(msg._active_turn_token!==authoritativeToken) return null;
+      }else if(msg._active_turn_token!==undefined){
+        return null;
+      }else if(typeof _isTailActivityOwnedByCandidateTurn!=='function'
+        ||!_isTailActivityOwnedByCandidateTurn(msg,candidateStart,candidateTimestamp)) return null;
+      crossedActivity=true;
+      continue;
+    }
+    if(msg._live){
+      if(authoritativeToken){
+        if(msg._active_turn_token!==authoritativeToken) return null;
+      }else if(msg._active_turn_token!==undefined){
+        return null;
+      }
+      crossedActivity=true;
+      continue;
+    }
     return null;
   }
   return null;
@@ -11541,23 +11608,55 @@ function _messageTimestampSeconds(msg){
 }
 
 /**
- * Exact-identity match for the active turn's user row via its
- * `_active_turn_token`, mirroring the server's `build_active_turn_token`
- * ("{stream_id}:{started_at}") stamped by the eager-checkpoint path. The token
- * embeds the stream_id, which no other turn can share, so a row carrying the
- * current session's token IS the active turn — no timestamp tolerance needed.
+ * Exact-identity match for the active turn's user row via the opaque,
+ * server-issued `_active_turn_token`. JavaScript deliberately does not parse,
+ * trim, or reconstruct this value; trim() below only rejects blank spellings.
  */
 function _activeTurnTokenMatches(msg, session){
-  if(!msg||typeof msg._active_turn_token!=='string') return false;
-  const streamId=session&&session.active_stream_id;
-  const startedAt=Number(session&&session.pending_started_at);
-  if(!streamId||!Number.isFinite(startedAt)||startedAt<=0) return false;
-  const sep=msg._active_turn_token.lastIndexOf(':');
-  if(sep<=0) return false;
-  if(msg._active_turn_token.slice(0,sep).trim()!==String(streamId).trim()) return false;
-  const tokenStarted=Number(msg._active_turn_token.slice(sep+1));
-  return Number.isFinite(tokenStarted)&&tokenStarted>0
-    && Math.abs(tokenStarted-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON;
+  const activeToken=session&&(session.active_turn_token??session.activeTurnToken);
+  return !!(msg&&typeof msg._active_turn_token==='string'&&msg._active_turn_token.trim().length
+    &&typeof activeToken==='string'&&activeToken.trim().length
+    &&msg._active_turn_token===activeToken);
+}
+
+function _captureSessionActiveTurnIdentity(session){
+  return {
+    session_id:session&&session.session_id,
+    active_stream_id:session&&session.active_stream_id,
+    active_turn_token:session&&session.active_turn_token,
+  };
+}
+
+function _acceptedStartMayUpdateSession(sessionId, response, submittedIdentity){
+  const blank=value=>value===null||value===undefined
+    ||(typeof value==='string'&&!value.trim().length);
+  const sameOpaque=(left,right)=>{
+    if(blank(left)||blank(right)) return blank(left)&&blank(right);
+    return typeof left==='string'&&typeof right==='string'&&left===right;
+  };
+  const streamId=response&&response.stream_id;
+  if(typeof streamId!=='string'||blank(streamId)) return false;
+  const responseToken=response&&response.active_turn_token;
+  if(!blank(responseToken)&&typeof responseToken!=='string') return false;
+
+  const currentSession=typeof S!=='undefined'?S.session:null;
+  // A different pane carries no authority for this session; callers may keep
+  // only their sid-scoped background recovery state in that case.
+  if(!currentSession||currentSession.session_id!==sessionId) return true;
+  const current=_captureSessionActiveTurnIdentity(currentSession);
+  const hasResponseToken=!blank(responseToken);
+  const matchesAccepted=sameOpaque(current.active_stream_id,streamId)
+    &&(hasResponseToken
+      ?sameOpaque(current.active_turn_token,responseToken)
+      :blank(current.active_turn_token));
+  if(matchesAccepted) return true;
+
+  // A successful start may replace the identity visible when it was submitted
+  // (for example, a completed turn's retained token). A different identity
+  // loaded afterwards is a newer owner and must win over this late response.
+  return !!(submittedIdentity&&submittedIdentity.session_id===sessionId
+    &&sameOpaque(current.active_stream_id,submittedIdentity.active_stream_id)
+    &&sameOpaque(current.active_turn_token,submittedIdentity.active_turn_token));
 }
 
 /**
@@ -11590,24 +11689,80 @@ function _pendingActiveTurnUserMessage(messages, session){
   const startedAt=Number(session?.pending_started_at);
   if(!Number.isFinite(startedAt)||startedAt<=0) return null;
   const list=Array.isArray(messages)?messages:[];
+  const activeTokenValue=session&&(session.active_turn_token??session.activeTurnToken);
+  const activeToken=typeof activeTokenValue==='string'?activeTokenValue:'';
+  const hasActiveToken=typeof activeTokenValue==='string'&&activeTokenValue.trim().length>0;
+  const publicMarkerOwners=list.filter(msg=>msg&&msg._active_turn_user===true);
+  if(publicMarkerOwners.length){
+    if(publicMarkerOwners.length!==1) return null;
+    const owner=publicMarkerOwners[0];
+    if(String(owner.role||'')!=='user'
+      ||(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(owner))) return null;
+    const ownerToken=typeof owner._active_turn_token==='string'?owner._active_turn_token:'';
+    if(!hasActiveToken&&list.some(row=>{
+      const rowToken=typeof row?._active_turn_token==='string'?row._active_turn_token:'';
+      return rowToken.trim().length>0;
+    })) return null;
+    if(hasActiveToken){
+      if(ownerToken.trim().length&&ownerToken!==activeToken) return null;
+      if(list.some(row=>row&&String(row.role||'')==='user'&&row!==owner
+        &&typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(row,session))) return null;
+    }
+    const ownerIdx=list.indexOf(owner);
+    for(let i=ownerIdx+1;i<list.length;i++){
+      const row=list[i];
+      if(!row) continue;
+      const role=String(row.role||'');
+      if(role==='user'&&typeof _isContextCompactionMessage==='function'
+        &&_isContextCompactionMessage(row)) continue;
+      if(role!=='assistant'&&role!=='tool') return null;
+      const rowToken=typeof row._active_turn_token==='string'?row._active_turn_token:'';
+      if(rowToken.trim().length&&(!hasActiveToken||rowToken!==activeToken)) return null;
+    }
+    return owner;
+  }
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
-    if(!msg||String(msg.role||'')!=='user') continue;
+    if(!msg) continue;
+    const isActivity=!!(msg._live
+      ||(typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
+      ||String(msg.role||'')==='tool');
+    if(isActivity){
+      const rowToken=typeof msg._active_turn_token==='string'?msg._active_turn_token:'';
+      const hasRowToken=typeof msg._active_turn_token==='string'
+        &&msg._active_turn_token.trim().length>0;
+      if(hasActiveToken?(!hasRowToken||rowToken!==activeToken):hasRowToken) return null;
+      continue;
+    }
+    if(String(msg.role||'')!=='user') continue;
     if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
-    // Public projections replace the private token with this authoritative marker.
-    if(msg._active_turn_user===true) return msg;
-    // Unambiguous: the row carries the active turn's exact token
-    // (stream_id + started_at) stamped by the server's eager-checkpoint path.
-    if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)) return msg;
-    // Unambiguous: the row's timestamp IS pending_started_at within
-    // precision-only float drift (never a whole second).
+    if(hasActiveToken){
+      const rowTokenPresent=typeof msg._active_turn_token==='string'
+        &&msg._active_turn_token.trim().length>0;
+      const tokenMatches=typeof _activeTurnTokenMatches==='function'
+        &&_activeTurnTokenMatches(msg,session);
+      if(rowTokenPresent&&!tokenMatches) return null;
+      if(tokenMatches){
+        const owners=list.filter(row=>row&&String(row.role||'')==='user'
+          &&!(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row))
+          &&typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(row,session));
+        return owners.length===1&&owners[0]===msg?msg:null;
+      }
+      return null;
+    }
+    // A tagged user row without session authority cannot prove it owns this
+    // pending turn. Do not fall back to a coincident timestamp.
+    if(typeof msg._active_turn_token==='string'&&msg._active_turn_token.trim().length>0)return null;
     const ts=_messageTimestampSeconds(msg);
-    if(ts===null) continue;
-    if(Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON) return msg;
+    if(ts===null||Math.abs(ts-startedAt)>_PENDING_ACTIVE_TURN_TS_EPSILON)return null;
+    const owners=list.filter(row=>{
+      if(!row||String(row.role||'')!=='user')return false;
+      if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row))return false;
+      const rowTs=_messageTimestampSeconds(row);
+      return rowTs!==null&&Math.abs(rowTs-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON;
+    });
+    return owners.length===1?msg:null;
   }
-  // Any wider drift (whole-second truncation, a rapid repeat ~1s later) is
-  // ambiguous: return null so getPendingSessionMessage() materializes the
-  // pending turn rather than guessing.
   return null;
 }
 
@@ -11618,8 +11773,33 @@ function getPendingSessionMessage(session, messagesOverride=null){
   const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
   const messages=Array.isArray(sourceMessages)?sourceMessages:[];
   const pendingCandidate={role:'user',content:text};
+  const pendingMessage={
+    role:'user',
+    content:text,
+    attachments:attachments.length?attachments:undefined,
+    _ts:session?.pending_started_at||Date.now()/1000,
+    _pending:true,
+    _source:session?.pending_user_source||undefined,
+  };
+  const activeTokenRows=typeof _activeTurnTokenMatches==='function'
+    ?messages.filter(row=>_activeTurnTokenMatches(row,session))
+    :[];
+  const activeTurnUser=typeof _pendingActiveTurnUserMessage==='function'
+    ?_pendingActiveTurnUserMessage(messages,session)
+    :null;
+  const activeToken=session&&(session.active_turn_token??session.activeTurnToken);
+  const hasActiveToken=typeof activeToken==='string'&&activeToken.trim().length>0;
+  const hasPublicMarker=messages.some(row=>row&&row._active_turn_user===true);
+  if(hasPublicMarker&&(!activeTurnUser||activeTurnUser._active_turn_user!==true)){
+    return pendingMessage;
+  }
   const _matchesPending=(row)=>{
     if(!row) return false;
+    if(typeof _activeTurnTokenMatches==='function'
+      &&Object.prototype.hasOwnProperty.call(row,'_active_turn_token')){
+      return activeTokenRows.length===1&&activeTokenRows[0]===row;
+    }
+    if(hasActiveToken&&row!==activeTurnUser) return false;
     return typeof _sameTranscriptMessage==='function'
       ? _sameTranscriptMessage(row,pendingCandidate)
       : String(msgContent(row)||'').trim()===text;
@@ -11628,7 +11808,12 @@ function getPendingSessionMessage(session, messagesOverride=null){
     if(attachments.length&&!row.attachments?.length) row.attachments=attachments;
     return null;
   };
-  const currentTailUser=_pendingCurrentTailUserMessage(messages);
+  const currentTailUser=_pendingCurrentTailUserMessage(
+    messages,
+    session?.pending_started_at,
+    undefined,
+    session&&(session.active_turn_token??session.activeTurnToken),
+  );
   if(currentTailUser){
     const sameCurrentTurn=_matchesPending(currentTailUser);
     if(sameCurrentTurn) return _adoptExistingRow(currentTailUser);
@@ -11639,20 +11824,10 @@ function getPendingSessionMessage(session, messagesOverride=null){
   // repeat the same text are unaffected. Guarded with typeof so a partial load
   // (or a static probe that extracts only some helpers) degrades to the
   // original strict-tail behaviour instead of throwing.
-  const activeTurnUser=typeof _pendingActiveTurnUserMessage==='function'
-    ? _pendingActiveTurnUserMessage(messages,session)
-    : null;
   if(activeTurnUser&&activeTurnUser!==currentTailUser&&_matchesPending(activeTurnUser)){
     return _adoptExistingRow(activeTurnUser);
   }
-  return {
-    role:'user',
-    content:text,
-    attachments:attachments.length?attachments:undefined,
-    _ts:session?.pending_started_at||Date.now()/1000,
-    _pending:true,
-    _source:session?.pending_user_source||undefined,
-  };
+  return pendingMessage;
 }
 async function checkInflightOnBoot(sid) {
   const raw = localStorage.getItem(INFLIGHT_KEY);
@@ -22775,7 +22950,9 @@ function addFiles(files){
 }
 const _uploadPendingFilesProgressBySession=new Map();
 function _uploadPendingFilesCurrentSession(sessionId){
-  return !!(!sessionId||(S.session&&S.session.session_id===sessionId));
+  if(!sessionId) return true;
+  if(typeof _isSessionCurrentPane==='function') return _isSessionCurrentPane(sessionId);
+  return !!(S.session&&S.session.session_id===sessionId);
 }
 function _uploadPendingFilesHideProgressBar(){
   const bar=$('uploadBar');const barWrap=$('uploadBarWrap');
@@ -22845,7 +23022,10 @@ async function uploadPendingFiles(options={}){
       }else{
         names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
       }
-    }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
+    }catch(e){
+      failures++;
+      if(_uploadPendingFilesCurrentSession(sessionId)) setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);
+    }
     _uploadPendingFilesUpdateProgress(sessionId,Math.round((i+1)/total*100));
   }
   _uploadPendingFilesUpdateProgress(sessionId,null);
@@ -22854,6 +23034,6 @@ async function uploadPendingFiles(options={}){
   if(failures===total&&total>0)throw new Error(t('all_uploads_failed',total));
   // Show extraction summary
   const extracted=names.filter(n=>n.extracted);
-  if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
+  if(extracted.length&&_uploadPendingFilesCurrentSession(sessionId))showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
   return names;
 }
