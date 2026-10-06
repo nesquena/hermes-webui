@@ -1302,9 +1302,16 @@ let _previewFsMode=null; // null | 'api' | 'overlay'
 // painel, substituição e cliques repetidos; sem isso os dois settlements
 // (sucesso e rejeição) reativam estado que já foi desmontado.
 let _previewFsPending=null; // {el} | null
+// Elemento DESTE preview dono do fullscreen nativo: é o que este preview pediu
+// (possuído antes do pedido) e o único que adopção e saída podem tocar.
+let _previewFsOwnedEl=null;
 
 function _previewFsInvalidatePending(){
   _previewFsPending=null;
+}
+
+function _previewFsOwned(){
+  return _previewFsOwnedEl||_previewFsEl();
 }
 
 function _previewFsEl(){
@@ -1354,10 +1361,10 @@ function _previewFsReleaseOwned(el){
 }
 
 function _previewFsExitApi(){
-  try{
-    if(document.fullscreenElement) document.exitFullscreen();
-    else if(document.webkitFullscreenElement) document.webkitExitFullscreen();
-  }catch(_){}
+  // O fullscreen nativo é document-wide: só sai se o elemento ativo for o
+  // deste preview — limpar o preview não pode derrubar o fullscreen de um
+  // vídeo ou de outra superfície.
+  _previewFsReleaseOwned(_previewFsOwned());
 }
 
 function _previewFsEnterOverlay(){
@@ -1375,12 +1382,17 @@ function _previewFsExitOverlay(){
 }
 
 function _previewFsOnChange(){
-  const nativeActive=!!(document.fullscreenElement||document.webkitFullscreenElement);
-  if(_previewFsMode==='api'&&!nativeActive){
-    // User pressed Escape (or the browser exited) inside native fullscreen
+  const active=document.fullscreenElement||document.webkitFullscreenElement||null;
+  // Só adota o elemento DESTE preview: um vídeo ou outra superfície em
+  // fullscreen não pode virar "modo api" do preview nem ser derrubado no exit.
+  const ours=!!active&&active===_previewFsOwned();
+  if(_previewFsMode==='api'&&!ours){
+    // User pressed Escape (or the browser exited) inside native fullscreen,
+    // ou um dono externo assumiu o lugar: desiste sem tocar no fullscreen alheio.
+    _previewFsInvalidatePending();
     _previewFsMode=null;
     _previewFsSync();
-  }else if(nativeActive){
+  }else if(ours){
     _previewFsMode='api';
     _previewFsSync();
   }
@@ -1404,6 +1416,7 @@ function togglePreviewFullscreen(){
   if(_previewFsApiSupported()){
     const token={el}; // possui a intenção ANTES de pedir
     _previewFsPending=token;
+    _previewFsOwnedEl=el;
     _previewFsRequest(el).then(()=>{
       if(_previewFsPending!==token){
         // Sucesso atrasado de um pedido já cancelado: só libera o elemento

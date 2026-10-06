@@ -126,10 +126,13 @@ function makePreviewArea(){
 let __doc=null;
 const document={
   get fullscreenEnabled(){return __doc.fullscreenEnabled;},
+  get webkitFullscreenEnabled(){return __doc.webkitFullscreenEnabled;},
   get fullscreenElement(){return __doc.fullscreenElement;},
-  // __doc.exits conta as chamadas de saída: é a prova de que a saída só pode
-  // acontecer no elemento dono (nunca no fullscreen de outro dono).
+  get webkitFullscreenElement(){return __doc.webkitFullscreenElement;},
+  // __doc.exits / __doc.wkExits contam as chamadas de saída: é a prova de que a
+  // saída só acontece no elemento dono (nunca no fullscreen de outro dono).
   exitFullscreen(){__doc.exits=(__doc.exits||0)+1;__doc.fullscreenElement=null;return Promise.resolve();},
+  webkitExitFullscreen(){__doc.wkExits=(__doc.wkExits||0)+1;__doc.webkitFullscreenElement=null;return Promise.resolve();},
 };
 """
 
@@ -307,3 +310,108 @@ def test_repeated_click_cancels_pending_request_single_flight():
     }
     assert payload["restarted"] == {"requests": 2}
     assert payload["again"] == {"requests": 2, "mode": "api"}
+
+
+# ── Posse do fullscreen nativo (PR #6682, ponto 3) ────────────────────────────
+#
+# O fullscreen é document-wide, não do preview: _previewFsOnChange() adotava
+# qualquer document.fullscreenElement e o teardown saía desse elemento alheio.
+# Aqui o dono externo (caminho padrão e prefixed) não pode ser adotado nem
+# derrubado, e o elemento DESTE preview continua saindo nos dois caminhos.
+
+_OWNERSHIP_SETUP = """
+let area=makePreviewArea();
+area.classList.add('visible');
+const btn=makeButton();
+const $=(id)=>id==='previewArea'?area:id==='btnFullscreenPreview'?btn:null;
+const t=(k)=>k;
+const outside={classList:{add(){},remove(){},contains(){return false;}}};
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_outside_fullscreen_owner_is_not_adopted_or_exited():
+    """Dono externo no caminho padrão: sem adotar mode='api' e sem cancelar o
+    fullscreen alheio quando o preview é limpo."""
+    script = _HARNESS + _OWNERSHIP_SETUP + f"""
+__doc={{fullscreenEnabled:true,fullscreenElement:outside}};
+{FULLSCREEN_BLOCK}
+_previewFsOnChange();
+const adopted={{mode:_previewFsMode}};
+_exitPreviewFullscreen();
+const after={{mode:_previewFsMode,exits:__doc.exits||0,
+              ownerKept:__doc.fullscreenElement===outside}};
+process.stdout.write(JSON.stringify({{adopted,after}}));
+"""
+    payload = _run_node(script)
+    assert payload["adopted"] == {"mode": None}
+    assert payload["after"] == {
+        "mode": None,
+        "exits": 0,
+        "ownerKept": True,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_outside_fullscreen_owner_is_not_adopted_or_exited_prefixed():
+    """Mesmo cenário no caminho prefixed (webkit): sem adotar e sem chamar
+    webkitExitFullscreen() sobre o dono externo."""
+    script = _HARNESS + _OWNERSHIP_SETUP + f"""
+__doc={{fullscreenEnabled:false,webkitFullscreenEnabled:true,
+       fullscreenElement:null,webkitFullscreenElement:outside}};
+{FULLSCREEN_BLOCK}
+_previewFsOnChange();
+const adopted={{mode:_previewFsMode}};
+_exitPreviewFullscreen();
+const after={{mode:_previewFsMode,exits:__doc.exits||0,wkExits:__doc.wkExits||0,
+              ownerKept:__doc.webkitFullscreenElement===outside}};
+process.stdout.write(JSON.stringify({{adopted,after}}));
+"""
+    payload = _run_node(script)
+    assert payload["adopted"] == {"mode": None}
+    assert payload["after"] == {
+        "mode": None,
+        "exits": 0,
+        "wkExits": 0,
+        "ownerKept": True,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_own_preview_element_still_enters_and_exits_on_both_paths():
+    """Guarda anti-escopo-excessivo: o elemento DESTE preview continua entrando
+    e saindo normalmente nos caminhos padrão e prefixed."""
+    script = _HARNESS + _OWNERSHIP_SETUP + f"""
+__doc={{fullscreenEnabled:true,fullscreenElement:null}};
+area.requestFullscreen=()=>{{__doc.fullscreenElement=area;return Promise.resolve();}};
+{FULLSCREEN_BLOCK}
+(async()=>{{
+  await togglePreviewFullscreen();
+  const entered={{mode:_previewFsMode,own:__doc.fullscreenElement===area}};
+  togglePreviewFullscreen();
+  _previewFsOnChange();
+  const exited={{mode:_previewFsMode,exits:__doc.exits||0,
+                 nativeActive:!!__doc.fullscreenElement}};
+
+  __doc={{fullscreenEnabled:false,webkitFullscreenEnabled:true,
+         fullscreenElement:null,webkitFullscreenElement:null}};
+  area.requestFullscreen=null; // força o caminho prefixed
+  area.webkitRequestFullscreen=()=>{{__doc.webkitFullscreenElement=area;return Promise.resolve();}};
+  await togglePreviewFullscreen();
+  const enteredWk={{mode:_previewFsMode,own:__doc.webkitFullscreenElement===area}};
+  togglePreviewFullscreen();
+  _previewFsOnChange();
+  const exitedWk={{mode:_previewFsMode,wkExits:__doc.wkExits||0,
+                   nativeActive:!!__doc.webkitFullscreenElement}};
+  process.stdout.write(JSON.stringify({{entered,exited,enteredWk,exitedWk}}));
+}})().catch(err=>{{console.error(err);process.exit(1);}});
+"""
+    payload = _run_node(script)
+    assert payload["entered"] == {"mode": "api", "own": True}
+    assert payload["exited"] == {"mode": None, "exits": 1, "nativeActive": False}
+    assert payload["enteredWk"] == {"mode": "api", "own": True}
+    assert payload["exitedWk"] == {
+        "mode": None,
+        "wkExits": 1,
+        "nativeActive": False,
+    }
