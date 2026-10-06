@@ -527,13 +527,8 @@ def _query_positive_int(parsed_url, name: str, *, default=None, maximum: int | N
     return value
 
 
-def _session_visible_to_active_profile(session_profile, handler=None, *, profile=None) -> bool:
-    """Return whether a detail-load session belongs to the request's profile.
-
-    ``profile`` (optional) overrides the benchmark for profile-scoped
-    requests (#7826: the archive route carries the row's OWNER profile, so
-    its visibility check must compare against that scope, not the active
-    profile).
+def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
+    """Return whether a detail-load session belongs to the active profile.
 
     Real request handlers must enforce the same profile boundary as
     /api/sessions, even when the request has no hermes_profile cookie and the
@@ -542,7 +537,7 @@ def _session_visible_to_active_profile(session_profile, handler=None, *, profile
     """
     if handler is None:
         return True
-    active_profile = profile or _get_active_profile_name()
+    active_profile = _get_active_profile_name()
     if not isinstance(session_profile, str):
         session_profile = None
     return _profiles_match(session_profile, active_profile)
@@ -1009,11 +1004,15 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     }
 
 
-def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True, profile=None) -> bool:
+def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True) -> bool:
     """Return whether ``sid`` belongs to the request's profile.
 
-    ``profile`` (optional) overrides the active profile as the benchmark for
-    profile-scoped requests (#7826: archive carries the row's owner profile).
+    The benchmark is ALWAYS the request's ACTIVE profile. A request-body
+    ``profile`` field is untrusted client input (a claim about ownership,
+    never an authorization token), so it must never widen or narrow the
+    visibility benchmark here — #7826 removed that relabel after a
+    default-bound request with ``profile:"work"`` let a foreign row reach
+    the archive route's disk-loading code path.
 
     On a profile mismatch, the helper mirrors the detail-load endpoint's
     contract (#13043, #13493): return ``409 session_profile_mismatch`` for
@@ -1105,23 +1104,21 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
     Covers top-level `session_id` in the query/body. Routes that accept session
     IDs under other keys must enforce their own visibility checks.
 
-    #7826: a profile-scoped request (the archive route carries the row's
-    OWNER profile in the body) is checked against that profile, not the
-    active one — otherwise the pre-dispatch guard would reject every foreign
-    row archive before the route's own profile-scoped logic could run.
+    The benchmark is the request's ACTIVE profile and nothing else. A
+    request-body ``profile`` field is untrusted input: #7826 briefly let it
+    relabel the benchmark here, which meant a default-bound request carrying
+    ``profile:"work"`` passed this guard on a ``work``-owned row and reached
+    the archive route's disk-loading path (whose repairs then rewrote the
+    foreign sidecar). The relabel is gone — the archive route enforces
+    owner==bound on its own.
     """
     method = str(method).upper()
     if _request_session_visibility_exempt(method, getattr(parsed, "path", "")):
         return True
-    request_profile = body.get("profile") if isinstance(body, dict) else None
-    if not isinstance(request_profile, str):
-        request_profile = None
-    else:
-        request_profile = request_profile.strip() or None
     sid = parse_qs(getattr(parsed, "query", "") or "").get("session_id", [None])[0]
-    if not _session_id_visible_to_request_profile(handler, sid, profile=request_profile):
+    if not _session_id_visible_to_request_profile(handler, sid):
         return False
-    if isinstance(body, dict) and not _session_id_visible_to_request_profile(handler, body.get("session_id"), profile=request_profile):
+    if isinstance(body, dict) and not _session_id_visible_to_request_profile(handler, body.get("session_id")):
         return False
     return True
 
@@ -20415,20 +20412,6 @@ def handle_post(handler, parsed) -> bool:
                     raise KeyError(sid)
                 with LOCK:
                     SESSIONS[sid] = s
-            # #7826: a profile-scoped archive request is a CLAIM about the
-            # row's owner — validate it against the sidecar's own profile so
-            # the field cannot be used to touch a foreign session. The 409
-            # names the sidecar's real owner (None coerces to the root
-            # profile) so the client can re-aim exactly like the CLI metadata
-            # path below.
-            if _arch_requested_profile and not _profiles_match(getattr(s, "profile", None), _arch_requested_profile):
-                j(handler, {
-                    "error": "Session belongs to a different profile",
-                    "code": "session_profile_mismatch",
-                    "session_id": sid,
-                    "profile": getattr(s, "profile", None) or "default",
-                }, status=409)
-                return None
         except KeyError:
             # #7776: reuse the CLI identity captured before the lock — the
             # lock-held reload can drop it. #7549/#7731: cross-profile archive

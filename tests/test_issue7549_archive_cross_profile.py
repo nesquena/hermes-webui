@@ -346,10 +346,11 @@ def test_archive_handler_passes_all_profiles_on_retry():
 def test_profile_scoped_archive_of_foreign_session_succeeds(
     routes_module, archive_env, monkeypatch
 ):
-    """#7826 root fix: a foreign-profile session archives with a 200 when the
-    request carries the owner profile — and the ACTIVE profile is never
-    consulted: ``_get_active_profile_name`` must not be called at all, so
-    neither the active profile nor its cookie can change."""
+    """#7826 round 5: the profile field is NOT an authorization. A foreign
+    ``work``-owned session must 409 for a default-bound request even when the
+    request claims ``profile:"work"``, and NOTHING may be materialized — the
+    pre-fix behaviour loaded the sidecar (running its persisted repairs, which
+    rewrite disk) on the way to that 409."""
     lookup_calls = []
     active_calls = []
 
@@ -360,55 +361,110 @@ def test_profile_scoped_archive_of_foreign_session_succeeds(
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", fake_lookup)
     monkeypatch.setattr(routes_module, "_get_active_profile_name",
                         lambda: active_calls.append("get") or "default")
-    messages = [{"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "hello"}]
-    monkeypatch.setattr(routes_module, "get_cli_session_messages",
-                        lambda _sid: messages)
-    fake_session = SimpleNamespace(
-        session_id="20260925_otherprof_abcd", archived=False,
-        profile="work", messages=[], title="x",
-        compact=lambda: {"session_id": "20260925_otherprof_abcd",
-                         "archived": True, "profile": "work"},
-        save=lambda **kw: saved.append(kw))
-    saved = []
+    side_effects = []
 
-    def fake_import(*args, **kwargs):
-        fake_session.is_cli_session = True
-        with routes_module.LOCK:
-            routes_module.SESSIONS[fake_session.session_id] = fake_session
-            routes_module.SESSIONS.move_to_end(fake_session.session_id)
-        return fake_session
-    monkeypatch.setattr(routes_module, "import_cli_session", fake_import)
-    monkeypatch.setattr(routes_module, "is_cli_session_row", lambda _m: True)
+    class _SpySession:
+        def __init__(self, *a, **k):
+            side_effects.append("Session-ctor")
+
+        def save(self, *a, **k):
+            side_effects.append("save")
+
+    monkeypatch.setattr(routes_module, "get_cli_session_messages",
+                        lambda _sid: side_effects.append("messages") or [])
+    monkeypatch.setattr(routes_module, "Session", _SpySession)
+    monkeypatch.setattr(routes_module, "import_cli_session",
+                        lambda *a, **k: side_effects.append("import"))
     monkeypatch.setattr(routes_module, "publish_session_list_changed",
-                        lambda *a, **k: None)
+                        lambda *a, **k: side_effects.append("publish"))
 
     status, payload = _post_archive(routes_module, {
         "session_id": "20260925_otherprof_abcd", "archived": True,
         "profile": "work"})
 
-    assert status == 200, f"profile-scoped archive must succeed: {payload}"
-    assert fake_session.archived is True
-    assert saved and saved[-1].get("touch_updated_at") is False
-    assert active_calls == [], (
-        "a profile-scoped archive must never consult the active profile: "
-        f"{active_calls}")
+    assert status == 409, (
+        f"a foreign row must 409 even when the request claims its profile: "
+        f"{payload}")
+    assert payload["code"] == "session_profile_mismatch"
+    assert payload["profile"] == "work"
+    assert side_effects == [], (
+        f"a denied archive must not load/materialize anything: {side_effects}")
+
+
+def test_archive_request_profile_claim_does_not_relabel_visibility(
+    routes_module, archive_env, monkeypatch
+):
+    """#7826 round 5 revert-pin (defense in depth): the pre-dispatch
+    visibility guard must ignore the body's ``profile`` claim. A default-bound
+    request carrying ``profile:"work"`` must be denied by the GUARD itself
+    before the archive route is ever reached."""
+    denied = []
+    real_guard = routes_module._guard_request_session_visibility
+
+    class _SpyGuard:
+        pass
+
+    monkeypatch.setattr(routes_module, "_get_active_profile_name",
+                        lambda: "default")
+
+    def spy_guard(handler, parsed, body=None, method="GET"):
+        # Pin the guard's real behaviour while recording the denial.
+        return real_guard(handler, parsed, body=body, method=method)
+
+    monkeypatch.setattr(routes_module, "_guard_request_session_visibility",
+                        spy_guard)
+
+    # The sidecar belongs to 'work'. get_session returns it for the guard's
+    # metadata-only visibility probe.
+    fake_sidecar = SimpleNamespace(
+        session_id="webui-work-sidecar", archived=False, profile="work",
+        messages=[], _loaded_metadata_only=False,
+        compact=lambda: {"session_id": "webui-work-sidecar", "archived": True},
+        save=lambda **kw: denied.append("save"))
+    _register_sidecar(routes_module, fake_sidecar)
+
+    def fake_get_session(sid, *a, **k):
+        if sid == "webui-work-sidecar":
+            return fake_sidecar
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes_module, "get_session", fake_get_session)
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only",
+                        lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
+                        lambda _sid, *, all_profiles=False: {})
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: denied.append("publish"))
+
+    handler = _FakePostHandler(
+        {"session_id": "webui-work-sidecar", "archived": True,
+         "profile": "work"},
+        path="/api/session/archive")
+    parsed = SimpleNamespace(path="/api/session/archive", query="")
+    routes_module.handle_post(handler, parsed)
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+    assert payload["code"] == "session_profile_mismatch", (
+        f"the guard must deny a foreign row regardless of the claimed "
+        f"profile: {payload}")
+    assert payload["profile"] == "work", payload
+    assert denied == [], (
+        f"a guard-denied archive must never mutate or publish: {denied}")
 
 
 def test_profile_field_wrong_owner_409s_with_real_owner(
     routes_module, archive_env, monkeypatch
 ):
     """#7826 security boundary: the `profile` field is a CLAIM, not an
-    override. Asking for a profile the session does not belong to must 409
-    with the REAL owner (so the client can re-aim) and materialize nothing."""
-    active_calls = []
-
+    override. A foreign row stays denied no matter which profile is claimed,
+    and nothing is materialized on the way to the 409 — the denial happens
+    before the load whose repairs would rewrite the sidecar (round 5)."""
     def fake_lookup(sid, *, all_profiles=False):
         return CLI_META_OTHER if all_profiles else {}
 
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", fake_lookup)
     monkeypatch.setattr(routes_module, "_get_active_profile_name",
-                        lambda: active_calls.append("get") or "default")
+                        lambda: "default")
     side_effects = []
 
     class _SpySession:
@@ -428,17 +484,14 @@ def test_profile_field_wrong_owner_409s_with_real_owner(
         "session_id": "20260925_otherprof_abcd", "archived": True,
         "profile": "home"})
 
-    assert status == 409, f"wrong owner profile must 409, got {status}: {payload}"
+    assert status == 409, f"a foreign row must 409, got {status}: {payload}"
     assert payload["code"] == "session_profile_mismatch"
     assert payload["profile"] == "work", (
         f"the 409 must name the session's REAL owner, not the request: {payload}")
     assert payload["session_id"] == "20260925_otherprof_abcd"
     assert side_effects == [], (
-        f"mismatched profile must not construct/save/import/publish: "
+        f"a denied archive must not construct/save/import/publish: "
         f"{side_effects}")
-    assert active_calls == [], (
-        f"the wrong-profile check must not consult the active profile: "
-        f"{active_calls}")
 
 
 def test_profile_field_does_not_rescue_profile_less_row(
@@ -485,10 +538,10 @@ def _register_sidecar(routes_module, session):
 def test_sidecar_archive_with_matching_requested_profile_succeeds(
     routes_module, archive_env, monkeypatch
 ):
-    """#7826: the sidecar (get_session) path is profile-agnostic, but a
-    profile-scoped request must still validate against the sidecar's own
-    profile. A matching profile archives fine and the active profile is never
-    consulted."""
+    """#7826: a WebUI sidecar belonging to the ACTIVE profile archives through
+    the sidecar (get_session) path normally — including a request whose
+    ``profile`` field agrees with the owner. A matching claim is not needed
+    for authorization, and its presence must not change the outcome."""
     active_calls = []
     fake_sidecar = SimpleNamespace(
         session_id="webui-work-sidecar", archived=False, profile="work",
@@ -505,64 +558,71 @@ def test_sidecar_archive_with_matching_requested_profile_succeeds(
 
     monkeypatch.setattr(routes_module, "get_session", fake_get_session)
     monkeypatch.setattr(routes_module, "_get_active_profile_name",
-                        lambda: active_calls.append("get") or "default")
+                        lambda: active_calls.append("get") or "work")
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
                         lambda _sid, *, all_profiles=False: {})
-    monkeypatch.setattr(routes_module, "publish_session_list_changed",
-                        lambda *a, **k: None)
+    monkeypatch.setattr(routes_module, "publish_session_list_changed", lambda *a, **k: None)
 
     status, payload = _post_archive(routes_module, {
-        "session_id": "webui-work-sidecar", "archived": True,
-        "profile": "work"})
+        "session_id": "webui-work-sidecar", "archived": True, "profile": "work"})
 
-    assert status == 200, f"matching sidecar profile must archive: {payload}"
+    assert status == 200, (
+        f"an owner-visible row must archive even when the request also claims "
+        f"its profile: {payload}")
     assert fake_sidecar.archived is True
     assert saved and saved[-1].get("touch_updated_at") is False
-    assert active_calls == [], (
-        f"sidecar archive must not consult the active profile: {active_calls}")
 
 
 def test_sidecar_archive_with_wrong_requested_profile_409s(
     routes_module, archive_env, monkeypatch
 ):
-    """#7826: a profile-scoped request naming the wrong owner must 409 on the
-    sidecar path too (the field cannot bypass the ownership check by hitting
-    get_session), naming the sidecar's real profile, and mutate nothing."""
-    active_calls = []
+    """#7826 round 5: the sidecar path ignores the request's ``profile``
+    claim entirely. The ACTIVE profile decides, so a ``work`` row stays 409
+    for a default-bound request, the envelope names the sidecar's real owner,
+    and nothing mutates — critically, the denial now happens BEFORE the load
+    whose persisted repairs would rewrite the sidecar."""
     fake_sidecar = SimpleNamespace(
         session_id="webui-work-sidecar", archived=False, profile="work",
         messages=[], _loaded_metadata_only=False,
         compact=lambda: {"session_id": "webui-work-sidecar", "archived": False})
     saved = []
     _register_sidecar(routes_module, fake_sidecar)
+    full_loads = []
 
     def fake_get_session(sid, *a, **k):
         if sid == "webui-work-sidecar":
+            if k.get("metadata_only"):
+                return fake_sidecar
+            full_loads.append("full")
             return fake_sidecar
         raise KeyError(sid)
 
     monkeypatch.setattr(routes_module, "get_session", fake_get_session)
     monkeypatch.setattr(routes_module, "_get_active_profile_name",
-                        lambda: active_calls.append("get") or "default")
+                        lambda: "default")
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
                         lambda _sid, *, all_profiles=False: {})
     published = []
     monkeypatch.setattr(routes_module, "publish_session_list_changed",
                         lambda *a, **k: published.append(a))
+    save_triggered = []
+    fake_sidecar.save = lambda **kw: save_triggered.append(kw)
 
     status, payload = _post_archive(routes_module, {
         "session_id": "webui-work-sidecar", "archived": True,
-        "profile": "default"})
+        "profile": "work"})
 
-    assert status == 409, f"wrong sidecar profile must 409: {payload}"
+    assert status == 409, f"a foreign row must 409: {payload}"
     assert payload["code"] == "session_profile_mismatch"
     assert payload["profile"] == "work", (
         f"the 409 must name the sidecar's real owner: {payload}")
     assert fake_sidecar.archived is False, "the sidecar must not be mutated"
     assert saved == [], f"no save may fire on the 409: {saved}"
+    assert save_triggered == [], f"no save may fire on the 409: {save_triggered}"
     assert published == [], f"no publish may fire on the 409: {published}"
-    assert active_calls == [], (
-        f"sidecar mismatch must not consult the active profile: {active_calls}")
+    assert full_loads == [], (
+        f"the denied archive must not reach the full-disk load whose repairs "
+        f"rewrite the sidecar: {full_loads}")
 
 
 def test_sidecar_wrong_profile_409s_even_without_predispatch_guard(
@@ -595,10 +655,176 @@ def test_sidecar_wrong_profile_409s_even_without_predispatch_guard(
 
     status, payload = _post_archive(routes_module, {
         "session_id": "webui-work-sidecar", "archived": True,
-        "profile": "default"})
+        "profile": "work"})
 
     assert status == 409, (
         f"route-side sidecar check must 409 without the guard: {payload}")
     assert payload["profile"] == "work", payload
     assert saved == [], f"no save may fire on the 409: {saved}"
     assert published == [], f"no publish may fire on the 409: {published}"
+
+
+# ---------------------------------------------------------------------------
+# #7826 round 5 regression: a DENIED archive must not rewrite another
+# profile's transcript on disk.
+#
+# The signature hazard was ordering, not the response: the route validated
+# ownership AFTER ``get_session(sid)`` / ``Session.load(sid)``, and those loads
+# run the persisted session repairs, which ``save()`` the sidecar and drop a
+# ``.bak`` when a repair shrinks the transcript. Codex reproduced it through
+# real auth + dispatch: the request answered 409, yet the foreign sidecar went
+# from three messages to two and a ``.bak`` appeared.
+#
+# This test writes a real ``work``-owned sidecar carrying THREE messages, of
+# which two are a repeated identical partial -- the exact shape the load-time
+# ``_collapse_adjacent_duplicate_partials`` repair rewrites into two. A
+# default-bound archive claiming ``profile:"work"`` must leave that file
+# BYTE-IDENTICAL (no trim, no ``.bak``).
+# ---------------------------------------------------------------------------
+
+def _repair_needing_sidecar_bytes() -> bytes:
+    """A sidecar that loses one message (and gains a .bak) if it is ever
+    loaded through the persisted session repairs."""
+    partial = {
+        "role": "assistant",
+        "content": "streaming tail",
+        "_partial": True,
+        "_partial_tool_calls": [],
+    }
+    payload = {
+        "session_id": "repairsid-work-own",
+        "title": "Foreign work-ish session",
+        "profile": "work",
+        "messages": [partial, partial],
+    }
+    return json.dumps(payload, indent=2).encode("utf-8")
+
+
+def _write_real_sidecar(session_dir, sid, before):
+    """Persist the repair-needing body through the REAL writer.
+
+    Written by hand, a minimal two-message JSON makes
+    ``Session.load_metadata_only`` fall back to a full load (it needs the
+    metadata prefix keys), which would trim the transcript even on the
+    allowed path and make this fixture test the fallback instead of the
+    repair. Going through ``Session.save()`` produces a real sidecar whose
+    metadata prefix is complete, so the metadata-only probe stays cheap and
+    write-free — the production shape for any sidecar the sidebar has seen.
+    """
+    import api.models as models
+
+    payload = json.loads(before.decode("utf-8"))
+    payload["session_id"] = sid
+    session = models.Session(**payload)
+    session.save(touch_updated_at=False, skip_index=True)
+    return (session_dir / f"{sid}.json").read_bytes()
+
+
+def test_denied_archive_leaves_foreign_sidecar_byte_identical(
+    routes_module, archive_env, monkeypatch, tmp_path
+):
+    """Maintainer's round-5 regression: the denied archive must not rewrite the
+    foreign sidecar. Pre-fix (validate-after-load) the 409 was correct and the
+    transcript was still trimmed, so this pins BOTH the response and the disk
+    state."""
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE",
+                        session_dir / "_index.json")
+    sidecar = session_dir / "repairsid-work-own.json"
+    before = _write_real_sidecar(
+        session_dir, "repairsid-work-own", _repair_needing_sidecar_bytes())
+    # Sanity: the sidecar really carries the shape a full load would trim,
+    # so a regression cannot pass by having chosen an inert fixture.
+    assert json.loads(before.decode("utf-8"))["messages"][0]["_partial"] is True
+
+    def real_get_session(sid, *a, **k):
+        return models.get_session(sid, *a, **k)
+
+    monkeypatch.setattr(routes_module, "get_session", real_get_session)
+    monkeypatch.setattr(routes_module, "_get_active_profile_name",
+                        lambda: "default")
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only",
+                        lambda _sid: False)
+    # Not a CLI row: no metadata lookup may rescue it, and the fallback path
+    # must not be the thing that saves us.
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
+                        lambda _sid, *, all_profiles=False: {})
+    published = []
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: published.append(a))
+
+    status, payload = _post_archive(routes_module, {
+        "session_id": "repairsid-work-own", "archived": True,
+        "profile": "work"})
+
+    # (a) The response contract is the structured 409.
+    assert status == 409, f"expected 409, got {status}: {payload}"
+    assert payload["code"] == "session_profile_mismatch"
+    assert payload["profile"] == "work"
+
+    # (b) The sidecar is BYTE-IDENTICAL: the load-time repair never ran.
+    after = sidecar.read_bytes()
+    assert after == before, (
+        "a denied archive must not rewrite another profile's sidecar: the "
+        f"file changed on disk ({len(before)} -> {len(after)} bytes)")
+
+    # (c) No backup was produced, and nothing was published.
+    bak = session_dir / "repairsid-work-own.json.bak"
+    assert not bak.exists(), (
+        "a denied archive must not leave a .bak behind")
+    assert not list(session_dir.glob("*.tmp.*")), (
+        "a denied archive must not leave temporary write artifacts")
+    assert published == [], f"no publish may fire on the 409: {published}"
+
+
+def test_allowed_archive_of_own_sidecar_still_runs_load_repairs(
+    routes_module, archive_env, monkeypatch, tmp_path
+):
+    """The round-5 check must not break the legitimate path: a ``work``-bound
+    request archiving its OWN ``work`` sidecar still loads it (repairs and
+    all), saves the archived flag, and publishes."""
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE",
+                        session_dir / "_index.json")
+    sidecar = session_dir / "repairsid-own.json"
+    before = _write_real_sidecar(
+        session_dir, "repairsid-own", _repair_needing_sidecar_bytes())
+
+    def real_get_session(sid, *a, **k):
+        return models.get_session(sid, *a, **k)
+
+    monkeypatch.setattr(routes_module, "get_session", real_get_session)
+    monkeypatch.setattr(routes_module, "_get_active_profile_name",
+                        lambda: "work")
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only",
+                        lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
+                        lambda _sid, *, all_profiles=False: {})
+    published = []
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: published.append(a))
+
+    status, payload = _post_archive(routes_module, {
+        "session_id": "repairsid-own", "archived": True})
+
+    assert status == 200, f"own-profile archive must succeed: {payload}"
+    assert payload.get("ok") is True
+    assert payload["session"]["archived"] is True, payload
+    assert published, "a successful archive must publish"
+    # The allowed path really DID load and rewrite the sidecar (the repair ran
+    # on it), so this pins the contrast against the denied case above: only a
+    # denied archive leaves the file untouched.
+    saved = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert saved["archived"] is True
+    assert len(saved["messages"]) < len(json.loads(before.decode("utf-8"))["messages"]), (
+        "the allowed archive must still run the load-time repair")
+    assert (session_dir / "repairsid-own.json.bak").exists(), (
+        "the allowed archive's repair must still produce the .bak")

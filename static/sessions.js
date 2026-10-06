@@ -5831,6 +5831,8 @@ function _renderBatchActionBar(){
     // resolved (unknown CLI metadata). Mixed owners are valid — each row
     // carries its own profile field below.
     if(!preflight.owners.length){
+      // #7826 round 5: this toast now fires ONLY for a row with no derivable
+      // owner, never for a mixed-profile selection (which archives per row).
       showToast(t('session_batch_archive_mixed_profiles'),3500);
       exitSessionSelectMode();
       return;
@@ -6494,10 +6496,12 @@ function _playSessionActionMenuEntrance(menu){
 // from what the user is looking at, so there is no switch-back to restore
 // afterwards (the old _restoreProfileAfterArchive /
 // _switchProfileForActiveProfile pipeline is gone). A structured 409
-// (session_profile_mismatch) only means the row's real owner differs from
-// what we sent: re-send exactly once with the envelope's profile. No switch,
-// no recursion beyond the single retry.
-async function _archiveSession(session, archived=true, beforeListRender=null, _retried=false){
+// (session_profile_mismatch) means the row's real owner differs from what we
+// sent: report the failure. There is deliberately NO re-POST carrying the
+// envelope's profile — that retry re-issued a write against a session the
+// server had just been denied for, so a denied archive could still rewrite a
+// foreign profile's transcript on its way out (round 5).
+async function _archiveSession(session, archived=true, beforeListRender=null){
   if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
@@ -6528,22 +6532,12 @@ async function _archiveSession(session, archived=true, beforeListRender=null, _r
     await _applyArchived(response);
     return true;
   }catch(err){
-    // #7826: the structured 409 envelope names the row's REAL owner when the
-    // requested profile was wrong or absent. Re-send WITH that profile once
-    // (guarded) instead of switching the active profile to it.
-    const profileMismatch=_sessionProfileMismatchFromError(err);
-    if(profileMismatch && profileMismatch.profile && !_retried){
-      if(renderHold) await renderHold.catch(()=>{});
-      try{
-        const target=_sessionSnapshotById(session.session_id)||session;
-        const scoped=Object.assign({},target,{profile:profileMismatch.profile});
-        return await _archiveSession(scoped,archived,null,true);
-      }catch(switchErr){
-        _pendingSessionReflowPositions=null;
-        showToast(t('session_archive_failed')+switchErr.message);
-        return false;
-      }
-    }
+    // #7826 round 5: a structured 409 (session_profile_mismatch) means the
+    // row's real owner differs from what we sent. Report the failure and stop
+    // — there is no retry that re-POSTs the envelope's profile, because that
+    // retry re-issued a WRITE against a session the server had just denied,
+    // and a denied write must never be able to touch another profile's
+    // transcript.
     if(renderHold) await renderHold.catch(()=>{});
     _pendingSessionReflowPositions=null;
     showToast(t('session_archive_failed')+err.message);
