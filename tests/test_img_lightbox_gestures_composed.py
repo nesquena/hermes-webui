@@ -581,6 +581,9 @@ class TestComposedTrustedInput:
             "return !!lb && !!lb._zoom && lb._zoom.boxW > 0; }",
             timeout=15000,
         )
+        assert page.evaluate(
+            "() => document.querySelectorAll('.img-lightbox').length"
+        ) == 1, "fixture: the fresh page must hold exactly one dialog"
         for _ in range(3):
             page.keyboard.press("Equal")  # three real '=' presses
         data = page.evaluate(_LB_RECTS_JS)
