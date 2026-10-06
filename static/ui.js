@@ -11960,7 +11960,67 @@ function _renderUpdateWhatsNewLinks(data){
   }
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
-function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
+// #7679 findings 1 & 2 — every update publication and every destructive
+// force offer must be race-safe against out-of-order completions.
+//
+// ``_updateCheckEpoch`` advances each time a new check/apply begins. A stale
+// check (an older POST resolving after a newer one started) can prove itself
+// stale and back off before mutating the banner, the Settings status text, or
+// the destructive affordance — the latest-owner lifecycle. ``boot.js`` and
+// ``panels.js`` route their banner publications through ``_showUpdateBanner``
+// with this epoch.
+//
+// ``_forceUpdateGrant`` is the work-authority that arms /api/updates/force.
+// It records the target plus the channel that target was offering WHEN the
+// destructive button was exposed, and it is retired whenever superseded (a
+// newer check, a channel change, or an Apply retry). forceUpdate() validates
+// that exact grant again after its (long) danger-confirm dialog, so an open
+// confirm can never authorize a destructive POST from a state that no longer
+// justifies it (stale-authority fix).
+let _updateCheckEpoch = 0;
+let _forceUpdateGrant = null;
+function _beginUpdateCheck(){
+  _updateCheckEpoch += 1;
+  _forceUpdateGrant = null;
+  return _updateCheckEpoch;
+}
+function _isUpdateCheckStale(epoch){
+  return typeof epoch === 'number' && epoch !== _updateCheckEpoch;
+}
+function _retireForceUpdate(){
+  _forceUpdateGrant = null;
+}
+function _grantForceUpdate(target, channel){
+  _forceUpdateGrant = {
+    target: target,
+    channel: (channel==='stable'||channel==='experimental') ? channel : null,
+    epoch: _updateCheckEpoch,
+  };
+}
+// #7679: two independent staleness counters meet at this call, and they are
+// NOT the same clock — collapsing them into one parameter is what made the
+// round-3 patch look right while disabling #8040's authority guard:
+//
+//   epoch                    — advanced by _beginUpdateCheck() on every NEW
+//                               check/apply. Answers "may this payload publish
+//                               at all?" (latest-owner).
+//   recoveryGenerationAtCheck — advanced only by forceUpdate()/apply in
+//                               ui.js. Answers "is the Force/Clear-lock
+//                               authority this payload carries still current?"
+//                               (#8040, Greptile P1).
+//
+// So the signature takes both. ``epoch`` is optional (legacy call sites and
+// the panels.js manual check, which already dropped its own stale payload
+// before reaching here, pass null); ``recoveryGenerationAtCheck`` is what the
+// manual_update branch reads for the recovery-gone probe.
+function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
+  // Latest-owner guard: a stale publication (older check resolving after a
+  // newer one began) must not overwrite banner/status state or re-arm the
+  // destructive control. Undefined epoch (legacy call sites) bypasses it.
+  if(epoch!==null&&epoch!==undefined&&typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
+  // A fresh render supersedes any in-flight force grant; it is re-armed below
+  // only if this payload is still forceable.
+  if(typeof _retireForceUpdate==='function') _retireForceUpdate();
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
@@ -12056,6 +12116,11 @@ function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
       forceBtn.style.display='inline-block';
       forceBtn.disabled=false;
       forceBtn.textContent=t('update_force','Force update');
+      // #7679 finding 1: arm the destructive grant with the exact target and
+      // channel this payload offers. forceUpdate() revalidates this grant
+      // after its danger confirm, so a superseding state cannot authorize a
+      // stale POST.
+      if(typeof _grantForceUpdate==='function') _grantForceUpdate(forceTarget, data&&data[forceTarget]?data[forceTarget].channel:null);
     }else{
       forceBtn.disabled=true;
       forceBtn.style.display='none';
@@ -12131,6 +12196,9 @@ async function applyUpdates(){
   // retry starts clean (otherwise stale state points at the wrong target).
   const forceBtnReset=$('btnForceUpdate');
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
+  // #7679 finding 1: an Apply retry supersedes any in-flight force grant, so
+  // a confirm opened for the earlier conflict cannot authorize a stale POST.
+  if(typeof _retireForceUpdate==='function') _retireForceUpdate();
   const targets=[];
   if(window._updateData?.agent?.behind>0) targets.push('agent');
   if(window._updateData?.webui?.behind>0&&!window._updateData?.webui?.manual_update) targets.push('webui');
@@ -12198,6 +12266,12 @@ function _showUpdateError(target,res){
     forceBtn.dataset.target=target;
     forceBtn.disabled=false;
     forceBtn.style.display='inline-block';
+    // #7679 finding 1: armed from the check payload's channel; forceUpdate()
+    // validates this grant (including that a newer check/retry hasn't retired
+    // it) after the danger confirm.
+    if(typeof _grantForceUpdate==='function'){
+      _grantForceUpdate(target, window._updateData&&window._updateData[target]?window._updateData[target].channel:null);
+    }
   }
   // Show "Clear lock and retry update" when the only failure was a stale
   // git lock. This calls the new non-destructive /api/updates/clear_lock
@@ -12347,6 +12421,12 @@ async function _readHealthServerIdentity() {
 async function forceUpdate(btn){
   const target=btn&&btn.dataset.target;
   if(!target) return;
+  // #7679 finding 1: bind the destructive POST to the grant that actually
+  // armed this button. Only a live grant (produced by the initiating
+  // check/apply, carrying the target + the channel that target offered) may
+  // be confirmed; a button without a grant has no authority to discard.
+  const grantSnapshot=(typeof _forceUpdateGrant!=='undefined')?_forceUpdateGrant:null;
+  if(!grantSnapshot||grantSnapshot.target!==target) return;
   const confirmed=await showConfirmDialog({
     title:'Force update '+target+'?',
     message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
@@ -12355,12 +12435,30 @@ async function forceUpdate(btn){
     focusCancel:true,
   });
   if(!confirmed) return;
+  // Revalidate the preserved grant after the (long) confirm: a newer check, a
+  // channel change, or an Apply retry — including while the confirm was open —
+  // retires the grant, so it must never authorize the destructive POST.
+  const stale=(typeof _forceUpdateGrant==='undefined')||_forceUpdateGrant!==grantSnapshot
+    || (typeof _isUpdateCheckStale==='function'&&_isUpdateCheckStale(grantSnapshot.epoch))
+    || target!==(btn&&btn.dataset.target);
+  if(stale){
+    const msg=((typeof t==='function')?t('force_no_longer_applicable','Force update is no longer applicable — the update state changed. Please check again.'):'Force update is no longer applicable — the update state changed. Please check again.');
+    const errEl=$('updateError');
+    if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+    else showToast(msg,5000,'error');
+    return;
+  }
   btn.disabled=true;btn.textContent='Force updating\u2026';
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
+    // Use the grant's FROZEN channel, not a live re-read of the latest state:
+    // a channel switch that races the confirm must not silently change the
+    // destructive action's target channel (stale-authority bug).
+    const body={target};
+    if(grantSnapshot.channel) body.channel=grantSnapshot.channel;
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(body),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';

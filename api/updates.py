@@ -2281,16 +2281,48 @@ def apply_force_update(target: str, channel=None) -> dict:
             }
 
         compare_ref = _select_apply_compare_ref(path, channel, target)
-        # Stable channel, already up to date on the promoted subset: nothing to
-        # force to. Do NOT fall back to origin/master (firehose). See
-        # _select_apply_compare_ref channel semantics.
+
+        # #7679 finding 3 — a branch name is not evidence the reset moves
+        # forward. In an isolated git fixture with no release tags the
+        # experimental WebUI and Agent select ``origin/master``, which is
+        # exactly HEAD: the reset is a dirty-only same-commit cleanup, not a
+        # forward/divergent recovery. Resolve the ref's ancestry against HEAD
+        # (the same two primitives the rewind guard below uses) so equality is
+        # decided by commit authority, not by a literal ref string.
+        same_commit = (
+            False
+            if compare_ref is None
+            else (_head_contains_ref(path, compare_ref) and _can_fast_forward_to(path, compare_ref))
+        )
         if compare_ref is None:
+            # Stable channel, already up to date on the promoted subset:
+            # nothing to force to. Only the WebUI stable checkout can fall
+            # back to a literal reset of its own HEAD (no forward move).
             dirty_state = None
             if target == 'webui' and channel == 'stable':
                 dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
             if dirty_state is True:
                 compare_ref = 'HEAD'
             else:
+                return {
+                    'ok': True,
+                    'message': f'{target} is already up to date on the {channel} channel.',
+                    'target': target,
+                    'up_to_date': True,
+                    'channel': channel,
+                }
+        elif same_commit:
+            # Dirty-only same-commit cleanup (origin/HEAD ref == HEAD),
+            # including Agent and experimental — the ONLY legitimate use is
+            # discarding the tracked local edits that armed the force-clean
+            # affordance. Revalidate that a dirty signal is still present
+            # immediately before discard, under the apply lock. A lapsed
+            # signal (the tracked edit resolved, only untracked files added
+            # since) must FAIL CLOSED rather than let ``git clean -fd``
+            # delete untracked work that was never part of the dirty probe;
+            # unknown (None) and clean both refuse without disabling genuine
+            # forward/divergent recovery (handled by the branch below).
+            if _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT) is not True:
                 return {
                     'ok': True,
                     'message': f'{target} is already up to date on the {channel} channel.',

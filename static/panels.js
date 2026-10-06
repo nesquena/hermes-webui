@@ -12440,6 +12440,10 @@ async function checkUpdatesNow(channelOverride){
   const spinner=$('checkUpdatesSpinner');
   const status=$('checkUpdatesStatus');
   if(!btn||!label) return;
+  // #7679 finding 2 (latest-owner): stamp this check with a fresh epoch so a
+  // slower, older check that resolves AFTER a newer one never overwrites the
+  // banner/status the newer check published (owner guard).
+  const epoch=(typeof _beginUpdateCheck==='function')?_beginUpdateCheck():null;
   // Disable button, show spinner
   btn.disabled=true;
   if(spinner) spinner.style.display='';
@@ -12455,6 +12459,10 @@ async function checkUpdatesNow(channelOverride){
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
     const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
+    // #7679 finding 2: an older check resolving after a newer one began must
+    // not publish — it would overwrite the newer banner/status and re-arm
+    // destructive state from stale payload. Drop it entirely.
+    if(epoch!==null && typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
@@ -12489,14 +12497,14 @@ async function checkUpdatesNow(channelOverride){
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       }
     }
   } catch(e){

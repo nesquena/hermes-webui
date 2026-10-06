@@ -2734,3 +2734,144 @@ def test_apply_update_pull_timeout_does_not_leak_remote_token(tmp_path):
     assert secret not in result['message']
     assert '<redacted>' in result['message']
 
+
+# ── #7679 finding 3: same-commit (branch == HEAD) force is dirty-only ──────
+
+
+def _force_fail_closed_harness(tmp_path, monkeypatch, dirty):
+    """Wire apply_force_update with a compare ref that resolves to HEAD."""
+    (tmp_path / '.git').mkdir(exist_ok=True)
+    git_calls = []
+    probe = MagicMock(return_value=dirty)
+
+    def fake_git(args, cwd, timeout=10):
+        git_calls.append(args)
+        if args[:2] == ['fetch', 'origin']:
+            return '', True
+        return '', True
+
+    monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', tmp_path)
+    monkeypatch.setattr(
+        updates, '_restart_blocker_snapshot',
+        lambda: {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0},
+    )
+    monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *a, **k: 'origin/master')
+    monkeypatch.setattr(updates, '_head_contains_ref', lambda *a, **k: True)
+    monkeypatch.setattr(updates, '_can_fast_forward_to', lambda *a, **k: True)
+    monkeypatch.setattr(updates, '_probe_dirty', probe)
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    restart = MagicMock()
+    monkeypatch.setattr(updates, '_schedule_restart', restart)
+    return git_calls, restart, probe
+
+
+def test_force_same_commit_clean_tracked_fails_closed_does_not_delete_untracked(
+    tmp_path, monkeypatch,
+):
+    """#7679 finding 3 — a branch ref equal to HEAD is dirty-only cleanup, not
+    a forward move. When the tracked tree is no longer dirty (the earlier
+    dirty signal lapsed and only untracked files were added since), the force
+    discard must FAIL CLOSED: ``git clean -fd`` must not run, so the untracked
+    work is preserved and no reset is issued."""
+    (tmp_path / '.git').mkdir()
+    tracked = tmp_path / 'tracked.txt'
+    tracked.write_text('tracked content\n', encoding='utf-8')
+    sentinel = tmp_path / 'untracked-sentinel.txt'
+    sentinel.write_text('do not delete\n', encoding='utf-8')
+
+    git_calls, restart, probe = _force_fail_closed_harness(tmp_path, monkeypatch, dirty=False)
+
+    with patch.dict(updates._update_cache, {'checked_at': 1234.0}, clear=False):
+        result = updates.apply_force_update('webui', channel='experimental')
+        assert updates._update_cache['checked_at'] == 1234.0
+
+    assert result['up_to_date'] is True and result['ok'] is True
+    # The dirty-only revalidate ran (dirty probe was consulted)...
+    assert probe.called
+    # ...and no destructive git command fired: reset/clean/checkout absent.
+    destructive = [c for c in git_calls if c[:1] in (['reset'], ['clean'], ['checkout'])]
+    assert destructive == [], f'destructive git must NOT run on clean same-commit: {git_calls!r}'
+    assert sentinel.read_text(encoding='utf-8') == 'do not delete\n', 'untracked sentinel must survive'
+
+
+def test_force_same_commit_dirty_proceeds_to_clean(tmp_path, monkeypatch):
+    """The same-commit force-clean IS still available when the tracked tree is
+    genuinely dirty at discard time — the dirty-only recovery is preserved, not
+    disabled."""
+    git_calls, restart, _ = _force_fail_closed_harness(tmp_path, monkeypatch, dirty=True)
+
+    result = updates.apply_force_update('webui', channel='experimental')
+
+    reset_refs = [c[2] for c in git_calls if c[:2] == ['reset', '--hard']]
+    assert result['ok'] is True
+    assert result['restart_scheduled'] is True
+    assert reset_refs == ['origin/master'], f'reset must target the equal commit: {reset_refs!r}'
+    restart.assert_called_once_with()
+
+
+def test_force_same_commit_fails_closed_for_agent_and_stable(tmp_path, monkeypatch):
+    """The dirty-only gate must also cover the Agent target (channel is forced
+    to stable server-side but the branch ref equals HEAD there too)."""
+    (tmp_path / '.git').mkdir()
+    for target, channel in (('agent', 'stable'), ('webui', 'stable')):
+        probe = MagicMock(return_value=False)
+        monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(updates, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(
+            updates, '_restart_blocker_snapshot',
+            lambda: {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0},
+        )
+        monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *a, **k: 'origin/master')
+        monkeypatch.setattr(updates, '_head_contains_ref', lambda *a, **k: True)
+        monkeypatch.setattr(updates, '_can_fast_forward_to', lambda *a, **k: True)
+        monkeypatch.setattr(updates, '_probe_dirty', probe)
+        monkeypatch.setattr(updates, '_run_git', lambda *a, **k: ('', True))
+        restart = MagicMock()
+        monkeypatch.setattr(updates, '_schedule_restart', restart)
+
+        result = updates.apply_force_update(target, channel=channel)
+        assert result['up_to_date'] is True, f'{target}/{channel} must fail closed: {result!r}'
+        assert probe.called
+        restart.assert_not_called()
+
+
+def test_force_forward_recovery_does_not_require_dirty(tmp_path, monkeypatch):
+    """Distinguish actual forward/divergent recovery from same-commit cleanup:
+    a ref that is NOT an ancestor of HEAD (a descendant or divergent commit)
+    must keep its destructive force behavior WITHOUT requiring a dirty tree, so
+    legitimate conflict/diverged recovery is never disabled by the finding-3
+    gate."""
+    (tmp_path / '.git').mkdir()
+    git_calls = []
+
+    def fake_git(args, cwd, timeout=10):
+        git_calls.append(args)
+        if args[:1] in (['fetch'], ['checkout'], ['clean'], ['reset']):
+            return '', True
+        return '', True
+
+    monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', tmp_path)
+    monkeypatch.setattr(
+        updates, '_restart_blocker_snapshot',
+        lambda: {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0},
+    )
+    # forward/divergent: ref is NOT an ancestor of HEAD.
+    monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *a, **k: 'origin/next')
+    monkeypatch.setattr(updates, '_head_contains_ref', lambda *a, **k: False)
+    monkeypatch.setattr(updates, '_can_fast_forward_to', lambda *a, **k: True)
+    probe = MagicMock(return_value=False)
+    monkeypatch.setattr(updates, '_probe_dirty', probe)
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    restart = MagicMock()
+    monkeypatch.setattr(updates, '_schedule_restart', restart)
+
+    result = updates.apply_force_update('webui', channel='stable')
+
+    assert result['ok'] is True
+    assert result['restart_scheduled'] is True
+    reset_refs = [c[2] for c in git_calls if c[:2] == ['reset', '--hard']]
+    assert reset_refs == ['origin/next']
+    probe.assert_not_called()  # forward recovery must NOT hit the dirty gate
+

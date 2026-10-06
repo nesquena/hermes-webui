@@ -753,6 +753,10 @@ class TestApplyForceUpdate:
                 return '', True
             if args[:2] == ['rev-parse', '--abbrev-ref']:
                 return 'origin/master', True
+            if args == ['diff', '--quiet', 'HEAD', '--']:
+                # Dirty working tree — required proof for a same-commit
+                # (origin == HEAD) force-clean (#7679 finding 3).
+                return 'git exited with status 1', False
             if args[0] == 'checkout':
                 return '', True
             if args[0] == 'reset':
@@ -791,6 +795,10 @@ class TestApplyForceUpdate:
                 return '', True
             if args[:2] == ['rev-parse', '--abbrev-ref']:
                 return 'origin/master', True
+            if args == ['diff', '--quiet', 'HEAD', '--']:
+                # Dirty working tree — required proof for a same-commit
+                # (origin == HEAD) force-clean (#7679 finding 3).
+                return 'git exited with status 1', False
             if args[0] == 'checkout':
                 return '', True
             if args[0] == 'clean':
@@ -1512,6 +1520,10 @@ class TestAgentUpdateRequiresGatewayRestart:
                 return '', True
             if args[:2] == ['rev-parse', '--abbrev-ref']:
                 return 'origin/master', True
+            if args == ['diff', '--quiet', 'HEAD', '--']:
+                # Dirty working tree — required proof for a same-commit
+                # (origin == HEAD) force-clean (#7679 finding 3).
+                return 'git exited with status 1', False
             if args[0] == 'checkout':
                 return '', True
             if args[0] == 'reset':
@@ -1540,6 +1552,10 @@ class TestAgentUpdateRequiresGatewayRestart:
                 return '', True
             if args[:2] == ['rev-parse', '--abbrev-ref']:
                 return 'origin/master', True
+            if args == ['diff', '--quiet', 'HEAD', '--']:
+                # Dirty working tree — required proof for a same-commit
+                # (origin == HEAD) force-clean (#7679 finding 3).
+                return 'git exited with status 1', False
             if args[0] == 'checkout':
                 return '', True
             if args[0] == 'reset':
@@ -2735,7 +2751,7 @@ class TestUpdateCompareSource:
 
     def test_update_banner_clears_stale_links_when_no_updates_remain(self):
         src = read('static/ui.js')
-        start = src.find('function _showUpdateBanner(data,recoveryGenerationAtCheck=null)')
+        start = src.find('function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null)')
         assert start != -1, "_showUpdateBanner not found"
         fn = src[start:src.find('function dismissUpdate()', start)]
         empty_idx = fn.find('if(!parts.length)')
@@ -2749,7 +2765,7 @@ class TestUpdateCompareSource:
         up_to_date_idx = src.find("settings_up_to_date")
         assert up_to_date_idx != -1, "manual update up-to-date branch not found"
         block = src[up_to_date_idx:up_to_date_idx + 300]
-        assert "_showUpdateBanner(data,_recoveryGenerationAtCheck)" in block
+        assert "_showUpdateBanner(data,epoch,_recoveryGenerationAtCheck)" in block
 
 
 class TestWhatsNewSummaryToggle:
