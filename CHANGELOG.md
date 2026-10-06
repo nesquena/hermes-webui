@@ -114,6 +114,12 @@
 
 ### Fixed
 
+- **A dead model endpoint no longer hides your other custom providers from the model picker.** The cold model
+  catalog shares its time budget fairly across custom-provider probes: an unreachable endpoint can't use up the whole
+  window, and a healthy slow gateway appears on the first picker load whatever its position in the configuration.
+  Healthy results are cached for the next load, and a probe that ran out of time is retried rather than remembered as
+  unreachable. Thanks @HarukiTakehata. (#7506 by @HarukiTakehata, refs #7481)
+
 - **Docker installs on the Experimental channel now get the update notice.** Docker images have no `.git`, so their
   update check falls back to comparing the baked version with published release tags, and that fallback only knew
   stable `v*` tags: an `:experimental` image never saw a newer `exp-v*` release. The check is now channel-aware: it
