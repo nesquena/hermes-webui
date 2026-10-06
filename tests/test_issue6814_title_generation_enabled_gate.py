@@ -17,6 +17,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _standalone_title_store(monkeypatch):
+    # These routing tests model standalone WebUI; canonical SQLite authority is
+    # exercised with real isolated SessionDBs in test_session_title_authority.
+    monkeypatch.setattr('api.state_sync._get_state_db', lambda **kwargs: None)
+
 from tests._aux_client_helpers import auxiliary_client_modules, patch_tg_config
 
 

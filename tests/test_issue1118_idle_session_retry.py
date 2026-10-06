@@ -50,12 +50,14 @@ class TestApiRetryOnNetworkError:
             "api() must limit to 3 attempts max (attempt < 2)"
 
     def test_api_preserves_401_redirect(self):
-        """api() must still redirect to login on 401 without escaping subpath mounts."""
+        """api() must still recover on 401 without rewriting the current deep link."""
         src = _src()
         assert "res.status===401" in src, \
             "api() must still check for 401 status"
-        assert "login?next=" in src, \
-            "api() must still redirect to login on 401"
+        assert "_redirectIfUnauth(res)" in src, \
+            "api() must delegate 401 recovery to the shared top-level navigator"
+        assert "window.location.reload()" in src, \
+            "api() must retain a top-level reload fallback"
         assert "/login?next=" not in src, \
             "api() must not escape subpath mounts by redirecting to root /login"
 

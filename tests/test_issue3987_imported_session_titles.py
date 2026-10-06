@@ -90,7 +90,7 @@ def test_import_cli_queue_helper_generates_title_once_for_placeholder_session(mo
     monkeypatch.setattr(
         routes,
         "_persist_generated_session_title",
-        lambda session, title, *, event_reason, require_default_title=False: persisted.append(
+        lambda session, title, *, event_reason, require_default_title=False, **kwargs: persisted.append(
             (session.session_id, title, event_reason, require_default_title)
         ),
     )
@@ -135,7 +135,7 @@ def test_import_cli_queue_helper_skips_sessions_that_already_have_real_titles(mo
     monkeypatch.setattr(
         routes,
         "_persist_generated_session_title",
-        lambda session, title, *, event_reason, require_default_title=False: persisted.append(
+        lambda session, title, *, event_reason, require_default_title=False, **kwargs: persisted.append(
             (session.session_id, title, event_reason, require_default_title)
         ),
     )

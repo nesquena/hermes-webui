@@ -16,6 +16,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _standalone_title_store(monkeypatch):
+    # These routing tests model standalone WebUI; canonical SQLite authority is
+    # exercised with real isolated SessionDBs in test_session_title_authority.
+    monkeypatch.setattr('api.state_sync._get_state_db', lambda **kwargs: None)
+
 # Ensure the project root is on sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -321,13 +328,14 @@ class TestRunBackgroundTitleRefresh:
         assert len(title_events) == 1
         assert title_events[0][1]['title'] == 'New Refreshed Title'
 
-    def test_exceptions_are_silently_swallowed(self):
+    def test_exceptions_report_skipped_status_without_propagating(self):
         """Any unexpected error inside must not propagate — it's a background daemon."""
         put, events = self._make_put_event()
         with patch('api.streaming.get_session', side_effect=RuntimeError('oops')):
-            # Should not raise
+            # Should not raise, but must report the failure rather than success.
             _run_background_title_refresh('sid', 'u', 'a', 'title', put)
-        assert events == []
+        assert events == [('title_status', {'session_id': 'sid', 'status': 'refresh_skipped',
+                                           'reason': 'title_persistence_error'})]
 
 
 # ---------------------------------------------------------------------------
