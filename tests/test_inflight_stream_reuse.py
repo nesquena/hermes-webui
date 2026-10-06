@@ -856,7 +856,7 @@ def test_load_session_rebuilds_live_tail_before_snapshot_fallback():
     body = _function_body(SESSIONS_JS, "loadSession")
     ensure_pos = body.find("_ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
     inflight_pos = body.find("const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
-    prepare_pos = body.find("_prepareRunningLiveTail(S.messages,inflightMessages);")
+    prepare_pos = body.find("_prepareRunningLiveTail(S.messages,inflightMessages,S.session);")
     drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages);")
     merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);")
     restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
@@ -2057,7 +2057,7 @@ def test_load_session_keeps_completed_assistant_when_live_tail_not_prepared():
     """
     src = SESSIONS_JS
     # The recovery path must call _prepareRunningLiveTail and capture its result
-    assert "_prepareRunningLiveTail(S.messages,inflightMessages)" in src
+    assert "_prepareRunningLiveTail(S.messages,inflightMessages,S.session)" in src
     # The drop must be conditional on the prepared live tail
     drop_call = "S.messages=_dropCurrentTurnAssistantMessages(S.messages);"
     assert drop_call in src
