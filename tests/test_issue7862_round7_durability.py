@@ -40,10 +40,42 @@ PROMPT = "keep refining the release checklist"
 
 
 @pytest.fixture
-def clean_registry():
-    """Isolate the registry between cases: memory, file, tombstones, receipts."""
+def clean_registry(monkeypatch):
+    """Isolate the registry between cases: memory, file, tombstones, receipts.
+
+    Also stubs ``api.goals.GoalManager``: CI installs no hermes-agent, so the
+    native import fails there and ``GoalManager`` is ``None`` — which makes
+    ``goal_command_payload`` bail out at ``_manager()`` with
+    ``error="unavailable"`` before it ever reaches the clear/retire path these
+    cases exercise. The module attribute is exported precisely so tests can
+    replace it, so stub it with the same shape the real one exposes.
+    """
     from api import goal_continuation_store as store
+    from api import goals as goals_module
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+    class _StubGoalManager:
+        """Minimal stand-in: only what the clear path touches."""
+
+        def __init__(self, *args, **kwargs):
+            self._state = None
+
+        def has_goal(self):
+            return False
+
+        def pause(self, *args, **kwargs):
+            return None
+
+        def resume(self, *args, **kwargs):
+            return None
+
+        def clear(self, *args, **kwargs):
+            return None
+
+        def state(self, *args, **kwargs):
+            return self._state
+
+    monkeypatch.setattr(goals_module, "GoalManager", _StubGoalManager)
 
     with store._LOCK:
         PENDING_GOAL_CONTINUATION.clear()
