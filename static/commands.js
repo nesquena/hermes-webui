@@ -2313,12 +2313,30 @@ async function getBundleCommandMetadata(name){
   const bundles=await loadBundleCommands();
   return bundles.find(bundle=>String(bundle&&bundle.name||'').toLowerCase()===needle)||null;
 }
+// The composer text the user last closed the list on, by picking a command or pressing
+// Escape. A refresh that was not caused by typing (a slash-command loader landing late,
+// or a lookup still in flight) must not re-open the list for that same text; any edit
+// clears it. Without this, a failing /api/skills (agent-free server) is retried on every
+// keystroke and its late refresh re-opened the list after `/new` was taken, so the next
+// Enter picked again instead of sending (#8050). Closing because nothing matched is not
+// a dismissal: a loader that lands later may still have matches to show.
+let _slashDismissedText=null;
+function markSlashDropdownDismissed(){
+  const ta=$('msg');
+  _slashDismissedText=ta?String(ta.value||''):null;
+}
+function clearSlashDropdownDismissed(){ _slashDismissedText=null; }
+function slashDropdownDismissedFor(text){
+  return _slashDismissedText!==null&&_slashDismissedText===String(text||'');
+}
 function refreshSlashCommandDropdown(){
   const ta=$('msg');if(!ta)return;
   const text=ta.value||'';
   if(text.indexOf('\n')!==-1||_activeSlashCommandOffset(text)<0){hideCmdDropdown();return;}
+  if(slashDropdownDismissedFor(text)) return;
   getSlashAutocompleteMatches(text).then(matches=>{
     if(($('msg').value||'')!==text) return;
+    if(slashDropdownDismissedFor(text)) return;
     if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
   });
 }
@@ -2401,6 +2419,7 @@ function showCmdDropdown(matches){
         });
       }else{
         hideCmdDropdown();
+        markSlashDropdownDismissed();
       }
     };
     dd.appendChild(el);
@@ -2437,6 +2456,10 @@ function selectCmdDropdownItem(){
     items[_cmdSelectedIdx].onmousedown({preventDefault:()=>{}});
   } else if(items.length===1){
     items[0].onmousedown({preventDefault:()=>{}});
+  } else {
+    hideCmdDropdown();
+    markSlashDropdownDismissed();
+    return;
   }
   hideCmdDropdown();
 }

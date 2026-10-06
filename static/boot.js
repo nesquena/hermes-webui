@@ -2381,11 +2381,15 @@ $('msg').addEventListener('input',()=>{
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
+  // The user edited the text, so an earlier pick/Escape no longer holds the list closed (#8050).
+  if(typeof clearSlashDropdownDismissed==='function') clearSlashDropdownDismissed();
   const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;
   if(_slashIdx>=0&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
       getSlashAutocompleteMatches(text).then(matches=>{
         if(($('msg').value||'')!==text) return;
+        // A pick or Escape that landed while this lookup was in flight wins (#8050).
+        if(typeof slashDropdownDismissedFor==='function'&&slashDropdownDismissedFor(text)) return;
         if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
       });
     }else{
@@ -2491,7 +2495,7 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='ArrowUp'){e.preventDefault();navigateCmdDropdown(-1);return;}
     if(e.key==='ArrowDown'){e.preventDefault();navigateCmdDropdown(1);return;}
     if(e.key==='Tab'){e.preventDefault();selectCmdDropdownItem();return;}
-    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();return;}
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();if(typeof markSlashDropdownDismissed==='function')markSlashDropdownDismissed();return;}
     if(e.key==='Enter'&&!e.shiftKey){
       if(_isImeEnter(e)){return;}
       if(window._sendKey==='shift+enter'){
