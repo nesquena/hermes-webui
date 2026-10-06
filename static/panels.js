@@ -112,6 +112,14 @@ function syncAppTitlebar() {
       inp.type = 'text';
       inp.className = 'app-titlebar-rename-input';
       inp.value = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
+      // #7542: this is a chat-title editor, not a credentials field.
+      // Chrome and password-manager extensions (1Password, LastPass,
+      // Bitwarden, Dashlane) mis-classify it as a login form because
+      // it accepts arbitrary user input and is rendered next to the
+      // chat UI. Disable autofill / form-fill explicitly so the
+      // browser does not surface the "save password" dialog after
+      // the user renames a conversation.
+      _markNonCredentialInput(inp);
 
       // Prevent click/dblclick on the input from bubbling — we don't want
       // panel switches, session switches, or any other handler firing.
