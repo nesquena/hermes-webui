@@ -84,6 +84,13 @@ class _ComposedRun:
             self._mobile = page.evaluate("(mode) => window.__composedChecks(mode)", "mobile")
         return self._mobile
 
+    def fresh_page(self):
+        """A brand-new page (own context) for a scenario that must not see state
+        a sibling test left behind — a leaked dialog or an in-flight gesture on
+        the module-wide desktop page. Used by the state-heavy pinch test, which
+        needs a freshly fitted image to pinch from."""
+        return _load_page(self._browser, DESKTOP_VIEWPORT)
+
 
 def _load_page(browser, viewport):
     context = browser.new_context(
@@ -550,7 +557,11 @@ class TestComposedTrustedInput:
         ignored and the pinched zoom survives (maintainer review of #6896,
         2026-10-06).
         """
-        page = composed.desktop_page
+        # A fresh page: the scenario needs a freshly fitted image to pinch from,
+        # and the module-wide desktop page is shared with sibling tests — a
+        # leaked dialog or a lingering gesture there would leave the pinch on
+        # the wrong baseline.
+        page = composed.fresh_page()
         page.evaluate(
             """([wide, portrait]) => {
                 const prev = document.querySelector('.img-lightbox');
@@ -572,7 +583,6 @@ class TestComposedTrustedInput:
         )
         for _ in range(3):
             page.keyboard.press("Equal")  # three real '=' presses
-        zoomed = page.evaluate("() => document.querySelector('.img-lightbox')._zoom.scale")
         data = page.evaluate(_LB_RECTS_JS)
         assert data is not None, "fixture: the lightbox must be open"
         vp = data["viewport"]
@@ -582,9 +592,18 @@ class TestComposedTrustedInput:
         try:
             _cdp_touch(session, "touchStart", [(cx - 50, cy), (cx + 50, cy)])
             _cdp_touch(session, "touchMove", [(cx - 60, cy), (cx + 60, cy)])
-            assert page.evaluate(
-                "() => document.querySelector('.img-lightbox')._zoom.pinching"
-            ) is True, "fixture: two real contacts must arm the pinch"
+            armed = page.evaluate(
+                "() => { const z = document.querySelector('.img-lightbox')._zoom; "
+                "return { pinching: z.pinching, scale: z.scale, fitScale: z.fitScale }; }"
+            )
+            # Only the production two-contact touch handlers can raise the scale,
+            # so this also proves the CDP contacts really armed the pinch.
+            assert armed["pinching"] is True, "fixture: two real contacts must arm the pinch"
+            assert armed["scale"] > armed["fitScale"], (
+                "fixture: the two real contacts must zoom the image in: "
+                f"{armed['fitScale']} -> {armed['scale']}"
+            )
+            pinched = armed["scale"]
             page.keyboard.press("ArrowRight")
             page.wait_for_function(
                 "() => { const lb = document.querySelector('.img-lightbox'); "
@@ -601,8 +620,9 @@ class TestComposedTrustedInput:
             assert before["pinching"] is False, (
                 "changing the image must end the in-flight pinch"
             )
-            assert before["scale"] >= zoomed - 1e-6, (
-                f"the navigation must not drop the pinched zoom: {zoomed} -> {before['scale']}"
+            assert abs(before["scale"] - pinched) < 1e-6, (
+                "the navigation must keep the pinched zoom: "
+                f"{pinched} -> {before['scale']}"
             )
             assert before["scale"] > before["fitScale"], (
                 "fixture: the pinched-in zoom must survive the navigation"
