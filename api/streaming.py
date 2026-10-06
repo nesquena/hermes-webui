@@ -4332,6 +4332,136 @@ def _split_thinking_from_content(raw_content, existing_reasoning=''):
     )
 
 
+def _turn_step_tool_call_ids(messages, prev_asst, started_ids):
+    """Map this turn's assistant step positions to their tool call IDs, in order.
+
+    ``prev_asst`` assistant messages belong to prior turns and are skipped.
+    ``started_ids`` lists every live tool start in order; an ID repeats when two
+    steps reuse it (agents derive IDs deterministically when providers omit them).
+
+    IDs come from the step's ``tool_calls``, else its following tool results.
+    ID-less results are bound by aligning every result slot of the turn with
+    the live starts in order; only when the counts match and each explicit ID
+    sits at its aligned start. Otherwise they stay unbound: misattribution is
+    worse than loss.
+    """
+    step_ids, slots = {}, []
+    positions = [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get('role') == 'assistant']
+    for pos in positions[prev_asst:]:
+        msg = messages[pos]
+        ids = [tc.get('id') for tc in msg.get('tool_calls') or [] if isinstance(tc, dict) and tc.get('id')]
+        slots.extend((pos, i) for i in ids)
+        if not ids:
+            for m in messages[pos + 1:]:
+                if not (isinstance(m, dict) and m.get('role') == 'tool'):
+                    break
+                slots.append((pos, m.get('tool_call_id') or None))
+                if m.get('tool_call_id'):
+                    ids.append(m['tool_call_id'])
+        step_ids[pos] = ids
+    started = list(started_ids)
+    if (any(i is None for _, i in slots) and len(slots) == len(started)
+            and all(i is None or i == s for (_, i), s in zip(slots, started, strict=True))):
+        for (pos, call_id), start_id in zip(slots, started, strict=True):
+            if call_id is None:
+                step_ids[pos].append(start_id)
+    return step_ids
+
+
+def _stream_reasoning_owner(msg, is_last, positional_idx, tool_call_segments, open_segment,
+                            interim_segments, call_ids):
+    """Return the stream segment index this assistant step owns, or None.
+
+    ``interim_segments`` is consumed in order: a step whose content holds an
+    interim message's visible text takes the segment bound to it (earlier
+    unmatched interims are dropped). ``tool_call_segments`` maps an ID to its
+    per-start segments; each step consumes the oldest one, so a repeated ID
+    resolves in step order.
+    """
+    bound = [tool_call_segments[i].pop(0) for i in call_ids if tool_call_segments.get(i)]
+    content = msg.get('content')
+    interim = None
+    # Codex Responses keeps a tool round's commentary in codex_message_items, not content
+    from api.media_snapshots import codex_commentary_text
+    match_text = (content if isinstance(content, str) else '') + codex_commentary_text(msg)
+    compact = _compact_for_echo_compare(match_text) if match_text else ''
+    # Exact text first, then the longest contained one, so an omitted interim
+    # that is a prefix of this step's text cannot claim it.
+    hits = [i for i, (text, _) in enumerate(interim_segments) if compact and text and text in compact]
+    hit = max(hits, key=lambda i: (interim_segments[i][0] == compact, len(interim_segments[i][0]), -i),
+              default=None)
+    if hit is not None:
+        interim = interim_segments[hit][1]
+        del interim_segments[:hit + 1]
+    if is_last and not bound and open_segment is not None and positional_idx is None:
+        # The final step's own thinking beats a repeated-commentary hit. Not when a
+        # positional mapping exists (Agents without tool_start_callback): there the
+        # positional index decides, or a silent final step inherits an earlier step's thinking.
+        return open_segment
+    if bound or interim is not None:
+        # parallel calls: only the first-started call carries the segment; a
+        # tool step with commentary had it bound at its interim message
+        return next((idx for idx in bound if idx is not None), interim)
+    if positional_idx is not None:
+        return positional_idx  # caller passes it only when no boundary bindings exist
+    return open_segment if is_last else None
+
+
+def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
+                           tool_call_segments=None, open_segment=None, interim_segments=None,
+                           tool_start_order=None):
+    """Persist per-step reasoning on this turn's assistant messages in ``s.messages``.
+
+    Contract (docs/sse-streams.md, "Reasoning settlement"): non-empty agent
+    ``reasoning`` wins; otherwise the stream segment the step owns is used.
+    Ownership comes from ``tool_call_segments`` (tool_call_id -> segment index
+    per start of that ID, in start order), ``interim_segments`` ((compact visible text,
+    segment index) per interim message, bound when it is delivered) and
+    ``open_segment`` (the final step's segment), so a step that streamed no
+    thinking never inherits a neighbour's segment.
+    Inline ``<think>`` blocks are split out of content either way.
+    """
+    # #3587: use per-message segments so each of this turn's assistant messages
+    # gets its own trace; skip prior-turn messages (multi-turn off-by-N).
+    if not s.messages:
+        return
+    tool_call_segments = {k: list(v) for k, v in (tool_call_segments or {}).items()}
+    interim_segments = list(interim_segments or [])
+    _positional = not tool_call_segments and not interim_segments
+    _prev_asst = sum(
+        1 for m in (_previous_messages or [])
+        if isinstance(m, dict) and m.get('role') == 'assistant'
+    )
+    _total_asst = sum(1 for m in s.messages if isinstance(m, dict) and m.get('role') == 'assistant')
+    _asst_count = 0
+    _step_ids = _turn_step_tool_call_ids(s.messages, _prev_asst, list(tool_start_order or []))
+    _pos = -1
+    for _rm in s.messages:
+        _pos += 1
+        if not (isinstance(_rm, dict) and _rm.get('role') == 'assistant'):
+            continue
+        _turn_idx = _asst_count
+        _asst_count += 1
+        if _turn_idx < _prev_asst:
+            continue  # prior-turn message: never touch its reasoning
+        _owner = _stream_reasoning_owner(
+            _rm, _asst_count == _total_asst, (_turn_idx - _prev_asst) if _positional else None,
+            tool_call_segments, open_segment, interim_segments,
+            _step_ids[_pos],
+        )
+        _existing_reasoning = _rm.get('reasoning') or _reasoning_segments.get(_owner, '')
+        _content = _rm.get('content')
+        if isinstance(_content, str) and _content:
+            _new_content, _merged_reasoning = _split_thinking_from_content(
+                _content, _existing_reasoning
+            )
+            _rm['content'] = _new_content
+            if _merged_reasoning:
+                _rm['reasoning'] = _merged_reasoning
+        elif _existing_reasoning:
+            _rm['reasoning'] = _existing_reasoning
+
+
 def _strip_thinking_markup(text: str) -> str:
     """Remove common reasoning/thinking wrappers from model text."""
     if not text:
@@ -6913,6 +7043,48 @@ def _compact_session_image_parts_for_persistence(session) -> int:
     return changed
 
 
+def _is_non_replayable_history_row(msg) -> bool:
+    """Return True for an error marker or an empty partial: rows that are
+    never model-facing history.
+
+    One predicate for the legacy path (``_sanitize_messages_for_api``) and the
+    Gateway runs-API history builder, so both drop these two kinds of row
+    alike (#8034). It is not the whole of the legacy projection: the sanitizer
+    also drops reasoning-only assistant rows and ``_recovered`` user rows,
+    which the Gateway builder still sends.
+    """
+    if not isinstance(msg, dict):
+        return False
+    # Persisted error markers — never send them to the LLM as prior context.
+    if msg.get('_error'):
+        return True
+    # _partial markers with no visible content. Partial messages that carry
+    # actual text (e.g. "Python is a high-level…") are kept so the model can
+    # continue from the cut-off point (#893). But empty partials (reasoning-only
+    # or tool-only cancellations where thinking markup was stripped) have
+    # nothing for the model to continue from and cause API 400 errors on strict
+    # providers (empty assistant content).
+    if msg.get('_partial') and not str(msg.get('content') or '').strip():
+        return True
+    return False
+
+
+def _recovered_user_row_is_kept(prev_role, next_role) -> bool:
+    """Return True when a ``_recovered`` user row must stay in replayed history.
+
+    It stays only where it opens a turn that was answered: ``next_role`` (the
+    next surviving row's role) must be ``assistant``, and ``prev_role`` (the
+    previously kept row's role) must be ``assistant`` or absent. Between two
+    assistant turns dropping it would fuse them; as the first row of the history
+    it is the question its answer replies to (a first turn interrupted by a
+    restart is saved as ``[recovered prompt, journaled answer]``). Anywhere else
+    it is dropped: after a user turn it would sit beside it, and before a user
+    turn (or at the end) it is a stale prompt nobody answered (#4283). One rule
+    for the two legacy projections and the Gateway runs-API history builder (#8038).
+    """
+    return next_role == 'assistant' and prev_role in (None, 'assistant')
+
+
 def _sanitize_messages_for_api(
     messages,
     *,
@@ -6975,16 +7147,8 @@ def _sanitize_messages_for_api(
         # metadata, not provider-facing assistant turns.
         if _is_reasoning_only_assistant_message(msg):
             continue
-        # Skip persisted error markers — never send them to the LLM as prior context.
-        if msg.get('_error'):
-            continue
-        # Skip _partial markers with no visible content. Partial messages that
-        # carry actual text (e.g. "Python is a high-level…") are kept so the
-        # model can continue from the cut-off point (#893). But empty partials
-        # (reasoning-only or tool-only cancellations where thinking markup was
-        # stripped) have nothing for the model to continue from and cause
-        # API 400 errors on strict providers (empty assistant content).
-        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+        # Skip persisted error markers and empty _partial markers.
+        if _is_non_replayable_history_row(msg):
             continue
         # Note: _recovered user messages are NOT skipped here — they may need
         # to be retained to preserve role alternation when a kept assistant
@@ -7082,8 +7246,8 @@ def _sanitize_messages_for_api(
             for j in range(i + 1, len(filtered_clean)):
                 next_role = filtered_clean[j].get('role')
                 break
-            # Keep only if this recovered user actually separates two assistants.
-            if not (prev_role == 'assistant' and next_role == 'assistant'):
+            # Keep only if this recovered user opens an answered turn (see the helper).
+            if not _recovered_user_row_is_kept(prev_role, next_role):
                 continue  # drop — fusing the neighbours is clean, or it's a stale prompt
             # Keep but strip the temporary marker
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
@@ -7137,9 +7301,7 @@ def _api_safe_message_positions(messages):
             continue
         if _is_reasoning_only_assistant_message(msg):
             continue
-        if msg.get('_error'):
-            continue
-        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+        if _is_non_replayable_history_row(msg):
             continue
         # Note: _recovered user messages are NOT skipped here — deferred to
         # a final pass after orphaned tool_calls stripping (#4283).
@@ -7191,7 +7353,7 @@ def _api_safe_message_positions(messages):
     # Fourth pass: drop _recovered user messages unless removing one would fuse
     # two same-role neighbours — mirrors _sanitize_messages_for_api pass 4 (#4283).
     # Decide on the ACTUAL kept sequence: prev kept role (final_out[-1]) + next
-    # surviving role. Keep ONLY when it separates two assistants; otherwise drop.
+    # surviving role. Keep ONLY when it opens an answered turn (see the helper); otherwise drop.
     final_out = []
     for i, (idx, msg) in enumerate(filtered_out):
         if msg.get('_recovered') and msg.get('role') == 'user':
@@ -7200,7 +7362,7 @@ def _api_safe_message_positions(messages):
             for j in range(i + 1, len(filtered_out)):
                 next_role = filtered_out[j][1].get('role')
                 break
-            if not (prev_role == 'assistant' and next_role == 'assistant'):
+            if not _recovered_user_row_is_kept(prev_role, next_role):
                 continue
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
         final_out.append((idx, msg))
@@ -11572,6 +11734,15 @@ def _run_agent_streaming(
             _reasoning_buffer_index = _CompactEchoIndex()
             _current_reasoning_idx = 0
             _tool_boundary_advanced = False
+            # Segment ownership: tool_call_id -> segment streamed before each start
+            # of that ID (None = its step streamed no thinking; IDs can repeat
+            # across steps); interim -> (compact visible
+            # text, segment) per delivered interim message; unbound = the open
+            # step's segment.
+            _tool_call_reasoning_idx: dict = {}
+            _tool_start_order: list = []
+            _interim_reasoning_idx: list = []
+            _unbound_reasoning_idx = [None]
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
 
             # Throttle: emit metering events at most every 100 ms so the per-message
@@ -11733,6 +11904,7 @@ def _run_agent_streaming(
                 _reasoning_segments[_current_reasoning_idx] = (
                     _reasoning_segments.get(_current_reasoning_idx, '') + reasoning_delta
                 )
+                _unbound_reasoning_idx[0] = _current_reasoning_idx
                 # Keep the folded index in step with the segment text.
                 _reasoning_segment_indexes.setdefault(
                     _current_reasoning_idx, _CompactEchoIndex()
@@ -11779,6 +11951,12 @@ def _run_agent_streaming(
                 visible = str(text).strip()
                 if not visible:
                     return
+                # The interim message closes its step: bind the open segment to it
+                # so the next tool call cannot claim it (settlement matches by text).
+                # Agents without tool_start_callback keep positional settlement.
+                if 'tool_start_callback' in _agent_params:
+                    _interim_reasoning_idx.append((_compact_for_echo_compare(visible), _unbound_reasoning_idx[0]))
+                    _unbound_reasoning_idx[0] = None
                 reasoning_echo = _strip_reasoning_output_echo(visible)
                 already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
                 payload = {
@@ -11870,6 +12048,7 @@ def _run_agent_streaming(
                         _reasoning_segments[_current_reasoning_idx] = (
                             _reasoning_segments.get(_current_reasoning_idx, '') + reason_delta
                         )
+                        _unbound_reasoning_idx[0] = _current_reasoning_idx
                         _reasoning_segment_indexes.setdefault(
                             _current_reasoning_idx, _CompactEchoIndex()
                         ).append(reason_delta)
@@ -12016,6 +12195,10 @@ def _run_agent_streaming(
                     return
 
             def on_tool_start(tool_call_id, name, args):
+                if tool_call_id:
+                    _tool_call_reasoning_idx.setdefault(tool_call_id, []).append(_unbound_reasoning_idx[0])
+                    _tool_start_order.append(tool_call_id)
+                _unbound_reasoning_idx[0] = None
                 try:
                     _record_live_tool_start(tool_call_id, name, args)
                     if tool_call_id and tool_call_id not in _live_tool_event_start_ids:
@@ -13853,37 +14036,12 @@ def _run_agent_streaming(
                 # assistant content into m['reasoning'] (server-side twin of the JS
                 # _splitThinkFromContent). Inline-thinking providers (e.g. MiniMax-M3)
                 # otherwise leave the thinking trace in m['content'], bloating the
-                # persisted session file 30-50% and bypassing the thinking card. The
-                # #3587: use per-message segments so intermediate assistant turns
-                # (before tool calls) each receive their own reasoning trace rather
-                # than all reasoning being written only to the last assistant message.
-                # Scope the walk to this turn's newly-appended assistant messages
-                # to prevent cross-turn reasoning clobber (multi-turn off-by-N).
-                if s.messages:
-                    _prev_asst = sum(
-                        1 for m in (_previous_messages or [])
-                        if isinstance(m, dict) and m.get('role') == 'assistant'
-                    )
-                    _asst_count = 0
-                    for _rm in s.messages:
-                        if not (isinstance(_rm, dict) and _rm.get('role') == 'assistant'):
-                            continue
-                        _turn_idx = _asst_count
-                        _asst_count += 1
-                        if _turn_idx < _prev_asst:
-                            continue  # prior-turn message — never touch its reasoning
-                        _seg_reasoning = _reasoning_segments.get(_turn_idx - _prev_asst, '')
-                        _existing_reasoning = _seg_reasoning or _rm.get('reasoning') or ''
-                        _content = _rm.get('content')
-                        if isinstance(_content, str) and _content:
-                            _new_content, _merged_reasoning = _split_thinking_from_content(
-                                _content, _existing_reasoning
-                            )
-                            _rm['content'] = _new_content
-                            if _merged_reasoning:
-                                _rm['reasoning'] = _merged_reasoning
-                        elif _existing_reasoning:
-                            _rm['reasoning'] = _existing_reasoning
+                # persisted session file 30-50% and bypassing the thinking card.
+                _settle_turn_reasoning(
+                    s, _previous_messages, _reasoning_segments,
+                    _tool_call_reasoning_idx, _unbound_reasoning_idx[0], _interim_reasoning_idx,
+                    _tool_start_order,
+                )
                 try:
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
                 except Exception:

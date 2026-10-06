@@ -5,6 +5,15 @@
 
 ### Added
 
+- **Extensions can add a small action to each message without touching transcript DOM.** A new
+  `ext.messages.registerAction({ id, label, icon, roles, getPressed, onInvoke })` on the boot-trusted extension handle
+  lets an extension put a Core-rendered `pin`, `bookmark` or `star` button after the built-in actions on settled user
+  and assistant messages, with an `aria-pressed` toggle state, a pending state while the action runs, and a page-wide
+  limit of two actions. Core keeps the row identity, pagination offset, cache restore, virtualization, disable and
+  uninstall in step, and re-resolves the message at click time so a stale button fails closed. Without an extension
+  using it nothing changes on screen, and the transcript render skips the slot work entirely. Documented in
+  `docs/EXTENSIONS.md`. Thanks @franksong2702. (#7245 by @franksong2702)
+
 - **Per-job "Tasks badge" toggle for scheduled jobs.** A new checkbox in the cron edit form (default on) controls
   whether that job's completions count toward the Tasks unread badge and new-run marker, so a high-frequency
   silent job (a sync or heartbeat) no longer keeps the badge lit. It mirrors the existing per-job "Completion
@@ -32,6 +41,12 @@
   `/api/sessions` + `/api/projects` read in front of the cursor, which held the composer for seconds on a long
   session list. The button, the shortcut, `/new`, and the no-session branches of `/terminal` and `/goal` now rely on
   `newSession()`'s refresh. (#7992, #7998 by @ybai08; #7936, #7996)
+- **The first message from an empty composer is sent without waiting for a second session-list read.** With no
+  conversation open, `send()` created the session and then awaited its own `renderSessionList()` before
+  `POST /api/chat/start`, so on a long session list the first message sat behind a full `/api/sessions` +
+  `/api/projects` read. All nine no-session branches of `send()` (the ordinary send path and the slash commands) now
+  rely on `newSession()`'s forced refresh; the new row still appears, becomes active and shows it is streaming.
+  (#8013 by @ybai08, fixes #8004)
 - **Switching profiles keeps the skill-count cache.** `switch_profile()` used to clear every profile's cached skill
   counts, so the next profile list re-parsed every profile's `SKILL.md` tree. Counts are keyed per profile directory,
   so the cache now survives a switch; the mtime probe and 300 s TTL still catch real changes, and the active-org
@@ -65,6 +80,14 @@
 
 ### Security
 
+- **Remote images in chat no longer load until you click them (zero-click exfiltration fix).** Any assistant-rendered
+  `![x](https://host/?d=…)` used to fetch the moment it rendered, which let a prompt-injected reply beacon chat data to
+  an outside server. The default CSP `img-src` no longer allows arbitrary `https:` images, and a non-allowlisted remote
+  image renders as an inert "🖼 Open image · host" chip that fetches nothing until clicked (the tooltip says why).
+  Operators can allow image origins with `HERMES_WEBUI_CSP_IMG_EXTRA`; the CSP header and the page read the same
+  validated list, and public share pages follow it too. Extension pages and injected extension scripts that load
+  remote images need their origins allowlisted the same way (see `docs/EXTENSIONS.md`). (#7962, fixes #7941)
+
 - **Public shares no longer 500 on large inline images, and never treat a `data:` URI as a file path.** A
   conversation containing a `MEDIA:data:image/…` token over about 4 KB failed share creation with a
   filename-too-long error, because the share builder tried to resolve the blob on disk. `data:` tokens now never touch
@@ -91,6 +114,65 @@
 
 ### Fixed
 
+- **Docker installs on the Experimental channel now get the update notice.** Docker images have no `.git`, so their
+  update check falls back to comparing the baked version with published release tags, and that fallback only knew
+  stable `v*` tags: an `:experimental` image never saw a newer `exp-v*` release. The check is now channel-aware: it
+  reads `exp-v*` tags for the Experimental channel (paginated, with a page cap; release candidates and suffixed tags are
+  ignored), also counts the experimental releases ahead of a stable image whose user picked Experimental, and the
+  notice shows `docker pull …:experimental` instead of `:latest`. In a mixed install the Agent's update recovery
+  buttons stay usable while the WebUI notice is shown. Thanks @pxxD1998. (#8040 by @pxxD1998)
+
+- **Gateway chats no longer replay reasoning-only replies or stale recovered prompts as history.** Following #8035,
+  the Gateway runs-API history now also leaves out an assistant reply that carried only reasoning (it went out as
+  empty assistant content) and a prompt WebUI restored after an interrupted turn, unless that prompt is the question
+  its answer replies to. Both backends now use one rule for restored prompts; it also keeps a first turn that was
+  interrupted by a restart together with its answer, which the in-process path used to drop. Thanks @ybai08.
+  (#8039 by @ybai08, fixes #8038)
+
+- **Pinning is limited per profile, not across all profiles.** Three pinned conversations in one profile used to use
+  up the pin limit for every other profile, so the first pin in a second profile failed. The pin limit now counts
+  only the pinned conversations owned by the target conversation's profile (root-profile aliases of `default` share
+  one allowance), a profile-listing failure no longer blocks a first pin when the limit can't be reached, and an
+  empty pinned placeholder can no longer be moved into another profile by a chat or `/goal` from that profile while
+  the pin is being admitted. Thanks @starship-s. (#7823 by @starship-s)
+
+- **Gateway chats no longer replay error notices or empty cut-off replies as conversation history.** With the
+  Gateway backend, the history sent to the agent for the next turn included the provider-error and cancel notices
+  shown in the transcript (as if the assistant had said them) and reasoning-only or tool-only partial replies as
+  empty assistant turns, which strict providers can reject. The Gateway path now drops exactly the rows the
+  in-process path already skips, through one shared check, so both backends send the same history for these rows.
+  Thanks @ybai08. (#8035 by @ybai08, fixes #8034)
+
+- **The sidebar resize handle keeps the drag with the pointer that started it.** A second pointer (a pen or a second mouse) pressing the handle mid-drag used to take over the resize, so the panel jumped to follow it and the original pointer's moves and release were ignored. The original pointer now owns the drag until it releases, and the stored group-collapse snapshot accepts only true/false values, so a malformed or hand-edited value can't keep a group collapsed or change the collapse map's prototype. Thanks @someaka. (#8028 by @someaka)
+
+- **Chat no longer reports a stale Agent runtime just because Git is slow.** Under load, one of the Agent revision
+  check's three Git reads could exceed its 2-second limit, so chat start failed with `agent_runtime_stale` even though
+  the Agent was current. The check now gets one 10-second budget across all three reads (each read is given only the
+  time remaining, and a read that finishes after the deadline is ignored), so a slow but working checkout passes
+  while a stale, unreadable or hung one still blocks chat. Thanks @matthewlush1. (#7920 by @matthewlush1)
+
+- **Thinking cards stay on the step that produced them after a reload.** With adaptive-thinking models in long
+  agentic turns, settlement let a drifted stream segment override the reasoning the Agent had already saved on each
+  step, so after a reload a trace could show up a step early, twice, or on a step that never thought (one real
+  session had 1,185 of 3,576 steps misattributed). The Agent's own `reasoning` on a step, including an explicit
+  none, now wins. When a runtime doesn't set it, each streamed segment is bound to the step that produced it (tool-call
+  starts and interim commentary, including Codex Responses commentary kept in `codex_message_items`), and Agents too old
+  to report tool starts keep positional settlement. (#7788 by @carlotestor)
+
+- **Colon-tagged Custom models route correctly when the default provider is Ollama, local or vLLM.** With
+  `model.provider: ollama` (or another alias of the custom endpoint) plus a `base_url`, picking a Custom-group model
+  whose id carries a tag such as `qwen3.8:27b` failed with "custom:qwen3.8 not configured": the tag's colon was read as
+  a provider separator. Such picks now keep the model id bare and route to the configured endpoint with its key, and a
+  named provider (including one literally called `custom-configured`) keeps its own endpoint and key.
+  (#7966 by @ybai08, fixes #7955)
+
+- **Sidebar and workspace-panel resizing no longer gets stuck, and date-group collapse survives bad saved state.**
+  Dragging a resize handle and then losing the window (a blur, a lost pointer, a release outside the page) could leave
+  the drag running so the panel kept following the cursor; the handles now use pointer capture with a fallback that
+  ends the drag on blur or cancel. A corrupted saved collapse state (for example a stored `null`, string or array)
+  left the conversation list empty with a page error or made the Today / Yesterday headers unclickable; it now falls
+  back to an empty state and repairs itself on the next click, and a collapse choice stays in effect for the tab even
+  when browser storage refuses the write. (#7968 by @someaka; addresses #7954, hardening toward #7953)
 - **A Gateway turn that spans a WebUI restart streams again after the tab reattaches.** #7785 reattached such
   runs, but the reopened tab showed only a spinner until the run ended, and only the final answer text was saved:
   the reattach worker polled `GET /v1/runs/{id}` and never subscribed to `/v1/runs/{id}/events`. It now restores

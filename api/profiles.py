@@ -405,6 +405,11 @@ _root_profile_name_cache_lock = threading.Lock()
 _root_profile_name_cache_loaded = False
 
 
+def _root_profile_names_snapshot() -> set[str] | None:
+    with _root_profile_name_cache_lock:
+        return {str(name) for name in _root_profile_name_cache} if _root_profile_name_cache_loaded else None
+
+
 def _invalidate_root_profile_cache() -> None:
     """Drop the memoized root-profile-name set.
 

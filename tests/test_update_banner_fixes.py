@@ -2291,6 +2291,12 @@ if (_healthResponseServerIdentity({{ server_started_at: null, uptime_seconds: nu
         assert 'btnForceUpdate' in fn or 'forceBtn' in fn, (
             "_showUpdateError must reference the force update button"
         )
+        assert 'forceBtn.disabled=false' in fn, (
+            "_showUpdateError must re-enable a force button hidden by a manual WebUI notice"
+        )
+        assert 'clearLockBtn.disabled=false' in fn, (
+            "_showUpdateError must re-enable a clear-lock recovery button"
+        )
 
     def test_error_displayed_persistently_not_just_toast(self):
         src = read('static/ui.js')
@@ -2394,6 +2400,19 @@ if(state.btnForceUpdate.disabled !== true) throw new Error('manual webui update 
 if(state.btnClearUpdateLock.style.display !== 'none') throw new Error('manual webui update must hide the clear lock button');
 if(state.btnClearUpdateLock.disabled !== true) throw new Error('manual webui update must disable the clear lock button');
 if(state.updateBanner.classList.added !== true) throw new Error('manual update must show the banner');
+
+state.btnForceUpdate.disabled = false;
+state.btnForceUpdate.style.display = 'inline-block';
+state.btnForceUpdate.dataset.target = 'agent';
+state.btnClearUpdateLock.disabled = false;
+state.btnClearUpdateLock.style.display = 'inline-block';
+state.btnClearUpdateLock.dataset.target = 'agent';
+_showUpdateBanner({{
+  webui: {{ no_git: true, manual_update: true, behind: 1, channel: 'experimental' }},
+  agent: {{ behind: 1 }},
+}});
+if(state.btnForceUpdate.style.display !== 'inline-block' || state.btnForceUpdate.disabled) throw new Error('manual WebUI notice must preserve Agent force recovery');
+if(state.btnClearUpdateLock.style.display !== 'inline-block' || state.btnClearUpdateLock.disabled) throw new Error('manual WebUI notice must preserve Agent lock recovery');
 """.strip()
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 

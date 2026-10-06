@@ -1440,7 +1440,7 @@ async function send(){
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();await renderSessionList();}
+      if(!S.session){await newSession();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, /yolo, or /stop while the agent is running and have
@@ -1518,7 +1518,7 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1536,7 +1536,7 @@ async function send(){
     }
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1582,7 +1582,7 @@ async function send(){
         : null;
       if(!_cmdLifecycleIsCurrent()) return;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
@@ -1765,7 +1765,7 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
@@ -1797,7 +1797,7 @@ async function send(){
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session){await newSession();await renderSessionList();}
+          if(!S.session){await newSession();}
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
@@ -1806,7 +1806,7 @@ async function send(){
       }
     }
   }
-  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session){await newSession();}
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
@@ -4737,7 +4737,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdImgSrcAllowed(v){
     const s=String(v||'');
     if(/^data:/i.test(s)) return typeof _isSafeDataImageUri==='function'&&_isSafeDataImageUri(s);
-    return _SMD_SAFE_IMG_URL_RE.test(s);
+    if(!_SMD_SAFE_IMG_URL_RE.test(s)) return false;
+    // #7941: a remote image outside the CSP img-src allowlist gets no src while
+    // streaming (nothing is fetched); the settled renderMd() pass then shows the
+    // inert click-to-open link.
+    return typeof _remoteImageAllowed!=='function'||_remoteImageAllowed(s);
   }
   function _smdLinkHref(raw){
     const href=String(raw||'');
