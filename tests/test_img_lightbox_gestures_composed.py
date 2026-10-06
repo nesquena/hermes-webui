@@ -32,6 +32,7 @@ Playwright at all skips them, which is the repository's standing convention
 for browser-backed tests.
 """
 
+import base64
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,15 @@ _BROWSER_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 
 DESKTOP_VIEWPORT = {"width": 1200, "height": 900}
 MOBILE_VIEWPORT = {"width": 390, "height": 844}
+
+
+def _svg(w: int, h: int) -> str:
+    """A solid-colour SVG data URL of the requested intrinsic size."""
+    markup = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
+        f'<rect width="100%" height="100%" fill="#3a7"/></svg>'
+    )
+    return "data:image/svg+xml;base64," + base64.b64encode(markup.encode()).decode()
 
 
 class _ComposedRun:
@@ -267,13 +277,40 @@ class TestComposedTrustedInput:
     def _is_open(page):
         return page.evaluate("() => document.querySelector('.img-lightbox') !== null")
 
+    # `_closeImgLightbox` writes the inline reverse animation the moment a
+    # dismissal starts but only removes the node 120ms later, so a presence
+    # sample taken before that deadline can never observe a close and the two
+    # "must survive" checks below went false-green (maintainer re-warmup of
+    # #6896, 2026-10-06: a route-only controlled mutation restoring the
+    # target-only dismissal arm still passed the 80ms presence assertion).
+    # Assert the transition itself — only the close path ever writes it — and
+    # then wait past the real removal deadline before sampling presence.
+    _CLOSE_DEADLINE_MS = 400
+
+    @staticmethod
+    def _close_initiated(page):
+        """True once the close transition has been started (or the node is gone)."""
+        return page.evaluate(
+            """() => {
+                const lb = document.querySelector('.img-lightbox');
+                if (!lb) return true;  // already removed => the close ran
+                const inline = lb.style.animation || '';
+                const direction = window.getComputedStyle(lb).animationDirection || '';
+                return /reverse/.test(inline) || /reverse/.test(direction);
+            }"""
+        )
+
     def test_trusted_click_on_image_pixels_keeps_the_lightbox_open(self, composed):
         page = composed.desktop_page
         data = self._open_from_thumbnail(page)
         assert data["imageHitsCanvas"] is True, "fixture: the image centre is off the canvas"
         img = data["image"]
         page.mouse.click(img["x"], img["y"])
-        page.wait_for_timeout(80)
+        page.wait_for_timeout(self._CLOSE_DEADLINE_MS)
+        assert not self._close_initiated(page), (
+            "a trusted mouse click on the rendered image started the close "
+            "transition (pointer capture retargets the click to the viewport)"
+        )
         assert self._is_open(page), (
             "a trusted mouse click on the rendered image dismissed the lightbox "
             "(pointer capture retargets the click to the viewport)"
@@ -286,7 +323,7 @@ class TestComposedTrustedInput:
         assert data["letterboxHitsCanvas"] is False, "fixture: the letterbox point is on the image"
         box = data["letterbox"]
         page.mouse.click(box["x"], box["y"])
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(self._CLOSE_DEADLINE_MS)
         assert not self._is_open(page), "a trusted click on the letterbox must still dismiss the lightbox"
 
     def test_trusted_drag_then_click_keeps_the_lightbox_open(self, composed):
@@ -297,7 +334,10 @@ class TestComposedTrustedInput:
         page.mouse.down()
         page.mouse.move(img["x"] + 60, img["y"] + 30, steps=6)
         page.mouse.up()  # the browser emits a real click after the drag
-        page.wait_for_timeout(80)
+        page.wait_for_timeout(self._CLOSE_DEADLINE_MS)
+        assert not self._close_initiated(page), (
+            "the post-drag click started the close transition"
+        )
         assert self._is_open(page), "the post-drag click must not dismiss the lightbox"
 
     def test_trusted_browser_zoom_shortcuts_are_not_hijacked(self, composed):
@@ -346,6 +386,84 @@ class TestComposedTrustedInput:
                 "() => { if (window.__gateKeyRec) document.removeEventListener('keydown', window.__gateKeyRec); }"
             )
 
+    def test_trusted_pan_across_navigation_does_not_teleport_the_new_image(self, composed):
+        """Real mouse-down -> navigation -> small move (maintainer re-warmup).
+
+        The pan in flight when the image changes belongs to the old image's
+        coordinate space. Re-applying its baseline to the freshly-centred new
+        image threw it ~83px up (2026-10-06 re-warmup of #6896). The image
+        change must cancel the gesture and keep the selected zoom.
+        """
+        page = composed.desktop_page
+        page.evaluate(
+            """([wide, portrait]) => {
+                const prev = document.querySelector('.img-lightbox');
+                if (prev) {
+                    try { window._closeImgLightbox(prev); } catch (_) {}
+                    if (prev.parentNode) prev.parentNode.removeChild(prev);
+                }
+                window._openImgLightboxWithNav(wide, 'wide', [
+                    { src: wide, alt: 'wide' },
+                    { src: portrait, alt: 'portrait' },
+                ], 0);
+            }""",
+            [_svg(1200, 300), _svg(300, 900)],
+        )
+        page.wait_for_function(
+            "() => { const lb = document.querySelector('.img-lightbox'); "
+            "return !!lb && !!lb._zoom && lb._zoom.boxW > 0; }",
+            timeout=15000,
+        )
+        for _ in range(3):
+            page.keyboard.press("Equal")  # three real '=' presses
+        zoomed = page.evaluate(
+            "() => document.querySelector('.img-lightbox')._zoom.scale"
+        )
+        data = page.evaluate(_LB_RECTS_JS)
+        assert data is not None, "fixture: the lightbox must be open"
+        img = data["image"]
+        # Real press on the image, 1px move, button still held.
+        page.mouse.move(img["x"], img["y"])
+        page.mouse.down()
+        page.mouse.move(img["x"], img["y"] + 1)
+        # Real ArrowRight while the button is still down, then wait for the
+        # next image to load and re-centre.
+        page.keyboard.press("ArrowRight")
+        page.wait_for_function(
+            "() => { const lb = document.querySelector('.img-lightbox'); "
+            "const z = lb && lb._zoom; "
+            "return !!z && lb._navIndex === 1 && z.pendingNav === false && z.boxW > 0; }",
+            timeout=15000,
+        )
+        page.wait_for_timeout(60)  # let the re-centre settle
+        before = page.evaluate(
+            "() => { const z = document.querySelector('.img-lightbox')._zoom; "
+            "return { x: z.x, y: z.y, scale: z.scale, dragging: z.dragging }; }"
+        )
+        assert before["dragging"] is False, (
+            "changing the image must cancel the in-flight pan"
+        )
+        # Small move while still held: the new image must not jump.
+        page.mouse.move(img["x"], img["y"] + 6, steps=2)
+        page.wait_for_timeout(60)
+        after = page.evaluate(
+            "() => { const z = document.querySelector('.img-lightbox')._zoom; "
+            "return { x: z.x, y: z.y, scale: z.scale }; }"
+        )
+        page.mouse.up()
+        assert abs(after["y"] - before["y"]) <= 2, (
+            "a move after navigation must not teleport the new image: "
+            f"y {before['y']} -> {after['y']}"
+        )
+        assert abs(after["x"] - before["x"]) <= 2, (
+            "a move after navigation must not teleport the new image: "
+            f"x {before['x']} -> {after['x']}"
+        )
+        assert abs(after["scale"] - zoomed) < 1e-6, (
+            f"the selected zoom must survive the navigation: {zoomed} -> {after['scale']}"
+        )
+        assert self._is_open(page), "navigating during a pan must not dismiss the lightbox"
+
 
 class TestComposedGate20261006:
     """The in-page synthetic halves of the same two gate blockers."""
@@ -358,6 +476,13 @@ class TestComposedGate20261006:
 
     def test_browser_shortcut_modifiers_are_left_alone(self, composed):
         _check(composed.desktop, "keyboard_modifier_shortcuts_untouched")
+
+
+class TestComposedReworkup20261006:
+    """The in-page synthetic half of the 2026-10-06 re-warmup finding."""
+
+    def test_navigation_during_a_pan_drops_the_stale_baseline(self, composed):
+        _check(composed.desktop, "navigation_during_pan_drops_the_stale_baseline")
 
 
 class TestComposedI18n:

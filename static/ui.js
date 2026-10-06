@@ -2741,6 +2741,11 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
       state.fitScale = _imgFitScale();
       state.scale = Math.max(_imgMinScale(), Math.min(8, state.scale));
       _centerPan();
+      // A press that began while the new image was still loading recorded its
+      // baseline against the previous geometry, so its first move would undo
+      // the re-centre above. The image change also cancels the gesture (see
+      // _imgCancelGesture).
+      _imgCancelGesture();
     } else {
       _fit();
     }
@@ -2848,6 +2853,19 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     }
     state.dragPointerId = null;
     viewport.classList.remove('is-panning');
+  }
+
+  // A navigation swaps the image under an in-flight pan. The old gesture's
+  // recorded baseline (dragOrigin/dragStartX/Y) belongs to the previous
+  // image's coordinate space, so the first pointermove after the new image
+  // loads would re-apply it and teleport the freshly-centred image
+  // (maintainer re-warmup of #6896, 2026-10-06: press on the image, 1px move,
+  // ArrowRight, then a 5px move threw the new image 83px up). Changing the
+  // image therefore cancels the owned gesture; the user's zoom level is NOT
+  // touched — the pendingNav re-centre in _onImgLoad keeps it.
+  function _imgCancelGesture() {
+    if(!state.dragging) return;
+    _imgEndPointerDrag();
   }
 
   function _onViewportClick(e) {
@@ -2968,6 +2986,9 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
   state.zoomBy = function(factor){
     _imgSetScale(state.scale * factor);
   };
+  // Used by _navigateLightbox (and by the pendingNav re-centre in
+  // _onImgLoad) to drop a pan that belongs to the image being replaced.
+  state.cancelGesture = _imgCancelGesture;
 
   if(img.complete && img.naturalWidth){
     _onImgLoad();
@@ -3093,6 +3114,10 @@ function _navigateLightbox(lb, direction) {
   const nextImg = images[newIndex];
   const lbImg = lb.querySelector('img');
   if(!lbImg) return;
+  // The new image invalidates any in-flight pan baseline, which belongs to
+  // the previous image's coordinate space (see _imgCancelGesture). Cancel
+  // before the src swap so the old gesture cannot outlive its image.
+  if(lb._zoom && lb._zoom.cancelGesture) lb._zoom.cancelGesture();
   lbImg.src = nextImg.src;
   lbImg.alt = nextImg.alt || '';
   lb.setAttribute('aria-label', nextImg.alt || 'Image');

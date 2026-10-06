@@ -475,6 +475,48 @@
       }
     });
 
+    await run("navigation_during_pan_drops_the_stale_baseline", bucket, async function () {
+      // Real-app repro from the maintainer re-warmup of #6896 (2026-10-06):
+      // zoom the wide image, press on it, move 1px, navigate to the portrait
+      // image with ArrowRight, wait for the load, then move 5px. The in-flight
+      // pan's baseline belongs to the previous image's coordinate space;
+      // re-applying it threw the freshly-centred image 83px up. Changing the
+      // image must cancel the pan without touching the selected zoom.
+      var box = await openBox(1200, 300, {
+        images: [
+          { src: svgDataUrl(1200, 300), alt: "wide" },
+          { src: svgDataUrl(300, 900), alt: "portrait" },
+        ],
+        index: 0,
+      });
+      var size = vpSize(box.vp);
+      key("+");
+      key("+");
+      key("+");
+      var keptScale = box.z.scale;
+      assert_(keptScale > box.z.fitScale, "fixture: expected zoom-in before navigating");
+      var rect = box.vp.getBoundingClientRect();
+      var cx = rect.left + size.w / 2;
+      var cy = rect.top + size.h / 2;
+      pointer(box.vp, "pointerdown", cx, cy, 1);
+      pointer(box.vp, "pointermove", cx, cy + 1, 1);
+      assert_(box.z.dragging === true, "fixture: the press must own the pan");
+      key("ArrowRight");
+      assert_(box.lb._navIndex === 1, "navigation must move to the next image");
+      for (var i = 0; i < 240 && box.z.pendingNav; i++) await frame();
+      for (var j = 0; j < 4; j++) await frame();
+      assert_(box.z.boxW > 0, "the new image must decode");
+      assert_(box.z.pendingNav === false, "the new image's load must consume pendingNav");
+      assert_(box.z.dragging === false, "changing the image must cancel the in-flight pan");
+      var beforeX = box.z.x;
+      var beforeY = box.z.y;
+      pointer(box.vp, "pointermove", cx, cy + 6, 1);
+      pointer(box.vp, "pointerup", cx, cy + 6, 1);
+      approx(box.z.y, beforeY, 1.5, "a move after navigation must not teleport the new image (y)");
+      approx(box.z.x, beforeX, 1.5, "a move after navigation must not teleport the new image (x)");
+      approx(box.z.scale, keptScale, 1e-9, "the selected zoom must survive the navigation");
+    });
+
     // 5. Review follow-ups (greptile 2026-10-05): a second pointer must not
     // take the pan over, the document-wide shortcuts must not hijack typing
     // in a background field, focus must move into the dialog, and a failed

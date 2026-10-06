@@ -252,3 +252,47 @@ class TestReviewFollowups20261005:
         assert "state.scale = 1;" not in body, (
             "_imgOnError must not reset the user's zoom level (greptile follow-up)"
         )
+
+
+class TestMaintainerReworkup20261006:
+    """Source locks for the 2026-10-06 re-warmup finding on #6896.
+
+    The behavioural proof (a real mouse-down → navigation → small move in
+    Chromium) lives in ``test_img_lightbox_gestures_composed.py``. These locks
+    keep a marker regression failing fast without launching a browser.
+    """
+
+    def test_navigation_cancels_the_in_flight_pan(self):
+        src = UI.read_text(encoding="utf-8")
+        # The cancel hook exists and is exposed on the mount's state object.
+        assert "function _imgCancelGesture() {" in src
+        assert "state.cancelGesture = _imgCancelGesture;" in src
+        # _navigateLightbox cancels BEFORE the src swap, so the old gesture
+        # cannot outlive the image whose coordinate space it was recorded in.
+        start = src.index("function _navigateLightbox(lb, direction) {")
+        end = src.index("function _closeImgLightbox(lb) {", start)
+        nav = src[start:end]
+        cancel_at = nav.index(
+            "if(lb._zoom && lb._zoom.cancelGesture) lb._zoom.cancelGesture();"
+        )
+        swap_at = nav.index("lbImg.src = nextImg.src;")
+        assert cancel_at < swap_at, (
+            "the navigation must cancel the in-flight pan before swapping the image"
+        )
+        # A press armed while the new image was still loading is dropped by the
+        # pendingNav re-centre as well.
+        start = src.index("function _onImgLoad() {")
+        end = src.index("function _imgOwnsDrag(e) {", start)
+        load = src[start:end]
+        assert load.index("_centerPan();") < load.index("_imgCancelGesture();"), (
+            "the pendingNav re-centre must drop a gesture armed against the "
+            "previous geometry"
+        )
+        # Cancelling is geometry-only: the navigation contract keeps zoom.
+        helper = src[
+            src.index("function _imgCancelGesture() {"):
+            src.index("function _onViewportClick(e) {")
+        ]
+        assert "state.scale" not in helper, (
+            "_imgCancelGesture must not touch the user's zoom level"
+        )
