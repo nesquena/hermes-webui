@@ -576,8 +576,12 @@ Window selection:
   7/30/90/365 presets send, and the fallback when no absolute bound is usable.
 - `start=…` / `end=…` — an absolute window. Each bound is either an exact Unix
   epoch timestamp in seconds or a `YYYY-MM-DD` calendar date. A supplied
-  `start` with no `end` runs to the server clock; a supplied `end` with no
-  `start` defaults to 30 calendar days before that end.
+  `start` with no `end` runs to the server clock. A supplied `end` with no
+  `start` back-steps the start by 30 days using the bound's own arithmetic: a
+  `YYYY-MM-DD` end subtracts 30 calendar days (local midnight to local
+  midnight, DST-safe), while a numeric end subtracts exactly `30 * 86400`
+  seconds — so across a daylight-saving change a numeric end's default start can
+  land on a different local date than the calendar one would.
 - The **Custom range…** selection sends the two `<input type=date>` values as
   raw `YYYY-MM-DD` strings, not epoch seconds, so the server reads them in its
   own timezone and a browser in another timezone cannot shift the selected
@@ -588,8 +592,10 @@ Window selection:
 Bounds and fallbacks:
 
 - A `YYYY-MM-DD` bound selects a whole local calendar day (start = that day's
-  local midnight, end = the next local midnight); an epoch bound keeps its
-  exact `[start, end)` precision. Bounds are swapped if supplied reversed.
+  local midnight; an end date's exclusive stop is the next local midnight,
+  except a date equal to today, which clamps to the server clock because that
+  day is not over). An epoch bound keeps its exact `[start, end)` precision.
+  Bounds are swapped if supplied reversed.
 - The window never extends into the future: an `end` beyond the server clock
   is clamped to `now`.
 - Windows are clamped to five calendar years so the daily series cannot grow
