@@ -28,7 +28,7 @@ there is a reason to add a re-authentication gate for it (#7815).
 from __future__ import annotations
 
 import re
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -38,6 +38,13 @@ from api.helpers import bad, j
 # obviously malformed names before touching the agent module. The writer's own
 # ``validate_env_var_name_for_write`` is the authority.
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# A value carrying NUL or a control character (CR/LF included) survives the
+# name checks, gets written verbatim into the profile's ``.env``, and then
+# breaks the reload: a CR can truncate the line the agent later parses and a
+# NUL truncates the value at the reader. Reject them here, before the writer
+# sees them (#7870 review).
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class EnvKeyProfileError(Exception):
@@ -248,6 +255,30 @@ def _write_error(exc: Exception) -> str:
     return f"Could not write the key: {message}"
 
 
+def _env_lock():
+    """Serialise the read-modify-write, matching the provider-key writer.
+
+    Two concurrent custom-key PUTs (or a PUT racing the provider-key writer)
+    would otherwise read the same ``.env``, apply their own mutation and
+    write back, and the second write would silently drop the first key.
+    ``api.streaming._ENV_LOCK`` is the lock the provider-key routes already
+    hold for exactly this reason, so the two writers cannot interleave.
+
+    The lock is a plain ``threading.Lock`` and is NOT reentrant: it must be
+    taken once per request, around the whole mutation **and** its read-back,
+    never nested.
+
+    Falls back to a no-op context when the lock cannot be imported (the
+    agent module is absent, as in parts of CI): a request that still
+    verifies its own write beats a request that fails on a missing import.
+    """
+    try:
+        from api.streaming import _ENV_LOCK
+    except Exception:  # pragma: no cover - agent module unavailable
+        return nullcontext()
+    return _ENV_LOCK
+
+
 def handle_env_keys_get(handler, parsed) -> bool:
     """GET /api/env/keys — list the profile's `.env` keys, redacted.
 
@@ -307,6 +338,15 @@ def handle_env_keys_put(handler, parsed, body: dict) -> bool:
             f"{name} is managed by another settings page; edit it there.",
             status=409,
         )
+    if _CONTROL_CHAR_RE.search(value):
+        # NUL and control characters (CR/LF included) are written verbatim
+        # into the .env and break the reload that follows, so they are
+        # rejected before the writer ever sees them.
+        return bad(
+            handler,
+            "value must not contain control characters (including newlines "
+            "or carriage returns)",
+        )
 
     try:
         from hermes_cli.config import save_env_value
@@ -318,7 +358,11 @@ def handle_env_keys_put(handler, parsed, body: dict) -> bool:
         return bad(handler, f"Profile scope unavailable: {exc}", status=503)
 
     try:
-        with _profile_scope(profile):
+        # The whole mutation AND its read-back run under the same lock the
+        # provider-key writer uses, so two concurrent custom-key PUTs cannot
+        # interleave their read-modify-write and drop each other's key. The
+        # lock is not reentrant — it is taken exactly once, here.
+        with _env_lock(), _profile_scope(profile):
             # The installed writer signals a managed-.env refusal by returning
             # WITHOUT raising, and returns ``None`` on success too — so its
             # return value cannot distinguish "wrote it" from "declined", and
@@ -398,7 +442,9 @@ def handle_env_key_delete(handler, name: str, parsed=None) -> bool:
         return bad(handler, f"Profile scope unavailable: {exc}", status=503)
 
     try:
-        with _profile_scope(profile):
+        # Same lock, same rule as PUT: the removal and its read-back are one
+        # read-modify-write, and the provider-key writer holds this lock too.
+        with _env_lock(), _profile_scope(profile):
             remove_env_value(name)
             # Prove the key is gone from the AUTHORIZED profile's .env rather
             # than trusting the writer's return (a managed refusal returns

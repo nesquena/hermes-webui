@@ -558,3 +558,135 @@ def test_unresolvable_profile_home_fails_closed(env, monkeypatch):
     assert not (env.writer.root / "default" / ".env").exists() or "X=" not in (
         env.writer.root / "default" / ".env"
     ).read_text(encoding="utf-8"), "must not write into the fallback home"
+
+
+# ── round-3 hardening: the concurrency lock and the value's characters ──────
+
+
+def test_write_paths_hold_the_provider_writer_env_lock(env):
+    """The custom-key writer must serialise against the provider-key writer.
+
+    Two concurrent PUTs read the same ``.env``, apply their own mutation and
+    write it back — the second write then silently drops the first key.
+    ``api.streaming._ENV_LOCK`` is the lock the provider-key routes already
+    hold for exactly this reason; the custom-key writer has to hold the same
+    one so the two cannot interleave.
+
+    ``threading.Lock`` is not reentrant and has no ``owner`` accessor, so the
+    hold cannot be observed from inside the locked section on the same thread.
+    The observable proxy is the lock being **unavailable to another thread**
+    for exactly the duration of the mutation: a second thread's non-blocking
+    acquire must fail while the writer runs and succeed afterwards. That is
+    the same property that makes two concurrent writers serialise.
+    """
+    import api.streaming as streaming
+
+    real_lock = streaming._ENV_LOCK
+    inside: list[bool] = []
+
+    original_save = env.writer.save_env_value
+
+    def _probe_save(key, value):
+        # Runs while the handler holds its lock. A plain Lock is not reentrant,
+        # so this succeeds iff the handler did NOT hold it.
+        acquired = real_lock.acquire(blocking=False)
+        if acquired:
+            real_lock.release()
+        inside.append(not acquired)
+        return original_save(key, value)
+
+    # The fixture bound the writer's bound methods into the fake config module
+    # at install time, so the probe has to re-bind there — replacing the
+    # instance attribute afterwards would not be seen by the handler's
+    # function-local ``from hermes_cli.config import save_env_value``.
+    import hermes_cli.config as fake_config
+
+    fake_config.save_env_value = _probe_save
+
+    handler = _Handler()
+    _put(env, handler, {"name": "LOCKED_KEY", "value": "v"})
+    assert handler.status == 200
+    assert inside == [True], (
+        "the mutation must run while the env lock is held — otherwise a "
+        f"second thread could acquire it (observed {inside})"
+    )
+    # And the lock is free once the request is done, so nothing deadlocks.
+    grabbed = real_lock.acquire(blocking=False)
+    assert grabbed, "the env lock must be released after the request"
+    if grabbed:
+        real_lock.release()
+
+    inside.clear()
+    original_remove = env.writer.remove_env_value
+
+    def _probe_remove(key):
+        acquired = real_lock.acquire(blocking=False)
+        if acquired:
+            real_lock.release()
+        inside.append(not acquired)
+        return original_remove(key)
+
+    import hermes_cli.config as fake_config_rm
+
+    fake_config_rm.remove_env_value = _probe_remove
+    _delete(env, handler, "LOCKED_KEY")
+    assert handler.status == 200
+    assert inside == [True], "the delete must run inside the same env lock"
+
+
+def test_value_with_control_characters_is_rejected(env, tmp_path):
+    """NUL / CR / LF and friends must not reach the ``.env``.
+
+    A name check alone does not catch these, so a value carrying one is
+    written verbatim — and a CR truncates the line the agent later parses
+    while a NUL truncates the value at the reader, breaking the profile's
+    ``.env`` reload long after the write was reported successful (#7870
+    review).
+    """
+    home = tmp_path / "homes" / "alpha"
+    home.mkdir(parents=True, exist_ok=True)
+
+    for bad_value in (
+        "line1\nline2",
+        "line1\rline2",
+        "with\x00nul",
+        "tab\there",
+        "esc\x1b[31m",
+    ):
+        handler = _Handler()
+        _put(env, handler, {"name": "BAD_VALUE", "value": bad_value})
+        assert handler.status == 400, (
+            f"a value with control characters must be rejected, got "
+            f"{handler.status} for {bad_value!r}"
+        )
+        assert not (home / ".env").exists(), "no write may be attempted"
+
+    # A clean value still writes, so the rejection is not over-broad.
+    handler = _Handler()
+    _put(env, handler, {"name": "GOOD_VALUE", "value": "sk-plain-token-123"})
+    assert handler.status == 200
+    assert "GOOD_VALUE=sk-plain-token-123" in (home / ".env").read_text()
+
+
+def test_lock_is_not_reentered_by_the_read_back(env):
+    """The read-back inside a locked PUT must not deadlock.
+
+    ``api.streaming._ENV_LOCK`` is a plain ``threading.Lock`` — not an RLock.
+    The handler takes it once around the mutation *and* its verification, so
+    if the read-back path ever acquires it again the request deadlocks on
+    itself. This drives the real PUT + read-back and simply completing proves
+    the lock is taken exactly once per request.
+    """
+    import api.streaming as streaming
+
+    lock = streaming._ENV_LOCK
+    assert lock.acquire(blocking=False)
+    lock.release()  # proven uncontended before the request
+
+    handler = _Handler()
+    _put(env, handler, {"name": "NO_DEADLOCK", "value": "v"})
+    assert handler.status == 200
+    # Still uncontended afterwards: the request did not hang and left it free.
+    acquired = lock.acquire(blocking=False)
+    assert acquired, "the env lock must be free after a successful PUT"
+    lock.release()
