@@ -359,3 +359,48 @@ def test_tls_overflow_does_not_force_accept_loop_handshake(monkeypatch, tmp_path
         hold_thread.join(timeout=5)
         assert "error" not in hold_result, hold_result.get("error")
         assert hold_result["value"][0] == 200
+
+
+class _NoopHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+
+def test_max_request_workers_default_is_128():
+    assert QuietHTTPServer.max_request_workers == 128
+
+
+def test_max_request_workers_env_override(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_MAX_REQUEST_WORKERS", "512")
+    srv = QuietHTTPServer(("127.0.0.1", 0), _NoopHandler)
+    try:
+        assert srv.max_request_workers == 512
+        assert srv._request_worker_slots._value == 512
+    finally:
+        srv.server_close()
+
+
+def test_max_request_workers_env_is_bounded(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_MAX_REQUEST_WORKERS", "100000")
+    srv = QuietHTTPServer(("127.0.0.1", 0), _NoopHandler)
+    try:
+        assert srv.max_request_workers == 2048
+    finally:
+        srv.server_close()
+
+    monkeypatch.setenv("HERMES_WEBUI_MAX_REQUEST_WORKERS", "2")
+    srv = QuietHTTPServer(("127.0.0.1", 0), _NoopHandler)
+    try:
+        assert srv.max_request_workers == 16
+    finally:
+        srv.server_close()
+
+
+def test_max_request_workers_env_invalid_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_MAX_REQUEST_WORKERS", "abc")
+    srv = QuietHTTPServer(("127.0.0.1", 0), _NoopHandler)
+    try:
+        assert srv.max_request_workers == 128
+    finally:
+        srv.server_close()
