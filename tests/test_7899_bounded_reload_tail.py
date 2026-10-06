@@ -236,7 +236,7 @@ class TestEnsureMessagesLoadedBoundedRequest:
 
     def test_stitch_called_with_both_origins_before_oldest_idx_overwrite(self):
         body = self._ensure_messages_loaded_body()
-        assert "_stitchBoundedReloadTail(S.messages, _previousReloadOffset, _reloadOffset, msgs)" in body, (
+        assert "_stitchBoundedReloadTail(S.messages, _previousReloadOffset, _reloadOffset, msgs," in body, (
             "the bounded reload must stitch the returned tail onto the "
             "already-rendered prefix using BOTH the previous and new global "
             "offsets — passing only the new offset mis-derives the overlap and "
@@ -251,3 +251,203 @@ class TestEnsureMessagesLoadedBoundedRequest:
             "with the new response offset — otherwise the overlap math collapses "
             "to the buggy single-offset form (#7925)"
         )
+
+
+# ---------------------------------------------------------------------------
+# #7925 (b)/(c): prefix trustworthiness and the full-fetch fallback.
+#
+# The stitch is an OPTIMISATION. It is only sound while the retained prefix is
+# provably rows [0, newOffset) of the server's CURRENT transcript. Where it is
+# not, the reviewer's requirement (c) applies: fall back to the authoritative
+# full fetch instead of inventing a transcript the server never produced.
+# ---------------------------------------------------------------------------
+
+
+def _run_trust(prev, previous_offset, new_offset, tail):
+    fn_def = _extract_function("_boundedReloadPrefixIsTrustworthy")
+    js_code = (
+        fn_def
+        + "\n"
+        + "const input = JSON.parse(process.argv[2]);\n"
+        + "process.stdout.write(JSON.stringify("
+        + "_boundedReloadPrefixIsTrustworthy("
+        + "input.prev, input.previousOffset, input.newOffset, input.tail)));\n"
+    )
+    tf = tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False, encoding="utf-8")
+    tf.write(js_code)
+    tf.close()
+    try:
+        result = subprocess.run(
+            ["node", tf.name, json.dumps(
+                {"prev": prev, "previousOffset": previous_offset, "newOffset": new_offset, "tail": tail}
+            )],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"node error: {result.stderr}")
+        return json.loads(result.stdout)
+    finally:
+        os.unlink(tf.name)
+
+
+def _row(i):
+    return {"role": "user", "content": f"m{i}"}
+
+
+def test_trustworthy_when_prefix_reaches_the_window_boundary():
+    """prevOrigin=100, newOffset=150, we hold 600 rows -> prefix covers the gap."""
+    prev = [_row(i) for i in range(100, 700)]
+    tail = [_row(i) for i in range(150, 160)]
+    assert _run_trust(prev, 100, 150, tail) is True
+
+
+def test_untrustworthy_when_the_prefix_cannot_reach_the_gap():
+    """The client fell further behind than its own prefix reaches.
+
+    prevOrigin=1000, newOffset=1500, but we only hold 400 rows. Splicing
+    prefix+tail would leave rows 1400-1499 invisible (silent row loss).
+    """
+    prev = [_row(i) for i in range(1000, 1400)]
+    tail = [_row(i) for i in range(1500, 1600)]
+    assert _run_trust(prev, 1000, 1500, tail) is False
+
+
+def test_untrustworthy_when_the_window_moved_backwards():
+    """The response offset is behind the retained prefix's origin.
+
+    prevOrigin=500, newOffset=400: nothing newer to stitch, and the retained
+    prefix is not the window the server describes.
+    """
+    prev = [_row(i) for i in range(500, 900)]
+    tail = [_row(i) for i in range(400, 450)]
+    assert _run_trust(prev, 500, 400, tail) is False
+
+
+def test_untrustworthy_when_the_offset_did_not_advance():
+    """Identical offsets mean the tail is not newer; a splice would duplicate."""
+    prev = [_row(i) for i in range(0, 600)]
+    tail = [_row(i) for i in range(0, 100)]
+    assert _run_trust(prev, 0, 0, tail) is False
+
+
+def test_untrustworthy_when_either_side_is_empty():
+    prev = [_row(i) for i in range(100, 700)]
+    assert _run_trust(prev, 100, 150, []) is False
+    assert _run_trust([], 100, 150, [_row(0)]) is False
+
+
+def test_stitch_returns_null_when_the_prefix_is_not_trustworthy():
+    """The helper must signal 'cannot stitch' rather than splice blindly."""
+    prev = [_row(i) for i in range(1000, 1400)]
+    tail = [_row(i) for i in range(1500, 1600)]
+    fn_def = _extract_function("_stitchBoundedReloadTail")
+    js_code = (
+        fn_def
+        + "\n"
+        + "const input = JSON.parse(process.argv[2]);\n"
+        + "process.stdout.write(JSON.stringify("
+        + "_stitchBoundedReloadTail("
+        + "input.prev, input.previousOffset, input.newOffset, input.tail, false)));\n"
+    )
+    tf = tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False, encoding="utf-8")
+    tf.write(js_code)
+    tf.close()
+    try:
+        result = subprocess.run(
+            ["node", tf.name, json.dumps(
+                {"prev": prev, "previousOffset": 1000, "newOffset": 1500, "tail": tail}
+            )],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) is None
+    finally:
+        os.unlink(tf.name)
+
+
+def _ensure_messages_loaded_body():
+    """The real body of _ensureMessagesLoaded, brace-matched past its strings.
+
+    `_extract_function` stops at the first brace-balanced match, which
+    truncates this function on a regex/string containing braces, so mirror the
+    class helper that handles it.
+    """
+    src = SESSIONS_JS
+    start = src.find("async function _ensureMessagesLoaded(")
+    if start < 0:
+        start = src.find("function _ensureMessagesLoaded(")
+    assert start >= 0, "_ensureMessagesLoaded not found in sessions.js"
+    brace = src.index("{", start)
+    depth = 0
+    end = brace
+    in_str = None
+    i = brace
+    while i < len(src):
+        c = src[i]
+        if in_str:
+            if c == "\\":
+                i += 2
+                continue
+            # ${...} inside a template literal is an interpolation, not code
+            # braces; the expression inside may itself contain strings.
+            if in_str == "`" and c == "$" and i + 1 < len(src) and src[i + 1] == "{":
+                j = i + 2
+                d = 1
+                while j < len(src) and d:
+                    if src[j] == "{":
+                        d += 1
+                    elif src[j] == "}":
+                        d -= 1
+                    j += 1
+                i = j
+                continue
+            if c == in_str:
+                in_str = None
+        elif c in "\"'`":
+            in_str = c
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+        i += 1
+    return src[start:end]
+
+
+def test_reload_falls_back_to_the_full_fetch_when_the_prefix_is_untrustworthy():
+    """Requirement (c): a non-provable prefix must trigger a full fetch.
+
+    The bounded tail request is kept (it is what discovers the offset), but
+    when the prefix cannot be proven the code re-issues the authoritative
+    full-transcript GET rather than splicing.
+    """
+    body = _ensure_messages_loaded_body()
+    assert "_boundedReloadPrefixIsTrustworthy(" in body, (
+        "the bounded reload must gate the stitch on a provenance check (#7925)"
+    )
+    assert "msgs === null" in body, (
+        "an unprovable prefix must make the stitch signal 'cannot stitch' (#7925)"
+    )
+    # Requirement (c) is asserted against the whole file because the brace-matched
+    # body truncates inside this function's template literals. The authoritative
+    # full-transcript GET is the one WITHOUT a msg_limit param — the bounded tail
+    # request above it always appends one, so this exact form can only be the
+    # fallback.
+    assert SESSIONS_JS.count("&messages=1&resolve_model=0`") == 1, (
+        "there must be exactly one unparameterised full-transcript GET: the "
+        "untrustworthy-prefix fallback (#7925)"
+    )
+    full_idx = SESSIONS_JS.index("&messages=1&resolve_model=0`")
+    fb_idx = SESSIONS_JS.index("#7925 (c)")
+    gate_idx = SESSIONS_JS.index("if (msgs === null) {", fb_idx)
+    assert fb_idx < gate_idx < full_idx, (
+        "the full-transcript fetch must sit inside the `msgs === null` guard "
+        "opened by the untrustworthy-prefix comment (#7925)"
+    )
+    read_idx = SESSIONS_JS.index(
+        "msgs = (data.session.messages || []).filter(m => m && m.role)", full_idx)
+    assert read_idx > full_idx, (
+        "the full-fetch fallback must re-read messages from the new response (#7925)"
+    )

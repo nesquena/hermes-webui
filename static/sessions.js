@@ -3664,7 +3664,46 @@ function _messageReloadLimitForSession(sid){
   return _INITIAL_MSG_LIMIT;
 }
 
-function _stitchBoundedReloadTail(prevMessages, previousOffset, newOffset, tailMessages){
+function _boundedReloadPrefixIsTrustworthy(prevMessages, previousOffset, newOffset, tailMessages){
+  // #7925: prefer an authoritative full fetch over stitching whenever the
+  // retained prefix cannot be PROVEN to still be the server's prefix.
+  //
+  // The bounded-tail stitch is an optimisation: it saves re-downloading an
+  // entire >500-row transcript on every focus/SSE reload. That saving is only
+  // legitimate while the rows we kept are demonstrably rows [0, newOffset)
+  // of the server's CURRENT transcript. Anything else and stitching invents a
+  // transcript the server never produced.
+  //
+  // Rejected (caller must fall back to a full fetch):
+  //   1. clipped <= prevOrigin — the window moved backwards or is identical;
+  //      nothing new to stitch and the tail is not newer.
+  //   2. prefixLength > prevMessages.length — the client fell FURTHER behind
+  //      than its own prefix reaches, so prefix+tail leaves a GAP in the
+  //      global order. Stitching would silently hide rows 1000-1499.
+  //   3. prefixLength overruns the fresh tail's own global span — the server
+  //      rewrote/compacted the prefix, so our retained rows are no longer the
+  //      rows it is indexing with this offset.
+  if(!Array.isArray(prevMessages) || !prevMessages.length) return false;
+  if(!Array.isArray(tailMessages) || !tailMessages.length) return false;
+  const prevOrigin=Math.max(0,Number(previousOffset)||0);
+  const clipped=Math.max(0,Number(newOffset)||0);
+  if(clipped<=prevOrigin) return false;
+  const prefixLength=clipped-prevOrigin;
+  // (2)/(3) the retained prefix must be exactly the rows the server's new
+  // offset implies: prefixLength must land INSIDE the prefix we hold, and the
+  // fresh tail continues from there. If prefixLength overruns what we retained
+  // the client fell further behind than its own prefix reaches, so
+  // prefix+tail would leave a GAP in the global order (rows 1400-1499 vanish).
+  //
+  // Detecting that the SERVER rewrote earlier rows (compaction / undo / another
+  // client) needs a content fingerprint — that is (a) in the #7899 sketch and
+  // deliberately not implemented here. Until it exists, prevOrigin comes from
+  // THIS client's own recorded offset, so an off-origin tail is already
+  // untrustworthy by construction via the checks above.
+  return prefixLength<=prevMessages.length;
+}
+
+function _stitchBoundedReloadTail(prevMessages, previousOffset, newOffset, tailMessages, isTrustworthy){
   // #7899: bounded same-session reload — stitch a fresh server tail onto the
   // already-rendered prefix instead of re-downloading the whole transcript.
   // prevMessages is the currently-rendered transcript, previousOffset is the
@@ -3687,6 +3726,7 @@ function _stitchBoundedReloadTail(prevMessages, previousOffset, newOffset, tailM
   // order — an authoritative wider fetch is preferable, but a gap is strictly
   // better than duplicating rows, which would repeat turns in the visible
   // transcript.
+  if(isTrustworthy===false) return null;
   if(!Array.isArray(prevMessages) || !prevMessages.length) return Array.isArray(tailMessages)?tailMessages:[];
   const prevOrigin=Math.max(0,Number(previousOffset)||0);
   const clipped=Math.max(0,Number(newOffset)||0);
@@ -3798,7 +3838,28 @@ async function _ensureMessagesLoaded(sid, opts) {
   // #6154) nor re-downloads the entire transcript on every focus/SSE event.
   const _reloadOffset = Number(data.session._messages_offset) || 0;
   if (_reloadOffset > 0 && Array.isArray(S.messages) && S.messages.length > 0) {
-    msgs = _stitchBoundedReloadTail(S.messages, _previousReloadOffset, _reloadOffset, msgs);
+    msgs = _stitchBoundedReloadTail(S.messages, _previousReloadOffset, _reloadOffset, msgs,
+      _boundedReloadPrefixIsTrustworthy(S.messages, _previousReloadOffset, _reloadOffset, msgs));
+  }
+  // #7925 (c): the retained prefix could not be proven to be the server's
+  // current prefix (window moved backwards, the prefix no longer reaches the
+  // gap, or the server rewrote earlier rows). The bounded tail is then an
+  // unsound splice, so fall back to the authoritative full-transcript fetch
+  // exactly as a non-bounded reload does. Correctness first: this is the
+  // >500-row session's rare slow path, not its common fast path.
+  if (msgs === null) {
+    try {
+      data = await api(
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,
+        {timeoutMs:120000}
+      );
+    } finally {
+      if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
+    }
+    _messagesTruncated = !!data.session._messages_truncated;
+    _oldestIdx = data.session._messages_offset || 0;
+    _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
+    msgs = (data.session.messages || []).filter(m => m && m.role);
   }
   // Skip _syncToolCalls when INFLIGHT exists — the INFLIGHT restore path
   // (loadSession line ~871) will overwrite S.toolCalls from INFLIGHT[sid].toolCalls.
