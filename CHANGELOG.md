@@ -114,6 +114,13 @@
 
 ### Fixed
 
+- **The update banner's Force update and Clear lock buttons go away once they no longer apply.** After a failed
+  Agent update armed them (a merge conflict, a diverged checkout, an untracked file in the way, or a stale
+  `.git/index.lock`), they stayed until a reload even after the problem was fixed. A fresh update check now clears a
+  button only when it can confirm the condition is gone. A result it can't confirm (for example an untracked nested
+  repository) keeps the button, as does a cached result or an older check that a newer failed update overtook. The
+  check never takes git's index lock. Thanks @pxxD1998. (#8058, follows #8040)
+
 - **Typing `/new` and pressing Enter twice quickly starts the new chat.** The first Enter takes `/new` from the
   slash-command list. When skills couldn't load (for example on a server without an Agent), a skill request that
   arrived a moment later re-opened the list, so the second Enter picked `/new` again instead of sending it. Picking a

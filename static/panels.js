@@ -12399,6 +12399,7 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
+    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
@@ -12434,14 +12435,14 @@ async function checkUpdatesNow(channelOverride){
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       }
     }
   } catch(e){
