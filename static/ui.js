@@ -16284,7 +16284,15 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
   const activityKey=`live:${streamId||S.activeStreamId||'anchor'}`;
-  const retainedGroup=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+  // The retained group must still be LIVE: an interim_assistant boundary
+  // finalizes the group in place (closeCurrentLiveActivityGroup ->
+  // _finalizeLiveActivityDisclosureGroup strips data-live-tool-call-group and
+  // collapses it) while leaving data-anchor-scene-owner="1". Reusing that
+  // finalized group kept re-rendering into a collapsed, static frame — tools
+  // and later live prose after the boundary never appeared while the turn was
+  // still busy. Requiring the live flag makes the sweep remove the finalized
+  // group so _anchorSceneWorklogGroup builds a fresh live one (#7495 re-gate).
+  const retainedGroup=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-live-tool-call-group="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
   blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
     if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
   });
