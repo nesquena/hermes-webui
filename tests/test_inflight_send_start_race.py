@@ -2451,7 +2451,14 @@ async function run(mode,options={}){
     assert.strictEqual(INFLIGHT.sid.activeTurnToken,options.activeTurnToken===undefined?null:options.activeTurnToken);
   }
   if(options.stopAfterLoad){
-    const pendingRows=INFLIGHT.sid.messages.filter(row=>row&&row.role==='user'&&row._pending===true);
+    // Distinguish unresolved input rows, their cached copies, and fresh server projections.
+    const pendingRows=inflightMessages.filter(row=>row&&row.role==='user'&&row._pending===true);
+    const cachedPendingRows=INFLIGHT.sid.messages.filter(row=>row&&row.role==='user'
+      &&row._pending===true&&row._ts!==START.pending_started_at);
+    const projectedRows=INFLIGHT.sid.messages.filter(row=>row&&row.role==='user'
+      &&row._pending===true&&row._ts===START.pending_started_at);
+    assert(projectedRows.every(row=>row._active_turn_token===TOKEN));
+    assert(cachedPendingRows.every(row=>row._active_turn_token!==TOKEN));
     return {beforeCopies,bound:userMsg._active_turn_token===TOKEN,
       activeTurnToken:INFLIGHT.sid.activeTurnToken,
       pendingTokens:pendingRows.map(row=>row._active_turn_token||null),

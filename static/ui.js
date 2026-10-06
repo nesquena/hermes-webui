@@ -11789,6 +11789,7 @@ function getPendingSessionMessage(session, messagesOverride=null){
     :null;
   const activeToken=session&&(session.active_turn_token??session.activeTurnToken);
   const hasActiveToken=typeof activeToken==='string'&&activeToken.trim().length>0;
+  if(hasActiveToken) pendingMessage._active_turn_token=activeToken;
   const hasPublicMarker=messages.some(row=>row&&row._active_turn_user===true);
   if(hasPublicMarker&&(!activeTurnUser||activeTurnUser._active_turn_user!==true)){
     return pendingMessage;
