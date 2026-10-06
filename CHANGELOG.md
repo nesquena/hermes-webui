@@ -114,6 +114,11 @@
 
 ### Fixed
 
+- **Deleting your last conversation resets the model picker to your configured default.** The empty composer used to
+  keep showing the deleted conversation's model even though the next chat starts on the default, so the picker and the
+  model actually used disagreed. Single and batch delete both reset it, and a model you pick while the delete is still
+  in flight is kept. Thanks @MoBluey. (#7324 by @MoBluey)
+
 - **The model picker no longer lists a slash-named model twice under a plugin provider.** With an active provider such
   as Command Code and a configured model id that itself contains a slash (`deepseek/deepseek-v4-flash`), the
   `provider/model` spelling no longer becomes a second row; each provider keeps its own row, so another provider's
