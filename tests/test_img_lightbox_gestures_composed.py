@@ -231,6 +231,75 @@ _THUMB_SVG = (
     "PSIjM2E3Ii8+PC9zdmc+"
 )
 
+# A point inside the lightbox overlay but OUTSIDE the gesture viewport and clear
+# of every control, so a press/release there targets the backdrop itself.
+_BACKDROP_JS = """
+() => {
+  const lb = document.querySelector('.img-lightbox');
+  if (!lb) return null;
+  const vp = lb.querySelector('.img-lightbox-viewport');
+  const v = vp.getBoundingClientRect();
+  const lbR = lb.getBoundingClientRect();
+  const kids = Array.from(lb.children).filter((el) => el !== vp)
+    .map((el) => el.getBoundingClientRect());
+  const inside = (x, y, r) => x >= r.left && x <= r.left + r.width
+    && y >= r.top && y <= r.top + r.height;
+  for (let y = lbR.top + 6; y < lbR.top + lbR.height - 6; y += 6) {
+    for (let x = lbR.left + 6; x < lbR.left + lbR.width - 6; x += 6) {
+      if (inside(x, y, v)) continue;
+      if (kids.some((r) => r.width > 0 && inside(x, y, r))) continue;
+      if (document.elementFromPoint(x, y) !== lb) continue;
+      return { x, y };
+    }
+  }
+  return null;
+}
+"""
+
+
+def _zoom_press_and_navigate(page):
+    """Open a two-image gallery through the production opener, zoom it with real
+    '=' presses, press the image with a real mouse, move 1px and then navigate
+    with a real ArrowRight while the button is still held. Returns the image
+    point and the selected zoom."""
+    page.evaluate(
+        """([wide, portrait]) => {
+            const prev = document.querySelector('.img-lightbox');
+            if (prev) {
+                try { window._closeImgLightbox(prev); } catch (_) {}
+                if (prev.parentNode) prev.parentNode.removeChild(prev);
+            }
+            window._openImgLightboxWithNav(wide, 'wide', [
+                { src: wide, alt: 'wide' },
+                { src: portrait, alt: 'portrait' },
+            ], 0);
+        }""",
+        [_svg(1200, 300), _svg(300, 900)],
+    )
+    page.wait_for_function(
+        "() => { const lb = document.querySelector('.img-lightbox'); "
+        "return !!lb && !!lb._zoom && lb._zoom.boxW > 0; }",
+        timeout=15000,
+    )
+    for _ in range(3):
+        page.keyboard.press("Equal")  # three real '=' presses
+    zoomed = page.evaluate("() => document.querySelector('.img-lightbox')._zoom.scale")
+    data = page.evaluate(_LB_RECTS_JS)
+    assert data is not None, "fixture: the lightbox must be open"
+    img = data["image"]
+    page.mouse.move(img["x"], img["y"])
+    page.mouse.down()
+    page.mouse.move(img["x"], img["y"] + 1)
+    page.keyboard.press("ArrowRight")
+    page.wait_for_function(
+        "() => { const lb = document.querySelector('.img-lightbox'); "
+        "const z = lb && lb._zoom; "
+        "return !!z && lb._navIndex === 1 && z.pendingNav === false && z.boxW > 0; }",
+        timeout=15000,
+    )
+    page.wait_for_timeout(60)  # let the re-centre settle
+    return img, zoomed
+
 
 class TestComposedTrustedInput:
     """The two 2026-10-06 gate blockers, driven with real Chromium input."""
@@ -395,47 +464,7 @@ class TestComposedTrustedInput:
         change must cancel the gesture and keep the selected zoom.
         """
         page = composed.desktop_page
-        page.evaluate(
-            """([wide, portrait]) => {
-                const prev = document.querySelector('.img-lightbox');
-                if (prev) {
-                    try { window._closeImgLightbox(prev); } catch (_) {}
-                    if (prev.parentNode) prev.parentNode.removeChild(prev);
-                }
-                window._openImgLightboxWithNav(wide, 'wide', [
-                    { src: wide, alt: 'wide' },
-                    { src: portrait, alt: 'portrait' },
-                ], 0);
-            }""",
-            [_svg(1200, 300), _svg(300, 900)],
-        )
-        page.wait_for_function(
-            "() => { const lb = document.querySelector('.img-lightbox'); "
-            "return !!lb && !!lb._zoom && lb._zoom.boxW > 0; }",
-            timeout=15000,
-        )
-        for _ in range(3):
-            page.keyboard.press("Equal")  # three real '=' presses
-        zoomed = page.evaluate(
-            "() => document.querySelector('.img-lightbox')._zoom.scale"
-        )
-        data = page.evaluate(_LB_RECTS_JS)
-        assert data is not None, "fixture: the lightbox must be open"
-        img = data["image"]
-        # Real press on the image, 1px move, button still held.
-        page.mouse.move(img["x"], img["y"])
-        page.mouse.down()
-        page.mouse.move(img["x"], img["y"] + 1)
-        # Real ArrowRight while the button is still down, then wait for the
-        # next image to load and re-centre.
-        page.keyboard.press("ArrowRight")
-        page.wait_for_function(
-            "() => { const lb = document.querySelector('.img-lightbox'); "
-            "const z = lb && lb._zoom; "
-            "return !!z && lb._navIndex === 1 && z.pendingNav === false && z.boxW > 0; }",
-            timeout=15000,
-        )
-        page.wait_for_timeout(60)  # let the re-centre settle
+        img, zoomed = _zoom_press_and_navigate(page)
         before = page.evaluate(
             "() => { const z = document.querySelector('.img-lightbox')._zoom; "
             "return { x: z.x, y: z.y, scale: z.scale, dragging: z.dragging }; }"
@@ -463,6 +492,30 @@ class TestComposedTrustedInput:
             f"the selected zoom must survive the navigation: {zoomed} -> {after['scale']}"
         )
         assert self._is_open(page), "navigating during a pan must not dismiss the lightbox"
+
+    def test_trusted_navigation_release_outside_viewport_keeps_the_dialog(self, composed):
+        """Releasing the held button outside the viewport must not dismiss.
+
+        Cancelling the pan on an image change must KEEP the pointer capture:
+        with the capture held, the release is retargeted to the viewport and the
+        recorded press origin suppresses the follow-up click. Releasing the
+        capture (the first version of the fix) let the release land on the
+        backdrop and close the dialog (greptile review of #6896, 2026-10-06).
+        """
+        page = composed.desktop_page
+        _zoom_press_and_navigate(page)
+        backdrop = page.evaluate(_BACKDROP_JS)
+        assert backdrop is not None, "fixture: no backdrop point outside the viewport"
+        page.mouse.move(backdrop["x"], backdrop["y"], steps=2)
+        page.mouse.up()
+        page.wait_for_timeout(self._CLOSE_DEADLINE_MS)
+        assert not self._close_initiated(page), (
+            "releasing a held pointer outside the viewport started the close transition"
+        )
+        assert self._is_open(page), (
+            "releasing a held pointer outside the viewport dismissed the lightbox; "
+            "cancelling the pan must keep the pointer capture"
+        )
 
 
 class TestComposedGate20261006:

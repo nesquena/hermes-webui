@@ -296,3 +296,11 @@ class TestMaintainerReworkup20261006:
         assert "state.scale" not in helper, (
             "_imgCancelGesture must not touch the user's zoom level"
         )
+        # ...and it must NOT release the pointer capture: releasing it lets a
+        # held-button release outside the viewport land on the backdrop and
+        # dismiss the dialog (greptile review of #6896, 2026-10-06). The
+        # browser releases the capture implicitly when the pointer goes up.
+        assert "releasePointerCapture" not in helper, (
+            "_imgCancelGesture must keep the pointer capture (greptile P2)"
+        )
+        assert "state.dragging = false;" in helper

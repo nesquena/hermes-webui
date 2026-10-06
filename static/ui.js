@@ -2863,9 +2863,19 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
   // ArrowRight, then a 5px move threw the new image 83px up). Changing the
   // image therefore cancels the owned gesture; the user's zoom level is NOT
   // touched — the pendingNav re-centre in _onImgLoad keeps it.
+  //
+  // Unlike an ordinary drag end this deliberately KEEPS the pointer capture
+  // (no releasePointerCapture): the browser releases the capture implicitly
+  // when the pointer goes up, and until then the capture keeps a held-button
+  // release retargeted to the viewport, so the follow-up click is still judged
+  // by the recorded press origin. Releasing it here sent a release outside the
+  // viewport straight to the backdrop and dismissed the dialog, bypassing the
+  // drag/click guard (greptile review of #6896, 2026-10-06).
   function _imgCancelGesture() {
     if(!state.dragging) return;
-    _imgEndPointerDrag();
+    state.dragging = false;
+    state.dragPointerId = null;
+    viewport.classList.remove('is-panning');
   }
 
   function _onViewportClick(e) {
