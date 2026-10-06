@@ -1296,6 +1296,16 @@ function openInBrowser(){
 // that restrict requestFullscreen to <video> elements). Both share the same
 // toggle button in the preview header; the overlay also exits on Escape.
 let _previewFsMode=null; // null | 'api' | 'overlay'
+// Intenção pendente: requestFullscreen() só assenta depois, e enquanto isso o
+// modo continua null — exit, clear e close não alcançam nada por conta própria.
+// O token é possuído ANTES do pedido e invalidado em exit, clear, fechar o
+// painel, substituição e cliques repetidos; sem isso os dois settlements
+// (sucesso e rejeição) reativam estado que já foi desmontado.
+let _previewFsPending=null; // {el} | null
+
+function _previewFsInvalidatePending(){
+  _previewFsPending=null;
+}
 
 function _previewFsEl(){
   return $('previewArea');
@@ -1330,6 +1340,17 @@ function _previewFsRequest(el){
   if(el.requestFullscreen) return el.requestFullscreen();
   if(el.webkitRequestFullscreen) return el.webkitRequestFullscreen();
   return Promise.reject(new Error('Fullscreen API unavailable'));
+}
+
+// Libera o elemento nativo APENAS quando ele é o que este preview pediu — o
+// fullscreen é document-wide, então nunca se mexe no dono de outra superfície.
+function _previewFsReleaseOwned(el){
+  try{
+    const active=document.fullscreenElement||document.webkitFullscreenElement;
+    if(!el||active!==el) return;
+    if(document.fullscreenElement) document.exitFullscreen();
+    else if(document.webkitFullscreenElement&&document.webkitExitFullscreen) document.webkitExitFullscreen();
+  }catch(_){}
 }
 
 function _previewFsExitApi(){
@@ -1368,16 +1389,34 @@ function _previewFsOnChange(){
 function togglePreviewFullscreen(){
   const el=_previewFsEl();
   if(!el||!el.classList.contains('visible')) return;
-  if(_previewFsMode==='overlay'){ _previewFsExitOverlay(); return; }
-  if(document.fullscreenElement===el||document.webkitFullscreenElement===el){
-    _previewFsExitApi();
+  // Sair: modo ativo ou elemento já em fullscreen — nos dois casos a intenção
+  // pendente é invalidada antes de qualquer coisa.
+  if(_previewFsMode==='overlay'||document.fullscreenElement===el||document.webkitFullscreenElement===el){
+    _exitPreviewFullscreen();
+    return;
+  }
+  if(_previewFsPending){
+    // Clique repetido com o pedido nativo ainda em voo: cancela a intenção em
+    // vez de empilhar um segundo pedido (single-flight).
+    _previewFsInvalidatePending();
     return;
   }
   if(_previewFsApiSupported()){
+    const token={el}; // possui a intenção ANTES de pedir
+    _previewFsPending=token;
     _previewFsRequest(el).then(()=>{
+      if(_previewFsPending!==token){
+        // Sucesso atrasado de um pedido já cancelado: só libera o elemento
+        // nativo deste preview; o resto do estado continua desmontado.
+        _previewFsReleaseOwned(token.el);
+        return;
+      }
+      _previewFsPending=null;
       _previewFsMode='api';
       _previewFsSync();
     }).catch(()=>{
+      if(_previewFsPending!==token) return; // já desmontado: não reativa overlay
+      _previewFsPending=null;
       // Native fullscreen rejected (or restricted to <video> on some mobile
       // browsers) → the fixed-overlay fallback covers every preview kind.
       _previewFsEnterOverlay();
@@ -1388,6 +1427,9 @@ function togglePreviewFullscreen(){
 }
 
 function _exitPreviewFullscreen(){
+  // Cancela a intenção em voo primeiro: exit, clear e fechar o painel podem
+  // acontecer com requestFullscreen() ainda pendente.
+  _previewFsInvalidatePending();
   if(_previewFsMode==='overlay') _previewFsExitOverlay();
   else if(_previewFsMode==='api') _previewFsExitApi();
 }

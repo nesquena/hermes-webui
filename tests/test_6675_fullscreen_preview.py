@@ -127,7 +127,9 @@ let __doc=null;
 const document={
   get fullscreenEnabled(){return __doc.fullscreenEnabled;},
   get fullscreenElement(){return __doc.fullscreenElement;},
-  exitFullscreen(){__doc.fullscreenElement=null;return Promise.resolve();},
+  // __doc.exits conta as chamadas de saída: é a prova de que a saída só pode
+  // acontecer no elemento dono (nunca no fullscreen de outro dono).
+  exitFullscreen(){__doc.exits=(__doc.exits||0)+1;__doc.fullscreenElement=null;return Promise.resolve();},
 };
 """
 
@@ -181,3 +183,127 @@ __doc={{fullscreenEnabled:true,fullscreenElement:null}};
     payload = _run_node(script)
     assert payload["entered"] == {"mode": "api", "apiActive": True}
     assert payload["exited"] == {"mode": None, "overlay": False}
+
+
+# ── Lifecycle do pedido nativo pendente (PR #6682, ponto 2) ───────────────────
+#
+# Enquanto requestFullscreen() não assenta, _previewFsMode continua null: exit,
+# clear e close não alcançam nada e os dois settlements (sucesso e rejeição)
+# reativam estado já desmontado. Os testes rodam os callers REAIS
+# (togglePreviewFullscreen/_exitPreviewFullscreen) sobre um pedido controlado
+# pelo teste, para poder atrasar cada settlement até depois do teardown.
+
+_PENDING_SETUP = """
+let area=makePreviewArea();
+area.classList.add('visible');
+const settlers=[];
+let requests=0;
+area.requestFullscreen=()=>{
+  requests++;
+  return new Promise((res,rej)=>{
+    settlers.push({
+      res(){ __doc.fullscreenElement=area; res(); },
+      rej,
+    });
+  });
+};
+const btn=makeButton();
+const $=(id)=>id==='previewArea'?area:id==='btnFullscreenPreview'?btn:null;
+const t=(k)=>k;
+__doc={fullscreenEnabled:true,fullscreenElement:null};
+"""
+
+_TICK = "await new Promise(r=>setTimeout(r,0));\n  "
+
+
+def _pending_script(body: str) -> str:
+    return _HARNESS + _PENDING_SETUP + FULLSCREEN_BLOCK + "\n" + body
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_late_success_after_exit_does_not_reactivate_state():
+    """Saída atrasada: o sucesso de um pedido cancelado não pode reativar o
+    modo api nem deixar o elemento deste preview preso em fullscreen."""
+    script = _pending_script(
+        f"""(async()=>{{
+  togglePreviewFullscreen();
+  const pending={{mode:_previewFsMode,requests}};
+  _exitPreviewFullscreen();
+  settlers[0].res();
+  {_TICK}const after={{mode:_previewFsMode,overlay:area.hasClass('preview-fullscreen'),
+            nativeActive:__doc.fullscreenElement===area,requests,
+            exits:__doc.exits||0}};
+  process.stdout.write(JSON.stringify({{pending,after}}));
+}})().catch(err=>{{console.error(err);process.exit(1);}});
+"""
+    )
+    payload = _run_node(script)
+    assert payload["pending"] == {"mode": None, "requests": 1}
+    assert payload["after"] == {
+        "mode": None,
+        "overlay": False,
+        "nativeActive": False,
+        "requests": 1,
+        "exits": 1,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_late_rejection_after_exit_does_not_enter_overlay():
+    """Saída atrasada: a rejeição de um pedido cancelado não pode trazer o
+    overlay de volta por cima do preview já desmontado."""
+    script = _pending_script(
+        f"""(async()=>{{
+  togglePreviewFullscreen();
+  _exitPreviewFullscreen();
+  settlers[0].rej(new Error('denied'));
+  {_TICK}const after={{mode:_previewFsMode,overlay:area.hasClass('preview-fullscreen'),
+            requests,exits:__doc.exits||0}};
+  process.stdout.write(JSON.stringify({{after}}));
+}})().catch(err=>{{console.error(err);process.exit(1);}});
+"""
+    )
+    payload = _run_node(script)
+    assert payload["after"] == {
+        "mode": None,
+        "overlay": False,
+        "requests": 1,
+        "exits": 0,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_repeated_click_cancels_pending_request_single_flight():
+    """Clique repetido durante o voo invalida a intenção em vez de disparar um
+    segundo pedido; um novo clique volta a pedir normalmente."""
+    script = _pending_script(
+        f"""(async()=>{{
+  togglePreviewFullscreen();
+  const first={{requests,mode:_previewFsMode}};
+  togglePreviewFullscreen();
+  const afterClick={{requests,mode:_previewFsMode}};
+  settlers[0].res();
+  {_TICK}const afterLate={{requests,mode:_previewFsMode,
+            overlay:area.hasClass('preview-fullscreen'),
+            nativeActive:__doc.fullscreenElement===area}};
+  togglePreviewFullscreen();
+  const restarted={{requests}};
+  settlers[1].res();
+  {_TICK}const again={{requests,mode:_previewFsMode}};
+  process.stdout.write(JSON.stringify({{first,afterClick,afterLate,restarted,again}}));
+}})().catch(err=>{{console.error(err);process.exit(1);}});
+"""
+    )
+    payload = _run_node(script)
+    assert payload["first"] == {"requests": 1, "mode": None}
+    # single-flight: o clique repetido cancela, não empilha um segundo pedido
+    assert payload["afterClick"] == {"requests": 1, "mode": None}
+    # o settlement do pedido cancelado não reativa nada nem prende o elemento
+    assert payload["afterLate"] == {
+        "requests": 1,
+        "mode": None,
+        "overlay": False,
+        "nativeActive": False,
+    }
+    assert payload["restarted"] == {"requests": 2}
+    assert payload["again"] == {"requests": 2, "mode": "api"}
