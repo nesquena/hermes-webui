@@ -276,14 +276,15 @@ def test_state_db_user_count_excludes_compression_markers():
 
 def test_sidecar_user_count_excludes_compression_markers():
     """#7681 finding 3: the sidecar walk (Session._compute_user_message_count)
-    must skip the same synthetic cards."""
+    must classify each row with the shared user-originated-turn predicate, which
+    excludes every synthetic card — not just durable-flag compression markers."""
     src = _read_models_py()
     assert (
-        "role == 'user' and not is_context_compression_marker(m)" in src
+        "is_user_originated_turn(m)" in src
     ), (
-        "Session._compute_user_message_count must exclude synthetic compression "
-        "markers via api.compression_anchor.is_context_compression_marker() — "
-        "see #7681 finding 3"
+        "Session._compute_user_message_count must use the shared "
+        "api.compression_anchor.is_user_originated_turn() predicate — "
+        "matching the state.db SQL aggregate — see #7681 finding 2"
     )
 
 
@@ -292,10 +293,10 @@ def test_count_user_turns_helper_excludes_compression_markers():
     apply the same classification."""
     src = _read_agent_sessions_py()
     assert (
-        "and not is_context_compression_marker(msg)" in src
+        "if is_user_originated_turn(msg)" in src
     ), (
-        "_count_user_turns() must not count synthetic compression cards when "
-        "falling back to row['messages'] — see #7681 finding 3"
+        "_count_user_turns() must count with is_user_originated_turn() when "
+        "falling back to row['messages'] — see #7681 finding 2"
     )
 
 
@@ -478,13 +479,158 @@ def test_read_importable_rows_excludes_compression_markers(tmp_path):
     )
 
 
+# ── Finding 2: sidecar vs state.db parity ──────────────────────────────────
+#
+# Both user-turn producers must classify a synthetic row matrix identically to
+# the shared is_user_originated_turn() predicate. The 14-shape overcount from
+# the review (legacy [CONTEXT SUMMARY]: with/without the flag, the continuation
+# marker, process-wakeup rows, display_kind hidden / async-delegation rows,
+# blank rows, the max-iterations request, TODO re-injection) must yield the
+# same answer whether it is walked from the sidecar or aggregated from state.db.
+
+_CONTINUATION_USER_CONTENT = (
+    "Continue from the compressed conversation context above. "
+    "This marker exists because no human user turn was available."
+)
+_MAX_ITERATIONS_REQUEST = (
+    "You've reached the maximum number of tool-calling iterations allowed. "
+    "Please provide a final response summarizing what you've found and accomplished so far, "
+    "without calling any more tools."
+)
+
+
+def _synthetic_row_matrix():
+    """Content-representable rows covering every overcounted shape from the review.
+
+    Each row uses the CANONICAL spelling the Hermes agent's own predicate
+    recognizes, so the sidecar/predicate producer and the state.db SQL producer
+    agree on exactly the same set (the two MUST-FIX counters in #7681 finding 2).
+    """
+    return [
+        ("m0", "user", "hello there", 0),
+        ("m1", "assistant", "on it", 0),
+        ("m2", "user", "please triage those logs", 0),
+        # durable flag → excluded by the agent (metadata) and by the SQL (flag).
+        ("m3", "user", "[context compaction] prior context summary", 1),
+        # legacy summary row WITHOUT the flag → excluded by the agent's
+        # legacy-prefix match and by the SQL prefix heuristic.
+        ("m4", "user", "[CONTEXT SUMMARY]: the user asked about x", 0),
+        # continuation marker → excluded by the agent's exact match and the SQL.
+        ("m6", "user", _CONTINUATION_USER_CONTENT, 0),
+        # process wake-up notification → excluded by the agent's prefix match.
+        ("m7", "user", "[IMPORTANT: Background process 42 finished] done", 0),
+        # blank echo → not a human ask.
+        ("m8", "user", "", 0),
+        # max-iterations request → excluded by the agent's exact match.
+        ("m9", "user", _MAX_ITERATIONS_REQUEST, 0),
+        # TODO re-injection header + newline → excluded by the agent's
+        # TODO_INJECTION_HEADER + "\n" prefix match (the header alone is not).
+        ("m10", "user",
+            "[Your active task list was preserved across context compression]\nContinue working", 0),
+    ]
+
+
+def test_user_turn_parity_db_vs_sidecar_and_predicate(tmp_path):
+    """#7681 finding 2: the SAME row matrix yields the same user-turn count
+    through the state.db SQL aggregate, the sidecar walk, and the shared
+    is_user_originated_turn() predicate (the local mirror when the agent's own
+    predicate is not importable in this venv)."""
+    from api.agent_sessions import read_importable_agent_session_rows
+    from api.compression_anchor import is_user_originated_turn
+    from api.models import Session
+
+    matrix = _synthetic_row_matrix()
+    # Sidecar + predicate producers over the message dicts.
+    sidecar_messages = [
+        {"role": role, "content": content, "_compressed_summary": flag}
+        for _mid, role, content, flag in matrix
+    ]
+    # only m0 and m2 are genuine human turns.
+    assert Session._compute_user_message_count(sidecar_messages) == 2, (
+        "sidecar producer must count exactly the 2 genuine turns"
+    )
+    assert sum(is_user_originated_turn(m) for m in sidecar_messages) == 2, (
+        "is_user_originated_turn() predicate must match the sidecar count"
+    )
+
+    # SQL producer: build a state.db carrying the SAME content matrix.
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT, session_source TEXT,
+            title TEXT, model TEXT, started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0, parent_session_id TEXT,
+            ended_at REAL, end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+            timestamp REAL, _compressed_summary INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, model,"
+        " started_at, message_count, parent_session_id, ended_at, end_reason)"
+        " VALUES ('parity_a', 'tui', 'tui', 'Parity A', 'm', 10.0,"
+        " 12, NULL, NULL, NULL)"
+    )
+    for mid, role, content, flag in matrix:
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp,"
+            " _compressed_summary) VALUES (?,?,?,?,?,?)",
+            (mid, "parity_a", role, content, 100.0, flag),
+        )
+    conn.commit()
+    conn.close()
+
+    by_id = {r["id"]: r for r in read_importable_agent_session_rows(db)}
+    assert "parity_a" in by_id, f"parity row missing: {list(by_id)}"
+    assert by_id["parity_a"]["actual_user_message_count"] == 2, (
+        "state.db SQL aggregate must equal the sidecar/predicate count for the "
+        "same row matrix — got "
+        f"{by_id['parity_a']['actual_user_message_count']!r}, expected 2"
+    )
+    # The rows whose roles were decidable do NOT carry the unknown marker.
+    assert not by_id["parity_a"].get("user_message_count_unknown")
+
+
+def test_user_turn_predicate_excludes_display_kind_async_rows():
+    """#7681 finding 2: display_kind hidden / async-delegation rows and blank
+    echoes are synthetic even though they carry role='user'; a /steer row is
+    human input."""
+    from api.compression_anchor import is_user_originated_turn
+
+    async_delegation = {
+        "role": "user", "content": "delegated task finished",
+        "display_kind": "hidden",
+    }
+    hidden_scaffolding = {
+        "role": "user", "content": "[context compaction] reran the task",
+        "display_kind": "hidden",
+    }
+    steer_row = {"role": "user", "content": "/steer clear", "display_kind": "steer"}
+    real_takeover = {"role": "user", "content": "take over from here"}
+
+    assert is_user_originated_turn(async_delegation) is False
+    assert is_user_originated_turn(hidden_scaffolding) is False
+    assert is_user_originated_turn(steer_row) is True
+    assert is_user_originated_turn(real_takeover) is True
+
+
 # ── Finding 1: compressed lineage total ─────────────────────────────────────
 
 
-def test_collapse_exposes_deduplicated_lineage_user_total():
-    """#7681 finding 1: a collapsed lineage row must expose the whole-lineage
-    user-turn total, not just the chosen tip segment's count."""
-    js = _read_sessions_js() + """
+def test_collapse_does_not_fabricate_lineage_turn_total():
+    """#7681 finding 1: a collapsed lineage row must NOT expose an undeduplicated
+    sum of segment user_message_count as a whole-lineage total (overlapping
+    snapshot/continuation segments over-count; an unknown segment degrades the
+    sum into a partial). The backend emits NULL for collapsed lineages and the
+    renderer omits the label, so the collapsed row must carry no fabricated
+    `_lineage_user_message_count` and must not be render-eligible."""
+    js = _read_sessions_js() + """\
 const segRoot = {
   session_id: 'root', title: 'Root',
   user_message_count: 7, message_count: 12,
@@ -501,31 +647,62 @@ const collapsed = _collapseSessionLineageForSidebar([segRoot, segTip]);
 if (collapsed.length !== 1) throw new Error('expected 1 collapsed row, got ' + collapsed.length);
 const row = collapsed[0];
 if (row._lineage_collapsed_count !== 2) throw new Error('collapsed count wrong');
-if (row._lineage_user_message_count !== 9) {
-  throw new Error('expected the deduplicated lineage total 9 (7 + 2), got '
-    + row._lineage_user_message_count);
+if ('_lineage_user_message_count' in row) {
+  throw new Error('collapsed lineage must not fabricate an undeduplicated user-turn total');
+}
+if (_sidebarUserTurnCountRenderOK(row)) {
+  throw new Error('a collapsed row must not be rendered with an arguably-accurate turn count');
 }
 process.stdout.write('ok');
 """
     assert _run_node(js).strip() == "ok", (
-        "a collapsed lineage must expose the deduplicated total across all "
-        "retained segments — see #7681 finding 1"
+        "a collapsed lineage must not fabricate a lineage total, and must not "
+        "be eligible for the user-turn label — see #7681 finding 1"
     )
 
 
-def test_render_prefers_lineage_total_over_tip_count():
-    """#7681 finding 1: the meta row must render the lineage total when the
-    row carries one, falling back to the row's own count otherwise."""
+def test_render_omits_turn_label_for_collapsed_rows():
+    """#7681 finding 1: the meta row must render the user-turn label ONLY when
+    the count is known-accurate (single segment, known roles, not pending) and
+    must omit it for collapsed lineages where the client cannot know a
+    deduplicated total."""
     src = _read_sessions_js()
-    assert "_lineage_user_message_count" in src, (
-        "sessions.js must consume the collapsed lineage total when rendering "
-        "the user-turn label — see #7681 finding 1"
+    assert "_sidebarUserTurnCountRenderOK" in src, (
+        "sessions.js must gate the user-turn label on an accuracy check — see #7681 finding 1"
     )
     render_idx = src.index("session_meta_user_turns")
-    lookup = src[render_idx - 400 : render_idx]
-    assert "_lineage_user_message_count" in lookup, (
-        "the render site must read _lineage_user_message_count to prefer the "
-        "lineage total over the tip segment's own count"
+    lookup = src[render_idx - 500 : render_idx]
+    assert "_sidebarUserTurnCountRenderOK(s)" in lookup, (
+        "the render site must consult _sidebarUserTurnCountRenderOK at the "
+        "label, not sum across lineage segments"
+    )
+    assert "_lineage_user_message_count" not in src, (
+        "no producer may expose a fabricated _lineage_user_message_count total"
+    )
+
+
+def test_user_turn_label_render_gate_behaviour():
+    """#7681 findings 1 & 3: behaviour — single-segment known counts render;
+    collapsed / pending / unknown counts are omitted."""
+    js = _read_sessions_js() + """\
+function check(name, s, expected){
+  const got=!!_sidebarUserTurnCountRenderOK(s);
+  if(got!==expected) throw new Error(name+': expected '+expected+' got '+got);
+}
+check('single known', {user_message_count:3}, true);
+check('known zero', {user_message_count:0}, true);
+check('collapsed browser', {user_message_count:7, _lineage_collapsed_count:2}, false);
+check('collapsed server', {user_message_count:7, _compression_segment_count:2}, false);
+check('lineage root', {user_message_count:7, _lineage_root_id:'r'}, false);
+check('pre-compression snapshot', {user_message_count:7, pre_compression_snapshot:true}, false);
+check('pending user message', {user_message_count:7, pending_user_message:'x'}, false);
+check('streaming', {user_message_count:7, active_stream_id:'s'}, false);
+check('unknown count', {user_message_count:null}, false);
+process.stdout.write('ok');
+"""
+    assert _run_node(js).strip() == "ok", (
+        "_sidebarUserTurnCountRenderOK must render only single-segment, known, "
+        "non-pending counts — see #7681 findings 1 & 3"
     )
 
 
@@ -766,6 +943,7 @@ def test_unknown_turn_count_does_not_hide_untitled_cli_row():
         "message_count": 3,
         "actual_user_message_count": None,  # no `role` column → unknown
         "user_message_count": None,
+        "user_message_count_unknown": True,  # SQL branch signals roles unavailable
         "messages": [],                     # no sidecar fallback available
         "ended_at": None,
         "end_reason": None,
@@ -776,6 +954,49 @@ def test_unknown_turn_count_does_not_hide_untitled_cli_row():
 
     assert ags._count_user_turns(row) == 0
     assert ags.is_cli_session_row_visible(row) is True
+
+
+def test_webui_row_without_unknown_marker_stays_hidden_by_count():
+    """#7681 finding 4: the escape must key on the EXPLICIT unknown marker
+    (set only by the no-role / no-messages SQL branches), never on the value
+    being absent.
+
+    A legacy WebUI sidecar/index row that simply does not carry
+    ``actual_user_message_count`` is not "unknown" — it has an accurate count
+    in its own metadata. Previously ``is_cli_session_row_visible()`` escaped
+    any row whose count field was missing, which surfaced rows master hid (the
+    escape fired on the *value*, so every index row without a count passed the
+    gate once it had message_count >= 2). With the escape now keyed on the
+    marker, such a row falls through to the real count threshold and stays
+    hidden once it cannot prove two user turns.
+
+    Revert-sensitive: keying the escape on the value (None) instead of the
+    marker makes this fail and re-surfaces the over-surfacing bug.
+    """
+    import api.agent_sessions as ags
+
+    row = {
+        "id": "webui_legacy_index",
+        # A legacy imported/CLI row that comes from an index/sidecar source and
+        # never carries actual_user_message_count nor the unknown marker, but
+        # does carry enough to hit the untitled threshold.
+        "actual_message_count": 5,
+        "message_count": 5,
+        "actual_user_message_count": None,   # field simply absent
+        "user_message_count": None,
+        # no "user_message_count_unknown" key → marker must NOT be used
+        "messages": [],
+        "ended_at": None,
+        "end_reason": None,
+        "source": "cli",
+        "source_tag": "cli",
+        "title": None,
+    }
+    # The row IS CLI-classified (source cli), but the escape must NOT fire
+    # because no explicit unknown marker is present — it must fall through to
+    # the count threshold and stay hidden without a recoverable user-turn count.
+    assert ags._count_user_turns(row) == 0
+    assert ags.is_cli_session_row_visible(row) is False
 
 
 def test_known_zero_turn_count_still_hides_untitled_cli_row():
@@ -822,6 +1043,7 @@ def test_legacy_single_message_untitled_cli_row_does_not_pass():
         "message_count": 1,
         "actual_user_message_count": None,  # no `role` column → unknown
         "user_message_count": None,
+        "user_message_count_unknown": True,  # SQL branch signals roles unavailable
         "messages": [],                  # no sidecar fallback available
         "ended_at": None,
         "end_reason": None,

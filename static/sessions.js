@@ -9251,30 +9251,43 @@ function _collapseSessionLineageForSidebar(sessions){
       ? _authoritativeLineageTipId(item)
       : item&&(item._lineage_tip_id||item._parent_lineage_tip_id)||null).filter(Boolean));
     const chosen=sorted.find(item=>tipIds.has(item&&item.session_id))||sorted[0];
-    // #7681: the collapsed row is ``{...chosen}``, so it inherits only the
-    // selected tip segment's ``user_message_count`` — a compressed lineage
-    // that retains every segment would otherwise look like a two-turn
-    // conversation. Expose the deduplicated whole-lineage total (max tip
-    // count, plus every other segment's count, keyed by session id) as
-    // ``_lineage_user_message_count`` so the meta row can render the
-    // authoritative number instead of the tip's slice.
-    const lineageTurnTotals=new Map();
-    for(const item of sorted){
-      if(!item||!item.session_id) continue;
-      const turns=Number(item.user_message_count);
-      if(!Number.isFinite(turns)||turns<0) continue;
-      lineageTurnTotals.set(item.session_id,turns);
-    }
-    const lineageUserTurns=Array.from(lineageTurnTotals.values()).reduce((a,b)=>a+b,0);
+    // #7681 finding 1: a collapsed lineage row must NOT fabricate a whole-lineage
+    // user-turn total by summing each segment's private `user_message_count`.
+    // Compression snapshot/continuation segments overlap (the carried tail is
+    // duplicated across them), so a naive sum over-counts (7 + 2 = 9 against a
+    // real stitched count of 6), and a segment with an unknown count silently
+    // degrades the sum into a partial total. The backend rules on it: a
+    // multi-segment row's user-turn count is *unknown* (api/agent_sessions.py
+    // emits NULL for collapsed lineages), so the collapsed row keeps only the
+    // tip's own user_message_count and the _renderer_ omits the label when the
+    // row is collapsed (see _sidebarUserTurnCountRenderOK).
     result.push({
       ...chosen,
       _lineage_key:key,
       _lineage_collapsed_count:items.length,
       _lineage_segments:sorted,
-      ...(lineageTurnTotals.size>0?{_lineage_user_message_count:lineageUserTurns}:{}),
     });
   }
   return result;
+}
+
+function _sidebarUserTurnCountRenderOK(s){
+  // #7681 finding 1 (smaller option): render the user-turn label ONLY when the
+  // count is known to be accurate. A multi-segment compressed lineage has no
+  // single authoritative count on the client (the backend emits NULL for such
+  // rows — api/agent_sessions.py), and a sidecar snapshot/continuation pair's
+  // summed count would be undeduplicated, so omit the label for collapsed rows.
+  // A row that is mid-stream or carries a pending local turn also has a count
+  // that is about to change, so omit until the server lands. Everything else
+  // (single segment, known roles, not pending) renders its user_message_count.
+  if(!s) return false;
+  const seg=Number(s._compression_segment_count||0);
+  const collapsed=Number(s._lineage_collapsed_count||0);
+  if(s._lineage_root_id||s.pre_compression_snapshot||seg>1||collapsed>1)return false;
+  if(s.active_stream_id||s.pending_user_message)return false;
+  if(typeof s.user_message_count==='undefined'||s.user_message_count===null)return false;
+  const turns=Number(s.user_message_count);
+  return Number.isFinite(turns)&&turns>=0;
 }
 
 function _sessionDisplayTitle(s){
@@ -9365,16 +9378,28 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   // just-sent turn renders stale until the next /api/sessions poll lands.
   // Only count REAL user messages — synthetic compression/task-summary cards
   // carry role='user' but are not user turns (mirrors
-  // api/compression_anchor.is_context_compression_marker()).
+  // api/compression_anchor.is_user_originated_turn()).
   const optimisticUserTurns=(Array.isArray(S.messages)?S.messages:[])
     .filter(m=>m&&m.role==='user'&&!(
       typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)
     )).length;
   if(optimisticUserTurns>0){
-    S.session.user_message_count=Math.max(
-      Number(S.session.user_message_count)||0,
-      optimisticUserTurns
-    );
+    const serverUserTurns=Number(S.session.user_message_count||0);
+    let userTurns=Math.max(serverUserTurns,optimisticUserTurns);
+    // #7681 finding 3 (minor): S.messages is windowed (last ~30), so for a
+    // long session the optimistic window undercounts and max(server, window)
+    // never advances past the server total after the next send. Detect the
+    // windowed case (server already knows more user turns than the window) and,
+    // when a genuine user turn is in flight, advance to server+1 for the
+    // pending turn. Short sessions where the window already reflects the new
+    // turn (optimisticUserTurns >= server) skip this so we never double-bump.
+    const inFlight=typeof _sendInProgress!=='undefined'&&!!_sendInProgress
+      && (typeof _sendInProgressSid==='undefined'||_sendInProgressSid===null
+        || _sendInProgressSid===S.session.session_id);
+    if(userTurns===serverUserTurns&&serverUserTurns>0&&optimisticUserTurns<serverUserTurns&&inFlight){
+      userTurns=serverUserTurns+1;
+    }
+    S.session.user_message_count=userTurns;
   }
   if((S.session.title==='Untitled'||!S.session.title)&&title){
     S.session.title=title;
@@ -10687,13 +10712,12 @@ function renderSessionListFromCache(){
       // sidebar, so prepending this label would push previously visible
       // model/source/profile information out of view at narrow widths.
       //
-      // Collapsed lineage rows carry ``_lineage_user_message_count`` — the
-      // deduplicated total across all retained segments — which supersedes
-      // the chosen tip segment's own count.
-      const lineageUserTurns=Number(s._lineage_user_message_count);
-      const useLineageTotal=Number.isFinite(lineageUserTurns)&&lineageUserTurns>=0;
-      const userTurns=useLineageTotal?lineageUserTurns:s.user_message_count;
-      if(typeof userTurns==='number'&&Number.isFinite(userTurns)&&userTurns>=0){
+      // #7681 finding 1 (smaller option): render ONLY when the count is known
+      // to be accurate — a single segment, known roles, not pending. Collapsed
+      // lineages and in-flight rows omit the label, and the lineage total is
+      // left for a follow-up.
+      if(_sidebarUserTurnCountRenderOK(s)){
+        const userTurns=Number(s.user_message_count);
         const userTurnLabel=(typeof t==='function')
           ? t('session_meta_user_turns', userTurns)
           : `${userTurns} user turn${userTurns===1?'':'s'}`;

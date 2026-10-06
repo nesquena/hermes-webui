@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover
     _msvcrt = None
 
 import api.config as _cfg
-from api.compression_anchor import is_context_compression_marker
+from api.compression_anchor import is_context_compression_marker, is_user_originated_turn
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
@@ -2413,13 +2413,8 @@ class Session:
             return 0
         n = 0
         for m in messages:
-            if isinstance(m, dict):
-                # Inline role check to avoid the _message_role helper call
-                # on every iteration. dict.get('role') with default '' is
-                # materially faster than a function call for the hot loop.
-                role = m.get('role')
-                if isinstance(role, str) and role == 'user' and not is_context_compression_marker(m):
-                    n += 1
+            if is_user_originated_turn(m):
+                n += 1
         return n
 
     def compact(

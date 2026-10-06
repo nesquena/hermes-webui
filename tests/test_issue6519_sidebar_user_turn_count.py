@@ -42,18 +42,21 @@ def test_detailed_mode_skips_user_message_count_when_absent():
     payload actually carries a number, so it never collides with
     sessions that have not yet been backfilled.
 
-    #7681: the guard now reads through a resolved ``userTurns`` local (the
-    lineage total supersedes the row's own count), so the predicate is
-    ``typeof userTurns==='number'`` rather than the old direct field access.
+    #7681 finding 1 (smaller option): the render now defers to
+    ``_sidebarUserTurnCountRenderOK``, which additionally omits the label for
+    collapsed lineages and in-flight rows; the finite-non-negative guard it
+    still enforces lives inside that helper.
     """
     src = _read_sessions_js()
-    assert "typeof userTurns==='number'" in src, (
-        "the user-turn label must only render when the resolved count "
-        "(user_message_count or the collapsed lineage total) is a finite "
-        "non-negative number — absent payload must not render a 0 "
-        "user-turns row"
+    assert "_sidebarUserTurnCountRenderOK" in src, (
+        "the user-turn label render must be gated by "
+        "_sidebarUserTurnCountRenderOK so an absent/pending/collapsed payload "
+        "never renders a 0 user-turns row"
     )
-    assert "Number.isFinite(userTurns)&&userTurns>=0" in src, (
+    assert "const turns=Number(s.user_message_count);" in src, (
+        "the render guard must resolve the row's own user_message_count"
+    )
+    assert "Number.isFinite(turns)&&turns>=0" in src, (
         "the render guard must still reject NaN/negative counts"
     )
 
