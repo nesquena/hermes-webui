@@ -209,12 +209,15 @@ def test_a_colon_in_a_name_takes_the_keyless_pre_fix_identity():
 def test_keyless_non_ascii_providers_do_not_share_one_api_key_env(monkeypatch):
     """An id with no POSIX-safe characters must not read a shared variable (#8026).
 
-    The old fallback minted ``CUSTOM_API_KEY`` for EVERY id whose characters all
-    sanitized away, so two distinct non-ASCII providers read one env var and the
-    key meant for the first travelled to the second's endpoint as a bearer
-    token. An unnameable id takes the keyless path instead.
+    The old fallback minted ``CUSTOM_CUSTOM_API_KEY`` for EVERY id whose
+    characters all sanitized away (the constant ``CUSTOM`` stood in for the empty
+    run), so two distinct non-ASCII providers read one env var and the key meant
+    for the first travelled to the second's endpoint as a bearer token.
+    ``CUSTOM_API_KEY`` is the wrong variable to set here: master never read it, so
+    a test that used it would pass on master too and pin nothing. An unnameable
+    Unicode id takes the keyless path instead.
     """
-    monkeypatch.setenv("CUSTOM_API_KEY", "sk-SHARED")
+    monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "sk-SHARED")
 
     first_env = config._api_key_env_name("custom:晨光鑫遇专用")
     second_env = config._api_key_env_name("custom:晨曦专用")
@@ -240,6 +243,75 @@ def test_ids_differing_only_by_the_custom_prefix_do_not_share_a_variable():
     assert config._api_key_env_name("custom:foo") == "CUSTOM_FOO_API_KEY"
     assert config._api_key_env_name("custom:custom_foo") == "CUSTOM_CUSTOM_FOO_API_KEY"
     assert config._api_key_env_name("custom:bar") != config._api_key_env_name("custom:custom_bar")
+
+
+def test_two_non_ascii_providers_resolve_no_convention_key(monkeypatch):
+    """The maintainer's probe, end to end through the connection resolver (#8026).
+
+    Two keyless non-ASCII records must not both take the shared convention
+    variable: with it set, a keyless record that reads it sends the key to an
+    endpoint it was never configured for. This drives
+    ``resolve_custom_provider_connection`` rather than the name helper alone, so
+    it pins the bundle streaming actually hands the Agent.
+    """
+    monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "sk-SHARED")
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "晨光鑫遇专用",
+                    "base_url": "http://127.0.0.1:8317/v1",
+                },
+                {
+                    "name": "晨曦专用",
+                    "base_url": "http://10.0.0.9:9000/v1",
+                },
+            ],
+        },
+    )
+
+    first_key, first_url = config.resolve_custom_provider_connection("custom:晨光鑫遇专用")
+    second_key, second_url = config.resolve_custom_provider_connection("custom:晨曦专用")
+
+    assert first_url == "http://127.0.0.1:8317/v1"
+    assert second_url == "http://10.0.0.9:9000/v1"
+    assert first_key is None, "an unnameable provider must not read the shared convention key"
+    assert second_key is None, "an unnameable provider must not read the shared convention key"
+
+
+def test_ascii_punctuation_only_id_keeps_its_convention_key(monkeypatch):
+    """CONTROL pinning master's behaviour for ASCII punctuation-only ids (#8026).
+
+    The maintainer asked for this guard by name. It asserts PRE-EXISTING
+    behaviour, so it does not fail on master and is not the regression proof --
+    there is no committed branch here without the guard. Its job is to pin that
+    this change does not re-introduce the round-2 regression, where the guard for
+    unnameable Unicode ids also caught ASCII ids whose distinctive part has no
+    letters or digits. Those names mint their variable from their OWN id, so they
+    never shared one; returning ``""`` there sends ``dummy-key`` to a provider
+    that authenticates on master. Rare, but a working setup must not break on
+    upgrade.
+    """
+    assert config._api_key_env_name("custom:_") == "CUSTOM_CUSTOM_API_KEY"
+    assert config._api_key_env_name("custom:.") == "CUSTOM_CUSTOM_API_KEY"
+    assert config._custom_provider_slug_from_name("_") == "custom:_"
+    assert config._custom_provider_slug_from_name(".") == "custom:."
+
+    monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "sk-ascii")
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "custom_providers": [
+                {"name": "_", "base_url": "http://127.0.0.1:8400/v1"},
+            ],
+        },
+    )
+    api_key, base_url = config.resolve_custom_provider_connection("custom:_")
+    assert base_url == "http://127.0.0.1:8400/v1"
+    assert api_key == "sk-ascii"
 
 
 def test_two_whitespace_name_and_double_dash_name_do_not_collapse():

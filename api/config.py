@@ -1434,8 +1434,16 @@ def _non_ascii_fallback_slug(raw: str) -> str:
     ``unowned_custom_provider``. The ASCII path folds ``:`` for exactly this
     reason, so a name with one takes the same route rather than keeping its own
     characters, and returns ``""`` here to fall through to the ASCII slug.
+
+    The other guard is that ``raw`` must actually contain a non-ASCII character.
+    An all-ASCII name reaches this fallback exactly when its ASCII fold is empty
+    (``"_"``, ``"."``, a single ``-``), and those names never had a fallback
+    identity: on master their fold was empty too, so they minted nothing. Keeping
+    them here would mint ``custom:_`` and change behaviour for existing providers,
+    which this change exists NOT to do. Only a name whose characters the ASCII
+    class cannot represent needs the name kept.
     """
-    if ":" in raw:
+    if raw.isascii() or ":" in raw:
         return ""
     return raw.replace(" ", "-")
 
@@ -1735,20 +1743,23 @@ def _api_key_env_name(provider_id: object) -> str:
     ``custom:`` collapses those two onto one variable, which is the same leak in
     the opposite direction.
 
-    Whether an id is nameable at all is decided by its DISTINCTIVE part. Every
-    custom-provider id carries the literal ``custom:`` prefix, so a prefix-only
-    sanitization leaves just that shared word; for an id whose distinctive part
-    has no POSIX-safe characters (``custom:晨光鑫遇专用``) the function returns
-    ``""`` and the caller takes the keyless path instead of reading a variable
-    that belongs to somebody else. An id the convention cannot name is a
-    provider it cannot carry a key for.
+    Whether an id is nameable at all is decided by its DISTINCTIVE part, and only
+    for an id whose distinctive part is NOT ASCII. Every custom-provider id
+    carries the literal ``custom:`` prefix, so a prefix-only sanitization leaves
+    just that shared word; for an id whose distinctive part has no POSIX-safe
+    characters (``custom:晨光鑫遇专用``) the function returns ``""`` and the caller
+    takes the keyless path instead of reading a variable that belongs to somebody
+    else. An id the convention cannot name is a provider it cannot carry a key
+    for. An ASCII id whose distinctive part has no letters or digits (``custom:_``)
+    keeps master's behaviour and its convention variable: those names never had a
+    collision, because each one's own id is still distinct.
     """
     text = str(provider_id or "").strip()
     if ":" in text and text.lower().startswith("custom:"):
         distinctive = text.split(":", 1)[1]
     else:
         distinctive = text
-    if not re.sub(r"[^A-Za-z0-9]", "", distinctive):
+    if not distinctive.isascii() and not re.sub(r"[^A-Za-z0-9]", "", distinctive):
         return ""
     sanitized = re.sub(r"[^A-Za-z0-9]", "_", text).upper().strip("_")
     if not sanitized:

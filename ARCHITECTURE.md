@@ -1020,10 +1020,7 @@ endpoint. Two rules:
   `_custom_provider_slug_from_name()`: lowercase, every run of other characters
   folded to `-`, so `Proxy Main` -> `custom:proxy-main` and `Foo (Bar)` ->
   `custom:foo-bar`. A name that has any of those characters is slugified this
-  way even when some of them are stripped in the process: `晨光-鑫遇` keeps its
-  ASCII `-` and is folded to `custom:晨光-鑫遇` — the fallback only runs when
-  `_custom_provider_slug_from_name()` returns nothing, which happens when `-`
-  was the only ASCII character present.
+  way even when some of them are stripped in the process.
 - **A name with none of them** (e.g. a pure-CJK name such as `晨光鑫遇专用`)
   keeps its own characters, because the agent's `custom_provider_slug()` does
   (`_agent_custom_provider_slug` mirrors it). Folding them away emptied the slug,
@@ -1037,12 +1034,18 @@ endpoint. Two rules:
   the ASCII fold, and for a name whose fold is empty that is no identity at all:
   `晨光:鑫遇` mints nothing and stays uncatalogued, exactly as it does today.
   Nothing that routes before stops routing; the name simply is not advertised.
+  The fallback also requires the name to carry a non-ASCII character: an
+  all-ASCII name reaches it exactly when its fold was empty (`_`, `.`), and
+  those minted nothing before either, so their behaviour is unchanged.
 
 The fallback is name-derived, not endpoint-derived: two providers sharing one
 `base_url` are two identities and must stay two entries. The same rule governs
-the API-key env var: `_api_key_env_name()` returns an empty name when an id has
-no POSIX-safe characters, so an unnameable provider takes the keyless path
-rather than every such provider reading one shared `CUSTOM_API_KEY` variable.
+the API-key env var: `_api_key_env_name()` returns an empty name when an id's
+distinctive part has no POSIX-safe characters AND is not ASCII, so an unnameable
+Unicode provider takes the keyless path rather than every such provider reading
+one shared `CUSTOM_CUSTOM_API_KEY` variable. An ASCII id keeps the convention
+variable it always had, including `custom:_` -> `CUSTOM_CUSTOM_API_KEY`, because
+each such id is still distinct and none shared a variable.
 
 ---
 

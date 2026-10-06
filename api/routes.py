@@ -7383,7 +7383,7 @@ def _custom_provider_slug_for_context(name: object) -> str:
         slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
         slug = re.sub(r"-{2,}", "-", slug)
         if not slug:
-            if ":" in raw:
+            if raw.isascii() or ":" in raw:
                 return ""
             slug = raw.replace(" ", "-")
             if not slug:
