@@ -11,6 +11,7 @@ Covers:
 """
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -415,3 +416,133 @@ area.requestFullscreen=()=>{{__doc.fullscreenElement=area;return Promise.resolve
         "wkExits": 1,
         "nativeActive": False,
     }
+
+
+# ── Geometria do fallback (PR #6682, ponto 4) ─────────────────────────────────
+#
+# #previewArea vive dentro de .rightpanel, que sempre tem transform:translateX(0)
+# — e transform vira containing block de position:fixed, então o fallback enchia
+# os ~300px do painel, não a viewport (299x805 a 1440x844; 299x844 a 390x844).
+# O teste mede a geometria real em Chromium headless, offline, com o CSS
+# production e o bloco production do workspace.js.
+
+_GEOMETRY_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<div class="layout">
+  <main style="flex:1;min-width:0"></main>
+  <aside class="rightpanel mobile-open">
+    <div class="preview-area visible" id="previewArea">
+      <div class="preview-path" id="previewPath">
+        <span id="previewPathText">/tmp/demo.md</span>
+        <button id="btnFullscreenPreview" class="panel-icon-btn"><span class="preview-btn-label">Fullscreen</span></button>
+      </div>
+      <pre class="preview-code" id="previewCode"># demo</pre>
+    </div>
+  </aside>
+</div>
+</body></html>
+"""
+
+_GEOMETRY_SCRIPT = """
+const $=(id)=>document.getElementById(id);
+const t=(k)=>k;
+""" + FULLSCREEN_BLOCK + """
+window.__run=()=>{
+  const el=document.getElementById('previewArea');
+  const home={parent:el.parentNode,next:el.nextSibling};
+  // Força o caminho de fallback: sem API nativa não há fullscreen de elemento.
+  // Chromium também expõe o alias webkit, então os dois precisam cair.
+  Object.defineProperty(document,'fullscreenEnabled',{configurable:true,get:()=>false});
+  Object.defineProperty(document,'webkitFullscreenEnabled',{configurable:true,get:()=>false});
+  togglePreviewFullscreen();
+  const r=el.getBoundingClientRect();
+  const label=el.querySelector('.preview-btn-label');
+  const full={
+    mode:_previewFsMode,
+    overlay:el.classList.contains('preview-fullscreen'),
+    width:Math.round(r.width),
+    height:Math.round(r.height),
+    inPanel:!!el.closest('.rightpanel'),
+    labelDisplay:getComputedStyle(label).display,
+    vw:window.innerWidth,
+    vh:window.innerHeight,
+  };
+  _exitPreviewFullscreen();
+  const restored={
+    mode:_previewFsMode,
+    overlay:el.classList.contains('preview-fullscreen'),
+    inPanel:el.parentNode===home.parent,
+    sameSlot:el.nextSibling===home.next,
+  };
+  return {full,restored};
+};
+"""
+
+
+def _measure_geometry(viewport_width: int, viewport_height: int = 844) -> dict:
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependência ausente
+        pytest.skip("playwright indisponível; rode o teste de geometria do fallback")
+
+    playwright = sync_playwright().start()
+    # Só a ausência do binário do browser pula o teste; depois de um launch
+    # bem-sucedido qualquer falha de medição precisa aparecer como erro.
+    try:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+    except Exception as exc:  # pragma: no cover - sandbox sem browser
+        playwright.stop()
+        pytest.skip(f"chromium indisponível para medição: {exc}")
+
+    try:
+        page = browser.new_page(
+            viewport={"width": viewport_width, "height": viewport_height}
+        )
+        page.set_content(_GEOMETRY_HTML)
+        page.add_style_tag(content=STYLE_CSS)
+        page.add_script_tag(content=_GEOMETRY_SCRIPT)
+        return page.evaluate("() => window.__run()")
+    finally:
+        browser.close()
+        playwright.stop()
+
+
+def test_fallback_overlay_fills_viewport_at_1440_and_restores_dom():
+    m = _measure_geometry(1440, 844)
+    full, restored = m["full"], m["restored"]
+    assert full["mode"] == "overlay", m
+    assert full["overlay"] is True, m
+    # O fallback precisa preencher a viewport, não os ~300px do painel.
+    assert full["width"] >= 1440 - 2, m
+    assert full["height"] >= 844 - 2, m
+    # ... e a propriedade do DOM é restaurada em todo exit.
+    assert restored == {
+        "mode": None,
+        "overlay": False,
+        "inPanel": True,
+        "sameSlot": True,
+    }, m
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_fallback_overlay_keeps_rightpanel_container_queries():
+    # 1440px: com o overlay no topo o container rightpanel resolve contra os
+    # 1440px reais (rótulo visível); preso no painel de 300px ele sumiria.
+    wide = _measure_geometry(1440, 844)
+    assert wide["full"]["width"] >= 1440 - 2, wide
+    assert wide["full"]["labelDisplay"] != "none", wide
+    # 390px: as mesmas regras responsivas continuam valendo dentro do overlay.
+    narrow = _measure_geometry(390, 844)
+    assert narrow["full"]["width"] >= 390 - 2, narrow
+    assert narrow["full"]["labelDisplay"] == "none", narrow
+    assert narrow["restored"]["inPanel"] is True, narrow
+
+
+def test_rightpanel_keeps_its_transform():
+    """Guarda contra o atalho proibido: remover o transform do painel mudaria o
+    comportamento do painel inteiro em vez de escapar do ancestor no overlay."""
+    assert re.search(r"\.rightpanel\{[^}]*transform:translateX\(0\)", STYLE_CSS)

@@ -3502,7 +3502,11 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
    viewport. Two paths share this class-free CSS — the native Fullscreen API
    (element gets :fullscreen) and the fixed-overlay fallback for mobile
    browsers that restrict requestFullscreen to <video> (.preview-fullscreen). */
-.preview-area.preview-fullscreen{position:fixed;inset:0;z-index:9999;background:var(--bg);padding:8px;border-radius:0;}
+.preview-area.preview-fullscreen{position:fixed;inset:0;z-index:9999;background:var(--bg);padding:8px;border-radius:0;
+  /* O overlay escapou do transform do painel: ele passa a ser o próprio
+     container `rightpanel`, então as regras @container do preview (rótulo do
+     botão em painéis estreitos, etc.) continuam medindo a largura real. */
+  container-type:inline-size;container-name:rightpanel;}
 #previewArea:fullscreen,#previewArea:-webkit-full-screen{background:var(--bg);padding:8px;border-radius:0;}
 @media (prefers-reduced-motion:reduce){
   .preview-area.preview-fullscreen{transition:none;}

@@ -1367,17 +1367,50 @@ function _previewFsExitApi(){
   _previewFsReleaseOwned(_previewFsOwned());
 }
 
+// O transform de .rightpanel (translateX(0)) vira containing block de
+// position:fixed, então o fallback encheria só os ~300px do painel. Antes de
+// fixar, o preview sai para <body> (overlay de topo) e a posição original fica
+// guardada; todo exit devolve o elemento ao mesmo slot do DOM.
+let _previewFsHome=null; // {parent,next} | null
+
+function _previewFsReparentOverlay(){
+  const el=_previewFsEl();
+  const parent=el&&el.parentNode;
+  if(!el||!parent||parent===document.body) return;
+  _previewFsHome={parent:parent,next:el.nextSibling};
+  parent.removeChild(el);
+  document.body.appendChild(el);
+}
+
+function _previewFsRestoreHome(){
+  const home=_previewFsHome;
+  _previewFsHome=null;
+  const el=_previewFsEl();
+  if(!el||!home||!home.parent) return;
+  if(el.parentNode) el.parentNode.removeChild(el);
+  // Só devolve ao container original se ele ainda está no documento.
+  if(home.parent.isConnected===false) return;
+  if(home.next&&home.next.parentNode===home.parent) home.parent.insertBefore(el,home.next);
+  else home.parent.appendChild(el);
+}
+
 function _previewFsEnterOverlay(){
   _previewFsMode='overlay';
   const el=_previewFsEl();
-  if(el) el.classList.add('preview-fullscreen');
+  if(el){
+    _previewFsReparentOverlay();
+    el.classList.add('preview-fullscreen');
+  }
   _previewFsSync();
 }
 
 function _previewFsExitOverlay(){
   _previewFsMode=null;
   const el=_previewFsEl();
-  if(el) el.classList.remove('preview-fullscreen');
+  if(el){
+    _previewFsRestoreHome();
+    el.classList.remove('preview-fullscreen');
+  }
   _previewFsSync();
 }
 
