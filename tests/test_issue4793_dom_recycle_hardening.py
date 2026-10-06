@@ -190,7 +190,9 @@ def test_messages_scrollbar_drag_ignores_bubbled_child_pointerdown():
     script = _js_prefix() + """
 const pointerdownBody = extractBody("el.addEventListener('pointerdown',(e)=>{", "},{passive:true});");
 let _scrollbarDragActive = false;
+let _scrollbarOverlayDragCandidate = null;
 const el = { clientWidth: 120 };
+function _beginScrollbarDragIntent() { _scrollbarDragActive = true; }
 eval(`function pointerdownHandler(e){${pointerdownBody}}`);
 pointerdownHandler({ target: { clientWidth: 120 }, offsetX: 999 });
 const bubbledArmed = _scrollbarDragActive;
@@ -213,7 +215,9 @@ const pointerdownBody = extractBody("el.addEventListener('pointerdown',(e)=>{", 
 const pointerupBody = extractBody("window.addEventListener('pointerup',()=>{", "},{passive:true});");
 const rerenders = [];
 let _scrollbarDragActive = false;
+let _scrollbarOverlayDragCandidate = null;
 const el = { clientWidth: 120 };
+function _beginScrollbarDragIntent() { _scrollbarDragActive = true; }
 function _scheduleMessageVirtualizedRender(force) {
   rerenders.push(force);
 }
