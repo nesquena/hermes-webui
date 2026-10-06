@@ -219,10 +219,14 @@ def test_update_flows_keep_explicit_longer_timeouts():
     assert "api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000})" in boot
     assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000})" in panels
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
-    # apply/force now build their body inline to optionally carry the offered
-    # channel (Codex debounce-race fix), but MUST still carry the 120s override.
+    # apply/force build their body from the offered target and channel, but MUST
+    # still carry the 120s override. Force captures both before confirmation.
     assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000})" in src
-    assert "api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000})" in src
+    assert "api('/api/updates/force',{method:'POST',body:JSON.stringify(body),timeoutMs:120000})" in src
+    force = _extract_js_function(src, "forceUpdate")
+    assert "const channelValue=window._updateData?.[target]?.channel;" in force
+    assert "const body=channel?{target,channel}:{target};" in force
+    assert force.index("const channelValue=") < force.index("await showConfirmDialog")
 
 
 def test_session_message_loads_keep_explicit_longer_timeouts():
