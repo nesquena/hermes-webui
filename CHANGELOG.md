@@ -114,6 +114,13 @@
 
 ### Fixed
 
+- **CLI conversations no longer vanish from the sidebar when a read fails partway.** A read-only `projects.json`
+  (for example after a Docker UID mismatch), a locked `state.db` during the cron, webhook, kanban, project-recovery or
+  refill reads, or one unavailable profile in the all-profiles view used to throw away every row already loaded, so the
+  CLI sidebar went empty and stayed empty on every poll. Those failures now keep the rows that were read, mark the
+  result incomplete so it isn't cached, and the warning names the profile and database instead of blaming
+  `state.db`. Thanks @martindell. (#7555 by @martindell)
+
 - **Deleting your last conversation resets the model picker to your configured default.** The empty composer used to
   keep showing the deleted conversation's model even though the next chat starts on the default, so the picker and the
   model actually used disagreed. Single and batch delete both reset it, and a model you pick while the delete is still
