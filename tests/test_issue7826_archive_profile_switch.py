@@ -9,6 +9,12 @@ pipeline: the archive request carries the row's OWNER profile, and the server
 resolves/validates against that profile. The client never calls
 _switchProfileForSessionLoad from any archive path.
 
+Round 5 (maintainer CHANGES_REQUESTED at 1c87a20578b5) removed one more
+layer: the client-side retry that re-POSTed with the 409 envelope's profile.
+It re-issued a WRITE against a session the server had just denied, so a
+denied archive could still rewrite a foreign profile's transcript. A
+structured 409 now surfaces as a failure with exactly ONE request.
+
 These are behaviour tests: the real ``_archiveSession`` /
 ``_archiveBatchSessions`` bodies are extracted from ``static/sessions.js``
 and run under Node with stubbed globals, so a future refactor that keeps the
@@ -80,10 +86,10 @@ def _build_driver(archive_body: str, mismatch_body: str, fail_mode: str = 'first
 
     ``fail_mode``:
       - 'first':  the first archive api call throws a structured 409
-                  (foreign profile), the second succeeds — the retry must
-                  re-send WITH the envelope's profile, without any switch.
-      - 'always': every archive api call throws 409 — the retry must NOT
-                  fire again (the _retried guard).
+                  (foreign profile) — the request must NOT be re-sent with
+                  the envelope's profile (round 5: no retry at all).
+      - 'always': every archive api call throws 409 — the failure surfaces
+                  without any further request.
       - 'never':  every archive api call succeeds — the happy path sends
                   exactly one request carrying the row's own profile.
     ``session_profile``: the archived row's known owner profile (absent on
@@ -96,13 +102,10 @@ const requests = [];
 async function api(path, opts){
   apiCalls++;
   requests.push({path, body: JSON.parse(opts.body)});
-  if(apiCalls === 1){
-    const e = new Error('409');
-    e.status = 409;
-    e.body = JSON.stringify({code:'session_profile_mismatch',profile:'work',session_id:'s1'});
-    throw e;
-  }
-  return {ok:true};
+  const e = new Error('409');
+  e.status = 409;
+  e.body = JSON.stringify({code:'session_profile_mismatch',profile:'work',session_id:'s1'});
+  throw e;
 }"""
     elif fail_mode == 'always':
         calls = """let apiCalls = 0;
@@ -179,9 +182,10 @@ function _sessionSnapshotById(sid) {{
 (async () => {{
   const sid = 's1';
   sessions.push({{ session_id: sid, archived: false }});
-  const result = await _archiveSession({session_js}, true, null, false);
+  const result = await _archiveSession({session_js}, true, null);
   console.log(JSON.stringify({{ result, apiCalls, switchCalls, requests, events, activeProfile: S.activeProfile }}));
 }})();
+
 """
 
 
@@ -210,25 +214,25 @@ def test_single_archive_sends_profile_field_in_one_request():
         f"active profile must never move: {data}")
 
 
-def test_single_archive_409_retry_carries_envelope_profile_without_switching():
-    """The 409 retry is the fallback for rows whose profile was absent/wrong:
-    the second request carries the envelope's profile. Crucially the retry
-    must NOT switch the active profile — that was the root bug (switch first,
-    restore never or too late)."""
+def test_single_archive_409_reports_failure_without_retrying():
+    """Round 5 (maintainer finding, security): a structured 409 must surface
+    as a failure with EXACTLY ONE request. The old client re-POSTed with the
+    409 envelope's profile, re-issuing a WRITE against a session the server
+    had just denied — which let a denied archive rewrite a foreign profile's
+    transcript. No retry of any kind, and no profile switch."""
     if NODE is None:
         return
     archive_body = _extract_async_function(SESSIONS_JS, "_archiveSession")
     mismatch_body = _extract_function(SESSIONS_JS, "_sessionProfileMismatchFromError")
     out = _run_node(_build_driver(archive_body, mismatch_body, fail_mode='first'))
     data = json.loads(out)
-    assert data["result"] is True, f"retry should succeed: {data}"
-    assert data["apiCalls"] == 2, f"one retry, exactly two requests: {data}"
-    assert data["switchCalls"] == 0, f"409 retry must never switch profiles: {data}"
-    bodies = [r["body"] for r in data["requests"]]
-    # First attempt: legacy row had no profile on the snapshot → no field.
-    assert "profile" not in bodies[0], data
-    # Retry carries the envelope's real owner.
-    assert bodies[1] == {"session_id": "s1", "archived": True, "profile": "work"}, data
+    assert data["result"] is False, f"409 must surface as failure: {data}"
+    assert data["apiCalls"] == 1, (
+        f"a denied archive must never be re-sent: {data}")
+    assert data["switchCalls"] == 0, f"no switching, ever: {data}"
+    assert data["requests"] == [{"path": "/api/session/archive",
+                                 "body": {"session_id": "s1",
+                                          "archived": True}}], data
     assert data["activeProfile"] == "default", (
         f"active profile must never move: {data}")
 
@@ -249,17 +253,17 @@ def test_single_archive_no_profile_field_for_legacy_row():
         f"legacy row must send no profile field: {data}")
 
 
-def test_single_archive_does_not_loop_when_second_attempt_409s():
-    """A 409 on the retried attempt must NOT fire a second retry — the
-    _retried guard breaks the recursion, and never through a switch."""
+def test_single_archive_does_not_loop_when_409_persists():
+    """A 409 that persists (every request denied) must not loop: one request,
+    then the failure is reported. There is no second attempt of any kind."""
     if NODE is None:
         return
     archive_body = _extract_async_function(SESSIONS_JS, "_archiveSession")
     mismatch_body = _extract_function(SESSIONS_JS, "_sessionProfileMismatchFromError")
     out = _run_node(_build_driver(archive_body, mismatch_body, fail_mode='always'))
     data = json.loads(out)
-    assert data["result"] is False, f"second 409 should surface as failure: {data}"
-    assert data["apiCalls"] == 2, f"exactly one retry, no loop: {data}"
+    assert data["result"] is False, f"409 should surface as failure: {data}"
+    assert data["apiCalls"] == 1, f"exactly one request, no loop: {data}"
     assert data["switchCalls"] == 0, f"no switch even when the retry fails: {data}"
 
 
@@ -279,12 +283,15 @@ def test_archive_source_has_no_profile_switch_pipeline():
         "_archiveSession must never call the switch endpoint")
     assert "_restoreProfileAfterArchive" not in body, (
         "_archiveSession must not wrap outcomes in a restore")
-    # The retry must be gated on the structured envelope + the guard, and the
-    # retry re-sends the profile field.
-    assert "_sessionProfileMismatchFromError(err)" in body
-    assert "!_retried" in body, "retry must carry the recursion guard"
-    assert "profile:profileMismatch.profile" in body, (
-        "retry must re-send the envelope's profile, not switch to it")
+    # Round 5: the claimed-profile retry is gone. There must be no recursive
+    # _archiveSession call and no _retried guard left behind.
+    assert "_retried" not in body, (
+        "the claimed-profile retry and its guard must be gone")
+    # The signature line `async function _archiveSession(` contains the name;
+    # strip it so only real call sites are scanned.
+    recurrences = body[len("async function _archiveSession("):]
+    assert "_archiveSession(" not in recurrences, (
+        "_archiveSession must never call itself (the retry is removed)")
     assert "profile:_ownedProfile" in body, (
         "the first attempt must carry the row's own profile when known")
 
@@ -391,6 +398,7 @@ async function _switchProfileForSessionLoad(profile){{
   const outcome = await _archiveBatchSessions(ids, sessionsById);
   console.log(JSON.stringify({{ preflight, outcome, switchCalls, apiCalls, events, archivedSids, requests, activeProfile: S.activeProfile }}));
 }})();
+
 """
 
 
