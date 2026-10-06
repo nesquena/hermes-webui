@@ -704,6 +704,69 @@ with the queued commit, so ownership still spans the durable write. The out-of-b
 commits directly, which is correct because it holds no catalog lock by then.
 
 
+### 4.12 Project Bindings (`/api/projects/bind`)
+
+A session project can carry **bindings**: a set of workspaces (one of them the
+default), a model, and a reasoning effort. The chip's quick-create (`+`) button,
+and the top-level New Chat button while that project filter is active, open a
+new session already configured for the project's context; with **auto-assign**
+on, sessions in the bound workspaces are filed under the project automatically.
+
+`POST /api/projects/bind` updates a single project by `project_id`. Every body
+field is optional and only the supplied ones are touched:
+
+- `workspaces: [str]` — replaces the full bound list. Each entry passes the
+  same trusted-path check as `/api/session/new` (`validate_workspace_to_add`
+  then `resolve_trusted_workspace`) and is auto-registered in the saved
+  workspace list, so a path outside the default root can be bound in one step.
+  Entries are de-duplicated, keeping first-seen order. `null` clears the list
+  (and the default with it).
+- `default_workspace: str` — the workspace a new session starts in. It must be
+  a member of `workspaces`; a value outside the list is auto-added so the
+  invariant "`default_workspace` ∈ `workspaces`" always holds. Removing the
+  workspace that was the default also drops the default.
+- `workspace: str` — the legacy single-workspace field from before
+  multi-workspace bindings. It is still accepted and kept in sync as
+  `workspaces: [w]`, so pre-existing rows that only set `workspace` keep
+  working; `_project_workspaces` reads the list first and falls back to it.
+- `auto_assign: bool` — see below.
+- `model` / `model_provider` / `reasoning_effort` — single-value bindings per
+  project; `null` clears that axis (the project is then unbound on it).
+
+The endpoint only binds a project its own profile owns (`_profiles_match`,
+otherwise 404), mirroring the `/api/session/new` profile boundary. The stored
+fields ride along in the plain `/api/projects` payload (the raw project rows),
+so the sidebar can render the bindings summary and the dialog without a second
+request.
+
+Where the bindings take effect:
+
+- **Quick-create and New Chat with an active project filter** —
+  `_projectBindingsForNewSession` forwards the default workspace (falling back
+  to the first bound workspace, then the legacy `workspace`) plus `model`,
+  `model_provider` and `reasoning_effort` as `newSession` options. Only bound
+  axes are forwarded, and only when the caller did not pass an explicit value,
+  so the chip's own `+` click (which passes its own `project_id`) is never
+  double-applied.
+- **Auto-assign for new sessions** — `/api/session/new` with no explicit
+  `project_id` calls `_auto_assign_project_for_workspace`, which returns the
+  first `auto_assign` project (in on-disk list order, the same order
+  `/api/projects` serves) whose bound workspaces contain the session's
+  workspace. An omitted `profile` resolves to the ACTIVE profile exactly as
+  `new_session` does, so auto-classification and session creation always agree
+  on the effective profile.
+- **Auto-assign for existing sessions** — turning `auto_assign` on runs
+  `_apply_project_auto_assign` in a background thread, so a large session index
+  never stalls the response. It sweeps only **unowned** sessions in the bound
+  workspaces: a session the user already placed in another project is never
+  stolen, and a session being streamed is updated on the live cached object so
+  the streaming thread's own save persists it.
+- **Profile boundary** — a NAMED-profile project only claims sessions from its
+  own profile; the root/default project claims default-profile (and unprofiled
+  legacy) rows. `_profiles_match` handles the renamed-root alias for both the
+  bind and the sweep.
+
+
 ---
 
 ## 5. Frontend Architecture: Current State
