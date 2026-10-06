@@ -1882,13 +1882,15 @@ async function send(){
   let profileForPostStart=_submittedProfile;
   const _explicitPick=_submittedPickFlag;
   try{
-    // Consume the pending explicit-pick marker for THIS send only. The marker is
-    // recorded on modelSelect.onchange and intentionally kept (not cleared on
-    // session-update) so it survives the normal pick→update→send flow; clear it here
-    // once read so a later send of an unchanged dropdown isn't treated as an explicit
-    // pick. (#3739/#3737, Codex catch)
-    if(_pendingPickMatch&&typeof _clearPendingSessionModel==='function'){
-      _clearPendingSessionModel(activeSid);
+    // Consume only the captured pick, and re-read after upload so a newer
+    // selection's marker remains pending for its next send. (#3737)
+    if(_pendingPickMatch&&typeof _clearPendingSessionModel==='function'&&typeof _readPendingSessionModel==='function'){
+      const _stillPending=_readPendingSessionModel(activeSid);
+      if(_stillPending
+        &&_stillPending.model===_submittedPendingPick.model
+        &&_stillPending.model_provider===_submittedPendingPick.model_provider){
+        _clearPendingSessionModel(activeSid);
+      }
     }
     _submittedTurnIdentity=S.session&&S.session.session_id===activeSid
       ?_captureSessionActiveTurnIdentity(S.session)
@@ -1945,7 +1947,7 @@ async function send(){
       stopApprovalPollingForSession(activeSid);
       stopClarifyPollingForSession(activeSid);
       // Keep the user's attempted turn by queueing it for after the current run.
-      const _retryModelState=modelStateForPostStart;
+      const _retryModelState=_ownsSendPane()?_chatPayloadModelState():modelStateForPostStart;
       queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:profileForPostStart});
       if(!_ownsSendPane()){
         return;
@@ -2113,9 +2115,13 @@ async function send(){
   _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
     const _modelState=modelStateForPostStart;
     const _postStartExplicitPick=_explicitPick;
+    const _currentModelState=_ownsSendPane()&&S.session?_chatPayloadModelState():null;
+    const _modelSelectionUnchanged=!!(_currentModelState
+      &&String(_currentModelState.model||'')===String(_submittedModelState.model||'')
+      &&String(_currentModelState.model_provider||'')===String(_submittedModelState.model_provider||''));
     if(_ownsSendPane()&&startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
-    if(_ownsSendPane()&&startData&&startData.effective_model && S.session){
+    if(_ownsSendPane()&&_modelSelectionUnchanged&&startData&&startData.effective_model && S.session){
       const _sentModel=_modelState&&_modelState.model;
       if(_postStartExplicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
         showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
@@ -2126,7 +2132,7 @@ async function send(){
       if(typeof _writePersistedModelState==='function') _writePersistedModelState(startData.effective_model,S.session.model_provider||null);
       if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
       if(typeof syncTopbar==='function') syncTopbar();
-    }else if(_ownsSendPane()&&startData&&startData.effective_model_provider && S.session){
+    }else if(_ownsSendPane()&&_modelSelectionUnchanged&&startData&&startData.effective_model_provider && S.session){
       S.session.model_provider=startData.effective_model_provider;
       if(typeof _writePersistedModelState==='function') _writePersistedModelState(S.session.model||'',S.session.model_provider||null);
       if($('modelSelect')&&typeof _applyModelToDropdown==='function') _applyModelToDropdown(S.session.model||'', $('modelSelect'), S.session.model_provider||null);

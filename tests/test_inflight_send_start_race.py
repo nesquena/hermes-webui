@@ -117,6 +117,279 @@ _START_OWNERSHIP_HELPERS = "\n".join(
     _function_source(UI_JS, name)
     for name in ("_captureSessionActiveTurnIdentity", "_acceptedStartMayUpdateSession")
 )
+_SEND_MODEL_HELPERS = "\n".join(
+    _function_source(MESSAGES_JS, name)
+    for name in ("_chatPayloadModel", "_chatPayloadModelProvider", "_chatPayloadModelState")
+) + "\n" + "\n".join(
+    _function_source(UI_JS, name)
+    for name in (
+        "_modelProviderForSend",
+        "_providerFromModelValue",
+        "_writePersistedModelState",
+        "_pendingSessionModelKey",
+        "_rememberPendingSessionModel",
+        "_readPendingSessionModel",
+        "_clearPendingSessionModel",
+    )
+)
+
+
+def _send_model_race_script(scenario: dict) -> str:
+    send_body = _function_body(MESSAGES_JS, "send")
+    return f"""
+const assert = require('assert');
+const scenario = {json.dumps(scenario)};
+const MODEL_STATE_KEY = 'hermes-webui-model-state';
+const PENDING_SESSION_MODEL_PREFIX = 'hermes-webui-pending-session-model:';
+const PENDING_SESSION_MODEL_MAX_AGE_MS = 10 * 60 * 1000;
+const calls = {{requests: [], dropdownWrites: [], attached: [], queued: []}};
+const elements = {{msg: {{value: 'first prompt'}}, modelSelect: {{id: 'modelSelect', value: scenario.originalModel, model_provider: scenario.originalProvider}}}};
+function $(id) {{ return elements[id] || null; }}
+const document = {{querySelector: () => null}};
+const localStorage = {{
+  values: Object.create(null),
+  getItem(key) {{ return this.values[key] || null; }},
+  setItem(key, value) {{ this.values[key] = String(value); }},
+  removeItem(key) {{ delete this.values[key]; }},
+}};
+const sessionStorage = {{
+  values: Object.create(null),
+  getItem(key) {{ return this.values[key] || null; }},
+  setItem(key, value) {{ this.values[key] = String(value); }},
+  removeItem(key) {{ delete this.values[key]; }},
+}};
+const window = {{_defaultMessageMode: 'steer', _defaultModel: scenario.originalModel, _activeProvider: scenario.originalProvider}};
+const S = {{
+  session: {{session_id: 'A', title: 'A', model: scenario.originalModel, model_provider: scenario.originalProvider,
+    workspace: '/a', profile: 'profile-a', active_turn_token: 'A-old-token', active_stream_id: null}},
+  messages: [], pendingFiles: scenario.holdUpload ? [{{name: 'attachment.txt'}}] : [],
+  busy: false, activeStreamId: null, activeProfile: 'profile-a', toolCalls: [], todos: [], todoStateMeta: null,
+}};
+const INFLIGHT = Object.create(null);
+let _sendInProgress = false, _sendInProgressSid = null;
+let _pendingSelections = [], _forcedSkillDirectivePending = null, _queueDrainSid = null;
+let _approvalSessionId = 'A', _clarifySessionId = 'A', _loadingSessionId = null;
+let releaseUpload, releaseStart, rejectStart, resolveUploadCalled, resolveStartCalled;
+let holdFirstUpload = scenario.holdUpload;
+const uploadCalled = new Promise(resolve => resolveUploadCalled = resolve);
+const startCalled = new Promise(resolve => resolveStartCalled = resolve);
+const uploadGate = new Promise(resolve => releaseUpload = resolve);
+const startGate = new Promise((resolve, reject) => {{ releaseStart = resolve; rejectStart = reject; }});
+function _isSessionCurrentPane(sid) {{{_CURRENT_PANE_BODY}}}
+{_SEND_MODEL_HELPERS}
+function changeModel(model, provider) {{
+  S.session.model = model; S.session.model_provider = provider;
+  elements.modelSelect.value = model; elements.modelSelect.model_provider = provider;
+  _writePersistedModelState(model, provider);
+  _rememberPendingSessionModel('A', model, provider);
+}}
+function assertSelection(model, provider) {{
+  assert.strictEqual(S.session.model, model);
+  assert.strictEqual(S.session.model_provider, provider);
+  assert.strictEqual(elements.modelSelect.value, model);
+  assert.strictEqual(elements.modelSelect.model_provider, provider);
+  assert.strictEqual(localStorage.getItem('hermes-webui-model'), model);
+  assert.deepStrictEqual(JSON.parse(localStorage.getItem(MODEL_STATE_KEY)), {{model, model_provider: provider}});
+}}
+function renderTray() {{}} function autoResize() {{}} function setComposerStatus() {{}}
+function setBusy(value) {{ S.busy = value; }} function updateSendBtn() {{}}
+function renderMessages() {{}} function clearLiveToolCards() {{}} function ensureLiveWorklogShell() {{}}
+function appendThinking() {{}} function upsertActiveSessionForLocalTurn() {{}}
+function renderSessionListFromCache() {{}} function startApprovalPolling() {{}} function startClarifyPolling() {{}}
+function _fetchYoloState() {{}} function applySessionTitleUpdate() {{}}
+function syncTopbar() {{}} function syncModelChip() {{}}
+function _applyModelToDropdown(model, sel, provider) {{
+  calls.dropdownWrites.push([model, provider]); sel.value = model; sel.model_provider = provider;
+}}
+function showToast() {{}} function showLiveRunStatus() {{}} function markInflight(sid, streamId) {{}}
+function saveInflightState() {{}}
+function attachLiveStream(sid, streamId) {{ calls.attached.push([sid, streamId]); }}
+function queueSessionMessage(sid, payload) {{ calls.queued.push({{sid, payload}}); }}
+function updateQueueBadge() {{}}
+async function loadSession() {{}}
+function stopApprovalPollingForSession() {{}} function stopClarifyPollingForSession() {{}}
+function hideApprovalCard() {{}} function hideClarifyCard() {{}} function removeThinking() {{}}
+function clearOptimisticSessionStreaming() {{}} function renderSessionList() {{ return Promise.resolve(); }}
+function _clearComposerDraft() {{ return Promise.resolve(); }}
+function uploadPendingFiles() {{
+  if (holdFirstUpload) {{ holdFirstUpload = false; resolveUploadCalled(); return uploadGate; }}
+  return Promise.resolve([]);
+}}
+function _clearStaleBusyStateBeforeSend() {{}} function isCompressionUiRunning() {{ return false; }}
+function _composerTextWithPendingSelections() {{ return elements.msg.value; }} function _flushSelectionBlocksToComposer() {{}}
+function _restoreComposerDraftAfterFailedSend() {{}}
+function _opaqueActiveTurnToken(value) {{ return typeof value === 'string' && value.trim() ? value : null; }}
+function _runOptionalPreStartUiStep(label, fn) {{{_PRE_START_STEP_BODY}}}
+function _runOptionalPostStartUiStep(label, fn) {{{_POST_START_STEP_BODY}}}
+{_RECOVER_COMPRESSED_SEND_HELPER}
+function api(path, options) {{
+  assert.strictEqual(path, '/api/chat/start');
+  calls.requests.push(JSON.parse(options.body));
+  if (calls.requests.length === 1) {{ resolveStartCalled(); return startGate; }}
+  return Promise.resolve({{stream_id: 'A-stream-2', active_turn_token: 'A-token-2', pending_started_at: 40}});
+}}
+{_START_OWNERSHIP_HELPERS}
+async function send() {{{send_body}}}
+
+(async () => {{
+  _writePersistedModelState(scenario.originalModel, scenario.originalProvider);
+  _rememberPendingSessionModel('A', scenario.originalModel, scenario.originalProvider);
+  const firstSend = send();
+  if (scenario.holdUpload) {{
+    await uploadCalled;
+    changeModel(scenario.nextModel, scenario.nextProvider);
+    releaseUpload([{{name: 'attachment.txt', path: 'attachment.txt'}}]);
+  }}
+  await startCalled;
+  const firstRequest = {{
+    session_id: 'A', message: scenario.holdUpload ? 'first prompt\\n\\n[Attached files: attachment.txt]' : 'first prompt',
+    model: scenario.originalModel, workspace: '/a', model_provider: scenario.originalProvider,
+    profile: 'profile-a', explicit_model_pick: true,
+  }};
+  if (scenario.holdUpload) firstRequest.attachments = [{{name: 'attachment.txt', path: 'attachment.txt'}}];
+  assert.deepStrictEqual(calls.requests[0], firstRequest);
+  if (scenario.rejectConflict) {{
+    if (scenario.switchPane) {{
+      S.session = {{session_id: 'B', title: 'B', model: scenario.nextModel, model_provider: scenario.nextProvider,
+        workspace: '/b', profile: 'profile-b', active_turn_token: null, active_stream_id: null}};
+      S.activeProfile = 'profile-b';
+      elements.modelSelect.value = scenario.nextModel; elements.modelSelect.model_provider = scenario.nextProvider;
+      _writePersistedModelState(scenario.nextModel, scenario.nextProvider);
+    }} else {{
+      changeModel(scenario.nextModel, scenario.nextProvider);
+    }}
+    rejectStart(new Error('session already has an active stream'));
+    await firstSend;
+    const retryModel = scenario.switchPane ? scenario.originalModel : scenario.nextModel;
+    const retryProvider = scenario.switchPane ? scenario.originalProvider : scenario.nextProvider;
+    assert.deepStrictEqual(calls.queued, [{{sid: 'A', payload: {{
+      text: 'first prompt', files: [], model: retryModel, model_provider: retryProvider, profile: 'profile-a',
+    }}}}]);
+    if (scenario.switchPane) {{
+      assert.strictEqual(S.session.session_id, 'B');
+      assert.strictEqual(S.session.model, scenario.nextModel);
+      assert.strictEqual(S.session.model_provider, scenario.nextProvider);
+    }}
+    return;
+  }}
+  if (!scenario.holdUpload && scenario.changeSelection) changeModel(scenario.nextModel, scenario.nextProvider);
+  if (scenario.changeSelection) {{
+    assert.deepStrictEqual(_readPendingSessionModel('A'), {{model: scenario.nextModel, model_provider: scenario.nextProvider}});
+  }}
+  const response = {{stream_id: 'A-stream', active_turn_token: 'A-token', pending_started_at: 30}};
+  if (scenario.responseKind === 'effective') {{
+    response.effective_model = 'server-corrected-model';
+    response.effective_model_provider = 'server-provider';
+  }} else {{
+    response.effective_model_provider = 'server-provider';
+  }}
+  releaseStart(response);
+  await firstSend;
+  const expectedModel = scenario.changeSelection
+    ? scenario.nextModel
+    : (scenario.responseKind === 'effective' ? 'server-corrected-model' : scenario.originalModel);
+  const expectedProvider = scenario.changeSelection
+    ? scenario.nextProvider
+    : 'server-provider';
+  assertSelection(expectedModel, expectedProvider);
+  assert.deepStrictEqual(calls.attached, [['A', 'A-stream']]);
+  assert.strictEqual(INFLIGHT.A.streamId, 'A-stream');
+  assert.strictEqual(calls.dropdownWrites.length, scenario.changeSelection ? 0 : 1);
+  if (scenario.changeSelection) {{
+    assert.deepStrictEqual(_readPendingSessionModel('A'), {{model: scenario.nextModel, model_provider: scenario.nextProvider}});
+    S.busy = false; S.activeStreamId = null; S.session.active_stream_id = null;
+    elements.msg.value = 'followup prompt';
+    await send();
+    assert.strictEqual(calls.requests.length, 2);
+    assert.strictEqual(calls.requests[1].model, scenario.nextModel);
+    assert.strictEqual(calls.requests[1].model_provider, scenario.nextProvider);
+    assert.strictEqual(calls.requests[1].explicit_model_pick, true);
+    assert.strictEqual(_readPendingSessionModel('A'), null);
+  }} else {{
+    assert.strictEqual(_readPendingSessionModel('A'), null);
+  }}
+}})().catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});
+"""
+
+
+@pytest.mark.parametrize(
+    "response_kind,change_selection,change_phase",
+    (
+        ("effective", True, "held_start"),
+        ("effective", True, "upload"),
+        ("provider_only", True, "held_start"),
+        ("effective", False, None),
+        ("provider_only", False, None),
+    ),
+)
+def test_delayed_chat_start_reconciles_model_only_for_unchanged_selection(response_kind, change_selection, change_phase):
+    """A stale accepted-start model response must not replace a newer picker state."""
+    original_model = "gpt-5.3"
+    original_provider = "openai"
+    if response_kind == "effective":
+        next_model, next_provider = "claude-sonnet-4.6", "anthropic"
+    else:
+        # Provider-only changes still invalidate the submitted model/provider pair.
+        next_model, next_provider = original_model, "custom-router"
+    script = _send_model_race_script(
+        {
+            "responseKind": response_kind,
+            "changeSelection": change_selection,
+            "holdUpload": change_phase == "upload",
+            "originalModel": original_model,
+            "originalProvider": original_provider,
+            "nextModel": next_model,
+            "nextProvider": next_provider,
+        }
+    )
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_newer_slash_model_pick_survives_upload_until_its_next_post():
+    """A newer pending marker recorded during upload belongs to the next send."""
+    script = _send_model_race_script(
+        {
+            "responseKind": "effective",
+            "changeSelection": True,
+            "holdUpload": True,
+            "originalModel": "gpt-5.3",
+            "originalProvider": "custom-router",
+            "nextModel": "openai/gpt-5.4",
+            "nextProvider": "custom-router",
+        }
+    )
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+@pytest.mark.parametrize(
+    "next_model,next_provider,switch_pane",
+    (
+        ("gpt-5.3", "anthropic", False),
+        ("gpt-5.4", "openai", False),
+        ("claude-sonnet-4.6", "anthropic", True),
+    ),
+)
+def test_active_stream_conflict_retry_uses_visible_routing_but_keeps_background_snapshot(
+    next_model, next_provider, switch_pane
+):
+    """Conflict queue routing follows the visible picker, never another session."""
+    script = _send_model_race_script(
+        {
+            "responseKind": "effective",
+            "changeSelection": False,
+            "holdUpload": False,
+            "rejectConflict": True,
+            "switchPane": switch_pane,
+            "originalModel": "gpt-5.3",
+            "originalProvider": "openai",
+            "nextModel": next_model,
+            "nextProvider": next_provider,
+        }
+    )
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_send_preserves_optimistic_messages_across_chat_start_await():
@@ -2368,6 +2641,8 @@ const localStorage={values:Object.create(null),getItem(k){return this.values[k]|
 const oldUser={role:'user',content:PROMPT,_ts:10,attachments:['older.txt']};
 let userMsg={role:'user',content:PROMPT,_ts:29.5,_pending:true,attachments:['new.txt']};
 let S={session:{session_id:SID,active_stream_id:null,active_turn_token:'previous-token'},messages:[],activeStreamId:null,busy:false,toolCalls:[]};
+const _submittedModelState={model:'',model_provider:''};
+function _chatPayloadModelState(){return {model:S.session.model||'',model_provider:S.session.model_provider||''};}
 let INFLIGHT={sid:{streamId:null,activeTurnToken:null,messages:[oldUser,userMsg],uploaded:['new.txt'],toolCalls:[],lastAssistantText:'working'}};
 const sessionResponse={eager:__EAGER__,deferred:__DEFERRED__};
 const submittedTurnIdentity=__CAPTURED_IDENTITY__;
