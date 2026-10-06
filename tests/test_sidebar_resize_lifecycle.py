@@ -226,6 +226,18 @@ def _pointer(page, type_, *, target="#sidebarResize", x=100, pointer_id=1, point
     )
 
 
+def _boot_resize_native(page):
+    """Wire initResize with NO capture stubbing: setPointerCapture is the
+    real Chromium implementation, and the drag below is driven by real mouse
+    input through the browser's native pointer-event routing."""
+    page.evaluate(
+        """() => {
+        localStorage.removeItem('hermes-sidebar-w');
+        initResize('#sidebarResize', document.getElementById('sidebar'), 'right', 180, 420, 'hermes-sidebar-w');
+    }"""
+    )
+
+
 @pytest.fixture
 def page(tmp_path):
     _require_playwright()
@@ -257,6 +269,96 @@ def test_capture_success_drag_resizes_and_persists(page):
     state = page.evaluate(STATE_JS)
     assert not state["dragging"] and not state["resizing"]
     assert state["stored"] == "410"
+
+
+def test_native_capture_keeps_drag_alive_outside_handle(page):
+    """Greptile follow-up on merged #7968: the capture-success cases above
+    stub setPointerCapture and send events straight to the handle, so they
+    cannot see a routing failure after the pointer leaves the 5px handle.
+    This drives a REAL mouse drag with NATIVE capture: the move and release
+    happen far outside the handle and must still reach it through the
+    browser's capture routing."""
+    _boot_resize_native(page)
+    box = page.locator("#sidebarResize").bounding_box()
+    cx = box["x"] + box["width"] / 2
+    cy = box["y"] + box["height"] / 2
+    page.mouse.move(cx, cy)
+    page.mouse.down()
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+    assert page.evaluate(
+        "() => document.getElementById('sidebarResize').hasPointerCapture(1)"
+    ) is True, "the real setPointerCapture must actually capture the pointer"
+
+    # 60px to the right: far outside the 5px handle. Only capture routing
+    # can deliver these moves to the handle (no document fallback exists on
+    # the capture-success path).
+    page.mouse.move(cx + 60, cy, steps=5)
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "420px", (
+        "native capture must keep routing moves to the handle outside it"
+    )
+
+    # Release outside too; capture must route the up event as well.
+    page.mouse.up()
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["stored"] == "420"
+    assert page.evaluate(
+        "() => document.getElementById('sidebarResize').hasPointerCapture(1)"
+    ) is False, "the capture must be released when the drag ends"
+
+
+def test_second_pointer_cannot_take_over_drag(page):
+    """A second pointer pressing the handle mid-drag must not replace the
+    active pointer: the original drag keeps its start point, keeps resizing,
+    and the second pointer's move/release are ignored end to end."""
+    _boot_resize(page, capture="ok")
+    _pointer(page, "pointerdown", x=100)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+
+    # Second press on the same handle from a different pointer.
+    _pointer(page, "pointerdown", x=300, pointer_id=2)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+
+    # The second pointer's movement must be ignored entirely.
+    _pointer(page, "pointermove", x=350, pointer_id=2)
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "360px", (
+        "the drag must not follow the second pointer"
+    )
+
+    # The original pointer still resizes, measured from ITS OWN start point
+    # (100px), not from the second press (300px): +50px -> 410px. If the
+    # second press had overwritten startX/startW this would be a different
+    # width, which is exactly the takeover the guard prevents.
+    _pointer(page, "pointermove", x=150)
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "410px"
+
+    # The second pointer's release must not end the drag.
+    _pointer(page, "pointerup", x=350, pointer_id=2)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"], (
+        "the second pointer's release must not end the first pointer's drag"
+    )
+
+    # The original pointer's release ends it and persists.
+    _pointer(page, "pointerup", x=150)
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["stored"] == "410"
+
+    # After the drag ends, a fresh pointerdown works again (the guard only
+    # blocks mid-drag presses, not the next legitimate drag).
+    _pointer(page, "pointerdown", x=200)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+    _pointer(page, "pointerup", x=200)
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
 
 
 def test_capture_failure_falls_back_and_still_ends(page):
@@ -545,3 +647,58 @@ def test_stored_null_snapshot_renders_expanded(page):
     assert not errors, "stored null: the real header click must not throw"
     stored = page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")
     assert json.loads(stored) == {"Today": True}
+
+
+def test_stored_proto_payload_cannot_change_collapse_prototype(page):
+    """Gate Oct 4 follow-up (Opus nit): _mergeStoredCollapsed must copy only
+    boolean values. Without the type check, a same-origin write of
+    {"__proto__":{"Older":true}} replaces the collapse map's prototype via
+    _groupCollapsed[k]=fresh[k], hiding a group until reload. Drives the
+    real render loop and real click handler."""
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.evaluate(
+        "(raw) => localStorage.setItem('hermes-date-groups-collapsed', raw)",
+        '{"__proto__":{"Older":true}}',
+    )
+    page.evaluate("() => window.__seedGroupsFixture()")
+    page.evaluate("() => window.__buildGroups()")
+    assert not errors, "a stored __proto__ payload must not throw in the real render"
+    assert page.evaluate(
+        "() => Object.getPrototypeOf(window.__hermesDateGroupCollapsed) !== Object.prototype"
+    ) is False, "the merge must not replace the collapse map's prototype"
+    assert page.evaluate("() => window.__hermesDateGroupCollapsed['Older']") in (None, False), (
+        "no group may be collapsed through the prototype chain"
+    )
+    assert page.evaluate(REAL_PATH_COUNTS_JS) == {"headers": 3, "rows": 6, "visibleBodies": 3}, (
+        "every group must render expanded despite the stored __proto__ payload"
+    )
+
+    # The real click path still works and writes a clean object snapshot.
+    page.click(".session-date-header")
+    assert not errors, "the real header click must not throw after a __proto__ payload"
+    stored = page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")
+    assert json.loads(stored) == {"Today": True}
+
+
+def test_stored_non_boolean_value_expands_a_previously_collapsed_group(page):
+    """Release-stage maintainer fix for #8028 (Greptile P2, reproduced by the senior review):
+    the deletion pass must use the same boolean-only rule as the copy pass. If Today is
+    collapsed and storage later says {"Today": null}, the merge must drop the stale key
+    (Today expands, as on master) instead of keeping it collapsed and writing
+    `Today: true` back on the next unrelated toggle."""
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.evaluate("() => window.__seedGroupsFixture()")
+    page.evaluate("() => window.__buildGroups()")
+    page.click(".session-date-header")  # collapse Today through the real handler
+    assert json.loads(page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")) == {"Today": True}
+    page.evaluate("() => localStorage.setItem('hermes-date-groups-collapsed', '{\"Today\":null}')")
+    page.evaluate("() => window.__buildGroups()")
+    assert not errors, "a non-boolean stored value must not throw in the real render"
+    assert page.evaluate(REAL_PATH_COUNTS_JS) == {"headers": 3, "rows": 6, "visibleBodies": 3}, (
+        "Today must expand once storage no longer holds a boolean for it"
+    )
+    page.click(".session-date-header >> nth=1")  # an unrelated toggle saves the snapshot
+    stored = json.loads(page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')"))
+    assert stored.get("Today") is not True, "the stale collapse must not be written back"

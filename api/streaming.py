@@ -7043,6 +7043,48 @@ def _compact_session_image_parts_for_persistence(session) -> int:
     return changed
 
 
+def _is_non_replayable_history_row(msg) -> bool:
+    """Return True for an error marker or an empty partial: rows that are
+    never model-facing history.
+
+    One predicate for the legacy path (``_sanitize_messages_for_api``) and the
+    Gateway runs-API history builder, so both drop these two kinds of row
+    alike (#8034). It is not the whole of the legacy projection: the sanitizer
+    also drops reasoning-only assistant rows and ``_recovered`` user rows,
+    which the Gateway builder still sends.
+    """
+    if not isinstance(msg, dict):
+        return False
+    # Persisted error markers — never send them to the LLM as prior context.
+    if msg.get('_error'):
+        return True
+    # _partial markers with no visible content. Partial messages that carry
+    # actual text (e.g. "Python is a high-level…") are kept so the model can
+    # continue from the cut-off point (#893). But empty partials (reasoning-only
+    # or tool-only cancellations where thinking markup was stripped) have
+    # nothing for the model to continue from and cause API 400 errors on strict
+    # providers (empty assistant content).
+    if msg.get('_partial') and not str(msg.get('content') or '').strip():
+        return True
+    return False
+
+
+def _recovered_user_row_is_kept(prev_role, next_role) -> bool:
+    """Return True when a ``_recovered`` user row must stay in replayed history.
+
+    It stays only where it opens a turn that was answered: ``next_role`` (the
+    next surviving row's role) must be ``assistant``, and ``prev_role`` (the
+    previously kept row's role) must be ``assistant`` or absent. Between two
+    assistant turns dropping it would fuse them; as the first row of the history
+    it is the question its answer replies to (a first turn interrupted by a
+    restart is saved as ``[recovered prompt, journaled answer]``). Anywhere else
+    it is dropped: after a user turn it would sit beside it, and before a user
+    turn (or at the end) it is a stale prompt nobody answered (#4283). One rule
+    for the two legacy projections and the Gateway runs-API history builder (#8038).
+    """
+    return next_role == 'assistant' and prev_role in (None, 'assistant')
+
+
 def _sanitize_messages_for_api(
     messages,
     *,
@@ -7105,16 +7147,8 @@ def _sanitize_messages_for_api(
         # metadata, not provider-facing assistant turns.
         if _is_reasoning_only_assistant_message(msg):
             continue
-        # Skip persisted error markers — never send them to the LLM as prior context.
-        if msg.get('_error'):
-            continue
-        # Skip _partial markers with no visible content. Partial messages that
-        # carry actual text (e.g. "Python is a high-level…") are kept so the
-        # model can continue from the cut-off point (#893). But empty partials
-        # (reasoning-only or tool-only cancellations where thinking markup was
-        # stripped) have nothing for the model to continue from and cause
-        # API 400 errors on strict providers (empty assistant content).
-        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+        # Skip persisted error markers and empty _partial markers.
+        if _is_non_replayable_history_row(msg):
             continue
         # Note: _recovered user messages are NOT skipped here — they may need
         # to be retained to preserve role alternation when a kept assistant
@@ -7212,8 +7246,8 @@ def _sanitize_messages_for_api(
             for j in range(i + 1, len(filtered_clean)):
                 next_role = filtered_clean[j].get('role')
                 break
-            # Keep only if this recovered user actually separates two assistants.
-            if not (prev_role == 'assistant' and next_role == 'assistant'):
+            # Keep only if this recovered user opens an answered turn (see the helper).
+            if not _recovered_user_row_is_kept(prev_role, next_role):
                 continue  # drop — fusing the neighbours is clean, or it's a stale prompt
             # Keep but strip the temporary marker
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
@@ -7267,9 +7301,7 @@ def _api_safe_message_positions(messages):
             continue
         if _is_reasoning_only_assistant_message(msg):
             continue
-        if msg.get('_error'):
-            continue
-        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+        if _is_non_replayable_history_row(msg):
             continue
         # Note: _recovered user messages are NOT skipped here — deferred to
         # a final pass after orphaned tool_calls stripping (#4283).
@@ -7321,7 +7353,7 @@ def _api_safe_message_positions(messages):
     # Fourth pass: drop _recovered user messages unless removing one would fuse
     # two same-role neighbours — mirrors _sanitize_messages_for_api pass 4 (#4283).
     # Decide on the ACTUAL kept sequence: prev kept role (final_out[-1]) + next
-    # surviving role. Keep ONLY when it separates two assistants; otherwise drop.
+    # surviving role. Keep ONLY when it opens an answered turn (see the helper); otherwise drop.
     final_out = []
     for i, (idx, msg) in enumerate(filtered_out):
         if msg.get('_recovered') and msg.get('role') == 'user':
@@ -7330,7 +7362,7 @@ def _api_safe_message_positions(messages):
             for j in range(i + 1, len(filtered_out)):
                 next_role = filtered_out[j][1].get('role')
                 break
-            if not (prev_role == 'assistant' and next_role == 'assistant'):
+            if not _recovered_user_row_is_kept(prev_role, next_role):
                 continue
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
         final_out.append((idx, msg))

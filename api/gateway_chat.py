@@ -841,12 +841,23 @@ def _run_gateway_runs_api_streaming(
             except Exception:
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
                 message_content = str(msg_text or "")
-        from api.streaming import _strip_oob_blocks
+        from api.streaming import (
+            _is_non_replayable_history_row,
+            _is_reasoning_only_assistant_message,
+            _recovered_user_row_is_kept,
+            _strip_oob_blocks,
+        )
 
         instructions_parts = []
         conversation_history = []
+        # (role, content, recovered) for each session row that may be sent.
+        history_rows = []
         for entry in getattr(session, "context_messages", None) or []:
             if not isinstance(entry, dict):
+                continue
+            # The same rows the legacy path drops: error markers, empty partials
+            # and reasoning-only assistant rows.
+            if _is_non_replayable_history_row(entry) or _is_reasoning_only_assistant_message(entry):
                 continue
             role = str(entry.get("role") or "").strip().lower()
             if role not in {"user", "assistant"}:
@@ -854,7 +865,16 @@ def _run_gateway_runs_api_streaming(
             content = entry.get("content")
             if content is not None:
                 content = _strip_oob_blocks(content)
-                conversation_history.append({"role": role, "content": content})
+                history_rows.append((role, content, role == "user" and bool(entry.get("_recovered"))))
+        # A _recovered user row is sent only where it opens an answered turn
+        # (after an assistant turn or as the first row sent), as the legacy path decides it.
+        for index, (role, content, recovered) in enumerate(history_rows):
+            if recovered:
+                prev_role = conversation_history[-1]["role"] if conversation_history else None
+                next_role = history_rows[index + 1][0] if index + 1 < len(history_rows) else None
+                if not _recovered_user_row_is_kept(prev_role, next_role):
+                    continue
+            conversation_history.append({"role": role, "content": content})
         for entry in prefill_messages or []:
             if not isinstance(entry, dict):
                 continue

@@ -2331,6 +2331,9 @@ $('modelSelect').onchange=async()=>{
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
+  if(typeof _rememberComposerModelPick==='function'){
+    _rememberComposerModelPick(modelState.model,modelState.model_provider);
+  }
   if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
@@ -2784,6 +2787,12 @@ if(window.visualViewport){
 
     handle.addEventListener('pointerdown', ev=>{
       if(ev.pointerType==='touch') return;
+      // A second pointer pressing the handle mid-drag must not take the drag
+      // over: without this guard the new press replaces the active pointer and
+      // starting width, the original pointer's move/release is ignored, and the
+      // panel unexpectedly follows the second pointer (greptile review of the
+      // merged #7954 fix).
+      if(activePointer!==null) return;
       ev.preventDefault();
       activePointer=ev.pointerId;
       startX = ev.clientX;

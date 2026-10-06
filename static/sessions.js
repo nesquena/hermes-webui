@@ -1885,6 +1885,55 @@ function _clearEmptyComposerModelOverride(){
   _emptyComposerModelOverrideHost._emptyComposerModelOverride=null;
 }
 
+const _composerModelPickHost=typeof window!=='undefined'?window:globalThis;
+
+// Track explicit picker intent independently of S.session. During deletion the
+// picker can change both before and after the active session is cleared.
+function _rememberComposerModelPick(model, modelProvider){
+  const resolvedModel=String(model||'').trim();
+  if(!resolvedModel) return;
+  const previous=_composerModelPickHost._composerModelPick;
+  _composerModelPickHost._composerModelPick={
+    model:resolvedModel,
+    model_provider:modelProvider||null,
+    revision:(Number(previous&&previous.revision||0)||0)+1,
+  };
+}
+
+function _readComposerModelPick(){
+  const state=_composerModelPickHost._composerModelPick;
+  if(!state||!state.model) return null;
+  return {
+    model:String(state.model||''),
+    model_provider:state.model_provider||null,
+    revision:Number(state.revision||0)||0,
+  };
+}
+
+function _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete){
+  const currentPick=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const currentRevision=Number(currentPick&&currentPick.revision||0)||0;
+  const preservePick=currentPick&&currentRevision!==(Number(modelPickRevisionAtDelete||0)||0);
+  const model=String(preservePick?currentPick.model:(window._defaultModel||'')).trim();
+  const provider=preservePick?currentPick.model_provider:(window._activeProvider||null);
+  if(preservePick){
+    if(typeof _rememberEmptyComposerModelOverride==='function'){
+      _rememberEmptyComposerModelOverride(model,provider);
+    }
+  }else if(typeof _clearEmptyComposerModelOverride==='function'){
+    _clearEmptyComposerModelOverride();
+  }
+  const modelSel=$('modelSelect');
+  if(!model||!modelSel) return null;
+  const applied=typeof _ensureModelOptionInDropdown==='function'
+    ? _ensureModelOptionInDropdown(model,modelSel,provider)
+    : (typeof _applyModelToDropdown==='function'?_applyModelToDropdown(model,modelSel,provider):null);
+  if(applied&&typeof syncReasoningChip==='function') syncReasoningChip();
+  return applied;
+}
+
 let _newSessionWorkspaceAnnouncementClearTimer=null;
 
 function _setNewSessionWorkspaceCue(message){
@@ -4948,6 +4997,10 @@ function _renderBatchActionBar(){
       danger:true
     });
     if(!ok)return;
+    const modelPickAtDelete=typeof _readComposerModelPick==='function'
+      ? _readComposerModelPick()
+      : null;
+    const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
     try{
       let newChatAfterDeleteResult=null;
       const results=await Promise.all(ids.map(async sid=>{
@@ -4959,17 +5012,21 @@ function _renderBatchActionBar(){
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         const _deletedWorkspace=(S.session&&S.session.workspace)||null;
-        const _deleteNewChatOwner=_deleteNewChatOwnerSnapshot();
+        const _startNewChatAfterDelete=window._newChatOnSessionDelete===true;
+        const _deleteNewChatOwner=_startNewChatAfterDelete?_deleteNewChatOwnerSnapshot():null;
         S.session=null;S.messages=[];S.entries=[];S.busy=false;S.activeStreamId=null;
         if(typeof updateSendBtn==='function') updateSendBtn();
         localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
-        if(window._newChatOnSessionDelete===true){
+        if(_startNewChatAfterDelete){
           newChatAfterDeleteResult=await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace,_deleteNewChatOwner);
         }else{
           const remaining=await api('/api/sessions'+_sessionListQueryString());
           if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-          else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+          else{
+            _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
+            $('msgInner').innerHTML='';$('emptyState').style.display='';
+          }
         }
       }
       if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
@@ -5213,6 +5270,8 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
     const inp=document.createElement('input');
     inp.className='session-title-input';
     inp.value=oldTitle;
+    // #7542: chat-title editor in the sidebar, not a credentials field.
+    _markNonCredentialInput(inp);
     ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
       inp.addEventListener(ev, e2=>e2.stopPropagation())
     );
@@ -8707,12 +8766,15 @@ function renderSessionListFromCache(){
   const _mergeStoredCollapsed=()=>{
     const fresh=_readStoredCollapsed();
     if(fresh===null) return; // unavailable/malformed: keep fallback + pending
-    for(const k in fresh){ if(!_pending.has(k)) _groupCollapsed[k]=fresh[k]; }
+    // Copy only boolean values: a same-origin write of
+    // {"__proto__":{"Older":true}} must not replace this map's prototype
+    // through _groupCollapsed[k]=fresh[k] (gate Oct 4, Opus nit).
+    for(const k in fresh){ if(!_pending.has(k)&&typeof fresh[k]==='boolean') _groupCollapsed[k]=fresh[k]; }
     // A valid snapshot (even an empty/cleared one) also removes non-pending
     // keys it no longer contains; a merge that only adds/updates would keep
     // stale collapses visible.
     for(const k in _groupCollapsed){
-      if(!(k in fresh) && !_pending.has(k)) delete _groupCollapsed[k];
+      if(typeof fresh[k]!=='boolean' && !_pending.has(k)) delete _groupCollapsed[k];
     }
   };
   _mergeStoredCollapsed();
@@ -10048,6 +10110,10 @@ async function deleteSession(sid, beforeDelete=null){
     danger:true
   });
   if(!ok)return false;
+  const modelPickAtDelete=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
   const reflowPositions=_captureSessionReflowPositions();
   const beforeDeleteHold=beforeDelete?Promise.resolve().then(beforeDelete):null;
   const previousSessions=_allSessions;
@@ -10087,12 +10153,13 @@ async function deleteSession(sid, beforeDelete=null){
     // Keep the deleted conversation's workspace so the opt-in new chat below
     // stays where the user was working.
     const _deletedWorkspace=(S.session&&S.session.workspace)||(session&&session.workspace)||null;
-    const _deleteNewChatOwner=_deleteNewChatOwnerSnapshot();
+    const _startNewChatAfterDelete=window._newChatOnSessionDelete===true;
+    const _deleteNewChatOwner=_startNewChatAfterDelete?_deleteNewChatOwnerSnapshot():null;
     S.session=null;S.messages=[];S.entries=[];S.busy=false;S.activeStreamId=null;
     if(typeof updateSendBtn==='function') updateSendBtn();
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
-    if(window._newChatOnSessionDelete===true){
+    if(_startNewChatAfterDelete){
       // Opt-in (default off): start a new chat instead of loading the most
       // recent remaining session.
       newChatAfterDeleteResult=await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace,_deleteNewChatOwner);
@@ -10102,6 +10169,7 @@ async function deleteSession(sid, beforeDelete=null){
       if(remaining.sessions&&remaining.sessions.length){
         await loadSession(remaining.sessions[0].session_id);
       }else{
+        _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
         const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
         const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
         $('msgInner').innerHTML='';
@@ -10277,6 +10345,8 @@ function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.placeholder='Project name';
+  // #7542: free-text project-name editor, not a credentials field.
+  _markNonCredentialInput(inp);
   let _finishDone=false;
   const finish=async(save)=>{
     if(_finishDone) return;
@@ -10315,6 +10385,8 @@ function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.value=proj.name;
+  // #7542: free-text project-name editor, not a credentials field.
+  _markNonCredentialInput(inp);
   let _finishDone=false;
   const finish=async(save)=>{
     if(_finishDone) return;
