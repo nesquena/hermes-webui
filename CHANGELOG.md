@@ -114,6 +114,13 @@
 
 ### Fixed
 
+- **Gateway chats no longer replay reasoning-only replies or stale recovered prompts as history.** Following #8035,
+  the Gateway runs-API history now also leaves out an assistant reply that carried only reasoning (it went out as
+  empty assistant content) and a prompt WebUI restored after an interrupted turn, unless that prompt is the question
+  its answer replies to. Both backends now use one rule for restored prompts; it also keeps a first turn that was
+  interrupted by a restart together with its answer, which the in-process path used to drop. Thanks @ybai08.
+  (#8039 by @ybai08, fixes #8038)
+
 - **Pinning is limited per profile, not across all profiles.** Three pinned conversations in one profile used to use
   up the pin limit for every other profile, so the first pin in a second profile failed. The pin limit now counts
   only the pinned conversations owned by the target conversation's profile (root-profile aliases of `default` share
