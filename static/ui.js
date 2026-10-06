@@ -8761,6 +8761,105 @@ function renderMd(raw){
   // Inline backtick spans: restore <code> tags produced in the stash callback above.
   // Must happen BEFORE bold/italic so **`code`** → <strong><code>code</code></strong>.
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
+  function _isCjkAutolinkChar(ch){
+    return /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(ch||'');
+  }
+  // Return one URL's exclusive end inside a maximal whitespace-free URL run.
+  // nextCjk and nextQuery are suffix tables shared by every URL in that run.
+  function _bareAutolinkEnd(run,start,nextCjk,nextQuery){
+    const schemeEnd=run.indexOf('://',start)+3;
+    let authorityEnd=schemeEnd;
+    while(authorityEnd<run.length&&!/[/?#]/.test(run[authorityEnd])) authorityEnd++;
+    const pathStart=run[authorityEnd]==='/'?authorityEnd:-1;
+    const queryFragmentStart=nextQuery[schemeEnd];
+    const firstCjkPath=pathStart<0?-1:nextCjk[pathStart];
+    const firstCjkQuery=queryFragmentStart<0?-1:nextCjk[queryFragmentStart+1];
+    // Closing marks and sentence punctuation end a URL. Full-width OPENING
+    // marks（【「『 also end it: prose such as `…/pull/8040（OPEN、…` starts
+    // there. The raw-CJK-path guard further down still keeps interior marks
+    // of genuine IRIs (for example `…/wiki/スター（映画）`).
+    const boundaryMarks='，。．｡；：！？、）】」》〕（【「『';
+    let currentLabelStart=schemeEnd;
+    for(let i=schemeEnd;i<run.length;i++){
+      const mark=run[i];
+      if(mark==='.'){currentLabelStart=i+1;continue;}
+      if(!boundaryMarks.includes(mark)) continue;
+      if(run.startsWith('http://',i+1)||run.startsWith('https://',i+1)) return i;
+      // U+FF0E and U+FF61 are ordinary IRI characters outside the authority.
+      // Keep them in paths, queries, and fragments just as master does.
+      if((mark==='．'||mark==='｡')&&i>=authorityEnd) continue;
+      // UTS #46 maps these three authority characters to an ASCII dot. They
+      // are label separators before an ASCII label. Also retain a CJK label
+      // when the host prefix already contains raw CJK; this covers real IDNs
+      // such as 例子。中国 without mistaking example.com。参见docs/ for one.
+      if((mark==='。'||mark==='．'||mark==='｡')&&i<authorityEnd
+         &&i+1<authorityEnd){
+        if(/[A-Za-z0-9_\-]/.test(run[i+1])){currentLabelStart=i+1;continue;}
+        // Keep a Unicode label when this is the first host separator, when the
+        // immediately preceding label is itself Unicode (www.例子。中国), or when the
+        // next label starts with a non-CJK script letter (www.example。рф). CJK,
+        // Common-script and fullwidth characters after an ASCII label are prose, so
+        // `example.com。参见` / `example.com．次に進む` / `example.com。２０２４年` still end
+        // at the TLD.
+        const firstLabelChar=String.fromCodePoint(run.codePointAt(i+1));
+        let unicodeLabel=currentLabelStart===schemeEnd
+          ||(/\p{L}/u.test(firstLabelChar)
+             &&!/[A-Za-z\p{Script=Common}\p{Script=Inherited}\uFF00-\uFFEF]/u.test(firstLabelChar)
+             &&!_isCjkAutolinkChar(firstLabelChar)
+             &&!/[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Hangul}\p{Script_Extensions=Bopomofo}]/u.test(firstLabelChar));
+        for(let j=currentLabelStart;!unicodeLabel&&j<i;){
+          const c=String.fromCodePoint(run.codePointAt(j));
+          unicodeLabel=/[\p{L}\p{M}\p{N}]/u.test(c)
+            &&!/[A-Za-z0-9]/.test(c);
+          j+=c.length;
+        }
+        for(let j=i+1;unicodeLabel&&j<authorityEnd;){
+          const c=String.fromCodePoint(run.codePointAt(j));
+          if(c==='.'||c===':'||boundaryMarks.includes(c)) break;
+          unicodeLabel=/[\p{L}\p{M}\p{N}_\-]/u.test(c);
+          j+=c.length;
+        }
+        if(unicodeLabel){currentLabelStart=i+1;continue;}
+      }
+      // Preserve marks in a query/fragment after raw CJK content. ASCII
+      // fragment continuations are also common section identifiers. A mark
+      // before the first CJK character remains a prose boundary, so
+      // `?q=1，参见` does not swallow the following sentence.
+      if(queryFragmentStart>=0&&i>queryFragmentStart&&i<run.length-1){
+        if((firstCjkQuery>=0&&firstCjkQuery<i)
+           ||(run[queryFragmentStart]==='#'&&/[A-Za-z0-9_\-]/.test(run[i+1]))) continue;
+        return i;
+      }
+      // Once a path contains raw CJK, interior CJK punctuation is a plausible
+      // IRI character, but it must not override a later query boundary.
+      if(firstCjkPath>=0&&firstCjkPath<i
+         &&(queryFragmentStart<0||i<queryFragmentStart)&&i<run.length-1) continue;
+      return i;
+    }
+    return /[.,;:!?)]$/.test(run)?run.length-1:run.length;
+  }
+  function _autolinkBareRun(run){
+    const nextCjk=new Int32Array(run.length+1);
+    const nextQuery=new Int32Array(run.length+1);
+    nextCjk[run.length]=-1;
+    nextQuery[run.length]=-1;
+    for(let i=run.length-1;i>=0;i--){
+      nextCjk[i]=_isCjkAutolinkChar(run[i])?i:nextCjk[i+1];
+      nextQuery[i]=(run[i]==='?'||run[i]==='#')?i:nextQuery[i+1];
+    }
+    const schemeRe=/https?:\/\//g;
+    let out='';
+    let cursor=0;
+    let match;
+    while((match=schemeRe.exec(run))){
+      out+=run.slice(cursor,match.index);
+      const end=_bareAutolinkEnd(run,match.index,nextCjk,nextQuery);
+      out+=_autolinkAnchor(run.slice(match.index,end));
+      cursor=end;
+      schemeRe.lastIndex=end;
+    }
+    return out+run.slice(cursor);
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -8785,7 +8884,7 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
-    t=t.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{const trail=url.match(/[.,;:!?)\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
+    t=_autolinkBareText(t);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -9147,18 +9246,23 @@ function renderMd(raw){
   // renderer's generated </p> could provide a closing ">" and turn them into
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).
   s=s.replace(/<[a-zA-Z][\w:-]*[^>\n]*$/gm,tag=>esc(tag));
-  // Autolink: convert plain URLs to clickable links.
+  // Autolink: convert plain URLs to clickable links. Both inline and block
+  // rendering use this helper so their boundary and safety rules stay equal.
+  function _autolinkAnchor(clean){
+    return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>`;
+  }
+  function _autolinkBareText(text){
+    return String(text||'').replace(
+      /(https?:\/\/[^\s<>"')\]\uFF09]+)/g,
+      run=>_autolinkBareRun(run),
+    );
+  }
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
-  s=s.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{
-    // Strip trailing punctuation that was likely not part of the URL.
-    // CJK full-width punctuation (）。，；：！？、) is included because LLMs
-    // frequently use full-width delimiters in Chinese/Japanese text.
-    const trail=url.match(/[.,;:!?)]$/)||url.match(/[\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';
-    const clean=trail?url.slice(0,-1):url;
-    return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
-  });
+  // Split high-confidence sentence boundaries while preserving valid CJK IRI
+  // content, then rescan each plain-text trail so adjacent URLs all link.
+  s=_autolinkBareText(s);
   s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);
   // Restore math stash → katex placeholder spans/divs
   // These will be rendered by renderKatexBlocks() after DOM insertion
