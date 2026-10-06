@@ -471,6 +471,8 @@ def test_session_save_persists_and_backups_guarded_snapshot(temp_session_dir):
         ),
         encoding="utf-8",
     )
+    session = Session.load(session.session_id)
+    assert session is not None
 
     session.save(skip_index=True)
 
@@ -520,6 +522,9 @@ def test_backup_keeps_distinct_existing_rows_while_removing_exact_replays(temp_s
         ),
         encoding="utf-8",
     )
+    session = Session.load(session.session_id)
+    assert session is not None
+    session.messages = [repeated, repeated.copy(), current]
 
     session.save(skip_index=True)
 
@@ -558,6 +563,8 @@ def test_save_leaves_preexisting_stale_duplicate_backup_untouched(temp_session_d
         ),
         encoding="utf-8",
     )
+    session = Session.load(session.session_id)
+    assert session is not None
     stale_backup = {
         "session_id": session.session_id,
         "message_count": 3,

@@ -62,6 +62,20 @@ def _user_rows(session):
     return [row for row in session.messages if row.get("role") == "user"]
 
 
+def _state_without_revision_owner(value):
+    state = copy.deepcopy(value if isinstance(value, dict) else value.__dict__)
+    state.pop("_sidecar_revisions", None)
+    return state
+
+
+def _assert_owns_visible_sidecar(session):
+    owned = models._coerce_sidecar_revision(
+        session._sidecar_revisions.get(session.session_id),
+        session.session_id,
+    )
+    assert owned == models._read_sidecar_revision(session.path, session.session_id)
+
+
 def _saved_retry_session(issue7193_env):
     session = new_session(workspace=str(issue7193_env.parent), profile="profile-a")
     session.title = "Existing retry"
@@ -108,6 +122,63 @@ def test_eager_rejected_before_stream_registration_retry_reload_has_one_new_prom
         "retry me",
         "retry me",
     ]
+
+
+def test_rejected_eager_start_reconciles_compensated_revision_owner(
+    issue7193_env, monkeypatch
+):
+    session = _saved_retry_session(issue7193_env)
+    before = _state_without_revision_owner(session)
+    monkeypatch.setattr(
+        routes,
+        "create_stream_channel",
+        lambda: (_ for _ in ()).throw(RuntimeError("stream registration rejected")),
+    )
+
+    with pytest.raises(RuntimeError, match="stream registration rejected"):
+        _start(session, workspace=issue7193_env / "workspace")
+
+    assert _state_without_revision_owner(session) == before
+    _assert_owns_visible_sidecar(session)
+
+    session.composer_draft = {"text": "saved after compensated rejection"}
+    session.save(touch_updated_at=False)
+
+    reloaded = Session.load(session.session_id)
+    assert reloaded is not None
+    assert reloaded.composer_draft == {
+        "text": "saved after compensated rejection"
+    }
+    assert reloaded.messages == before["messages"]
+
+
+def test_chat_start_compensation_refuses_an_unowned_visible_revision(
+    issue7193_env,
+):
+    session = _saved_retry_session(issue7193_env)
+    expected = models._coerce_sidecar_revision(
+        session._sidecar_revisions[session.session_id],
+        session.session_id,
+    )
+    owner_before = copy.deepcopy(session._sidecar_revisions)
+    foreign = json.loads(session.path.read_text(encoding="utf-8"))
+    foreign["title"] = "foreign concurrent update"
+    session.path.write_text(
+        json.dumps(foreign, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(
+        models.StaleSessionGenerationError,
+        match="lost sidecar ownership",
+    ):
+        routes._adopt_expected_chat_start_sidecar_revision(session, expected)
+
+    assert session._sidecar_revisions == owner_before
+    assert json.loads(session.path.read_text(encoding="utf-8"))["title"] == (
+        "foreign concurrent update"
+    )
 
 
 def test_rejected_start_restores_pending_continuation_markers(
@@ -403,7 +474,8 @@ def test_rejected_start_with_unreadable_entry_backup_restores_session_and_backup
             msg="new unreadable backup prompt",
         )
 
-    assert session.__dict__ == before
+    assert _state_without_revision_owner(session) == _state_without_revision_owner(before)
+    _assert_owns_visible_sidecar(session)
     assert Session.load(session.session_id).messages == before["messages"]
     assert backup_path.read_bytes() == entry_backup
     assert inspect_session_recovery_status(session.path)["recommend"] == "restore"
@@ -472,7 +544,8 @@ def test_save_replaces_sidecar_then_raises_restores_snapshot(issue7193_env, monk
         _start(session, workspace=issue7193_env / "workspace")
 
     state = copy.deepcopy(session.__dict__)
-    assert state == before
+    assert _state_without_revision_owner(state) == _state_without_revision_owner(before)
+    _assert_owns_visible_sidecar(session)
     reloaded = Session.load(session.session_id)
     for field in (
         "title",
@@ -492,6 +565,9 @@ def test_save_replaces_sidecar_then_raises_restores_snapshot(issue7193_env, monk
         assert getattr(reloaded, field) == before[field]
     persisted = json.loads(session.path.read_text(encoding="utf-8"))
     expected_persisted = json.loads(before_sidecar.decode("utf-8"))
+    assert persisted.pop("_sidecar_generation_v1") > expected_persisted.pop(
+        "_sidecar_generation_v1"
+    )
     assert persisted == expected_persisted
     assert config.session_writeback_owner(session.session_id) is None
     assert not config.STREAM_SESSION_OWNERS

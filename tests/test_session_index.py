@@ -1412,6 +1412,12 @@ def test_concurrent_saves_dont_lose_data():
     # Build initial index
     _write_session_index(updates=None)
 
+    # Raw fixture writes bypass Session.save(), so reload the durable revisions
+    # before exercising concurrent mutations under the sidecar CAS contract.
+    sA = models.Session.load("sess_a")
+    sB = models.Session.load("sess_b")
+    assert sA is not None and sB is not None
+
     # Now update both sessions concurrently
     barrier = threading.Event()
     errors = []

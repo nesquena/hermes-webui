@@ -183,17 +183,13 @@ def test_save_writes_bak_when_messages_shrink(temp_session_dir):
     from api.models import Session
     sid = _make_session_on_disk(temp_session_dir, n_msgs=1000, with_active_stream=False)
 
-    # Build a fresh in-memory Session with a smaller messages array, then save —
+    # Load the durable owner, apply a smaller messages array, then save —
     # this models the precise failure shape of #1558 (a caller mutates messages
-    # downward and saves). We construct the Session directly rather than going
-    # through get_session() so we don't trigger _repair_stale_pending side-effects.
-    s = Session(
-        session_id=sid,
-        title="t",
-        workspace="",
-        model="m",
-        messages=[{"role": "user", "content": f"m{i}"} for i in range(500)],
-    )
+    # downward and saves). Session.load() avoids get_session() repair side-effects
+    # while retaining the revision token required by the sidecar CAS contract.
+    s = Session.load(sid)
+    assert s is not None
+    s.messages = s.messages[:500]
     s.save()
 
     bak_path = temp_session_dir / f"{sid}.json.bak"
@@ -213,14 +209,10 @@ def test_save_does_not_write_bak_when_messages_grow(temp_session_dir):
     from api.models import Session
     sid = _make_session_on_disk(temp_session_dir, n_msgs=1000, with_active_stream=False)
 
-    # Build a session with MORE messages than on disk — the normal grow path.
-    s = Session(
-        session_id=sid,
-        title="t",
-        workspace="",
-        model="m",
-        messages=[{"role": "user", "content": f"m{i}"} for i in range(1001)],
-    )
+    # Load the current owner and append one message — the normal grow path.
+    s = Session.load(sid)
+    assert s is not None
+    s.messages.append({"role": "user", "content": "m1000"})
     s.save()
 
     bak_path = temp_session_dir / f"{sid}.json.bak"
