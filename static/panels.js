@@ -1159,6 +1159,22 @@ function _cronExpansionSet(key, expanded){
 // it is bounded by the number of rows on screen.
 let _cronRunBodyCache = {};
 
+// #7303 re-gate 10/06 (CORE): generation fence for the run-body cache.
+// When the runs list is rebuilt ``_resetCronRunBodyCache`` clears the
+// cache AND bumps this counter. ``_loadRunContent`` captures the
+// generation it started under and only publishes (cache write + render)
+// if it is still current, so an in-flight load that began against the
+// OLD list cannot write an old run's payload back into the cache the NEW
+// list owns (same job/filename key). Without the fence, a replaced row
+// sharing that key would mount the stale run's PRIVATE answer until its
+// own fetch settled.
+let _cronRunBodyGen = 0;
+
+function _resetCronRunBodyCache(){
+  _cronRunBodyGen += 1;
+  _cronRunBodyCache = {};
+}
+
 function toggleCronPromptExpanded(jobId){
   const key = _cronPanelExpandKey(jobId, 'prompt');
   _cronExpansionSet(key, !_cronExpansionGet(key));
@@ -1405,7 +1421,9 @@ async function _loadCronDetailRuns(jobId, detailKey){
     // A fresh list invalidates any cached run payloads: the previous
     // rows are gone from the DOM, so their projections must not leak
     // into a re-mounted row that happens to share an expansion key.
-    _cronRunBodyCache = {};
+    // The generation bump also fences off any in-flight load from the
+    // previous list (see _loadRunContent).
+    _resetCronRunBodyCache();
     const countLabel = data.total > 50 ? ` (${data.total} runs, showing latest 50)` : ` (${data.total} runs)`;
     card.innerHTML = `<div class="detail-card-title">${esc(outputTitle)}${countLabel}</div>${rows}`;
   } catch(e) { /* ignore */ }
@@ -1608,8 +1626,16 @@ async function _loadRunContent(jobId, filename, runId){
   item.classList.add('open');
   body.classList.toggle('expanded', _cronExpansionGet(_cronRunExpandKey(jobId, filename)));
   body.innerHTML = `<span style="opacity:.5">${esc(t('loading'))}</span>`;
+  // #7303 re-gate 10/06 (CORE): capture the cache generation this load
+  // starts under. If the runs list is replaced while the fetch is in
+  // flight, the reset bumps the generation; the stale load must NOT
+  // publish (cache write or DOM render, success or rejection) because
+  // the new list owns the job/filename key and would read it back as a
+  // newer row's content.
+  const gen = _cronRunBodyGen;
   try {
     const data = await api(`/api/crons/run?job_id=${encodeURIComponent(jobId)}&filename=${encodeURIComponent(filename)}`);
+    if (gen !== _cronRunBodyGen) return;
     if (data.error) {
       body.textContent = data.error;
       return;
@@ -1617,6 +1643,7 @@ async function _loadRunContent(jobId, filename, runId){
     _cronRunBodyCache[_cronRunExpandKey(jobId, filename)] = data;
     _renderCronRunBody(body, data, jobId, filename);
   } catch(e) {
+    if (gen !== _cronRunBodyGen) return;
     body.textContent = 'Error: ' + e.message;
   }
 }

@@ -197,6 +197,18 @@ global._cronPanelExpandKey = (jobId, suffix) => `hermes-webui-cron-${suffix}-exp
 global._cronExpansionGet = (key) => { try { return localStorage.getItem(key) === '1'; } catch (_) { return false; } };
 global._cronExpansionSet = (key, expanded) => { try { localStorage.setItem(key, expanded ? '1' : '0'); } catch (_) { } };
 global._cronRunBodyCache = {};
+// #7303 10/06 review: the list replacement resets ``_cronRunBodyCache``
+// and bumps a generation counter. ``_loadRunContent`` captures the
+// generation it started under and only publishes (cache write + render)
+// if that generation is still current -- an in-flight load from the OLD
+// list must not repopulate the reset cache owned by the NEW list.
+// Both must be global properties: the driver evals ``_loadRunContent``
+// via an INDIRECT eval (module ``let`` is invisible to it).
+global._cronRunBodyGen = 0;
+global._resetCronRunBodyCache = () => {
+  global._cronRunBodyGen += 1;
+  global._cronRunBodyCache = {};
+};
 
 let _currentCronDetail = scenario.currentCronDetail || null;
 Object.defineProperty(global, '_currentCronDetail', {
@@ -325,6 +337,24 @@ async function main() {
       await loadPromise;
     }
     result.rendered = serialize(rowBody);
+  } else if (scenario.mode === 'stale-write') {
+    // CORE (10/06 review): the run-list replacement resets the cache and
+    // bumps the generation; an in-flight _loadRunContent that started
+    // against the previous list must not publish its payload back into
+    // the cache the new list owns (same job/filename key).
+    rowItem._classes.remove('open');
+    rowBody.innerHTML = '';
+    const staleLoad = _loadRunContent(scenario.jobId, scenario.filename, 'run1');
+    await Promise.resolve();
+    await Promise.resolve();
+    // The runs list is replaced while the load is in flight.
+    global._resetCronRunBodyCache();
+    // Let the stale in-flight load settle; with the fix it must NOT write.
+    global._releaseFetch(scenario.payload);
+    await staleLoad;
+    result.fetchSettled = true;
+    const staleKey = global._cronRunExpandKey(scenario.jobId, scenario.filename);
+    result.cacheAfterStale = Object.prototype.hasOwnProperty.call(global._cronRunBodyCache, staleKey);
   }
 
   result.fetchCount = fetchCount;

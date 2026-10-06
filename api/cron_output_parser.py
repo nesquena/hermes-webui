@@ -56,6 +56,13 @@ from dataclasses import dataclass
 # tolerate minor inconsistency between agent runs.
 _RESPONSE_HEADING_RE = re.compile(r"^#{1,2}\s+Response\s*$")
 
+# The writer-owned prompt section header (``cron/scheduler.py``
+# ``_run_doc_header``). Its presence marks a run document as
+# writer-framed: ``## Prompt`` + prompt bytes + ``## Response`` +
+# response. Recognised so the filled prompt can be skipped rather than
+# scanned for headings the prompt may legitimately quote.
+_PROMPT_HEADING_RE = re.compile(r"^#{1,2}\s+Prompt\s*$")
+
 # A fenced code block starts with ``` or ~~~ (optionally with a language
 # tag) and ends with the same fence on its own line. We track fence
 # character AND opening delimiter length so a ```` ```` ``` ```` ```` line
@@ -136,6 +143,49 @@ def parse_cron_output(text: str) -> CronOutputProjection:
 
     raw = text
     lines = text.split("\n")
+
+    # ---- Writer-framed envelope (producer contract) ---------------------
+    # The cron writer (``cron/scheduler.py`` ``_run_doc_header`` + success
+    # assembly) frames every agent run as ``## Prompt`` + prompt bytes +
+    # ``## Response`` + the logged answer. The assembled prompt half can
+    # legitimately QUOTE a literal ``## Response`` heading (a skill
+    # documenting its output format, an injected previous answer), so the
+    # only authoritative boundary is the LAST ``## Response`` — the
+    # producer's own reader (``_archive_answer``) splits on the last
+    # occurrence for the same reason.
+    #
+    # For a writer-framed artifact we SKIP the prompt bytes rather than
+    # scan prompt examples: fence / ``<pre>`` state from an unclosed
+    # prompt block cannot strand the scan, and a framed terminator with no
+    # usable answer (a truncated/empty response frame the producer reader
+    # rejects) is not promoted to a recognized partial answer — it stays
+    # raw-primary.
+    _prompt_idx = None
+    _resp_idx = None
+    for _i, _ln in enumerate(lines):
+        if _PROMPT_HEADING_RE.match(_ln):
+            _prompt_idx = _i
+        elif _RESPONSE_HEADING_RE.match(_ln):
+            _resp_idx = _i
+    if _prompt_idx is not None and _resp_idx is not None and _resp_idx > _prompt_idx:
+        _framed_body = "\n".join(lines[_resp_idx + 1:]).strip()
+        if _framed_body:
+            return CronOutputProjection(
+                response=_framed_body,
+                context="\n".join(lines[:_resp_idx]).strip(),
+                raw=raw,
+                has_response_boundary=True,
+                response_line=_resp_idx + 1,
+            )
+        # Empty / truncated framed terminator → not a usable answer.
+        return CronOutputProjection(
+            response="",
+            context=raw,
+            raw=raw,
+            has_response_boundary=False,
+        )
+
+    # ---- Legacy unframed path (conservative, fail-closed) ---------------
     in_fence = False
     in_html_pre = False
     # #7303 re-gate 9/21: track <pre> and <code> depths separately
@@ -158,60 +208,78 @@ def parse_cron_output(text: str) -> CronOutputProjection:
     # fail-closed are the fence / <pre> tracking and the exact heading
     # match below, not a line-range limit.
 
+    # #7303 10/06 review (finding 1): a fenced HTML sample and a quoted
+    # Markdown fence can coexist, and each protected context must be
+    # inspected ONLY by its own terminator test while the other is open:
+    #  - inside a fence, only a valid fence closer may be processed — a
+    #    literal ``<pre>`` there must not open HTML state that outlives
+    #    the fence and swallows a later heading;
+    #  - inside an HTML block, only its ordered tags may be processed — a
+    #    literal fence there must not open fence state that outlives the
+    #    ``<pre>``.
     for i, line in enumerate(lines):
-        # Track fenced code blocks. Toggle on opening AND closing fences
-        # of the same character so ``` doesn't re-open. The closing
-        # fence must be at least as long as the opening one, otherwise
-        # a ``` line inside a ```` block would close it early and a
-        # subsequent ``## Response`` inside the still-open block could
-        # be mistaken for the real boundary.
-        m = _FENCE_RE.match(line)
-        if m:
-            fence = m.group(1)[0]
-            length = len(m.group(1))
+        if in_fence:
+            # Inside a fence: only a valid *closing* fence matters.
             # A closing fence carries no info string; an indented or
             # tagged run of fence characters is a nested opening fence
-            # and must not close the current block.
-            rest = line[m.end():].strip()
-            if not in_fence:
-                in_fence = True
-                fence_char = fence
-                fence_len = length
-            elif fence_char == fence and length >= fence_len and not rest:
-                in_fence = False
-                fence_char = None
-                fence_len = 0
+            # and must not close the current block. The closer must be at
+            # least as long as the opening fence so a ``` line inside a
+            # ```` block cannot close it early (skill dumps nest fences).
+            m = _FENCE_RE.match(line)
+            if m:
+                fence = m.group(1)[0]
+                length = len(m.group(1))
+                rest = line[m.end():].strip()
+                if fence_char == fence and length >= fence_len and not rest:
+                    in_fence = False
+                    fence_char = None
+                    fence_len = 0
             continue
-        # Track HTML <pre>/<code> blocks (some skill output uses them
-        # for shell snippets and the parser must respect the boundary).
-        # #7303 re-gate 9/21 (correctness gap): the previous single
-        # ``in_html_pre`` boolean conflates two independently nestable
-        # elements — for a ``<pre><code>...</code></pre>`` shape, a
-        # ``</code>`` inside the still-open ``<pre>`` would clear the
-        # flag and a later ``## Response`` heading (inside the quoted
-        # HTML) would be accepted as the boundary.
-        #
+
+        if in_html_pre:
+            # Inside an HTML <pre>/<code> block: process its ordered tags
+            # only. A close token always applies; an open token only counts
+            # when anchored (starts the line or follows another tag), so a
+            # prose mention of ``<pre>`` cannot re-open the block. A literal
+            # Markdown fence here must NOT open fence state.
+            for _tag in _HTML_TAG_RE.finditer(line):
+                _name = _tag.group(1).lower()
+                _is_close = _tag.group(0).startswith("</")
+                if not _is_close and not _is_anchored_html_tag(line[: _tag.start()]):
+                    continue  # a prose mention, not a real open
+                if _name == "pre":
+                    if _is_close:
+                        _pre_depth = max(0, _pre_depth - 1)
+                    else:
+                        _pre_depth += 1
+                else:
+                    if _is_close:
+                        _code_depth = max(0, _code_depth - 1)
+                    else:
+                        _code_depth += 1
+            in_html_pre = _pre_depth > 0 or _code_depth > 0
+            continue
+
+        # Outside every protected context: a new fence or HTML block can
+        # open, or the line can carry the response boundary.
+        m = _FENCE_RE.match(line)
+        if m:
+            in_fence = True
+            fence_char = m.group(1)[0]
+            fence_len = len(m.group(1))
+            continue
+
+        # Track HTML <pre>/<code> blocks (some skill output uses them for
+        # shell snippets and the parser must respect the boundary).
         # Two-tier detection to keep well-formed artifacts tracking
-        # correctly without confusing plain-text mentions like
-        # ``the open <pre> tag`` for an actual tag:
-        # 1. **Entry** — a line that *starts* (after optional indent)
-        #    with ``<pre`` or ``<code`` opens the HTML block, and that
-        #    specific opening token is counted as the open. This is
-        #    the only place open tokens are recognised.
-        # 2. **Inside** — while the HTML block is open, the tags on the
-        #    line are walked **in token order**. A close token always
-        #    applies; an open token only counts when it is anchored —
-        #    it starts the line or directly follows another tag — so
-        #    prose that merely mentions ``<pre>`` cannot re-open the
-        #    block, while a genuinely adjacent tag (``</pre><code>``)
-        #    still does. Once both depths hit zero, the block closes.
+        # correctly without confusing plain-text mentions like ``the open
+        # <pre> tag`` for an actual tag.
         _opening_match = re.match(r"^\s*<(pre|code)\b", line, re.IGNORECASE)
         # Where the ordered token walk starts on this line. On the entry
         # line it begins *after* the token that already opened the block,
         # so that token is not counted twice.
         _tag_scan_start = 0
-        if _opening_match and not in_html_pre:
-            # Open the HTML block on this single starting token.
+        if _opening_match:
             in_html_pre = True
             if _opening_match.group(1).lower() == "pre":
                 _pre_depth = 1
@@ -220,7 +288,6 @@ def parse_cron_output(text: str) -> CronOutputProjection:
                 _pre_depth = 0
                 _code_depth = 1
             _tag_scan_start = _opening_match.end()
-        if in_html_pre:
             # Walk the tokens left-to-right so a close that precedes an
             # open on the same line cannot be pre-counted against it.
             for _tag in _HTML_TAG_RE.finditer(line):
@@ -241,10 +308,8 @@ def parse_cron_output(text: str) -> CronOutputProjection:
                     else:
                         _code_depth += 1
             in_html_pre = _pre_depth > 0 or _code_depth > 0
-            if in_fence or in_html_pre:
-                continue
-        if in_fence or in_html_pre:
             continue
+
         if _RESPONSE_HEADING_RE.match(line):
             response_idx = i
             break
