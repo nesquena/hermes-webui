@@ -2297,6 +2297,9 @@ if (_healthResponseServerIdentity({{ server_started_at: null, uptime_seconds: nu
         assert 'clearLockBtn.disabled=false' in fn, (
             "_showUpdateError must re-enable a clear-lock recovery button"
         )
+        assert '_updateRecoveryGeneration' in fn, (
+            "_showUpdateError must invalidate older update-check recovery state"
+        )
 
     def test_error_displayed_persistently_not_just_toast(self):
         src = read('static/ui.js')
@@ -2416,6 +2419,81 @@ if(state.btnClearUpdateLock.style.display !== 'inline-block' || state.btnClearUp
 """.strip()
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
+    def test_manual_webui_banner_clears_stale_agent_recovery_on_recheck(self):
+        src = read('static/ui.js')
+        format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
+        instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
+        show_fn = extract_js_function(src, '_showUpdateBanner')
+        script = f"""
+const state = {{
+  updateBanner: {{ classList: {{ added: false, add() {{ this.added = true; }}, remove() {{ this.removed = true; }} }} }},
+  updateMsg: {{ textContent: '' }},
+  btnApplyUpdate: {{ disabled: false, style: {{ display: '' }} }},
+  btnForceUpdate: {{ disabled: false, style: {{ display: 'inline-block' }}, dataset: {{ target: 'agent' }} }},
+  btnClearUpdateLock: {{ disabled: false, style: {{ display: 'inline-block' }}, dataset: {{ target: 'agent' }} }},
+  updateWhatsNewLinks: {{ style: {{ display: 'none' }}, replaceChildren() {{ this.cleared = true; }} }},
+}};
+global.window = {{ _updateRecoveryGeneration: 1 }};
+global.$ = (id) => state[id] || null;
+global._renderUpdateWhatsNewLinks = () => {{}};
+global.t = (key, ...args) => {{
+  const values = {{ settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.' }};
+  return (values[key] || key).replace(/\\{{(\\d+)}}/g, (_, i) => args[Number(i)] ?? '');
+}};
+{format_fn}
+{instruction_fn}
+{show_fn}
+// A cached result predating the failure must not clear buttons that the
+// subsequent failed update just armed.
+_showUpdateBanner({{
+  cached: true,
+  webui: {{ no_git: true, manual_update: true, behind: 1 }},
+  agent: {{ behind: 1, recovery: {{ force: false, clear_lock: false }} }},
+}});
+if(state.btnForceUpdate.style.display !== 'inline-block' || state.btnForceUpdate.disabled) throw new Error('cached result must not clear fresh force recovery');
+if(state.btnClearUpdateLock.style.display !== 'inline-block' || state.btnClearUpdateLock.disabled) throw new Error('cached result must not clear fresh lock recovery');
+// An older fresh check must not clear buttons armed after that check started.
+_showUpdateBanner({{
+  webui: {{ no_git: true, manual_update: true, behind: 1 }},
+  agent: {{ behind: 1, recovery: {{ force: false, clear_lock: false }} }},
+}}, 0);
+if(state.btnForceUpdate.style.display !== 'inline-block' || state.btnForceUpdate.disabled) throw new Error('older check must not clear fresh force recovery');
+if(state.btnClearUpdateLock.style.display !== 'inline-block' || state.btnClearUpdateLock.disabled) throw new Error('older check must not clear fresh lock recovery');
+// A fresh check from the current recovery generation that positively reports both recovery conditions gone clears
+// the buttons that a previous in-page failure had armed.
+_showUpdateBanner({{
+  webui: {{ no_git: true, manual_update: true, behind: 1 }},
+  agent: {{ behind: 1, recovery: {{ force: false, clear_lock: false }} }},
+}}, 1);
+if(state.btnForceUpdate.style.display !== 'none') throw new Error('resolved conflict must clear the stale force button');
+if(state.btnForceUpdate.disabled !== true) throw new Error('resolved conflict must disable the stale force button');
+if(state.btnForceUpdate.dataset.target !== '') throw new Error('resolved conflict must drop the stale force target');
+if(state.btnClearUpdateLock.style.display !== 'none') throw new Error('removed lock must clear the stale lock button');
+if(state.btnClearUpdateLock.disabled !== true) throw new Error('removed lock must disable the stale lock button');
+if(state.btnClearUpdateLock.dataset.target !== '') throw new Error('removed lock must drop the stale lock target');
+// The same failure context still present keeps both buttons armed.
+state.btnForceUpdate.disabled = false;
+state.btnForceUpdate.style.display = 'inline-block';
+state.btnForceUpdate.dataset.target = 'agent';
+state.btnClearUpdateLock.disabled = false;
+state.btnClearUpdateLock.style.display = 'inline-block';
+state.btnClearUpdateLock.dataset.target = 'agent';
+_showUpdateBanner({{
+  webui: {{ no_git: true, manual_update: true, behind: 1 }},
+  agent: {{ behind: 1, recovery: {{ force: true, clear_lock: true }} }},
+}});
+if(state.btnForceUpdate.style.display !== 'inline-block' || state.btnForceUpdate.disabled) throw new Error('persisting conflict must keep the force recovery');
+if(state.btnClearUpdateLock.style.display !== 'inline-block' || state.btnClearUpdateLock.disabled) throw new Error('persisting lock must keep the lock recovery');
+// An inconclusive probe (null) must never clear a recovery button.
+_showUpdateBanner({{
+  webui: {{ no_git: true, manual_update: true, behind: 1 }},
+  agent: {{ behind: 1, recovery: {{ force: null, clear_lock: null }} }},
+}});
+if(state.btnForceUpdate.style.display !== 'inline-block' || state.btnForceUpdate.disabled) throw new Error('inconclusive probe must not clear the force recovery');
+if(state.btnClearUpdateLock.style.display !== 'inline-block' || state.btnClearUpdateLock.disabled) throw new Error('inconclusive probe must not clear the lock recovery');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
     def test_settings_manual_webui_update_includes_pull_guidance(self):
         ui_src = read('static/ui.js')
         panels_src = read('static/panels.js')
@@ -2442,6 +2520,7 @@ let apiData = {{
   agent: null,
 }};
 function $(id) {{ return state[id] || null; }}
+global.window = {{}};
 function t(key, ...args) {{
   const values = {{
     settings_checking: 'Checking',
@@ -2652,7 +2731,7 @@ class TestUpdateCompareSource:
 
     def test_update_banner_clears_stale_links_when_no_updates_remain(self):
         src = read('static/ui.js')
-        start = src.find('function _showUpdateBanner(data)')
+        start = src.find('function _showUpdateBanner(data,recoveryGenerationAtCheck=null)')
         assert start != -1, "_showUpdateBanner not found"
         fn = src[start:src.find('function dismissUpdate()', start)]
         empty_idx = fn.find('if(!parts.length)')
@@ -2666,7 +2745,7 @@ class TestUpdateCompareSource:
         up_to_date_idx = src.find("settings_up_to_date")
         assert up_to_date_idx != -1, "manual update up-to-date branch not found"
         block = src[up_to_date_idx:up_to_date_idx + 300]
-        assert "_showUpdateBanner(data)" in block
+        assert "_showUpdateBanner(data,_recoveryGenerationAtCheck)" in block
 
 
 class TestWhatsNewSummaryToggle:

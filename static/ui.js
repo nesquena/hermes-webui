@@ -11657,7 +11657,7 @@ function _renderUpdateWhatsNewLinks(data){
   }
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
-function _showUpdateBanner(data){
+function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
@@ -11673,10 +11673,21 @@ function _showUpdateBanner(data){
     btnApply.disabled=!hasApplyTargets;
     btnApply.style.display=hasApplyTargets?'':'none';
     if(webuiManual){
+      // Keep an Agent recovery button only while the fresh check still shows
+      // the condition it recovers from. A check that positively reports the
+      // condition gone (recovery.force / recovery.clear_lock === false) clears
+      // the stale button so a destructive force update cannot linger after the
+      // conflict was resolved outside the UI (Greptile P1 on #8040). Probes
+      // that could not determine the state stay null and never clear. Cached
+      // results also never clear buttons armed after that cache was recorded.
+      const _agentRecovery=(data&&data.agent&&data.agent.recovery)||null;
+      const _currentRecoveryGeneration=Number(window._updateRecoveryGeneration)||0;
+      const _recoveryGenerationIsCurrent=recoveryGenerationAtCheck===null||Number(recoveryGenerationAtCheck)===_currentRecoveryGeneration;
+      const _recoveryGone=(kind)=>!!(!data.cached&&_recoveryGenerationIsCurrent&&_agentRecovery&&_agentRecovery[kind]===false);
       const forceBtn=$('btnForceUpdate');
-      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent')){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
+      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent'&&!_recoveryGone('force'))){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
       const clearLockBtn=$('btnClearUpdateLock');
-      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent')){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent'&&!_recoveryGone('clear_lock'))){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
     }
   }
   if(!parts.length){
@@ -11792,6 +11803,9 @@ function _showUpdateError(target,res){
     errEl.style.display='block';
   } else {
     showToast(msg);
+  }
+  if(res.conflict||res.diverged||res.lock_conflict){
+    window._updateRecoveryGeneration=(Number(window._updateRecoveryGeneration)||0)+1;
   }
   // Show "Force update" button ONLY for errors recoverable by a destructive
   // hard reset. Lock-only failures are routed to a separate non-destructive
