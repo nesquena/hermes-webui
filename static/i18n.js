@@ -19137,7 +19137,7 @@ const LOCALES = {
     session_batch_archive_confirm: 'Archiver {0} conversation(s) ?',
     session_batch_delete_worktree_confirm: 'Supprimer {0} conversation(s) ? {1} conversation(s) adossées à un worktree laisseront leurs répertoires worktree sur le disque.',
     session_batch_archive_worktree_confirm: 'Archiver {0} conversation(s) ? {1} conversation(s) adossées à un worktree conserveront leurs répertoires worktree sur le disque.',
-    session_batch_archive_mixed_profiles: 'Certaines conversations sélectionnées n'ont pas pu être associées à un profil — essayez de les archiver une par une.',
+    session_batch_archive_mixed_profiles: 'Certaines conversations sélectionnées n\'ont pas pu être associées à un profil — essayez de les archiver une par une.',
     session_no_selection: 'Aucune conversation sélectionnée',
     settings_heading_title: 'Centre de contrôle',
     settings_heading_subtitle: 'Préférences, outils de conversation et contrôles système.',
