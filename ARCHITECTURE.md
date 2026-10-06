@@ -735,12 +735,15 @@ field is optional and only the supplied ones are touched:
 
 `reasoning_effort` is applied through the **profile-wide** preference, not a
 session-local override: for a bound workspace/model/effort session the sidebar
-POSTs `/api/reasoning`, which persists `agent.reasoning_effort` for the bound
-model family in the active profile's `config.yaml` — the same key the CLI
-`/reasoning` and the composer's effort chip use. Creating a project-bound
-session therefore also moves the effective effort of other sessions and
-projects in that profile; only the workspace and model axes are stored on the
-session itself.
+POSTs `/api/reasoning`, which persists one shared `agent.reasoning_effort`
+value in the active profile's `config.yaml` — the same key the CLI `/reasoning`
+and the composer's effort chip use. The bound `model` / `model_provider` only
+*interpret* that single value (they select which ladder applies); they do not
+get separately stored effort preferences, so two projects bound to different
+models still share one effort setting. Creating a project-bound session
+therefore also moves the effective effort of other sessions and projects in
+that profile; only the workspace and model axes are stored on the session
+itself.
 
 The endpoint only binds a project its own profile owns (`_profiles_match`,
 otherwise 404), mirroring the `/api/session/new` profile boundary. The stored
