@@ -1043,7 +1043,7 @@ def test_custom_slug_cold_stale_not_picked_still_strips_5979():
     assert model == bare, f"unmarked stale cold custom:slug id must strip (legacy), got {model!r}"
 
 
-def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979():
+def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979(monkeypatch):
     """The send-path warm helper publishes provenance from a valid disk cache
     when memory is cold — restoring the endpoint-advertised signal so #433
     strips and #5979 preserves — WITHOUT a live rebuild.
@@ -1068,6 +1068,12 @@ def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979():
         config._sync_models_cache_provenance()
         assert config._models_cache_provenance is None, "precondition: memory cold"
         # The warm helper should republish provenance from disk (network-free).
+        assert config._get_models_cache_path().is_file()
+
+        def unexpected_rebuild(*args, **kwargs):
+            pytest.fail('disk provenance warming must not rebuild the catalog')
+
+        monkeypatch.setattr(config, '_invoke_models_rebuild', unexpected_rebuild)
         config.warm_models_catalog_provenance_if_cold()
         assert config._models_cache_provenance is not None, (
             "warm helper must publish provenance from the disk cache"
@@ -1378,7 +1384,7 @@ def test_default_model_shadowed_with_xiaomi_provider():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_models_cache():
+def _isolate_models_cache(monkeypatch):
     """Invalidate the models TTL cache before and after every test in this file.
 
     Several helpers here mutate ``config.cfg`` in-memory and call
@@ -1389,15 +1395,42 @@ def _isolate_models_cache():
     ``test_custom_endpoint_uses_model_config_api_key_for_model_discovery``
     ``KeyError: 'auth'`` on CI where ``urlopen`` is never reached).
     """
+    import socket
+    import threading
+    import urllib.error
+    import urllib.request
+
+    # Routing tests own their catalogs; neither DNS nor the Agent's live model
+    # discovery may turn their warm-cache preconditions into budget fallbacks.
+    # Individual discovery tests override these transport seams explicitly.
+    def offline_dns(*args, **kwargs):
+        raise socket.gaierror('resolver test: no DNS')
+
+    def offline_probe(*args, **kwargs):
+        raise urllib.error.URLError('resolver test: no live endpoint')
+
+    monkeypatch.setattr(socket, 'getaddrinfo', offline_dns)
+    monkeypatch.setattr(urllib.request, 'urlopen', offline_probe)
+    monkeypatch.setattr(config, '_read_live_provider_model_ids', lambda pid: [])
+    workers = []
+    original_start = threading.Thread.start
+
+    def start(thread, *args, **kwargs):
+        if thread.name == 'models-catalog-rebuild':
+            workers.append(thread)
+        return original_start(thread, *args, **kwargs)
+
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    config.invalidate_models_cache()
     try:
+        yield
+    finally:
+        # Invalidation revokes publication, but does not stop a detached worker.
+        # Join before monkeypatch teardown, including when an assertion fails.
+        for thread in workers:
+            thread.join(timeout=5)
+            assert not thread.is_alive(), 'catalog worker outlived resolver test'
         config.invalidate_models_cache()
-    except Exception:
-        pass
-    yield
-    try:
-        config.invalidate_models_cache()
-    except Exception:
-        pass
 
 
 def _available_models_with_provider(provider):
@@ -1611,6 +1644,39 @@ def test_default_model_lands_under_active_provider_group(monkeypatch):
     assert 'gpt-5.4' not in {norm(mid) for mid in groups.get('Anthropic', [])}, (
         f"gpt-5.4 leaked into Anthropic group via fallback: {groups.get('Anthropic')}"
     )
+
+
+@pytest.mark.parametrize('default_model', ['gpt-5.4', 'openai/gpt-5.4'])
+def test_default_model_is_not_suppressed_by_another_provider_catalog(monkeypatch, default_model):
+    """An OpenAI API catalog must not hide the configured Codex default.
+
+    The full-suite predecessor in test_issue603_provider_categories leaves an
+    OpenAI API credential behind. Reproduce that extra provider deterministically
+    through config, without relying on test order or leaking credentials.
+    """
+    monkeypatch.setitem(config.cfg, 'providers', {
+        'openai-api': {'api': 'openai-completions'},
+    })
+    import sys, types
+    fake_mod = types.ModuleType('hermes_cli.models')
+    fake_mod.list_available_providers = lambda: [
+        {'id': 'anthropic', 'authenticated': True},
+        {'id': 'openai-codex', 'authenticated': True},
+    ]
+    fake_auth = types.ModuleType('hermes_cli.auth')
+    fake_auth.get_auth_status = lambda pid: {'key_source': 'env'}
+    monkeypatch.setitem(sys.modules, 'hermes_cli.models', fake_mod)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.auth', fake_auth)
+    monkeypatch.setattr(config, '_read_live_provider_model_ids', lambda pid: [])
+    monkeypatch.setattr(config, '_read_visible_codex_cache_model_ids', lambda: [])
+    result = _available_models_with_full_cfg('openai-codex', default_model, '')
+    groups = {g['provider_id']: g['models'] for g in result['groups']}
+    norm = lambda mid: mid.split(':', 1)[-1].split('/', 1)[-1]
+    for pid in ('openai-codex', 'openai-api'):
+        assert sum(norm(m['id']) == 'gpt-5.4' for m in groups[pid]) == 1
+    assert all(norm(m['id']) != 'gpt-5.4' for m in groups['anthropic'])
+    ids = [m['id'] for g in result['groups'] for m in g['models']]
+    assert len(ids) == len(set(ids))
 
 
 def test_unknown_providers_do_not_inherit_default_model(monkeypatch):
