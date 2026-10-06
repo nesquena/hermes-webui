@@ -159,6 +159,10 @@ for (const name of [
   '_topbarLoadedMessageCount', '_topbarMessageMetaText',
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
   '_findModelInDropdown', '_refreshOpenModelDropdown', '_applyModelToDropdown',
+  // #7400: _addLiveModelsToSelect() stamps qualified options through
+  // _stampQualifiedOptionMeta() -> _qualifiedCatalogOptionMeta(); both are
+  // required dependencies of the live-option path.
+  '_qualifiedCatalogOptionMeta', '_stampQualifiedOptionMeta',
   '_addLiveModelsToSelect',
   '_modelStateFromAppliedDropdown', '_persistSessionModelCorrection',
   '_applySessionModelFallback', 'syncTopbar'

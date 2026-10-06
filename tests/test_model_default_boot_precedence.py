@@ -128,7 +128,7 @@ let _liveModelCache = {};
 for (const name of [
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
   '_captureModelDropdownSelection', '_findModelInDropdown', '_refreshOpenModelDropdown',
-  '_applyModelToDropdown', '_reconcileModelDropdownSelection', 'populateModelDropdown'
+  '_applyModelToDropdown', '_reconcileModelDropdownSelection', '_qualifiedCatalogOptionMeta', 'populateModelDropdown'
 ]) {
   eval(extractFunc(name));
 }

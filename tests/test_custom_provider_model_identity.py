@@ -48,7 +48,10 @@ const _liveModelFetchPending=new Set();
 const $=()=>null;
 const getModelLabel=value=>value;
 const syncModelChip=()=>{};
-for(const name of ['_getOptionProviderId','_providerFromModelValue','_modelPickerOptionIdentity','_deduplicateModelPickerOptions','_modelStateForSelect','_findModelInDropdown','_refreshOpenModelDropdown','_applyModelToDropdown','_ensureModelOptionInDropdown','_addLiveModelsToSelect']) eval(extract(name));
+// #7400: _addLiveModelsToSelect() stamps qualified options via
+// _stampQualifiedOptionMeta() -> _qualifiedCatalogOptionMeta(). Both must be
+// evaluated first or the live-option path throws ReferenceError.
+for(const name of ['_getOptionProviderId','_providerFromModelValue','_modelPickerOptionIdentity','_deduplicateModelPickerOptions','_modelStateForSelect','_findModelInDropdown','_refreshOpenModelDropdown','_applyModelToDropdown','_ensureModelOptionInDropdown','_qualifiedCatalogOptionMeta','_stampQualifiedOptionMeta','_addLiveModelsToSelect']) eval(extract(name));
 function makeSelect(selected){
   const sel=new Node('select');sel.id='modelSelect';
   const group=new Node('optgroup');group.dataset.provider='custom:cpa';sel.appendChild(group);
