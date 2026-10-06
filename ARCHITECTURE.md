@@ -561,6 +561,49 @@ This transaction serializes cooperating writes/reloads in one WebUI process.
 It does not lock out other processes or provide Agent status/schema/dispatch
 isolation; those remain the runtime boundary described above.
 
+### 4.11 Insights Period Endpoint (`/api/insights`)
+
+`GET /api/insights` reports usage analytics for one time window. The window is
+selected by query parameters, and the response echoes the window it actually
+served through `mode` (`"trailing"` or `"custom"`). Totals and the daily series
+are always computed over the same resolved interval. Data comes from the WebUI
+session index plus the CLI `state.db` rows the optional `sync_to_insights`
+setting mirrors in.
+
+Window selection:
+
+- `days=N` — trailing window of the last `N` days. This is what the panel's
+  7/30/90/365 presets send, and the fallback when no absolute bound is usable.
+- `start=…` / `end=…` — an absolute window. Each bound is either an exact Unix
+  epoch timestamp in seconds or a `YYYY-MM-DD` calendar date. A supplied
+  `start` with no `end` runs to the server clock; a supplied `end` with no
+  `start` defaults to 30 calendar days before that end.
+- The **Custom range…** selection sends the two `<input type=date>` values as
+  raw `YYYY-MM-DD` strings, not epoch seconds, so the server reads them in its
+  own timezone and a browser in another timezone cannot shift the selected
+  calendar day. The panel defaults the inputs to the last 30 calendar days only
+  when no range has been picked yet, so preset → Custom never erases a chosen
+  range.
+
+Bounds and fallbacks:
+
+- A `YYYY-MM-DD` bound selects a whole local calendar day (start = that day's
+  local midnight, end = the next local midnight); an epoch bound keeps its
+  exact `[start, end)` precision. Bounds are swapped if supplied reversed.
+- The window never extends into the future: an `end` beyond the server clock
+  is clamped to `now`.
+- Windows are clamped to five calendar years so the daily series cannot grow
+  unbounded.
+- The request fails closed to the trailing `days` window (`mode: "trailing"`)
+  when an absolute bound cannot be served faithfully: a supplied bound that is
+  unparseable (e.g. `2026-02-31`) or out of the supported epoch range, a
+  pre-epoch date (Chromium's date input accepts `0001-…`, and no session
+  predates 1970), or a strictly-future start. A supplied-but-invalid bound is
+  never treated as an omitted one, so a rejected request cannot fabricate an
+  interval the caller did not ask for. An explicit zero-length window pinned to
+  the clock itself (`start == now`) stays an empty custom interval rather than
+  silently serving the trailing window.
+
 ---
 
 ## 5. Frontend Architecture: Current State
