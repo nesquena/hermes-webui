@@ -19597,11 +19597,24 @@ function renderMessages(options){
     const liveToolMetadata=Array.isArray(S._settledLiveToolMetadata)
       ? S._settledLiveToolMetadata
       : (Array.isArray(S.toolCalls)?S.toolCalls:[]);
+    // #7358 round 10+ / #7653 (re-gate 10/06, reviewer Finding 2, SILENT):
+    // a reused tool id legitimately owns SEVERAL live rows — the server's
+    // re-arm branch appends a second ``call_0`` row for the second
+    // occurrence — and they do NOT share a verdict. Keeping one entry per
+    // tid (``!liveMetadataByTid.has(tid)``) hands the FIRST row to every
+    // occurrence, so the one-way upgrade below paints both cards with the
+    // first occurrence's ``is_error``. The live-settle path therefore
+    // rendered ``[[0,true],[2,true]]`` for a "fail then succeed" pair.
+    // Keep an ARRAY per tid in mirror order and hand each settled row the
+    // next entry that has not been used yet (``usedLiveToolMetadata``).
     const liveMetadataByTid=new Map();
     liveToolMetadata.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
       const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
-      if(tid&&!liveMetadataByTid.has(tid)) liveMetadataByTid.set(tid,{tc,idx});
+      if(!tid) return;
+      let rows=liveMetadataByTid.get(tid);
+      if(!rows){ rows=[]; liveMetadataByTid.set(tid,rows); }
+      rows.push({tc,idx});
     });
     const usedLiveToolMetadata=new Set();
     // #7358 round 5 (re-gate 9/22): cold-reload-friendly persisted
@@ -19622,7 +19635,20 @@ function renderMessages(options){
       // with a newer failed one, settling the older row as Failed. The
       // name fallback stays name-matchable for the presentation-only keys
       // (burst / duration / started_at).
-      const idMatchEntry=tid?liveMetadataByTid.get(tid):null;
+      //
+      // #7358/#7653 (re-gate 10/06, reviewer Finding 2, SILENT):
+      // ``liveMetadataByTid`` now maps a tid to the ARRAY of its live rows,
+      // so a reused id resolves per occurrence: take the next row that no
+      // settled row has consumed yet. When every row of this tid is already
+      // used, the ownership is ambiguous (more occurrences rendered than the
+      // server settled) — skip the transfer entirely rather than re-pair a
+      // row and guess a verdict.
+      const idRows=tid?liveMetadataByTid.get(tid):null;
+      let idMatchEntry=null;
+      if(idRows&&idRows.length){
+        const nextRow=idRows.find(entry=>!usedLiveToolMetadata.has(entry.idx));
+        if(nextRow) idMatchEntry=nextRow;
+      }
       let matchEntry=idMatchEntry;
       if(!matchEntry){
         const matchIdx=liveToolMetadata.findIndex((tc,i)=>tc&&!usedLiveToolMetadata.has(i)&&(!name||tc.name===name));

@@ -10424,6 +10424,21 @@ def _live_tool_calls_by_tid(live_tool_calls):
     history, which does not carry that bit, so the only way to carry the
     live classification into ``s.tool_calls`` is to look the live entry
     up by its tid.
+
+    #7653 (re-gate 10/06, reviewer Finding 1, SILENT): the index keeps a
+    LIST per tid in mirror order, not one entry. A reused tid (llama.cpp's
+    constant id, a per-turn ``call_0``) legitimately carries several live
+    rows — the re-arm branch in ``on_tool_start`` appends a second row for
+    the second occurrence — and they do NOT share a verdict: the first
+    ``call_0`` fails while the second succeeds. Indexing with
+    ``setdefault`` keeps the first row per tid, so every occurrence of that
+    tid is settled with the FIRST row's verdict, which is the same reversed
+    result the pre-fix single-row mirror produced (master's settlement
+    carries no ``is_error`` at all, so this was a live regression against
+    master). The settlement loop consumes these lists positionally and
+    pairs the k-th assistant owner of a tid with the k-th live row, so a
+    caller that does not care about occurrence order (there is none in
+    production any more) must slice ``[0]`` explicitly.
     """
     by_tid = {}
     for tc in live_tool_calls or []:
@@ -10431,7 +10446,7 @@ def _live_tool_calls_by_tid(live_tool_calls):
             continue
         tid = tc.get('tid') or ''
         if tid:
-            by_tid.setdefault(tid, tc)
+            by_tid.setdefault(tid, []).append(tc)
     return by_tid
 
 
@@ -10453,9 +10468,12 @@ def _extract_tool_call_occurrences(messages):
     - ``last_owner`` — the largest assistant ``msg_idx`` emitting it
       (the "last" occurrence, which is the one the current turn's live
       mirror still owns);
-    - ``owners`` — every assistant ``msg_idx`` emitting it (the set of
-      occurrences a prior verdict's ``assistant_msg_idx`` must name to be
-      attributable to THIS history — round 10).
+    - ``owners`` — every assistant ``msg_idx`` emitting it, in ascending
+      production order (the k-th element is the k-th occurrence of the
+      tid, so the settlement loop can pair it with the k-th live mirror
+      row — #7358/#7653 round 10+). Membership in this list is also what
+      a prior verdict's ``assistant_msg_idx`` must satisfy to be
+      attributable to THIS history (round 10).
 
     Returns ``(counts, last_owner_of_by_tid, owners_of_by_tid)``.
     """
@@ -10487,7 +10505,14 @@ def _extract_tool_call_occurrences(messages):
         for _tid in tids:
             counts[_tid] = counts.get(_tid, 0) + 1
             last_owner[_tid] = m_idx
-            owners.setdefault(_tid, set()).add(m_idx)
+            # #7653 (re-gate 10/06, reviewer Finding 1, SILENT): keep the
+            # owner list ORDERED. The settlement loop pairs the k-th owner
+            # of a reused tid with the k-th live mirror row, which is only
+            # possible against an ordered sequence — a set would make the
+            # k-th occurrence a coin flip.
+            _owners = owners.setdefault(_tid, [])
+            if m_idx not in _owners:
+                _owners.append(m_idx)
     return counts, last_owner, owners
 
 
@@ -10622,20 +10647,58 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
                     _owner_idx = pending_asst_idx.get(tid, -1)
-                    # #7358 round 9 (reviewer Finding 1, SILENT): bind
-                    # the live verdict only to the LAST occurrence of a
-                    # reused tid. The live mirror holds only the current
-                    # turn's calls; an EARLIER occurrence of a reused id
-                    # is an older call whose live row has been replaced.
-                    # Binding it here copies the current failure onto a
+                    # #7358 round 9 (reviewer Finding 1, SILENT): bind the
+                    # live verdict only to the occurrence of a reused tid
+                    # that owns it. An EARLIER occurrence of a reused id is
+                    # an older call whose live row has been superseded;
+                    # binding it here copies the current failure onto a
                     # previously-successful call (verified repro: turn-1
                     # call_0 success + turn-2 call_0 failure, single live
                     # entry -> turn-1 must stay successful).
+                    #
+                    # #7653 (re-gate 10/06, Finding 1, SILENT): when the
+                    # mirror carries SEVERAL rows of the reused tid — the
+                    # re-arm branch in ``on_tool_start`` appends one per
+                    # occurrence — the k-th assistant owner now consumes the
+                    # k-th live row instead of every owner consuming the
+                    # first one. The round-9 rule is the degenerate case of
+                    # this pairing: for a single-row mirror it hands that
+                    # row to the LAST owner, which is what it always did.
+                    #
+                    # Alignment is from the END whenever the mirror is
+                    # short (``#rows <= #owners``): the trailing rows belong
+                    # to the current turn, so they pair with the trailing
+                    # owners and the earlier occurrences stay unknown —
+                    # which lets the prior-turn merge below supply their
+                    # verdicts. With more rows than owners the surplus
+                    # tails are left unpaired rather than attributed to an
+                    # occurrence that never asked for them.
+                    _occ_rows = live_by_tid.get(tid) or []
+                    _n_rows = len(_occ_rows)
+                    _n_owners = _occ_counts.get(tid, 0)
+                    _row_idx = -1
+                    if _n_rows:
+                        _owners = _occ_owners.get(tid) or []
+                        if _owner_idx in _owners:
+                            _rank = _owners.index(_owner_idx)
+                        elif not _owners:
+                            # No assistant row emits this tid in this
+                            # history, so it cannot be scoped at all — the
+                            # round-6 unscoped lookup, kept only when the
+                            # mirror is unambiguous.
+                            _rank = 0
+                        else:
+                            # The resolved owner is not one of this tid's
+                            # occurrences (a malformed ordering); refuse to
+                            # guess rather than paint the wrong card.
+                            _rank = -1
+                        if _rank >= 0:
+                            _offset = max(_n_owners - _n_rows, 0)
+                            _row_idx = _rank - _offset
                     live_tc = (
-                        None
-                        if _occ_counts.get(tid, 0) > 1
-                        and _owner_idx != _occ_last_owner.get(tid, _owner_idx)
-                        else live_by_tid.get(tid)
+                        _occ_rows[_row_idx]
+                        if 0 <= _row_idx < _n_rows
+                        else None
                     )
                     # #7358 round 6: prefer live classification; fall
                     # back to the prior turn's verdict when the live
@@ -13748,9 +13811,23 @@ def _run_agent_streaming(
                             'args': args if isinstance(args, dict) else {},
                             'tid': tool_call_id,
                         })
+                        # #7358/#7653 (re-gate 10/06, reviewer Finding 3,
+                        # SHOULD-FIX): the shared mirror row must carry
+                        # ``args`` exactly like the fresh branch below.
+                        # ``cancel_stream`` snapshots this list into
+                        # ``_build_partial_message`` -> ``_partial_tool_calls``,
+                        # which the browser restores into the tool card
+                        # (static/ui.js: the ``m._partial_tool_calls``
+                        # forEach). A row without ``args`` restores the
+                        # second occurrence with EMPTY args, and the
+                        # ``_partial_message_signature`` args digest at
+                        # ``api/streaming.py:10047`` diverges from the one
+                        # the fresh branch produces, so the dedupe no longer
+                        # recognises its own marker.
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             STREAM_LIVE_TOOL_CALLS[stream_id].append({
                                 'name': name,
+                                'args': args if isinstance(args, dict) else {},
                                 'done': False,
                                 'tid': tool_call_id,
                             })

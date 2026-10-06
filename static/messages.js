@@ -4631,11 +4631,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+    // #7358/#7653 (re-gate 10/06, reviewer Finding 2, SILENT): a reused
+    // tool id owns several live rows (the server's re-arm branch appends a
+    // second ``call_0`` row for the second occurrence) and they do not
+    // share a verdict. A one-entry-per-tid map gave the FIRST row to
+    // every occurrence, so the one-way upgrade below painted both cards
+    // with the first occurrence's ``is_error``. Keep an ARRAY per tid and
+    // hand each persisted row the next unused entry (``used``).
     const byTid=new Map();
     liveCalls.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
       const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
-      if(tid&&!byTid.has(tid)) byTid.set(tid,{tc,idx});
+      if(!tid) return;
+      let rows=byTid.get(tid);
+      if(!rows){ rows=[]; byTid.set(tid,rows); }
+      rows.push({tc,idx});
     });
     const used=new Set();
     return (rawCalls||[]).map((raw,idx)=>{
@@ -4648,7 +4658,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // upgrade would then settle the older row as Failed. The name
       // fallback stays name-matchable for the presentation-only keys
       // (burst / duration / started_at).
-      const idMatchEntry=tid?byTid.get(tid):null;
+      //
+      // #7358/#7653 (re-gate 10/06, Finding 2, SILENT): resolve a reused
+      // id per occurrence — the next unused live row of that tid. When
+      // they are all consumed the ownership is ambiguous, so skip the
+      // transfer instead of guessing.
+      const idRows=tid?byTid.get(tid):null;
+      let idMatchEntry=null;
+      if(idRows&&idRows.length){
+        const nextRow=idRows.find(entry=>!used.has(entry.idx));
+        if(nextRow) idMatchEntry=nextRow;
+      }
       let matchEntry=idMatchEntry;
       if(!matchEntry){
         const name=next.name||((next.function||{}).name)||'';

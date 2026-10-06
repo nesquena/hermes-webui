@@ -102,11 +102,16 @@ def _ui_copy_live_tool_metadata_driver() -> str:
     return f"""
 // The live mirror and the per-tid map, as the production closure reads
 // them. The cold-reload fallback path in ui.js builds both from S.
+// #7653 (re-gate 10/06): ui.js keeps an ARRAY of live rows per tid so a
+// reused id resolves per occurrence — the driver mirrors that shape.
 const liveToolMetadata = PAYLOAD.liveToolMetadata;
 const liveMetadataByTid = new Map();
 liveToolMetadata.forEach(function(tc, idx) {{
   const tid = tc && (tc.tid || tc.id || tc.tool_call_id || tc.call_id) || '';
-  if (tid && !liveMetadataByTid.has(tid)) liveMetadataByTid.set(tid, {{tc: tc, idx: idx}});
+  if (!tid) return;
+  let rows = liveMetadataByTid.get(tid);
+  if (!rows) {{ rows = []; liveMetadataByTid.set(tid, rows); }}
+  rows.push({{tc: tc, idx: idx}});
 }});
 const usedLiveToolMetadata = new Set();
 const S = {{ _settledToolIsErrorByTid: PAYLOAD.persistedIsErrorByTid || {{}} }};
@@ -400,7 +405,7 @@ def test_all_three_upgrade_sites_are_gated_on_the_id_match():
         _read("static/messages.js"), "function _enrichSettledToolRowBodyFromLive("
     )
 
-    assert "const idMatchEntry=tid?liveMetadataByTid.get(tid):null;" in ui_body, (
+    assert "const idRows=tid?liveMetadataByTid.get(tid):null;" in ui_body, (
         "copyLiveToolMetadata must keep the per-tid map hit separate from "
         "the name fallback so the is_error upgrade can be gated on it "
         "(#7358 re-gate 9/24)"
@@ -409,14 +414,35 @@ def test_all_three_upgrade_sites_are_gated_on_the_id_match():
         "copyLiveToolMetadata's one-way is_error upgrade must be gated "
         "on the id-map hit, not the name fallback"
     )
+    # #7653 (re-gate 10/06, Finding 2): the per-tid map keeps EVERY live
+    # row of a reused id and the hit picks the next unused one, so a
+    # reused id no longer hands its first row to every occurrence.
+    # (The map BUILD for site ① lives just above the lifted closure, so the
+    # push marker is checked against the enclosing render function body.)
+    assert "usedLiveToolMetadata.has(entry.idx)" in ui_body, (
+        "copyLiveToolMetadata must consume an id's live rows one per "
+        "settled occurrence instead of reusing the first"
+    )
+    assert "rows.push({tc,idx});" in _read("static/ui.js"), (
+        "ui.js must keep all live rows per tid so a reused id resolves "
+        "per occurrence"
+    )
 
-    assert "const idMatchEntry=tid?byTid.get(tid):null;" in merge_body, (
+    assert "const idRows=tid?byTid.get(tid):null;" in merge_body, (
         "_mergeSettledToolCallsWithLiveMetadata must keep the per-tid map "
         "hit separate from the name fallback"
     )
     assert "if(idMatchEntry&&live.is_error===true" in merge_body, (
         "_mergeSettledToolCallsWithLiveMetadata's one-way is_error "
         "upgrade must be gated on the id-map hit"
+    )
+    assert "rows.push({tc,idx});" in merge_body, (
+        "_mergeSettledToolCallsWithLiveMetadata must keep all live rows "
+        "per tid so a reused id resolves per occurrence"
+    )
+    assert "used.has(entry.idx)" in merge_body, (
+        "_mergeSettledToolCallsWithLiveMetadata must consume an id's live "
+        "rows one per persisted occurrence instead of reusing the first"
     )
 
     assert "_matchedById=!!_rowTid&&!!_liveTid&&_rowTid===_liveTid;" in enrich_body, (
