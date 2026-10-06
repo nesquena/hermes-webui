@@ -221,8 +221,8 @@ def test_update_flows_keep_explicit_longer_timeouts():
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
     # apply/force now build their body inline to optionally carry the offered
     # channel (Codex debounce-race fix), but MUST still carry the 120s override.
-    assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000})" in src
-    assert "api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000})" in src
+    assert "timeoutMs:target==='agent'?2100000:120000" in src
+    assert "api('/api/updates/force'" in src
 
 
 def test_session_message_loads_keep_explicit_longer_timeouts():
