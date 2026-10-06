@@ -841,12 +841,15 @@ def _run_gateway_runs_api_streaming(
             except Exception:
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
                 message_content = str(msg_text or "")
-        from api.streaming import _strip_oob_blocks
+        from api.streaming import _is_non_replayable_history_row, _strip_oob_blocks
 
         instructions_parts = []
         conversation_history = []
         for entry in getattr(session, "context_messages", None) or []:
             if not isinstance(entry, dict):
+                continue
+            # The same rows the legacy path drops: error markers and empty partials.
+            if _is_non_replayable_history_row(entry):
                 continue
             role = str(entry.get("role") or "").strip().lower()
             if role not in {"user", "assistant"}:

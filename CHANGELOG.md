@@ -105,6 +105,13 @@
 
 ### Fixed
 
+- **Gateway chats no longer replay error notices or empty cut-off replies as conversation history.** With the
+  Gateway backend, the history sent to the agent for the next turn included the provider-error and cancel notices
+  shown in the transcript (as if the assistant had said them) and reasoning-only or tool-only partial replies as
+  empty assistant turns, which strict providers can reject. The Gateway path now drops exactly the rows the
+  in-process path already skips, through one shared check, so both backends send the same history for these rows.
+  Thanks @ybai08. (#8035 by @ybai08, fixes #8034)
+
 - **The sidebar resize handle keeps the drag with the pointer that started it.** A second pointer (a pen or a second mouse) pressing the handle mid-drag used to take over the resize, so the panel jumped to follow it and the original pointer's moves and release were ignored. The original pointer now owns the drag until it releases, and the stored group-collapse snapshot accepts only true/false values, so a malformed or hand-edited value can't keep a group collapsed or change the collapse map's prototype. Thanks @someaka. (#8028 by @someaka)
 
 - **Chat no longer reports a stale Agent runtime just because Git is slow.** Under load, one of the Agent revision
