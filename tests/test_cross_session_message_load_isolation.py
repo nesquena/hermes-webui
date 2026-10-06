@@ -92,6 +92,16 @@ ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoa
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
+# #7925 (finding 4): the module-level helpers _ensureMessagesLoaded calls are
+# extracted with the real definitions — an implicitly-global reference would
+# throw inside the extracted body and surface as "Failed to load conversation
+# messages". _ensureMessagesLoaded only *references* `_boundedReloadPrefixProof`
+# transitively through the trust gate and the row-fingerprint helpers, so those
+# are the ones that must be present.
+PREFIX_FINGERPRINT_SRC = _extract_function(SESSIONS_SRC, "_reloadPrefixRowFingerprint")
+PREFIX_DIGEST_SRC = _extract_function(SESSIONS_SRC, "_prefixFreshnessDigest")
+BOUNDED_TRUST_SRC = _extract_function(SESSIONS_SRC, "_boundedReloadPrefixIsTrustworthy")
+BOUNDED_STITCH_SRC = _extract_function(SESSIONS_SRC, "_stitchBoundedReloadTail")
 
 
 def _normalise_ws(s: str) -> str:
@@ -349,6 +359,10 @@ let toastCalls = [];
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
+__PREFIX_FINGERPRINT_SRC__
+__PREFIX_DIGEST_SRC__
+__BOUNDED_TRUST_SRC__
+__BOUNDED_STITCH_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
@@ -607,6 +621,10 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
+        .replace("__PREFIX_FINGERPRINT_SRC__", PREFIX_FINGERPRINT_SRC)
+        .replace("__PREFIX_DIGEST_SRC__", PREFIX_DIGEST_SRC)
+        .replace("__BOUNDED_TRUST_SRC__", BOUNDED_TRUST_SRC)
+        .replace("__BOUNDED_STITCH_SRC__", BOUNDED_STITCH_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
     )

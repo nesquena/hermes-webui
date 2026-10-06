@@ -434,15 +434,21 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     # row-loss fix).
     # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
     # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
-    # #7899: the over-ceiling fallback is GONE on purpose. A bare
-    # full-transcript GET turned every focus/SSE reconciliation on a >500-row
-    # session into a multi-MB re-download, so the reload window is now clamped
-    # to the server ceiling and the returned tail is stitched onto the
-    # already-rendered prefix (_stitchBoundedReloadTail) — bounded request, no
-    # dropped rows. The unconditional msg_limit param below is the guard that
-    # keeps every reload on the bounded tail path.
-    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : _msgLimitMax;" in SESSIONS_JS
+    # #7899: an over-ceiling reload no longer falls back to a bare
+    # full-transcript GET (that turned every focus/SSE reconciliation on a
+    # >500-row session into a multi-MB re-download).
+    # #7925 (finding 2): clamping the over-ceiling width to _msgLimitMax was
+    # ALSO wrong, just more quietly — a 601-row fully-loaded session reloaded
+    # by an idle poll then requested msg_limit=500 and rendered the server's
+    # window from row 101, silently dropping the 101 rows the client had
+    # already loaded. The reload width is now either satisfiable under the
+    # ceiling (bounded tail + prefix stitch) or it is not, and when it is not
+    # the request is the explicit full-transcript `msg_limit=all` — the shape
+    # the backend documents for exactly this frontend need.
+    assert "const _reloadWidthExceedsCeiling = !(reloadLimit && reloadLimit <= _msgLimitMax);" in SESSIONS_JS
+    assert "const boundedReloadLimit = _reloadWidthExceedsCeiling ? 'all' : reloadLimit;" in SESSIONS_JS
     assert "const reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;" in SESSIONS_JS
+    # msg_limit is ALWAYS present, on every reload, whichever branch is taken.
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function loadSession(sid)")

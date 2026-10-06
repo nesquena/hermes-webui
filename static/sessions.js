@@ -3664,7 +3664,89 @@ function _messageReloadLimitForSession(sid){
   return _INITIAL_MSG_LIMIT;
 }
 
-function _boundedReloadPrefixIsTrustworthy(prevMessages, previousOffset, newOffset, tailMessages){
+// Stable content fingerprint for one rendered transcript row (server-shaped
+// message dict). Deliberately covers ONLY fields the server itself controls
+// for the row — role, visible text, timestamp and tool-call identity.
+// Client-side projection fields (_live, _journal_snapshot, _turnUsage, ...)
+// never reach the server, so a row the server compacts/edits out of the
+// prefixed transcript changes this fingerprint while a purely client-side
+// re-render does not. Must stay byte-compatible with the server's
+// api/routes.py:_transcript_prefix_proof() over the same fields.
+function _reloadPrefixRowFingerprint(row){
+  if(!row || typeof row!=='object') return null;
+  const role=String(row.role||'');
+  let content=row.content;
+  let text='';
+  if(Array.isArray(content)){
+    for(const part of content){
+      if(part && part.type==='text') text+=String(part.text||'');
+    }
+  }else if(content===undefined || content===null){
+    text='';
+  }else{
+    text=String(content);
+  }
+  const timestamp=(row.timestamp===undefined||row.timestamp===null)
+    ? (row._ts===undefined||row._ts===null?null:row._ts)
+    : row.timestamp;
+  const tids=[];
+  if(Array.isArray(row.tool_calls)){
+    for(const tc of row.tool_calls){
+      if(tc && (tc.id || tc.tool_call_id)) tids.push(String(tc.id||tc.tool_call_id));
+    }
+  }
+  if(Array.isArray(content)){
+    for(const part of content){
+      if(part && part.type==='tool_use' && (part.id||part.tool_use_id)) tids.push(String(part.id||part.tool_use_id));
+    }
+  }
+  return [role,text.trim(),timestamp===null?'':String(timestamp),tids.sort().join(',')].join('\u0000');
+}
+
+// Chained FNV-1a digest over the row fingerprints of rows [0, prefixLength).
+//
+// The multiply MUST use Math.imul (or two 16-bit halves). `hash*0x01000193`
+// on a 32-bit value exceeds Number.MAX_SAFE_INTEGER once the accumulator has
+// its high bit set (the accumulator after a few rows can reach ~4.3e9, and
+// 4.3e9*1.68e7 ~= 7.2e16 > 9.0e15), so a plain multiply followed by `>>>0`
+// would silently round and both digests would drift apart. Math.imul keeps
+// every intermediate product exact, matching the server's Python modulo
+// arithmetic bit for bit.
+//
+// Same constants, separator and zero-padded base-36 width as
+// api/routes.py:_transcript_prefix_proof, so the two digests are byte-identical
+// for the same rows — that equality IS the prefix-freshness proof. Returns ''
+// when the rows cannot be described (non-object rows, non-positive length),
+// which the trust gate treats as "unprovable".
+//
+// charCodeAt yields UTF-16 CODE UNITS, so an astral character (emoji, CJK
+// ext-B) contributes two units through its surrogate pair. The server must
+// therefore iterate its payload as UTF-16 LE code units too (it encodes with
+// .encode("utf-16-le") for exactly this reason); hashing Python characters
+// would diverge on the first transcript containing an emoji.
+function _prefixFreshnessDigest(prevMessages, prefixLength){
+  const origin=Math.max(0,Number(prefixLength)||0);
+  if(!origin) return '';
+  const bound=Math.min(origin,Array.isArray(prevMessages)?prevMessages.length:0);
+  if(!bound) return '';
+  let hash=0x811c9dc5>>>0;
+  for(let i=0;i<bound;i++){
+    const row=_reloadPrefixRowFingerprint(prevMessages[i]);
+    if(row===null) return '';
+    for(let j=0;j<row.length;j++){
+      hash=(hash^row.charCodeAt(j))>>>0;
+      hash=(Math.imul(hash,0x01000193))>>>0;
+    }
+    hash=(hash^0x2c)>>>0;
+    hash=(Math.imul(hash,0x01000193))>>>0;
+  }
+  // Same zero-padded base-36 rendering as the server's _base36_fixed_width.
+  // The leading count is part of the proof: it is the number of rows covered,
+  // so a digest minted for a different span can never compare equal.
+  return `${bound}:${(hash>>>0).toString(36).padStart(26,'0')}`;
+}
+
+function _boundedReloadPrefixIsTrustworthy(prevMessages, previousOffset, newOffset, tailMessages, serverPrefixProof){
   // #7925: prefer an authoritative full fetch over stitching whenever the
   // retained prefix cannot be PROVEN to still be the server's prefix.
   //
@@ -3683,6 +3765,17 @@ function _boundedReloadPrefixIsTrustworthy(prevMessages, previousOffset, newOffs
   //   3. prefixLength overruns the fresh tail's own global span — the server
   //      rewrote/compacted the prefix, so our retained rows are no longer the
   //      rows it is indexing with this offset.
+  //   4. the SPLICE PREFIX does not hash to the proof the server just issued.
+  //      Checks (1)-(3) only prove the GEOMETRY of the splice; they say nothing
+  //      about whether the retained rows are still the server's rows. A
+  //      compaction that removes 100 rows below the client's prefix origin
+  //      leaves both offsets looking perfectly consistent while silently hiding
+  //      100 turns (#7925 finding 4). The response's own `_prefix_proof` was
+  //      minted THIS response over rows [0, newOffset) of THIS transcript, so
+  //      re-deriving the digest over the rows we intend to keep and comparing
+  //      them is a genuine server-vs-client check: a server that rewrote the
+  //      prefix mints a different proof for the same offset and the stitch is
+  //      refused.
   if(!Array.isArray(prevMessages) || !prevMessages.length) return false;
   if(!Array.isArray(tailMessages) || !tailMessages.length) return false;
   const prevOrigin=Math.max(0,Number(previousOffset)||0);
@@ -3694,13 +3787,31 @@ function _boundedReloadPrefixIsTrustworthy(prevMessages, previousOffset, newOffs
   // fresh tail continues from there. If prefixLength overruns what we retained
   // the client fell further behind than its own prefix reaches, so
   // prefix+tail would leave a GAP in the global order (rows 1400-1499 vanish).
+  if(prefixLength>prevMessages.length) return false;
+  // (4) The proof must cover the whole spliced prefix. Checks (1)-(3) only
+  // prove the GEOMETRY of the splice; they say nothing about whether the
+  // retained rows are still the server's rows. A compaction that removes 100
+  // rows below the client's prefix origin leaves both offsets looking
+  // perfectly consistent while silently hiding 100 turns (#7925 finding 4).
   //
-  // Detecting that the SERVER rewrote earlier rows (compaction / undo / another
-  // client) needs a content fingerprint — that is (a) in the #7899 sketch and
-  // deliberately not implemented here. Until it exists, prevOrigin comes from
-  // THIS client's own recorded offset, so an off-origin tail is already
-  // untrustworthy by construction via the checks above.
-  return prefixLength<=prevMessages.length;
+  // The server mints `_prefix_proof` over rows [0, newOffset) of THIS
+  // transcript in every windowed response (api/routes.py
+  // _transcript_prefix_proof), so re-deriving the digest over the first
+  // `clipped` rows we hold and comparing them is a genuine server-vs-client
+  // check: a server that rewrote any row below the window mints a different
+  // proof for the same offset and the stitch is refused.
+  //
+  // That requires the rows to be the ones the proof describes, which is only
+  // knowable when our rendered transcript starts at the server's row 0
+  // (prevOrigin === 0). A tail WINDOW transcript (we paged in mid-transcript,
+  // prevOrigin > 0) holds rows the proof does not cover, so its digest can
+  // never match — fail closed and let the authoritative fetch re-render from
+  // row 0, which mints a usable proof for next time.
+  if(prevOrigin!==0) return false;
+  if(typeof serverPrefixProof!=='string' || !serverPrefixProof) return false;
+  const retainedDigest=_prefixFreshnessDigest(prevMessages, clipped);
+  if(!retainedDigest) return false;
+  return retainedDigest===serverPrefixProof;
 }
 
 function _stitchBoundedReloadTail(prevMessages, previousOffset, newOffset, tailMessages, isTrustworthy){
@@ -3795,12 +3906,34 @@ async function _ensureMessagesLoaded(sid, opts) {
   // bounded tail path instead: clamp to the server ceiling and stitch the
   // returned tail onto the already-rendered prefix (_stitchBoundedReloadTail)
   // so no loaded rows are lost (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : _msgLimitMax;
+  //
+  // #7925 (finding 2): "clamp to the ceiling" is only correct while the reload
+  // width the hint asks for is satisfiable by that window. A reload that
+  // cannot fit under the ceiling at all must still resolve to the full
+  // transcript width the client had loaded — clamping it does NOT hold that
+  // authority, it silently narrows it. 601 fully-loaded rows refreshed by an
+  // idle poll used to request msg_limit=500, get back the server's window
+  // starting at row 101 (the client's own rows 0..100 were outside the
+  // window), and show 500 rows from m101 with oldestIdx=101 / truncated=true,
+  // while master shows all 601. Re-requesting the transcript at its full width
+  // is what preserves it, so distinguish the two cases here instead of
+  // collapsing both into `_msgLimitMax`.
+  //
+  // Reload width that fits under the ceiling → bounded tail request + stitch.
+  // Reload width the ceiling cannot express (`null` = the hint says the
+  // transcript is wider than one bounded window and no narrower window is
+  // still the authoritative one) → explicit full-transcript request. Explicit
+  // `msg_limit=all` rather than a bare GET: _resolve_effective_msg_limit treats
+  // a bare no-limit shape as the historical full-transcript contract, while
+  // `all` is the documented escape hatch for exactly this frontend need. Both
+  // return the same rows; the explicit form keeps the request self-describing.
+  const _reloadWidthExceedsCeiling = !(reloadLimit && reloadLimit <= _msgLimitMax);
+  const boundedReloadLimit = _reloadWidthExceedsCeiling ? 'all' : reloadLimit;
   const reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  const expandParam = '&expand_renderable=1';
   let data;
   try {
     data = await api(
@@ -3813,7 +3946,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
-  // #7899: capture the PREVIOUS global origin of the currently-rendered
+  // #7925: capture the PREVIOUS global origin of the currently-rendered
   // transcript BEFORE _oldestIdx is overwritten with this response's
   // _messages_offset below. Both values index the server's full message array
   // (api/routes.py _message_window_for_display returns the window's absolute
@@ -3822,6 +3955,15 @@ async function _ensureMessagesLoaded(sid, opts) {
   // offset in both slots and collapse the overlap math to the buggy
   // single-offset form that duplicated every visible turn (#7925).
   const _previousReloadOffset = Math.max(0, Number(_oldestIdx) || 0);
+  // #7925 (finding 4): the prefix-freshness proof minted BY THIS RESPONSE for
+  // rows [0, _messages_offset) (api/routes.py _transcript_prefix_proof,
+  // emitted verbatim as `_prefix_proof`). It is the only admissible evidence
+  // that the rows a bounded stitch would preserve are still the server's rows,
+  // so it is handed to the trust gate below. An older backend that omits the
+  // field yields '', which fails the stitch closed.
+  const _serverPrefixProof = data.session && typeof data.session._prefix_proof==='string'
+    ? data.session._prefix_proof
+    : '';
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
@@ -3837,9 +3979,13 @@ async function _ensureMessagesLoaded(sid, opts) {
   // prefix so a >500-row session refresh neither drops rows (Codex gate
   // #6154) nor re-downloads the entire transcript on every focus/SSE event.
   const _reloadOffset = Number(data.session._messages_offset) || 0;
+  // Set by the stitch below so the cursor fixup runs exactly once.
+  let _stitchedFromPrefix = false;
   if (_reloadOffset > 0 && Array.isArray(S.messages) && S.messages.length > 0) {
     msgs = _stitchBoundedReloadTail(S.messages, _previousReloadOffset, _reloadOffset, msgs,
-      _boundedReloadPrefixIsTrustworthy(S.messages, _previousReloadOffset, _reloadOffset, msgs));
+      _boundedReloadPrefixIsTrustworthy(S.messages, _previousReloadOffset, _reloadOffset, msgs,
+        _serverPrefixProof));
+    _stitchedFromPrefix = msgs !== null;
   }
   // #7925 (c): the retained prefix could not be proven to be the server's
   // current prefix (window moved backwards, the prefix no longer reaches the
@@ -3856,10 +4002,34 @@ async function _ensureMessagesLoaded(sid, opts) {
     } finally {
       if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
     }
+    // The await above is the SECOND network round-trip in this function and it
+    // must be guarded exactly like the first one. Without these two checks a
+    // user who switched to session B while A's full-fetch fallback was in
+    // flight would have B's transcript replaced by A's 2,000 messages and tool
+    // summary (#7925, new MUST-FIX regression introduced by the fallback).
+    if (!_ownsLoad()) return;
+    if (!data || !data.session) return;
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
     _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
     msgs = (data.session.messages || []).filter(m => m && m.role);
+    _stitchedFromPrefix = false;
+  } else if (_stitchedFromPrefix) {
+    // #7925 (finding 3): the cursor must describe the ASSEMBLED transcript,
+    // not the response window. A successful stitch drops the overlap and
+    // prepends the retained prefix, so the assembled transcript starts at
+    // global index _previousReloadOffset and reaches back to row 0 — its
+    // _oldestIdx is 0 and it is NOT truncated. Leaving the response window's
+    // values in place made _loadOlderMessages page from a global index that
+    // no longer matches the client-local array, prepending 30 rows that were
+    // already on screen (631 rows, 30 duplicates).
+    _oldestIdx = 0;
+    _messagesTruncated = false;
+  } else {
+    // Not a stitch and not a fallback: this response's rendered transcript is
+    // either a full transcript at offset 0 (rows [0, offset) covers all of it)
+    // or a partial window the client cannot re-verify. The stitch gate needs
+    // only this response's own proof, so there is nothing to carry forward.
   }
   // Skip _syncToolCalls when INFLIGHT exists — the INFLIGHT restore path
   // (loadSession line ~871) will overwrite S.toolCalls from INFLIGHT[sid].toolCalls.

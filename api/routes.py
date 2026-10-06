@@ -9249,6 +9249,141 @@ def _messages_for_limited_payload(messages) -> list:
     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
+_BASE36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+_BASE36_WIDTH = 26  # ceil(log36(2**32)) — fixed width, zero padded
+
+
+def _base36_fixed_width(value: int, width: int = _BASE36_WIDTH) -> str:
+    """Render *value* as lowercase base-36, zero padded to *width*.
+
+    Matches JavaScript's ``Number.prototype.toString(36)`` digit alphabet and
+    zero padding exactly, so a digest minted here and one re-derived in the
+    browser compare byte-for-byte (#7925 prefix-freshness proof).
+    """
+    value = int(value) & 0xFFFFFFFF
+    chars = []
+    for _ in range(width):
+        chars.append(_BASE36_DIGITS[value % 36])
+        value //= 36
+    return "".join(reversed(chars))
+
+
+def _canonical_proof_scalar(value) -> str:
+    """Render a scalar the way the browser's ``String()`` renders the JSON.
+
+    The prefix-freshness proof is minted here from the payload we are about to
+    serialize and re-derived in the browser from the JSON it received, so the
+    two renderings must agree. JSON round-tripping turns a Python ``102.0``
+    into a JS ``102``, which stringifies back as ``"102"`` — not
+    ``"102.0"``. Collapse integral floats to their integer form and keep
+    shortest-round-trip for the rest, which is what both runtimes do; any other
+    scalar falls back to ``str()``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return str(value)
+        if value.is_integer():
+            return str(int(value))
+        return repr(value)
+    return str(value)
+
+
+def _transcript_prefix_proof(all_messages, prefix_length) -> str:
+    """Mint a server-issued proof covering rows ``[0, prefix_length)``.
+
+    #7925 (finding 4): the WebUI bounded reload stitches a fresh tail window
+    onto the prefix it already rendered. Its offset bookkeeping can only prove
+    the *geometry* of that splice — a compaction that removes 100 rows below
+    the client's prefix origin leaves ``_messages_offset`` looking perfectly
+    consistent while the client's retained prefix is no longer the server's
+    transcript. This digest gives the client something server-issued to check
+    against: it covers the row count it claims plus every role/visible-text/
+    timestamp identity in that prefix, so any rewrite of the prefix below the
+    window changes the proof.
+
+    Bounded on purpose — the prefix the client can have retained is at most the
+    server's own ``_MAX_MSG_LIMIT`` window plus what it paged with
+    ``msg_before``, and the digest is a chained FNV-1a over the identity
+    fields, not a serialization of the rows.
+
+    Returns ``""`` when the prefix cannot be described (non-positive length,
+    non-list rows) — the client treats that as "unprovable" and falls back to
+    the authoritative full fetch.
+    """
+    try:
+        prefix_length = int(prefix_length)
+    except (TypeError, ValueError):
+        return ""
+    if prefix_length <= 0 or not isinstance(all_messages, list):
+        return ""
+    rows = all_messages[:prefix_length]
+    # Cheap identity pre-check: two rows that differ only in fields the client
+    # never sees cannot change this digest, and rows the client projects
+    # (client-side-only fields) are excluded by construction.
+    hash_value = 0x811C9DC5
+    for row in rows:
+        if not isinstance(row, dict):
+            return ""
+        role = str(row.get("role") or "")
+        content = row.get("content")
+        if isinstance(content, list):
+            text = "".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        elif isinstance(content, str):
+            text = content
+        elif content is None:
+            text = ""
+        else:
+            text = str(content)
+        timestamp = row.get("timestamp")
+        if timestamp is None:
+            timestamp = row.get("_ts")
+        tool_ids = []
+        for call in row.get("tool_calls") or []:
+            if isinstance(call, dict):
+                identifier = call.get("id") or call.get("tool_call_id")
+                if identifier:
+                    tool_ids.append(str(identifier))
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "tool_use":
+                    identifier = part.get("id") or part.get("tool_use_id")
+                    if identifier:
+                        tool_ids.append(str(identifier))
+        # Timestamp goes through the canonical scalar renderer: the browser
+        # receives this value as JSON and re-stringifies it with String(),
+        # which drops the trailing ".0" an integral Python float would keep.
+        timestamp_text = _canonical_proof_scalar(timestamp)
+        payload = "\x00".join([role, text.strip(), timestamp_text, ",".join(sorted(tool_ids))])
+        # Iterate UTF-16 CODE UNITS, not characters. The browser re-derives this
+        # digest with String.prototype.charCodeAt, which yields one unit per
+        # UTF-16 word: an astral character (emoji, CJK ext-B) is a surrogate
+        # pair = two units, while Python iterates it as a single character.
+        # Mixing the two makes the digests diverge on the first transcript
+        # containing an emoji.
+        encoded = payload.encode("utf-16-le")
+        for offset in range(0, len(encoded), 2):
+            hash_value ^= encoded[offset] | (encoded[offset + 1] << 8)
+            hash_value = (hash_value * 0x01000193) & 0xFFFFFFFF
+        hash_value ^= 0x2C
+        hash_value = (hash_value * 0x01000193) & 0xFFFFFFFF
+    # Row count, then the chained hash as fixed-width lowercase base-36 — the
+    # client's static/sessions.js:_prefixFreshnessDigest() reproduces this exact
+    # string from the rows it retained, and comparing the two IS the
+    # prefix-freshness proof. Fixed width keeps the field length constant so a
+    # shorter digest cannot trivially match a longer one.
+    return f"{len(rows)}:{_base36_fixed_width(hash_value)}"
+
+
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
@@ -13608,6 +13743,13 @@ def _handle_session_get(handler, parsed) -> bool:
                 msg_before=msg_before,
                 expand_renderable=expand_renderable,
             )
+            # #7925 (finding 4): mint the server-issued proof for rows
+            # [0, _messages_offset) so the WebUI's bounded reload can verify
+            # that the prefix it retained is still rows [0, offset) of THIS
+            # transcript. Emitted for every windowed response, including the
+            # offset==0 full-window case, so a client that later stitches onto
+            # it has something authoritative to compare against.
+            _prefix_proof = _transcript_prefix_proof(_all_msgs, _messages_offset)
             if msg_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
@@ -13794,6 +13936,13 @@ def _handle_session_get(handler, parsed) -> bool:
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+        # #7925 (finding 4): server-issued proof that rows [0, _messages_offset)
+        # of THIS transcript are the rows the client is being told its window
+        # starts after. Empty string means "unprovable" (no messages / not a
+        # load_messages response), which makes the WebUI bounded reload fall
+        # back to the authoritative full fetch rather than trust a prefix it
+        # cannot verify.
+        raw["_prefix_proof"] = _prefix_proof if load_messages else ""
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:

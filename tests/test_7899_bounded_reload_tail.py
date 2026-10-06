@@ -263,15 +263,30 @@ class TestEnsureMessagesLoadedBoundedRequest:
 # ---------------------------------------------------------------------------
 
 
-def _run_trust(prev, previous_offset, new_offset, tail):
-    fn_def = _extract_function("_boundedReloadPrefixIsTrustworthy")
+def _run_trust(prev, previous_offset, new_offset, tail, proof):
+    """Evaluate the trust gate with a server-issued prefix proof.
+
+    The fifth argument mirrors what _ensureMessagesLoaded passes: the
+    `_prefix_proof` this response minted for rows [0, _messages_offset), or
+    '' when the backend omits it (the fail-closed case).
+
+    The digest helpers are inlined ahead of the gate so the sandbox has the
+    same module-scope definitions the real file provides.
+    """
+    fn_def = (
+        _extract_function("_reloadPrefixRowFingerprint")
+        + "\n"
+        + _extract_function("_prefixFreshnessDigest")
+        + "\n"
+        + _extract_function("_boundedReloadPrefixIsTrustworthy")
+    )
     js_code = (
         fn_def
         + "\n"
         + "const input = JSON.parse(process.argv[2]);\n"
-        + "process.stdout.write(JSON.stringify("
-        + "_boundedReloadPrefixIsTrustworthy("
-        + "input.prev, input.previousOffset, input.newOffset, input.tail)));\n"
+        + "process.stdout.write(JSON.stringify(\n"
+        + "_boundedReloadPrefixIsTrustworthy(\n"
+        + "input.prev, input.previousOffset, input.newOffset, input.tail, input.proof)));\n"
     )
     tf = tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False, encoding="utf-8")
     tf.write(js_code)
@@ -279,7 +294,8 @@ def _run_trust(prev, previous_offset, new_offset, tail):
     try:
         result = subprocess.run(
             ["node", tf.name, json.dumps(
-                {"prev": prev, "previousOffset": previous_offset, "newOffset": new_offset, "tail": tail}
+                {"prev": prev, "previousOffset": previous_offset, "newOffset": new_offset,
+                 "tail": tail, "proof": proof}
             )],
             capture_output=True, text=True, timeout=30,
         )
@@ -290,15 +306,99 @@ def _run_trust(prev, previous_offset, new_offset, tail):
         os.unlink(tf.name)
 
 
+def _run_digest(rows, prefix_length):
+    """Re-derive the prefix digest the way the client does."""
+    fn_def = (
+        _extract_function("_reloadPrefixRowFingerprint")
+        + "\n"
+        + _extract_function("_prefixFreshnessDigest")
+    )
+    js_code = (
+        fn_def
+        + "\n"
+        + "const input = JSON.parse(process.argv[2]);\n"
+        + "process.stdout.write(JSON.stringify(\n"
+        + "_prefixFreshnessDigest(input.rows, input.prefixLength)));\n"
+    )
+    tf = tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False, encoding="utf-8")
+    tf.write(js_code)
+    tf.close()
+    try:
+        result = subprocess.run(
+            ["node", tf.name, json.dumps({"rows": rows, "prefixLength": prefix_length})],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"node error: {result.stderr}")
+        return json.loads(result.stdout)
+    finally:
+        os.unlink(tf.name)
+
+
+def _proof_for(rows, prefix_length):
+    """The server-minted proof string for rows [0, prefix_length)."""
+    return _run_digest(rows, prefix_length)
+
+
 def _row(i):
     return {"role": "user", "content": f"m{i}"}
 
 
-def test_trustworthy_when_prefix_reaches_the_window_boundary():
-    """prevOrigin=100, newOffset=150, we hold 600 rows -> prefix covers the gap."""
+def test_trustworthy_when_the_proof_matches_the_spliced_prefix():
+    """The only trustworthy stitch: our rows hash to the server's fresh proof.
+
+    prevOrigin=0 (the rendered transcript starts at the server's row 0), the
+    window advanced to 150, and the server's proof for rows [0, 150) equals the
+    digest we re-derive over our own first 150 rows. Both the geometry and the
+    content check out, so the bounded tail is a legitimate splice.
+    """
+    prev = [_row(i) for i in range(0, 600)]
+    tail = [_row(i) for i in range(150, 160)]
+    assert _run_trust(prev, 0, 150, tail, _proof_for(prev, 150)) is True
+
+
+def test_untrustworthy_when_the_transcript_is_a_tail_window():
+    """#7925 finding 4: a client that paged in mid-transcript cannot be proven.
+
+    prevOrigin=100 means rows [0, 100) live on the server, not on this client.
+    The proof covers rows [0, 150) of the SERVER's array; the rows we hold start
+    at the server's row 100, so our digest can never match. Must fail closed.
+    """
     prev = [_row(i) for i in range(100, 700)]
     tail = [_row(i) for i in range(150, 160)]
-    assert _run_trust(prev, 100, 150, tail) is True
+    assert _run_trust(prev, 100, 150, tail, _proof_for(prev, 150)) is False
+
+
+def test_untrustworthy_when_no_proof_was_issued():
+    """#7925 finding 4: an older backend that omits the proof fails closed."""
+    prev = [_row(i) for i in range(0, 600)]
+    tail = [_row(i) for i in range(150, 160)]
+    assert _run_trust(prev, 0, 150, tail, "") is False
+    assert _run_trust(prev, 0, 150, tail, None) is False
+
+
+def test_untrustworthy_when_the_server_rewrote_the_prefix():
+    """#7925 finding 4 regression: compaction below the window origin.
+
+    The server compacts 100 rows below our prefix and returns a window that
+    starts 100 earlier. Every GEOMETRIC check still passes (offsets agree, the
+    prefix reaches the gap), but the proof the server mints for rows [0, 150) of
+    ITS transcript no longer hashes to the rows we hold, so the splice is
+    rejected and the authoritative fetch wins — the 100 compacted-away turns
+    cannot silently vanish.
+    """
+    held = [_row(i) for i in range(0, 600)]
+    proof_over_held = _proof_for(held, 150)
+    # A server that rewrote the prefix mints its proof over DIFFERENT rows for
+    # the same reported offset.
+    rewritten = [_row(i) for i in range(0, 600)]
+    for row in rewritten[:100]:
+        row["content"] = "compacted-away"
+    proof_after_compaction = _proof_for(rewritten, 150)
+    assert proof_over_held != proof_after_compaction
+    # Our rows hash to our own proof, never the post-compaction one.
+    assert _run_trust(held, 0, 150, [_row(600)], proof_over_held) is True
+    assert _run_trust(held, 0, 150, [_row(600)], proof_after_compaction) is False
 
 
 def test_untrustworthy_when_the_prefix_cannot_reach_the_gap():
@@ -309,7 +409,8 @@ def test_untrustworthy_when_the_prefix_cannot_reach_the_gap():
     """
     prev = [_row(i) for i in range(1000, 1400)]
     tail = [_row(i) for i in range(1500, 1600)]
-    assert _run_trust(prev, 1000, 1500, tail) is False
+    proof = _proof_for(prev, 500)
+    assert _run_trust(prev, 1000, 1500, tail, proof) is False
 
 
 def test_untrustworthy_when_the_window_moved_backwards():
@@ -320,20 +421,23 @@ def test_untrustworthy_when_the_window_moved_backwards():
     """
     prev = [_row(i) for i in range(500, 900)]
     tail = [_row(i) for i in range(400, 450)]
-    assert _run_trust(prev, 500, 400, tail) is False
+    proof = _proof_for(prev, 400)
+    assert _run_trust(prev, 500, 400, tail, proof) is False
 
 
 def test_untrustworthy_when_the_offset_did_not_advance():
     """Identical offsets mean the tail is not newer; a splice would duplicate."""
     prev = [_row(i) for i in range(0, 600)]
     tail = [_row(i) for i in range(0, 100)]
-    assert _run_trust(prev, 0, 0, tail) is False
+    proof = _proof_for(prev, 0)
+    assert _run_trust(prev, 0, 0, tail, proof) is False
 
 
 def test_untrustworthy_when_either_side_is_empty():
     prev = [_row(i) for i in range(100, 700)]
-    assert _run_trust(prev, 100, 150, []) is False
-    assert _run_trust([], 100, 150, [_row(0)]) is False
+    proof = _proof_for(prev, 150)
+    assert _run_trust(prev, 100, 150, [], proof) is False
+    assert _run_trust([], 100, 150, [_row(0)], proof) is False
 
 
 def test_stitch_returns_null_when_the_prefix_is_not_trustworthy():

@@ -381,6 +381,12 @@ function _messageReloadLimitForSession() {{ return 0; }}
 function _syncToolCallsForLoadedMessages() {{}}
 function clearLiveToolCards() {{}}
 
+// #7925 (finding 4): module-scope anchors the real sessions.js holds. Shallow
+// copies suffice here — this harness never runs the proof machinery; it only
+// needs the identifiers bound so _ensureMessagesLoaded's references resolve.
+function _boundedReloadPrefixIsTrustworthy() {{ return true; }}
+function _stitchBoundedReloadTail() {{ return null; }}
+
 // Delayed messages fetch: resolves only when we release it, simulating a slow
 // /api/session?messages=1 response that spans the tab going hidden.
 let _releaseApi;
