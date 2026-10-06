@@ -114,6 +114,13 @@
 
 ### Fixed
 
+- **Links next to Chinese/Japanese punctuation end in the right place, and internationalized domains stay whole.** A URL
+  followed by full-width punctuation (`，`, `）`, `。`, opening brackets and quotes) now ends before it, so the prose after
+  it is no longer pulled into the link, while hosts written with the full-width dots (`https://例子。中国`,
+  `https://www。例子.com`, `https://example。рф`, labels with Indic or Thai vowel signs) still link whole and `．`/`｡`
+  inside a path or query no longer cut it short. Long runs of adjacent URLs still render in linear time. Thanks
+  @pxxD1998. (#7979 by @pxxD1998)
+
 - **CLI conversations no longer vanish from the sidebar when a read fails partway.** A read-only `projects.json`
   (for example after a Docker UID mismatch), a locked `state.db` during the cron, webhook, kanban, project-recovery or
   refill reads, or one unavailable profile in the all-profiles view used to throw away every row already loaded, so the

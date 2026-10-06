@@ -212,6 +212,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Code block copy button with "Copied!" feedback
 - Syntax highlighting via Prism.js (Python, JS, bash, JSON, SQL, and more)
 - Safe HTML rendering in AI responses (bold, italic, code converted to markdown)
+- Bare HTTP(S) URLs are auto-linked without absorbing adjacent CJK prose; Unicode IDN host separators and raw-CJK IRI paths remain linkable
 - rAF-throttled token streaming for smoother rendering during long responses
 - Context usage indicator in composer footer -- token count, cost, and fill bar (model-aware)
 
