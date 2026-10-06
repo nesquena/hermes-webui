@@ -114,6 +114,14 @@
 
 ### Fixed
 
+- **Docker installs on the Experimental channel now get the update notice.** Docker images have no `.git`, so their
+  update check falls back to comparing the baked version with published release tags, and that fallback only knew
+  stable `v*` tags: an `:experimental` image never saw a newer `exp-v*` release. The check is now channel-aware: it
+  reads `exp-v*` tags for the Experimental channel (paginated, with a page cap; release candidates and suffixed tags are
+  ignored), also counts the experimental releases ahead of a stable image whose user picked Experimental, and the
+  notice shows `docker pull …:experimental` instead of `:latest`. In a mixed install the Agent's update recovery
+  buttons stay usable while the WebUI notice is shown. Thanks @pxxD1998. (#8040 by @pxxD1998)
+
 - **Gateway chats no longer replay reasoning-only replies or stale recovered prompts as history.** Following #8035,
   the Gateway runs-API history now also leaves out an assistant reply that carried only reasoning (it went out as
   empty assistant content) and a prompt WebUI restored after an interrupted turn, unless that prompt is the question
