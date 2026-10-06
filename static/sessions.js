@@ -2039,11 +2039,7 @@ async function newSession(flash, options={}){
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     updateQueueBadge();
     S.toolCalls=[];
-    // #7358 round 10 (re-gate finding 4): the per-session persisted error map
-    // must not leak into a brand-new chat. This path replaces S.session
-    // directly without going through loadSession()/_syncToolCallsForLoadedMessages,
-    // which is the only place the map gets rebuilt, so an old session's
-    // reused-id failure verdict would otherwise paint the new session's cards.
+    // #7358 r10 (f4): drop the per-session error map so a new chat cannot inherit the previous session's reused-id verdicts.
     S._settledToolIsErrorByTid=null;
     _messagesTruncated=false;
     _oldestIdx=0;
