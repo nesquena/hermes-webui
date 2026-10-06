@@ -175,6 +175,32 @@ def _install_real_shaped_agent(monkeypatch, writer: _RealWriter):
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_config)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", fake_scope_mod)
+
+    # `api.env_keys._profile_scope` imports `hermes_constants` for the
+    # context-local home override, and `_RealWriter._home` reads it back. CI
+    # does not install hermes-agent, so the real module is absent there and the
+    # production scope would fail closed (EnvKeyProfileError -> 500/503) purely
+    # on that import. Stub the module with a contextvar-backed override that
+    # mirrors the real API so the scope under test is exercised end to end
+    # without the agent installed.
+    import contextvars
+
+    _home_override_var: "contextvars.ContextVar" = contextvars.ContextVar(
+        "hermes_home_override", default=None
+    )
+
+    def _set_override(path):
+        return _home_override_var.set(None if path is None else str(path))
+
+    fake_hc = types.ModuleType("hermes_constants")
+    fake_hc.set_hermes_home_override = _set_override  # type: ignore[attr-defined]
+    fake_hc.reset_hermes_home_override = (  # type: ignore[attr-defined]
+        _home_override_var.reset
+    )
+    fake_hc.get_hermes_home_override = (  # type: ignore[attr-defined]
+        _home_override_var.get
+    )
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake_hc)
     return activations
 
 

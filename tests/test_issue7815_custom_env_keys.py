@@ -98,6 +98,32 @@ def _install_agent(monkeypatch, store: _FakeEnvStore):
     fake_scope_mod._profile_scope = _profile_scope  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", fake_scope_mod)
 
+    # `api.env_keys._profile_scope` also imports `hermes_constants` for the
+    # context-local home override (`set/reset_hermes_home_override`). CI does
+    # not install hermes-agent, so the real module is absent there; a call to
+    # the production `_profile_scope` would fail closed (EnvKeyProfileError ->
+    # 500/503) purely on that import. Stub the module with a contextvar-backed
+    # override that mirrors the real API, so the handlers exercise the profile
+    # scoping without needing the agent installed.
+    import contextvars
+
+    _home_override_var: "contextvars.ContextVar" = contextvars.ContextVar(
+        "hermes_home_override", default=None
+    )
+
+    def _set_override(path):
+        return _home_override_var.set(None if path is None else str(path))
+
+    fake_hc = types.ModuleType("hermes_constants")
+    fake_hc.set_hermes_home_override = _set_override  # type: ignore[attr-defined]
+    fake_hc.reset_hermes_home_override = (  # type: ignore[attr-defined]
+        _home_override_var.reset
+    )
+    fake_hc.get_hermes_home_override = (  # type: ignore[attr-defined]
+        _home_override_var.get
+    )
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake_hc)
+
     # WebUI's authorization source for the request's profile.
     import api.profiles as profiles
 
