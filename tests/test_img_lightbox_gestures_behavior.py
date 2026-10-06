@@ -304,3 +304,24 @@ class TestMaintainerReworkup20261006:
             "_imgCancelGesture must keep the pointer capture (greptile P2)"
         )
         assert "state.dragging = false;" in helper
+
+    def test_navigation_also_cancels_the_in_flight_pinch(self):
+        src = UI.read_text(encoding="utf-8")
+        helper = src[
+            src.index("function _imgCancelGesture() {"):
+            src.index("function _onViewportClick(e) {")
+        ]
+        # A two-finger pinch keeps pinching/pinchStart* alive and only clears
+        # dragging (_imgOnTouchStart), so the drag-only early return used to let
+        # an in-flight zoom outlive a navigation; the next _imgOnTouchMove then
+        # applied the previous image's pinchStart baselines to the freshly
+        # centred new image (maintainer review of #6896, 2026-10-06: two fingers
+        # down, ArrowRight, spread -> 544px jump).
+        assert "state.pinching = false;" in helper, (
+            "the image-change cancel must end an in-flight pinch too"
+        )
+        # The pinch reset must precede the drag-only early return, which a pinch
+        # never satisfies.
+        assert helper.index("state.pinching = false;") < helper.index(
+            "if(!state.dragging) return;"
+        ), "the pinch reset must come before the drag-only early return"

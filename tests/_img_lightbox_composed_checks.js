@@ -517,6 +517,52 @@
       approx(box.z.scale, keptScale, 1e-9, "the selected zoom must survive the navigation");
     });
 
+    await run("navigation_during_pinch_drops_the_stale_baseline", bucket, async function () {
+      // Maintainer review of #6896 (2026-10-06): a two-finger pinch that is
+      // still down when the image changes used to keep pinching/pinchStart*
+      // alive, so the next touchmove applied the previous image's baselines to
+      // the freshly-centred one and it jumped 544px on the reviewer's fixture.
+      // Changing the image must end the pinch (making the next move a no-op
+      // until a fresh two-finger start) and keep the pinched zoom.
+      var box = await openBox(1200, 300, {
+        images: [
+          { src: svgDataUrl(1200, 300), alt: "wide" },
+          { src: svgDataUrl(300, 900), alt: "portrait" },
+        ],
+        index: 0,
+      });
+      var size = vpSize(box.vp);
+      key("+");
+      key("+");
+      key("+");
+      var rect = box.vp.getBoundingClientRect();
+      var cx = rect.left + size.w / 2;
+      var cy = rect.top + size.h / 2;
+      var start = [{ x: cx - 50, y: cy }, { x: cx + 50, y: cy }];
+      var spread = [{ x: cx - 60, y: cy }, { x: cx + 60, y: cy }];
+      touch(box.vp, "touchstart", start);
+      assert_(box.z.pinching === true, "fixture: two fingers must start a pinch");
+      touch(box.vp, "touchmove", spread);
+      assert_(box.z.scale > box.z.fitScale, "fixture: the pinch must zoom in before navigating");
+      key("ArrowRight");
+      assert_(box.lb._navIndex === 1, "navigation must move to the next image");
+      for (var i = 0; i < 240 && box.z.pendingNav; i++) await frame();
+      for (var j = 0; j < 4; j++) await frame();
+      assert_(box.z.boxW > 0, "the new image must decode");
+      assert_(box.z.pendingNav === false, "the new image's load must consume pendingNav");
+      assert_(box.z.pinching === false, "changing the image must end the in-flight pinch");
+      var beforeX = box.z.x;
+      var beforeY = box.z.y;
+      var beforeScale = box.z.scale;
+      // Both fingers stay down and spread further: the next touchmove must be
+      // ignored (the pinch is over) rather than re-apply a stale baseline.
+      touch(box.vp, "touchmove", [{ x: cx - 61, y: cy + 40 }, { x: cx + 61, y: cy + 40 }]);
+      approx(box.z.x, beforeX, 1.5, "a pinch move after navigation must not teleport the new image (x)");
+      approx(box.z.y, beforeY, 1.5, "a pinch move after navigation must not teleport the new image (y)");
+      approx(box.z.scale, beforeScale, 1e-9, "a pinch move after navigation must not change the scale");
+      touch(box.vp, "touchend", []);
+    });
+
     // 5. Review follow-ups (greptile 2026-10-05): a second pointer must not
     // take the pan over, the document-wide shortcuts must not hijack typing
     // in a background field, focus must move into the dialog, and a failed

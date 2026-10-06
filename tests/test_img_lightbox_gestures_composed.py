@@ -301,6 +301,27 @@ def _zoom_press_and_navigate(page):
     return img, zoomed
 
 
+def _cdp_touch(session, type_, points):
+    """Dispatch one real multi-touch frame through Chromium's own input pipeline.
+
+    Playwright's ``touchscreen`` API can only tap a single contact, so a genuine
+    two-finger pinch has to go through CDP (``Input.dispatchTouchEvent``). A
+    touchStart/touchMove carrying both points yields the matching TouchEvent
+    whose ``touches`` holds both contacts (Chromium may split the frame across
+    points, but the second event always carries both), and an empty touchEnd
+    releases them all.
+    """
+    session.send(
+        "Input.dispatchTouchEvent",
+        {
+            "type": type_,
+            "touchPoints": [
+                {"x": x, "y": y, "id": i + 1} for i, (x, y) in enumerate(points)
+            ],
+        },
+    )
+
+
 class TestComposedTrustedInput:
     """The two 2026-10-06 gate blockers, driven with real Chromium input."""
 
@@ -517,6 +538,102 @@ class TestComposedTrustedInput:
             "cancelling the pan must keep the pointer capture"
         )
 
+    def test_trusted_pinch_across_navigation_drops_the_stale_baseline(self, composed):
+        """A two-finger pinch held across a navigation must not throw the new image.
+
+        Real CDP touch (two simultaneous contacts): zoom the wide image, put two
+        fingers down, spread, press ArrowRight with both contacts still down,
+        wait for the 300x900 replacement to decode, then spread a little more.
+        Before the fix the next touchmove re-applied the previous image's
+        pinchStart baselines and jumped the new image (544px on the reviewer's
+        fixture); now the image change ends the pinch, so the extra spread is
+        ignored and the pinched zoom survives (maintainer review of #6896,
+        2026-10-06).
+        """
+        page = composed.desktop_page
+        page.evaluate(
+            """([wide, portrait]) => {
+                const prev = document.querySelector('.img-lightbox');
+                if (prev) {
+                    try { window._closeImgLightbox(prev); } catch (_) {}
+                    if (prev.parentNode) prev.parentNode.removeChild(prev);
+                }
+                window._openImgLightboxWithNav(wide, 'wide', [
+                    { src: wide, alt: 'wide' },
+                    { src: portrait, alt: 'portrait' },
+                ], 0);
+            }""",
+            [_svg(1200, 300), _svg(300, 900)],
+        )
+        page.wait_for_function(
+            "() => { const lb = document.querySelector('.img-lightbox'); "
+            "return !!lb && !!lb._zoom && lb._zoom.boxW > 0; }",
+            timeout=15000,
+        )
+        for _ in range(3):
+            page.keyboard.press("Equal")  # three real '=' presses
+        zoomed = page.evaluate("() => document.querySelector('.img-lightbox')._zoom.scale")
+        data = page.evaluate(_LB_RECTS_JS)
+        assert data is not None, "fixture: the lightbox must be open"
+        vp = data["viewport"]
+        cx = vp["left"] + vp["width"] / 2
+        cy = vp["top"] + vp["height"] / 2
+        session = page.context.new_cdp_session(page)
+        try:
+            _cdp_touch(session, "touchStart", [(cx - 50, cy), (cx + 50, cy)])
+            _cdp_touch(session, "touchMove", [(cx - 60, cy), (cx + 60, cy)])
+            assert page.evaluate(
+                "() => document.querySelector('.img-lightbox')._zoom.pinching"
+            ) is True, "fixture: two real contacts must arm the pinch"
+            page.keyboard.press("ArrowRight")
+            page.wait_for_function(
+                "() => { const lb = document.querySelector('.img-lightbox'); "
+                "const z = lb && lb._zoom; "
+                "return !!z && lb._navIndex === 1 && z.pendingNav === false && z.boxW > 0; }",
+                timeout=15000,
+            )
+            page.wait_for_timeout(60)  # let the re-centre settle
+            before = page.evaluate(
+                "() => { const z = document.querySelector('.img-lightbox')._zoom; "
+                "return { x: z.x, y: z.y, scale: z.scale, pinching: z.pinching, "
+                "fitScale: z.fitScale }; }"
+            )
+            assert before["pinching"] is False, (
+                "changing the image must end the in-flight pinch"
+            )
+            assert before["scale"] >= zoomed - 1e-6, (
+                f"the navigation must not drop the pinched zoom: {zoomed} -> {before['scale']}"
+            )
+            assert before["scale"] > before["fitScale"], (
+                "fixture: the pinched-in zoom must survive the navigation"
+            )
+            # Both contacts stay down and spread further; the pinch is over, so
+            # this move must not touch the freshly-centred image.
+            _cdp_touch(session, "touchMove", [(cx - 61, cy + 40), (cx + 61, cy + 40)])
+            page.wait_for_timeout(60)
+            after = page.evaluate(
+                "() => { const z = document.querySelector('.img-lightbox')._zoom; "
+                "return { x: z.x, y: z.y, scale: z.scale }; }"
+            )
+            assert abs(after["y"] - before["y"]) <= 2, (
+                "a pinch move after navigation must not teleport the new image: "
+                f"y {before['y']} -> {after['y']}"
+            )
+            assert abs(after["x"] - before["x"]) <= 2, (
+                "a pinch move after navigation must not teleport the new image: "
+                f"x {before['x']} -> {after['x']}"
+            )
+            assert abs(after["scale"] - before["scale"]) < 1e-6, (
+                "a pinch move after navigation must not change the scale: "
+                f"{before['scale']} -> {after['scale']}"
+            )
+            assert self._is_open(page), (
+                "the pinch across navigation must not dismiss the lightbox"
+            )
+        finally:
+            _cdp_touch(session, "touchEnd", [])
+            session.detach()
+
 
 class TestComposedGate20261006:
     """The in-page synthetic halves of the same two gate blockers."""
@@ -536,6 +653,9 @@ class TestComposedReworkup20261006:
 
     def test_navigation_during_a_pan_drops_the_stale_baseline(self, composed):
         _check(composed.desktop, "navigation_during_pan_drops_the_stale_baseline")
+
+    def test_navigation_during_a_pinch_drops_the_stale_baseline(self, composed):
+        _check(composed.desktop, "navigation_during_pinch_drops_the_stale_baseline")
 
 
 class TestComposedI18n:

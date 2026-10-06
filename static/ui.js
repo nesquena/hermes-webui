@@ -2872,6 +2872,15 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
   // viewport straight to the backdrop and dismissed the dialog, bypassing the
   // drag/click guard (greptile review of #6896, 2026-10-06).
   function _imgCancelGesture() {
+    // A two-finger pinch keeps pinching/pinchStart* alive and only clears
+    // dragging (_imgOnTouchStart calls _imgEndPointerDrag), so the drag-only
+    // early return below used to let an in-flight zoom outlive a navigation.
+    // The next _imgOnTouchMove then applied the previous image's pinchStart
+    // baselines to the freshly-centred new image (maintainer review of #6896,
+    // 2026-10-06: two fingers down, ArrowRight, spread -> 544px jump).
+    // Clearing pinching makes _imgOnTouchMove a no-op until a fresh two-finger
+    // start re-anchors every pinchStart*; the selected zoom is left intact.
+    state.pinching = false;
     if(!state.dragging) return;
     state.dragging = false;
     state.dragPointerId = null;
