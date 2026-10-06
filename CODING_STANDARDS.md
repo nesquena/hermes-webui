@@ -22,9 +22,11 @@ the paths it names, skim past it.
 | changing what the user sees a run do | the RFC for that subsystem |
 | adding a dependency, build tool, or new parallel abstraction | `docs/GUIDELINES.md` rule 8, `CONTRIBUTING.md` "Preserve the Design Constraints" |
 
-## Runtime registry locks — read before editing `api/streaming.py`,
-## `api/session_ops.py`, `api/routes.py`, `api/models.py`, `api/updates.py`,
-## `api/background_process.py`, or `api/config.py`
+## Runtime registry locks
+
+Read before editing `api/streaming.py`, `api/session_ops.py`, `api/routes.py`,
+`api/models.py`, `api/updates.py`, `api/background_process.py`, or
+`api/config.py`.
 
 `STREAMS_LOCK` guards the browser/SSE observation path; `ACTIVE_RUNS_LOCK` guards
 worker liveness. They are independent registries.
@@ -39,8 +41,9 @@ worker liveness. They are independent registries.
 - Never perform HTTP response writes or cache/database teardown under a registry
   lock (`api/streaming.py:14308`).
 
-## Active-run Steer and Stop — read before editing steer, stop, interrupt, or
-## cancellation paths
+## Active-run Steer and Stop
+
+Read before editing steer, stop, interrupt, or cancellation paths.
 
 Active-run Steer resolves the stream-bound agent with explicit stream and worker
 ownership before consulting the reusable session cache. Compression may rotate the
@@ -77,8 +80,9 @@ Tests for this area: cover both Stop/Steer orderings — registered and cache-on
 and both drain/Steer orderings, including compression-rotated identities, with
 deterministic barriers rather than sleeps.
 
-## Inactive-session recovery — read before editing recovery, continuation, or
-## compression-lineage paths
+## Inactive-session recovery
+
+Read before editing recovery, continuation, or compression-lineage paths.
 
 Separate from live Steer. Resolve durable compression lineage in the session's
 profile database, read-only, even when the WebUI sidecar has no snapshot flag.
