@@ -184,10 +184,13 @@ def main():
                             # Check computed animation behavior, not merely CSS source.
                             page.evaluate("""()=>{
                               const dot=document.createElement('span');dot.className='tool-card-running-dot';dot.id='energy-dot';document.body.append(dot);
-                              if(getComputedStyle(dot).animationName!=='wlpulse')throw new Error('missing running pulse');
+                              // The pulse lives on the ::after ring; the dot core stays solid.
+                              if(getComputedStyle(dot).animationName!=='none')throw new Error('dot core must not animate');
+                              const ring=getComputedStyle(dot,'::after');
+                              if(ring.animationName!=='wlring')throw new Error('missing running ring pulse');
                             }""")
                             page.emulate_media(reduced_motion='reduce')
-                            assert page.evaluate("getComputedStyle(document.getElementById('energy-dot')).animationName") == 'none'
+                            assert page.evaluate("getComputedStyle(document.getElementById('energy-dot'),'::after').animationName") == 'none'
                             assert not errors, errors
                             context.close()
                     finally:

@@ -3851,9 +3851,13 @@ body.resizing .sidebar{transition:none!important;}
 
 /* ── Tool call cards ── */
 /* Running indicator dot (pulsing) */
-/* Opacity avoids repainting the surrounding scene on every pulse frame. */
-@keyframes wlpulse{0%,100%{opacity:.45;}50%{opacity:1;}}
+/* The dot core stays solid (full-opacity contrast in every theme); the pulse
+   lives on a ::after ring animated with transform:scale + opacity — both
+   compositor-only, so no scene repaint per frame (UX gate: an opacity-only
+   pulse on the dot itself dropped to ~1.6:1 contrast in light theme). */
+@keyframes wlring{0%{transform:scale(1);opacity:.45;}100%{transform:scale(2.4);opacity:0;}}
 .tool-card-running-dot{
+  position:relative;
   display:inline-block;
   width:7px;
   height:7px;
@@ -3862,11 +3866,19 @@ body.resizing .sidebar{transition:none!important;}
   opacity:1;
   flex-shrink:0;
   vertical-align:middle;
-  animation:wlpulse 1.3s ease-in-out infinite;
 }
-.tl-rundot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:wlpulse 1.3s ease-in-out infinite;}
+.tool-card-running-dot::after,.tl-rundot::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  border-radius:50%;
+  background:var(--accent);
+  animation:wlring 1.3s ease-out infinite;
+  pointer-events:none;
+}
+.tl-rundot{position:relative;width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;}
 @media (prefers-reduced-motion:reduce){
-  .tool-card-running-dot,.tl-rundot{animation:none;}
+  .tool-card-running-dot::after,.tl-rundot::after{animation:none;opacity:0;}
 }
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
