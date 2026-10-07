@@ -324,7 +324,7 @@ function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
 
   if(sourceOwned){
     const state=tx.sourceState;
-    _composerApplyRecordToState(state,record);
+    _composerApplyRecordToState(state,record,true);
     state.dirty=true;
     _rememberComposerOwnerState(tx.sourceSid,tx.sourceProfile,state,tx.generation);
     if(kind.startsWith('text-')){const input=$('msg');if(input)input.value=state.text;}

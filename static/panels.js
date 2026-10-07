@@ -7209,11 +7209,26 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  let _savedSourceDraftForReplacement = null;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
   // setup can't leak the embargo and freeze the sidebar (Codex re-gate 4).
   try {
+    // A replacement New Chat runs after the profile cookie changes. Persist the
+    // source owner's draft while the old profile still owns the cookie, then
+    // hand that exact owner to newSession() so it does not repeat a cross-profile
+    // draft write that the backend correctly rejects with 409.
+    if (sessionInProgress && !_openingExistingSidebarSession && S.session
+        && typeof _saveComposerDraftNow === 'function'
+        && !(typeof _isReadOnlySession === 'function' && _isReadOnlySession(S.session))) {
+      const sourceSid = S.session.session_id;
+      const sourceProfile = String(S.session.profile || _prevProfileName || 'default').trim() || 'default';
+      const sourceText = ($('msg') || {}).value || '';
+      const sourceFiles = Array.isArray(S.pendingFiles) ? [...S.pendingFiles] : [];
+      await _saveComposerDraftNow(sourceSid, sourceText, sourceFiles, sourceProfile, {rejectOnError:true});
+      _savedSourceDraftForReplacement = {session_id:sourceSid, profile:sourceProfile};
+    }
     // Invalidate any in-flight/queued session-list render BEFORE showing the skeleton,
     // so a pre-switch /api/sessions response (old profile's rows, issued before the
     // switch) can't resolve, pass the generation guard, clear the skeleton flag, and
@@ -7413,6 +7428,7 @@ async function switchToProfile(name) {
       const newSessionResult=await newSession(false, {
         awaitWorkspaceLoad: workspaceVisible, worktree:false, contextTransition:intent,
         _paneNavigationGeneration:paneNavigationGeneration,
+        savedSourceDraft:_savedSourceDraftForReplacement,
       });
       _replacementSessionPending = false;
       if(_newSessionResultWasSuperseded(newSessionResult)

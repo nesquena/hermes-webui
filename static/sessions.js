@@ -2412,9 +2412,13 @@ async function newSession(flash, options={}){
     // so New Chat can leave the view without a guaranteed 400 draft POST.
     const sourceDraftServerWritable=!(S.session
       &&typeof _isReadOnlySession==='function'&&_isReadOnlySession(S.session));
+    const savedSourceDraft=options&&options.savedSourceDraft;
+    const sourceDraftAlreadySaved=!!(previousSid&&savedSourceDraft
+      &&savedSourceDraft.session_id===previousSid
+      &&String(savedSourceDraft.profile||'default')===previousProfile);
     const composerTransition=typeof _beginComposerOwnershipTransition==='function'
       ? _beginComposerOwnershipTransition(previousSid,previousProfile,{
-          persistSourceDraft:sourceDraftServerWritable,
+          persistSourceDraft:sourceDraftServerWritable&&!sourceDraftAlreadySaved,
         })
       : null;
     // With no previous owner (the first Send on an empty app), the existing
@@ -2424,7 +2428,8 @@ async function newSession(flash, options={}){
       if(sourceComposerFiles.length&&typeof _composerAddFiles==='function')_composerAddFiles(sourceComposerFiles);
     }
     try{
-      if(previousSid&&sourceDraftServerWritable&&typeof _saveComposerDraftNow==='function'){
+      if(previousSid&&sourceDraftServerWritable&&!sourceDraftAlreadySaved
+         &&typeof _saveComposerDraftNow==='function'){
         await _saveComposerDraftNow(
           previousSid,
           sourceComposerText,
@@ -2631,6 +2636,7 @@ async function newSession(flash, options={}){
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session',{force:true})).catch(()=>{})}
     }finally{
       _setNewSessionPending(false);
+      if(typeof updateSendBtn==='function') updateSendBtn();
       if(focusRestoredComposerAfterAbort
         &&typeof _composerOwnerIsVisible==='function'
         &&_composerOwnerIsVisible(
@@ -5485,7 +5491,7 @@ function _renderBatchActionBar(){
       const retainedCount=_worktreeResponseCount(results);
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
-      ids.forEach(_forgetComposerPendingFiles);
+      if(typeof _forgetComposerPendingFiles==='function') ids.forEach(_forgetComposerPendingFiles);
       if(typeof _forgetComposerOwnerState==='function') ids.forEach(_forgetComposerOwnerState);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
@@ -10497,7 +10503,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   const response=deleteResult&&deleteResult.response;
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
-  _forgetComposerPendingFiles(sid);
+  if(typeof _forgetComposerPendingFiles==='function') _forgetComposerPendingFiles(sid);
   if(typeof _forgetComposerOwnerState==='function') _forgetComposerOwnerState(sid);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){

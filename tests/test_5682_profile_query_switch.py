@@ -651,8 +651,9 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
     assert payload["afterPreviousResponse"] == {"effort": "", "wrapDisplay": "none"}
     assert payload["afterDestination"] == "high"
     assert payload["calls"] == 2
-    assert "refreshProfileTransitionReasoningChip" in PANELS_JS
-    assert PANELS_JS.index("refreshProfileTransitionReasoningChip") > PANELS_JS.index("S.activeProfile = data.active || name")
+    destination_refresh = "refreshProfileTransitionReasoningChip(data.default_model"
+    assert destination_refresh in PANELS_JS
+    assert PANELS_JS.index(destination_refresh) > PANELS_JS.index("S.activeProfile = data.active || name")
     background = PANELS_JS[PANELS_JS.index("function _refreshProfileSwitchBackground"):PANELS_JS.index("async function loadProfilesPanel")]
     for refresh in (
         "_ensureComposerControlVisibilityState",
