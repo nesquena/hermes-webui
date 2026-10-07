@@ -10878,26 +10878,53 @@ function _showProjectBindingsDialog(proj){
   // this project and unticking only clears the flag — nothing is ever
   // un-filed. Confirm with a real count first, and put the checkbox back when
   // the user declines. (re-gate 2026-10-07T19:22:30Z, item 3.)
-  aaCb.onchange=async()=>{
-    if(!aaCb.checked) return;
-    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
-    if(!wsPaths.length) return;   // nothing bound yet => no sweep to guard
-    let count=null;
+  // Save goes through the SAME gate (re-gate 2026-10-07T22:04:16Z): it used to
+  // read the ticked box while the preview was still in flight, so a sweep filed
+  // chats before the user answered the confirm, and a workspace ADDED after the
+  // box was ticked was never counted at all. The confirmation is keyed on the
+  // exact workspace snapshot it covered, so any change to the list re-arms it.
+  let _aaConfirmedKey=null;     // JSON of the workspace list the user confirmed
+  let _aaConfirmInFlight=null;  // at most one prompt (toggle + Save share it)
+  const _wsKey=(paths)=>JSON.stringify(paths||[]);
+  const _aaPathsNow=()=>wsList.map(x=>x.value).filter(Boolean);
+  const _aaConfirmed=()=>_aaConfirmedKey!==null&&_aaConfirmedKey===_wsKey(_aaPathsNow());
+  const _autoAssignCount=async(wsPaths)=>{
     try{
       const res=await api('/api/projects/auto-assign-preview',{
         method:'POST',
         body:JSON.stringify({project_id:proj.project_id, workspaces:wsPaths}),
       });
-      if(res&&typeof res.count==='number') count=res.count;
-    }catch(_){ count=null; }
-    const confirmed=await showConfirmDialog({
-      title:t('pb_auto_assign_label'),
-      message:(count===null)
-        ? t('pb_auto_assign_confirm_unknown',proj.name)
-        : t('pb_auto_assign_confirm',count,proj.name),
-      confirmLabel:t('pb_auto_assign_confirm_btn'),
-      cancelLabel:t('pb_cancel'),
-    });
+      if(res&&typeof res.count==='number') return res.count;
+    }catch(_){}
+    return null;   // preview unavailable => fail closed and still confirm
+  };
+  const _ensureAutoAssignConfirmed=(wsPaths)=>{
+    if(_aaConfirmed()) return Promise.resolve(true);
+    if(_aaConfirmInFlight) return _aaConfirmInFlight;
+    _aaConfirmInFlight=(async()=>{
+      const key=_wsKey(wsPaths);
+      const count=await _autoAssignCount(wsPaths);
+      // A definite 0 means the sweep would file nothing, so there is nothing to
+      // guard (the counter may over-count view-only rows but never under-counts).
+      if(count===0){ _aaConfirmedKey=key; return true; }
+      const ok=await showConfirmDialog({
+        title:t('pb_auto_assign_label'),
+        message:(count===null)
+          ? t('pb_auto_assign_confirm_unknown',proj.name)
+          : t('pb_auto_assign_confirm',count,proj.name),
+        confirmLabel:t('pb_auto_assign_confirm_btn'),
+        cancelLabel:t('pb_cancel'),
+      });
+      if(ok) _aaConfirmedKey=key;
+      return ok;
+    })().finally(()=>{ _aaConfirmInFlight=null; });
+    return _aaConfirmInFlight;
+  };
+  aaCb.onchange=async()=>{
+    if(!aaCb.checked) return;
+    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
+    if(!wsPaths.length) return;   // nothing bound yet => no sweep to guard
+    const confirmed=await _ensureAutoAssignConfirmed(wsPaths);
     if(!confirmed) aaCb.checked=false;
   };
 
@@ -10916,15 +10943,34 @@ function _showProjectBindingsDialog(proj){
   saveBtn.className='app-dialog-btn confirm';
   saveBtn.textContent=t('pb_save');
   saveBtn.onclick=async()=>{
+    // Workspaces: the EXACT snapshot Save submits (empty → unbind all), captured
+    // once and never re-read after an await, so what the auto-assign
+    // confirmation covers is precisely what the server sweeps.
+    // (re-gate 2026-10-07T22:04:16Z.)
+    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
+    const def=_wsDefault();
+    let autoAssign=!!aaCb.checked;
+    if(autoAssign&&wsPaths.length&&!_aaConfirmed()){
+      // Save must await the preview + confirmation itself: it used to post
+      // auto_assign:true off the ticked box while the confirmation was still in
+      // flight (filing chats nobody had agreed to yet), and a workspace added
+      // AFTER the box was ticked was never counted at all.
+      const ok=await _ensureAutoAssignConfirmed(wsPaths);
+      if(!ok){
+        // Declining must prevent the bind POST; put the box back (the same
+        // contract the toggle has) and leave the dialog open.
+        aaCb.checked=false;
+        _aaConfirmedKey=null;
+        return;
+      }
+      if(!_aaConfirmed()) return;   // the list moved while prompting: save again
+      autoAssign=!!aaCb.checked;
+    }
     const modelVal=modelCombo.getValue();
     const fields={};
-    // Workspaces: the current list (empty → unbind all). Send the array so
-    // the server replaces the full binding; null clears.
-    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
     fields.workspaces=wsPaths.length?wsPaths:null;
-    const def=_wsDefault();
     fields.default_workspace=(def&&def.value)||null;
-    fields.auto_assign=!!aaCb.checked;
+    fields.auto_assign=autoAssign;
     // Model: empty → unbind; else bind model (+ provider from the option).
     // Always send model_provider — a selected model WITHOUT provider metadata
     // must CLEAR any previously-bound provider, otherwise the server keeps the
@@ -10979,6 +11025,17 @@ function _showProjectBindingsDialog(proj){
     overlay.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')
   ).filter(el=>!el.disabled&&el.offsetParent!==null);
   function _onKey(e){
+    // A shared app dialog (the "Type a path…" prompt / the counted confirm)
+    // opened from INSIDE this one owns the keyboard: ui.js installs its own
+    // document-capture listener that preventDefault()s Escape/Tab/Enter. Both
+    // listeners run for one keydown — stopPropagation() does not stop same-node
+    // listeners — so without this guard Escape closed the prompt AND this
+    // dialog (throwing away unsaved workspace/model edits) and Tab escaped the
+    // modal that was actually on top. Yield in both orders: if the shared
+    // handler ran first it has already called preventDefault(); if this one ran
+    // first, the shared dialog is open. (re-gate 2026-10-07T22:04:16Z —
+    // [CORE] static/sessions.js:10981 + senior-review MUST-FIX.)
+    if(e.defaultPrevented||_isAppDialogOpen()) return;
     if(e.key==='Escape'){
       e.preventDefault();e.stopPropagation();_closeBindingsDialog();return;
     }

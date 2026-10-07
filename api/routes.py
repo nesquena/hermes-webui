@@ -960,15 +960,40 @@ def _auto_assign_candidate_count(workspaces, profile=None) -> int:
     (re-gate 2026-10-07T19:22:30Z, item 3).
 
     Mirrors ``_auto_assign_sweep_body``'s metadata gate (profile match,
-    workspace bound, not already owned) reading the session index alone. It is
-    deliberately metadata-only: the sweep additionally skips view-only rows
-    (read-only imports / delegated subagent children) via
+    workspace bound, not already owned) reading the session index alone. The
+    workspaces are canonicalized exactly like ``/api/projects/bind`` does
+    (``validate_workspace_to_add`` → ``resolve_trusted_workspace``), because the
+    sweep compares against the CANONICAL paths the bind stores: comparing the
+    raw typed strings under-counted a "Type a path…" entry ("alpha/",
+    "~/ws/alpha", "/ws/./alpha" all previewed 0 while the bind canonicalized the
+    path and the sweep then filed every chat in it). It is deliberately
+    metadata-only: the sweep additionally skips view-only rows (read-only
+    imports / delegated subagent children) via
     ``_auto_assign_target_is_view_only``, which needs the session object, so a
     preview may over-count by those rows while never under-counting.
+    (re-gate 2026-10-07T22:04:16Z, [SHOULD-FIX] 3.)
     """
     if not SESSION_INDEX_FILE.exists():
         return 0
-    bound = {str(w) for w in (workspaces or []) if w}
+    bound = set()
+    for w in (workspaces or []):
+        if w is None or str(w).strip() == "":
+            continue
+        try:
+            # The two steps /api/projects/bind's _resolve_ws_list applies, minus
+            # its auto-registration (a preview must not mutate the saved list).
+            registered = validate_workspace_to_add(str(w))
+            try:
+                bound.add(str(resolve_trusted_workspace(registered)))
+            except (TypeError, ValueError):
+                # A not-yet-saved path outside home resolves only AFTER the bind
+                # registers it; the registered form is the same canonical string
+                # the bind stores, so the count cannot diverge.
+                bound.add(str(registered))
+        except (TypeError, ValueError, OSError):
+            # The bind would reject this entry (missing dir / system root), so it
+            # can never be bound and cannot contribute sessions.
+            continue
     if not bound:
         return 0
     if not profile:

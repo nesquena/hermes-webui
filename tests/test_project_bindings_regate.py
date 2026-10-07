@@ -1401,6 +1401,11 @@ def test_auto_assign_preview_counts_only_unowned_rows(tmp_path, monkeypatch):
     ws = tmp_path / "ws-preview"
     ws.mkdir()
     ws_str = str(ws)
+    # A second REAL bound workspace: paths the bind would reject (missing dirs)
+    # can never be bound, so the preview no longer counts their rows.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    other_str = str(elsewhere)
     index = tmp_path / "_index.json"
     index.write_text(json.dumps([
         # counted: unowned + bound workspace + own profile
@@ -1408,8 +1413,8 @@ def test_auto_assign_preview_counts_only_unowned_rows(tmp_path, monkeypatch):
         {"session_id": "p2", "workspace": ws_str, "profile": "default"},
         # skipped: already filed under a project
         {"session_id": "p3", "workspace": ws_str, "profile": "default", "project_id": "other"},
-        # skipped: different workspace
-        {"session_id": "p4", "workspace": str(tmp_path / "elsewhere"), "profile": "default"},
+        # counted only when its own workspace is bound
+        {"session_id": "p4", "workspace": other_str, "profile": "default"},
         # skipped: different profile
         {"session_id": "p5", "workspace": ws_str, "profile": "work"},
         # skipped: no session id
@@ -1423,7 +1428,7 @@ def test_auto_assign_preview_counts_only_unowned_rows(tmp_path, monkeypatch):
     assert routes._auto_assign_candidate_count([ws_str], "work") == 1
     assert routes._auto_assign_candidate_count([], "default") == 0
     assert routes._auto_assign_candidate_count(
-        [ws_str, str(tmp_path / "elsewhere")], "default"
+        [ws_str, other_str], "default"
     ) == 3
 
 
@@ -1471,3 +1476,124 @@ def test_retired_bindings_i18n_keys_are_gone_from_every_locale():
         chunk = _i18n_locale_chunk(src, loc)
         leftover = [k for k in PB_I18N_KEYS_RETIRED if ("%s: '" % k) in chunk]
         assert not leftover, f"locale {loc!r} still defines retired keys: {leftover}"
+
+
+# ---------------------------------------------------------------------------
+# Re-gate 2026-10-07T22:04:16Z — keyboard ownership under a stacked dialog, the
+# Save-side auto-assign confirmation, canonical preview counts, stale docs.
+# ---------------------------------------------------------------------------
+
+
+def test_stacked_app_dialog_owns_the_keyboard():
+    """[CORE] static/sessions.js:10981 (senior-review MUST-FIX).
+
+    The dialog's document-capture ``_onKey`` must yield to the shared app dialog
+    (the "Type a path…" prompt / the counted confirm) opened from inside it.
+    Both listeners run on one keydown — ``stopPropagation()`` does not stop
+    same-node listeners — so Escape used to close the prompt AND the dialog
+    (losing unsaved workspace/model edits) and Tab escaped the modal on top.
+    """
+    seg = _dialog_source()
+    guard = "if(e.defaultPrevented||_isAppDialogOpen()) return;"
+    assert guard in seg
+    on_key = seg.index("function _onKey(e){")
+    # The guard is the FIRST thing _onKey does: before its own Escape/Tab paths.
+    assert on_key < seg.index(guard)
+    assert seg.index(guard) < seg.index("if(e.key==='Escape')", on_key)
+    assert seg.index(guard) < seg.index("e.key==='Tab'", on_key)
+    # ...and it reads the shared dialog's own open state (ui.js), so it works in
+    # both listener-registration orders.
+    ui = _read_static("ui.js")
+    assert "function _isAppDialogOpen(){" in ui
+    assert "if(!_isAppDialogOpen()) return;" in ui
+
+
+def test_save_awaits_the_auto_assign_confirmation_for_its_exact_snapshot():
+    """[SILENT] static/sessions.js:10927 + [SHOULD-FIX] 1/2.
+
+    Save read the ticked box while the preview was still in flight (filing chats
+    before the user answered) and a workspace added after ticking was never
+    counted; the fix makes Save await the shared confirmation for the exact
+    workspace snapshot it submits, and declining prevents the bind POST.
+    """
+    seg = _dialog_source()
+    save_start = seg.index("saveBtn.onclick=async()=>{")
+    post = seg.index("await _saveProjectBindings(proj,fields);", save_start)
+    # One shared gate, defined once and awaited by BOTH the toggle and Save.
+    assert seg.count("_ensureAutoAssignConfirmed=(") >= 1
+    assert seg.count("await _ensureAutoAssignConfirmed(wsPaths);") == 2
+    assert "if(autoAssign&&wsPaths.length&&!_aaConfirmed()){" in seg
+    # The snapshot is captured ONCE, before the await, and only that array is
+    # posted — never re-read after the confirmation resolves.
+    capture = seg.index("const wsPaths=wsList.map(x=>x.value).filter(Boolean);", save_start)
+    confirm = seg.index("const ok=await _ensureAutoAssignConfirmed(wsPaths);", save_start)
+    assert capture < confirm < post
+    assert "fields.workspaces=wsPaths.length?wsPaths:null;" in seg
+    assert "fields.auto_assign=autoAssign;" in seg
+    assert "fields.auto_assign=!!aaCb.checked;" not in seg
+    # Declining the confirmation returns BEFORE the POST (the only one in the
+    # handler) and puts the checkbox back.
+    decline = seg.index("aaCb.checked=false;", confirm)
+    assert confirm < decline < post
+    assert "return;" in seg[decline:post]
+    # The confirmation is keyed on the whole workspace list, so adding or
+    # removing a workspace re-arms it (that is the SHOULD-FIX 2 case: the flag
+    # was already on and a workspace was added after the tick).
+    assert "const _aaConfirmed=()=>_aaConfirmedKey!==null&&_aaConfirmedKey===_wsKey(_aaPathsNow());" in seg
+    assert "if(!_aaConfirmed()) return;" in seg
+    # A definite 0-count preview needs no prompt (the sweep would file nothing);
+    # an unavailable preview fails CLOSED and still confirms.
+    assert "if(count===0){ _aaConfirmedKey=key; return true; }" in seg
+    assert "pb_auto_assign_confirm_unknown" in seg
+
+
+def test_auto_assign_preview_canonicalizes_typed_paths(tmp_path, monkeypatch):
+    """[SHOULD-FIX] 3 — the preview count must canonicalize like the bind does.
+
+    routes.py:971 compared the raw typed strings against the canonical paths the
+    bind stores, so "alpha/", "~/ws/alpha" and "/ws/./alpha" each previewed 0 and
+    the sweep then filed every chat in the path anyway.
+    """
+    import api.routes as routes
+
+    ws = tmp_path / "ws-canon"
+    ws.mkdir()
+    ws_str = str(ws)
+    index = tmp_path / "_index.json"
+    index.write_text(json.dumps([
+        # counted: unowned + bound workspace + own profile
+        {"session_id": "c1", "workspace": ws_str, "profile": "default", "project_id": None},
+        {"session_id": "c2", "workspace": ws_str, "profile": "default"},
+        # skipped: already filed somewhere
+        {"session_id": "c3", "workspace": ws_str, "profile": "default", "project_id": "other"},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: str(a) == str(b))
+
+    # Every non-canonical spelling of the SAME directory counts its chats.
+    for typed in (ws_str + "/", ws_str + "/.", ws_str + "/../" + ws.name):
+        assert routes._auto_assign_candidate_count([typed], "default") == 2, typed
+    # The canonical spelling still counts the same rows (no regression).
+    assert routes._auto_assign_candidate_count([ws_str], "default") == 2
+    # A path the bind would reject (it does not exist) can never be bound, so it
+    # cannot count anything — this must not raise.
+    assert routes._auto_assign_candidate_count([str(tmp_path / "not-there")], "default") == 0
+    # A bound path with no unowned rows counts 0.
+    assert routes._auto_assign_candidate_count([str(tmp_path)], "default") == 0
+
+
+def test_docs_match_the_project_settings_ui():
+    """[SHOULD-FIX] 4 — README + ARCHITECTURE still described the retired UI."""
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    arch = (root / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    for stale in ("Bindings…", "effort:high", "ws×2", "bindings summary",
+                  "pick **Bindings"):
+        assert stale not in readme, stale
+        assert stale not in arch, stale
+    assert "Project settings…" in readme
+    assert "Project settings…" in arch
+    # The counted confirmation and the endpoint behind it are documented.
+    assert "File 23 existing chats under" in readme
+    assert "auto-assign-preview" in arch

@@ -726,10 +726,16 @@ commits directly, which is correct because it holds no catalog lock by then.
 ### 4.12 Project Bindings (`/api/projects/bind`)
 
 A session project can carry **bindings**: a set of workspaces (one of them the
-default), a model, and a reasoning effort. The chip's quick-create (`+`) button,
-and the top-level New Chat button while that project filter is active, open a
-new session already configured for the project's context; with **auto-assign**
-on, sessions in the bound workspaces are filed under the project automatically.
+default), a model, and — API-only since the dialog row is hidden — a reasoning
+effort. The chip's quick-create (`+`) button, and the top-level New Chat button
+while that project filter is active, open a new session already configured for
+the project's context; with **auto-assign** on, unfiled sessions in the bound
+workspaces are filed under the project after a counted confirmation. Right-click
+a project chip and pick **Project settings…** to edit them: one row in the chip
+menu (no inline summary, no per-axis unbind rows), a dialog built on the shared
+`.app-dialog*` classes (skins, Escape, focus trap) that stays below the shared
+app dialog's z-index so a prompt it opens stacks on top, and a menu clamped to
+the viewport.
 
 `POST /api/projects/bind` updates a single project by `project_id`. Every body
 field is optional and only the supplied ones are touched:
@@ -750,7 +756,19 @@ field is optional and only the supplied ones are touched:
   working; `_project_workspaces` reads the list first and falls back to it.
 - `auto_assign: bool` — see below.
 - `model` / `model_provider` / `reasoning_effort` — single-value bindings per
-  project; `null` clears that axis (the project is then unbound on it).
+  project; `null` clears that axis (the project is then unbound on it). The
+  dialog renders the model row only: it never submits `reasoning_effort`, so
+  saving a binding PRESERVES an existing effort value instead of clearing it.
+
+`POST /api/projects/auto-assign-preview` is the read-only companion the dialog
+calls before submitting `auto_assign: true`. Its body takes
+`workspaces: [str]` (canonicalized through the same
+`validate_workspace_to_add` → `resolve_trusted_workspace` chain the bind stores,
+so a typed `alpha/`, `~/ws/alpha` or `/ws/./alpha` counts the chats in the
+canonical path) and `profile` (optional, defaults to the active profile); it
+answers `{"count": N}` — how many unfiled sessions in those workspaces a sweep
+would file. It reads the session index only, so it may over-count the
+read-only/subagent rows the sweep skips but never under-counts.
 
 `reasoning_effort` is applied through the **profile-wide** preference, not a
 session-local override: for a bound workspace/model/effort session the sidebar
@@ -762,12 +780,14 @@ get separately stored effort preferences, so two projects bound to different
 models still share one effort setting. Creating a project-bound session
 therefore also moves the effective effort of other sessions and projects in
 that profile; only the workspace and model axes are stored on the session
-itself.
+itself. Because that makes a per-project effort row read as per-project, the bind
+dialog no longer renders one (re-gate 2026-10-07): the field stays in
+`/api/projects/bind` and comes back with per-session effort (#7881).
 
 The endpoint only binds a project its own profile owns (`_profiles_match`,
 otherwise 404), mirroring the `/api/session/new` profile boundary. The stored
 fields ride along in the plain `/api/projects` payload (the raw project rows),
-so the sidebar can render the bindings summary and the dialog without a second
+so the sidebar can render the chip menu row and the dialog without a second
 request.
 
 Where the bindings take effect:
@@ -791,7 +811,13 @@ Where the bindings take effect:
   never stalls the response. It sweeps only **unowned** sessions in the bound
   workspaces: a session the user already placed in another project is never
   stolen, and a session being streamed is updated on the live cached object so
-  the streaming thread's own save persists it.
+  the streaming thread's own save persists it. Because the sweep runs on EVERY
+  bind while the flag is on, the dialog confirms it with the
+  `/api/projects/auto-assign-preview` count: the checkbox handler confirms on
+  tick, and Save awaits the same confirmation for the EXACT workspace snapshot
+  it submits (declining prevents the bind POST), so ticking and saving before
+  the count arrives, or adding a workspace after ticking, can no longer file
+  chats without a confirmation.
 - **Profile boundary** — a NAMED-profile project only claims sessions from its
   own profile; the root/default project claims default-profile (and unprofiled
   legacy) rows. `_profiles_match` handles the renamed-root alias for both the
