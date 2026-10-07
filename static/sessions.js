@@ -10884,7 +10884,7 @@ function _showProjectBindingsDialog(proj){
   // box was ticked was never counted at all. The confirmation is keyed on the
   // exact workspace snapshot it covered, so any change to the list re-arms it.
   let _aaConfirmedKey=null;     // JSON of the workspace list the user confirmed
-  let _aaConfirmInFlight=null;  // at most one prompt (toggle + Save share it)
+  let _aaConfirmInFlight=null;  // at most one confirmation at a time (toggle + Save share it)
   const _wsKey=(paths)=>JSON.stringify(paths||[]);
   const _aaPathsNow=()=>wsList.map(x=>x.value).filter(Boolean);
   const _aaConfirmed=()=>_aaConfirmedKey!==null&&_aaConfirmedKey===_wsKey(_aaPathsNow());
