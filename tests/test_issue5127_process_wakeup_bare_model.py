@@ -365,21 +365,23 @@ class TestRepairBareCustomProviderModel:
         """CONTROL: the same repair for an id that names its own ``custom:`` (#8026).
 
         A prefixed name is a distinct identity from the bare fallback one, so it
-        must repair through its own entry. Run beside the case above so a fix that
-        "repairs the non-ASCII case" by widening the match to any non-ASCII id is
-        caught; every entry must still be found by its OWN id.
+        must repair through its own entry. Every entry must still be found by its
+        OWN id, so the bare ``晨光`` entry is placed FIRST: a matcher widened to
+        any non-ASCII id would hit that one first and return ``vendor-b/shared``,
+        failing the assertion below. With the prefixed entry first, such a matcher
+        would still return the expected value and pin nothing.
         """
         from api.routes import _repair_bare_custom_provider_model
 
         cfg = {
             "custom_providers": [
                 {
-                    "name": "custom:晨光",
-                    "models": {"vendor-a/shared": {}},
-                },
-                {
                     "name": "晨光",
                     "models": {"vendor-b/shared": {}},
+                },
+                {
+                    "name": "custom:晨光",
+                    "models": {"vendor-a/shared": {}},
                 },
             ]
         }

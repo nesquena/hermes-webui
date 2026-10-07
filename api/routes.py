@@ -7928,10 +7928,10 @@ def _repair_bare_custom_provider_model(
             _custom_provider_entries,
             get_config,
         )
-        # `_custom_provider_entry_slug_for_context` is defined in THIS module (below), not in
-        # api.config. Importing it from there raised ImportError inside this `try`, and the
-        # `except Exception: return None` below swallowed it, so repair returned None for EVERY
-        # custom provider, ASCII included. Use the local helper.
+        # `_custom_provider_entry_slug_for_context` is defined in THIS module (above, at
+        # line 7385), not in api.config. Importing it from there raised ImportError inside
+        # this `try`, and the `except Exception: return None` below swallowed it, so repair
+        # returned None for EVERY custom provider, ASCII included. Use the local helper.
 
         if isinstance(config_obj, dict):
             _entries = _custom_provider_entries(config_obj)

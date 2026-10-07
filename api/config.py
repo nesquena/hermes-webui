@@ -3298,9 +3298,12 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     # entry and sent the model to the default endpoint instead.
                     if _custom_provider_slug_is_fallback(entry_name):
                         continue
-                    # No slug, so use the entry's own name as the provider hint and keep its
-                    # configured URL, which is what master did for this entry.
-                    return _finalize(model_id, entry_name, entry_base_url or None)
+                    # No slug, so return the empty provider hint together with the entry's
+                    # own URL. That is exactly master's pair: master computed the same helper
+                    # (which is empty here) and passed it to the same three-argument
+                    # _finalize with the same base_url. Substituting the raw name would invent
+                    # a provider value master never produced.
+                    return _finalize(model_id, provider_hint, entry_base_url or None)
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
                 return _finalize(model_id, provider_hint, entry_base_url or None)
@@ -3458,14 +3461,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                         _slug = _custom_provider_entry_identity(
                             _entry, _custom_cfg, cfg.get("providers")
                         )
-                        if not _slug:
-                            # Only a fallback-derived name that a legacy entry already owns mints
-                            # nothing. A legacy entry with no slug for any other reason (``-``,
-                            # ``晨光:鑫遇``) still routes to its own URL on master, so keep it.
-                            if _custom_provider_slug_is_fallback(prefix):
-                                continue
-                            _base = (_entry.get("base_url") or "").strip()
-                            return _finalize(model_id, prefix, _base or None)
+                        # Only a fallback-derived name that a legacy entry already owns mints
+                        # nothing, and that is the one case to skip. A legacy entry with no
+                        # slug for any other reason (``-``, ``晨光:鑫遇``) still routes to its
+                        # own URL on master, so it falls through to master's own return below,
+                        # which passes this same (empty) slug and this entry's base_url.
+                        if not _slug and _custom_provider_slug_is_fallback(prefix):
+                            continue
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 

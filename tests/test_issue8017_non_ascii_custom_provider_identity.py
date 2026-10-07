@@ -206,7 +206,7 @@ def test_a_colon_in_a_name_takes_the_keyless_pre_fix_identity():
     )
 
 
-def test_keyless_non_ascii_providers_do_not_share_one_api_key_env(monkeypatch):
+def test_two_non_ascii_providers_do_not_share_one_api_key_env(monkeypatch):
     """Two fallback non-ASCII providers must not take the shared variable (#8026).
 
     The fallback mints an id whose characters all sanitize away (the constant
@@ -216,10 +216,10 @@ def test_keyless_non_ascii_providers_do_not_share_one_api_key_env(monkeypatch):
     ``CUSTOM_API_KEY`` is the wrong variable to set here: master never read it, so
     a test that used it would pass on master too and pin nothing.
 
-    The refusal is a RECORD-level decision, not an id-level one: the id
-    ``custom:晨光`` is identical whether the user typed ``custom:晨光`` (which
-    reads the convention variable on master) or the fallback minted it, so only
-    the record's own ``name`` can tell them apart (round 4).
+    The two ids map to the SAME variable name (that is the hazard), so the refusal
+    cannot live in the name helper; it is a RECORD-level decision, because the id
+    ``custom:晨光`` is identical whether the user typed ``custom:晨光`` (which reads
+    the convention variable on master) or the fallback minted it (round 4).
     """
     monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "sk-SHARED")
 
@@ -736,11 +736,44 @@ def test_a_legacy_entry_with_no_slug_keeps_its_own_endpoint(monkeypatch):
     monkeypatch.setattr(config, "cfg", dict(cfg_shape))
     monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
 
-    model, _provider, base_url = config.resolve_model_provider("chat-model")
+    model, provider, base_url = config.resolve_model_provider("chat-model")
     assert model == "chat-model"
+    # The PAIR, not just the URL: master computed the same slug helper (empty for this
+    # name) and passed it to the same three-argument _finalize. Asserting only the URL
+    # would let a fix that invents the raw name as the provider pass.
+    assert provider == "", "a slugless entry resolves to the empty provider, as on master"
     assert base_url == "http://dash.example/v2", (
         "a legacy entry with no slug must keep routing to its own endpoint"
     )
+
+
+def test_a_legacy_entry_with_no_slug_keeps_its_own_endpoint_for_a_colon_name(monkeypatch):
+    """The same skip, for a name that splits on its colon instead of sanitizing away.
+
+    ``晨光:鑫遇`` takes a different branch of the identity helper than ``-`` does, so
+    pin both: a fix that widens the skip for one shape and not the other would
+    otherwise pass.
+    """
+    cfg_shape = {
+        "model": {
+            "default": "chat-model",
+            "provider": "custom",
+            "base_url": "http://default.example/v1",
+        },
+        "custom_providers": [
+            {
+                "name": "晨光:鑫遇",
+                "base_url": "http://colon.example/v2",
+                "models": {"chat-model": {}},
+            },
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    _model, provider, base_url = config.resolve_model_provider("chat-model")
+    assert provider == ""
+    assert base_url == "http://colon.example/v2"
 
 
 def test_a_fallback_entry_that_owns_nothing_is_still_skipped(monkeypatch):
