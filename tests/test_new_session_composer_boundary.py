@@ -1767,8 +1767,13 @@ def _run_profile_switch_settlement_harness(
           session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},
           messages:[{{role:'user',content:'A'}}],activeProfile:'default',
           activeProfileIsDefault:true,_pendingSessionToolsets:['tools'],
+          _pendingProfileModel:'prior-model',_pendingProfileModelProvider:'prior-provider',
+          _profileDefaultWorkspace:'/prior-workspace',_profileSwitchWorkspace:'/prior-override',
         }};
-        const window={{}};
+        const window={{_defaultModel:'prior-default',_activeProvider:'prior-provider'}};
+        let pickedModel='prior-model';
+        let reasoningModel='prior-model';
+        let cachedRenders=0;
         const localStorage={{removeItem(){{}}}};
         const elements={{
           profileChip:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},
@@ -1780,13 +1785,14 @@ def _run_profile_switch_settlement_harness(
         function closeSessionActionMenu(){{}}
         function _invalidateSessionListRenders(){{}}
         function _setProfileSwitchListEmbargo(){{}}
-        function showSessionListSkeleton(){{}}
+        function showSessionListSkeleton(){{_sessionListSkeletonActive=true;}}
         function bumpWorkspaceTreeGen(){{}}
         function t(key){{return key;}}
         function startGatewaySSE(){{}}
         function applyBotName(){{}}
         function _clearPersistedModelState(){{}}
-        function refreshProfileTransitionReasoningChip(){{}}
+        function _applyModelToDropdown(model){{pickedModel=model;return model;}}
+        function refreshProfileTransitionReasoningChip(model){{reasoningModel=model;}}
         function animateNextSessionListRefresh(){{}}
         function renderSessionList(){{return Promise.resolve();}}
         function _openProfileSwitchSessionBrowser(){{}}
@@ -1795,7 +1801,7 @@ def _run_profile_switch_settlement_harness(
         function showToast(...args){{toasts.push(args.map(String).join(' '));}}
         function _profileSwitchPanelLoad(){{return Promise.resolve();}}
         function _refreshProfileSwitchBackground(){{}}
-        function renderSessionListFromCache(){{}}
+        function renderSessionListFromCache(){{if(!_sessionListSkeletonActive)cachedRenders+=1;}}
         async function newSession(){{
           newSessionCalls+=1;
           if({str(reject_replacement).lower()}){{
@@ -1820,7 +1826,9 @@ def _run_profile_switch_settlement_harness(
             if(requested==='beta'&&{str(supersede_after_switch).lower()})_claimPaneNavigation();
             return Promise.resolve({{
               active:requested,is_default:requested==='default',
-              default_model:null,default_workspace:null,
+              default_model:requested==='beta'?'beta-model':'prior-default',
+              default_model_provider:requested==='beta'?'beta-provider':'prior-provider',
+              default_workspace:requested==='beta'?'/beta-workspace':'/prior-workspace',
             }});
           }}
           throw new Error(`unexpected API call: ${{path}}`);
@@ -1849,6 +1857,9 @@ def _run_profile_switch_settlement_harness(
             activeSid:S.session&&S.session.session_id,
             serverProfile,paneGeneration:_paneNavigationGeneration,
             newSessionInFlight:_newSessionInFlight!==null,toasts,newSessionCalls,
+            defaults:[window._defaultModel,window._activeProvider,S._profileDefaultWorkspace],
+            pendingOverrides:[S._pendingProfileModel,S._pendingProfileModelProvider,S._profileSwitchWorkspace,S._pendingSessionToolsets],
+            pickedModel,reasoningModel,cachedRenders,skeleton:_sessionListSkeletonActive,
           }}));
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
@@ -1936,6 +1947,27 @@ def test_failed_profile_rollback_keeps_committed_authority_and_surfaces_error():
     assert result["serverProfile"] == "beta"
     assert result["activeProfile"] == "beta"
     assert any("rollback failed" in toast for toast in result["toasts"])
+
+
+@pytest.mark.parametrize("supersede_pane", [False, True])
+def test_profile_rollback_restores_defaults_and_pending_overrides(supersede_pane):
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=False, reject_replacement=True, supersede_pane=supersede_pane,
+    )
+    assert result["defaults"] == ["prior-default", "prior-provider", "/prior-workspace"]
+    assert result["pendingOverrides"] == [
+        "prior-model", "prior-provider", "/prior-override", ["tools"]
+    ]
+    assert result["pickedModel"] == "prior-model"
+    assert result["reasoningModel"] == "prior-model"
+
+
+def test_abandoned_profile_switch_restores_sidebar_cache():
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=False, supersede_after_switch=True,
+    )
+    assert result["cachedRenders"] == 1
+    assert result["skeleton"] is False
 
 
 def _run_new_session_load_interleave_harness(

@@ -7127,6 +7127,32 @@ async function switchToProfile(name) {
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
   if (name && name === S.activeProfile) return true;
+  // Defaults and one-shot overrides belong to the committed profile. Keep their
+  // pre-switch authority until the replacement session has settled successfully.
+  const _previousProfileDefaults = {
+    model: window._defaultModel, provider: window._activeProvider,
+    workspace: S._profileDefaultWorkspace,
+    workspaceOverride: S._profileSwitchWorkspace,
+    pendingModel: S._pendingProfileModel,
+    pendingProvider: S._pendingProfileModelProvider,
+    toolsets: S._pendingSessionToolsets,
+  };
+  const _restoreProfileDefaults = () => {
+    window._defaultModel = _previousProfileDefaults.model;
+    window._activeProvider = _previousProfileDefaults.provider;
+    S._profileDefaultWorkspace = _previousProfileDefaults.workspace;
+    S._profileSwitchWorkspace = _previousProfileDefaults.workspaceOverride;
+    S._pendingProfileModel = _previousProfileDefaults.pendingModel;
+    S._pendingProfileModelProvider = _previousProfileDefaults.pendingProvider;
+    S._pendingSessionToolsets = _previousProfileDefaults.toolsets;
+    const model = S._pendingProfileModel || (S.session && S.session.model) || window._defaultModel;
+    const provider = S._pendingProfileModelProvider
+      || (S.session && S.session.model_provider) || window._activeProvider;
+    if (typeof _applyModelToDropdown === 'function') _applyModelToDropdown(model, $('modelSelect'), provider);
+    if (typeof refreshProfileTransitionReasoningChip === 'function') {
+      refreshProfileTransitionReasoningChip(model, provider);
+    }
+  };
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -7225,6 +7251,7 @@ async function switchToProfile(name) {
         S.activeProfile=rollback.active||_prevProfileName;
         S.activeProfileIsDefault=typeof rollback.is_default==='boolean'
           ?rollback.is_default:_prevProfileIsDefault;
+        _restoreProfileDefaults();
       }catch(rollbackError){
         _profileRollbackFailed=true;
         S.activeProfile=data.active||name;
@@ -7235,6 +7262,12 @@ async function switchToProfile(name) {
       }
       if(typeof startGatewaySSE==='function')startGatewaySSE();
       if(typeof applyBotName==='function')applyBotName();
+      // The waiting same-profile navigation uses cached rows; release the
+      // skeleton before it runs so renderSessionListFromCache can paint them.
+      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+      _sessionListSkeletonActive = false;
+      if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+      if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       return false;
     }
     S.activeProfile = data.active || name;
@@ -7460,6 +7493,7 @@ async function switchToProfile(name) {
         S.activeProfile = rollback.active || _prevProfileName;
         S.activeProfileIsDefault = typeof rollback.is_default === 'boolean'
           ? rollback.is_default : _prevProfileIsDefault;
+        _restoreProfileDefaults();
         if (_switchGen === _profileSwitchGeneration) {
           if (typeof startGatewaySSE === 'function') startGatewaySSE();
           if (typeof applyBotName === 'function') applyBotName();
