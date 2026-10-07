@@ -84,6 +84,7 @@ globalThis.startSessionStream = () => {};
 globalThis._setSessionViewedCount = () => {};
 window._clearPendingSelections = () => {};
 globalThis._appRootPath = () => '/';
+globalThis._newSessionPendingText = () => 'Creating new conversation…';
 
 let releaseCreate = null;
 let releaseDraft = null;
@@ -168,6 +169,19 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
   } else if (scenario === 'ordinary-b-pending-during-delete-a') {
     releaseCreate();
     await ordinary;
+  } else if (scenario === 'shortcut-during-delete-post') {
+    while (!releaseCreate) await new Promise(resolve => setTimeout(resolve, 0));
+    const shortcut = newSession(false);
+    releaseCreate();
+    await shortcut;
+  } else if (scenario === 'enter-during-delete-post') {
+    while (!releaseCreate) await new Promise(resolve => setTimeout(resolve, 0));
+    const send = (async () => {
+      if (!S.session) await newSession();
+      return S.session && S.session.session_id;
+    })();
+    releaseCreate();
+    globalThis.sentSessionId = await send;
   } else if (scenario === 'draft-load-failure') {
     while (!releaseCreate) await new Promise(resolve => setTimeout(resolve, 0));
     releaseCreate();
@@ -184,6 +198,7 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
     activeStreamId:S.activeStreamId,
     sendButtonUpdates,
     createWorkspaces,
+    sentSessionId:globalThis.sentSessionId||null,
   }));
 })().catch(error => {
   process.stderr.write(String(error && error.stack || error));
@@ -256,6 +271,21 @@ def test_delete_continuation_joins_pending_workspace_without_leaking_override(dr
     assert result["createWorkspaces"] == ["/ws/B"]
     assert result["profileWorkspace"] is None
     assert result["superseded"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_ctrl_cmd_k_joins_delete_new_chat_post(driver):
+    result = _run(driver, "shortcut-during-delete-post")
+    assert result["activeSid"] == "created-A"
+    assert result["createWorkspaces"] == ["/ws/A"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_enter_send_joins_delete_new_chat_post(driver):
+    result = _run(driver, "enter-during-delete-post")
+    assert result["activeSid"] == "created-A"
+    assert result["sentSessionId"] == "created-A"
+    assert result["createWorkspaces"] == ["/ws/A"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

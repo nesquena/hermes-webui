@@ -5033,7 +5033,7 @@ function _renderBatchActionBar(){
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
       if(newChatAfterDeleteResult&&newChatAfterDeleteResult.error){
         const error=newChatAfterDeleteResult.error;
-        showToast('Conversations deleted, but starting a new chat failed: '+(error&&error.message||error),0,'error');
+        showToast(t('session_batch_delete_new_chat_failed',error&&error.message||error),0,'error');
       }
       exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
@@ -10184,7 +10184,7 @@ async function deleteSession(sid, beforeDelete=null){
   else showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
   if(newChatAfterDeleteResult&&newChatAfterDeleteResult.error){
     const error=newChatAfterDeleteResult.error;
-    showToast('Conversation deleted, but starting a new chat failed: '+(error&&error.message||error),0,'error');
+    showToast(t('session_delete_new_chat_failed',error&&error.message||error),0,'error');
   }
   if(optimisticRendered) void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(sid));
   else await renderSessionList();

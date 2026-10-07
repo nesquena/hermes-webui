@@ -203,7 +203,10 @@ var _loadSessionGeneration = 0;
 var _profileSwitchGeneration = 0;
 var _allSessions = [];
 const _optimisticallyRemovedSessionIds = new Set();
-const t = k => k;
+const t = (k, ...args) => ({
+  session_delete_new_chat_failed: `Conversation deleted, but starting a new chat failed: ${args[0]}`,
+  session_batch_delete_new_chat_failed: `Conversations deleted, but starting a new chat failed: ${args[0]}`,
+}[k] || k);
 const showToast = m => { out.toasts.push(String(m)); };
 const setStatus = () => {};
 const assistantDisplayName = () => 'Hermes';
