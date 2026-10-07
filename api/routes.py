@@ -26677,6 +26677,19 @@ def _handle_chat_sync(handler, body):
                 _find_active_turn_checkpoint_index,
                 _merge_display_messages_after_agent_result,
                 _resolve_active_turn_authority,
+                AGENT_UPDATE_REQUIRED_ERROR,
+                AGENT_UPDATE_REQUIRED_HINT,
+                _add_supported_run_conversation_kwarg,
+                _adjacent_user_merge_signature,
+                _materialize_active_turn_user,
+                _messages_have_exact_prefix,
+                _retry_failed_silently,
+                _run_kwargs_carry_turn_timestamp,
+                _unprovable_rewrite_needs_newer_agent,
+                _callable_boundary_contract,
+                _classify_provider_error,
+                _provider_error_payload,
+                _strip_producer_turn_markers,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata_before_boundary,
                 _settle_current_turn_boundary,
@@ -26708,7 +26721,7 @@ def _handle_chat_sync(handler, body):
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
 
-            result = agent.run_conversation(
+            _sync_kwargs = dict(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_agent(
@@ -26721,6 +26734,16 @@ def _handle_chat_sync(handler, body):
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
+            # Same invocation-bound provenance as the streaming lanes: this turn's
+            # timestamp (through the #6935 signature shim) and the adjacent-merge
+            # signature, captured before the Agent can merge the history in place.
+            _sync_turn_stamp = time.time()
+            _add_supported_run_conversation_kwarg(
+                agent.run_conversation, _sync_kwargs, "persist_user_timestamp", _sync_turn_stamp,
+            )
+            _sync_merge_signature = _adjacent_user_merge_signature(_sync_kwargs)
+            _sync_timestamp_provenance = _run_kwargs_carry_turn_timestamp(_sync_kwargs)
+            result = agent.run_conversation(**_sync_kwargs)
     finally:
         # Same as the streaming worker's teardown: mirror the workspace into the
         # Agent-created state.db row on every exit, including a raised turn.
@@ -26749,10 +26772,31 @@ def _handle_chat_sync(handler, body):
         _result_messages = result.get("messages") or _previous_context_messages
         # Active-turn boundary is fixed BEFORE any restoration (same as streaming),
         # using whatever exact turn authority the result/Agent pair exported.
+        # A contract-v2 Agent proves its row through the turn token stamped on the
+        # exported marker row (as on the streaming lanes), so mint one up front.
+        _sync_turn_token = None
+        if _callable_boundary_contract(agent) >= 2:
+            from api.process_event_utils import build_active_turn_token
+
+            _sync_turn_token = build_active_turn_token(
+                f"sync:{s.session_id}:{uuid.uuid4().hex}", _sync_turn_stamp,
+            )
         _active_turn_identity = _resolve_active_turn_authority(
-            {"token": None, "text": msg, "current_turn_user_idx": None, "turn_id": ""},
+            {"token": _sync_turn_token, "text": msg, "timestamp": _sync_turn_stamp,
+             "current_turn_user_idx": None, "turn_id": ""},
             result=result,
             agent=agent,
+            merge_signature=_sync_merge_signature,
+            timestamp_provenance=_sync_timestamp_provenance,
+        )
+        # Fail closed at the response boundary: a rewritten (non-prefix) result
+        # without a proven current-turn coordinate is never returned as ``done``.
+        _sync_unproven_rewrite = bool(
+            _previous_context_messages
+            and not _messages_have_exact_prefix(_result_messages, _previous_context_messages)
+            and _find_active_turn_checkpoint_index(
+                _result_messages, _previous_context_messages, _active_turn_identity, msg,
+            ) is None
         )
         if (
             isinstance(_active_turn_identity, dict)
@@ -26781,6 +26825,9 @@ def _handle_chat_sync(handler, body):
                     f"sync:{s.session_id}:{_active_turn_identity['turn_id']}",
                     time.time(),
                 )
+        # The producer's ``_turn_id`` marker has done its job (the token now holds the
+        # authority); copy the rows without it before either projection is built.
+        _result_messages = _strip_producer_turn_markers(_result_messages)
         _turn_boundary = _active_turn_boundary(
             _result_messages, _previous_context_messages, _active_turn_identity, msg,
         )
@@ -26798,7 +26845,65 @@ def _handle_chat_sync(handler, body):
             _previous_context_messages,
             _next_context_messages,
             msg,
+            active_turn_identity=_active_turn_identity,
         )
+        _sync_error = None
+        if _sync_unproven_rewrite:
+            _sync_source = getattr(s, "pending_user_source", None) or "webui"
+            _sync_classification = None
+            if not _retry_failed_silently(result, agent):
+                # The result carries a failure of its own (provider error, failed or
+                # compression-exhausted run): report THAT, not an ownership error.
+                _sync_err = getattr(agent, "_last_error", None) or result.get("error") or ""
+                _sync_classification = _classify_provider_error(
+                    str(_sync_err) if _sync_err else "",
+                    _sync_err or None,
+                    silent_failure=not bool(_sync_err),
+                    result=result,
+                )
+                _sync_error = (
+                    _sync_classification["type"],
+                    (str(_sync_err) if isinstance(_sync_err, str) and _sync_err.strip() else "")
+                    or f"{_sync_classification['label']}.",
+                    _sync_classification.get("hint") or "",
+                )
+            elif _unprovable_rewrite_needs_newer_agent(
+                result, _previous_context_messages, _active_turn_identity, msg,
+            ):
+                _sync_error = ("agent_update_required", AGENT_UPDATE_REQUIRED_ERROR, AGENT_UPDATE_REQUIRED_HINT)
+            else:
+                _sync_error = (
+                    "turn_ownership_unproven",
+                    "The Agent rewrote the conversation history and its reply could not be "
+                    "tied to this turn, so it was not saved.",
+                    "Send the message again.",
+                )
+            _sync_error_payload = _provider_error_payload(_sync_error[1], _sync_error[0], _sync_error[2])
+            # Preserve the history as returned and materialize the pending prompt
+            # after it; the display keeps its history plus the prompt and an error row.
+            _pending_user = _materialize_active_turn_user(_active_turn_identity, msg, _sync_source)
+            _next_context_messages = list(_next_context_messages or []) + [dict(_pending_user)]
+            s.context_messages = _next_context_messages
+            s.messages = list(_previous_messages) + [dict(_pending_user), {
+                "role": "assistant",
+                "content": f"**Error:** {_sync_error[1]}\n\n*{_sync_error[2]}*",
+                "timestamp": int(time.time()),
+                "_error": True,
+            }]
+            s.save()
+            return j(
+                handler,
+                {
+                    "answer": "",
+                    "status": "error",
+                    "error": _sync_error_payload.get("message") or _sync_error[1],
+                    "error_type": _sync_error[0],
+                    "error_payload": _sync_error_payload,
+                    **({"error_classification": _sync_classification} if _sync_classification else {}),
+                    "session": public_session_projection(s.compact() | {"messages": s.messages}),
+                },
+                status=502,
+            )
         if _active_turn_identity.get("token"):
             _next_context_messages = _settle_current_turn_boundary(
                 _previous_context_messages,
