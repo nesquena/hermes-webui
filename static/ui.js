@@ -1933,7 +1933,13 @@ function _getDashboardChipRestoreMode(){
 function _dashboardBrowserUrl(status){
   if(!status||!status.running) return '';
   if(status.browser_url||status.url){
-    try{return new URL(status.browser_url||status.url).toString().replace(/\/$/,'');}
+    try{
+      const parsed=new URL(status.browser_url||status.url);
+      if(parsed.pathname==='/' || parsed.pathname===''){
+        return parsed.toString().replace(/\/$/,'');
+      }
+      return parsed.toString();
+    }
     catch(_){}
   }
   if(!status.port) return '';
