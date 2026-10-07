@@ -114,6 +114,12 @@
 
 ### Fixed
 
+- **Auto-follow holds up during fast streams.** While an agent streams quickly, scrolling up to read no longer yanks
+  you back to the bottom, and scrolling down to catch up re-attaches to the tail even though it keeps moving. A
+  trackpad jiggle near the bottom no longer drops the follow, and on iOS/Android post-render scroll artifacts and
+  portrait reflows are no longer mistaken for your own scrolling. Keyboard scrolling inside a nested pane such as
+  terminal output chains to the transcript at the pane's edge. Thanks @CharlesMcquade. (#7494)
+
 - **A MoA preset picked in the model picker runs its reference models once per call, not twice.** The WebUI also
   sent a per-turn `moa_config` for these sessions, which made the Agent run a second, independent MoA round on every
   API call, including each tool iteration, on top of the virtual provider's own. That roughly doubled reference and
