@@ -3631,6 +3631,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
+    const iconTint=s.icon_tint||localStorage.getItem('hermes-icon-tint')||'#08EBF1';
+    localStorage.setItem('hermes-icon-tint',iconTint);
+    _applyIconTint(iconTint);
     if(typeof setLocale==='function'){
       // #7622 (round 3): the settings payload's `s.language` is
       // absent (None) for a fresh install, so an explicit non-empty

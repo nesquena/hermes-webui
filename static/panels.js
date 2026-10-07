@@ -8701,7 +8701,8 @@ async function _autosaveAppearanceSettings(payload){
     if(saved&&saved.font_size){
       localStorage.setItem('hermes-font-size',saved.font_size);
     }
-    if(saved&&saved.icon_tint){
+    const iconTintInput=$('settingsIconTint');
+    if(saved&&saved.icon_tint&&iconTintInput&&iconTintInput.value===payload.icon_tint){
       localStorage.setItem('hermes-icon-tint',saved.icon_tint);
       if(typeof _applyIconTint==='function') _applyIconTint(saved.icon_tint);
     }

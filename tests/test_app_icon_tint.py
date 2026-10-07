@@ -270,6 +270,97 @@ assert.equal(saves,3);
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
+def test_icon_tint_applies_on_boot_without_opening_settings():
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required for the boot tint test")
+    script = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const boot = fs.readFileSync('static/boot.js','utf8');
+const start = boot.indexOf("const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');");
+const end = boot.indexOf("if(typeof setLocale==='function')",start);
+assert.ok(start>=0 && end>start);
+const apply = new Function('s','localStorage','_applyFontSize','_applyIconTint',boot.slice(start,end));
+const values = {};
+const storage = {getItem:key=>values[key]||null,setItem:(key,value)=>{values[key]=value;}};
+let icon = null;
+let font = null;
+apply({icon_tint:'#E5484D',font_size:'large'},storage,value=>{font=value;},value=>{icon=value;});
+assert.equal(icon,'#E5484D');
+assert.equal(values['hermes-icon-tint'],'#E5484D');
+assert.equal(font,'large');
+apply({icon_tint:'#7C3AED'},storage,()=>{},value=>{icon=value;});
+assert.equal(icon,'#7C3AED');
+assert.equal(values['hermes-icon-tint'],'#7C3AED');
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_older_autosave_response_does_not_replace_newer_icon_pick():
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required for the autosave ordering test")
+    script = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const boot = fs.readFileSync('static/boot.js','utf8');
+const panels = fs.readFileSync('static/panels.js','utf8');
+const input = {value:'#08EBF1'};
+const preview = {src:''};
+const link = {href:'static/favicon.svg'};
+const storage = {};
+const localStorage = {getItem:key=>storage[key]||null,setItem:(key,value)=>{storage[key]=value;}};
+const document = {querySelectorAll:selector=>selector==='link[rel~="icon"][type="image/svg+xml"]'?[link]:[]};
+const $ = id=>({settingsIconTint:input,iconTintPreview:preview})[id]||null;
+const window = {};
+const _ensureComposerControlVisibilityState=()=>{};
+const _renderComposerControlChips=()=>{};
+const _renderComposerSituationalControlChips=()=>{};
+let nextTimer = null;
+const setTimeout = callback=>{nextTimer=callback;return 1;};
+const clearTimeout = ()=>{nextTimer=null;};
+let _settingsAppearanceAutosaveTimer = null;
+let _settingsAppearanceAutosaveRetryPayload = null;
+const _appearancePayloadFromUi = ()=>({icon_tint:input.value,font_size:'large'});
+const _rememberAppearanceSaved = ()=>{};
+const _setAppearanceAutosaveStatus = ()=>{};
+const pending = [];
+const api = (_path,options)=>new Promise(resolve=>pending.push({payload:JSON.parse(options.body),resolve}));
+eval(boot.slice(boot.indexOf('function _normalizeIconTint('),boot.indexOf('function _applyFontSize(')));
+eval(panels.slice(panels.indexOf('function _scheduleAppearanceAutosave('),panels.indexOf('function _retryAppearanceAutosave(')));
+(async()=>{
+  _pickIconTint('#E5484D');
+  nextTimer(); // Red POST is in flight.
+  assert.equal(pending[0].payload.icon_tint,'#E5484D');
+  _pickIconTint('#7C3AED'); // Purple is selected before its debounce fires.
+  pending[0].resolve({icon_tint:'#E5484D'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(input.value,'#7C3AED');
+  assert.equal(preview.src,'static/favicon.svg?tint=7C3AED');
+  assert.equal(localStorage.getItem('hermes-icon-tint'),'#7C3AED');
+  _scheduleAppearanceAutosave(); // Another Appearance change (font size).
+  nextTimer();
+  assert.equal(pending[1].payload.icon_tint,'#7C3AED');
+  pending[1].resolve({icon_tint:'#7C3AED'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(input.value,'#7C3AED');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_icon_tint_picker_uses_skin_rings_and_aligns_wrapped_phone_rows():
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    for skin in ("graphite", "codex", "terracotta", "github", "geist-contrast"):
+        assert f':root[data-skin="{skin}"] ' in css
+        assert (
+            f':root[data-skin="{skin}"] #mainSettings .icon-tint-pick-btn.active' in css
+            or f':root[data-skin="{skin}"] .icon-tint-pick-btn.active' in css
+        )
+    assert (
+        "#mainSettings .icon-tint-control{display:flex;align-items:flex-start;" in css
+    )
+
+
 def test_icon_tint_control_autosaves():
     assert 'id="settingsIconTint"' in INDEX
     assert "function _pickIconTint(" in BOOT
