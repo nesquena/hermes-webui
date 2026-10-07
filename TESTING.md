@@ -15,6 +15,27 @@
 
 ---
 
+## Public-share media properties
+
+Run `./scripts/test.sh tests/test_share_properties.py tests/test_public_share_private_media_refs.py tests/test_session_public_share.py`.
+Use isolated `HERMES_HOME`, `HERMES_BASE_HOME`, `HERMES_CONFIG_PATH`, and
+`HERMES_WEBUI_STATE_DIR`. The deterministic seeds are `7868`, `20261003`, and
+`5391774930`. Tests execute the actual snapshot builder and Markdown renderer,
+inspect emitted image URLs independently, verify snapshot immutability and
+idempotence, and compare Node-decoded bytes for generated PNG and fixture JPEG/GIF
+images. Cases cover private-path encodings, malformed prefixes, public neighbors,
+titles, accepted data-URI forms, and 16 KiB/2 MiB boundaries. Three runtime-only
+mutations verify the privacy and image-preservation oracles fail on regressions.
+The shared bounded Markdown matcher is compared with the original regex spans,
+capture groups, substitutions and snapshots on 6,374 deterministic inputs.
+Malformed-alt/destination capacity cases reach 32,768 markers and fail an 8-second
+snapshot watchdog; this server bound does not claim a linear browser renderer.
+Node-dependent tests skip when Node is absent; the bounded capacity watchdog
+requires POSIX signals. Decoder acceptance does not certify browser pixel decoding;
+verify real public pages at desktop, narrow, and mobile widths separately. Raw HTML
+and arbitrary private hyperlinks are outside these media-token properties, and
+known-path/credential prose redaction remains active inside image-shaped text.
+
 ## Session-scoped media authorization
 
 Run `./scripts/test.sh tests/test_media_inline.py tests/test_media_session_preview_auth.py`.
@@ -2105,3 +2126,36 @@ Bridged CLI sessions:
   Matching empty wrappers such as `**MEDIA:**` must remain prose.
 - Recheck settled and safe/fade streaming output across callback boundaries.
   Automated coverage: renderer behavior, MEDIA consumer parity, and SMD stream tests.
+
+### Public-share privacy review regression
+
+Run `./scripts/test.sh tests/test_share_renderer_privacy_review.py` with isolated
+state. These cases call `build_share_snapshot` and production `renderMd`, including
+its real remote-image policy with a same-origin WebUI and an allowlisted public
+CDN. They cover browser authority slash folding, labels and destinations whose
+backticks keep adjacent HTML inert, closing code delimiters, `profile:` public
+URLs (including `profile://` in URL paths and prose), and complete raw `<img>`
+data-image attributes containing inert file metadata. Omitted file-link labels use
+the same numeric escaping as image labels, preserving link wrappers and literal
+backticks across encoded, nested quote, list, table and code-span forms. Bare
+`file://` before a backtick is removed, and a backtick-wrapped local URI with
+spaces is omitted completely while keeping its code delimiters.
+Invalid and shadowed data-image `src` attributes remain scrubbed. Raw HTML in
+omitted image labels remains text in paragraphs, lists, tables, and recursively
+rendered blockquotes; retaining labels must not introduce a new active image.
+Named/numeric entity labels retain their visible characters without adding a
+Markdown backtick delimiter; Chromium also verifies the visible label text.
+Plain-text titles retain literal label text and code delimiters without renderer
+escaping. Public HTTP(S) MEDIA references retain their scheme case in titles,
+including wrapped uppercase schemes, after private classification. Scheme-less
+file matching never consumes a suffix of another scheme; only rejected or
+shadowed raw data-image attribute payloads use a boundary-free scrub.
+
+For actual Chromium request and pixel-decoding evidence, run
+`python tests/browser_public_share_media_privacy.py --snapshot-python .venv/bin/python
+--evidence /tmp/share-privacy-browser.json` using a Python with Playwright and
+Chromium installed. This runs desktop (1280px) and narrow (390px) widths; every HTTP
+request is intercepted, and no real private file or provider is accessed. It must
+observe zero `/api/media` requests for private cases and decoded public controls.
+This gate does not widen the existing `/api/file*` route policy or certify arbitrary
+raw HTML privacy.
