@@ -9,8 +9,11 @@ get_state_db_regeneration_tail_snapshot project prefix_keys and tail_keys using 
 while projected tail rows retain raw api_content.
 """
 
+import json
 import sqlite3
 from api.models import (
+    Session,
+    reconciled_state_db_messages_for_session,
     _unwrap_steer_row_oob_marker,
     get_state_db_session_messages,
     get_state_db_session_message_keys_before_timestamp,
@@ -189,3 +192,102 @@ def test_state_db_regeneration_tail_snapshot_unwraps_steer(tmp_path, monkeypatch
     # tail_keys[1] must use clean text
     assert snapshot["tail_keys"][1][0] == "user"
     assert snapshot["tail_keys"][1][1] == "now deploy to prod"
+
+
+def test_legacy_sidecar_steer_collapses_with_state_db_on_reload_and_next_send(tmp_path, monkeypatch):
+    """A legacy pre-#7600 sidecar holding raw OOB steer frame collapses with state.db steer row to 1 row on reload and next-send."""
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL,
+            tool_calls TEXT,
+            display_kind TEXT,
+            api_content TEXT
+        )
+        """
+    )
+    # Insert normal user prompt
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        ("sess-legacy", "user", "initial prompt", 1000.0),
+    )
+    # Insert steer row in state.db
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp, display_kind) VALUES (?, ?, ?, ?, ?)",
+        ("sess-legacy", "user", STEER_FRAME, 1001.0, "steer"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr("api.models._active_state_db_path", lambda: db_path)
+
+    # Legacy sidecar with raw STEER_FRAME in both messages and context_messages
+    raw_steer_row = {
+        "role": "user",
+        "display_kind": "steer",
+        "content": STEER_FRAME,
+        "timestamp": 1001.0,
+    }
+    legacy_session = Session(
+        session_id="sess-legacy",
+        messages=[
+            {"role": "user", "content": "initial prompt", "timestamp": 1000.0},
+            dict(raw_steer_row),
+        ],
+        context_messages=[
+            {"role": "user", "content": "initial prompt", "timestamp": 1000.0},
+            dict(raw_steer_row),
+        ],
+    )
+
+    # 1. Reload (reconcile display messages)
+    reconciled_display = reconciled_state_db_messages_for_session(legacy_session, prefer_context=False)
+    # Must collapse to exactly 2 rows (initial prompt + 1 steer row), NOT duplicate the steer!
+    assert len(reconciled_display) == 2
+    assert reconciled_display[1]["role"] == "user"
+    assert reconciled_display[1]["display_kind"] == "steer"
+    assert reconciled_display[1]["content"] == "use the staging bucket this time"
+    assert reconciled_display[1]["api_content"] == STEER_FRAME
+
+    # 2. Next-send (reconcile context messages for provider)
+    reconciled_context = reconciled_state_db_messages_for_session(legacy_session, prefer_context=True)
+    # Must collapse to exactly 2 rows as well
+    assert len(reconciled_context) == 2
+    assert reconciled_context[1]["role"] == "user"
+    assert reconciled_context[1]["display_kind"] == "steer"
+    assert reconciled_context[1]["content"] == "use the staging bucket this time"
+    assert reconciled_context[1]["api_content"] == STEER_FRAME
+
+    # 3. Verify via Session.load from JSON file
+    sess_file = tmp_path / "sess-legacy.json"
+    sidecar_data = {
+        "session_id": "sess-legacy",
+        "messages": [
+            {"role": "user", "content": "initial prompt", "timestamp": 1000.0},
+            dict(raw_steer_row),
+        ],
+        "context_messages": [
+            {"role": "user", "content": "initial prompt", "timestamp": 1000.0},
+            dict(raw_steer_row),
+        ],
+    }
+    sess_file.write_text(json.dumps(sidecar_data), encoding="utf-8")
+    monkeypatch.setattr("api.models.SESSION_DIR", tmp_path)
+    loaded_session = Session.load("sess-legacy")
+    assert loaded_session is not None
+    assert loaded_session.messages[1]["content"] == "use the staging bucket this time"
+    assert loaded_session.messages[1]["api_content"] == STEER_FRAME
+    assert loaded_session.context_messages[1]["content"] == "use the staging bucket this time"
+    assert loaded_session.context_messages[1]["api_content"] == STEER_FRAME
+
+    reloaded_display = reconciled_state_db_messages_for_session(loaded_session, prefer_context=False)
+    assert len(reloaded_display) == 2
+    assert reloaded_display[1]["content"] == "use the staging bucket this time"
+    assert reloaded_display[1]["api_content"] == STEER_FRAME
+

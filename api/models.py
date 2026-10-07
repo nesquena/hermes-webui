@@ -1459,6 +1459,68 @@ def _validated_webui_pending_user_timestamp_identity(session, value):
     return (stream_id, pending_timestamp)
 
 
+_OOB_STEER_FRAME_RE = re.compile(
+    r'^\s*\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)\s*.*?)?\]\s*(.*?)\s*\[/OUT-OF-BAND\s+USER\s+MESSAGE\]\s*$',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _unwrap_steer_row_oob_marker(content):
+    """Unwrap a single complete [OUT-OF-BAND USER MESSAGE] frame (#7834).
+
+    When Hermes Agent persists a steer turn, it wraps the user instruction in
+    an out-of-band delivery frame so the runtime and replay loop can treat it
+    as an out-of-band injection.  In WebUI transcript queries and visible keys,
+    we project the clean user text while preserving the raw transport envelope
+    in ``api_content``.
+
+    Legacy tool rows, untyped user messages, and rows where markers are
+    multiple, nested, incomplete, or contain ambiguous delimiters are preserved
+    byte-for-byte.
+    """
+    if not isinstance(content, str):
+        return content
+    lower = content.lower()
+    if lower.count("[out-of-band user message") != 1 or lower.count("[/out-of-band user message]") != 1:
+        return content
+    m = _OOB_STEER_FRAME_RE.match(content)
+    if not m:
+        return content
+    return m.group(1).strip()
+
+
+def _normalize_sidecar_steer_row(message):
+    """Normalize complete typed steer frames in a sidecar message row (#7834)."""
+    if not isinstance(message, dict):
+        return
+    if message.get('role') == 'user' and message.get('display_kind') == 'steer':
+        raw_content = message.get('content')
+        if isinstance(raw_content, str):
+            unwrapped = _unwrap_steer_row_oob_marker(raw_content)
+            if unwrapped != raw_content:
+                if 'api_content' not in message or not message.get('api_content'):
+                    message['api_content'] = raw_content
+                message['content'] = unwrapped
+        elif isinstance(raw_content, list) and len(raw_content) == 1 and isinstance(raw_content[0], dict):
+            part = raw_content[0]
+            if part.get('type') == 'text' and isinstance(part.get('text'), str):
+                raw_text = part['text']
+                unwrapped = _unwrap_steer_row_oob_marker(raw_text)
+                if unwrapped != raw_text:
+                    if 'api_content' not in message or not message.get('api_content'):
+                        message['api_content'] = raw_text
+                    part['text'] = unwrapped
+
+
+def _normalize_sidecar_steer_messages(messages):
+    """Normalize complete typed steer frames in sidecar messages (#7834)."""
+    if not isinstance(messages, list):
+        return messages
+    for msg in messages:
+        _normalize_sidecar_steer_row(msg)
+    return messages
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1548,6 +1610,7 @@ class Session:
         # Preserve malformed persisted containers so save() can fail closed
         # instead of silently normalizing a dict/string to an empty transcript.
         self.messages = messages if messages is not None else []
+        _normalize_sidecar_steer_messages(self.messages)
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
@@ -1572,6 +1635,7 @@ class Session:
             )
         )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
+        _normalize_sidecar_steer_messages(self.context_messages)
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
         self.compression_anchor_summary = compression_anchor_summary
@@ -1986,6 +2050,10 @@ class Session:
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        if isinstance(data.get('messages'), list):
+            _normalize_sidecar_steer_messages(data['messages'])
+        if isinstance(data.get('context_messages'), list):
+            _normalize_sidecar_steer_messages(data['context_messages'])
         session = cls(**data)
         if _collapsed_partials:
             try:
@@ -10712,34 +10780,6 @@ def _decode_state_db_content(value):
     return decoded
 
 
-_OOB_STEER_FRAME_RE = re.compile(
-    r'^\s*\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)\s*.*?)?\]\s*(.*?)\s*\[/OUT-OF-BAND\s+USER\s+MESSAGE\]\s*$',
-    re.DOTALL | re.IGNORECASE,
-)
-
-
-def _unwrap_steer_row_oob_marker(content):
-    """Unwrap a single complete [OUT-OF-BAND USER MESSAGE] frame (#7834).
-
-    When Hermes Agent persists a steer turn, it wraps the user instruction in
-    an out-of-band delivery frame so the runtime and replay loop can treat it
-    as an out-of-band injection.  In WebUI transcript queries and visible keys,
-    we project the clean user text while preserving the raw transport envelope
-    in ``api_content``.
-
-    Legacy tool rows, untyped user messages, and rows where markers are
-    multiple, nested, incomplete, or contain ambiguous delimiters are preserved
-    byte-for-byte.
-    """
-    if not isinstance(content, str):
-        return content
-    lower = content.lower()
-    if lower.count("[out-of-band user message") != 1 or lower.count("[/out-of-band user message]") != 1:
-        return content
-    m = _OOB_STEER_FRAME_RE.match(content)
-    if not m:
-        return content
-    return m.group(1).strip()
 
 
 def _project_state_db_message(row, available, id_col, optional, *, include_row_identity=False):
@@ -14540,6 +14580,11 @@ def reconciled_state_db_messages_for_session(
             using_context_messages = True
     if not local_messages:
         local_messages = getattr(session, 'messages', None) or []
+    if session is not None:
+        _normalize_sidecar_steer_messages(getattr(session, 'messages', None))
+        _normalize_sidecar_steer_messages(getattr(session, 'context_messages', None))
+    if local_messages:
+        _normalize_sidecar_steer_messages(local_messages)
     if state_messages is None:
         session_id = getattr(session, 'session_id', None)
         session_profile = getattr(session, 'profile', None)
