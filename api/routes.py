@@ -26757,13 +26757,25 @@ def _handle_chat_start(handler, body, diag=None):
                 or explicit_model_pick
             ):
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
-        elif model_provider == "moa" and moa_config is None:
-            from api.commands import resolve_moa_config
+        elif model_provider == "moa":
+            from api.commands import agent_has_moa_virtual_provider, resolve_moa_config
 
-            try:
-                moa_config = resolve_moa_config(model)
-            except RuntimeError as e:
-                return bad(handler, str(e), 503)
+            if agent_has_moa_virtual_provider():
+                # hermes-agent serves the virtual ``moa`` provider itself and runs
+                # the selected preset through its MoA facade (profile-scoped
+                # config, fan-out cadence, degraded-reference policy). Also
+                # passing a per-turn ``moa_config`` makes run_conversation() run
+                # a SECOND, legacy fan-out + synthesis on every tool iteration,
+                # and the rewritten user message defeats the facade's per-turn
+                # reference cache. Never stack the two paths.
+                moa_config = None
+            elif moa_config is None:
+                # Older hermes-agent without the virtual provider: keep the
+                # legacy per-turn MoA path so a ``moa`` session still runs MoA.
+                try:
+                    moa_config = resolve_moa_config(model)
+                except RuntimeError as e:
+                    return bad(handler, str(e), 503)
         # NOTE: runtime-adapter selection is delegated to _start_run (shared
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
