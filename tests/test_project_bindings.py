@@ -543,3 +543,33 @@ def test_bind_model_update_without_provider_clears_stale_provider(
     )[2]
     assert "model" not in out
     assert "model_provider" not in out
+
+
+def test_bind_default_workspace_keeps_legacy_workspace(tmp_path):
+    """A default_workspace update on a LEGACY project must not drop its workspace.
+
+    Greptile P1 (2026-10-07T06:37:09Z): a legacy project carrying only
+    ``workspace: A`` that receives ``default_workspace: B`` seeded the bound
+    list as empty, stored only B and overwrote the compatibility alias — so A
+    vanished from quick-create and auto-assignment.
+    """
+    pid = _create_project()
+    ws_a = tmp_path / "legacy-keep-a"
+    ws_b = tmp_path / "legacy-keep-b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    a, b = str(ws_a), str(ws_b)
+
+    # Legacy bind: only the single `workspace` field, no `workspaces` list.
+    r1 = _post("/api/projects/bind", {"project_id": pid, "workspace": a})
+    assert r1.get("ok"), r1
+    assert r1["project"]["workspace"] == a
+
+    r2 = _post("/api/projects/bind", {"project_id": pid, "default_workspace": b})
+    assert r2.get("ok"), r2
+    proj = r2["project"]
+    bound = proj.get("workspaces") or []
+    assert a in bound, f"legacy workspace A must stay bound, got {bound}"
+    assert b in bound, f"the new default must be auto-added, got {bound}"
+    assert proj.get("default_workspace") == b
+    assert proj.get("workspace") in bound, "compatibility alias must stay bound"

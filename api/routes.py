@@ -18834,8 +18834,13 @@ def handle_post(handler, parsed) -> bool:
                 except (TypeError, ValueError) as e:
                     return bad(handler, str(e))
                 # Must be one of the bound workspaces — auto-add if needed so
-                # the invariant "default ∈ workspaces" always holds.
-                ws_list = proj.get("workspaces") or []
+                # the invariant "default ∈ workspaces" always holds. Use the
+                # canonical accessor (not `proj.get("workspaces") or []`) so a
+                # LEGACY project carrying only `workspace: A` keeps A in the
+                # bound set: starting from an empty list would store just B and
+                # then overwrite the compatibility alias, dropping A from both
+                # quick-create and auto-assignment.
+                ws_list = _project_workspaces(proj)
                 if dw_resolved not in ws_list:
                     try:
                         ws_list = _resolve_ws_list([*ws_list, dw_resolved])

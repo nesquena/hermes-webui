@@ -452,3 +452,30 @@ def test_backfill_uses_touch_updated_at_false_call_site():
     """The sweep body must call save(touch_updated_at=False)."""
     src = _read_routes_py()
     assert "s.save(touch_updated_at=False)" in src
+
+
+# ---------------------------------------------------------------------------
+# greptile re-review P1 (2026-10-07T06:37:09Z) — default_workspace drops the
+# legacy workspace on a project that only carries `workspace: A`.
+# ---------------------------------------------------------------------------
+
+
+def test_default_workspace_update_seeds_from_canonical_workspace_accessor():
+    """The default_workspace branch must seed the bound list canonically."""
+    src = _read_routes_py()
+    i = src.index('if "default_workspace" in body:')
+    seg = src[i:i + 2000]
+    assert "ws_list = _project_workspaces(proj)" in seg
+    assert 'ws_list = proj.get("workspaces") or []' not in seg
+
+
+def test_project_workspaces_falls_back_to_legacy_single_workspace():
+    """_project_workspaces must surface a legacy `workspace: A` as the bound set."""
+    import api.routes as routes
+
+    assert routes._project_workspaces({"workspace": "/ws/A"}) == ["/ws/A"]
+    assert routes._project_workspaces({"workspaces": ["/ws/A", "/ws/B"]}) == ["/ws/A", "/ws/B"]
+    # A list wins over the stale alias; empty/absent yields nothing.
+    assert routes._project_workspaces({"workspaces": ["/ws/B"], "workspace": "/ws/A"}) == ["/ws/B"]
+    assert routes._project_workspaces({}) == []
+    assert routes._project_workspaces(None) == []
