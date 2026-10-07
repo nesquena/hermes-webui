@@ -18152,6 +18152,17 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         from api.config import invalidate_provider_models_cache
         invalidate_provider_models_cache(provider_id)
+        # GET /api/providers (the Settings "Providers" card) keeps its own
+        # short-TTL cache keyed on config.yaml mtime. A model refresh does
+        # not touch config.yaml, so without this the card would keep
+        # echoing the stale pre-refresh catalog until the TTL lapses,
+        # making "Refresh models" look like a no-op (#7404).
+        try:
+            from api.providers import invalidate_providers_cache
+
+            invalidate_providers_cache()
+        except Exception:
+            logger.debug("providers cache invalidation failed", exc_info=True)
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":

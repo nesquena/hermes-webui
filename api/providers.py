@@ -41,6 +41,7 @@ from api.config import (
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
+    _provider_models_are_discovered_catalog,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
@@ -2640,6 +2641,47 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
 # SECTION: Public API
 
 
+def _live_custom_provider_models(provider_id: str) -> list[dict[str, str]]:
+    """Return the live catalog rows for a custom provider, or ``[]``.
+
+    Reuses ``get_available_models()`` so the Providers card and the model
+    picker read the *same* discovered catalog (#7404) instead of duplicating
+    the ``/v1/models`` probe. The picker prefixes non-active providers' ids
+    with ``@<provider>:`` for routing (``_apply_provider_prefix``); the
+    Providers card lists plain model IDs, so that prefix is stripped here.
+    Returns ``[]`` on any failure so the caller can fall back to the
+    configured ``models:`` list.
+    """
+    pid = str(provider_id or "").strip()
+    if not pid:
+        return []
+    try:
+        from api.config import get_available_models
+
+        payload = get_available_models() or {}
+    except Exception:
+        logger.debug("live custom-provider lookup failed for %s", pid, exc_info=True)
+        return []
+    prefix = f"@{pid}:"
+    for group in payload.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        if str(group.get("provider_id") or "") != pid:
+            continue
+        rows: list[dict[str, str]] = []
+        for model in group.get("models") or []:
+            if not isinstance(model, dict):
+                continue
+            mid = str(model.get("id") or "").strip()
+            if not mid:
+                continue
+            if mid.startswith(prefix):
+                mid = mid[len(prefix):]
+            rows.append({"id": mid, "label": mid})
+        return rows
+    return []
+
+
 def get_providers() -> dict[str, Any]:
     """Return a list of all known providers with their configuration status.
 
@@ -2941,6 +2983,20 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
+            # #7404: when ``models:`` is an auto-discovered catalog
+            # (``models_discovered: true`` with discovery not opted out)
+            # it is per-model discovery *metadata*, not a hand-curated
+            # allowlist — so the live ``/v1/models`` catalog is
+            # authoritative and the Providers card must agree with the
+            # model picker instead of echoing stale configured IDs (e.g.
+            # a model the provider has since retired). Mirrors the
+            # ``providers:`` branch and the custom_providers handling in
+            # ``get_available_models()``; fall back to the configured
+            # list only when the probe yields nothing.
+            if _provider_models_are_discovered_catalog(cp):
+                _live_cp_models = _live_custom_provider_models(cp_id)
+                if _live_cp_models:
+                    cp_models = _live_cp_models
             # Check for env var reference (${VAR_NAME} pattern)
             cp_api_key = str(cp.get("api_key") or "")
             cp_has_key = bool(cp_api_key.strip())
