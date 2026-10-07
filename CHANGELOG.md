@@ -127,6 +127,11 @@
 
 ### Fixed
 
+- **The Hermes dashboard link works when the dashboard is served under a sub-path.** A dashboard URL such as
+  `https://host/hermes/` is now accepted and opened with its path (and its trailing slash) intact, instead of being
+  rejected or cut back to the host. Backslashes and their encoded forms are still refused, and the server-side
+  reachability probe still targets the host only. Thanks @webtecnica. (#7909, fixes #7844)
+
 - **Work you stopped survives a restart.** When you press Stop, the partial reply and its tool cards are saved, and
   they now come back intact after the server restarts, on reload, in copies and branches, and in later turns. That
   includes conversations where Gateway questions were queued around the Stop, and older conversations recovered
