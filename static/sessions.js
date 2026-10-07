@@ -10531,6 +10531,57 @@ function _makeBindingsCombo(o){
 // All three fields use the SAME custom combobox component so the dropdowns
 // look identical; workspace options show name-first with the path as the
 // secondary line. Each field has a "(none)" option to unbind it.
+
+// Provider-scoped model keys for the bindings dialog. Two providers can offer
+// the same bare model id; the synthetic key is "provider\u001fvalue" so each
+// route stays independently selectable, while the WIRE value stays the model id
+// and the provider is sent separately.
+const _modelValueKeyFor=(val,prov)=>prov?(prov+"\u001f"+val):val;
+const _modelValueFor=(k)=>{const i=k.indexOf("\u001f");return i>=0?k.slice(i+1):k;};
+const _modelProvFor=(k)=>{const i=k.indexOf("\u001f");return i>=0?k.slice(0,i):"";};
+
+// Resolve the model-combobox key for a project's saved (model, provider)
+// binding.
+//
+// The server canonicalizes a provider-qualified id — '@custom:backup:model-a:free'
+// is stored as model 'model-a:free' with provider 'custom:backup' — so comparing
+// that bare id with the catalog option VALUE never matched. The dialog then
+// reopened on "(none)"/inherit-default and saving dropped model_provider, which
+// rerouted new sessions to whichever backend owned the bare id. Resolution is
+// therefore by IDENTITY (model + provider): the exact pair first, then the bare
+// model, then the composer's own matcher; a saved pair that is missing from the
+// current catalog is re-injected so it stays selectable AND re-savable instead
+// of being silently cleared.
+function _bindingModelKeyFor(proj, modelOptions, opts){
+  const o=opts||{};
+  const duplicates=!!o.duplicates;
+  const keyOf=(item)=>duplicates?((item&&item._key)||(item&&item.value)||''):((item&&item.value)||'');
+  const wantModel=String((proj&&proj.model)||'');
+  if(!wantModel) return '';
+  const wantProv=String((proj&&proj.model_provider)||'');
+  if(wantProv){
+    const exact=modelOptions.find(x=>x.value&&x._modelId===wantModel&&String(x._providerId||'')===wantProv);
+    if(exact) return keyOf(exact);
+  }
+  const bare=modelOptions.find(x=>x.value&&x._modelId===wantModel);
+  if(bare) return keyOf(bare);
+  if(typeof o.findModelInDropdown==='function'&&o.select){
+    let resolved=null;
+    try{ resolved=o.findModelInDropdown(wantModel,o.select,wantProv||undefined); }catch(_){}
+    if(resolved){
+      const hit=modelOptions.find(x=>x.value===resolved);
+      if(hit) return keyOf(hit);
+    }
+  }
+  const savedKey=duplicates?_modelValueKeyFor(wantModel,wantProv):wantModel;
+  modelOptions.push({
+    value:wantModel,name:wantModel,sub:wantProv,
+    _key:savedKey,_provider:wantProv,_modelId:wantModel,_providerId:wantProv,
+    _saved:true,
+  });
+  return savedKey;
+}
+
 function _showProjectBindingsDialog(proj){
   const overlay=document.createElement('div');
   overlay.className='project-bindings-overlay';
@@ -10718,12 +10769,24 @@ function _showProjectBindingsDialog(proj){
       }
     });
   }
-  // Provider-scoped key: same bare model id under multiple providers must not collapse.
-  // When duplicates exist, the synthetic key is "providervalue" for display/selection,
-  // wire value stays the bare model id (provider sent separately).
-  const _modelValueKeyFor=(val,prov)=>prov?(prov+""+val):val;
-  const _modelValueFor=(k)=>{const i=k.indexOf("");return i>=0?k.slice(i+1):k;};
-  const _modelProvFor=(k)=>{const i=k.indexOf("");return i>=0?k.slice(0,i):"";};
+  // Canonical (model, provider) identity per catalog option, resolved through
+  // the composer's own helper. Restoration must match on identity, not on the
+  // raw option value: the server canonicalizes '@custom:backup:model-a:free'
+  // to model 'model-a:free' + provider 'custom:backup', so value equality
+  // never hit and the dialog reopened on inherit-default. (Provider-scoped
+  // keys come from the module-level _modelValueKeyFor/_modelValueFor/
+  // _modelProvFor helpers.)
+  modelOptions.forEach(o=>{
+    if(!o.value){ o._modelId=''; o._providerId=''; return; }
+    let st=null;
+    try{
+      if(typeof _modelStateForSelect==='function'&&srcModelSel) st=_modelStateForSelect(srcModelSel,o.value);
+    }catch(_){}
+    o._modelId=(st&&st.model)||o.value;
+    // Per-option provider first (authoritative for THIS option: walks its own
+    // <optgroup>/data-provider chain), then the resolver's answer.
+    o._providerId=_optProviderId(o)||(st&&st.model_provider)||o.sub||'';
+  });
   const _hasDuplicateModelValues=(()=>{const c={};for(const o of modelOptions){if(!o.value)continue;c[o.value]=(c[o.value]||0)+1;}return Object.values(c).some(n=>n>1);})();
   if(_hasDuplicateModelValues){
     // Rewrite options to use provider-scoped keys so each provider route is independently selectable.
@@ -10731,25 +10794,11 @@ function _showProjectBindingsDialog(proj){
     // Preserve providers detail under _provider for clarity
     modelOptions.forEach(o=>{ o._provider=o.sub||""; });
   }
-  const _initialModelKey=(()=>{
-    if(!proj.model) return "";
-    const wantProv=String(proj.model_provider||"");
-    const _keyOf=(o)=>_hasDuplicateModelValues?((o&&o._key)||o.value):o.value;
-    // Restoration prefers the exact (model, provider) pair so a canonicalized
-    // binding reopens on the provider route it was saved with, not the first
-    // catalog entry that happens to share the bare model id.
-    if(wantProv){
-      const exact=modelOptions.find(o=>o.value===proj.model&&String(o.sub||"")===wantProv);
-      if(exact) return _keyOf(exact);
-    }
-    if(_hasDuplicateModelValues){
-      const k=_modelValueKeyFor(proj.model, wantProv);
-      if(modelOptions.some(o=>o._key===k)) return k;
-      const hit=modelOptions.find(o=>o.value===proj.model);
-      return hit?hit._key||hit.value:"";
-    }
-    return proj.model;
-  })();
+  const _initialModelKey=_bindingModelKeyFor(proj, modelOptions, {
+    duplicates:_hasDuplicateModelValues,
+    findModelInDropdown:(typeof _findModelInDropdown==='function')?_findModelInDropdown:null,
+    select:srcModelSel,
+  });
   const modelCombo=_makeBindingsCombo({
     placeholder:t('pb_none_inherit'),
     value:_initialModelKey,
@@ -10827,9 +10876,19 @@ function _showProjectBindingsDialog(proj){
       let _prov=null;
       if(_hasDuplicateModelValues){
         _prov=_modelProvFor(modelVal)||null;
-        if(!_prov&&hit) _prov=(hit.sub||null);
-      }else if(hit){
-        _prov=(hit.sub||null);
+      }
+      // `hit.sub` is the option's own authoritative provider (optgroup chain);
+      // `_providerId` is the fallback for an option we re-injected for a saved
+      // binding that is no longer in the catalog.
+      if(!_prov&&hit) _prov=(hit.sub||hit._providerId||null);
+      // Selection came from outside the catalog (a re-injected canonicalized
+      // binding), so resolve the pair through the composer's own model→provider
+      // resolver before falling back to parsing the raw id.
+      if(!_prov&&typeof _modelStateForSelect==='function'&&srcModelSel){
+        try{
+          const st=_modelStateForSelect(srcModelSel,_bare);
+          if(st&&st.model_provider) _prov=st.model_provider;
+        }catch(_){}
       }
       // Last resort: derive the provider from the model id itself (handles a
       // provider-qualified id whose catalog option isn't loaded yet, e.g.

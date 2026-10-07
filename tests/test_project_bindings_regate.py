@@ -18,8 +18,13 @@ SHOULD  the bind worker must self-unregister from the drain registry; the chip
 """
 
 import json
+import shutil
+import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +121,18 @@ def test_bindings_dialog_resolves_provider_via_optgroup_helper():
     # Option collection uses it, never a bare dataset read.
     assert "const provider=_optProviderId(o);" in src
     assert "const provider=(o.dataset&&o.dataset.provider)||'';" not in src
-    # Restoration prefers the exact (model, provider) pair.
-    assert 'modelOptions.find(o=>o.value===proj.model&&String(o.sub||"")===wantProv)' in src
+    # Restoration matches on the canonical (model, provider) IDENTITY, not on
+    # the raw option VALUE: the server canonicalizes
+    # '@custom:backup:model-a:free' to model 'model-a:free' + provider
+    # 'custom:backup', so value equality never hit and the dialog reopened on
+    # inherit-default with the provider dropped on save (re-gate 2026-10-07).
+    assert "o._modelId=(st&&st.model)||o.value;" in src
+    assert "o._providerId=_optProviderId(o)||(st&&st.model_provider)||o.sub||'';" in src
+    assert "x.value&&x._modelId===wantModel&&String(x._providerId||'')===wantProv" in src
+    assert "const _initialModelKey=_bindingModelKeyFor(proj, modelOptions, {" in src
+    # A saved pair that is missing from the current catalog is re-injected so
+    # it stays selectable AND re-savable instead of being silently cleared.
+    assert "_saved:true," in src
     # Saving never persists null for a provider-qualified model id.
     assert "_prov=_getOptionProviderId({value:_bare})||null;" in src
 
@@ -407,11 +422,23 @@ def test_delete_endpoint_cancels_sweeps_before_removing_project():
     """The delete handler cancels + joins sweeps before it unlinks sessions."""
     src = _read_routes_py()
     i = src.index('parsed.path == "/api/projects/delete"')
-    seg = src[i:i + 5000]
+    seg = src[i:i + 9000]
     cancel_i = seg.index('_auto_assign_cancel_sweeps(body["project_id"])')
     save_i = seg.index("save_projects(projects)")
     assert cancel_i < save_i, "cancellation must precede project removal"
     assert '_auto_assign_finish_deleting(body["project_id"])' in seg
+    # A drain that fails must refuse the deletion entirely (503) instead of
+    # removing a project whose sweep can still write project_id (re-gate
+    # 2026-10-07, finding 3).
+    assert 'if not _auto_assign_cancel_sweeps(body["project_id"]):' in seg
+    assert '_auto_assign_abort_deleting(body["project_id"])' in seg
+    assert "503" in seg
+    # The catalog is RELOADED after the drain, inside the shared mutation lock:
+    # saving the list read before the join erased a project created meanwhile
+    # (re-gate 2026-10-07, finding 4).
+    lock_i = seg.index("with _PROJECTS_CATALOG_LOCK:")
+    assert cancel_i < lock_i < save_i, "reload must follow the drain"
+    assert "p for p in load_projects()" in seg
 
 
 # ---------------------------------------------------------------------------
@@ -486,3 +513,350 @@ def test_auto_assign_launch_guard_uses_canonical_workspace_accessor():
     src = _read_routes_py()
     assert 'if proj.get("auto_assign") and _project_workspaces(proj):' in src
     assert 'if proj.get("auto_assign") and proj.get("workspaces"):' not in src
+
+
+# ---------------------------------------------------------------------------
+# Re-gate 2026-10-07T10:29:19Z — the three backend findings are one race
+# between deletion and the sweep lifecycle, seen from three orderings:
+#
+#   (a) "worker admitted late"      — a delete that lands between bind starting
+#                                     its worker and the worker's own admission;
+#   (b) "worker stuck past the join"— a sweep that outlives the join timeout;
+#   (c) "create during the drain"   — the catalog saved after the join is the
+#                                     stale list read before it.
+#
+# One ordering per test, each deterministic.
+# ---------------------------------------------------------------------------
+
+
+def _install_project_route_stubs(monkeypatch, projects, index_path=None):
+    """Stub only persistence/trust lookups so the route logic runs for real.
+
+    ``load_projects`` returns a FRESH copy per call, exactly like the
+    disk-backed reader, so a handler's early read really is a stale snapshot;
+    ``save_projects`` writes back into ``projects`` in place.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes, "load_projects", lambda *a, **k: [dict(p) for p in projects]
+    )
+    monkeypatch.setattr(
+        routes,
+        "save_projects",
+        lambda ps: projects.__setitem__(slice(None), [dict(p) for p in ps]),
+    )
+    if index_path is not None:
+        monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_path)
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "load_workspaces", lambda: [])
+    monkeypatch.setattr(routes, "save_workspaces", lambda wss: None)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda p, **_kw: Path(p))
+
+
+def _post_project_route(monkeypatch, path, body, responses):
+    """Drive a project route in-process; each response lands in ``responses``.
+
+    The recorder appends to a caller-owned list (rather than capturing into a
+    dict) because concurrent drivers replace ``routes.j`` / ``routes.bad``
+    between calls; responses are identified by payload shape, not by handler.
+    """
+    import api.routes as routes
+
+    def _record(payload, status):
+        responses.append({"payload": payload, "status": status})
+        return True
+
+    monkeypatch.setattr(routes, "read_body", lambda handler: dict(body))
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None, **kw: _record(
+            payload, status
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: _record({"error": msg}, status),
+    )
+    return routes.handle_post(
+        SimpleNamespace(command="POST"), SimpleNamespace(path=path)
+    )
+
+
+def test_bind_refuses_to_start_a_sweep_for_a_project_being_deleted():
+    """Ordering (a): admission is atomic with the start, so nothing is launched.
+
+    The old flow started the worker unconditionally and admitted it from inside
+    the worker: a delete landing in that window found nothing to join, cleared
+    its deleting marker in the `finally`, and the late sweep then filed
+    sessions under the removed project.
+    """
+    import api.routes as routes
+
+    pid = "proj_regate_admit_late"
+    started = threading.Event()
+    t = threading.Thread(target=lambda: started.set(), daemon=True)
+    routes._AUTO_ASSIGN_DELETING.add(pid)
+    try:
+        assert routes._auto_assign_start_sweep(pid, t) is False
+        assert not started.wait(0.2), "a refused admission must not start the worker"
+        assert pid not in routes._AUTO_ASSIGN_SWEEPS
+    finally:
+        routes._auto_assign_finish_deleting(pid)
+
+
+def test_admitted_sweep_is_registered_and_always_joinable():
+    """Every registered sweep is already running, so a delete can always join it."""
+    import api.routes as routes
+
+    pid = "proj_regate_joinable"
+    ran = threading.Event()
+    t = threading.Thread(target=lambda: ran.set(), daemon=True)
+    try:
+        assert routes._auto_assign_start_sweep(pid, t) is True
+        assert pid in routes._AUTO_ASSIGN_SWEEPS
+        assert ran.wait(5)
+        assert routes._auto_assign_cancel_sweeps(pid, timeout=5.0) is True
+    finally:
+        routes._auto_assign_finish_deleting(pid)
+        routes._auto_assign_sweep_end(pid, t)
+    assert pid not in routes._AUTO_ASSIGN_SWEEPS
+
+
+def test_cancel_sweeps_reports_failure_when_a_worker_outlives_the_join():
+    """Ordering (b): a stuck sweep makes the drain report failure, not success."""
+    import api.routes as routes
+
+    pid = "proj_regate_stuck"
+    release = threading.Event()
+
+    def _sweep():
+        routes._auto_assign_sweep_begin(pid)
+        try:
+            release.wait(10)
+        finally:
+            routes._auto_assign_sweep_end(pid)
+
+    t = threading.Thread(target=_sweep, daemon=True)
+    assert routes._auto_assign_start_sweep(pid, t) is True
+    try:
+        assert routes._auto_assign_cancel_sweeps(pid, timeout=0.2) is False
+        # ...and the claim can be released so the intact project stays usable.
+        routes._auto_assign_abort_deleting(pid)
+        assert pid not in routes._AUTO_ASSIGN_DELETING
+    finally:
+        release.set()
+        t.join(5)
+        routes._auto_assign_finish_deleting(pid)
+    assert not t.is_alive()
+
+
+def test_delete_returns_503_and_keeps_the_project_when_a_sweep_cannot_drain(
+    tmp_path, monkeypatch
+):
+    """Ordering (b) end-to-end: the handler refuses instead of orphaning rows."""
+    import api.routes as routes
+
+    pid = "proj_regate_503"
+    projects = [{"project_id": pid, "name": "Busy", "profile": "default"}]
+    _install_project_route_stubs(monkeypatch, projects, tmp_path / "no-index.json")
+    release = threading.Event()
+
+    def _sweep():
+        routes._auto_assign_sweep_begin(pid)
+        try:
+            release.wait(10)
+        finally:
+            routes._auto_assign_sweep_end(pid)
+
+    t = threading.Thread(target=_sweep, daemon=True)
+    assert routes._auto_assign_start_sweep(pid, t) is True
+    real_cancel = routes._auto_assign_cancel_sweeps
+    # The handler joins with its 10 s default; shrink it for the test.
+    monkeypatch.setattr(
+        routes,
+        "_auto_assign_cancel_sweeps",
+        lambda project_id, timeout=10.0: real_cancel(project_id, timeout=0.2),
+    )
+    captured = []
+    try:
+        assert (
+            _post_project_route(
+                monkeypatch, "/api/projects/delete", {"project_id": pid}, captured
+            )
+            is True
+        )
+        assert [r["status"] for r in captured] == [503], captured
+        assert [p["project_id"] for p in projects] == [pid], "project must stay intact"
+        assert pid not in routes._AUTO_ASSIGN_DELETING, "claim released for a retry"
+    finally:
+        release.set()
+        t.join(5)
+        routes._auto_assign_finish_deleting(pid)
+
+
+def test_create_during_the_delete_drain_survives_the_save(tmp_path, monkeypatch):
+    """Ordering (c): the delete must not erase a project created while it waits.
+
+    The handler read the catalog BEFORE joining its sweeps and saved that stale
+    list afterwards; a project created during the (up to 10 s) join vanished.
+    """
+    import api.routes as routes
+
+    pid = "proj_regate_drain"
+    other = "proj_regate_other"
+    projects = [
+        {"project_id": pid, "name": "Doomed", "profile": "default"},
+        {"project_id": other, "name": "Keeper", "profile": "default"},
+    ]
+    _install_project_route_stubs(monkeypatch, projects, tmp_path / "no-index.json")
+
+    hold = threading.Event()
+    entered = threading.Event()
+
+    def _sweep():
+        routes._auto_assign_sweep_begin(pid)
+        try:
+            hold.wait(10)
+        finally:
+            routes._auto_assign_sweep_end(pid)
+
+    t = threading.Thread(target=_sweep, daemon=True)
+    assert routes._auto_assign_start_sweep(pid, t) is True
+
+    real_cancel = routes._auto_assign_cancel_sweeps
+
+    def _hooked_cancel(project_id, timeout=10.0):
+        entered.set()
+        return real_cancel(project_id, timeout)
+
+    monkeypatch.setattr(routes, "_auto_assign_cancel_sweeps", _hooked_cancel)
+
+    responses = []
+
+    def _delete():
+        _post_project_route(
+            monkeypatch, "/api/projects/delete", {"project_id": pid}, responses
+        )
+
+    del_thread = threading.Thread(target=_delete)
+    del_thread.start()
+    try:
+        assert entered.wait(5), "delete never reached the sweep drain"
+        _post_project_route(
+            monkeypatch, "/api/projects/create", {"name": "BornDuringDrain"}, responses
+        )
+        # Only the create's response is in yet (the delete is still draining).
+        assert [r["status"] for r in responses if r["payload"].get("project")] == [200], responses
+    finally:
+        hold.set()
+        del_thread.join(10)
+        routes._auto_assign_finish_deleting(pid)
+
+    names = [p["name"] for p in projects]
+    assert "BornDuringDrain" in names, f"the drain save erased a new project: {names}"
+    assert "Doomed" not in names, names
+    assert "Keeper" in names, names
+    assert [r["status"] for r in responses if r["payload"] == {"ok": True}] == [200], responses
+
+
+# ---------------------------------------------------------------------------
+# CORE 1 (re-gate follow-up) — provider binding restoration, run for real
+# ---------------------------------------------------------------------------
+
+
+def _run_node(tmp_path: Path, name: str, script: str) -> str:
+    if shutil.which("node") is None:
+        pytest.skip("node is required for the dialog resolution probe")
+    script_path = tmp_path / name
+    script_path.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        ["node", str(script_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    return result.stdout
+
+
+_BINDING_KEY_PROBE = """
+__HELPERS__
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+
+// Case 1 — server-canonicalized pair matches the qualified catalog option.
+const opts1 = [
+  {value: '', name: '(none)'},
+  {value: '@custom:backup:model-a:free', name: 'model-a:free', sub: 'custom:backup',
+   _modelId: 'model-a:free', _providerId: 'custom:backup'},
+  {value: 'gpt-4o-mini', name: 'gpt-4o-mini', sub: 'openai',
+   _modelId: 'gpt-4o-mini', _providerId: 'openai'},
+];
+assert(
+  _bindingModelKeyFor({model: 'model-a:free', model_provider: 'custom:backup'}, opts1, {duplicates: false})
+    === '@custom:backup:model-a:free',
+  'canonicalized pair must restore onto its qualified catalog option'
+);
+
+// Case 2 — duplicate bare ids stay provider-scoped.
+const opts2 = [
+  {value: '@openai:gpt-4o', name: 'gpt-4o', sub: 'openai',
+   _key: 'openai\\u001fgpt-4o', _modelId: 'gpt-4o', _providerId: 'openai'},
+  {value: '@azure:gpt-4o', name: 'gpt-4o', sub: 'azure',
+   _key: 'azure\\u001fgpt-4o', _modelId: 'gpt-4o', _providerId: 'azure'},
+];
+assert(
+  _bindingModelKeyFor({model: 'gpt-4o', model_provider: 'azure'}, opts2, {duplicates: true})
+    === 'azure\\u001fgpt-4o',
+  'the saved provider route must win over the first catalog entry'
+);
+
+// Case 3 — a saved pair missing from the catalog is re-injected, not dropped.
+const opts3 = [{value: 'gpt-4o-mini', name: 'gpt-4o-mini', sub: 'openai',
+                _modelId: 'gpt-4o-mini', _providerId: 'openai'}];
+const key3 = _bindingModelKeyFor({model: 'model-a:free', model_provider: 'custom:backup'}, opts3, {duplicates: false});
+assert(key3 === 'model-a:free', 'the saved pair must stay selectable: ' + key3);
+const injected = opts3.filter(o => o._saved)[0];
+assert(injected && injected.value === 'model-a:free' && injected.sub === 'custom:backup',
+  'the saved pair must be re-injected with its provider');
+assert(_modelValueFor(key3) === 'model-a:free', 'wire model id round-trips');
+
+// ...and the provider survives the provider-scoped key form too.
+const opts4 = [{value: '@openai:a', _key: 'openai\\u001fa', _modelId: 'a', _providerId: 'openai'}];
+const key4 = _bindingModelKeyFor({model: 'm', model_provider: 'p'}, opts4, {duplicates: true});
+assert(key4 === 'p\\u001fm', key4);
+assert(_modelValueFor(key4) === 'm' && _modelProvFor(key4) === 'p', 'scoped key round-trips');
+
+// Case 4 — the composer's own matcher is the fallback when identity is absent.
+const opts5 = [{value: '@custom:backup:model-a:free'}];
+assert(
+  _bindingModelKeyFor(
+    {model: 'model-a:free', model_provider: 'custom:backup'},
+    opts5,
+    {duplicates: false, select: {}, findModelInDropdown: () => '@custom:backup:model-a:free'}
+  ) === '@custom:backup:model-a:free',
+  'findModelInDropdown fallback'
+);
+
+// Case 5 — no saved model, and a bare (provider-less) binding.
+assert(_bindingModelKeyFor({}, opts1, {duplicates: false}) === '', 'no saved model => (none)');
+assert(
+  _bindingModelKeyFor({model: 'gpt-4o-mini'}, opts3, {duplicates: false}) === 'gpt-4o-mini',
+  'bare saved model matches by identity'
+);
+console.log('ok');
+"""
+
+
+def test_binding_model_key_resolution_matches_by_identity(tmp_path):
+    """Run the shipped restoration logic under node (not a text assertion)."""
+    src = _read_sessions_js()
+    helpers = src[src.index("const _modelValueKeyFor=") : src.index("function _showProjectBindingsDialog(")]
+    assert "_bindingModelKeyFor" in helpers
+    script = _BINDING_KEY_PROBE.replace("__HELPERS__", helpers)
+    assert _run_node(tmp_path, "binding_model_key_probe.js", script).strip() == "ok"

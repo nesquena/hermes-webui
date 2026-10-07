@@ -580,27 +580,71 @@ _AUTO_ASSIGN_SWEEPS: dict = {}
 _AUTO_ASSIGN_SWEEPS_LOCK = threading.Lock()
 _AUTO_ASSIGN_DELETING: set = set()
 
+# Catalog mutation lock. Every project-list mutation (create / rename / bind /
+# delete) does load → modify → save, and each of those read-modify-write pairs
+# must be atomic against the others: a delete that waits several seconds for
+# sweeps used to save the list it read BEFORE the wait, erasing any project
+# created meanwhile (`api/routes.py:19127`). Reentrant so a mutation may call
+# helpers that take it again.
+_PROJECTS_CATALOG_LOCK = threading.RLock()
 
-def _auto_assign_sweep_begin(project_id) -> bool:
-    """Admit a backfill sweep for ``project_id`` unless it is being deleted."""
+
+def _auto_assign_sweep_begin(project_id, thread=None) -> bool:
+    """Admit ``thread`` (default: the caller) as a sweep for ``project_id``.
+
+    Returns False while the project is being deleted, so no sweep can be
+    started that deletion would not join. ``thread`` is explicit because
+    /api/projects/bind admits the worker it starts (see
+    ``_auto_assign_start_sweep``).
+    """
     if not project_id:
+        return True
+    thr = threading.current_thread() if thread is None else thread
+    with _AUTO_ASSIGN_SWEEPS_LOCK:
+        if project_id in _AUTO_ASSIGN_DELETING:
+            return False
+        _AUTO_ASSIGN_SWEEPS.setdefault(project_id, set()).add(thr)
+        return True
+
+
+def _auto_assign_start_sweep(project_id, thread) -> bool:
+    """Admit AND start ``thread`` atomically against deletion.
+
+    Registering the sweep inside the worker left a window: a delete landing
+    between ``bind`` starting the thread and the worker's own admission found
+    nothing to join, removed the project, cleared its deleting marker in the
+    ``finally``, and the late worker then filed sessions under the removed
+    project. Registering under the same lock that deletion snapshots keeps the
+    invariant deletion relies on — every registered sweep is already running,
+    so it can always be joined.
+    """
+    if not project_id:
+        thread.start()
         return True
     with _AUTO_ASSIGN_SWEEPS_LOCK:
         if project_id in _AUTO_ASSIGN_DELETING:
             return False
-        _AUTO_ASSIGN_SWEEPS.setdefault(project_id, set()).add(threading.current_thread())
+        # Start while holding the lock, then register: the worker cannot
+        # finish (and deregister itself) before it is in the bucket, because
+        # `_auto_assign_sweep_end` needs this same lock.
+        try:
+            thread.start()
+        except Exception:
+            raise
+        _AUTO_ASSIGN_SWEEPS.setdefault(project_id, set()).add(thread)
         return True
 
 
-def _auto_assign_sweep_end(project_id) -> None:
-    """Unregister the current thread's sweep (never leave a dead Thread behind)."""
+def _auto_assign_sweep_end(project_id, thread=None) -> None:
+    """Unregister a sweep thread (never leave a dead Thread behind)."""
     if not project_id:
         return
+    thr = threading.current_thread() if thread is None else thread
     with _AUTO_ASSIGN_SWEEPS_LOCK:
         bucket = _AUTO_ASSIGN_SWEEPS.get(project_id)
         if not bucket:
             return
-        bucket.discard(threading.current_thread())
+        bucket.discard(thr)
         if not bucket:
             _AUTO_ASSIGN_SWEEPS.pop(project_id, None)
 
@@ -613,15 +657,19 @@ def _auto_assign_sweep_cancelled(project_id) -> bool:
         return project_id in _AUTO_ASSIGN_DELETING
 
 
-def _auto_assign_cancel_sweeps(project_id, timeout: float = 10.0) -> None:
+def _auto_assign_cancel_sweeps(project_id, timeout: float = 10.0) -> bool:
     """Mark ``project_id`` deleting and join its in-flight sweeps.
 
     Called by /api/projects/delete BEFORE the project is removed and its
     sessions unlinked, so a sweep can neither persist a project_id for a
     project that no longer exists nor re-file rows the unlink just cleared.
+
+    Returns True only when every admitted sweep has exited. False means one is
+    still alive (join failed, or it outlived ``timeout``): the caller MUST NOT
+    remove the project then — that worker can still persist ``project_id``.
     """
     if not project_id:
-        return
+        return True
     with _AUTO_ASSIGN_SWEEPS_LOCK:
         _AUTO_ASSIGN_DELETING.add(project_id)
         threads = list(_AUTO_ASSIGN_SWEEPS.get(project_id, ()))
@@ -631,13 +679,35 @@ def _auto_assign_cancel_sweeps(project_id, timeout: float = 10.0) -> None:
             continue
         try:
             thr.join(timeout)
-            if thr.is_alive():
-                logger.warning(
-                    "auto-assign sweep for project %s still running after %.1fs; "
-                    "proceeding with deletion", project_id, timeout,
-                )
         except Exception:
-            pass
+            logger.debug("auto-assign sweep join failed for project %s", project_id)
+    # Re-check under the lock: any registered thread still alive blocks the
+    # deletion instead of being silently ignored.
+    with _AUTO_ASSIGN_SWEEPS_LOCK:
+        alive = [
+            thr for thr in _AUTO_ASSIGN_SWEEPS.get(project_id, ())
+            if thr is not current and thr.is_alive()
+        ]
+    if alive:
+        logger.warning(
+            "auto-assign sweep for project %s still running after %.1fs; "
+            "refusing deletion", project_id, timeout,
+        )
+        return False
+    return True
+
+
+def _auto_assign_abort_deleting(project_id) -> None:
+    """Release the deletion claim WITHOUT removing the project.
+
+    Used when a delete is refused because its sweeps could not be drained: the
+    project stays intact (so a late sweep's write is harmless and correct) and
+    must remain both sweepable and deletable once that worker exits.
+    """
+    if not project_id:
+        return
+    with _AUTO_ASSIGN_SWEEPS_LOCK:
+        _AUTO_ASSIGN_DELETING.discard(project_id)
 
 
 def _auto_assign_finish_deleting(project_id) -> None:
@@ -18813,25 +18883,26 @@ def handle_post(handler, parsed) -> bool:
         color = body.get("color")
         if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
             return bad(handler, "Invalid color format")
-        projects = load_projects()
-        # #3331 follow-up (Codex+Opus gate): validate the optional client-supplied
-        # `profile` before stamping it, mirroring /api/profile/switch — otherwise a
-        # client could create a project tagged with an arbitrary/unknown profile,
-        # producing hidden cross-profile rows that can't be managed normally.
-        _requested_profile = str(body.get('profile') or "").strip()
-        if _requested_profile and _requested_profile != "default":
-            from api.profiles import _PROFILE_ID_RE
-            if not _PROFILE_ID_RE.fullmatch(_requested_profile):
-                return bad(handler, "invalid profile")
-        proj = {
-            "project_id": uuid.uuid4().hex[:12],
-            "name": name,
-            "color": color,
-            "profile": _requested_profile or get_active_profile_name() or 'default',
-            "created_at": time.time(),
-        }
-        projects.append(proj)
-        save_projects(projects)
+        with _PROJECTS_CATALOG_LOCK:
+            projects = load_projects()
+            # #3331 follow-up (Codex+Opus gate): validate the optional client-supplied
+            # `profile` before stamping it, mirroring /api/profile/switch — otherwise a
+            # client could create a project tagged with an arbitrary/unknown profile,
+            # producing hidden cross-profile rows that can't be managed normally.
+            _requested_profile = str(body.get('profile') or "").strip()
+            if _requested_profile and _requested_profile != "default":
+                from api.profiles import _PROFILE_ID_RE
+                if not _PROFILE_ID_RE.fullmatch(_requested_profile):
+                    return bad(handler, "invalid profile")
+            proj = {
+                "project_id": uuid.uuid4().hex[:12],
+                "name": name,
+                "color": color,
+                "profile": _requested_profile or get_active_profile_name() or 'default',
+                "created_at": time.time(),
+            }
+            projects.append(proj)
+            save_projects(projects)
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/rename":
@@ -18841,23 +18912,24 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         import re as _re
 
-        projects = load_projects()
-        proj = next(
-            (p for p in projects if p["project_id"] == body["project_id"]), None
-        )
-        if not proj:
-            return bad(handler, "Project not found", 404)
-        # #1614: a project can only be renamed by the profile that owns it.
-        active_profile = get_active_profile_name()
-        if not _profiles_match(proj.get("profile"), active_profile):
-            return bad(handler, "Project not found", 404)
-        proj["name"] = body["name"].strip()[:128]
-        if "color" in body:
-            color = body["color"]
-            if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
-                return bad(handler, "Invalid color format")
-            proj["color"] = color
-        save_projects(projects)
+        with _PROJECTS_CATALOG_LOCK:
+            projects = load_projects()
+            proj = next(
+                (p for p in projects if p["project_id"] == body["project_id"]), None
+            )
+            if not proj:
+                return bad(handler, "Project not found", 404)
+            # #1614: a project can only be renamed by the profile that owns it.
+            active_profile = get_active_profile_name()
+            if not _profiles_match(proj.get("profile"), active_profile):
+                return bad(handler, "Project not found", 404)
+            proj["name"] = body["name"].strip()[:128]
+            if "color" in body:
+                color = body["color"]
+                if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
+                    return bad(handler, "Invalid color format")
+                proj["color"] = color
+            save_projects(projects)
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/bind":
@@ -18880,183 +18952,184 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
 
-        projects = load_projects()
-        proj = next(
-            (p for p in projects if p["project_id"] == body["project_id"]), None
-        )
-        if not proj:
-            return bad(handler, "Project not found", 404)
-        # #1614: a project can only be bound by the profile that owns it.
-        active_profile = get_active_profile_name()
-        if not _profiles_match(proj.get("profile"), active_profile):
-            return bad(handler, "Project not found", 404)
+        with _PROJECTS_CATALOG_LOCK:
+            projects = load_projects()
+            proj = next(
+                (p for p in projects if p["project_id"] == body["project_id"]), None
+            )
+            if not proj:
+                return bad(handler, "Project not found", 404)
+            # #1614: a project can only be bound by the profile that owns it.
+            active_profile = get_active_profile_name()
+            if not _profiles_match(proj.get("profile"), active_profile):
+                return bad(handler, "Project not found", 404)
 
-        def _resolve_ws_list(raw_list):
-            """Validate + canonicalize a list of workspace paths. Each entry
-            must pass the same trusted-path check as /api/session/new; paths
-            are ALSO auto-registered in the saved workspace list so an
-            admin-style path outside home can be bound in one step."""
-            out = []
-            for entry in raw_list or []:
-                if entry is None or str(entry).strip() == "":
-                    continue
-                ws_str = str(entry).strip()
-                try:
-                    registered = validate_workspace_to_add(ws_str)
-                    wss = load_workspaces()
-                    if not any(w["path"] == str(registered) for w in wss):
-                        wss.append({"path": str(registered), "name": registered.name})
-                        save_workspaces(wss)
-                    out.append(str(resolve_trusted_workspace(registered)))
-                except (TypeError, ValueError) as e:
-                    raise ValueError(str(e)) from e
-            # Dedupe, keep order.
-            seen = set()
-            return [p for p in out if not (p in seen or seen.add(p))]
+            def _resolve_ws_list(raw_list):
+                """Validate + canonicalize a list of workspace paths. Each entry
+                must pass the same trusted-path check as /api/session/new; paths
+                are ALSO auto-registered in the saved workspace list so an
+                admin-style path outside home can be bound in one step."""
+                out = []
+                for entry in raw_list or []:
+                    if entry is None or str(entry).strip() == "":
+                        continue
+                    ws_str = str(entry).strip()
+                    try:
+                        registered = validate_workspace_to_add(ws_str)
+                        wss = load_workspaces()
+                        if not any(w["path"] == str(registered) for w in wss):
+                            wss.append({"path": str(registered), "name": registered.name})
+                            save_workspaces(wss)
+                        out.append(str(resolve_trusted_workspace(registered)))
+                    except (TypeError, ValueError) as e:
+                        raise ValueError(str(e)) from e
+                # Dedupe, keep order.
+                seen = set()
+                return [p for p in out if not (p in seen or seen.add(p))]
 
-        # ── Workspaces (multi-value) ──
-        if "workspaces" in body:
-            raw = body.get("workspaces")
-            if raw is None:
-                proj.pop("workspaces", None)
-                proj.pop("default_workspace", None)
-                proj.pop("workspace", None)  # keep legacy alias in sync
-            else:
-                try:
-                    resolved = _resolve_ws_list(raw)
-                except ValueError as e:
-                    return bad(handler, str(e))
-                proj["workspaces"] = resolved
-                # Keep the default valid: drop a default no longer in the list.
-                if proj.get("default_workspace") not in resolved:
+            # ── Workspaces (multi-value) ──
+            if "workspaces" in body:
+                raw = body.get("workspaces")
+                if raw is None:
+                    proj.pop("workspaces", None)
                     proj.pop("default_workspace", None)
-                # Legacy alias must mirror the new list (or disappear).
-                if resolved:
-                    proj["workspace"] = resolved[0]
+                    proj.pop("workspace", None)  # keep legacy alias in sync
                 else:
-                    proj.pop("workspace", None)
+                    try:
+                        resolved = _resolve_ws_list(raw)
+                    except ValueError as e:
+                        return bad(handler, str(e))
+                    proj["workspaces"] = resolved
+                    # Keep the default valid: drop a default no longer in the list.
+                    if proj.get("default_workspace") not in resolved:
+                        proj.pop("default_workspace", None)
+                    # Legacy alias must mirror the new list (or disappear).
+                    if resolved:
+                        proj["workspace"] = resolved[0]
+                    else:
+                        proj.pop("workspace", None)
 
-        # ── Legacy single-workspace field (compat) ──
-        if "workspace" in body and "workspaces" not in body:
-            ws = body.get("workspace")
-            if ws is None or str(ws).strip() == "":
-                proj.pop("workspace", None)
-                proj.pop("workspaces", None)
-                proj.pop("default_workspace", None)
-            else:
-                try:
-                    resolved = _resolve_ws_list([ws])
-                except ValueError as e:
-                    return bad(handler, str(e))
-                if not resolved:
+            # ── Legacy single-workspace field (compat) ──
+            if "workspace" in body and "workspaces" not in body:
+                ws = body.get("workspace")
+                if ws is None or str(ws).strip() == "":
                     proj.pop("workspace", None)
                     proj.pop("workspaces", None)
                     proj.pop("default_workspace", None)
                 else:
-                    proj["workspace"] = resolved[0]  # legacy alias
-                    proj["workspaces"] = resolved
-                    # This binding REPLACES the workspace set with exactly
-                    # ``resolved``, so a default left over from the previous
-                    # set would point at an unbound workspace and send
-                    # quick-create to a path the project no longer owns.
-                    # Assign (not setdefault) so "default ∈ workspaces" holds.
-                    proj["default_workspace"] = resolved[0]
-
-        # ── default_workspace ──
-        if "default_workspace" in body:
-            dw = body.get("default_workspace")
-            if dw is None or str(dw).strip() == "":
-                proj.pop("default_workspace", None)
-            else:
-                try:
-                    dw_resolved = str(
-                        resolve_trusted_workspace(str(dw).strip())
-                    )
-                except (TypeError, ValueError) as e:
-                    return bad(handler, str(e))
-                # Must be one of the bound workspaces — auto-add if needed so
-                # the invariant "default ∈ workspaces" always holds. Use the
-                # canonical accessor (not `proj.get("workspaces") or []`) so a
-                # LEGACY project carrying only `workspace: A` keeps A in the
-                # bound set: starting from an empty list would store just B and
-                # then overwrite the compatibility alias, dropping A from both
-                # quick-create and auto-assignment.
-                ws_list = _project_workspaces(proj)
-                if dw_resolved not in ws_list:
                     try:
-                        ws_list = _resolve_ws_list([*ws_list, dw_resolved])
+                        resolved = _resolve_ws_list([ws])
                     except ValueError as e:
                         return bad(handler, str(e))
-                    proj["workspaces"] = ws_list
-                proj["default_workspace"] = dw_resolved
-                # Keep the legacy alias in sync.
-                if ws_list:
-                    proj["workspace"] = ws_list[0]
-
-        # ── auto_assign flag ──
-        if "auto_assign" in body:
-            if bool(body.get("auto_assign")):
-                proj["auto_assign"] = True
-            else:
-                proj.pop("auto_assign", None)
-
-        # model / model_provider: pair stored with canonicalization so a
-        # stale/foreign provider cannot silently rebind. Null/'' clears.
-        # When the model IS provided via a slash/@ qualified string, derive
-        # the implied family and prefer that over the free-form provider.
-        if "model" in body:
-            model = body.get("model")
-            if model is None or str(model).strip() == "":
-                proj.pop("model", None)
-                proj.pop("model_provider", None)
-            else:
-                # An @-qualified model carries its own provider (see
-                # _split_provider_qualified_model), so store the pair
-                # canonically — quick-create then resolves the backend the
-                # caller actually named. A BARE model with no model_provider in
-                # this payload must NOT keep the previously stored provider:
-                # that provider belonged to the model it was bound with, and
-                # the stale pair would route quick-create to an incompatible
-                # backend (or fail session startup). An explicit
-                # model_provider in the same payload always wins (below).
-                bare_model, implied_provider = _split_provider_qualified_model(
-                    str(model).strip()
-                )
-                proj["model"] = bare_model or str(model).strip()
-                if "model_provider" not in body:
-                    if implied_provider:
-                        proj["model_provider"] = (
-                            _canonical_context_provider(implied_provider)
-                            or implied_provider
-                        )
+                    if not resolved:
+                        proj.pop("workspace", None)
+                        proj.pop("workspaces", None)
+                        proj.pop("default_workspace", None)
                     else:
-                        proj.pop("model_provider", None)
-        if "model_provider" in body:
-            mp = body.get("model_provider")
-            if mp is None or str(mp).strip() == "":
-                proj.pop("model_provider", None)
-            else:
-                # Canonicalize via _canonical_context_provider so e.g.
-                # "OpenAI" / "openai:gpt-4o" / "custom:foo" normalize.
-                proj["model_provider"] = _canonical_context_provider(str(mp).strip()) or str(mp).strip()
+                        proj["workspace"] = resolved[0]  # legacy alias
+                        proj["workspaces"] = resolved
+                        # This binding REPLACES the workspace set with exactly
+                        # ``resolved``, so a default left over from the previous
+                        # set would point at an unbound workspace and send
+                        # quick-create to a path the project no longer owns.
+                        # Assign (not setdefault) so "default ∈ workspaces" holds.
+                        proj["default_workspace"] = resolved[0]
 
-        # reasoning_effort: must be a valid effort level or empty (clear).
-        if "reasoning_effort" in body:
-            from api.config import VALID_REASONING_EFFORTS
+            # ── default_workspace ──
+            if "default_workspace" in body:
+                dw = body.get("default_workspace")
+                if dw is None or str(dw).strip() == "":
+                    proj.pop("default_workspace", None)
+                else:
+                    try:
+                        dw_resolved = str(
+                            resolve_trusted_workspace(str(dw).strip())
+                        )
+                    except (TypeError, ValueError) as e:
+                        return bad(handler, str(e))
+                    # Must be one of the bound workspaces — auto-add if needed so
+                    # the invariant "default ∈ workspaces" always holds. Use the
+                    # canonical accessor (not `proj.get("workspaces") or []`) so a
+                    # LEGACY project carrying only `workspace: A` keeps A in the
+                    # bound set: starting from an empty list would store just B and
+                    # then overwrite the compatibility alias, dropping A from both
+                    # quick-create and auto-assignment.
+                    ws_list = _project_workspaces(proj)
+                    if dw_resolved not in ws_list:
+                        try:
+                            ws_list = _resolve_ws_list([*ws_list, dw_resolved])
+                        except ValueError as e:
+                            return bad(handler, str(e))
+                        proj["workspaces"] = ws_list
+                    proj["default_workspace"] = dw_resolved
+                    # Keep the legacy alias in sync.
+                    if ws_list:
+                        proj["workspace"] = ws_list[0]
 
-            effort = body.get("reasoning_effort")
-            if effort is None or str(effort).strip() == "":
-                proj.pop("reasoning_effort", None)
-            else:
-                effort = str(effort).strip().lower()
-                if effort not in VALID_REASONING_EFFORTS:
-                    return bad(
-                        handler,
-                        f"reasoning_effort must be one of {', '.join(VALID_REASONING_EFFORTS)}",
+            # ── auto_assign flag ──
+            if "auto_assign" in body:
+                if bool(body.get("auto_assign")):
+                    proj["auto_assign"] = True
+                else:
+                    proj.pop("auto_assign", None)
+
+            # model / model_provider: pair stored with canonicalization so a
+            # stale/foreign provider cannot silently rebind. Null/'' clears.
+            # When the model IS provided via a slash/@ qualified string, derive
+            # the implied family and prefer that over the free-form provider.
+            if "model" in body:
+                model = body.get("model")
+                if model is None or str(model).strip() == "":
+                    proj.pop("model", None)
+                    proj.pop("model_provider", None)
+                else:
+                    # An @-qualified model carries its own provider (see
+                    # _split_provider_qualified_model), so store the pair
+                    # canonically — quick-create then resolves the backend the
+                    # caller actually named. A BARE model with no model_provider in
+                    # this payload must NOT keep the previously stored provider:
+                    # that provider belonged to the model it was bound with, and
+                    # the stale pair would route quick-create to an incompatible
+                    # backend (or fail session startup). An explicit
+                    # model_provider in the same payload always wins (below).
+                    bare_model, implied_provider = _split_provider_qualified_model(
+                        str(model).strip()
                     )
-                proj["reasoning_effort"] = effort
+                    proj["model"] = bare_model or str(model).strip()
+                    if "model_provider" not in body:
+                        if implied_provider:
+                            proj["model_provider"] = (
+                                _canonical_context_provider(implied_provider)
+                                or implied_provider
+                            )
+                        else:
+                            proj.pop("model_provider", None)
+            if "model_provider" in body:
+                mp = body.get("model_provider")
+                if mp is None or str(mp).strip() == "":
+                    proj.pop("model_provider", None)
+                else:
+                    # Canonicalize via _canonical_context_provider so e.g.
+                    # "OpenAI" / "openai:gpt-4o" / "custom:foo" normalize.
+                    proj["model_provider"] = _canonical_context_provider(str(mp).strip()) or str(mp).strip()
 
-        save_projects(projects)
+            # reasoning_effort: must be a valid effort level or empty (clear).
+            if "reasoning_effort" in body:
+                from api.config import VALID_REASONING_EFFORTS
+
+                effort = body.get("reasoning_effort")
+                if effort is None or str(effort).strip() == "":
+                    proj.pop("reasoning_effort", None)
+                else:
+                    effort = str(effort).strip().lower()
+                    if effort not in VALID_REASONING_EFFORTS:
+                        return bad(
+                            handler,
+                            f"reasoning_effort must be one of {', '.join(VALID_REASONING_EFFORTS)}",
+                        )
+                    proj["reasoning_effort"] = effort
+
+            save_projects(projects)
 
         # When auto_assign is (now) enabled, file every existing session whose
         # workspace is in this project's bound list under this project. Runs in
@@ -19078,6 +19151,15 @@ def handle_post(handler, parsed) -> bool:
                     logger.warning("auto-assign for project %s failed: %s",
                                    (proj or {}).get("project_id"), exc)
                 finally:
+                    # The sweep was registered by the bind handler (atomically
+                    # with its start), so drop that registration here too — not
+                    # only the one _apply_project_auto_assign manages.
+                    try:
+                        _auto_assign_sweep_end(
+                            proj["project_id"], threading.current_thread()
+                        )
+                    except Exception:
+                        pass
                     # Self-unregister so the background-commit registry does not
                     # leak a dead Thread per bind (mirrors the memory worker's
                     # finally-block at api/routes.py:16544-16550); the drain only
@@ -19096,7 +19178,16 @@ def handle_post(handler, parsed) -> bool:
             # drain snapshot already missed (mirrors memory-worker pattern
             # at api/routes.py:14799-14804).
             if _register_background_commit_thread(t):
-                t.start()
+                # Admit AND start the sweep before this response returns, so a
+                # concurrent delete either joins this worker or refuses the
+                # sweep outright. Starting it from the worker's own body left a
+                # window where the delete found nothing to join and the late
+                # sweep filed sessions under the removed project.
+                if not _auto_assign_start_sweep(proj["project_id"], t):
+                    try:
+                        _unregister_background_commit_thread(t)
+                    except Exception:
+                        pass
 
         return j(handler, {"ok": True, "project": proj})
 
@@ -19122,10 +19213,30 @@ def handle_post(handler, parsed) -> bool:
         # that no longer exists (its sessions then vanish from Unassigned), and
         # rows it reached after the unlink pass would be re-filed right after
         # being cleared.
-        _auto_assign_cancel_sweeps(body["project_id"])
+        if not _auto_assign_cancel_sweeps(body["project_id"]):
+            # A registered sweep outlived the join timeout and can still write
+            # project_id. Refuse the deletion and leave the project (and its
+            # sessions) intact — removing it now would let that worker orphan
+            # sessions under a project id that no longer exists. Releasing the
+            # marker keeps the project usable and deletable once it exits.
+            _auto_assign_abort_deleting(body["project_id"])
+            return bad(
+                handler,
+                "Project is busy: an auto-assign sweep is still running; retry",
+                503,
+            )
         try:
-            projects = [p for p in projects if p["project_id"] != body["project_id"]]
-            save_projects(projects)
+            with _PROJECTS_CATALOG_LOCK:
+                # Reload AFTER the drain: `projects` was read before the (up to
+                # 10 s) join above, and saving that stale list erased a project
+                # created meanwhile (new regression on api/routes.py:19127).
+                # The read → filter → save runs under the catalog lock shared
+                # with create / rename / bind so no mutation can interleave.
+                projects = [
+                    p for p in load_projects()
+                    if p["project_id"] != body["project_id"]
+                ]
+                save_projects(projects)
             # Unassign all sessions that belonged to this project.
             # #3746: this loop is O(N) full-JSON read+save per session, and each
             # save() reserializes the entire messages array. For a project with many
