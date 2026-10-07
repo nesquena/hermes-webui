@@ -3539,6 +3539,7 @@ def _find_journal_tool_match(
     min_assistant_idx: int | None = None,
     max_assistant_idx: int | None = None,
     consumed_indexes: set[int] | None = None,
+    event_id: str | None = None,
 ) -> int | None:
     """Return the index of the ONE existing card this journal event consumes.
 
@@ -3551,16 +3552,27 @@ def _find_journal_tool_match(
     ``terminal: running`` card absorbed every identical tool event and the
     surplus journaled calls vanished.
 
-    Ownership (the #7167 additions): a card qualifies only when the
-    candidate tool id matches (when one is known), the stream tag agrees
-    when it has one, and an untagged card falls back to proving turn
-    ownership by its assistant anchor inside [min_assistant_idx,
-    max_assistant_idx).
+    Matching is stream-scoped when ``stream_id`` is supplied.  For untagged
+    cards, a supplied current-turn boundary must prove ownership with a valid
+    assistant anchor; unknown ownership defaults to append so an old card
+    cannot suppress the current recovery.
+
+    ``event_id`` is the journal event's immutable identity (stream + seq).
+    It is checked BEFORE the preview, because the live journal shape
+    (api/streaming.py: ``tool`` carries ``preview: None`` and a real ``tid``,
+    then ``tool_complete`` overwrites the card's preview with the result
+    snippet) means the card's preview has usually been replaced by the time a
+    repair runs. Comparing the start preview against a completion-updated card
+    fails, so one journaled event grew into three cards over three repair
+    cycles, and a matched card was skipped by the completion handler and
+    stayed ``done=False`` with no result. Identity first, preview as a
+    fallback for cards that pre-date event stamping.
     """
     candidate_tool_id = str(tool_id or '').strip() or None
     candidate_name = str(name or '')
     candidate_preview = _normalize_journal_recovery_text(preview)
     candidate_stream = str(stream_id) if stream_id else None
+    candidate_event = str(event_id) if event_id else None
     for tool_idx, tool_call in enumerate(session.tool_calls or []):
         if consumed_indexes and tool_idx in consumed_indexes:
             # Already consumed by an earlier journal event on this pass:
@@ -3570,6 +3582,14 @@ def _find_journal_tool_match(
             continue
         if str(tool_call.get('name') or '') != candidate_name:
             continue
+        # Immutable identity first: same stream + same journal event seq is
+        # the same card the completion handler must also be able to update.
+        if candidate_event is not None:
+            card_event = tool_call.get('_recovered_event_id')
+            if card_event is not None:
+                if str(card_event) != candidate_event:
+                    continue
+                return tool_idx
         existing_preview = _normalize_journal_recovery_text(
             tool_call.get('preview') or tool_call.get('snippet') or ''
         )
@@ -3686,6 +3706,7 @@ def _journal_tool_already_present(
     min_assistant_idx: int | None = None,
     max_assistant_idx: int | None = None,
     consumed_indexes: set[int] | None = None,
+    event_id: str | None = None,
 ) -> bool:
     """Bool wrapper over :func:`_find_journal_tool_match` (back-compat)."""
     return (
@@ -3697,6 +3718,7 @@ def _journal_tool_already_present(
             min_assistant_idx=min_assistant_idx,
             max_assistant_idx=max_assistant_idx,
             consumed_indexes=consumed_indexes,
+            event_id=event_id,
         )
         is not None
     )
@@ -4146,6 +4168,10 @@ def _append_journaled_partial_output(
     # each existing tool card counts once, so N identical journaled tool
     # events need N distinct persisted cards.
     consumed_tool_card_indexes: set[int] = set()
+    # Indexes into ``session.tool_calls`` that were REUSED (deduped) on this
+    # pass. A later ``tool_complete`` must complete them too, not only the
+    # cards freshly appended this pass.
+    reused_tool_cards: list[int] = []
 
     messages_list = session.messages or []
     current_turn_min_idx = 0
@@ -4568,9 +4594,24 @@ def _append_journaled_partial_output(
             # exists — only the anchor allocation is deferred.
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
-            tool_id = str(
-                payload.get('tid') or payload.get('tool_call_id') or ''
-            ).strip()
+            # Immutable identity of this journal event (stream + seq). The live
+            # journal shape sends ``tool`` with preview None and a real tid and
+            # then overwrites the CARD's preview via ``tool_complete``, so the
+            # start preview is useless for matching a card that has already
+            # completed. Identity is what survives; preview stays as a fallback
+            # for cards persisted before event stamping existed.
+            _event_seq = event.get('seq')
+            _event_id = (
+                f"{(stream_id or '')}:{_event_seq}"
+                if _event_seq is not None
+                else None
+            )
+            # #7167: ``dedupe_tools`` is independent of the CONTENT dedupe
+            # mode. ``None`` (the default) preserves the historical coupling
+            # to ``dedupe_existing``; the stale-pending caller passes True so
+            # tool cards dedupe by same-stream provenance even though the
+            # content path uses its own provenance-reuse mode.
+            _tools_dedupe = dedupe_existing if dedupe_tools is None else dedupe_tools
             tool_match_idx = (
                 _find_journal_tool_match(
                     session, name, preview, stream_id=stream_id,
@@ -4578,6 +4619,7 @@ def _append_journaled_partial_output(
                     min_assistant_idx=dedupe_min_index,
                     max_assistant_idx=dedupe_max_index,
                     consumed_indexes=consumed_tool_card_indexes,
+                    event_id=_event_id,
                 )
                 if _tools_dedupe
                 else None
@@ -4604,60 +4646,57 @@ def _append_journaled_partial_output(
                 # Claim the matched card so a later identical journal event
                 # cannot dedupe against the very same card again.
                 consumed_tool_card_indexes.add(tool_match_idx)
+                # Remember the reused card so a later ``tool_complete`` for the
+                # same event updates IT (not only freshly built cards): a card
+                # reused while ``done=False`` used to stay incomplete and
+                # result-less forever, because the completion handler only
+                # walked ``recovered_tool_calls``.
+                if isinstance(session.tool_calls, list) and 0 <= tool_match_idx < len(session.tool_calls):
+                    reused_tool_cards.append(tool_match_idx)
                 continue
             if anchor_idx is None:
                 anchor_idx = ensure_assistant_anchor(created_at)
-            recovered_tool_calls.append({
+            _tool_card = {
                 'name': name,
                 'preview': preview,
                 'snippet': preview,
-                'tid': (
-                    tool_id
-                    or f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}"
-                ),
-                '_journal_synthetic_tid': not bool(tool_id),
+                'tid': f"journal-{_event_seq or len(recovered_tool_calls) + 1}",
                 'assistant_msg_idx': anchor_idx,
                 'args': _truncate_journal_tool_args(payload.get('args') or {}),
                 'done': False,
                 '_recovered_from_run_journal': True,
                 '_recovered_stream_id': stream_id,
-            })
+            }
+            if _event_id:
+                _tool_card['_recovered_event_id'] = _event_id
+            recovered_tool_calls.append(_tool_card)
             appended_any = True
             output_accounted_for = True
             current_assistant_idx = anchor_idx
             continue
         if event_name == 'tool_complete':
             name = str(payload.get('name') or '')
-            completion_tool_id = str(
-                payload.get('tid') or payload.get('tool_call_id') or ''
-            ).strip()
-            unfinished = [call for call in reversed(recovered_tool_calls) if not call.get('done')]
-            matched_tool = None
-            if completion_tool_id:
-                matched_tool = next((
-                    call for call in unfinished
-                    if str(call.get('tid') or '') == completion_tool_id
-                ), None)
-                if matched_tool is None:
-                    matched_tool = next((
-                        call for call in unfinished
-                        if call.get('_journal_synthetic_tid')
-                        and name and call.get('name') == name
-                    ), None)
-            else:
-                matched_tool = next((
-                    call for call in unfinished
-                    if not name or call.get('name') == name
-                ), None)
-            if matched_tool is not None:
-                tool_call = matched_tool
-                tool_call['done'] = True
-                if payload.get('preview'):
-                    tool_call['preview'] = str(payload.get('preview') or '')
-                    tool_call['snippet'] = str(payload.get('preview') or '')
-                if payload.get('duration') is not None:
-                    tool_call['duration'] = payload.get('duration')
-                tool_call['is_error'] = bool(payload.get('is_error', False))
+            # Reused cards must be completed too. Before this, a card matched
+            # by identity while ``done=False`` was skipped by the completion
+            # handler (which only walked ``recovered_tool_calls``) and stayed
+            # permanently incomplete with no result.
+            _completables = list(recovered_tool_calls)
+            if isinstance(session.tool_calls, list):
+                for _reused_idx in reused_tool_cards:
+                    if 0 <= _reused_idx < len(session.tool_calls):
+                        _completables.append(session.tool_calls[_reused_idx])
+            for tool_call in reversed(_completables):
+                if tool_call.get('done'):
+                    continue
+                if not name or tool_call.get('name') == name:
+                    tool_call['done'] = True
+                    if payload.get('preview'):
+                        tool_call['preview'] = str(payload.get('preview') or '')
+                        tool_call['snippet'] = str(payload.get('preview') or '')
+                    if payload.get('duration') is not None:
+                        tool_call['duration'] = payload.get('duration')
+                    tool_call['is_error'] = bool(payload.get('is_error', False))
+                    break
             continue
         if event_name in {'done', 'stream_end', 'cancel', 'apperror', 'error'}:
             flush_assistant()
@@ -5183,16 +5222,32 @@ def _reorder_journal_tail_above_marker(session, marker_idx: int) -> None:
     )
     # Rebase any tool_calls.assistant_msg_idx values that pointed into the
     # journaled rows when they were appended at the tail.
-    old_journaled_idx_base = marker_idx + 1
-    new_journaled_idx_base = marker_idx
-    shift = new_journaled_idx_base - old_journaled_idx_base  # = -1
+    #
+    # Rebase by IDENTITY, not by a contiguous shift. The old code mapped
+    # ``[marker_idx+1, marker_idx+1+len(journaled))`` as if the journaled rows
+    # were consecutive, but a stale-pending cycle can interleave them with a
+    # recovered user prompt, so a card anchored to a journaled row past that
+    # interleaving kept a stale index that ended up pointing at a USER row.
+    # Map each old index to its new one via object identity instead.
+    new_index_of_old: dict[int, int] = {}
+    for offset, row in enumerate(journaled):
+        # Identity by object, not by ==: two identical transcript rows would
+        # otherwise both resolve to the first occurrence's index.
+        try:
+            tail_offset = next(
+                i for i, r in enumerate(tail) if r is row
+            )
+        except StopIteration:  # pragma: no cover - row always comes from tail
+            continue
+        new_index_of_old[marker_idx + 1 + tail_offset] = marker_idx + offset
     for tool_call in session.tool_calls or []:
         if not isinstance(tool_call, dict):
             continue
         idx = tool_call.get('assistant_msg_idx')
-        if isinstance(idx, int) and idx >= old_journaled_idx_base \
-                and idx < old_journaled_idx_base + len(journaled):
-            tool_call['assistant_msg_idx'] = idx + shift
+        if isinstance(idx, bool) or not isinstance(idx, int):
+            continue
+        if idx in new_index_of_old:
+            tool_call['assistant_msg_idx'] = new_index_of_old[idx]
     session.messages = new_messages
 
 

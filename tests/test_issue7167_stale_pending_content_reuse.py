@@ -505,3 +505,200 @@ def test_old_untagged_live_card_is_not_swallowed(hermes_home):
     assert len(_stream_tool_cards(session, dead_stream)) == 1, (
         "the journaled event still recovers beside the live card"
     )
+
+
+# ── #7167 Must-fix 1: identity-based tool matching ──────────────────────────
+#
+# The installed Agent journals the LIVE path (``tool_start_callback``):
+# ``tool`` carries ``preview: None`` with a real ``tid``/seq, then
+# ``tool_complete`` overwrites the CARD's preview with the result snippet.
+# The submitted tests used equal start/completion previews, so they never hit
+# the two failures that shape causes:
+#
+#   * completion BEFORE repair — the start event's empty preview can no longer
+#     match a card whose preview was replaced, so every repair cycle appends
+#     another card (1 event -> 3 cards over 3 cycles);
+#   * completion AFTER the first repair — the card matched by identity is
+#     skipped by the completion handler (it only walked freshly built cards),
+#     so it stays ``done=False`` with no result forever.
+#
+# Both are fixed by matching on immutable identity (stream + event seq) and by
+# completing REUSED cards too.
+
+EMPTY_PREVIEW_TOOL_JOURNAL = {
+    "name": "terminal",
+    "preview": None,  # what api/streaming.py writes for tool_start_callback
+    "tid": "tid-live-1",
+}
+
+
+def _tool_journal_real_shape(sid: str, stream_id: str, *, delay_completion: bool) -> None:
+    """The shape the installed Agent actually journals (re-gate Must-fix 1)."""
+    append_run_event(sid, stream_id, "tool", dict(EMPTY_PREVIEW_TOOL_JOURNAL))
+    if not delay_completion:
+        append_run_event(
+            sid,
+            stream_id,
+            "tool_complete",
+            {"name": "terminal", "preview": "total 0\n", "duration": 12},
+        )
+
+
+def test_completion_before_repair_keeps_one_card(hermes_home):
+    """Completion landed before the repair: the start preview is stale.
+
+    The card's preview was already replaced by the result snippet, so a
+    preview-based match fails and each repair cycle appends another card.
+    Identity (stream + event seq) must match instead.
+    """
+    sid = "regate_real_shape_completed"
+    dead_stream = "dead-stream-completed"
+    _tool_journal_real_shape(sid, dead_stream, delay_completion=False)
+
+    session = _repair_five_times(sid, dead_stream, hermes_home)
+
+    cards = _stream_tool_cards(session, dead_stream)
+    assert len(cards) == 1, (
+        "one journaled tool event must recover exactly one card across "
+        f"repeated repair cycles, got {len(cards)}"
+    )
+    assert cards[0].get("done") is True, "the reused card must be completed"
+    assert cards[0].get("preview") == "total 0\n", (
+        "the completion's result snippet must survive, got "
+        f"{cards[0].get('preview')!r}"
+    )
+    assert cards[0].get("duration") == 12
+
+
+def test_delayed_completion_completes_the_reused_card(hermes_home):
+    """Completion arrives after the repair already reused the card.
+
+    The card matched by identity while still ``done=False`` must be updated by
+    the completion handler, not left incomplete and result-less.
+    """
+    sid = "regate_real_shape_delayed"
+    dead_stream = "dead-stream-delayed"
+    # Repair cycles run against a journal that has NOT completed yet.
+    _tool_journal_real_shape(sid, dead_stream, delay_completion=True)
+
+    session = _repair_five_times(sid, dead_stream, hermes_home)
+    cards = _stream_tool_cards(session, dead_stream)
+    assert len(cards) == 1, f"expected exactly one card, got {len(cards)}"
+    assert cards[0].get("done") is False, "no completion yet: card stays open"
+
+    # The stream's completion lands late (after a reopen/repair already ran).
+    append_run_event(
+        sid,
+        dead_stream,
+        "tool_complete",
+        {"name": "terminal", "preview": "total 0\n", "duration": 7},
+    )
+    session = _repair_five_times(sid, dead_stream, hermes_home)
+    cards = _stream_tool_cards(session, dead_stream)
+    assert len(cards) == 1, (
+        "a late completion must not append a second card, got "
+        f"{len(cards)}"
+    )
+    assert cards[0].get("done") is True, "the reused card must be completed"
+    assert cards[0].get("preview") == "total 0\n"
+    assert cards[0].get("duration") == 7
+
+
+def test_identity_match_still_consumes_one_to_one(hermes_home):
+    """Two genuinely identical live calls stay as two cards.
+
+    Identity matching must not collapse across DISTINCT events: each journal
+    event carries its own seq, so two events claim two distinct cards.
+    """
+    sid = "regate_real_shape_two_events"
+    dead_stream = "dead-stream-two-events"
+    append_run_event(sid, dead_stream, "tool", dict(EMPTY_PREVIEW_TOOL_JOURNAL))
+    append_run_event(
+        sid, dead_stream, "tool_complete",
+        {"name": "terminal", "preview": "first\n", "duration": 1},
+    )
+    append_run_event(
+        sid, dead_stream, "tool",
+        {"name": "terminal", "preview": None, "tid": "tid-live-2"},
+    )
+    append_run_event(
+        sid, dead_stream, "tool_complete",
+        {"name": "terminal", "preview": "second\n", "duration": 2},
+    )
+
+    session = _repair_five_times(sid, dead_stream, hermes_home)
+
+    cards = _stream_tool_cards(session, dead_stream)
+    assert len(cards) == 2, (
+        "two distinct journal events must recover two cards, got "
+        f"{len(cards)}"
+    )
+    previews = sorted(str(tc.get('preview') or '') for tc in cards)
+    assert previews == ["first\n", "second\n"], (
+        f"each card takes its own completion, got {previews}"
+    )
+
+
+def test_marker_promotion_keeps_tool_anchor_on_assistant(hermes_home):
+    """Must-fix 3: promoting a reused marker must not orphan a tool card.
+
+    ``_reorder_journal_tail_above_marker`` rebased anchors with a contiguous
+    minus-one shift that assumed every row after the marker was journaled. A
+    stale-pending cycle can interleave the journaled rows with a recovered user
+    prompt, so a card anchored past that interleaving kept an index that ended
+    up pointing at a USER row. Rebase by identity instead.
+    """
+    from api.models import _reorder_journal_tail_above_marker
+
+    markers_msg = {"role": "assistant", "content": "reload to retry",
+                   "_pending_journal_recovery": True}
+    first_journaled = {"role": "assistant", "content": "first recovered",
+                       "_recovered_from_run_journal": True,
+                       "_recovered_stream_id": "stream-a"}
+    # The interleaving the contiguous shift cannot express: a recovered user
+    # prompt sits BETWEEN two journaled assistant rows.
+    interleaved_user = {"role": "user", "content": "recovered prompt"}
+    second_journaled = {"role": "assistant", "content": "second recovered",
+                        "_recovered_from_run_journal": True,
+                        "_recovered_stream_id": "stream-a"}
+
+    messages = [
+        {"role": "user", "content": "earlier turn"},
+        {"role": "assistant", "content": "earlier reply"},
+        markers_msg,          # index 2 - the marker being promoted
+        first_journaled,      # index 3
+        interleaved_user,     # index 4
+        second_journaled,     # index 5  <- the tool card anchors here
+    ]
+    session = Session(session_id="anchor_probe", title="probe",
+                      messages=[dict(m) for m in messages])
+    # The card points at index 5, the second journaled assistant row.
+    session.tool_calls = [
+        {"name": "terminal", "preview": "ls", "assistant_msg_idx": 5,
+         "_recovered_from_run_journal": True, "_recovered_stream_id": "stream-a"}
+    ]
+    # Point the in-memory list at the ORIGINAL dicts so identity survives.
+    session.messages = [
+        {"role": "user", "content": "earlier turn"},
+        {"role": "assistant", "content": "earlier reply"},
+        markers_msg,
+        first_journaled,
+        interleaved_user,
+        second_journaled,
+    ]
+
+    _reorder_journal_tail_above_marker(session, 2)
+
+    anchor = (session.tool_calls or [{}])[0].get("assistant_msg_idx")
+    assert isinstance(anchor, int) and not isinstance(anchor, bool), (
+        f"anchor must stay an int, got {anchor!r}"
+    )
+    assert 0 <= anchor < len(session.messages), f"anchor {anchor} out of range"
+    anchored = session.messages[anchor]
+    assert isinstance(anchored, dict) and anchored.get("role") == "assistant", (
+        "tool card must stay anchored to an ASSISTANT row after the reorder, "
+        f"got role={anchored.get('role')!r} at index {anchor}"
+    )
+    assert anchored is second_journaled, (
+        "the card must still anchor the SAME assistant row, not a neighbour"
+    )
