@@ -1934,6 +1934,22 @@ def test_insights_absolute_range_out_of_platform_endpoints_fail_closed(monkeypat
         assert data["total_sessions"] == 1
 
 
+def _local_midnight_raises(y, m, d):
+    """True when THIS platform cannot represent local midnight for the date.
+
+    The insights window resolves calendar dates in LOCAL time, so whether
+    ``1970-01-01`` is representable is platform-dependent: ts 0 under UTC, but
+    pre-epoch (``mktime`` raises) in a positive-offset zone such as Windows
+    UTC+08. Shared by the derived-start boundary test below so it asserts the
+    platform's own contract instead of a UTC-only expectation.
+    """
+    try:
+        time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))
+    except (OverflowError, OSError, ValueError):
+        return True
+    return False
+
+
 def test_insights_absolute_range_derived_start_pre_epoch_fails_closed(monkeypatch, tmp_path):
     """Greptile P1 (2026-10-07): an end-only DATE within 30 days of the Unix
     epoch (`end=1970-01-15`) is itself >= 0, so the supplied-endpoint guard
@@ -1942,25 +1958,43 @@ def test_insights_absolute_range_derived_start_pre_epoch_fails_closed(monkeypatc
     `OverflowError: mktime argument out of range` on Windows -> HTTP 500
     before the post-arithmetic range check could fall back.  The derivation is
     now covered by the same platform guard and fails closed to the trailing
-    window (`_call_insights` asserts 200).  `end=1970-01-31` is the boundary
-    a plain `start_day < 1970-01-01` comparison would still miss: in an
-    east-of-UTC zone the derived local midnight 1970-01-01 is pre-epoch."""
+    window (`_call_insights` asserts 200).
+
+    The `end=1970-01-31` boundary (derived start = local midnight 1970-01-01)
+    stays platform-derived on purpose: in UTC that instant IS representable
+    (ts 0) so a real window is served, while an east-of-UTC zone cannot
+    represent it and must fall back.  Either way the answer must never be a
+    500 - that is the bug this guards."""
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [
         {"session_id": "today", "updated_at": now, "created_at": now,
          "message_count": 1, "input_tokens": 10, "output_tokens": 5,
          "estimated_cost": "0.0001", "model": "gpt-x"},
     ]
+    # Unambiguously pre-epoch derived starts - mktime() rejects every one of
+    # these on Linux CI and on Windows alike, so they must always fall back.
     for q in (
         "end=1970-01-15",   # greptile repro: derived start 1969-12-16
         "end=1970-01-01",   # derived start 1969-12-02
-        "end=1970-01-31",   # derived start is local midnight 1970-01-01
         "end=1970-01-05&days=7",
     ):
         data = _call_insights(monkeypatch, tmp_path, entries, query=q, now=now)
         assert data["mode"] == "trailing", f"{q} must fail closed to the trailing window"
         assert data["effective_start"] is None and data["effective_end"] is None
         assert data["total_sessions"] == 1
+
+    # Boundary: derived start is local midnight 1970-01-01.
+    data = _call_insights(
+        monkeypatch, tmp_path, entries, query="end=1970-01-31", now=now
+    )
+    if _local_midnight_raises(1970, 1, 1):
+        assert data["mode"] == "trailing", "an unrepresentable derived start must fall back"
+        assert data["effective_start"] is None and data["effective_end"] is None
+        assert data["total_sessions"] == 1
+    else:
+        assert data["mode"] == "custom", "a representable derived start must keep the window"
+        assert data["effective_start"] == "1970-01-01"
+        assert data["effective_end"] == "1970-01-31"
 
 
 def test_insights_absolute_range_derived_start_still_custom_when_safe(monkeypatch, tmp_path):
