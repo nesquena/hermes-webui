@@ -1997,6 +1997,51 @@ def test_insights_absolute_range_derived_start_pre_epoch_fails_closed(monkeypatc
         assert data["effective_end"] == "1970-01-31"
 
 
+def test_insights_absolute_range_future_end_derives_start_from_supplied_date(monkeypatch, tmp_path):
+    """Greptile P1 'Future end shifts start' (2026-10-07 02:01Z): an end-only
+    request implies `start = end - 30 calendar days`.  Deriving it from the end
+    ALREADY CLAMPED to the server clock shifted the whole window backwards for a
+    future `end`, serving days outside the interval the caller asked for
+    (`end=2026-05-10` on 2026-05-04 returned 2026-04-04..now - six days of
+    history the request never covered).  The clamp must clamp the INTERVAL, not
+    relocate the start.
+    """
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))                # 2026-05-04 12:00 local
+    entries = [
+        {"session_id": "today", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+         "estimated_cost": "0.0001", "model": "gpt-x"},
+    ]
+
+    # Future DATE end 6 days ahead: implicit start = 2026-05-10 - 30d.
+    data = _call_insights(monkeypatch, tmp_path, entries, query="end=2026-05-10", now=now)
+    assert data["mode"] == "custom"
+    assert data["effective_start"] == "2026-04-10", "start must come from the SUPPLIED end"
+    assert data["effective_end"] == "2026-05-04"     # only the interval end is clamped
+    assert data["daily_tokens"][0]["date"] == "2026-04-10"
+    assert data["daily_tokens"][-1]["date"] == "2026-05-04"
+    assert len(data["daily_tokens"]) == 25
+
+    # Same rule for a NUMERIC future end.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query="end=%d" % int(now + 6 * 86400), now=now)
+    assert data["mode"] == "custom"
+    assert data["effective_start"] == "2026-04-10"
+
+    # An implicit window lying entirely in the future keeps the documented
+    # fallback - never a window fabricated backwards from the clock.
+    data = _call_insights(monkeypatch, tmp_path, entries, query="end=2026-06-20", now=now)
+    assert data["mode"] == "trailing"
+    assert data["effective_start"] is None and data["effective_end"] is None
+    assert data["daily_tokens"][-1]["date"] == "2026-05-04"
+
+    # Control: a PAST date end still derives end - 30d (unchanged).
+    data = _call_insights(monkeypatch, tmp_path, entries, query="end=2026-04-20", now=now)
+    assert data["mode"] == "custom"
+    assert data["effective_start"] == "2026-03-21"
+    assert data["effective_end"] == "2026-04-20"
+
+
 def test_insights_absolute_range_derived_start_still_custom_when_safe(monkeypatch, tmp_path):
     """Control for the derived-start guard: an end-only DATE whose derived start
     IS representable must keep serving a real CUSTOM window - the guard must

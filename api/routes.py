@@ -12607,12 +12607,20 @@ def _handle_insights(handler, parsed) -> bool:
                 # platform), so neither fromtimestamp() nor the 30-day
                 # back-step can underflow.
                 if end_kind == "date":
-                    end_day_tmp = _datetime.fromtimestamp(end_ts).date()
+                    # Derive from the endpoint the CALLER sent, not from the
+                    # end already clamped to `now`: for a future `end` the
+                    # clamp must clamp the INTERVAL only, otherwise the whole
+                    # window shifts backwards and serves days outside the
+                    # requested [end - 30d, end] range (Greptile P1: 'Future
+                    # end shifts start').  The clamps below still keep every
+                    # served boundary at/behind the clock.
+                    end_day_tmp = _datetime.fromtimestamp(
+                        min(end_ts_v, 4102444800)).date()
                     start_day_tmp = end_day_tmp - _timedelta(days=30)
                     start_ts = _time.mktime(start_day_tmp.timetuple())
                     start_kind = "date"
                 else:
-                    start_ts = end_ts - 30 * 86400
+                    start_ts = end_ts_v - 30 * 86400
         else:
             start_ts = start_ts_v
             end_ts = now
