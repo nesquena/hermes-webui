@@ -734,7 +734,87 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
-def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
+_AMBIENT_CONFIG = object()
+
+
+def _profile_home_config_source(
+    profile_home: "Path | str | None", *, isolate_config_override: bool = False,
+):
+    """Pick the config file :func:`get_config_for_profile_home` reads.
+
+    Returns ``_AMBIENT_CONFIG`` for the ambient ``get_config()`` (whose file is
+    ``_get_config_path()``), ``None`` for a missing profile home, or the
+    profile's own ``config.yaml``.
+    """
+    if not profile_home:
+        return _AMBIENT_CONFIG
+    try:
+        target = Path(profile_home).expanduser()
+    except Exception:
+        return _AMBIENT_CONFIG
+
+    from api.workspace import _safe_resolve as _cfg_safe_resolve
+
+    # Canonicalize BOTH sides before every identity comparison (#7168 re-gate
+    # round 5): when HERMES_HOME (or the config parent) is a symlink alias,
+    # lexical equality fails and an authoritative HERMES_CONFIG_PATH inside
+    # the aliased home would be bypassed in favor of a direct — wrong — read.
+    target = _cfg_safe_resolve(target)
+    try:
+        from api.profiles import get_active_hermes_home, get_hermes_home_for_profile
+
+        root_home = _cfg_safe_resolve(get_hermes_home_for_profile("default"))
+        override = os.getenv("HERMES_CONFIG_PATH")
+        # Resolve the folder, not the file: a symlinked config.yaml belongs to the
+        # profile home it sits in, not to wherever its target lives.
+        override_path = None
+        if override:
+            _override_raw = Path(override).expanduser()
+            override_path = _cfg_safe_resolve(_override_raw.parent) / _override_raw.name
+        # An external override is the root profile's config whichever named
+        # profile is process-active, unless it lives under a named profile home.
+        if (
+            isolate_config_override and override_path is not None
+            and target == root_home
+            and not override_path.is_relative_to(_cfg_safe_resolve(root_home / "profiles"))
+        ):
+            return _AMBIENT_CONFIG
+        # Root is handled above; an override under <root>/profiles belongs to
+        # that named profile, never to root, so root must not match it here.
+        override_matches = (
+            not isolate_config_override
+            or override_path is None
+            or (target != root_home and override_path.is_relative_to(target))
+        )
+        active_home = _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser())
+        if override_matches and active_home == target:
+            return _AMBIENT_CONFIG
+    except Exception:
+        pass
+    # If the ambient resolver already points at this profile home, defer to
+    # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
+    # MUST run before the nonexistent-home guard below: a matching ambient home
+    # whose directory doesn't physically exist yet (fresh install, monkeypatched
+    # cfg) must still resolve through get_config(), not return {} (#4516 gate).
+    try:
+        # Resolve the parent directory, not the file, so a symlinked config.yaml
+        # still matches its own home (master's comparison).
+        config_parent = _cfg_safe_resolve(_get_config_path().parent)
+        if config_parent == target or (
+            isolate_config_override and target != root_home
+            and config_parent.is_relative_to(target)
+        ):
+            return _AMBIENT_CONFIG
+    except Exception:
+        pass
+    if not target.exists():
+        return None
+    return target / "config.yaml"
+
+
+def get_config_for_profile_home(
+    profile_home: "Path | str | None", *, isolate_config_override: bool = False,
+) -> dict:
     """Return the config dict for an explicit profile home directory.
 
     The streaming agent runs on a detached worker thread that does NOT inherit
@@ -751,53 +831,44 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     the path the ambient resolver would pick (the common single-profile case),
     we return the cached ``get_config()`` to preserve in-memory overrides used
     by tests and runtime callers, and to honour an authoritative
-    ``HERMES_CONFIG_PATH`` override. Only when the session's profile home
-    diverges from the ambient path do we read the session profile's file
+    ``HERMES_CONFIG_PATH`` override. Session defaults and Gateway workers pass
+    ``isolate_config_override=True`` so a named profile never uses an override
+    outside its own home, even when request-local context selects that profile;
+    in that mode the root profile always uses an override that is not under
+    ``<root>/profiles``, whichever named profile is process-active.
+    Settings/workspace callers retain their ambient read/write authority.
+    When the session's profile home diverges from the ambient path or its
+    isolated override check rejects the ambient file, we read the profile file
     directly — a pure read with no global cache mutation, so it is race-free
     across concurrent sessions on different profiles. Divergent profiles stay
     isolated: a nonexistent home returns ``{}`` and an existing home without a
     ``config.yaml`` yields defaults — neither ever falls back to the ambient
     config (profiles-are-islands).
     """
-    if not profile_home:
+    source = _profile_home_config_source(
+        profile_home, isolate_config_override=isolate_config_override
+    )
+    if source is _AMBIENT_CONFIG:
         return get_config()
-    try:
-        target = Path(profile_home).expanduser()
-    except Exception:
-        return get_config()
-
-    from api.workspace import _safe_resolve as _cfg_safe_resolve
-
-    # Canonicalize BOTH sides before every identity comparison (#7168 re-gate
-    # round 5): when HERMES_HOME (or the config parent) is a symlink alias,
-    # lexical equality fails and an authoritative HERMES_CONFIG_PATH inside
-    # the aliased home would be bypassed in favor of a direct — wrong — read.
-    target = _cfg_safe_resolve(target)
-    try:
-        from api.profiles import get_active_hermes_home
-
-        if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
-            return get_config()
-    except Exception:
-        pass
-    # If the ambient resolver already points at this profile home, defer to
-    # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
-    # MUST run before the nonexistent-home guard below: a matching ambient home
-    # whose directory doesn't physically exist yet (fresh install, monkeypatched
-    # cfg) must still resolve through get_config(), not return {} (#4516 gate).
-    try:
-        if _cfg_safe_resolve(_get_config_path().parent) == target:
-            return get_config()
-    except Exception:
-        pass
-    if not target.exists():
+    if source is None:
         return {}
     # Read the profile file directly and apply documented defaults locally so the
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
-    profile_cfg = _load_yaml_config_file(target / "config.yaml")
+    profile_cfg = _load_yaml_config_file(source)
     _apply_config_defaults(profile_cfg)
     return profile_cfg
+
+
+def isolated_profile_config_path(profile_home: "Path | str | None") -> "Path | None":
+    """Return the file ``get_config_for_profile_home(..., isolate_config_override=True)``
+    reads for ``profile_home`` (``None`` when that home does not exist).
+
+    Lets the reasoning-effort chip and its writer use the same file as the
+    isolated readers (session defaults, local and Gateway workers).
+    """
+    source = _profile_home_config_source(profile_home, isolate_config_override=True)
+    return _get_config_path() if source is _AMBIENT_CONFIG else source
 
 
 def _config_for_yaml_save(config_data: dict) -> dict:
@@ -5990,14 +6061,69 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def _config_reasoning_effort(config_data) -> str:
+    """Return a config dict's ``agent.reasoning_effort`` ("" when unset)."""
+    agent_cfg = config_data.get("agent") if isinstance(config_data, dict) else None
+    if not isinstance(agent_cfg, dict):
+        return ""
+    return str(agent_cfg.get("reasoning_effort") or "").strip().lower()
+
+
+def resolve_session_reasoning_effort(
+    config_data,
+    *,
+    session_effort=None,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Resolve the effort used by one WebUI session for its next turn.
+
+    ``Session.reasoning_effort`` is authoritative when present, including the
+    empty string (provider default). Legacy sessions store ``None`` and inherit
+    the active profile's CLI-compatible ``agent.reasoning_effort`` value.
+    """
+    effort_raw = session_effort
+    if effort_raw is None:
+        effort_raw = _config_reasoning_effort(config_data)
+    return coerce_reasoning_effort_for_model(
+        effort_raw,
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
+def effective_session_reasoning_effort(session_effort, profile_home) -> str:
+    """Return the stored effort a session's next turn starts from.
+
+    ``session_effort`` wins when present (``""`` = provider default). Legacy
+    sessions (``None``) inherit ``agent.reasoning_effort`` from their own
+    profile's isolated config: the single source shared by the composer chip,
+    new-session defaults, and the local and Gateway workers.
+    """
+    if session_effort is not None:
+        return str(session_effort)
+    return _config_reasoning_effort(
+        get_config_for_profile_home(profile_home, isolate_config_override=True)
+    )
+
+
+_REASONING_EFFORT_UNSET = object()
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    effort_override=_REASONING_EFFORT_UNSET,
 ) -> dict:
-    """Return current reasoning configuration from the active profile's
-    config.yaml — the same source of truth the CLI reads from.
+    """Return current reasoning configuration for a model.
+
+    The active profile's config.yaml is the default (and remains the CLI source
+    of truth). ``effort_override`` lets a WebUI session supply its durable
+    per-session selection without changing capability resolution.
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
@@ -6005,9 +6131,17 @@ def get_reasoning_status(
     """
     config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
-    agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
-    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    if effort_override is not _REASONING_EFFORT_UNSET:
+        effort_raw = effort_override
+    else:
+        # The profile default comes from the same isolated file the session
+        # readers and write_reasoning_effort() use, not the ambient override.
+        default_path = _active_isolated_config_path()
+        effort_raw = (
+            _config_reasoning_effort(_load_yaml_config_file(default_path))
+            if default_path is not None else ""
+        )
 
     resolve_model = model_id
     resolve_provider = provider_id
@@ -6154,6 +6288,20 @@ def set_reasoning_display(show: bool) -> dict:
     return get_reasoning_status()
 
 
+def normalize_reasoning_effort(effort) -> str:
+    """Return the canonical stored form of a ``/reasoning`` level.
+
+    ``""`` means provider default. Raises ``ValueError`` for unknown levels.
+    """
+    raw = str(effort or "").strip().lower()
+    if raw and raw != "none" and raw not in VALID_REASONING_EFFORTS:
+        raise ValueError(
+            f"Unknown reasoning effort '{effort}'. "
+            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
+        )
+    return raw
+
+
 def set_reasoning_effort(
     effort: str,
     *,
@@ -6175,13 +6323,47 @@ def set_reasoning_effort(
 
     Raises ``ValueError`` on any other unrecognised level so callers can 400.
     """
-    raw = str(effort or "").strip().lower()
-    if raw and raw != "none" and raw not in VALID_REASONING_EFFORTS:
-        raise ValueError(
-            f"Unknown reasoning effort '{effort}'. "
-            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
-        )
-    config_path = _get_config_path()
+    write_reasoning_effort(effort)
+    return get_reasoning_status(
+        model_id=model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
+def _active_isolated_config_path() -> "Path | None":
+    from api.profiles import get_active_hermes_home
+
+    return isolated_profile_config_path(get_active_hermes_home())
+
+
+def write_reasoning_effort(effort: str, profile_home: "Path | str | None" = None) -> str:
+    """Write ``agent.reasoning_effort`` to a profile's config.yaml.
+
+    The local file write half of :func:`set_reasoning_effort`, without the
+    capability lookup (which may do network I/O), so callers can hold a
+    session lock across it. ``profile_home`` (default: the active profile)
+    selects the file through :func:`isolated_profile_config_path`, the same
+    file every reader of the profile default uses. A missing profile home is
+    never redirected to another profile's file: for a session's profile the
+    write is skipped (the session keeps its own value, and the profile's
+    readers see ``""``); for the active profile, where the profile default is
+    the only thing saved, it raises ``ValueError``. Returns the normalized
+    stored value.
+    """
+    raw = normalize_reasoning_effort(effort)
+    if profile_home is None:
+        config_path = _active_isolated_config_path()
+        if config_path is None:
+            raise ValueError("The active profile no longer exists.")
+    else:
+        config_path = isolated_profile_config_path(profile_home)
+        if config_path is None:
+            logger.warning(
+                "reasoning effort: profile home %s is missing; profile default not written",
+                profile_home,
+            )
+            return raw
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
         agent_cfg = config_data.get("agent")
@@ -6198,11 +6380,7 @@ def set_reasoning_effort(
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()
-    return get_reasoning_status(
-        model_id=model_id,
-        provider_id=provider_id,
-        base_url=base_url,
-    )
+    return raw
 
 
 def _public_advanced_model_options(model_cfg: dict) -> dict:

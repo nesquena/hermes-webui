@@ -2046,15 +2046,14 @@ function cmdReasoning(args){
     return true;
   }
   if(EFFORTS.includes(arg)){
-    // Persist via /api/reasoning → config.yaml agent.reasoning_effort.
-    // Takes effect on the NEXT session/turn (agent re-reads config at
-    // construction time), matching CLI semantics where `/reasoning high`
-    // also forces an agent re-init.
-    api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
+    // Persist the profile default and the active session override together.
+    // The next turn rebuilds the cached agent with this session-owned value.
+    // _saveReasoningEffort POSTs {effort:arg} plus the active session context
+    // to /api/reasoning, in pick order, and applies the server-confirmed chip.
+    _saveReasoningEffort(arg)
       .then(function(st){
         const eff=(st && st.reasoning_effort)||arg;
         showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
-        if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff, st||{});
       })
       .catch(function(e){
         showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));

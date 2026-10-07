@@ -1459,6 +1459,7 @@ class Session:
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
                  model=DEFAULT_MODEL,
                  model_provider=None,
+                 reasoning_effort=None,
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
                  project_id: str=None, profile=None,
@@ -1530,6 +1531,14 @@ class Session:
         )
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
+        # None means a legacy session with no session-owned preference yet;
+        # the runtime then falls back to the active profile config.  The empty
+        # string is meaningful: it explicitly selects the provider default.
+        self.reasoning_effort = (
+            str(reasoning_effort).strip().lower()
+            if reasoning_effort is not None
+            else None
+        )
         # #5979: signature of the model the user DELIBERATELY picked this session
         # (``"<model>\x1f<provider>"``), or None. Used by the streaming resolver
         # to preserve a custom-proxy vendor namespace on a COLD catalog ONLY when
@@ -1682,7 +1691,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'reasoning_effort', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -2160,6 +2169,7 @@ class Session:
             'workspace': self.workspace,
             'model': self.model,
             'model_provider': self.model_provider,
+            'reasoning_effort': self.reasoning_effort,
             'message_count': message_count,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
@@ -5841,8 +5851,9 @@ def _profile_default_model_state(profile=None):
     default_provider = None
     try:
         from api.profiles import get_hermes_home_for_profile
-        config_path = Path(get_hermes_home_for_profile(profile)) / "config.yaml"
-        config_data = _cfg._load_yaml_config_file(config_path)
+        config_data = _cfg.get_config_for_profile_home(
+            get_hermes_home_for_profile(profile), isolate_config_override=True,
+        )
     except Exception:
         config_data = {}
 
@@ -5854,6 +5865,20 @@ def _profile_default_model_state(profile=None):
         default_provider = str(model_cfg.get("provider") or "").strip() or None
 
     return default_model or get_effective_default_model(), default_provider
+
+
+def _profile_default_reasoning_effort(profile=None):
+    """Return the profile reasoning preference for a newly-created session."""
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        return _cfg.effective_session_reasoning_effort(
+            None, get_hermes_home_for_profile(profile),
+        )
+    except Exception:
+        # Stay legacy (None) so the turn-time fallback still reads the profile
+        # instead of pinning this chat to the provider default.
+        logger.warning("profile reasoning default read failed for %r", profile, exc_info=True)
+        return None
 
 
 def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None):
@@ -5902,6 +5927,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         workspace=workspace_path or get_last_workspace(profile=profile),
         model=effective_model,
         model_provider=effective_model_provider,
+        reasoning_effort=_profile_default_reasoning_effort(profile),
         profile=profile,
         project_id=project_id,
         personality=None,

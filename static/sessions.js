@@ -2229,7 +2229,13 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
+  let reasoningSwitchHeld=false;
   try{
+    // Effort saves queued in the previous profile must go out under its cookie.
+    if(typeof _beginReasoningProfileSwitch==='function'){
+      reasoningSwitchHeld=true;
+      await _beginReasoningProfileSwitch();
+    }
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
@@ -2263,6 +2269,8 @@ async function _switchProfileForSessionLoad(profile){
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
     throw switchErr;
+  }finally{
+    if(reasoningSwitchHeld) _endReasoningProfileSwitch();
   }
 }
 

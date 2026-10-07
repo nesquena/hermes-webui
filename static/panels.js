@@ -7144,6 +7144,7 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  let _reasoningSwitchHeld = false;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
@@ -7171,6 +7172,11 @@ async function switchToProfile(name) {
     // red error while the real switch completes and renders. The catch block below is
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
+    // Effort saves queued in the previous profile must go out under its cookie.
+    if (typeof _beginReasoningProfileSwitch === 'function') {
+      _reasoningSwitchHeld = true;
+      await _beginReasoningProfileSwitch();
+    }
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
@@ -7393,6 +7399,7 @@ async function switchToProfile(name) {
     }
     return false;
   } finally {
+    if (_reasoningSwitchHeld) _endReasoningProfileSwitch();
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
     if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }

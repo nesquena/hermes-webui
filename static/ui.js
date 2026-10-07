@@ -5618,6 +5618,10 @@ function _reasoningEffortContext(){
   const ctx={};
   if(model) ctx.model=model;
   if(provider) ctx.provider=provider;
+  // Reasoning effort is session-owned just like the model selection. Including
+  // the session identity also makes the request-cache key change when two
+  // sessions happen to use the same model/provider pair.
+  if(session&&session.session_id) ctx.session_id=session.session_id;
   return ctx;
 }
 
@@ -5625,6 +5629,99 @@ function _reasoningEffortQuery(){
   const params=new URLSearchParams(_reasoningEffortContext());
   const qs=params.toString();
   return qs?('?'+qs):'';
+}
+
+// Monotonic save counter plus the newest save per profile/session: only the
+// newest save for a chat may update that chat's chip, so an older save resolving
+// late cannot undo a newer pick, and another chat's pick cannot hide this one's.
+let _reasoningSaveSeq=0;
+const _reasoningLatestSaveByOwner=new Map();
+// Effort saves are sent one at a time in pick order, so the threaded server
+// stores the latest pick rather than whichever request it handled last.
+let _reasoningSaveChain=Promise.resolve();
+// Every request carries the profile cookie at send time. A profile switch
+// freezes new picks and drains queued saves before it changes the cookie, so a
+// save queued behind a slow one still lands in the profile it was picked in.
+let _reasoningSavesFrozen=0;
+
+function _reasoningSaveOwner(profile, context){
+  return profile+'\n'+((context&&context.session_id)||'');
+}
+
+// While frozen the effort controls are disabled, so a pick is never accepted
+// by the UI and then dropped; /reasoning still reports the refusal in a toast.
+function _setReasoningControlsFrozen(frozen){
+  ['composerReasoningChip','composerMobileReasoningAction'].forEach(function(id){
+    const btn=$(id);
+    if(btn) btn.disabled=frozen;
+  });
+  if(frozen) closeReasoningDropdown();
+}
+
+async function _beginReasoningProfileSwitch(){
+  ++_reasoningSavesFrozen;
+  _setReasoningControlsFrozen(true);
+  await _reasoningSaveChain;
+}
+
+function _endReasoningProfileSwitch(){
+  if(_reasoningSavesFrozen>0) --_reasoningSavesFrozen;
+  if(!_reasoningSavesFrozen) _setReasoningControlsFrozen(false);
+}
+
+function _saveReasoningEffort(effort){
+  if(_reasoningSavesFrozen) return Promise.reject(new Error('profile switch in progress'));
+  const context=_reasoningEffortContext();
+  const profile=(S&&S.activeProfile)||'default';
+  const owner=_reasoningSaveOwner(profile, context);
+  const saveSeq=++_reasoningSaveSeq;
+  _reasoningLatestSaveByOwner.set(owner, saveSeq);
+  const payload=Object.assign({effort:effort},context);
+  const post=function(){
+    return api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)});
+  };
+  const request=_reasoningSaveChain.then(post,post);
+  _reasoningSaveChain=request.catch(function(){});
+  return request.then(function(st){
+    _applyReasoningSaveResult(saveSeq, owner, context, profile, (st&&st.reasoning_effort)||effort, st||{});
+    return st;
+  },function(e){
+    _failReasoningSave(saveSeq, owner);
+    throw e;
+  });
+}
+
+function _isLatestReasoningSave(saveSeq, owner){
+  return _reasoningLatestSaveByOwner.get(owner)===saveSeq;
+}
+
+function _failReasoningSave(saveSeq, owner){
+  // This chat's newest save failed, so an older save (whose result was
+  // suppressed) may be what the server stored. Re-read it now if it is visible.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(owner===_reasoningSaveOwner((S&&S.activeProfile)||'default', _reasoningEffortContext())) fetchReasoningChip();
+}
+
+function _applyReasoningSaveResult(saveSeq, owner, context, profile, effort, status){
+  // The server saved the originating session. This single-entry UI cache
+  // belongs only to the visible context; revisiting another session refetches.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(profile!==((S&&S.activeProfile)||'default')) return;
+  const params=new URLSearchParams(context).toString();
+  const key=params?('?'+params):'';
+  if(key!==_reasoningEffortQuery()){
+    // Same chat, different model/provider: a GET for the new key may have
+    // read the pre-save value, so re-read it rather than keep a stale cache.
+    const current=_reasoningEffortContext();
+    if(context.session_id&&current.session_id===context.session_id) fetchReasoningChip();
+    return;
+  }
+  // A GET dispatched before this save must not restore the old effort later.
+  ++_reasoningFetchSeq;
+  _lastReasoningFetchKey=key;
+  _applyReasoningChip(effort, status);
 }
 
 function _applyReasoningOptions(supportedEfforts){
@@ -5708,9 +5805,9 @@ function _applyReasoningChip(eff){
   _highlightReasoningOption(effort);
 }
 
-// Tracks the model/provider identity of the last reasoning fetch so routine
-// topbar syncs can serve the cached chip state instead of re-hitting the
-// network. null = never fetched.
+// Tracks the session/model/provider identity of the last reasoning fetch so
+// routine topbar syncs can serve the cached chip state instead of re-hitting
+// the network. null = never fetched.
 let _lastReasoningFetchKey=null;
 // Monotonic dispatch counter. Each fetchReasoningChip() increments it and the
 // async handlers capture their own value; a response (success OR failure) only
@@ -5767,12 +5864,12 @@ function syncReasoningChip(){
   // refetch unconditionally to refresh supported-efforts after a model switch,
   // which turned ordinary syncs into a GET /api/reasoning storm (one per token).
   // Restore the cache short-circuit but keep a9ce2889's intent: only hit the
-  // network when nothing is cached yet OR the model/provider identity changed
-  // since the last fetch (the only inputs that change /api/reasoning's answer).
+  // network when nothing is cached yet OR the session/model/provider identity
+  // changed since the last fetch (the inputs that change /api/reasoning's answer).
   // The user-pick and model-switch paths still update the cache directly.
   const key=_reasoningEffortQuery();
-  // Short-circuit on the KEY alone: if a fetch for this exact model/provider has
-  // already been dispatched (in-flight) or completed, do not dispatch another —
+  // Short-circuit on the KEY alone: if a fetch for this exact session/model/provider
+  // has already been dispatched (in-flight) or completed, do not dispatch another —
   // this is what stops the #4650 storm, including the COLD-cache window where
   // _currentReasoningEffort is still null between the first dispatch and its
   // response (10 syncs before the first GET resolves must produce ONE request,
@@ -5798,6 +5895,7 @@ function toggleReasoningDropdown(){
   if(!dd||!chip) return;
   const open=dd.classList.contains('open');
   if(open){closeReasoningDropdown();return;}
+  if(_reasoningSavesFrozen) return;
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
@@ -5849,13 +5947,11 @@ document.addEventListener('click',function(e){
     // silently ignore the Default click and leave the toggle one-way off-only.
     // (#6219 round-3)
     if(opt){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      _saveReasoningEffort(effort)
         .then(function(st){
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
           // — display 'Default' rather than an empty toast.
           const display=(st&&st.reasoning_effort)||effort||'Default';
-          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+display);
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
