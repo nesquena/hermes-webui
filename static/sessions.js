@@ -10597,25 +10597,46 @@ function _bindingModelKeyFor(proj, modelOptions, opts){
 }
 
 function _showProjectBindingsDialog(proj){
+  // The dialog is built on the app's shared dialog classes (.app-dialog*) so
+  // the registered skins (light mode / geist-contrast / zeus) restyle it, the
+  // Save button picks up the theme's dark-on-accent text instead of white on
+  // yellow, Escape closes it and Tab stays inside it. The overlay intentionally
+  // sits BELOW the shared app dialog's z-index (see .project-bindings-overlay)
+  // so a prompt/confirm opened from inside still stacks on top.
+  // (re-gate 2026-10-07T19:22:30Z, item 4.)
   const overlay=document.createElement('div');
-  overlay.className='project-bindings-overlay';
-  // z-index below the app dialog (1100) so showPromptDialog / confirm
-  // dialogs opened from inside the bindings dialog stay on top.
-  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1050;display:flex;align-items:center;justify-content:center;';
+  overlay.className='app-dialog-overlay project-bindings-overlay';
   const dialog=document.createElement('div');
-  dialog.className='project-bindings-dialog';
-  dialog.style.cssText='background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;width:min(520px,92vw);max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.45);color:var(--text);font-size:13px;';
+  dialog.className='app-dialog project-bindings-dialog';
+  dialog.setAttribute('role','dialog');
+  dialog.setAttribute('aria-modal','true');
+  dialog.setAttribute('aria-labelledby','projectBindingsTitle');
+
+  const header=document.createElement('div');
+  header.className='app-dialog-header';
   const title=document.createElement('div');
+  title.className='app-dialog-title';
+  title.id='projectBindingsTitle';
   title.textContent=t('pb_bindings_title',proj.name);
-  title.style.cssText='font-size:15px;font-weight:600;margin-bottom:14px;';
-  dialog.appendChild(title);
+  const closeBtn=document.createElement('button');
+  closeBtn.type='button';
+  closeBtn.className='app-dialog-close';
+  closeBtn.setAttribute('aria-label',t('pb_close'));
+  closeBtn.innerHTML=li('x',14);
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+  dialog.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='project-bindings-body';
+  dialog.appendChild(body);
 
   const _field=(labelText,control)=>{
     const wrap=document.createElement('div');
-    wrap.style.cssText='margin-bottom:12px;';
+    wrap.className='project-bindings-field';
     const lab=document.createElement('div');
+    lab.className='project-bindings-label';
     lab.textContent=labelText;
-    lab.style.cssText='font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:5px;';
     wrap.appendChild(lab);
     wrap.appendChild(control);
     return wrap;
@@ -10756,8 +10777,6 @@ function _showProjectBindingsDialog(proj){
   })();
 
   const wsWrap=_field(t('pb_field_workspaces'),wsListEl);
-  // NOTE: appended below Model/Reasoning effort (layout: config on top,
-  // workspace list + auto-assign underneath).
 
   // ── Model: name-first combobox cloned from the composer modelSelect ──
   const modelOptions=[{value:'',name:t('pb_none_inherit')}];
@@ -10823,23 +10842,19 @@ function _showProjectBindingsDialog(proj){
     value:_initialModelKey,
     options:(()=>{ if(!_hasDuplicateModelValues) return modelOptions; return modelOptions.map(o=>({value:o._key, name:o.name, sub:o.sub})); })(),
   });
-  dialog.appendChild(_field(t('pb_field_model'),modelCombo.el));
+  body.appendChild(_field(t('pb_field_model'),modelCombo.el));
 
-  // ── Reasoning effort: name-first combobox of the standard ladder ──
-  const effortOptions=[{value:'',name:t('pb_none_inherit')}];
-  ['minimal','low','medium','high','xhigh','max'].forEach(eff=>{
-    effortOptions.push({value:eff,name:t('pb_effort_'+eff)});
-  });
-  const effortCombo=_makeBindingsCombo({
-    placeholder:t('pb_none_inherit'),
-    value:proj.reasoning_effort||'',
-    options:effortOptions,
-  });
-  dialog.appendChild(_field(t('pb_field_effort'),effortCombo.el));
+  // ── Reasoning effort: NOT rendered. The value is applied through
+  // /api/reasoning, which sets the effort for that model family across the
+  // WHOLE profile, so a row inside a per-project dialog read as per-project.
+  // The API field is kept (see /api/projects/bind), the row comes back with
+  // per-session effort (#7881). Because the field is not submitted here, an
+  // existing reasoning_effort binding is left untouched.
+  // (re-gate 2026-10-07T19:22:30Z, item 2.)
 
-  // ── Workspaces list + auto-assign (below the model/effort config) ──
-  dialog.appendChild(wsWrap);
-  dialog.appendChild(addRow);
+  // ── Workspaces list + auto-assign (below the model config) ──
+  body.appendChild(wsWrap);
+  body.appendChild(addRow);
 
   const aaRow=document.createElement('label');
   aaRow.className='project-bindings-auto-assign';
@@ -10857,25 +10872,51 @@ function _showProjectBindingsDialog(proj){
   aaText.appendChild(aaTitle);
   aaText.appendChild(aaHint);
   aaRow.appendChild(aaText);
-  dialog.appendChild(aaRow);
+  body.appendChild(aaRow);
+
+  // Ticking the box files EVERY existing chat in the bound workspaces under
+  // this project and unticking only clears the flag — nothing is ever
+  // un-filed. Confirm with a real count first, and put the checkbox back when
+  // the user declines. (re-gate 2026-10-07T19:22:30Z, item 3.)
+  aaCb.onchange=async()=>{
+    if(!aaCb.checked) return;
+    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
+    if(!wsPaths.length) return;   // nothing bound yet => no sweep to guard
+    let count=null;
+    try{
+      const res=await api('/api/projects/auto-assign-preview',{
+        method:'POST',
+        body:JSON.stringify({project_id:proj.project_id, workspaces:wsPaths}),
+      });
+      if(res&&typeof res.count==='number') count=res.count;
+    }catch(_){ count=null; }
+    const confirmed=await showConfirmDialog({
+      title:t('pb_auto_assign_label'),
+      message:(count===null)
+        ? t('pb_auto_assign_confirm_unknown',proj.name)
+        : t('pb_auto_assign_confirm',count,proj.name),
+      confirmLabel:t('pb_auto_assign_confirm_btn'),
+      cancelLabel:t('pb_cancel'),
+    });
+    if(!confirmed) aaCb.checked=false;
+  };
 
   _seedWsList();
 
   // ── Actions ──
   const btnRow=document.createElement('div');
-  btnRow.style.cssText='display:flex;gap:8px;justify-content:flex-end;margin-top:16px;';
-  const _btn=(label,style,onclick)=>{
-    const b=document.createElement('button');
-    b.type='button';
-    b.textContent=label;
-    b.style.cssText='padding:7px 16px;border-radius:8px;border:1px solid var(--border);cursor:pointer;font-size:13px;'+style;
-    b.onclick=onclick;
-    return b;
-  };
-  btnRow.appendChild(_btn(t('pb_cancel'),'background:transparent;color:var(--muted);',()=>{overlay.remove();}));
-  btnRow.appendChild(_btn(t('pb_save'),'background:var(--accent,#6366f1);color:#fff;border-color:transparent;',async()=>{
+  btnRow.className='app-dialog-actions';
+  const cancelBtn=document.createElement('button');
+  cancelBtn.type='button';
+  cancelBtn.className='app-dialog-btn';
+  cancelBtn.textContent=t('pb_cancel');
+  cancelBtn.onclick=()=>{ _close(); };
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='app-dialog-btn confirm';
+  saveBtn.textContent=t('pb_save');
+  saveBtn.onclick=async()=>{
     const modelVal=modelCombo.getValue();
-    const effortVal=effortCombo.getValue();
     const fields={};
     // Workspaces: the current list (empty → unbind all). Send the array so
     // the server replaces the full binding; null clears.
@@ -10923,17 +10964,50 @@ function _showProjectBindingsDialog(proj){
       fields.model=null;
       fields.model_provider=null;
     }
-    fields.reasoning_effort=effortVal||null;
-    overlay.remove();
+    _close();
     await _saveProjectBindings(proj,fields);
-  }));
+  };
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(saveBtn);
   dialog.appendChild(btnRow);
 
+  // Escape closes; Tab cycles inside the dialog (same trap the shared app
+  // dialog installs) — the private overlay used to do neither.
+  const _lastFocus=document.activeElement;
+  let _closed=false;
+  const _focusables=()=>Array.from(
+    overlay.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')
+  ).filter(el=>!el.disabled&&el.offsetParent!==null);
+  function _onKey(e){
+    if(e.key==='Escape'){
+      e.preventDefault();e.stopPropagation();_close();return;
+    }
+    if(e.key==='Tab'){
+      const nodes=_focusables();
+      if(!nodes.length) return;
+      const idx=nodes.indexOf(document.activeElement);
+      let next;
+      if(e.shiftKey) next=idx<=0?nodes.length-1:idx-1;
+      else next=(idx===-1||idx===nodes.length-1)?0:idx+1;
+      e.preventDefault();
+      nodes[next].focus();
+    }
+  }
+  function _close(){
+    if(_closed) return;
+    _closed=true;
+    document.removeEventListener('keydown',_onKey,true);
+    overlay.remove();
+    try{ if(_lastFocus&&typeof _lastFocus.focus==='function') _lastFocus.focus(); }catch(_){}
+  }
+  closeBtn.onclick=()=>{ _close(); };
   overlay.appendChild(dialog);
-  overlay.onclick=(e)=>{if(e.target===overlay) overlay.remove();};
+  overlay.onclick=(e)=>{if(e.target===overlay) _close();};
+  document.addEventListener('keydown',_onKey,true);
   document.body.appendChild(overlay);
   try{overlay.querySelector('.project-bindings-combo-trigger').focus();}catch(_){}
 }
+
 
 function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
@@ -11021,22 +11095,16 @@ function _showProjectContextMenu(e, proj, chip){
   bindSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
   menu.appendChild(bindSep);
 
-  // ── Project bindings: workspaces / model / reasoning effort ─────────────
-  // One entry opens a modal dialog with a multi-workspace list (default
-  // marked, add/remove), an auto-assign toggle, and single-value model +
-  // effort dropdowns. Each field keeps its unbind affordance.
-  const boundParts=[];
-  const _boundWs=(Array.isArray(proj.workspaces)&&proj.workspaces.length)
-    ? proj.workspaces.slice()
-    : (proj.workspace?[proj.workspace]:[]);
-  if(_boundWs.length) boundParts.push(t('pb_ws_summary',_boundWs.length));
-  if(proj.model) boundParts.push(t('pb_chip_model'));
-  if(proj.reasoning_effort) boundParts.push(t('pb_chip_effort',proj.reasoning_effort));
-  if(proj.auto_assign) boundParts.push(t('pb_chip_auto'));
+  // ── Project settings: ONE row, nothing else ─────────────────────────────
+  // The chip menu used to grow from 3 rows to 6 + N (an inline binding summary
+  // plus one "Unbind …" row per bound workspace, model and effort) and from
+  // ~193px to ~355px wide, because the longest row is the workspace path —
+  // exactly why _buildSessionAction keeps menus to icon + label. The unbind
+  // rows were redundant too: the dialog already carries an × per workspace and
+  // a "(none)" option for model and effort. One row opens the dialog.
+  // (re-gate 2026-10-07T19:22:30Z, item 1.)
   const bindItem=document.createElement('div');
-  bindItem.textContent=boundParts.length
-    ? t('pb_bindings_menu_bound',boundParts.join(' · '))
-    : t('pb_bindings_menu');
+  bindItem.textContent=t('pb_bindings_menu');
   bindItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
   bindItem.onmouseenter=()=>bindItem.style.background='var(--hover-bg)';
   bindItem.onmouseleave=()=>bindItem.style.background='';
@@ -11045,37 +11113,6 @@ function _showProjectContextMenu(e, proj, chip){
     _showProjectBindingsDialog(proj);
   };
   menu.appendChild(bindItem);
-
-  // Unbind items — only shown for fields that are currently bound.
-  const _unbindItem=(label,onclick)=>{
-    const item=document.createElement('div');
-    item.textContent=label;
-    item.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--muted);';
-    item.onmouseenter=()=>item.style.background='var(--hover-bg)';
-    item.onmouseleave=()=>item.style.background='';
-    item.onclick=()=>{menu.remove();onclick();};
-    return item;
-  };
-  const hasModel=!!proj.model;
-  const hasEffort=!!proj.reasoning_effort;
-  if(_boundWs.length||hasModel||hasEffort){
-    const unbindSep=document.createElement('hr');
-    unbindSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
-    menu.appendChild(unbindSep);
-    // One item PER bound workspace: the chip menu can be opened with several
-    // bound workspaces, and the legacy `workspace: null` payload cleared every
-    // one of them (plus the default) on a single click. Post the remaining
-    // list instead so only the clicked workspace is removed.
-    _boundWs.forEach(wsPath=>{
-      const _nm=String(wsPath||'').split(/[\\/]/).pop()||String(wsPath||'');
-      menu.appendChild(_unbindItem(t('pb_unbind_workspace_named',_nm),()=>{
-        const remaining=_boundWs.filter(p=>p!==wsPath);
-        _saveProjectBindings(proj, remaining.length?{workspaces:remaining}:{workspaces:null});
-      }));
-    });
-    if(hasModel) menu.appendChild(_unbindItem(t('pb_unbind_model'),()=>_saveProjectBindings(proj,{model:null})));
-    if(hasEffort) menu.appendChild(_unbindItem(t('pb_unbind_effort'),()=>_saveProjectBindings(proj,{reasoning_effort:null})));
-  }
 
   // Divider + Delete
   const sep=document.createElement('hr');
@@ -11090,6 +11127,21 @@ function _showProjectContextMenu(e, proj, chip){
   menu.appendChild(delItem);
 
   document.body.appendChild(menu);
+  // Clamp the menu to the viewport the way the session ⋮ menu does (8px
+  // margins + a width cap): with several bound workspaces the old long rows
+  // pushed it off-screen on a 390px phone. (re-gate 2026-10-07T19:22:30Z,
+  // item 5.)
+  const menuW=Math.min(menu.offsetWidth||menu.getBoundingClientRect().width||140, window.innerWidth-16);
+  menu.style.width=menuW+'px';
+  let menuLeft=e.clientX;
+  if(menuLeft+menuW>window.innerWidth-8) menuLeft=window.innerWidth-menuW-8;
+  if(menuLeft<8) menuLeft=8;
+  menu.style.left=menuLeft+'px';
+  const menuH=menu.offsetHeight||0;
+  let menuTop=e.clientY;
+  if(menuTop+menuH>window.innerHeight-8) menuTop=window.innerHeight-menuH-8;
+  if(menuTop<8) menuTop=8;
+  menu.style.top=menuTop+'px';
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }

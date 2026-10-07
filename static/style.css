@@ -2274,6 +2274,18 @@
   .project-bindings-auto-assign input[type="checkbox"]{margin-top:2px;accent-color:var(--accent);width:14px;height:14px;flex:0 0 auto;}
   .project-bindings-auto-assign .aa-label{font-size:12px;color:var(--text);line-height:1.4;}
   .project-bindings-auto-assign .aa-hint{font-size:11px;color:var(--muted);line-height:1.35;}
+  /* Project settings dialog (PR #6836 re-gate 2026-10-07T19:22:30Z, item 4):
+     the dialog IS a shared .app-dialog now, so skins, Escape handling and the
+     Save button's theme contrast all come from the app's own dialog styles.
+     Only these additions are needed. The overlay deliberately stays BELOW the
+     shared app dialog (z-index 1100) so a prompt/confirm opened from inside
+     still stacks on top of it. */
+  .app-dialog-overlay.project-bindings-overlay{display:flex;z-index:1050;}
+  .project-bindings-dialog{max-height:80vh;overflow:auto;}
+  .project-bindings-body{font-size:13px;}
+  .project-bindings-field{margin-bottom:12px;}
+  .project-bindings-label{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:5px;}
+  .project-bindings-body .app-dialog-actions{margin-top:16px;}
 
   .sidebar-actions{display:flex;gap:6px;}
   .sm-btn{flex:1;padding:8px 0;border-radius:8px;font-size:11px;font-weight:500;background:var(--input-bg);border:1px solid var(--border);color:var(--muted);cursor:pointer;transition:all .15s;text-align:center;letter-spacing:.02em;}

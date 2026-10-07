@@ -47,14 +47,9 @@ def _read_routes_py() -> str:
 PB_I18N_KEYS = (
     "pb_bindings_title",
     "pb_bindings_menu",
-    "pb_bindings_menu_bound",
-    "pb_ws_summary",
-    "pb_chip_model",
-    "pb_chip_effort",
-    "pb_chip_auto",
+    "pb_close",
     "pb_field_workspaces",
     "pb_field_model",
-    "pb_field_effort",
     "pb_none_inherit",
     "pb_no_workspaces",
     "pb_no_options",
@@ -71,13 +66,28 @@ PB_I18N_KEYS = (
     "pb_workspace_already_bound",
     "pb_auto_assign_label",
     "pb_auto_assign_hint",
+    "pb_auto_assign_confirm",
+    "pb_auto_assign_confirm_unknown",
+    "pb_auto_assign_confirm_btn",
     "pb_cancel",
     "pb_save",
     "pb_updated",
     "pb_update_failed",
+)
+
+# Keys the 2026-10-07T19:22:30Z UX re-gate retired: the chip menu no longer
+# carries an inline binding summary or per-field "Unbind …" rows, and the
+# per-project "Reasoning effort" row is hidden (it is profile-wide; #7881).
+PB_I18N_KEYS_RETIRED = (
+    "pb_bindings_menu_bound",
+    "pb_ws_summary",
+    "pb_chip_model",
+    "pb_chip_effort",
+    "pb_chip_auto",
     "pb_unbind_workspace_named",
     "pb_unbind_model",
     "pb_unbind_effort",
+    "pb_field_effort",
     "pb_effort_minimal",
     "pb_effort_low",
     "pb_effort_medium",
@@ -183,16 +193,19 @@ def test_project_bindings_require_active_profile_at_both_sites():
 
 
 # ---------------------------------------------------------------------------
-# SHOULD-FIX — chip menu unbinds everything
+# Re-gate 2026-10-07T19:22:30Z — the chip menu is ONE row now (item 1).
+# (Supersedes the earlier "unbind only the clicked workspace" SHOULD-FIX: the
+# per-workspace unbind rows are gone, so the whole-menu-clear bug they fixed
+# can no longer be reached from the menu.)
 # ---------------------------------------------------------------------------
 
 
 def test_chip_menu_unbinds_only_the_clicked_workspace():
-    """One item per bound workspace; posts the remaining list, not workspace:null."""
+    """The old multi-row payload can never come back through the menu."""
     src = _read_sessions_js()
-    assert "const remaining=_boundWs.filter(p=>p!==wsPath);" in src
-    assert "_saveProjectBindings(proj, remaining.length?{workspaces:remaining}:{workspaces:null});" in src
-    assert "_unbindItem('workspace','workspace')" not in src
+    assert "const remaining=_boundWs.filter(p=>p!==wsPath);" not in src
+    assert "_unbindItem" not in src
+    assert "_saveProjectBindings(proj, remaining.length?{workspaces:remaining}:{workspaces:null});" not in src
 
 
 # ---------------------------------------------------------------------------
@@ -1281,3 +1294,180 @@ def test_auto_assign_sweep_skips_a_view_only_session_in_the_live_cache(tmp_path,
         routes._auto_assign_finish_deleting(pid)
         routes.SESSIONS.pop("s_ro_cache", None)
     assert cached.project_id is None, "a read-only cached active stream was filed"
+
+
+# ---------------------------------------------------------------------------
+# Re-gate 2026-10-07T19:22:30Z — the six-item UX pass, items 1-5.
+# ---------------------------------------------------------------------------
+
+
+def _dialog_source() -> str:
+    """Only the _showProjectBindingsDialog body (up to the next top-level fn)."""
+    src = _read_sessions_js()
+    start = src.index("function _showProjectBindingsDialog(proj){")
+    end = src.index("function _startProjectRename(proj, chip){")
+    return src[start:end]
+
+
+def _ctx_menu_source() -> str:
+    """Only the _showProjectContextMenu body (up to the next top-level fn)."""
+    src = _read_sessions_js()
+    start = src.index("function _showProjectContextMenu(e, proj, chip){")
+    end = src.index("async function _confirmDeleteProject(proj){")
+    return src[start:end]
+
+
+def test_chip_menu_holds_a_single_project_settings_row():
+    """[item 1] One row; no inline summary, no "Unbind …" rows, no widening."""
+    seg = _ctx_menu_source()
+    assert "t('pb_bindings_menu')" in seg
+    assert "_unbindItem" not in seg
+    assert "pb_bindings_menu_bound" not in seg
+    assert "pb_ws_summary" not in seg
+    assert "pb_chip_" not in seg
+    assert "pb_unbind_model" not in seg
+    assert "pb_unbind_effort" not in seg
+    # It still opens the dialog on click.
+    assert "_showProjectBindingsDialog(proj);" in seg
+    # ...and the dialog title/menu label say "Project settings", not "Bindings"
+    # (the maintainer's wording: "Bindings" is implementer vocabulary).
+    i18n = _read_static("i18n.js")
+    assert "pb_bindings_title: 'Project settings — {0}'" in i18n
+    assert "pb_bindings_menu: 'Project settings…'" in i18n
+
+
+def test_chip_menu_clamps_to_the_viewport():
+    """[item 5] Clamped like the session row menu: 8px margins + a width cap."""
+    seg = _ctx_menu_source()
+    assert "window.innerWidth-8" in seg
+    assert "window.innerHeight-8" in seg
+    assert "window.innerWidth-16" in seg
+    assert "menu.style.left=menuLeft+'px';" in seg
+    assert "menu.style.top=menuTop+'px';" in seg
+
+
+def test_bindings_dialog_uses_the_shared_app_dialog_classes():
+    """[item 4] Built on .app-dialog* => skins, Escape, focus trap, contrast."""
+    seg = _dialog_source()
+    assert "app-dialog-overlay project-bindings-overlay" in seg
+    assert "app-dialog project-bindings-dialog" in seg
+    assert "app-dialog-header" in seg
+    assert "app-dialog-title" in seg
+    assert "app-dialog-close" in seg
+    assert "app-dialog-btn confirm" in seg
+    # Escape closes it; Tab stays trapped inside it.
+    assert "if(e.key==='Escape')" in seg
+    assert "e.key==='Tab'" in seg
+    assert "document.removeEventListener('keydown',_onKey,true);" in seg
+    # The private inline-styled overlay/dialog chrome is gone.
+    assert "overlay.style.cssText" not in seg
+    assert "dialog.style.cssText" not in seg
+    # The CSS keeps the overlay BELOW the shared app dialog (z-index 1100) so a
+    # prompt/confirm opened from inside still stacks on top.
+    css = _read_static("style.css")
+    assert ".app-dialog-overlay.project-bindings-overlay{display:flex;z-index:1050;}" in css
+
+
+def test_bindings_dialog_hides_the_reasoning_effort_row():
+    """[item 2] The profile-wide effort row is hidden; the API field stays."""
+    seg = _dialog_source()
+    assert "pb_field_effort" not in seg
+    assert "pb_effort_" not in seg
+    assert "effortCombo" not in seg
+    # (the field never reaches the save payload or reads proj.reasoning_effort)
+    assert "fields.reasoning_effort" not in seg
+    assert "proj.reasoning_effort" not in seg
+    # Backend keeps the field (it comes back with per-session effort, #7881).
+    routes_src = _read_routes_py()
+    assert "\"reasoning_effort\"" in routes_src
+    assert "VALID_REASONING_EFFORTS" in routes_src
+
+
+def test_auto_assign_toggle_is_guarded_by_a_count_confirmation():
+    """[item 3] Ticking the box confirms the sweep (with a count) first."""
+    seg = _dialog_source()
+    assert "aaCb.onchange=async()=>{" in seg
+    assert "'/api/projects/auto-assign-preview'" in seg
+    assert "pb_auto_assign_confirm" in seg
+    assert "if(!confirmed) aaCb.checked=false;" in seg
+    # The count is what the sweep's metadata gate would file.
+    assert "_auto_assign_candidate_count" in _read_routes_py()
+
+
+def test_auto_assign_preview_counts_only_unowned_rows(tmp_path, monkeypatch):
+    """The preview counter mirrors the sweep's metadata gate."""
+    import api.routes as routes
+
+    ws = tmp_path / "ws-preview"
+    ws.mkdir()
+    ws_str = str(ws)
+    index = tmp_path / "_index.json"
+    index.write_text(json.dumps([
+        # counted: unowned + bound workspace + own profile
+        {"session_id": "p1", "workspace": ws_str, "profile": "default", "project_id": None},
+        {"session_id": "p2", "workspace": ws_str, "profile": "default"},
+        # skipped: already filed under a project
+        {"session_id": "p3", "workspace": ws_str, "profile": "default", "project_id": "other"},
+        # skipped: different workspace
+        {"session_id": "p4", "workspace": str(tmp_path / "elsewhere"), "profile": "default"},
+        # skipped: different profile
+        {"session_id": "p5", "workspace": ws_str, "profile": "work"},
+        # skipped: no session id
+        {"workspace": ws_str, "profile": "default"},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: str(a) == str(b))
+
+    assert routes._auto_assign_candidate_count([ws_str], "default") == 2
+    assert routes._auto_assign_candidate_count([ws_str], "work") == 1
+    assert routes._auto_assign_candidate_count([], "default") == 0
+    assert routes._auto_assign_candidate_count(
+        [ws_str, str(tmp_path / "elsewhere")], "default"
+    ) == 3
+
+
+def test_auto_assign_preview_route_returns_the_count(tmp_path, monkeypatch):
+    """POST /api/projects/auto-assign-preview answers {"count": N}."""
+    import api.routes as routes
+
+    ws = tmp_path / "ws-preview-route"
+    ws.mkdir()
+    ws_str = str(ws)
+    index = tmp_path / "_index.json"
+    index.write_text(json.dumps([
+        {"session_id": "r1", "workspace": ws_str, "profile": "default", "project_id": None},
+        {"session_id": "r2", "workspace": ws_str, "profile": "default", "project_id": "x"},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index)
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+
+    responses = []
+    assert _post_project_route(
+        monkeypatch, "/api/projects/auto-assign-preview", {"workspaces": [ws_str]}, responses
+    ) is True
+    assert [r["status"] for r in responses] == [200], responses
+    assert responses[0]["payload"] == {"count": 1}, responses
+
+    # An absent list counts nothing; a non-list is a 400, not a silent zero.
+    responses = []
+    _post_project_route(monkeypatch, "/api/projects/auto-assign-preview", {}, responses)
+    assert [r["status"] for r in responses] == [200], responses
+    assert responses[0]["payload"] == {"count": 0}, responses
+
+    responses = []
+    _post_project_route(
+        monkeypatch, "/api/projects/auto-assign-preview", {"workspaces": "nope"}, responses
+    )
+    assert [r["status"] for r in responses] == [400], responses
+
+
+def test_retired_bindings_i18n_keys_are_gone_from_every_locale():
+    """The keys the menu/effort cleanup retired must not linger anywhere."""
+    src = _read_static("i18n.js")
+    for loc in I18N_LOCALES:
+        chunk = _i18n_locale_chunk(src, loc)
+        leftover = [k for k in PB_I18N_KEYS_RETIRED if ("%s: '" % k) in chunk]
+        assert not leftover, f"locale {loc!r} still defines retired keys: {leftover}"

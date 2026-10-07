@@ -950,6 +950,46 @@ def _auto_assign_sweep_body(proj) -> int:
     return changed
 
 
+def _auto_assign_candidate_count(workspaces, profile=None) -> int:
+    """Count the sessions a workspace backfill would file for ``workspaces``.
+
+    Read-only preview behind ``/api/projects/auto-assign-preview``: the bind
+    dialog confirms with this number before switching auto-assign on, because
+    switching it on files every existing chat in the bound workspaces while
+    switching it off only clears the flag — nothing is ever un-filed
+    (re-gate 2026-10-07T19:22:30Z, item 3).
+
+    Mirrors ``_auto_assign_sweep_body``'s metadata gate (profile match,
+    workspace bound, not already owned) reading the session index alone. It is
+    deliberately metadata-only: the sweep additionally skips view-only rows
+    (read-only imports / delegated subagent children) via
+    ``_auto_assign_target_is_view_only``, which needs the session object, so a
+    preview may over-count by those rows while never under-counting.
+    """
+    if not SESSION_INDEX_FILE.exists():
+        return 0
+    bound = {str(w) for w in (workspaces or []) if w}
+    if not bound:
+        return 0
+    if not profile:
+        profile = _get_active_profile_name() or "default"
+    try:
+        index = json.loads(SESSION_INDEX_FILE.read_bytes())
+    except Exception:
+        return 0
+    count = 0
+    for entry in index:
+        if not _profiles_match(entry.get("profile") or "default", profile):
+            continue
+        ws = entry.get("workspace")
+        if not ws or str(ws) not in bound:
+            continue
+        if not entry.get("session_id") or entry.get("project_id"):
+            continue
+        count += 1
+    return count
+
+
 def _auto_assign_project_for_workspace(workspace, profile=None) -> str | None:
     """Return the project_id that should own a NEW session in ``workspace``.
 
@@ -19040,6 +19080,29 @@ def handle_post(handler, parsed) -> bool:
                 proj["color"] = color
             save_projects(projects)
         return j(handler, {"ok": True, "project": proj})
+
+    if parsed.path == "/api/projects/auto-assign-preview":
+        # Read-only preview for the bind dialog: how many existing sessions
+        # would be filed if auto-assign were switched on for these workspaces?
+        # Ticking the box files EVERY existing chat in the bound workspaces and
+        # unticking it does not un-file them, so the dialog confirms with this
+        # count first (re-gate 2026-10-07T19:22:30Z, item 3).
+        #
+        # Body fields:
+        #   workspaces: [str]  — the workspace list the dialog is about to save
+        #   profile: str       — optional; defaults to the active profile
+        raw_ws = body.get("workspaces")
+        if raw_ws is None:
+            ws_list = []
+        elif isinstance(raw_ws, list):
+            ws_list = [str(w) for w in raw_ws if w]
+        else:
+            return bad(handler, "workspaces must be a list")
+        preview_profile = str(body.get("profile") or "").strip() or None
+        return j(
+            handler,
+            {"count": _auto_assign_candidate_count(ws_list, preview_profile)},
+        )
 
     if parsed.path == "/api/projects/bind":
         # Project bindings: attach workspaces (multi-value, with one marked
