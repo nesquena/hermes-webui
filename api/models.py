@@ -13104,6 +13104,7 @@ def reconciled_state_db_messages_for_session(
     *,
     prefer_context: bool = False,
     state_messages: list | StateDBSessionMessagesSnapshot | None = None,
+    require_reconciled: bool = False,
     with_revision: Literal[False] = False,
 ) -> list: ...
 
@@ -13114,6 +13115,7 @@ def reconciled_state_db_messages_for_session(
     *,
     prefer_context: bool = False,
     state_messages: list | StateDBSessionMessagesSnapshot | None = None,
+    require_reconciled: bool = False,
     with_revision: Literal[True],
 ) -> StateDBSessionMessagesSnapshot: ...
 
@@ -13123,9 +13125,15 @@ def reconciled_state_db_messages_for_session(
     *,
     prefer_context: bool = False,
     state_messages: list | StateDBSessionMessagesSnapshot | None = None,
+    require_reconciled: bool = False,
     with_revision: bool = False,
 ):
-    """Return append-only messages reconciled with state.db for a WebUI session."""
+    """Reconcile the local projection with state.db.
+
+    require_reconciled is for admission under the native turn lease: refuse an
+    unprovable compressed-context fallback rather than label it with fresh SQL
+    revision metadata. Display/legacy readers retain their append-only behavior.
+    """
     if session is None:
         return _state_db_session_messages_result([], None, with_revision=with_revision)
     state_revision = None
@@ -13192,6 +13200,8 @@ def reconciled_state_db_messages_for_session(
                 anchor_key = getattr(session, "compression_anchor_message_key", None)
                 if compressed_context:
                     if not anchor_key:
+                        if require_reconciled:
+                            raise RuntimeError("compression_anchor_missing: reload context before inference")
                         logger.debug(
                             "Compressed context for session %s has no compression anchor; using context_messages only",
                             getattr(session, "session_id", None),
@@ -13203,6 +13213,8 @@ def reconciled_state_db_messages_for_session(
                         )
                     anchor_index = _state_db_anchor_index(state_messages, anchor_key)
                     if anchor_index is None:
+                        if require_reconciled:
+                            raise RuntimeError("compression_anchor_unverifiable: reload context before inference")
                         logger.debug(
                             "Compressed context for session %s has an unverifiable compression anchor; using context_messages only",
                             getattr(session, "session_id", None),
