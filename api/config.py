@@ -1436,16 +1436,113 @@ def _non_ascii_fallback_slug(raw: str) -> str:
     characters, and returns ``""`` here to fall through to the ASCII slug.
 
     The other guard is that ``raw`` must actually contain a non-ASCII character.
-    An all-ASCII name reaches this fallback exactly when its ASCII fold is empty
-    (``"_"``, ``"."``, a single ``-``), and those names never had a fallback
-    identity: on master their fold was empty too, so they minted nothing. Keeping
-    them here would mint ``custom:_`` and change behaviour for existing providers,
-    which this change exists NOT to do. Only a name whose characters the ASCII
-    class cannot represent needs the name kept.
+    An all-ASCII name reaches this fallback exactly when its ASCII fold is empty,
+    and those names never had a fallback identity: on master they minted nothing.
+    The names that fold to empty are ``-`` and ``()`` — punctuation that the
+    ASCII class drops. ``_`` and ``.`` do NOT fold away; they are identifier
+    characters, so a name made of them keeps the ASCII slug (``custom:_``) on
+    both master and this branch. Only a name whose characters the ASCII class
+    cannot represent needs the name kept.
     """
     if raw.isascii() or ":" in raw:
         return ""
     return raw.replace(" ", "-")
+
+
+def _ascii_provider_slug(raw: str) -> str:
+    """The ASCII-only slug shape for ``raw`` (lowercased, stripped by caller).
+
+    ONE definition, because two rules depend on it staying in lockstep: the
+    producer below mints with it, and :func:`_custom_provider_slug_is_fallback`
+    decides a name took the fallback precisely when this returns empty.
+    """
+    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    return re.sub(r"-{2,}", "-", slug)
+
+
+def _custom_provider_slug_is_fallback(name: object) -> bool:
+    """True when ``name``'s identity comes from the non-ASCII fallback (#8017).
+
+    A ``custom:``-prefixed name, or one with ANY ASCII identifier character,
+    already had an identity before this change. Only a name whose ASCII fold is
+    empty takes :func:`_non_ascii_fallback_slug`, and only those identities are
+    new — so only those can collide with an owner that predates them.
+    """
+    raw = str(name or "").strip().lower()
+    if not raw or raw.startswith("custom:"):
+        return False
+    return not _ascii_provider_slug(raw) and bool(_non_ascii_fallback_slug(raw))
+
+
+def _custom_provider_identity_owners(
+    custom_providers: object = None,
+    providers_cfg: object = None,
+) -> set[str]:
+    """Bare slugs that an EXISTING rule already owns, ignoring fallback identities.
+
+    "Existing" means a ``custom:``-prefixed name or a name with ASCII identifier
+    characters (both pre-date #8017), plus every ``providers:`` record key or
+    display name. A fallback-derived identity is admissible only when this set
+    does not already contain its slug, which is what stops a legacy entry (or a
+    keyed ``providers:`` record) from being shadowed by a newer identity.
+
+    Both vocabularies are covered the same way the rest of this module does:
+    ``_custom_provider_slug_key`` for the WebUI's own mint, applied to the record
+    key AND its ``name``, so ``providers: {custom:晨光: ...}`` and
+    ``providers: {晨光: {name: custom:晨光}}`` both count as owners.
+    """
+    owners: set[str] = set()
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not str(name or "").strip() or _custom_provider_slug_is_fallback(name):
+                continue
+            key = _custom_provider_slug_key(name)
+            if key:
+                owners.add(key)
+    if isinstance(providers_cfg, dict):
+        for record_key, record in providers_cfg.items():
+            values = [record_key]
+            if isinstance(record, dict):
+                values.append(record.get("name"))
+            for value in values:
+                if not str(value or "").strip():
+                    continue
+                key = _custom_provider_slug_key(value)
+                if key:
+                    owners.add(key)
+    return owners
+
+
+def _custom_provider_entry_identity(
+    entry: object,
+    custom_providers: object = None,
+    providers_cfg: object = None,
+) -> str:
+    """The identity ONE ``custom_providers[]`` entry may own, or ``""`` when shadowed.
+
+    Existing owners come first: a fallback-derived identity is admitted only when
+    no pre-existing entry or ``providers:`` record already owns its slug. A
+    shadowed entry mints nothing — exactly what it did on master, where its slug
+    was empty — so it is excluded from routing and from catalog ownership instead
+    of taking the identity of the record that was already there.
+
+    The unconstrained producer :func:`_custom_provider_slug_from_name` still mints
+    the fallback id for a name in isolation; this is the cfg-aware view the
+    consumers of an ENTRY use.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    name = entry.get("name")
+    produced = _custom_provider_slug_from_name(name)
+    if not produced or not _custom_provider_slug_is_fallback(name):
+        return produced
+    owners = _custom_provider_identity_owners(custom_providers, providers_cfg)
+    if _custom_provider_slug_key(name) in owners:
+        return ""
+    return produced
 
 
 def _custom_provider_slug_from_name(name: object) -> str:
@@ -1459,8 +1556,7 @@ def _custom_provider_slug_from_name(name: object) -> str:
     # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'. The
     # ASCII substitution folds a ':' to '-' below; the non-ASCII fallback refuses
     # one too, for the same reason (see its docstring).
-    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
-    slug = re.sub(r"-{2,}", "-", slug)
+    slug = _ascii_provider_slug(raw)
     if not slug:
         # No ASCII identifier characters survived. Falling back to the empty
         # string drops the entry; keep the name's own characters so the WebUI
@@ -1574,11 +1670,14 @@ def _merge_model_option_rows(*row_lists: object) -> list[dict[str, str]]:
 
 
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    entries = _custom_provider_entries(source)
+    providers_cfg = source.get("providers") if isinstance(source, dict) else None
     return {
         slug
         for slug in (
-            _custom_provider_slug_from_name(entry.get("name"))
-            for entry in _custom_provider_entries(config_obj)
+            _custom_provider_entry_identity(entry, entries, providers_cfg)
+            for entry in entries
         )
         if slug
     }
@@ -1592,9 +1691,11 @@ def _named_custom_provider_slug_for_provider(
     if not raw:
         return ""
     raw_suffix = raw.removeprefix("custom:")
-    for entry in _custom_provider_entries(config_obj):
+    entries = _custom_provider_entries(config_obj)
+    providers_cfg = config_obj.get("providers") if isinstance(config_obj, dict) else None
+    for entry in entries:
         entry_name = str(entry.get("name") or "").strip().lower()
-        slug = _custom_provider_slug_from_name(entry_name)
+        slug = _custom_provider_entry_identity(entry, entries, providers_cfg)
         if not entry_name or not slug:
             continue
         if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
@@ -1752,7 +1853,10 @@ def _api_key_env_name(provider_id: object) -> str:
     else. An id the convention cannot name is a provider it cannot carry a key
     for. An ASCII id whose distinctive part has no letters or digits (``custom:_``)
     keeps master's behaviour and its convention variable: those names never had a
-    collision, because each one's own id is still distinct.
+    collision, because each one's own id is still distinct. That includes an
+    ASCII id with NO sanitizable character anywhere (``"-"``, ``"()"``): master
+    fell back to the constant ``CUSTOM`` there, so ``CUSTOM_CUSTOM_API_KEY`` is
+    still the name it must resolve.
     """
     text = str(provider_id or "").strip()
     if ":" in text and text.lower().startswith("custom:"):
@@ -1763,7 +1867,10 @@ def _api_key_env_name(provider_id: object) -> str:
         return ""
     sanitized = re.sub(r"[^A-Za-z0-9]", "_", text).upper().strip("_")
     if not sanitized:
-        return ""
+        # Only an ASCII id reaches here (the unnameable non-ASCII case returned
+        # above), so the constant is master's own answer for it, not a shared
+        # variable an unnameable provider could collide on.
+        sanitized = "CUSTOM"
     if not sanitized.startswith("CUSTOM_"):
         sanitized = f"CUSTOM_{sanitized}"
     return f"{sanitized}_API_KEY"
@@ -1811,11 +1918,13 @@ def _named_custom_provider_slug_for_base_url(
     target = _normalize_base_url_for_match(base_url)
     if not target:
         return ""
-    for entry in _custom_provider_entries(config_obj):
+    entries = _custom_provider_entries(config_obj)
+    providers_cfg = config_obj.get("providers") if isinstance(config_obj, dict) else None
+    for entry in entries:
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        return _custom_provider_entry_identity(entry, entries, providers_cfg) or "custom"
     return ""
 
 
@@ -2675,8 +2784,11 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     prov = str(config_provider or "").strip().lower()
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
-        for entry in _custom_provider_entries():
-            slug = _custom_provider_slug_from_name(entry.get("name"))
+        _entries = _custom_provider_entries()
+        for entry in _entries:
+            slug = _custom_provider_entry_identity(
+                entry, _entries, cfg.get("providers") if isinstance(cfg, dict) else None
+            )
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
                 continue
@@ -2901,7 +3013,11 @@ def _custom_provider_slug_key(value: object) -> str:
     return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
 
 
-def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:
+def _unique_custom_provider_entry(
+    custom_providers: object,
+    slug_key: str,
+    providers_cfg: object = None,
+) -> dict | None:
     """Return the single named ``custom_providers`` entry matching ``slug_key``.
 
     Pure and lock-safe: operates only on the passed-in list, so it can be called
@@ -2913,9 +3029,17 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     entries share the key so an endpoint and an API key can never be resolved
     from different entries on any path. Returns the matching entry, or ``None``
     when no entry matches.
+
+    An entry that only reaches this slug through the non-ASCII fallback is
+    skipped when a pre-existing entry or keyed ``providers:`` record already owns
+    it (#8026): the fallback identity is admitted only for a slug no legacy name
+    claims, so a config holding both ``custom:晨光`` and ``晨光`` keeps resolving
+    the entry it always did instead of failing closed on an identity this change
+    introduced.
     """
     if not slug_key or not isinstance(custom_providers, list):
         return None
+    owners = _custom_provider_identity_owners(custom_providers, providers_cfg)
     matches: list[dict] = []
     for entry in custom_providers:
         if not isinstance(entry, dict):
@@ -2923,8 +3047,13 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        if _custom_provider_slug_key(name) == slug_key:
-            matches.append(entry)
+        if _custom_provider_slug_key(name) != slug_key:
+            continue
+        if _custom_provider_slug_is_fallback(name) and slug_key in owners:
+            # Fallback-derived, and a legacy entry or keyed record already owns
+            # this slug: this entry minted nothing before the change either.
+            continue
+        matches.append(entry)
     if len(matches) >= 2:
         names = [str(e.get("name") or "").strip() for e in matches]
         raise AmbiguousCustomProviderError(
@@ -3006,6 +3135,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             _unique_custom_provider_entry(
                 cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider),
+                cfg.get('providers'),
             )
         return model, provider, base_url
 
@@ -3112,11 +3242,15 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # never blocks a request that resolves to a different provider.
         if _active_custom_slug:
             _active_key = _custom_provider_slug_key(_active_custom_slug)
+            _providers_cfg_for_identity = cfg.get('providers')
             _active_owner = next(
                 (
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
+                    and _custom_provider_entry_identity(
+                        e, custom_providers, _providers_cfg_for_identity
+                    )
                     and _custom_provider_slug_key(e.get('name')) == _active_key
                 ),
                 None,
@@ -3144,7 +3278,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 entry_model_ids.add(entry_model)
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
-                provider_hint = _custom_provider_slug_from_name(entry_name)
+                provider_hint = _custom_provider_entry_identity(
+                    entry, custom_providers, cfg.get('providers')
+                )
+                if not provider_hint:
+                    # A fallback-derived name that a legacy entry already owns
+                    # mints nothing (it did not before #8026 either), so this
+                    # entry cannot claim the model.
+                    continue
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
                 return _finalize(model_id, provider_hint, entry_base_url or None)
@@ -3245,6 +3386,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             entry = _unique_custom_provider_entry(
                 cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider_hint),
+                cfg.get('providers'),
             )
             if entry is not None:
                 base_url = str(entry.get('base_url') or '').strip() or None
@@ -3298,7 +3440,11 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
-                        _slug = _custom_provider_slug_from_name(prefix)
+                        _slug = _custom_provider_entry_identity(
+                            _entry, _custom_cfg, cfg.get("providers")
+                        )
+                        if not _slug:
+                            continue
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 
@@ -3930,7 +4076,9 @@ def _select_custom_provider_record(
     # Fail closed when the slug maps to multiple entries (raises); otherwise use
     # the single matching entry. Shared with resolve_model_provider so endpoint
     # and credential are always resolved from the SAME entry.
-    matched_entry = _unique_custom_provider_entry(custom_providers, slug)
+    matched_entry = _unique_custom_provider_entry(
+        custom_providers, slug, cfg_data.get("providers")
+    )
     if matched_entry is not None:
         return matched_entry, "custom_providers", True, CUSTOM_SELECTION_EXACT
 
@@ -5048,7 +5196,9 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
             custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else []
             if (
                 _unique_custom_provider_entry(
-                    custom_providers, _custom_provider_slug_key(provider)
+                    custom_providers,
+                    _custom_provider_slug_key(provider),
+                    cfg.get("providers") if isinstance(cfg, dict) else None,
                 )
                 is not None
             ):
@@ -5891,8 +6041,13 @@ def _resolve_model_reasoning_efforts_impl(
     _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
-            for _entry in _custom_provider_entries():
-                if _custom_provider_slug_from_name(_entry.get("name")) == provider:
+            _re_entries = _custom_provider_entries()
+            for _entry in _re_entries:
+                if _custom_provider_entry_identity(
+                    _entry,
+                    _re_entries,
+                    cfg.get("providers") if isinstance(cfg, dict) else None,
+                ) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
@@ -6814,6 +6969,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     _cp_match = _unique_custom_provider_entry(
                         config_data.get("custom_providers", []),
                         _custom_provider_slug_key(provider),
+                        config_data.get("providers"),
                     )
                     if _cp_match is not None:
                         resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
@@ -7590,9 +7746,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                     detected_providers.add(provider)
                     _append_model_id(provider, entry.get("model"))
 
-        for entry in _custom_provider_entries(cfg):
+        _static_custom_entries = _custom_provider_entries(cfg)
+        _static_providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else None
+        for entry in _static_custom_entries:
             provider_name = str(entry.get("name") or "").strip()
-            provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
+            provider_slug = _custom_provider_entry_identity(
+                entry, _static_custom_entries, _static_providers_cfg
+            ) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
@@ -10093,7 +10253,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         continue
                     entry_name = str(entry.get("name") or "").strip()
                     if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
+                        return _custom_provider_entry_identity(
+                            entry, custom_providers_cfg, cfg.get("providers")
+                        )
                     return "custom"
 
             return ""
@@ -10437,12 +10599,22 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _named_custom_groups: dict = {}
         _named_custom_errors: dict[str, dict] = {}
         if isinstance(_custom_providers_cfg, list):
+            _providers_cfg_for_identity = cfg.get("providers") if isinstance(cfg, dict) else None
             _seen_custom_ids = set()
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
                     continue
                 _cp_name = (_cp.get("name") or "").strip()
-                _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
+                # Ownership uses the cfg-aware view so a fallback-derived entry
+                # that a legacy name already claims is NOT catalogued under an
+                # identity it does not own (#8026).
+                _slug = (
+                    _custom_provider_entry_identity(
+                        _cp, _custom_providers_cfg, _providers_cfg_for_identity
+                    )
+                    if _cp_name
+                    else None
+                )
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 

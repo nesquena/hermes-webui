@@ -1020,7 +1020,8 @@ endpoint. Two rules:
   `_custom_provider_slug_from_name()`: lowercase, every run of other characters
   folded to `-`, so `Proxy Main` -> `custom:proxy-main` and `Foo (Bar)` ->
   `custom:foo-bar`. A name that has any of those characters is slugified this
-  way even when some of them are stripped in the process.
+  way even when some of them are stripped in the process. `_` and `.` ARE
+  identifier characters, so `_` -> `custom:_` and `.` -> `custom:.`.
 - **A name with none of them** (e.g. a pure-CJK name such as `晨光鑫遇专用`)
   keeps its own characters, because the agent's `custom_provider_slug()` does
   (`_agent_custom_provider_slug` mirrors it). Folding them away emptied the slug,
@@ -1035,8 +1036,17 @@ endpoint. Two rules:
   `晨光:鑫遇` mints nothing and stays uncatalogued, exactly as it does today.
   Nothing that routes before stops routing; the name simply is not advertised.
   The fallback also requires the name to carry a non-ASCII character: an
-  all-ASCII name reaches it exactly when its fold was empty (`_`, `.`), and
+  all-ASCII name reaches it exactly when its fold was empty (`-`, `()`), and
   those minted nothing before either, so their behaviour is unchanged.
+- **Existing owners come first.** A fallback-derived identity is admitted only
+  when no pre-existing entry or `providers:` record already owns that slug.
+  A config holding both `custom:晨光` and `晨光` (or a `providers: {"custom:晨光":
+  ...}` record plus a legacy `晨光` list entry) keeps resolving the record it
+  always did: the legacy name owns `晨光`, so the fallback entry mints nothing
+  and is excluded from routing, catalog ownership and collision detection
+  (`_unique_custom_provider_entry`). Without this, the new identity would turn a
+  working config into `AmbiguousCustomProviderError` and silently re-point an
+  existing keyed route at the other entry's endpoint and key.
 
 The fallback is name-derived, not endpoint-derived: two providers sharing one
 `base_url` are two identities and must stay two entries. The same rule governs

@@ -37,6 +37,7 @@ from api.config import (
     _PROVIDER_MODELS,
     _coerce_provider_cost_budget,
     _configured_model_ids,
+    _custom_provider_entry_identity,
     _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
@@ -75,6 +76,31 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
     if slug:
         candidates.add(slug)
     return pid in candidates
+
+
+def _custom_provider_entry_matches(
+    provider_id: str,
+    entry: object,
+    custom_providers: object = None,
+    providers_cfg: object = None,
+) -> bool:
+    """cfg-aware :func:`_custom_provider_name_matches` for one list ENTRY.
+
+    A fallback-derived name whose slug an existing record already owns mints
+    nothing and belongs to no provider (#8026), so its raw name — which equals
+    the owner's slug — must not make it a match. Otherwise which credential is
+    attributed to a provider slug would depend on the ORDER of the list.
+    """
+    pid = str(provider_id or "").strip().lower()
+    if not pid or not isinstance(entry, dict):
+        return False
+    raw_name = str(entry.get("name") or "").strip().lower()
+    if not raw_name:
+        return False
+    slug = _custom_provider_entry_identity(entry, custom_providers, providers_cfg)
+    if not slug:
+        return False
+    return pid in {raw_name, f"custom:{raw_name}", slug}
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
@@ -1158,8 +1184,11 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
             values.append(provider_cfg.get("api_key"))
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):
+        providers_cfg = cfg.get("providers")
         for cp in custom_providers:
-            if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
+            if isinstance(cp, dict) and _custom_provider_entry_matches(
+                provider_id, cp, custom_providers, providers_cfg
+            ):
                 cp_key = cp.get("api_key")
                 if isinstance(cp_key, str) and cp_key.startswith("${") and cp_key.endswith("}"):
                     values.append(_thread_local_env_value(cp_key[2:-1]))
@@ -1328,9 +1357,12 @@ def _provider_has_key(provider_id: str) -> bool:
     # Check custom_providers
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):
+        providers_cfg = cfg.get("providers")
         for cp in custom_providers:
             if isinstance(cp, dict):
-                if _custom_provider_name_matches(provider_id, cp.get("name")):
+                if _custom_provider_entry_matches(
+                    provider_id, cp, custom_providers, providers_cfg
+                ):
                     if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
                         return True
     return False
@@ -1375,10 +1407,13 @@ def _get_provider_api_key(provider_id: str) -> str | None:
 
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):
+        providers_cfg = cfg.get("providers")
         for cp in custom_providers:
             if not isinstance(cp, dict):
                 continue
-            if _custom_provider_name_matches(provider_id, cp.get("name")):
+            if _custom_provider_entry_matches(
+                provider_id, cp, custom_providers, providers_cfg
+            ):
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
                     return _thread_local_env_value(cp_key[2:-1]).strip() or None
@@ -2822,11 +2857,17 @@ def get_providers() -> dict[str, Any]:
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
     custom_providers_cfg = cfg.get("custom_providers", [])
     if isinstance(custom_providers_cfg, list):
+        _cp_providers_cfg = cfg.get("providers")
         for cp in custom_providers_cfg:
             if not isinstance(cp, dict) or not cp.get("name"):
                 continue
             cp_name = str(cp["name"]).strip()
-            cp_id = _custom_provider_slug_from_name(cp_name)
+            # cfg-aware: a fallback-derived name a legacy entry or keyed
+            # providers: record already owns mints nothing (#8026), so the card
+            # does not list a second row under an identity it does not own.
+            cp_id = _custom_provider_entry_identity(
+                cp, custom_providers_cfg, _cp_providers_cfg
+            )
             if not cp_id:
                 logger.warning(
                     "Custom provider entry %r produced empty slug; skipping",
@@ -3036,9 +3077,12 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             # 3. Clean custom_providers[].api_key
             custom_providers = cfg.get("custom_providers", [])
             if isinstance(custom_providers, list):
+                providers_cfg = cfg.get("providers")
                 for cp in custom_providers:
                     if isinstance(cp, dict):
-                        if _custom_provider_name_matches(provider_id, cp.get("name")):
+                        if _custom_provider_entry_matches(
+                            provider_id, cp, custom_providers, providers_cfg
+                        ):
                             if cp.get("api_key"):
                                 del cp["api_key"]
                                 changed = True

@@ -7391,6 +7391,27 @@ def _custom_provider_slug_for_context(name: object) -> str:
         return f"custom:{slug}"
 
 
+def _custom_provider_entry_slug_for_context(
+    entry: object,
+    custom_providers: object = None,
+    providers_cfg: object = None,
+) -> str:
+    """cfg-aware identity for ONE ``custom_providers`` entry, or ``""`` when shadowed.
+
+    A fallback-derived name that a legacy entry or ``providers:`` record already
+    owns mints nothing (#8026), so those entries are skipped instead of matching
+    an identity they do not own. Falls back to the plain producer when the
+    cfg-aware helper is unavailable (import-failure path).
+    """
+    try:
+        from api.config import _custom_provider_entry_identity
+
+        return _custom_provider_entry_identity(entry, custom_providers, providers_cfg)
+    except Exception:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        return _custom_provider_slug_for_context(name)
+
+
 def _providers_match_for_context(config_key: object, requested_provider: str) -> bool:
     if not requested_provider:
         return False
@@ -7589,7 +7610,9 @@ def _context_length_lookup_inputs_for_model(
             if not isinstance(entry, dict):
                 continue
             entry_name = str(entry.get("name") or "").strip()
-            entry_slug = _custom_provider_slug_for_context(entry_name)
+            entry_slug = _custom_provider_entry_slug_for_context(
+                entry, custom_providers, providers_cfg
+            )
             entry_base = str(entry.get("base_url") or "").strip()
             entry_base_norm = entry_base.rstrip("/")
             provider_matches = bool(
@@ -7893,7 +7916,7 @@ def _repair_bare_custom_provider_model(
             return None
         from api.config import (
             _custom_provider_entries,
-            _custom_provider_slug_from_name,
+            _custom_provider_entry_slug_for_context,
             get_config,
         )
 
@@ -7904,12 +7927,16 @@ def _repair_bare_custom_provider_model(
             _entries = _custom_provider_entries(
                 _cfg if isinstance(_cfg, dict) else None
             )
+            config_obj = _cfg if isinstance(_cfg, dict) else None
+        _providers_cfg = config_obj.get("providers") if isinstance(config_obj, dict) else None
         prov_norm = str(prov).strip().lower()
         raw_suffix = prov_norm.removeprefix("custom:")
         _matching_cp = None
         for _entry in _entries:
             entry_name = str(_entry.get("name") or "").strip().lower()
-            slug = _custom_provider_slug_from_name(_entry.get("name"))
+            slug = _custom_provider_entry_slug_for_context(
+                _entry, _entries, _providers_cfg
+            )
             if not slug:
                 continue
             if (
@@ -22853,15 +22880,21 @@ def _handle_live_models(handler, parsed):
                 if not (provider == "custom" or provider.startswith("custom:")):
                     return []
                 try:
-                    from api.config import _custom_provider_slug_from_name
+                    from api.config import _custom_provider_entry_identity
                     _cp_entries = cfg.get("custom_providers", [])
                     if not isinstance(_cp_entries, list):
                         return []
+                    _cp_providers_cfg = cfg.get("providers")
                     _matches = []
                     for _cp in _cp_entries:
                         if not isinstance(_cp, dict):
                             continue
-                        _slug = _custom_provider_slug_from_name(_cp.get("name", ""))
+                        # cfg-aware: a fallback-derived name a legacy entry
+                        # already owns mints nothing (#8026), so it is not
+                        # treated as the provider this request named.
+                        _slug = _custom_provider_entry_identity(
+                            _cp, _cp_entries, _cp_providers_cfg
+                        )
                         if provider.startswith("custom:"):
                             if _slug == provider:
                                 _matches.append(_cp)

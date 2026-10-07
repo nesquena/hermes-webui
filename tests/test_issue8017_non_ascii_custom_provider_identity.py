@@ -492,3 +492,203 @@ def test_catalog_still_includes_an_ascii_custom_provider(monkeypatch):
     assert "custom:cgxy-cpa" in groups_by_id
     model_ids = [m["id"] for m in groups_by_id["custom:cgxy-cpa"]["models"]]
     assert "DeepSeek-V4.1-Flash" in model_ids
+
+
+# ---------------------------------------------------------------------------
+# Round four: an EXISTING identity owner comes first (#8026)
+# ---------------------------------------------------------------------------
+
+
+def test_identity_owner_helper_admits_a_free_fallback_and_refuses_a_claimed_one():
+    """The ownership rule itself: a claimed slug is refused, a free one admitted.
+
+    ``_custom_provider_entry_identity`` is the cfg-aware view every consumer
+    uses. A fallback-derived name whose slug a legacy entry already owns mints
+    nothing; on its own, the same name keeps the fallback identity the picker
+    needs. The ``providers:`` vocabulary counts too (both the record key and its
+    ``name``), so a keyed route is an owner as well.
+    """
+    # Claimed by a prefixed list entry -> refused.
+    cfg_claimed = {
+        "custom_providers": [{"name": "custom:晨光"}, {"name": "晨光"}],
+    }
+    assert (
+        config._custom_provider_entry_identity(
+            {"name": "晨光"}, cfg_claimed["custom_providers"], None
+        )
+        == ""
+    )
+    # Claimed by a keyed providers: record -> refused.
+    cfg_keyed = {
+        "custom_providers": [{"name": "晨光"}],
+        "providers": {"custom:晨光": {"base_url": "http://127.0.0.1:8317/v1"}},
+    }
+    assert (
+        config._custom_provider_entry_identity(
+            {"name": "晨光"}, cfg_keyed["custom_providers"], cfg_keyed["providers"]
+        )
+        == ""
+    )
+    # Alone -> the fallback identity is kept, unconstrained.
+    assert (
+        config._custom_provider_entry_identity({"name": "晨光"}, [{"name": "晨光"}], None)
+        == "custom:晨光"
+    )
+    # An ASCII name is never treated as fallback-derived, owner or not.
+    assert (
+        config._custom_provider_entry_identity(
+            {"name": "custom:omni"}, [{"name": "custom:omni"}], None
+        )
+        == "custom:omni"
+    )
+
+
+def test_resolution_does_not_raise_when_a_legacy_entry_owns_the_identity(monkeypatch):
+    """A config holding both `custom:晨光` and `晨光` still resolves the prefixed one.
+
+    The maintainer's first probe: before this round both entries normalized to
+    the same slug, so ``resolve_custom_provider_connection`` raised
+    ``AmbiguousCustomProviderError`` and sending made zero provider requests,
+    where master resolved the prefixed record. The fallback identity belongs to
+    the entry that already owned the name, so the other entry mints nothing.
+    """
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "custom:晨光",
+                    "base_url": "http://127.0.0.1:8317/v1",
+                    "api_key": "sk-keyed",
+                },
+                {
+                    "name": "晨光",
+                    "base_url": "http://127.0.0.1:8318/v1",
+                    "api_key": "sk-legacy",
+                    "model": "chat-model",
+                },
+            ],
+        },
+    )
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光")
+    assert base_url == "http://127.0.0.1:8317/v1", "the prefixed entry owns the identity"
+    assert api_key == "sk-keyed"
+
+
+def test_keyed_providers_record_is_not_shadowed_by_a_legacy_list_entry(monkeypatch):
+    """An existing `providers: {"custom:晨光": ...}` route keeps its endpoint and key.
+
+    The maintainer's second probe: with a legacy list entry named `晨光` present,
+    the fallback gave the list entry the same identity, and resolution returned
+    that entry's port and key (8318/sk-legacy) instead of the configured 8317
+    record's. Master uses the keyed record.
+    """
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "providers": {
+                "custom:晨光": {
+                    "base_url": "http://127.0.0.1:8317/v1",
+                    "api_key": "sk-keyed",
+                }
+            },
+            "custom_providers": [
+                {
+                    "name": "晨光",
+                    "base_url": "http://127.0.0.1:8318/v1",
+                    "api_key": "sk-legacy",
+                    "model": "chat-model",
+                }
+            ],
+        },
+    )
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光")
+    assert base_url == "http://127.0.0.1:8317/v1", "the keyed record is the owner"
+    assert api_key == "sk-keyed"
+
+
+def test_ascii_punctuation_only_id_without_a_prefix_keeps_the_convention_name():
+    """CONTROL pinning master for an ASCII id with nothing to sanitize (#8026).
+
+    ``"-"`` and ``"()"`` sanitize to the empty string, and master substituted the
+    constant ``CUSTOM``, so ``CUSTOM_CUSTOM_API_KEY`` is the variable such a route
+    read. The unnameable-Unicode guard must not catch them: only the
+    context-length lookup can pass such an id, but returning ``""`` there would
+    change behaviour for a setup that works today.
+    """
+    assert config._api_key_env_name("-") == "CUSTOM_CUSTOM_API_KEY"
+    assert config._api_key_env_name("()") == "CUSTOM_CUSTOM_API_KEY"
+    assert config._api_key_env_name("custom:-") == "CUSTOM_CUSTOM_API_KEY"
+    assert config._api_key_env_name("custom:()") == "CUSTOM_CUSTOM_API_KEY"
+
+
+def test_every_consumer_agrees_on_the_entry_that_owns_the_identity(monkeypatch):
+    """The shadowed entry owns nothing, on EVERY consumer of the identity (#8026).
+
+    The first cut fixed the connection resolver but left the model router and the
+    name lookup on the unconstrained producer, so a shadowed entry could still
+    supply the owner's endpoint and be matched by the owner's slug. The router
+    assertion below reproduces that: on the previous head it returned the legacy
+    entry's port (8318) for the owner's model, so the owner's provider slug was
+    paired with an endpoint it does not own. Every consumer is asserted against
+    the entry the connection resolver names as the owner, so a fix that repairs
+    one consumer and misses another fails here.
+    """
+    import api.providers as providers
+
+    entries = [
+        {
+            "name": "custom:晨光",
+            "base_url": "http://127.0.0.1:8317/v1",
+            "api_key": "sk-keyed",
+        },
+        {
+            "name": "晨光",
+            "base_url": "http://127.0.0.1:8318/v1",
+            "api_key": "sk-legacy",
+            "model": "chat-model",
+        },
+    ]
+    owner, shadowed = entries[0], entries[1]
+    cfg_shape = {
+        "model": {"provider": "custom:晨光", "default": "chat-model"},
+        "custom_providers": list(entries),
+    }
+    # resolve_model_provider reads the module-level ``cfg``; the connection
+    # resolver reads get_config(). Patch both so the two see one config.
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    # Routing must never adopt the shadowed entry's endpoint for the owner's
+    # model. This is the finding the first cut missed.
+    _, routed_provider, routed_url = config.resolve_model_provider("chat-model")
+    assert routed_url != "http://127.0.0.1:8318/v1", (
+        "a shadowed fallback entry must not supply the owner's endpoint"
+    )
+
+    # The identity view agrees with itself.
+    assert config._custom_provider_entry_identity(owner, entries, None) == "custom:晨光"
+    assert config._custom_provider_entry_identity(shadowed, entries, None) == ""
+
+    # The owner's own name maps to the identity; the shadowed entry's identity
+    # is empty, so no consumer can match it to the owner's slug.
+    assert config._named_custom_provider_slug_for_provider(
+        "custom:晨光", {"custom_providers": entries}
+    ) == "custom:晨光"
+
+    # Credential attribution does not depend on list order.
+    for ordered in (entries, list(reversed(entries))):
+        assert providers._custom_provider_entry_matches(
+            "custom:晨光", owner, ordered, None
+        )
+        assert not providers._custom_provider_entry_matches(
+            "custom:晨光", shadowed, ordered, None
+        )
+
+    # The resolver agrees with the router on which record owns the route.
+    api_key, owner_url = config.resolve_custom_provider_connection("custom:晨光")
+    assert (api_key, owner_url) == ("sk-keyed", "http://127.0.0.1:8317/v1")
