@@ -466,8 +466,15 @@ def recover_session(session_path: Path) -> dict:
         f'.json.recover.tmp.{os.getpid()}.{threading.current_thread().ident}'
     )
     try:
+        payload = json.dumps(backup_payload, ensure_ascii=False, indent=2)
+        try:
+            payload.encode('utf-8')
+        except UnicodeEncodeError:
+            # Restore the same guarded snapshot losslessly, including lone
+            # provider surrogates preserved in raw or rewritten backups.
+            payload = json.dumps(backup_payload, ensure_ascii=True, indent=2)
         with open(tmp_path, 'w', encoding='utf-8') as fh:
-            fh.write(json.dumps(backup_payload, ensure_ascii=False, indent=2))
+            fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, session_path)
