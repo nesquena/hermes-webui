@@ -3388,7 +3388,7 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
-def _clear_stale_stream_state(session) -> bool:
+def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
     A server restart or worker crash can leave active_stream_id/pending_* in the
@@ -3465,6 +3465,13 @@ def _clear_stale_stream_state(session) -> bool:
         )
         return False
 
+    # Observation must not queue behind a worker committing a large transcript.
+    # The locked() probe avoids a needless full reload; acquire below is the
+    # actual synchronization check and also covers a writer starting afterward.
+    session_lock = _get_session_agent_lock(session.session_id)
+    if not wait_for_writer and session_lock.locked():
+        return False
+
     # ── #1558 P0 safety: if we were handed a metadata-only stub, reload the
     # full session before touching persisted state. The original
     # metadata-only object is left untouched so the caller's read path is
@@ -3515,7 +3522,9 @@ def _clear_stale_stream_state(session) -> bool:
     # active_stream_id under it. A concurrent chat_start may have already
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
-    with _get_session_agent_lock(session.session_id):
+    if not session_lock.acquire(blocking=wait_for_writer):
+        return False
+    try:
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
         if getattr(session, "pending_user_message", None):
@@ -3573,6 +3582,8 @@ def _clear_stale_stream_state(session) -> bool:
                 "_clear_stale_stream_state: save() failed for session %s",
                 getattr(session, "session_id", "?"),
             )
+    finally:
+        session_lock.release()
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.
     if original_stub is not session:
@@ -25435,7 +25446,9 @@ def _start_chat_stream_for_session(
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
-            cleared = _clear_stale_stream_state(s)
+            # chat_start is itself a writer that just released this lock: wait for a
+            # transient holder instead of answering 409 for a dead stream (#8072 review).
+            cleared = _clear_stale_stream_state(s, wait_for_writer=True)
             if not cleared and getattr(s, "active_stream_id", None):
                 diag.stage("response_write") if diag else None
                 return {
