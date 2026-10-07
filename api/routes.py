@@ -719,6 +719,59 @@ def _auto_assign_finish_deleting(project_id) -> None:
         _AUTO_ASSIGN_SWEEPS.pop(project_id, None)
 
 
+def _project_row_exists(project_id) -> bool:
+    """True while ``project_id`` still has a row in the projects catalog.
+
+    Deletion removes that row while holding ``_PROJECTS_CATALOG_LOCK``, so a
+    caller that already holds the lock can treat this as atomic against a
+    completed deletion. The deleting marker alone was not enough: deletion
+    CLEARS it in its ``finally`` (so a future sweep for a reused id can still
+    be admitted), which left a window where ``/api/projects/bind`` — paused
+    after its catalog save — resumed and admitted a sweep for a project whose
+    row was already gone, filing sessions under a dead project id (re-gate
+    2026-10-07, api/routes.py:19186).
+    """
+    if not project_id:
+        return False
+    with _PROJECTS_CATALOG_LOCK:
+        try:
+            return any(
+                p.get("project_id") == project_id for p in load_projects()
+            )
+        except Exception:
+            logger.debug(
+                "project catalog read failed while checking %s", project_id,
+                exc_info=True,
+            )
+            return False
+
+
+def _clear_cached_sessions_for_project(project_id) -> int:
+    """Drop ``project_id`` from every cached session that still carries it.
+
+    Returns the number of cached sessions cleared. ``/api/projects/delete``
+    unlinks by walking the session INDEX (``_index.json``), but a session
+    created by "+ New Chat" is cache-only until its first save —
+    ``new_session`` writes nothing to disk — so an unsaved chat whose workspace
+    was claimed by the removed project kept the dead id in the LRU cache and
+    persisted it on its draft-save (re-gate 2026-10-07, api/routes.py:16855).
+    Callers hold ``_PROJECTS_CATALOG_LOCK`` so this scan cannot interleave with
+    the implicit assignment + cache publication it competes with.
+    """
+    if not project_id:
+        return 0
+    cleared = 0
+    with LOCK:
+        for cached in list(SESSIONS.values()):
+            try:
+                if getattr(cached, "project_id", None) == project_id:
+                    cached.project_id = None
+                    cleared += 1
+            except Exception:
+                continue
+    return cleared
+
+
 def _apply_project_auto_assign(proj) -> int:
     """Run one backfill sweep under the deletion-serialized registry."""
     pid = proj.get("project_id") if isinstance(proj, dict) else None
@@ -16852,20 +16905,39 @@ def handle_post(handler, parsed) -> bool:
         # Project assignment: explicit project_id wins; otherwise, if an
         # auto-assign project claims this workspace, the session is filed
         # under it automatically (multi-workspace auto-classification).
+
+        def _create_session(_project_id):
+            return new_session(
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                profile=body.get("profile") or None,
+                project_id=_project_id,
+                worktree_info=worktree_info,
+                enabled_toolsets=enabled_toolsets,
+            )
+
         project_id = body.get("project_id") or None
         if not project_id and workspace:
-            project_id = _auto_assign_project_for_workspace(
-                workspace, profile=body.get("profile") or None
-            )
-        s = new_session(
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            profile=body.get("profile") or None,
-            project_id=project_id,
-            worktree_info=worktree_info,
-            enabled_toolsets=enabled_toolsets,
-        )
+            # Serialize the implicit assignment WITH the session's publication
+            # into the cache, under the same lock /api/projects/delete takes to
+            # remove the catalog row and to clear the cached sessions that
+            # referenced it. A new chat is cache-only until its first save
+            # (new_session writes nothing to disk), so if the delete's row
+            # removal landed between this assignment and the publication, the
+            # session kept the dead project_id in the cache and persisted it on
+            # the draft-save — the index-only unlink never saw it. Holding the
+            # lock across both makes the two orderings the only ones possible:
+            # either the session is already published when deletion clears the
+            # cache, or the row is already gone so the session is created
+            # unassigned (re-gate 2026-10-07, api/routes.py:16855).
+            with _PROJECTS_CATALOG_LOCK:
+                project_id = _auto_assign_project_for_workspace(
+                    workspace, profile=body.get("profile") or None
+                )
+                s = _create_session(project_id)
+        else:
+            s = _create_session(project_id)
         if worktree_info:
             publish_session_list_changed(
                 "session_new",
@@ -19177,17 +19249,33 @@ def handle_post(handler, parsed) -> bool:
             # Respect shutdown drain refusal — do NOT start a worker the
             # drain snapshot already missed (mirrors memory-worker pattern
             # at api/routes.py:14799-14804).
-            if _register_background_commit_thread(t):
-                # Admit AND start the sweep before this response returns, so a
-                # concurrent delete either joins this worker or refuses the
-                # sweep outright. Starting it from the worker's own body left a
-                # window where the delete found nothing to join and the late
-                # sweep filed sessions under the removed project.
-                if not _auto_assign_start_sweep(proj["project_id"], t):
-                    try:
-                        _unregister_background_commit_thread(t)
-                    except Exception:
-                        pass
+            #
+            # Admission is serialized with deletion under the projects-catalog
+            # lock AND re-checks that the project row still exists. The deleting
+            # marker alone left a window: deletion clears that marker in its
+            # `finally`, so a bind paused after the catalog save above could
+            # resume, see no marker, and file sessions under a project whose row
+            # was already removed (re-gate 2026-10-07, api/routes.py:19186).
+            # Holding the same lock deletion takes to remove the row makes the
+            # check + registration atomic against it: the delete either joins
+            # this worker (it is registered before we release) or the row is
+            # already gone and we refuse.
+            with _PROJECTS_CATALOG_LOCK:
+                if not _project_row_exists(proj["project_id"]):
+                    # The project was deleted while this bind was paused. Do not
+                    # resurrect it and do not start a sweep for it.
+                    return bad(handler, "Project not found", 404)
+                if _register_background_commit_thread(t):
+                    # Admit AND start the sweep before this response returns, so
+                    # a concurrent delete either joins this worker or refuses the
+                    # sweep outright. Starting it from the worker's own body left
+                    # a window where the delete found nothing to join and the
+                    # late sweep filed sessions under the removed project.
+                    if not _auto_assign_start_sweep(proj["project_id"], t):
+                        try:
+                            _unregister_background_commit_thread(t)
+                        except Exception:
+                            pass
 
         return j(handler, {"ok": True, "project": proj})
 
@@ -19237,6 +19325,24 @@ def handle_post(handler, parsed) -> bool:
                     if p["project_id"] != body["project_id"]
                 ]
                 save_projects(projects)
+                # Clear the CACHED sessions that still carry this project_id
+                # while the catalog lock is held. An unsaved new chat lives only
+                # in the LRU cache (new_session writes nothing to disk), so the
+                # index-only unlink below never saw it and its draft-save
+                # persisted the dead id. Running this under the same lock the
+                # create path takes for its implicit assignment + publication
+                # makes the pair mutually exclusive: either that session is
+                # already published (and cleared here) or the row was already
+                # gone (so it is created unassigned) — never an orphan
+                # (re-gate 2026-10-07, api/routes.py:16855).
+                cleared_cached = _clear_cached_sessions_for_project(
+                    body["project_id"]
+                )
+            if cleared_cached:
+                logger.info(
+                    "projects/delete: cleared project_id on %d cached session(s) "
+                    "absent from the index", cleared_cached,
+                )
             # Unassign all sessions that belonged to this project.
             # #3746: this loop is O(N) full-JSON read+save per session, and each
             # save() reserializes the entire messages array. For a project with many

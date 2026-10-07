@@ -127,7 +127,12 @@ def test_bindings_dialog_resolves_provider_via_optgroup_helper():
     # 'custom:backup', so value equality never hit and the dialog reopened on
     # inherit-default with the provider dropped on save (re-gate 2026-10-07).
     assert "o._modelId=(st&&st.model)||o.value;" in src
-    assert "o._providerId=_optProviderId(o)||(st&&st.model_provider)||o.sub||'';" in src
+    # The option's own captured provider wins over the resolver's currently
+    # selected route: the cloned entry has no DOM metadata, and
+    # _modelStateForSelect answers with whichever route OWNS the value, so two
+    # providers offering the same bare model id restored the wrong one
+    # (re-gate 2026-10-07T14:33:01Z).
+    assert "o._providerId=o.sub||(st&&st.model_provider)||'';" in src
     assert "x.value&&x._modelId===wantModel&&String(x._providerId||'')===wantProv" in src
     assert "const _initialModelKey=_bindingModelKeyFor(proj, modelOptions, {" in src
     # A saved pair that is missing from the current catalog is re-injected so
@@ -141,8 +146,10 @@ def test_bindings_dialog_provider_falls_back_to_qualified_model_id():
     """A '@custom:<slug>:<model>' id must still yield its provider when unsaved."""
     src = _read_sessions_js()
     # The fallback runs only after both option-based lookups came up empty.
+    # Window covers the whole save block (it grew when the provider-scoped key
+    # handling landed: _modelValueFor/_modelProvFor now run unconditionally).
     save_i = src.index("if(modelVal){")
-    save_seg = src[save_i:save_i + 1600]
+    save_seg = src[save_i:save_i + 2400]
     assert "_prov=_getOptionProviderId({value:_bare})||null;" in save_seg
     assert "fields.model_provider=_prov;" in save_seg
 
@@ -816,15 +823,18 @@ assert(
   'the saved provider route must win over the first catalog entry'
 );
 
-// Case 3 — a saved pair missing from the catalog is re-injected, not dropped.
+// Case 3 — a saved pair missing from the catalog is re-injected under a
+// provider-SCOPED key (not the bare id: restoring the bare model would silently
+// rebind the binding to whatever other provider happens to offer it).
 const opts3 = [{value: 'gpt-4o-mini', name: 'gpt-4o-mini', sub: 'openai',
                 _modelId: 'gpt-4o-mini', _providerId: 'openai'}];
 const key3 = _bindingModelKeyFor({model: 'model-a:free', model_provider: 'custom:backup'}, opts3, {duplicates: false});
-assert(key3 === 'model-a:free', 'the saved pair must stay selectable: ' + key3);
+assert(key3 === 'custom:backup\\u001fmodel-a:free', 'the saved pair must keep its provider: ' + key3);
 const injected = opts3.filter(o => o._saved)[0];
-assert(injected && injected.value === 'model-a:free' && injected.sub === 'custom:backup',
+assert(injected && injected.value === key3 && injected.sub === 'custom:backup',
   'the saved pair must be re-injected with its provider');
-assert(_modelValueFor(key3) === 'model-a:free', 'wire model id round-trips');
+assert(_modelValueFor(key3) === 'model-a:free' && _modelProvFor(key3) === 'custom:backup',
+  'the provider-scoped key round-trips');
 
 // ...and the provider survives the provider-scoped key form too.
 const opts4 = [{value: '@openai:a', _key: 'openai\\u001fa', _modelId: 'a', _providerId: 'openai'}];
@@ -833,7 +843,7 @@ assert(key4 === 'p\\u001fm', key4);
 assert(_modelValueFor(key4) === 'm' && _modelProvFor(key4) === 'p', 'scoped key round-trips');
 
 // Case 4 — the composer's own matcher is the fallback when identity is absent.
-const opts5 = [{value: '@custom:backup:model-a:free'}];
+const opts5 = [{value: '@custom:backup:model-a:free', sub: 'custom:backup', _providerId: 'custom:backup'}];
 assert(
   _bindingModelKeyFor(
     {model: 'model-a:free', model_provider: 'custom:backup'},
@@ -849,6 +859,34 @@ assert(
   _bindingModelKeyFor({model: 'gpt-4o-mini'}, opts3, {duplicates: false}) === 'gpt-4o-mini',
   'bare saved model matches by identity'
 );
+
+// Case 6 — [re-gate 2026-10-07T14:33:01Z] only a DIFFERENT provider offers the
+// saved model id. The old bare fallback reopened/saved custom:primary.
+const opts6 = [{value: 'model-a:free', name: 'model-a:free', sub: 'custom:primary',
+                _modelId: 'model-a:free', _providerId: 'custom:primary'}];
+const key6 = _bindingModelKeyFor({model: 'model-a:free', model_provider: 'custom:backup'}, opts6, {duplicates: false});
+assert(key6.indexOf('custom:primary') === -1, 'must not reopen as custom:primary: ' + key6);
+assert(_modelValueFor(key6) === 'model-a:free' && _modelProvFor(key6) === 'custom:backup',
+  'the saved (model, provider) pair must survive: ' + key6);
+const inj6 = opts6.filter(o => o._saved)[0];
+assert(inj6 && inj6.value === key6, 'the re-injected option must be selectable by that key');
+
+// Case 7 — a resolver answer carrying a DIFFERENT provider is rejected too.
+const opts7 = [{value: 'gpt-4o', name: 'gpt-4o', sub: 'provA', _modelId: 'gpt-4o', _providerId: 'provA'}];
+const key7 = _bindingModelKeyFor(
+  {model: 'gpt-4o', model_provider: 'provB'},
+  opts7,
+  {duplicates: false, select: {}, findModelInDropdown: () => 'gpt-4o'}
+);
+assert(_modelProvFor(key7) === 'provB', 'the saved provider must survive a resolver snap: ' + key7);
+
+// Case 8 — no saved provider: the bare catalog row is still the identity.
+const opts8 = [{value: 'model-a:free', name: 'model-a:free', sub: 'custom:primary',
+                _modelId: 'model-a:free', _providerId: 'custom:primary'}];
+assert(
+  _bindingModelKeyFor({model: 'model-a:free'}, opts8, {duplicates: false}) === 'model-a:free',
+  'a provider-less saved model keeps matching the bare catalog row'
+);
 console.log('ok');
 """
 
@@ -860,3 +898,205 @@ def test_binding_model_key_resolution_matches_by_identity(tmp_path):
     assert "_bindingModelKeyFor" in helpers
     script = _BINDING_KEY_PROBE.replace("__HELPERS__", helpers)
     assert _run_node(tmp_path, "binding_model_key_probe.js", script).strip() == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Re-gate 2026-10-07T14:33:01Z — the four remaining items on head bfa7b68c.
+# ---------------------------------------------------------------------------
+
+
+def test_binding_options_prefer_the_captured_provider():
+    """[CORE] static/sessions.js:10788 — the cloned option loses its DOM
+    metadata, and the resolver answers with the route that currently OWNS the
+    value; two providers offering the same bare model id then restored (and
+    re-saved) the wrong provider."""
+    src = _read_sessions_js()
+    assert "o._providerId=o.sub||(st&&st.model_provider)||'';" in src
+    assert "o._providerId=_optProviderId(o)||(st&&st.model_provider)||o.sub||'';" not in src
+
+
+def test_binding_save_keeps_a_provider_scoped_reinjection():
+    """[CORE] static/sessions.js:10875 — the save path must recover the model id
+    and the provider from a provider-scoped key in a NON-duplicate catalog."""
+    src = _read_sessions_js()
+    assert "const _bare=_modelValueFor(modelVal);" in src
+    assert "let _prov=_modelProvFor(modelVal)||null;" in src
+    assert "const _bare=_hasDuplicateModelValues?_modelValueFor(modelVal):modelVal;" not in src
+    assert "if(_hasDuplicateModelValues){\n        _prov=_modelProvFor(modelVal)||null;\n      }" not in src
+
+
+def test_bind_refuses_admission_when_the_project_row_was_removed(monkeypatch):
+    """[CORE] api/routes.py:19186 — a bind paused after its catalog save, with a
+    delete completing in between, must not start a sweep.
+
+    Deletion clears its deleting marker in the ``finally``, so the marker check
+    alone let the resumed bind file sessions under the removed project. The
+    admission now re-checks the catalog row under the projects-catalog lock.
+    """
+    import api.routes as routes
+
+    pid = "proj_regate_row_removed"
+    ws = "D:/ws-row-removed"
+    projects = [{
+        "project_id": pid, "name": "Gone", "profile": "default",
+        "workspaces": [ws], "auto_assign": True,
+    }]
+    _install_project_route_stubs(monkeypatch, projects)
+
+    reads = {"n": 0}
+
+    def _load(*a, **k):
+        reads["n"] += 1
+        # Read #1 is the bind's own catalog block (the row is still there); the
+        # delete completes before read #2 — the admission re-check — which is
+        # exactly the ordering the review reproduced 20/20.
+        return [dict(p) for p in projects] if reads["n"] == 1 else []
+
+    monkeypatch.setattr(routes, "load_projects", _load)
+    # Neither a worker nor a sweep admission may happen for the removed row.
+    # Both are recorded rather than started so a regression cannot launch a real
+    # sweep against the live state directory.
+    registered = []
+    started = []
+    monkeypatch.setattr(
+        routes, "SESSION_INDEX_FILE", Path(routes.SESSION_INDEX_FILE.parent) / "_missing_regate.json"
+    )
+    monkeypatch.setattr(
+        routes, "_auto_assign_start_sweep", lambda pid_, t: (started.append(pid_), True)[1]
+    )
+    import api.session_lifecycle as _sl
+
+    monkeypatch.setattr(
+        _sl, "_register_background_commit_thread",
+        lambda t: (registered.append(t), True)[1],
+    )
+
+    responses = []
+    _post_project_route(
+        monkeypatch, "/api/projects/bind", {"project_id": pid, "auto_assign": True}, responses
+    )
+    assert reads["n"] >= 2, "the admission must re-read the catalog"
+    assert responses and responses[-1]["status"] == 404, responses
+    assert not registered, "no sweep worker may be considered for a removed project"
+    assert not started, "no sweep may be admitted for a removed project"
+    assert pid not in routes._AUTO_ASSIGN_SWEEPS
+
+
+def test_delete_clears_a_cache_only_session_for_the_removed_project(tmp_path, monkeypatch):
+    """[SILENT] api/routes.py:16855 — real create -> delete -> draft-save used to
+    persist the removed project id.
+
+    A chat created by "+ New Chat" is cache-only until its first save, so the
+    index-only unlink never saw it. The delete now clears matching cached
+    sessions — including those absent from the index — under the catalog lock.
+    """
+    import api.routes as routes
+
+    pid = "proj_regate_cache_only"
+    keep = "proj_regate_untouched"
+    projects = [{
+        "project_id": pid, "name": "Gone", "profile": "default", "workspaces": ["D:/ws-a"],
+    }]
+    _install_project_route_stubs(
+        monkeypatch, projects, index_path=tmp_path / "missing_index.json"
+    )
+
+    class _CachedSession:
+        def __init__(self, project_id):
+            self.project_id = project_id
+            self.saves = 0
+
+        def save(self, *a, **k):
+            self.saves += 1
+
+    orphan = _CachedSession(pid)
+    other = _CachedSession(keep)
+    with routes.LOCK:
+        routes.SESSIONS["s_regate_orphan"] = orphan
+        routes.SESSIONS["s_regate_other"] = other
+    try:
+        responses = []
+        _post_project_route(
+            monkeypatch, "/api/projects/delete", {"project_id": pid}, responses
+        )
+        assert responses and responses[-1]["status"] == 200, responses
+        assert orphan.project_id is None, (
+            "the unsaved new chat kept the id of the deleted project"
+        )
+        assert orphan.saves == 0, "deletion must not write an unsaved chat"
+        assert other.project_id == keep, "another project's session was touched"
+        assert all(p["project_id"] != pid for p in projects)
+    finally:
+        with routes.LOCK:
+            routes.SESSIONS.pop("s_regate_orphan", None)
+            routes.SESSIONS.pop("s_regate_other", None)
+
+
+class _DepthProbeLock:
+    """Context-manager lock that records how deep the catalog section is.
+
+    ``threading.RLock`` is a factory function, so wrap a real RLock instead of
+    subclassing it.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self.depth = 0
+
+    def __enter__(self):
+        self.depth += 1
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.depth -= 1
+        self._lock.release()
+        return False
+
+
+def test_session_new_publishes_the_implicit_assignment_under_the_catalog_lock(monkeypatch):
+    """[SILENT] api/routes.py:16855 — the implicit assignment AND the session's
+    publication into the cache must be atomic with deletion, which is what makes
+    the two orderings exhaustive (published-then-cleared / row-gone-then-unassigned).
+    """
+    import api.routes as routes
+
+    pid = "proj_regate_publish_under_lock"
+    ws = "D:/ws-publish-under-lock"
+    probe = _DepthProbeLock()
+    monkeypatch.setattr(routes, "_PROJECTS_CATALOG_LOCK", probe)
+    _install_project_route_stubs(monkeypatch, [])
+    monkeypatch.setattr(routes, "_resolve_new_session_workspace", lambda *a, **k: ws)
+    monkeypatch.setattr(routes, "_worktree_default_from_config", lambda profile=None: False)
+    monkeypatch.setattr(routes, "_session_model_state_from_request", lambda m, p: ("model-x", None))
+    monkeypatch.setattr(routes, "_validate_session_toolsets_shape", lambda v: None)
+    monkeypatch.setattr(
+        routes, "_auto_assign_project_for_workspace", lambda workspace, profile=None: pid
+    )
+
+    depths = []
+
+    class _Sess:
+        session_id = "s_regate_new"
+        messages = []
+        profile = "default"
+
+        def compact(self):
+            return {}
+
+    def _fake_new_session(**kw):
+        depths.append(probe.depth)
+        assert kw.get("project_id") == pid
+        return _Sess()
+
+    monkeypatch.setattr(routes, "new_session", _fake_new_session)
+    monkeypatch.setattr(routes, "public_session_projection", lambda row: row)
+
+    responses = []
+    _post_project_route(monkeypatch, "/api/session/new", {"workspace": ws}, responses)
+    assert depths, "new_session was never called"
+    assert depths[0] >= 1, (
+        "the implicit assignment + cache publication must run inside the "
+        "projects-catalog lock deletion holds while removing the row"
+    )
+    assert responses and responses[-1]["status"] == 200, responses

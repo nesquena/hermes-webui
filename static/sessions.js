@@ -10548,10 +10548,12 @@ const _modelProvFor=(k)=>{const i=k.indexOf("\u001f");return i>=0?k.slice(0,i):"
 // that bare id with the catalog option VALUE never matched. The dialog then
 // reopened on "(none)"/inherit-default and saving dropped model_provider, which
 // rerouted new sessions to whichever backend owned the bare id. Resolution is
-// therefore by IDENTITY (model + provider): the exact pair first, then the bare
-// model, then the composer's own matcher; a saved pair that is missing from the
-// current catalog is re-injected so it stays selectable AND re-savable instead
-// of being silently cleared.
+// therefore by IDENTITY (model + provider): the exact pair first, then the
+// composer's own provider-aware matcher; a saved pair that is missing from the
+// current catalog is re-injected under a provider-scoped key so it stays
+// selectable AND re-savable — and, crucially, never falls back to a DIFFERENT
+// provider that merely offers the same bare model id (re-gate 2026-10-07,
+// static/sessions.js:10566).
 function _bindingModelKeyFor(proj, modelOptions, opts){
   const o=opts||{};
   const duplicates=!!o.duplicates;
@@ -10562,20 +10564,32 @@ function _bindingModelKeyFor(proj, modelOptions, opts){
   if(wantProv){
     const exact=modelOptions.find(x=>x.value&&x._modelId===wantModel&&String(x._providerId||'')===wantProv);
     if(exact) return keyOf(exact);
+  }else{
+    // No saved provider: a bare-model hit IS the identity.
+    const bare=modelOptions.find(x=>x.value&&x._modelId===wantModel);
+    if(bare) return keyOf(bare);
   }
-  const bare=modelOptions.find(x=>x.value&&x._modelId===wantModel);
-  if(bare) return keyOf(bare);
   if(typeof o.findModelInDropdown==='function'&&o.select){
     let resolved=null;
     try{ resolved=o.findModelInDropdown(wantModel,o.select,wantProv||undefined); }catch(_){}
     if(resolved){
       const hit=modelOptions.find(x=>x.value===resolved);
-      if(hit) return keyOf(hit);
+      // With a saved provider, only accept a resolver answer that still carries
+      // it. The resolver is provider-aware, but its last-resort normalization
+      // step can still answer with the row that happens to own the current
+      // value, which is how a 'custom:backup' binding reopened as
+      // 'custom:primary' (only primary offered that model id).
+      if(hit&&(!wantProv||String(hit._providerId||'')===wantProv)) return keyOf(hit);
     }
   }
-  const savedKey=duplicates?_modelValueKeyFor(wantModel,wantProv):wantModel;
+  // Nothing in the catalog carries the saved (model, provider) pair. Restoring
+  // the bare model would silently reroute new sessions to another backend that
+  // merely shares the model id, so preserve the exact pair under a
+  // provider-scoped key that can never collide with a catalog option.
+  const scoped=duplicates||!!wantProv;
+  const savedKey=scoped?_modelValueKeyFor(wantModel,wantProv):wantModel;
   modelOptions.push({
-    value:wantModel,name:wantModel,sub:wantProv,
+    value:duplicates?wantModel:savedKey,name:wantModel,sub:wantProv,
     _key:savedKey,_provider:wantProv,_modelId:wantModel,_providerId:wantProv,
     _saved:true,
   });
@@ -10783,9 +10797,14 @@ function _showProjectBindingsDialog(proj){
       if(typeof _modelStateForSelect==='function'&&srcModelSel) st=_modelStateForSelect(srcModelSel,o.value);
     }catch(_){}
     o._modelId=(st&&st.model)||o.value;
-    // Per-option provider first (authoritative for THIS option: walks its own
-    // <optgroup>/data-provider chain), then the resolver's answer.
-    o._providerId=_optProviderId(o)||(st&&st.model_provider)||o.sub||'';
+    // The option's OWN captured provider wins (re-gate 2026-10-07,
+    // static/sessions.js:10788): `o.sub` is read off the real <option> when the
+    // list is built (data-provider / <optgroup> chain / qualified-id parse),
+    // whereas `_optProviderId(o)` on this cloned, metadata-less entry and
+    // `_modelStateForSelect(sel,o.value)` both answer with whichever route
+    // currently OWNS that value. With two providers offering the same bare
+    // model id that restored — and then re-saved — the wrong provider.
+    o._providerId=o.sub||(st&&st.model_provider)||'';
   });
   const _hasDuplicateModelValues=(()=>{const c={};for(const o of modelOptions){if(!o.value)continue;c[o.value]=(c[o.value]||0)+1;}return Object.values(c).some(n=>n>1);})();
   if(_hasDuplicateModelValues){
@@ -10870,13 +10889,15 @@ function _showProjectBindingsDialog(proj){
     // must CLEAR any previously-bound provider, otherwise the server keeps the
     // stale one and quick-create submits an incompatible pair.
     if(modelVal){
-      const _bare=_hasDuplicateModelValues?_modelValueFor(modelVal):modelVal;
+      const _bare=_modelValueFor(modelVal);
       fields.model=_bare;
       const hit=modelOptions.find(x=>_hasDuplicateModelValues ? (x._key===modelVal) : (x.value===modelVal));
-      let _prov=null;
-      if(_hasDuplicateModelValues){
-        _prov=_modelProvFor(modelVal)||null;
-      }
+      // `_modelProvFor` recovers the provider from a provider-scoped key and is
+      // a no-op ('') for a plain catalog value, so it is safe to apply
+      // unconditionally: a saved pair re-injected under a scoped key in a
+      // NON-duplicate catalog would otherwise be saved back with the bare model
+      // and no provider (re-gate 2026-10-07, static/sessions.js:10875).
+      let _prov=_modelProvFor(modelVal)||null;
       // `hit.sub` is the option's own authoritative provider (optgroup chain);
       // `_providerId` is the fallback for an option we re-injected for a saved
       // binding that is no longer in the catalog.
