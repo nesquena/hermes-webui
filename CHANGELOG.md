@@ -35,6 +35,14 @@
 
 ### Performance
 
+- **Long conversations settle a reply much faster.** Finishing a stream compared the new transcript rows with the
+  saved ones in time that grew with the square of the conversation length, while holding the conversation's lock.
+  A 66,666-message transcript could stay stuck for over 90 minutes, with opening or stopping the chat waiting
+  behind it. That comparison is now linear: 4,000 rows take 0.2 seconds instead of over 5 minutes. Stale-stream
+  cleanup no longer waits on a busy conversation; it skips and retries on the next read, while sending a message
+  still waits briefly instead of reporting a phantom active stream. A second, model-context comparison is still
+  slow on very long conversations (#8073). Thanks @hejuntt1014. (#8072)
+
 - **New Chat, Cmd/Ctrl+K and `/new` focus the composer without waiting for a second session-list read.**
   `newSession()` already refreshes the sidebar (now forced, so the new row paints even while the pointer is over
   the list), but each caller also awaited its own `renderSessionList()` before focusing. That queued a second full

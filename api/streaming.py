@@ -7892,12 +7892,30 @@ def _strip_replayed_prefix(existing_messages, candidates):
     existing_messages = list(existing_messages or [])
     candidates = list(candidates or [])
     max_overlap = min(len(existing_messages), len(candidates))
-    for overlap in range(max_overlap, 0, -1):
-        left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
-        right = [_message_replay_key(m) for m in candidates[:overlap]]
-        if left == right:
-            return candidates[overlap:]
-    return candidates
+    if not max_overlap:
+        return candidates
+    # KMP matches the longest candidate prefix at the end of the old transcript.
+    # Each payload is keyed once; shrinking slices re-serialized O(n²) rows while
+    # settlement held the session lock. Keep the existing replay-key semantics.
+    keys = [_message_replay_key(m) for m in candidates[:max_overlap]]
+    fallback = [0] * max_overlap
+    matched = 0
+    for idx in range(1, max_overlap):
+        while matched and keys[idx] != keys[matched]:
+            matched = fallback[matched - 1]
+        if keys[idx] == keys[matched]:
+            matched += 1
+        fallback[idx] = matched
+    matched = 0
+    for message in existing_messages[-max_overlap:]:
+        key = _message_replay_key(message)
+        if matched == max_overlap:
+            matched = fallback[matched - 1]
+        while matched and key != keys[matched]:
+            matched = fallback[matched - 1]
+        if key == keys[matched]:
+            matched += 1
+    return candidates[matched:]
 
 
 def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):

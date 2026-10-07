@@ -128,6 +128,11 @@ Log file:
 - Access from Mac: SSH tunnel: ssh -N -L 8787:127.0.0.1:8787 <user>@<your-server>
 - The server imports Hermes modules via sys.path.insert(0, parent_dir)
 
+Suffix/prefix replay matching uses a linear prefix-function scan and constructs
+each comparison key once, preserving the existing replay equality contract.
+Read-side stale-stream maintenance defers when the session writer lock is busy;
+it leaves stream ownership and pending input intact for a later repair pass.
+
 Environment variables controlling behavior:
 
     HERMES_WEBUI_HOST              Bind address (default: 127.0.0.1)
