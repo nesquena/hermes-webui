@@ -6541,7 +6541,12 @@ async function switchToWorkspace(path,name){
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
-    if(typeof newSession==='function') await newSession(false);
+    // Also pass the workspace explicitly: with a project bound to workspace A,
+    // an active project filter would otherwise merge the project's default
+    // workspace into the request and the explicit B choice would lose (the
+    // chip-new-chat path posts A, master posts B). An explicit `workspace`
+    // option wins over any project binding in newSession().
+    if(typeof newSession==='function') await newSession(false,{workspace:path});
     showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }

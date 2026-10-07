@@ -340,7 +340,7 @@ def test_apply_project_auto_assign_files_existing_sessions(tmp_path, monkeypatch
             # (correctly) reject it. Keep the fake minimal but realistic.
             self.profile = "other" if sid == "sess_ddd" else "default"
             self.workspace = HOME_WS if sid == "sess_ccc" else ws_str
-        def save(self):
+        def save(self, touch_updated_at=True):
             saved[self.session_id] = self.project_id
 
     def _fake_get_session(sid, metadata_only=False):  # noqa: ARG001 — signature mirrors real get_session
@@ -395,7 +395,7 @@ def test_apply_project_auto_assign_named_profile_never_sweeps_default(tmp_path, 
             # the fake. None profile coalesces to "default" in prod.
             self.profile = {"sess_def": "default", "sess_none": None, "sess_haku": "haku"}[sid]
             self.workspace = ws_str
-        def save(self):
+        def save(self, touch_updated_at=True):
             saved[self.session_id] = self.project_id
 
     def _fake_get_session_named(sid, metadata_only=False):  # noqa: ARG001

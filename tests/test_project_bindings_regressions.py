@@ -69,7 +69,7 @@ def test_auto_assign_does_not_steal_session_claimed_between_snapshot_and_write(t
         def __init__(self):
             self.session_id = "sess_a"
             self.project_id = "other-project"
-            self.save = lambda: (_ for _ in ()).throw(AssertionError("save must not be called when already owned"))
+            self.save = lambda *a, **k: (_ for _ in ()).throw(AssertionError("save must not be called when already owned"))
 
     def _fake_get_session(sid, metadata_only=False):
         if sid != "sess_a":
@@ -108,7 +108,7 @@ def test_auto_assign_non_streaming_rechecks_under_agent_lock_and_skips_claimed(t
         def __init__(self):
             self.session_id = "sess_b"
             self.project_id = "owner-pid"
-        def save(self):
+        def save(self, touch_updated_at=True):
             raise AssertionError("save must not be called when recheck finds existing project_id")
 
     def _fake_get_session(sid, metadata_only=False):
@@ -259,7 +259,11 @@ def test_bindings_dialog_preserves_provider_scoped_duplicate_model_ids():
     # When duplicates exist, option keys become provider-scoped and Save extracts
     # provider from the synthetic key rather than collapsing to the first hit.
     assert "o._key=_modelValueKeyFor(o.value,o.sub" in src
-    assert "fields.model_provider=(_hasDuplicateModelValues ? (_prov||null)" in src
+    assert "_prov=_modelProvFor(modelVal)||null;" in src
+    # The provider is always resolved from the authoritative option (dataset or
+    # inherited <optgroup>), with the provider-qualified model id as last resort.
+    assert "const provider=_optProviderId(o);" in src
+    assert "_prov=_getOptionProviderId({value:_bare})||null;" in src
     # Clearing the model must also clear the provider (no stale provider stick).
     # The Save path has an else { fields.model=null; fields.model_provider=null }.
     assert "fields.model_provider=null" in src
@@ -378,7 +382,7 @@ def test_auto_assign_non_streaming_load_under_lock_survives_concurrent_move(tmp_
         profile = "default"
         workspace = ws_str
         _saved = False
-        def save(self):  # type: ignore[no-redef]
+        def save(self, touch_updated_at=True):  # type: ignore[no-redef]
             self._saved = True  # type: ignore[attr-defined]
 
     live = _LiveRow()
@@ -527,7 +531,7 @@ def test_auto_assign_stale_active_snapshot_missing_cache_falls_through(tmp_path,
             self.profile = "default"
             self.workspace = ws_str
             self._saved = False
-        def save(self):
+        def save(self, touch_updated_at=True):
             self._saved = True
 
     persisted = _Persisted()
@@ -585,7 +589,7 @@ def test_auto_assign_stale_active_snapshot_ended_stream_falls_through(tmp_path, 
             self.profile = "default"
             self.workspace = ws_str
             self._saved = False
-        def save(self):
+        def save(self, touch_updated_at=True):
             self._saved = True
 
     persisted = _Persisted()

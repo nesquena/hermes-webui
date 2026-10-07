@@ -568,7 +568,101 @@ def _project_default_workspace(proj) -> str | None:
     return ws[0] if ws else None
 
 
+# ── Auto-assign sweep registry ──────────────────────────────────────────────
+# Backfill sweeps run in a background thread from /api/projects/bind. Deleting
+# a project while its sweep is still walking the session index used to orphan
+# sessions: the sweep kept writing ``project_id`` for a project that no longer
+# exists, and rows it reached after the unlink pass were re-filed immediately
+# after being cleared. Admission is therefore serialized with deletion — a
+# project being deleted refuses NEW sweeps, and deletion cancels + joins the
+# in-flight ones before removing the project and unlinking its sessions.
+_AUTO_ASSIGN_SWEEPS: dict = {}
+_AUTO_ASSIGN_SWEEPS_LOCK = threading.Lock()
+_AUTO_ASSIGN_DELETING: set = set()
+
+
+def _auto_assign_sweep_begin(project_id) -> bool:
+    """Admit a backfill sweep for ``project_id`` unless it is being deleted."""
+    if not project_id:
+        return True
+    with _AUTO_ASSIGN_SWEEPS_LOCK:
+        if project_id in _AUTO_ASSIGN_DELETING:
+            return False
+        _AUTO_ASSIGN_SWEEPS.setdefault(project_id, set()).add(threading.current_thread())
+        return True
+
+
+def _auto_assign_sweep_end(project_id) -> None:
+    """Unregister the current thread's sweep (never leave a dead Thread behind)."""
+    if not project_id:
+        return
+    with _AUTO_ASSIGN_SWEEPS_LOCK:
+        bucket = _AUTO_ASSIGN_SWEEPS.get(project_id)
+        if not bucket:
+            return
+        bucket.discard(threading.current_thread())
+        if not bucket:
+            _AUTO_ASSIGN_SWEEPS.pop(project_id, None)
+
+
+def _auto_assign_sweep_cancelled(project_id) -> bool:
+    """True once deletion has claimed ``project_id`` — the sweep must stop."""
+    if not project_id:
+        return False
+    with _AUTO_ASSIGN_SWEEPS_LOCK:
+        return project_id in _AUTO_ASSIGN_DELETING
+
+
+def _auto_assign_cancel_sweeps(project_id, timeout: float = 10.0) -> None:
+    """Mark ``project_id`` deleting and join its in-flight sweeps.
+
+    Called by /api/projects/delete BEFORE the project is removed and its
+    sessions unlinked, so a sweep can neither persist a project_id for a
+    project that no longer exists nor re-file rows the unlink just cleared.
+    """
+    if not project_id:
+        return
+    with _AUTO_ASSIGN_SWEEPS_LOCK:
+        _AUTO_ASSIGN_DELETING.add(project_id)
+        threads = list(_AUTO_ASSIGN_SWEEPS.get(project_id, ()))
+    current = threading.current_thread()
+    for thr in threads:
+        if thr is current:
+            continue
+        try:
+            thr.join(timeout)
+            if thr.is_alive():
+                logger.warning(
+                    "auto-assign sweep for project %s still running after %.1fs; "
+                    "proceeding with deletion", project_id, timeout,
+                )
+        except Exception:
+            pass
+
+
+def _auto_assign_finish_deleting(project_id) -> None:
+    """Drop the deleting marker once the project has been fully removed."""
+    if not project_id:
+        return
+    with _AUTO_ASSIGN_SWEEPS_LOCK:
+        _AUTO_ASSIGN_DELETING.discard(project_id)
+        _AUTO_ASSIGN_SWEEPS.pop(project_id, None)
+
+
 def _apply_project_auto_assign(proj) -> int:
+    """Run one backfill sweep under the deletion-serialized registry."""
+    pid = proj.get("project_id") if isinstance(proj, dict) else None
+    # Refuse a sweep for a project that is already being deleted; register
+    # this one so /api/projects/delete can cancel + join it.
+    if not _auto_assign_sweep_begin(pid):
+        return 0
+    try:
+        return _auto_assign_sweep_body(proj)
+    finally:
+        _auto_assign_sweep_end(pid)
+
+
+def _auto_assign_sweep_body(proj) -> int:
     """File every existing session whose workspace is bound to ``proj`` under it.
 
     Iterates the session index (metadata rows only — cheap), and for each
@@ -600,6 +694,15 @@ def _apply_project_auto_assign(proj) -> int:
     # sessions (they would end up tagged with a foreign project_id).
     # _profiles_match handles the renamed-root alias (kinni == default).
     for entry in index:
+        # Deletion may have claimed this project mid-sweep — stop before
+        # writing any further project_id for a project that no longer exists
+        # (and before re-filing rows the unlink pass just cleared).
+        if _auto_assign_sweep_cancelled(pid):
+            logger.info(
+                "auto-assign %s: cancelled (project being deleted); stopping sweep",
+                pid,
+            )
+            break
         entry_profile = entry.get("profile") or "default"
         if not _profiles_match(entry_profile, profile):
             continue
@@ -671,7 +774,10 @@ def _apply_project_auto_assign(proj) -> int:
                 if not s_ws or str(s_ws) not in bound:
                     continue
                 s.project_id = pid
-                s.save()
+                # Backfill must not rewrite historical activity dates: a plain
+                # save() stamps updated_at=now, so an imported/legacy session
+                # without message timestamps would jump into "Today".
+                s.save(touch_updated_at=False)
             changed += 1
         except Exception:
             logger.debug("auto-assign: failed to update session %s", sid)
@@ -18810,7 +18916,10 @@ def handle_post(handler, parsed) -> bool:
         # workspace is in this project's bound list under this project. Runs in
         # a background thread so a large index doesn't stall the response.
         if proj.get("auto_assign") and proj.get("workspaces"):
-            from api.session_lifecycle import _register_background_commit_thread
+            from api.session_lifecycle import (
+                _register_background_commit_thread,
+                _unregister_background_commit_thread,
+            )
 
             def _file_existing_sessions(_proj=None):
                 try:
@@ -18818,6 +18927,15 @@ def handle_post(handler, parsed) -> bool:
                 except Exception as exc:
                     logger.warning("auto-assign for project %s failed: %s",
                                    (proj or {}).get("project_id"), exc)
+                finally:
+                    # Self-unregister so the background-commit registry does not
+                    # leak a dead Thread per bind (mirrors the memory worker's
+                    # finally-block at api/routes.py:16544-16550); the drain only
+                    # tracks live workers, so a completed thread must drop out.
+                    try:
+                        _unregister_background_commit_thread(threading.current_thread())
+                    except Exception:
+                        pass
 
             t = threading.Thread(
                 target=_file_existing_sessions,
@@ -18847,58 +18965,71 @@ def handle_post(handler, parsed) -> bool:
         active_profile = get_active_profile_name()
         if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
-        projects = [p for p in projects if p["project_id"] != body["project_id"]]
-        save_projects(projects)
-        # Unassign all sessions that belonged to this project.
-        # #3746: this loop is O(N) full-JSON read+save per session, and each
-        # save() reserializes the entire messages array. For a project with many
-        # messageful sessions that throughput alone can blow past the client's
-        # 30s timeout. For an actively-streaming session we must NOT issue our own
-        # s.save() — it would race the streaming thread's atomic writer and it
-        # carries the largest in-memory message array. Instead we clear project_id
-        # on the live cached Session object (under LOCK); the streaming thread owns
-        # that object and persists it on its next checkpoint/final save (the worker
-        # always does a final s.save() at turn completion), so the unlink still
-        # lands without a competing write. (If the streaming session isn't in the
-        # cache for some reason, fall back to a direct save.) Guard each per-session
-        # update so one slow/failing session can't abort the whole request.
-        if SESSION_INDEX_FILE.exists():
-            try:
-                index = json.loads(SESSION_INDEX_FILE.read_bytes())
-                active_ids = _active_stream_ids()
-                deferred_to_stream = []
-                for entry in index:
-                    if entry.get("project_id") != body["project_id"]:
-                        continue
-                    sid = entry.get("session_id")
-                    try:
-                        if entry.get("active_stream_id") in active_ids:
-                            # Clear on the live cached object so the streaming
-                            # thread's own next save persists project_id=None.
-                            cleared_in_cache = False
-                            with LOCK:
-                                cached = SESSIONS.get(sid)
-                                if cached is not None:
-                                    cached.project_id = None
-                                    cleared_in_cache = True
-                            if cleared_in_cache:
-                                deferred_to_stream.append(sid)
-                                continue
-                            # Not cached — fall through to a direct save.
-                        s = get_session(sid)
-                        s.project_id = None
-                        s.save()
-                    except Exception:
-                        logger.debug("Failed to update session %s", sid)
-                if deferred_to_stream:
-                    logger.info(
-                        "projects/delete: cleared project_id on %d streaming session(s) "
-                        "in-cache; streaming thread will persist: %s",
-                        len(deferred_to_stream), deferred_to_stream,
-                    )
-            except Exception:
-                logger.debug("Failed to load session index for project unlink")
-        return j(handler, {"ok": True})
+        # Serialize deletion with an in-flight auto-assign backfill: refuse new
+        # sweeps for this project and cancel + JOIN the running ones BEFORE the
+        # project is removed and its sessions unlinked. Otherwise a sweep
+        # admitted a moment earlier would keep writing project_id for a project
+        # that no longer exists (its sessions then vanish from Unassigned), and
+        # rows it reached after the unlink pass would be re-filed right after
+        # being cleared.
+        _auto_assign_cancel_sweeps(body["project_id"])
+        try:
+            projects = [p for p in projects if p["project_id"] != body["project_id"]]
+            save_projects(projects)
+            # Unassign all sessions that belonged to this project.
+            # #3746: this loop is O(N) full-JSON read+save per session, and each
+            # save() reserializes the entire messages array. For a project with many
+            # messageful sessions that throughput alone can blow past the client's
+            # 30s timeout. For an actively-streaming session we must NOT issue our own
+            # s.save() — it would race the streaming thread's atomic writer and it
+            # carries the largest in-memory message array. Instead we clear project_id
+            # on the live cached Session object (under LOCK); the streaming thread owns
+            # that object and persists it on its next checkpoint/final save (the worker
+            # always does a final s.save() at turn completion), so the unlink still
+            # lands without a competing write. (If the streaming session isn't in the
+            # cache for some reason, fall back to a direct save.) Guard each per-session
+            # update so one slow/failing session can't abort the whole request.
+            if SESSION_INDEX_FILE.exists():
+                try:
+                    index = json.loads(SESSION_INDEX_FILE.read_bytes())
+                    active_ids = _active_stream_ids()
+                    deferred_to_stream = []
+                    for entry in index:
+                        if entry.get("project_id") != body["project_id"]:
+                            continue
+                        sid = entry.get("session_id")
+                        try:
+                            if entry.get("active_stream_id") in active_ids:
+                                # Clear on the live cached object so the streaming
+                                # thread's own next save persists project_id=None.
+                                cleared_in_cache = False
+                                with LOCK:
+                                    cached = SESSIONS.get(sid)
+                                    if cached is not None:
+                                        cached.project_id = None
+                                        cleared_in_cache = True
+                                if cleared_in_cache:
+                                    deferred_to_stream.append(sid)
+                                    continue
+                                # Not cached — fall through to a direct save.
+                            s = get_session(sid)
+                            s.project_id = None
+                            s.save()
+                        except Exception:
+                            logger.debug("Failed to update session %s", sid)
+                    if deferred_to_stream:
+                        logger.info(
+                            "projects/delete: cleared project_id on %d streaming session(s) "
+                            "in-cache; streaming thread will persist: %s",
+                            len(deferred_to_stream), deferred_to_stream,
+                        )
+                except Exception:
+                    logger.debug("Failed to load session index for project unlink")
+            return j(handler, {"ok": True})
+        finally:
+            # The project is gone — let a future sweep for this id (there should
+            # be none) be admitted again instead of leaking the marker forever.
+            _auto_assign_finish_deleting(body["project_id"])
 
     # ── Session import from JSON (POST) ──
     if parsed.path == "/api/session/import":
