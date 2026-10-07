@@ -12545,7 +12545,29 @@ def _handle_insights(handler, parsed) -> bool:
     # for an absurd start, so the documented "valid start + huge end" window
     # (start..now) keeps working.
     _PLATFORM_MIN_TS = 0           # 1970-01-01 local (no sessions predate it)
-    if (start_ts_v is not None and start_ts_v < _PLATFORM_MIN_TS) \
+    # The DERIVED start of an end-only DATE request needs the SAME guard.  An
+    # `end=1970-01-15` is itself >= 0, so the supplied-endpoint check below
+    # cannot see that its implicit `end - 30 calendar days` start lands on
+    # 1969-12-16 - and mktime() on that pre-epoch day raises on Windows BEFORE
+    # the post-arithmetic range check can fall back, so /api/insights answered
+    # HTTP 500 instead of the trailing window (Greptile P1: 'Derived start
+    # bypasses platform guard').  Probe the derivation the same way the real
+    # arithmetic will (a local-midnight mktime) rather than comparing against a
+    # hard-coded 1970-01-01: east-of-UTC zones make even local midnight
+    # 1970-01-01 pre-epoch, so the date comparison alone would still miss
+    # `end=1970-01-31` -> start 1970-01-01.  On any platform failure, fail
+    # closed to the trailing `days` window exactly like a pre-epoch supplied
+    # endpoint does.
+    derived_start_pre_epoch = False
+    if start_ts_v is None and end_kind == "date" and end_ts_v is not None:
+        try:
+            _end_day_v = _datetime.fromtimestamp(
+                min(end_ts_v, 4102444800)).date()
+            _time.mktime((_end_day_v - _timedelta(days=30)).timetuple())
+        except (OverflowError, ValueError, OSError):
+            derived_start_pre_epoch = True
+    if derived_start_pre_epoch \
+            or (start_ts_v is not None and start_ts_v < _PLATFORM_MIN_TS) \
             or (end_ts_v is not None and end_ts_v < _PLATFORM_MIN_TS):
         start_meta = None
         end_meta = None
@@ -12580,8 +12602,10 @@ def _handle_insights(handler, parsed) -> bool:
                 # end=2026-03-10 in America/New_York → elapsed gives 2026-02-07
                 # instead of the calendar 2026-02-08).  `end_ts` is guaranteed
                 # inside the platform window here (the guard above rejected any
-                # pre-epoch / out-of-range supplied endpoint), so neither
-                # fromtimestamp() nor the 30-day back-step can underflow.
+                # pre-epoch / out-of-range supplied endpoint AND any end-only
+                # DATE whose derived start would not survive mktime() on this
+                # platform), so neither fromtimestamp() nor the 30-day
+                # back-step can underflow.
                 if end_kind == "date":
                     end_day_tmp = _datetime.fromtimestamp(end_ts).date()
                     start_day_tmp = end_day_tmp - _timedelta(days=30)

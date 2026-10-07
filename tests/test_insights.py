@@ -1934,6 +1934,52 @@ def test_insights_absolute_range_out_of_platform_endpoints_fail_closed(monkeypat
         assert data["total_sessions"] == 1
 
 
+def test_insights_absolute_range_derived_start_pre_epoch_fails_closed(monkeypatch, tmp_path):
+    """Greptile P1 (2026-10-07): an end-only DATE within 30 days of the Unix
+    epoch (`end=1970-01-15`) is itself >= 0, so the supplied-endpoint guard
+    above let it through while the start the server DERIVES from it
+    (end - 30 calendar days = 1969-12-16) reached mktime() first and raised
+    `OverflowError: mktime argument out of range` on Windows -> HTTP 500
+    before the post-arithmetic range check could fall back.  The derivation is
+    now covered by the same platform guard and fails closed to the trailing
+    window (`_call_insights` asserts 200).  `end=1970-01-31` is the boundary
+    a plain `start_day < 1970-01-01` comparison would still miss: in an
+    east-of-UTC zone the derived local midnight 1970-01-01 is pre-epoch."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "today", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+         "estimated_cost": "0.0001", "model": "gpt-x"},
+    ]
+    for q in (
+        "end=1970-01-15",   # greptile repro: derived start 1969-12-16
+        "end=1970-01-01",   # derived start 1969-12-02
+        "end=1970-01-31",   # derived start is local midnight 1970-01-01
+        "end=1970-01-05&days=7",
+    ):
+        data = _call_insights(monkeypatch, tmp_path, entries, query=q, now=now)
+        assert data["mode"] == "trailing", f"{q} must fail closed to the trailing window"
+        assert data["effective_start"] is None and data["effective_end"] is None
+        assert data["total_sessions"] == 1
+
+
+def test_insights_absolute_range_derived_start_still_custom_when_safe(monkeypatch, tmp_path):
+    """Control for the derived-start guard: an end-only DATE whose derived start
+    IS representable must keep serving a real CUSTOM window - the guard must
+    not over-reject every early-1970 end."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "today", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+         "estimated_cost": "0.0001", "model": "gpt-x"},
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, query="end=1970-02-15", now=now)
+    assert data["mode"] == "custom"
+    assert data["effective_start"] == "1970-01-16"
+    assert data["effective_end"] == "1970-02-15"
+    assert data["total_sessions"] == 0
+
+
 def test_insights_absolute_range_pre_epoch_end_fails_closed_state_db(monkeypatch, tmp_path):
     """Same platform guard on the state.db/CLI input path."""
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
