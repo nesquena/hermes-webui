@@ -2663,6 +2663,17 @@ async function newSession(flash, options={}){
         _newSessionRequest=null;
         _newSessionInFlight=null;
       }
+      // A failed New Chat restores the source owner and requeues any follow-up
+      // that finished streaming during the attempt. Resume the normal idle
+      // transition only after the in-flight guard is cleared so setBusy(false)
+      // can drain that queued turn instead of immediately putting it back.
+      if(focusRestoredComposerAfterAbort
+        &&!S.busy
+        &&typeof _composerOwnerIsVisible==='function'
+        &&_composerOwnerIsVisible(restoredComposerOwnerSid,restoredComposerOwnerProfile)
+        &&typeof setBusy==='function'){
+        setBusy(false);
+      }
     }
   };
   // Keep coordinator settlement separate from the shared result promise. The

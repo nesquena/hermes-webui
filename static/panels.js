@@ -7100,6 +7100,23 @@ async function switchToProfile(name) {
   }
   const ownsPane=()=>paneNavigationGeneration===null
     ||_paneNavigationClaimIsCurrent(paneNavigationGeneration);
+  const setProfileSwitchComposerPending=pending=>{
+    const composerIds=['msg','fileInput','btnAttach','btnSavedPrompts','btnMic','btnVoiceMode'];
+    for(const id of composerIds){
+      const control=$(id);
+      if(!control)continue;
+      if(typeof _composerControlSetDisabledReason==='function'){
+        _composerControlSetDisabledReason(control,'profile-switch',!!pending);
+      }else control.disabled=!!pending;
+    }
+    if(typeof document!=='undefined'&&document.querySelectorAll){
+      document.querySelectorAll('#attachTray button').forEach(control=>{
+        if(typeof _composerControlSetDisabledReason==='function'){
+          _composerControlSetDisabledReason(control,'profile-switch',!!pending);
+        }else control.disabled=!!pending;
+      });
+    }
+  };
   return _runContextTransition('profile-switch',contextIntent,async intent=>{
   // Keep the authority captured at click time; queue admission cannot renew it.
   if(!ownsPane()) return false;
@@ -7215,11 +7232,21 @@ async function switchToProfile(name) {
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
   // setup can't leak the embargo and freeze the sidebar (Codex re-gate 4).
   try {
+    // Freeze native composer producers for the whole profile transition. Voice
+    // dictation may still be committing a final browser result or awaiting
+    // server transcription, so settle it before snapshotting the source draft
+    // and before changing the profile cookie.
+    setProfileSwitchComposerPending(true);
+    if(typeof window!=='undefined'
+      &&typeof window._stopAndSettleComposerDictation==='function'){
+      await window._stopAndSettleComposerDictation();
+    }
+    if(!ownsPane())return false;
     // A replacement New Chat runs after the profile cookie changes. Persist the
     // source owner's draft while the old profile still owns the cookie, then
     // hand that exact owner to newSession() so it does not repeat a cross-profile
     // draft write that the backend correctly rejects with 409.
-    if (sessionInProgress && !_openingExistingSidebarSession && S.session
+    if (!_openingExistingSidebarSession && S.session
         && typeof _saveComposerDraftNow === 'function'
         && !(typeof _isReadOnlySession === 'function' && _isReadOnlySession(S.session))) {
       const sourceSid = S.session.session_id;
@@ -7567,6 +7594,9 @@ async function switchToProfile(name) {
     // sidebar). Guarded by _switchGen so a superseded switch can't lift a newer switch's embargo.
     if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
+    }
+    if(_switchGen===_profileSwitchGeneration){
+      setProfileSwitchComposerPending(false);
     }
   }
   });

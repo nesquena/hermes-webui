@@ -798,7 +798,19 @@ function _micToastKeyForRecognitionError(error){
   let _micHoldActive=false;
   let _micPointerDown=false;
   let _micStartSeq=0;
+  let _micSettlementPromise=Promise.resolve();
   const _micHoldThresholdMs=300;
+
+  function _beginMicSettlement(){
+    let settled=false;
+    let resolveSettlement;
+    _micSettlementPromise=new Promise(resolve=>{ resolveSettlement=resolve; });
+    return ()=>{
+      if(settled)return;
+      settled=true;
+      resolveSettlement();
+    };
+  }
 
   function _setButtonTooltipAndKey(btn, key){
     const text = t(key);
@@ -1060,7 +1072,15 @@ function _micToastKeyForRecognitionError(error){
   }
   window._stopMic=_stopMic; // expose for send-guard above
 
-  function _ensureSpeechRecognition(producerHandle=null){
+  async function _stopAndSettleComposerDictation(){
+    window._micPendingSend=false;
+    const settlement=_micSettlementPromise;
+    if(window._micActive||_isRecording)_stopMic();
+    await settlement;
+  }
+  window._stopAndSettleComposerDictation=_stopAndSettleComposerDictation;
+
+  function _ensureSpeechRecognition(producerHandle=null,settleCapture=null){
     if(!SpeechRecognition) return null;
     const sr=producerHandle?new SpeechRecognition():(recognition||new SpeechRecognition());
     const lifecycleProducerHandle=producerHandle||(
@@ -1152,6 +1172,7 @@ function _micToastKeyForRecognitionError(error){
         send();
       }
       _applyDeferredServerSttFlip();
+      if(settleCapture)settleCapture();
     };
 
     sr.onerror=(event)=>{
@@ -1182,6 +1203,7 @@ function _micToastKeyForRecognitionError(error){
       }
       const messageKey=_micToastKeyForRecognitionError(event.error);
       showToast(messageKey?t(messageKey):t('mic_error')+event.error);
+      if(settleCapture)settleCapture();
     };
 
     return sr;
@@ -1260,6 +1282,9 @@ function _micToastKeyForRecognitionError(error){
       return;
     }
     _isRecording=true;
+    const settleCapture=typeof _beginMicSettlement==='function'
+      ?_beginMicSettlement()
+      :()=>{};
     _finalText='';
     _prefix=ta.value;
     _micComposerProducerToken=typeof _newComposerProducerHandle==='function'
@@ -1273,10 +1298,11 @@ function _micToastKeyForRecognitionError(error){
       _isRecording=false;
       window._micPendingSend=false;
       showToast(t('mic_insecure_origin'));
+      settleCapture();
       return;
     }
     if(!_forceMediaRecorder&&!_rawAudioMode){
-      recognition=_ensureSpeechRecognition(_micComposerProducerToken);
+      recognition=_ensureSpeechRecognition(_micComposerProducerToken,settleCapture);
     }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
@@ -1286,7 +1312,13 @@ function _micToastKeyForRecognitionError(error){
       // effect for this session (desktop stays one-shot, mobile stays continuous).
       recognition.continuous=_micDictationContinuous();
       recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
-      recognition.start();
+      try{
+        recognition.start();
+      }catch(err){
+        _isRecording=false;
+        settleCapture();
+        throw err;
+      }
       void _acquireMicWakeLock();
       _setRecording(true);
       return;
@@ -1294,6 +1326,7 @@ function _micToastKeyForRecognitionError(error){
     if(!_canRecordAudio){
       _isRecording=false;
       showToast(t('mic_network'));
+      settleCapture();
       return;
     }
     try{
@@ -1301,6 +1334,7 @@ function _micToastKeyForRecognitionError(error){
       if(startSeq!==_micStartSeq||!_micButtonAvailable()||(holdRequired&&!_micHoldActive)){
         if(_micProducerIsCurrent(captureProducerHandle))_isRecording=false;
         _stopTracks(captureStream);
+        settleCapture();
         return;
       }
       mediaStream=captureStream;
@@ -1310,6 +1344,7 @@ function _micToastKeyForRecognitionError(error){
       const recorder=new MediaRecorder(captureStream,mimeType?{mimeType}:undefined);
       audioChunks=[];
       const captureChunks=audioChunks;
+      const settleCurrentCapture=typeof settleCapture==='function'?settleCapture:()=>{};
       recorder.ondataavailable=e=>{
         if(!_micProducerIsCurrent(captureProducerHandle))return;
         if(e.data&&e.data.size)captureChunks.push(e.data);
@@ -1323,6 +1358,7 @@ function _micToastKeyForRecognitionError(error){
         if(isCurrentProducer)window._micPendingSend=false;
         _stopTracks(captureStream);
         if(isCurrentProducer)showToast(t('mic_network'));
+        settleCurrentCapture();
       };
       recorder.onstop=async()=>{
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
@@ -1330,6 +1366,7 @@ function _micToastKeyForRecognitionError(error){
         if(!isCurrentProducer){
           if(mediaRecorder===recorder) mediaRecorder=null;
           _stopTracks(captureStream);
+          settleCurrentCapture();
           return;
         }
         if(mediaRecorder===recorder) mediaRecorder=null;
@@ -1354,17 +1391,22 @@ function _micToastKeyForRecognitionError(error){
           window._micPendingSend=false;
         }
         if(isCurrentProducer)_applyDeferredServerSttFlip();
+        settleCurrentCapture();
       };
       _activeCaptureMode=captureMode;
       mediaRecorder=recorder;
       recorder.start();
       _setRecording(true);
     }catch(err){
-      if(startSeq!==_micStartSeq) return;
+      if(startSeq!==_micStartSeq){
+        settleCapture();
+        return;
+      }
       _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();
       showToast(t(_micToastKeyForRecognitionError('not-allowed')||'mic_denied'));
+      settleCapture();
     }
   }
 

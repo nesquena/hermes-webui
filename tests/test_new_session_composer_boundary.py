@@ -3985,3 +3985,43 @@ def test_failed_new_session_reconciles_file_dropped_during_create_with_visible_t
     assert result["trayRenders"] >= 1
     assert result["sendButtonUpdates"] >= 1
     assert result["autoResizeCalls"] >= 1
+
+
+def test_profile_switch_settles_dictation_before_saving_every_writable_source():
+    switch = _function(PANELS_JS, "switchToProfile", "\n\nfunction openProfileCreate")
+    settle = switch.index("await window._stopAndSettleComposerDictation()")
+    save = switch.index("await _saveComposerDraftNow(")
+    cookie_switch = switch.index("await api('/api/profile/switch'")
+
+    assert settle < save < cookie_switch
+    assert "if (!_openingExistingSidebarSession && S.session" in switch
+    assert "if (sessionInProgress && !_openingExistingSidebarSession" not in switch
+    assert "setProfileSwitchComposerPending(true)" in switch
+    assert "setProfileSwitchComposerPending(false)" in switch
+
+
+def test_dictation_settlement_waits_for_server_transcription_completion():
+    stop_start = BOOT_JS.index("async function _stopAndSettleComposerDictation()")
+    stop_end = BOOT_JS.index("\n  window._stopAndSettleComposerDictation", stop_start)
+    stop = BOOT_JS[stop_start:stop_end]
+    recorder_start = BOOT_JS.index("recorder.onstop=async()=>")
+    recorder_end = BOOT_JS.index("\n      _activeCaptureMode=captureMode", recorder_start)
+    recorder = BOOT_JS[recorder_start:recorder_end]
+
+    assert "const settlement=_micSettlementPromise" in stop
+    assert "await settlement" in stop
+    assert recorder.index("await _transcribeBlob(") < recorder.index(
+        "settleCurrentCapture()", recorder.index("await _transcribeBlob(")
+    )
+
+
+def test_failed_new_session_resumes_queue_after_clearing_inflight_guard():
+    new_session = _new_session_function()
+    clear = new_session.index("_newSessionInFlight=null")
+    resume = new_session.index("\n        setBusy(false);", clear)
+
+    assert clear < resume
+    boundary = new_session[clear:resume]
+    assert "focusRestoredComposerAfterAbort" in boundary
+    assert "_composerOwnerIsVisible" in boundary
+    assert "!S.busy" in boundary
