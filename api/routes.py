@@ -7459,8 +7459,18 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
             return resolved
 
     try:
-        from api.config import _lookup_custom_api_key_env
+        from api.config import (
+            _custom_provider_record_may_take_convention_key,
+            _lookup_custom_api_key_env,
+        )
 
+        if not _custom_provider_record_may_take_convention_key(entry, "custom_providers"):
+            # This entry is a newly admitted fallback identity whose id sanitizes to the
+            # shared constant CUSTOM, so the convention variable belongs to whichever
+            # provider claimed it first. Reading it here would send that provider's key to
+            # this endpoint. Keyless is the honest answer; a literal/api_key/key_env above
+            # still wins, so a properly configured entry is unaffected.
+            return ""
         return _lookup_custom_api_key_env(provider) or ""
     except Exception:
         return ""
@@ -7916,9 +7926,12 @@ def _repair_bare_custom_provider_model(
             return None
         from api.config import (
             _custom_provider_entries,
-            _custom_provider_entry_slug_for_context,
             get_config,
         )
+        # `_custom_provider_entry_slug_for_context` is defined in THIS module (below), not in
+        # api.config. Importing it from there raised ImportError inside this `try`, and the
+        # `except Exception: return None` below swallowed it, so repair returned None for EVERY
+        # custom provider, ASCII included. Use the local helper.
 
         if isinstance(config_obj, dict):
             _entries = _custom_provider_entries(config_obj)

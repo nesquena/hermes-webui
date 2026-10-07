@@ -329,6 +329,69 @@ class TestRepairBareCustomProviderModel:
                 config_obj=profile_cfg,
             ) == "profile-vendor/shared"
 
+    def test_repairs_a_non_ascii_provider_name(self):
+        """A non-ASCII provider id repairs too (#8026 round 4).
+
+        The repair body imports its slug helper from ``api.config``, but the
+        helper lives in ``api.routes``. That ImportError was raised inside the
+        function's own ``except Exception: return None``, so repair returned
+        ``None`` for EVERY custom provider, ASCII ones included. This case is the
+        one the maintainer reproduced as a 404: the bare ``shared`` must come back
+        as ``vendor/shared`` so the relay gets a 200.
+
+        The provider id is also the shape #8017 exists for, so this pins that the
+        repair path and the non-ASCII identity path agree.
+        """
+        from api.routes import _repair_bare_custom_provider_model
+
+        cfg = {
+            "custom_providers": [
+                {
+                    "name": "晨光鑫遇专用",
+                    "models": {"vendor/shared": {}},
+                }
+            ]
+        }
+        assert (
+            _repair_bare_custom_provider_model(
+                "shared",
+                "custom:晨光鑫遇专用",
+                config_obj=cfg,
+            )
+            == "vendor/shared"
+        )
+
+    def test_repairs_a_prefixed_non_ascii_provider_name(self):
+        """CONTROL: the same repair for an id that names its own ``custom:`` (#8026).
+
+        A prefixed name is a distinct identity from the bare fallback one, so it
+        must repair through its own entry. Run beside the case above so a fix that
+        "repairs the non-ASCII case" by widening the match to any non-ASCII id is
+        caught; every entry must still be found by its OWN id.
+        """
+        from api.routes import _repair_bare_custom_provider_model
+
+        cfg = {
+            "custom_providers": [
+                {
+                    "name": "custom:晨光",
+                    "models": {"vendor-a/shared": {}},
+                },
+                {
+                    "name": "晨光",
+                    "models": {"vendor-b/shared": {}},
+                },
+            ]
+        }
+        assert (
+            _repair_bare_custom_provider_model(
+                "shared",
+                "custom:晨光",
+                config_obj=cfg,
+            )
+            == "vendor-a/shared"
+        )
+
 
 class TestReadProfileModelConfigWithExplicitProvider:
     def test_returns_profile_default_when_session_has_model_provider(self, tmp_path, monkeypatch):

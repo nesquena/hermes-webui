@@ -207,26 +207,42 @@ def test_a_colon_in_a_name_takes_the_keyless_pre_fix_identity():
 
 
 def test_keyless_non_ascii_providers_do_not_share_one_api_key_env(monkeypatch):
-    """An id with no POSIX-safe characters must not read a shared variable (#8026).
+    """Two fallback non-ASCII providers must not take the shared variable (#8026).
 
-    The old fallback minted ``CUSTOM_CUSTOM_API_KEY`` for EVERY id whose
-    characters all sanitized away (the constant ``CUSTOM`` stood in for the empty
-    run), so two distinct non-ASCII providers read one env var and the key meant
-    for the first travelled to the second's endpoint as a bearer token.
+    The fallback mints an id whose characters all sanitize away (the constant
+    ``CUSTOM`` stands in for the empty run), so two distinct non-ASCII providers
+    would both read ``CUSTOM_CUSTOM_API_KEY`` and the key meant for the first
+    would travel to the second's endpoint as a bearer token.
     ``CUSTOM_API_KEY`` is the wrong variable to set here: master never read it, so
-    a test that used it would pass on master too and pin nothing. An unnameable
-    Unicode id takes the keyless path instead.
+    a test that used it would pass on master too and pin nothing.
+
+    The refusal is a RECORD-level decision, not an id-level one: the id
+    ``custom:晨光`` is identical whether the user typed ``custom:晨光`` (which
+    reads the convention variable on master) or the fallback minted it, so only
+    the record's own ``name`` can tell them apart (round 4).
     """
     monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "sk-SHARED")
 
-    first_env = config._api_key_env_name("custom:晨光鑫遇专用")
-    second_env = config._api_key_env_name("custom:晨曦专用")
-    # Neither mints a variable at all, so there is no shared var to collide on.
-    assert first_env == ""
-    assert second_env == ""
-    # And the lookup therefore resolves no key for either.
-    assert config._lookup_custom_api_key_env("custom:晨光鑫遇专用") is None
-    assert config._lookup_custom_api_key_env("custom:晨曦专用") is None
+    # The id-level name follows master's whole-id rule for BOTH shapes ...
+    assert config._api_key_env_name("custom:晨光鑫遇专用") == "CUSTOM_CUSTOM_API_KEY"
+    assert config._api_key_env_name("custom:晨曦专用") == "CUSTOM_CUSTOM_API_KEY"
+    # ... but neither fallback RECORD may read it.
+    assert not config._custom_provider_record_may_take_convention_key(
+        {"name": "晨光鑫遇专用"}, "custom_providers"
+    )
+    assert not config._custom_provider_record_may_take_convention_key(
+        {"name": "晨曦专用"}, "custom_providers"
+    )
+    # A prefixed name, an ASCII name, and a providers:/model: record all keep it.
+    assert config._custom_provider_record_may_take_convention_key(
+        {"name": "custom:晨光"}, "custom_providers"
+    )
+    assert config._custom_provider_record_may_take_convention_key(
+        {"name": "proxy-a"}, "custom_providers"
+    )
+    assert config._custom_provider_record_may_take_convention_key(
+        {"name": "晨光鑫遇专用"}, "providers"
+    )
 
     # The ASCII control still mints DISTINCT per-provider names.
     assert config._api_key_env_name("custom:proxy-a") == "CUSTOM_PROXY_A_API_KEY"
@@ -277,8 +293,8 @@ def test_two_non_ascii_providers_resolve_no_convention_key(monkeypatch):
 
     assert first_url == "http://127.0.0.1:8317/v1"
     assert second_url == "http://10.0.0.9:9000/v1"
-    assert first_key is None, "an unnameable provider must not read the shared convention key"
-    assert second_key is None, "an unnameable provider must not read the shared convention key"
+    assert first_key is None, "a fallback provider must not read the shared convention key"
+    assert second_key is None, "a fallback provider must not read the shared convention key"
 
 
 def test_ascii_punctuation_only_id_keeps_its_convention_key(monkeypatch):
@@ -616,9 +632,9 @@ def test_ascii_punctuation_only_id_without_a_prefix_keeps_the_convention_name():
 
     ``"-"`` and ``"()"`` sanitize to the empty string, and master substituted the
     constant ``CUSTOM``, so ``CUSTOM_CUSTOM_API_KEY`` is the variable such a route
-    read. The unnameable-Unicode guard must not catch them: only the
-    context-length lookup can pass such an id, but returning ``""`` there would
-    change behaviour for a setup that works today.
+    read. Those names must keep the convention variable: their own id is still
+    distinct, so none of them shares a variable with another provider, and a
+    refusal here would change behaviour for a setup that works today.
     """
     assert config._api_key_env_name("-") == "CUSTOM_CUSTOM_API_KEY"
     assert config._api_key_env_name("()") == "CUSTOM_CUSTOM_API_KEY"
@@ -692,3 +708,64 @@ def test_every_consumer_agrees_on_the_entry_that_owns_the_identity(monkeypatch):
     # The resolver agrees with the router on which record owns the route.
     api_key, owner_url = config.resolve_custom_provider_connection("custom:晨光")
     assert (api_key, owner_url) == ("sk-keyed", "http://127.0.0.1:8317/v1")
+
+
+def test_a_legacy_entry_with_no_slug_keeps_its_own_endpoint(monkeypatch):
+    """A name the convention cannot slug still routes to its OWN url (#8026 r4).
+
+    ``-`` and ``晨光:鑫遇`` have no identity at all: the fallback refuses the first
+    (nothing to slug) and the second splits on its colon. Master routed the models
+    such an entry declares to the entry's own ``base_url``; the round-3 head
+    skipped it, so the request left on the DEFAULT endpoint instead (the
+    maintainer's 200-on-master, 404-here).
+
+    The fix requires the fallback test in the skip, so a non-fallback legacy entry
+    keeps returning its configured URL. The assertion is on the URL, because a
+    wrong route with the right model id is exactly the failure.
+    """
+    cfg_shape = {
+        "model": {
+            "default": "chat-model",
+            "provider": "custom",
+            "base_url": "http://default.example/v1",
+        },
+        "custom_providers": [
+            {"name": "-", "base_url": "http://dash.example/v2", "models": {"chat-model": {}}},
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    model, _provider, base_url = config.resolve_model_provider("chat-model")
+    assert model == "chat-model"
+    assert base_url == "http://dash.example/v2", (
+        "a legacy entry with no slug must keep routing to its own endpoint"
+    )
+
+
+def test_a_fallback_entry_that_owns_nothing_is_still_skipped(monkeypatch):
+    """CONTROL: the widened skip must NOT readmit the fallback case it was for (#8026).
+
+    A fallback-derived name whose slug an existing entry already owns mints
+    nothing (it did not before #8026 either), so it must still be skipped and the
+    model must fall through to the default endpoint. Run beside the case above, so
+    "keep every slugless entry" is distinguished from "keep the ones that existed".
+    """
+    cfg_shape = {
+        "model": {
+            "default": "chat-model",
+            "provider": "custom",
+            "base_url": "http://default.example/v1",
+        },
+        "custom_providers": [
+            {"name": "custom:晨光", "base_url": "http://owner.example/v1"},
+            {"name": "晨光", "base_url": "http://fallback.example/v1", "models": {"chat-model": {}}},
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    _model, _provider, base_url = config.resolve_model_provider("chat-model")
+    assert base_url == "http://default.example/v1", (
+        "a shadowed fallback entry must not claim the model; the default endpoint keeps it"
+    )

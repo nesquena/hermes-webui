@@ -1836,44 +1836,52 @@ _LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
 def _api_key_env_name(provider_id: object) -> str:
     """Return the POSIX-safe default API-key env var for a custom provider id.
 
-    Two rules, and they are deliberately separate.
-
-    The variable name is derived from the WHOLE id, so ids that differ stay
-    distinct: ``custom:foo`` -> ``CUSTOM_FOO_API_KEY`` and ``custom:custom_foo``
-    -> ``CUSTOM_CUSTOM_FOO_API_KEY``. Deriving it from only the part after
+    Derived from the WHOLE id, so ids that differ stay distinct: ``custom:foo``
+    -> ``CUSTOM_FOO_API_KEY`` and ``custom:custom_foo`` ->
+    ``CUSTOM_CUSTOM_FOO_API_KEY``. Deriving it from only the part after
     ``custom:`` collapses those two onto one variable, which is the same leak in
     the opposite direction.
 
-    Whether an id is nameable at all is decided by its DISTINCTIVE part, and only
-    for an id whose distinctive part is NOT ASCII. Every custom-provider id
-    carries the literal ``custom:`` prefix, so a prefix-only sanitization leaves
-    just that shared word; for an id whose distinctive part has no POSIX-safe
-    characters (``custom:晨光鑫遇专用``) the function returns ``""`` and the caller
-    takes the keyless path instead of reading a variable that belongs to somebody
-    else. An id the convention cannot name is a provider it cannot carry a key
-    for. An ASCII id whose distinctive part has no letters or digits (``custom:_``)
-    keeps master's behaviour and its convention variable: those names never had a
-    collision, because each one's own id is still distinct. That includes an
-    ASCII id with NO sanitizable character anywhere (``"-"``, ``"()"``): master
-    fell back to the constant ``CUSTOM`` there, so ``CUSTOM_CUSTOM_API_KEY`` is
-    still the name it must resolve.
+    This is deliberately the WHOLE-id rule and nothing narrower. An id alone
+    cannot tell a pre-existing ``custom:晨光`` entry from one the #8026 fallback
+    minted from the bare name ``晨光``: both ids are ``custom:晨光``, and
+    ``custom:晨光鑫遇专用`` sanitizes to the same constant ``CUSTOM`` as the plain
+    ``custom:_``. Narrowing here by the id's characters therefore also denies
+    the convention variable to entries that read it on master (the #8026 round-4
+    regression). Deciding which entry may take the shared name is a RECORD-level
+    question, answered by the caller from the record's own ``name``: see
+    :func:`_custom_provider_record_may_take_convention_key`.
     """
-    text = str(provider_id or "").strip()
-    if ":" in text and text.lower().startswith("custom:"):
-        distinctive = text.split(":", 1)[1]
-    else:
-        distinctive = text
-    if not distinctive.isascii() and not re.sub(r"[^A-Za-z0-9]", "", distinctive):
-        return ""
-    sanitized = re.sub(r"[^A-Za-z0-9]", "_", text).upper().strip("_")
+    sanitized = re.sub(r"[^A-Za-z0-9]", "_", str(provider_id or "")).upper().strip("_")
     if not sanitized:
-        # Only an ASCII id reaches here (the unnameable non-ASCII case returned
-        # above), so the constant is master's own answer for it, not a shared
-        # variable an unnameable provider could collide on.
         sanitized = "CUSTOM"
     if not sanitized.startswith("CUSTOM_"):
         sanitized = f"CUSTOM_{sanitized}"
     return f"{sanitized}_API_KEY"
+
+
+def _custom_provider_record_may_take_convention_key(
+    record: object,
+    source: object = None,
+) -> bool:
+    """May this custom-provider RECORD read the ``CUSTOM_<SLUG>_API_KEY`` name?
+
+    False only for a NEWLY ADMITTED fallback entry: a record that comes from the
+    ``custom_providers`` list AND whose ``name`` is one the #8026 fallback minted
+    (see :func:`_custom_provider_slug_is_fallback`). Those ids sanitize to the
+    shared constant ``CUSTOM``, so two of them would read one variable and the
+    key of the first would travel to the second's endpoint.
+
+    Every other record keeps master's lookup: a ``custom:``-prefixed name and a
+    name with ASCII identifier characters both pre-date #8026, and a record from
+    ``providers:``/``model:`` is an already-keyed route. Suppressing the lookup
+    for those would send ``dummy-key`` to an endpoint that authenticates today.
+    """
+    if str(source or "") != "custom_providers":
+        return True
+    if not isinstance(record, dict):
+        return True
+    return not _custom_provider_slug_is_fallback(record.get("name"))
 
 
 def _legacy_custom_api_key_env_name(provider_id: object) -> str:
@@ -1885,13 +1893,13 @@ def _legacy_custom_api_key_env_name(provider_id: object) -> str:
 
 
 def _lookup_custom_api_key_env(provider_id: object) -> str | None:
-    """Look up sanitized custom-provider env first, then legacy broken shape."""
+    """Look up sanitized custom-provider env first, then legacy broken shape.
+
+    This reads whatever variable the NAME resolves to; it does not decide whether
+    this provider is entitled to it. That is a record-level question, answered by
+    the caller through :func:`_custom_provider_record_may_take_convention_key`.
+    """
     env_name = _api_key_env_name(provider_id)
-    if not env_name:
-        # The id has no POSIX-safe characters, so there is no variable that
-        # belongs to THIS provider; any shared one would leak its key to a
-        # different endpoint. Keyless is the honest answer.
-        return None
     api_key = _thread_local_env_value(env_name).strip()
     if api_key:
         return api_key
@@ -3282,10 +3290,17 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     entry, custom_providers, cfg.get('providers')
                 )
                 if not provider_hint:
-                    # A fallback-derived name that a legacy entry already owns
-                    # mints nothing (it did not before #8026 either), so this
-                    # entry cannot claim the model.
-                    continue
+                    # Only a FALLBACK-DERIVED name that a legacy entry already owns mints
+                    # nothing here (it did not before #8026 either), so only that case cannot
+                    # claim the model. A legacy entry with no slug for any OTHER reason (for
+                    # example the name ``-`` or ``晨光:鑫遇``) still routes its declared models
+                    # to its own URL, exactly as it did on master; skipping it dropped the
+                    # entry and sent the model to the default endpoint instead.
+                    if _custom_provider_slug_is_fallback(entry_name):
+                        continue
+                    # No slug, so use the entry's own name as the provider hint and keep its
+                    # configured URL, which is what master did for this entry.
+                    return _finalize(model_id, entry_name, entry_base_url or None)
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
                 return _finalize(model_id, provider_hint, entry_base_url or None)
@@ -3444,7 +3459,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                             _entry, _custom_cfg, cfg.get("providers")
                         )
                         if not _slug:
-                            continue
+                            # Only a fallback-derived name that a legacy entry already owns mints
+                            # nothing. A legacy entry with no slug for any other reason (``-``,
+                            # ``晨光:鑫遇``) still routes to its own URL on master, so keep it.
+                            if _custom_provider_slug_is_fallback(prefix):
+                                continue
+                            _base = (_entry.get("base_url") or "").strip()
+                            return _finalize(model_id, prefix, _base or None)
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 
@@ -3599,6 +3620,8 @@ def _resolve_custom_record_key(
     raw_api_key: object,
     raw_key_env: object,
     provider_hint: object = None,
+    *,
+    allow_convention_key: bool = True,
 ) -> str | None:
     """Static credential declared by ONE custom record.
 
@@ -3606,6 +3629,14 @@ def _resolve_custom_record_key(
     hint, then falls back to the ``CUSTOM_<SLUG>_API_KEY`` convention. Reading
     every form from the SAME record is what keeps an endpoint and a credential
     from being resolved out of two different authorities.
+
+    ``allow_convention_key`` is False only for a newly admitted fallback entry
+    (see :func:`_custom_provider_record_may_take_convention_key`). For those the
+    convention variable is shared with a pre-existing provider, so resolving it
+    would hand this endpoint another provider's credential. Every other record,
+    including an existing ``custom:``-prefixed entry with its key in the
+    convention variable, keeps the lookup: suppressing it there would break a
+    credential that works today.
     """
     api_key = None
     if raw_api_key is not None:
@@ -3618,7 +3649,7 @@ def _resolve_custom_record_key(
         key_env = str(raw_key_env or "").strip()
         if key_env:
             api_key = _thread_local_env_value(key_env).strip() or None
-    if not api_key and provider_hint:
+    if not api_key and provider_hint and allow_convention_key:
         api_key = _lookup_custom_api_key_env(provider_hint)
     return api_key
 
@@ -4216,7 +4247,7 @@ def resolve_custom_provider_connection(
 
     # Read the live config snapshot to avoid stale module-level cache edge
     # cases after profile switches or runtime config edits.
-    record, _source, is_exact, _status = _select_custom_provider_record(pid, slug, get_config())
+    record, source, is_exact, _status = _select_custom_provider_record(pid, slug, get_config())
     if record is None:
         # Nothing owns this slug. Returning ``(None, None)`` is the whole point:
         # an unknown named route must not inherit an unrelated row's endpoint or
@@ -4226,7 +4257,12 @@ def resolve_custom_provider_connection(
         return None, None
 
     base_url = _custom_record_base_url(record)
-    api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+    api_key = _resolve_custom_record_key(
+        record.get("api_key"),
+        record.get("key_env"),
+        pid,
+        allow_convention_key=_custom_provider_record_may_take_convention_key(record, source),
+    )
     if return_provenance:
         return api_key, base_url, is_exact
     return api_key, base_url
@@ -4563,7 +4599,12 @@ def resolve_custom_provider_bundle(
             owned["credential_pool"] = pool_runtime.get("credential_pool")
 
     if not api_key:
-        api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+        api_key = _resolve_custom_record_key(
+            record.get("api_key"),
+            record.get("key_env"),
+            pid,
+            allow_convention_key=_custom_provider_record_may_take_convention_key(record, source),
+        )
     if not api_key:
         api_key = _host_gated_env_key(base_url)
 

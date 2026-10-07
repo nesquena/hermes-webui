@@ -1050,12 +1050,16 @@ endpoint. Two rules:
 
 The fallback is name-derived, not endpoint-derived: two providers sharing one
 `base_url` are two identities and must stay two entries. The same rule governs
-the API-key env var: `_api_key_env_name()` returns an empty name when an id's
-distinctive part has no POSIX-safe characters AND is not ASCII, so an unnameable
-Unicode provider takes the keyless path rather than every such provider reading
-one shared `CUSTOM_CUSTOM_API_KEY` variable. An ASCII id keeps the convention
-variable it always had, including `custom:_` -> `CUSTOM_CUSTOM_API_KEY`, because
-each such id is still distinct and none shared a variable.
+the API-key env var, and it is decided per RECORD rather than per id:
+`_api_key_env_name()` keeps master's whole-id rule (so `custom:foo` and
+`custom:custom_foo` stay distinct), while
+`_custom_provider_record_may_take_convention_key()` refuses the shared
+`CUSTOM_<SLUG>_API_KEY` lookup only for a newly admitted fallback entry, whose id
+sanitizes to the constant `CUSTOM` and so would otherwise read a variable that
+belongs to another provider. An id cannot carry that distinction on its own: the
+id `custom:晨光` is the same whether the user typed it or the fallback minted it,
+and an ASCII id such as `custom:_` sanitizes to that same constant while being a
+variable nobody else shares.
 
 ---
 
