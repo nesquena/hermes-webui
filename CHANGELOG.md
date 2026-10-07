@@ -114,6 +114,12 @@
 
 ### Fixed
 
+- **A MoA preset picked in the model picker runs its reference models once per call, not twice.** The WebUI also
+  sent a per-turn `moa_config` for these sessions, which made the Agent run a second, independent MoA round on every
+  API call, including each tool iteration, on top of the virtual provider's own. That roughly doubled reference and
+  aggregator calls and latency, and broke the preset's per-turn cache. With an Agent that serves the virtual `moa`
+  provider, the WebUI no longer sends it; older Agents keep the previous behaviour. Thanks @psanger. (#8065)
+
 - **Cron results now raise a browser notification when the WebUI tab is in the background.** The cron completion poll
   skipped every tick while the tab was hidden, so a job delivering to its origin chat left a transcript entry and an
   unread dot but never a notification, which is exactly when one is useful (and the Android app relays these). The
