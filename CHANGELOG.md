@@ -122,6 +122,12 @@
 
 ### Fixed
 
+- **The native Windows launcher starts on Agent-managed installs again.** `start.ps1` found the hermes-agent folder
+  but never passed it to the server process, so the server could not load the Agent's dependencies and exited before
+  it was reachable (`ModuleNotFoundError: yaml`). The launcher now exports the folder it found. Discovery also works
+  with pip-style and sibling-checkout layouts, and no longer stops on a legacy home folder it can't read.
+  Thanks @Yi-111-a. (#7948)
+
 - **Auto-follow holds up during fast streams.** While an agent streams quickly, scrolling up to read no longer yanks
   you back to the bottom, and scrolling down to catch up re-attaches to the tail even though it keeps moving. A
   trackpad jiggle near the bottom no longer drops the follow, and on iOS/Android post-render scroll artifacts and
