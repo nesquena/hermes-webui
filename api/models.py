@@ -7878,14 +7878,17 @@ def _cache_cli_sessions_if_current(
     ttl: float,
     invalidation_stamp: int,
     sessions: list,
+    read_started_at: float | None = None,
 ) -> bool:
     with _CLI_SESSIONS_CACHE_LOCK:
         if _CLI_SESSIONS_CACHE_INVALIDATION_VERSION != invalidation_stamp:
             return False
+        now = time.monotonic()
         _CLI_SESSIONS_CACHE[cache_key] = (
-            time.monotonic() + ttl,
+            now + ttl,
             invalidation_stamp,
             _copy_cli_sessions(sessions),
+            read_started_at if read_started_at is not None else now,
         )
         _CLI_SESSIONS_CACHE.move_to_end(cache_key)
         while len(_CLI_SESSIONS_CACHE) > _CLI_SESSIONS_CACHE_MAX_ENTRIES:
@@ -7898,8 +7901,8 @@ def _copy_fresh_cli_sessions_cache_entry(cache_key: tuple):
         cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
         if cached_entry is None:
             return None
-        if len(cached_entry) == 3:
-            cached_expires_at, cached_stamp, cached_sessions = cached_entry
+        if len(cached_entry) >= 3:
+            cached_expires_at, cached_stamp, cached_sessions = cached_entry[:3]
         else:
             cached_expires_at, cached_sessions = cached_entry
             cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
@@ -7936,30 +7939,40 @@ def _load_and_cache_cli_sessions(
             return stale_sessions
         return []
     # Atomic choose-and-publish under _CLI_SESSIONS_CACHE_LOCK: if a fresh entry
-    # for cache_key was published DURING our load (newer expiry, same
-    # invalidation stamp) — e.g. the real owner published fresher rows while the
-    # capped fallback was still reading — prefer that entry and do not clobber it
+    # for cache_key was published DURING our load (unexpired, same invalidation
+    # stamp, and whose read started AFTER our load started) — e.g. a concurrent
+    # rebuilder read fresher rows — prefer that entry and do not clobber it
     # with our older snapshot (#4966).
+    now = time.monotonic()
     with _CLI_SESSIONS_CACHE_LOCK:
         if _CLI_SESSIONS_CACHE_INVALIDATION_VERSION != invalidation_stamp:
             # Stamp changed mid-load: don't cache, but still return what we read.
             return _copy_cli_sessions(sessions)
         cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
         if cached_entry is not None:
-            if len(cached_entry) == 3:
+            if len(cached_entry) == 4:
+                cached_expires_at, cached_stamp, cached_sessions, cached_read_started_at = cached_entry
+            elif len(cached_entry) == 3:
                 cached_expires_at, cached_stamp, cached_sessions = cached_entry
+                cached_read_started_at = 0.0
             else:
                 cached_expires_at, cached_sessions = cached_entry
                 cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
-            # A same-stamp entry with an expiry newer than our load start means a
-            # concurrent rebuilder published fresher rows while we were reading.
-            if cached_stamp == invalidation_stamp and cached_expires_at >= loaded_at + ttl:
+                cached_read_started_at = 0.0
+            # A same-stamp, unexpired entry whose read started after our load started
+            # represents strictly newer data. Prefer it over our older read.
+            if (
+                cached_stamp == invalidation_stamp
+                and cached_expires_at > now
+                and cached_read_started_at > loaded_at
+            ):
                 _CLI_SESSIONS_CACHE.move_to_end(cache_key)
                 return _copy_cli_sessions(cached_sessions)
         _CLI_SESSIONS_CACHE[cache_key] = (
-            time.monotonic() + ttl,
+            now + ttl,
             invalidation_stamp,
             _copy_cli_sessions(sessions),
+            loaded_at,
         )
         _CLI_SESSIONS_CACHE.move_to_end(cache_key)
         while len(_CLI_SESSIONS_CACHE) > _CLI_SESSIONS_CACHE_MAX_ENTRIES:

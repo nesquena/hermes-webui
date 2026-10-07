@@ -1,3 +1,4 @@
+import time
 import threading
 import api.models as models
 
@@ -61,14 +62,15 @@ def test_cli_sessions_cache_fallback_preserves_newer_rows_published_during_load(
     older_rows = [{"session_id": "older-fallback-session"}]
 
     # While _load_and_cache_cli_sessions is "loading" (running this callback), a
-    # concurrent rebuilder publishes fresher rows under the SAME stamp with a newer
-    # expiry. The load itself returns the older rows, as the capped fallback would.
+    # concurrent rebuilder that started AFTER our load publishes fresher rows.
+    # The load itself returns older rows, as the capped fallback would.
     def _load_sessions_with_concurrent_publish():
         models._cache_cli_sessions_if_current(
             cache_key,
             ttl + 10_000.0,  # much newer expiry, same stamp
             stamp,
             newer_rows,
+            read_started_at=time.monotonic() + 0.5,  # owner read started after fallback started
         )
         return older_rows
 
@@ -92,3 +94,89 @@ def test_cli_sessions_cache_fallback_preserves_newer_rows_published_during_load(
     assert entry[2] == newer_rows
 
     models.clear_cli_sessions_cache()
+
+
+def test_cli_sessions_cache_fallback_overwrites_older_rows_read_before_fallback():
+    """If an owner started reading BEFORE the fallback started, but published its older read
+    during the fallback's load, the fallback's newer read must win and overwrite the cache (#4966)."""
+    models.clear_cli_sessions_cache()
+    cache_key = ("test_fallback_overwrites_older",)
+    ttl = 10.0
+    stamp = models._cli_sessions_cache_invalidation_stamp()
+    older_owner_rows = [{"session_id": "older-owner-session"}]
+    newer_fallback_rows = [{"session_id": "newer-fallback-session"}]
+
+    def _load_sessions_with_earlier_started_owner():
+        # Owner started reading in the past (read_started_at = 1.0) and publishes mid-load
+        models._cache_cli_sessions_if_current(
+            cache_key,
+            ttl + 100.0,
+            stamp,
+            older_owner_rows,
+            read_started_at=1.0,  # much older than fallback's loaded_at
+        )
+        return newer_fallback_rows
+
+    result = models._load_and_cache_cli_sessions(
+        cache_key=cache_key,
+        ttl=ttl,
+        invalidation_stamp=stamp,
+        load_sessions=_load_sessions_with_earlier_started_owner,
+        stale_sessions=None,
+        stale_stamp=None,
+        all_profiles=False,
+        db_path=":memory:",
+    )
+
+    # Fallback's newer read must win over owner's older read
+    assert result == newer_fallback_rows
+    with models._CLI_SESSIONS_CACHE_LOCK:
+        entry = models._CLI_SESSIONS_CACHE.get(cache_key)
+    assert entry is not None
+    assert entry[2] == newer_fallback_rows
+
+    models.clear_cli_sessions_cache()
+
+
+def test_cli_sessions_cache_fallback_discards_expired_rows_published_during_load():
+    """If an entry was published during the load but already expired before the load completes,
+    the fallback must discard the expired entry and publish its fresh read (#4966)."""
+    import time
+    models.clear_cli_sessions_cache()
+    cache_key = ("test_fallback_discards_expired",)
+    ttl = 10.0
+    stamp = models._cli_sessions_cache_invalidation_stamp()
+    expired_rows = [{"session_id": "expired-session"}]
+    fresh_rows = [{"session_id": "fresh-session"}]
+
+    def _load_sessions_with_already_expired_publish():
+        # Publish an entry with negative TTL so it is already expired at return time
+        models._cache_cli_sessions_if_current(
+            cache_key,
+            -1.0,
+            stamp,
+            expired_rows,
+            read_started_at=time.monotonic() + 10.0,
+        )
+        return fresh_rows
+
+    result = models._load_and_cache_cli_sessions(
+        cache_key=cache_key,
+        ttl=ttl,
+        invalidation_stamp=stamp,
+        load_sessions=_load_sessions_with_already_expired_publish,
+        stale_sessions=None,
+        stale_stamp=None,
+        all_profiles=False,
+        db_path=":memory:",
+    )
+
+    # Must return and cache fresh rows, not expired ones
+    assert result == fresh_rows
+    with models._CLI_SESSIONS_CACHE_LOCK:
+        entry = models._CLI_SESSIONS_CACHE.get(cache_key)
+    assert entry is not None
+    assert entry[2] == fresh_rows
+
+    models.clear_cli_sessions_cache()
+
