@@ -3027,18 +3027,48 @@ function _normalizeIconTint(color){
   return /^#[0-9a-f]{6}$/i.test(color||'')?color.toUpperCase():'#08EBF1';
 }
 
-function _applyIconTint(color){
-  const tint=_normalizeIconTint(color).slice(1);
-  document.querySelectorAll('link[rel~="icon"][type="image/svg+xml"]').forEach(link=>{
-    link.href=`static/favicon.svg?tint=${tint}`;
+function _iconTintGradientEnd(tint){
+  if(tint==='#08EBF1') return '#3889FD';
+  return '#'+[1,3,5].map(i=>Math.round(parseInt(tint.slice(i,i+2),16)*0.7).toString(16).padStart(2,'0')).join('').toUpperCase();
+}
+
+function _syncIconTintPicker(tint){
+  const cells=document.querySelectorAll('#iconTintPickerGrid .icon-tint-pick-btn');
+  const preset=Array.from(cells).some(cell=>cell.dataset.iconTintVal===tint);
+  cells.forEach(cell=>{
+    const active=cell.dataset.iconTintVal===tint || (cell.dataset.iconTintVal==='custom'&&!preset);
+    cell.classList.toggle('active',active);
+    if(cell.tagName==='BUTTON') cell.setAttribute('aria-pressed',String(active));
   });
+}
+
+function _applyIconTint(color){
+  const tint=_normalizeIconTint(color);
+  const url=`static/favicon.svg?tint=${tint.slice(1)}`;
+  document.querySelectorAll('link[rel~="icon"][type="image/svg+xml"]').forEach(link=>{
+    link.href=url;
+  });
+  const preview=$('iconTintPreview');
+  if(preview) preview.src=url;
+  const input=$('settingsIconTint');
+  if(input) input.value=tint;
+  _syncIconTintPicker(tint);
+  const end=_iconTintGradientEnd(tint);
+  for(const [selector,stopColor] of [
+    ['#app-titlebar-mark stop:first-child',tint],
+    ['#app-titlebar-mark stop:last-child',end],
+    ['.empty-logo .hm-g0',tint],
+    ['.empty-logo .hm-g1',end],
+  ]){
+    document.querySelectorAll(selector).forEach(stop=>{
+      stop.style.stopColor=tint==='#08EBF1'?'':stopColor;
+    });
+  }
 }
 
 function _pickIconTint(color){
   const tint=_normalizeIconTint(color);
   localStorage.setItem('hermes-icon-tint',tint);
-  const input=$('settingsIconTint');
-  if(input) input.value=tint;
   _applyIconTint(tint);
   if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }

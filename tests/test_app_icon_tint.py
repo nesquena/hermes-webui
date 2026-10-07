@@ -171,8 +171,10 @@ const links = JSON.parse(process.argv[1]);
 for (const link of links) {
   link.original = {...link};
 }
+const $ = () => null;
 const document = {
   querySelectorAll(selector) {
+    if (!selector.startsWith('link[')) return [];
     return links.filter(link => selector.split(',').some(part => {
       const match = part.match(/^link\\[rel([~=])=\\"([^\\"]+)\\"\\](?:\\[type=\\"([^\\"]+)\\"\\])?$/);
       if (!match) throw new Error(`Unexpected selector: ${part}`);
@@ -201,6 +203,71 @@ for (const link of links) {
         capture_output=True,
         text=True,
     )
+
+
+def test_icon_tint_picker_updates_preview_presets_and_inline_marks():
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required for the icon picker DOM test")
+    script = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const html = fs.readFileSync('static/index.html', 'utf8');
+const js = fs.readFileSync('static/boot.js', 'utf8');
+const css = fs.readFileSync('static/style.css', 'utf8');
+assert.ok(html.includes('id="iconTintLabel"'));
+const field = html.slice(html.indexOf('id="iconTintLabel"'), html.indexOf('id="fontSizePickerGrid"'));
+assert.match(field, /id="iconTintPreview"[^>]*src="static\/favicon.svg\?tint=08EBF1"/);
+assert.match(field, /data-icon-tint-val="#08EBF1"/);
+assert.match(field, /data-icon-tint-val="#E5484D"/);
+assert.match(field, /data-icon-tint-val="custom"/);
+assert.match(field, /id="settingsIconTint"[^>]*oninput="_pickIconTint\(this.value\)"/);
+assert.doesNotMatch(field.match(/<input type="color"[^>]*>/)[0], / style=/);
+assert.match(css, /\.icon-tint-pick-btn[^\n]*min-height:48px/);
+assert.match(css, /\.icon-tint-custom[^\n]*min-height:48px/);
+assert.match(field, /Safari and installed-app icons keep the default color/);
+const start = js.indexOf('function _normalizeIconTint(');
+const end = js.indexOf('function _applyFontSize(', start);
+const links = [{href:'static/favicon.svg', type:'image/svg+xml', rel:'icon'}, {href:'static/apple-touch-icon.png', rel:'apple-touch-icon'}];
+assert.match(html, /id="app-titlebar-mark"[\s\S]*?<stop offset="0" stop-color="#08EBF1"\/><stop offset="1" stop-color="#3889FD"\/>/);
+assert.match(html, /class="empty-logo"[\s\S]*?class="hm-g0"[\s\S]*?class="hm-g1"/);
+const stops = {'#app-titlebar-mark stop:first-child':[{style:{stopColor:''}}], '#app-titlebar-mark stop:last-child':[{style:{stopColor:''}}], '.empty-logo .hm-g0':[{style:{stopColor:''}}], '.empty-logo .hm-g1':[{style:{stopColor:''}}]};
+const cells = ['#08EBF1','#E5484D','#7C3AED','#F59E0B','custom'].map(value=>({dataset:{iconTintVal:value}, tagName:value==='custom'?'LABEL':'BUTTON', classList:{active:false, toggle(_name,on){this.active=on;}},setAttribute(name,value){this[name]=value;}}));
+const input = {value:'#08EBF1'};
+const preview = {src:'static/favicon.svg?tint=08EBF1'};
+const localStorage = {values:{},setItem(key,value){this.values[key]=value;}};
+const document = {
+  querySelectorAll(selector){
+    if(selector==='link[rel~="icon"][type="image/svg+xml"]') return links.filter(link=>link.rel==='icon'&&link.type==='image/svg+xml');
+    if(selector==='#iconTintPickerGrid .icon-tint-pick-btn') return cells;
+    if(stops[selector]) return stops[selector];
+    throw new Error(`Unexpected selector: ${selector}`);
+  }
+};
+const $ = id => ({settingsIconTint:input,iconTintPreview:preview})[id];
+let saves = 0;
+function _scheduleAppearanceAutosave(){saves++;}
+eval(js.slice(start,end));
+_pickIconTint('#E5484D');
+assert.equal(preview.src,'static/favicon.svg?tint=E5484D');
+assert.equal(links[0].href,preview.src);
+assert.equal(links[1].href,'static/apple-touch-icon.png');
+assert.equal(input.value,'#E5484D');
+assert.equal(localStorage.values['hermes-icon-tint'],'#E5484D');
+assert.deepEqual(cells.map(cell=>cell.classList.active),[false,true,false,false,false]);
+assert.equal(cells[1]['aria-pressed'],'true');
+assert.equal(cells[0]['aria-pressed'],'false');
+assert.equal(stops['#app-titlebar-mark stop:first-child'][0].style.stopColor,'#E5484D');
+assert.equal(stops['.empty-logo .hm-g0'][0].style.stopColor,'#E5484D');
+assert.equal(stops['#app-titlebar-mark stop:last-child'][0].style.stopColor,'#A03236');
+assert.equal(stops['.empty-logo .hm-g1'][0].style.stopColor,'#A03236');
+_pickIconTint('#123456');
+assert.deepEqual(cells.map(cell=>cell.classList.active),[false,false,false,false,true]);
+_pickIconTint('#08EBF1');
+assert.deepEqual(cells.map(cell=>cell.classList.active),[true,false,false,false,false]);
+for(const group of Object.values(stops)) assert.equal(group[0].style.stopColor,'');
+assert.equal(saves,3);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
 def test_icon_tint_control_autosaves():

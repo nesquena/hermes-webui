@@ -5253,14 +5253,28 @@ main.main > #mainPlugin{display:none;}
    tokens so all skins flip correctly. */
 #mainSettings .theme-pick-btn,
 #mainSettings .skin-pick-btn,
-#mainSettings .font-size-pick-btn{background:var(--bg)!important;border-color:var(--border)!important;}
+#mainSettings .font-size-pick-btn,
+#mainSettings .icon-tint-pick-btn{background:var(--bg)!important;border-color:var(--border)!important;}
 #mainSettings .theme-pick-btn:hover,
 #mainSettings .skin-pick-btn:hover,
-#mainSettings .font-size-pick-btn:hover{border-color:var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .font-size-pick-btn:hover,
+#mainSettings .icon-tint-pick-btn:hover{border-color:var(--accent-bg-strong)!important;background:var(--surface)!important;}
 /* Active/selected state for picker cards — must use !important to beat the base border-color:var(--border)!important rule above */
 #mainSettings .theme-pick-btn.active,
 #mainSettings .skin-pick-btn.active,
-#mainSettings .font-size-pick-btn.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .font-size-pick-btn.active,
+#mainSettings .icon-tint-pick-btn.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .icon-tint-control{display:flex;align-items:center;gap:12px;min-width:0;}
+#mainSettings .icon-tint-preview{width:48px;height:48px;flex:none;}
+#mainSettings .icon-tint-picker{display:flex;flex-wrap:wrap;gap:6px;min-width:0;}
+#mainSettings .icon-tint-pick-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:64px;min-height:48px;padding:5px 8px;border:1px solid var(--border2);border-radius:8px;color:var(--text);font-size:11px;cursor:pointer;position:relative;}
+#mainSettings .icon-tint-swatch{width:17px;height:17px;border-radius:50%;border:1px solid var(--border2);}
+#mainSettings .icon-tint-custom{min-height:48px;overflow:hidden;}
+#mainSettings .icon-tint-custom-swatch{background:conic-gradient(#E5484D,#F59E0B,#08EBF1,#7C3AED,#E5484D);}
+#mainSettings #settingsIconTint{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;}
+#mainSettings .icon-tint-pick-btn:focus-visible,
+#mainSettings .icon-tint-custom:focus-within{outline:2px solid var(--accent);outline-offset:2px;}
+#mainSettings .icon-tint-caption{font-size:12px;color:var(--muted);line-height:1.5;margin-top:8px;}
 #mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:4px;}
 #mainSettings .chat-activity-mode-btn{min-height:34px;padding:7px 10px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;}
 #mainSettings .chat-activity-mode-btn:hover{border-color:var(--accent-bg-strong);color:var(--text);background:var(--hover-bg);}
