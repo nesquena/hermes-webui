@@ -351,12 +351,14 @@ def regeneration_state(session, *, use_sidecar=False):
     otherwise the read falls back to the full transcript.
     """
     from api.models import (
+        _cancelled_journal_turn_owner,
         get_state_db_session_messages,
         reconciled_state_db_messages_for_session,
     )
 
     bounded_tail = None
-    if use_sidecar:
+    cancelled_owner = _cancelled_journal_turn_owner(getattr(session, 'messages', None) or [], include_live_partial=True)
+    if use_sidecar and not cancelled_owner:
         read_floor = _sidecar_regeneration_read_floor(session)
         if read_floor is not None:
             bounded_tail = _bounded_tail_snapshot_if_safe(session, read_floor)
@@ -366,6 +368,7 @@ def regeneration_state(session, *, use_sidecar=False):
         state_messages = get_state_db_session_messages(
             getattr(session, "session_id", None),
             profile=getattr(session, "profile", None),
+            **({'include_row_identity': True} if cancelled_owner else {}),
         )
     return (
         reconciled_state_db_messages_for_session(
