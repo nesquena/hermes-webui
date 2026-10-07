@@ -4011,7 +4011,7 @@ def test_dictation_settlement_waits_for_server_transcription_completion():
     assert "const settlement=_micSettlementPromise" in stop
     assert "await settlement" in stop
     assert recorder.index("await _transcribeBlob(") < recorder.index(
-        "settleCurrentCapture()", recorder.index("await _transcribeBlob(")
+        "settle()", recorder.index("await _transcribeBlob(")
     )
 
 

@@ -1344,7 +1344,7 @@ function _micToastKeyForRecognitionError(error){
       const recorder=new MediaRecorder(captureStream,mimeType?{mimeType}:undefined);
       audioChunks=[];
       const captureChunks=audioChunks;
-      const settleCurrentCapture=typeof settleCapture==='function'?settleCapture:()=>{};
+      const settle=typeof settleCapture==='function'?settleCapture:()=>{};
       recorder.ondataavailable=e=>{
         if(!_micProducerIsCurrent(captureProducerHandle))return;
         if(e.data&&e.data.size)captureChunks.push(e.data);
@@ -1358,7 +1358,7 @@ function _micToastKeyForRecognitionError(error){
         if(isCurrentProducer)window._micPendingSend=false;
         _stopTracks(captureStream);
         if(isCurrentProducer)showToast(t('mic_network'));
-        settleCurrentCapture();
+        settle();
       };
       recorder.onstop=async()=>{
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
@@ -1366,7 +1366,7 @@ function _micToastKeyForRecognitionError(error){
         if(!isCurrentProducer){
           if(mediaRecorder===recorder) mediaRecorder=null;
           _stopTracks(captureStream);
-          settleCurrentCapture();
+          settle();
           return;
         }
         if(mediaRecorder===recorder) mediaRecorder=null;
@@ -1391,17 +1391,15 @@ function _micToastKeyForRecognitionError(error){
           window._micPendingSend=false;
         }
         if(isCurrentProducer)_applyDeferredServerSttFlip();
-        settleCurrentCapture();
+        settle();
       };
       _activeCaptureMode=captureMode;
       mediaRecorder=recorder;
       recorder.start();
       _setRecording(true);
     }catch(err){
-      if(startSeq!==_micStartSeq){
-        settleCapture();
-        return;
-      }
+      if(startSeq!==_micStartSeq)settleCapture();
+      if(startSeq!==_micStartSeq) return;
       _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();
