@@ -772,6 +772,32 @@ def _clear_cached_sessions_for_project(project_id) -> int:
     return cleared
 
 
+def _auto_assign_target_is_view_only(session, sid: str) -> bool:
+    """True when the backfill sweep must NOT file ``sid`` under a project.
+
+    The sweep is a second write path into session metadata, so it has to honour
+    the same guards as ``/api/session/move`` (see
+    ``_get_or_materialize_session``): read-only imported sessions and delegated
+    subagent children are view-only and owned by their origin (the CLI importer
+    / the delegate runner). Stamping ``project_id`` on such a row would rewrite
+    state WebUI does not own (re-gate 2026-10-07T17:06Z, [SHOULD-FIX]).
+    """
+    if getattr(session, "read_only", False):
+        return True
+    source = str(
+        getattr(session, "source_tag", "")
+        or getattr(session, "raw_source", "")
+        or getattr(session, "session_source", "")
+        or ""
+    ).strip().lower()
+    if source == "subagent":
+        return True
+    try:
+        return _is_subagent_child_session_id(sid)
+    except Exception:
+        return False
+
+
 def _apply_project_auto_assign(proj) -> int:
     """Run one backfill sweep under the deletion-serialized registry."""
     pid = proj.get("project_id") if isinstance(proj, dict) else None
@@ -857,6 +883,12 @@ def _auto_assign_sweep_body(proj) -> int:
                     with LOCK:
                         cached = SESSIONS.get(sid)
                     if cached is not None:
+                        if _auto_assign_target_is_view_only(cached, sid):
+                            # View-only row (read-only imported / subagent
+                            # child) sitting in the live cache: never file it,
+                            # and do not fall through to the authoritative
+                            # path either.
+                            continue
                         if not getattr(cached, "project_id", None):
                             if _profiles_match(getattr(cached, "profile", None) or "default", profile):
                                 c_ws = getattr(cached, "workspace", None)
@@ -890,6 +922,11 @@ def _auto_assign_sweep_body(proj) -> int:
                         continue
                 s = get_session(sid)
                 if s is None or getattr(s, "project_id", None):  # noqa: B009
+                    continue
+                if _auto_assign_target_is_view_only(s, sid):
+                    # Read-only imported session / delegated subagent child —
+                    # view-only, must not be re-filed (same guards as
+                    # /api/session/move).
                     continue
                 if not _profiles_match(getattr(s, "profile", None) or "default", profile):  # noqa: B009
                     continue

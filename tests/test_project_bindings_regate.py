@@ -1100,3 +1100,184 @@ def test_session_new_publishes_the_implicit_assignment_under_the_catalog_lock(mo
         "projects-catalog lock deletion holds while removing the row"
     )
     assert responses and responses[-1]["status"] == 200, responses
+
+
+# ---------------------------------------------------------------------------
+# re-gate 2026-10-07T17:06Z — [SHOULD-FIX] the backfill sweep must apply the
+# same view-only guards as /api/session/move: read-only imported sessions and
+# delegated subagent children are never filed under a bound project.
+# ---------------------------------------------------------------------------
+
+
+def _write_index(tmp_path, rows):
+    index_file = tmp_path / "_index.json"
+    index_file.write_text(json.dumps(rows))
+    return index_file
+
+
+def test_auto_assign_sweep_skips_read_only_imported_sessions(tmp_path, monkeypatch):
+    """A read-only imported row is never filed; a writable sibling still is."""
+    import api.routes as routes
+
+    ws = tmp_path / "ws-ro-guard"
+    ws.mkdir()
+    ws_str = str(ws)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", _write_index(tmp_path, [
+        {"session_id": "s_ro", "workspace": ws_str, "profile": "default", "project_id": None},
+        {"session_id": "s_ok", "workspace": ws_str, "profile": "default", "project_id": None},
+    ]))
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(routes, "_state_db_session_source", lambda sid: "")
+
+    saved = []
+
+    class _Row:
+        def __init__(self, sid, read_only=False):
+            self.session_id = sid
+            self.project_id = None
+            self.profile = "default"
+            self.workspace = ws_str
+            self.read_only = read_only
+
+        def save(self, touch_updated_at=True):
+            saved.append(self.session_id)
+
+    rows = {"s_ro": _Row("s_ro", read_only=True), "s_ok": _Row("s_ok")}
+    monkeypatch.setattr(
+        routes, "get_session",
+        lambda sid, metadata_only=False: None if metadata_only else rows.get(sid),
+    )
+
+    pid = "proj_viewonly_ro"
+    try:
+        assert routes._apply_project_auto_assign(
+            {"project_id": pid, "profile": "default", "workspaces": [ws_str]}
+        ) == 1
+    finally:
+        routes._auto_assign_finish_deleting(pid)
+    assert rows["s_ro"].project_id is None, "read-only imported session was filed"
+    assert saved == ["s_ok"]
+    assert rows["s_ok"].project_id == pid
+
+
+def test_auto_assign_sweep_skips_subagent_sidecars_by_source_tag(tmp_path, monkeypatch):
+    """A sidecar tagged ``subagent`` (read_only=False) is still view-only."""
+    import api.routes as routes
+
+    ws = tmp_path / "ws-sub-tag"
+    ws.mkdir()
+    ws_str = str(ws)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", _write_index(tmp_path, [
+        {"session_id": "s_sub_tag", "workspace": ws_str, "profile": "default", "project_id": None},
+    ]))
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(routes, "_state_db_session_source", lambda sid: "")
+
+    class _Row:
+        session_id = "s_sub_tag"
+        project_id = None
+        profile = "default"
+        workspace = ws_str
+        read_only = False
+        source_tag = "subagent"
+
+        def save(self, touch_updated_at=True):
+            raise AssertionError("subagent child must never be filed")
+
+    row = _Row()
+    monkeypatch.setattr(
+        routes, "get_session",
+        lambda sid, metadata_only=False: None if metadata_only else row,
+    )
+
+    pid = "proj_viewonly_sub_tag"
+    try:
+        assert routes._apply_project_auto_assign(
+            {"project_id": pid, "profile": "default", "workspaces": [ws_str]}
+        ) == 0
+    finally:
+        routes._auto_assign_finish_deleting(pid)
+    assert row.project_id is None
+
+
+def test_auto_assign_sweep_skips_subagent_children_known_only_to_state_db(tmp_path, monkeypatch):
+    """A pre-fix sidecar (read_only=False, no tag) is caught via state.db."""
+    import api.routes as routes
+
+    ws = tmp_path / "ws-sub-db"
+    ws.mkdir()
+    ws_str = str(ws)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", _write_index(tmp_path, [
+        {"session_id": "s_sub_db", "workspace": ws_str, "profile": "default", "project_id": None},
+    ]))
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(
+        routes, "_state_db_session_source",
+        lambda sid: "subagent" if sid == "s_sub_db" else "",
+    )
+
+    class _Row:
+        session_id = "s_sub_db"
+        project_id = None
+        profile = "default"
+        workspace = ws_str
+        read_only = False
+
+        def save(self, touch_updated_at=True):
+            raise AssertionError("subagent child must never be filed")
+
+    row = _Row()
+    monkeypatch.setattr(
+        routes, "get_session",
+        lambda sid, metadata_only=False: None if metadata_only else row,
+    )
+
+    pid = "proj_viewonly_sub_db"
+    try:
+        assert routes._apply_project_auto_assign(
+            {"project_id": pid, "profile": "default", "workspaces": [ws_str]}
+        ) == 0
+    finally:
+        routes._auto_assign_finish_deleting(pid)
+    assert row.project_id is None
+
+
+def test_auto_assign_sweep_skips_a_view_only_session_in_the_live_cache(tmp_path, monkeypatch):
+    """The streaming/cached branch must honour the guard before writing."""
+    import api.routes as routes
+
+    ws = tmp_path / "ws-ro-cache"
+    ws.mkdir()
+    ws_str = str(ws)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", _write_index(tmp_path, [
+        {
+            "session_id": "s_ro_cache",
+            "workspace": ws_str,
+            "profile": "default",
+            "project_id": None,
+            "active_stream_id": "st_ro",
+        },
+    ]))
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"st_ro"})
+
+    class _Cached:
+        session_id = "s_ro_cache"
+        project_id = None
+        profile = "default"
+        workspace = ws_str
+        active_stream_id = "st_ro"
+        read_only = True
+
+    cached = _Cached()
+    routes.SESSIONS["s_ro_cache"] = cached
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: None)
+
+    pid = "proj_viewonly_cache"
+    try:
+        assert routes._apply_project_auto_assign(
+            {"project_id": pid, "profile": "default", "workspaces": [ws_str]}
+        ) == 0
+    finally:
+        routes._auto_assign_finish_deleting(pid)
+        routes.SESSIONS.pop("s_ro_cache", None)
+    assert cached.project_id is None, "a read-only cached active stream was filed"
