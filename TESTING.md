@@ -401,7 +401,20 @@ EXPECT:
   - Switching away and back to the conversation restores the same model in the footer selector
 FAIL: Dropdown shows the wrong active model after a session switch, or sending uses a stale model.
 
-### T3.3: Context Badge Shares Footer Space Cleanly
+### T3.3: Reasoning Effort Is Scoped To The Active Conversation
+SETUP: Create two conversations that use reasoning-capable models.
+STEPS:
+  1. In conversation A, choose "High" from the composer reasoning control
+  2. Switch to conversation B and choose "Low"
+  3. Switch between A and B, then reload the page
+EXPECT:
+  - Conversation A restores "High" and conversation B restores "Low"
+  - Changing either value does not change the profile-wide reasoning default
+  - Choosing "Auto" clears only that conversation's override and displays the effective model/profile default
+  - A change made while a response is running affects the next run, not the in-flight response
+FAIL: The value leaks between conversations, disappears after reload, rewrites the profile default, or changes an already-running response.
+
+### T3.4: Context Badge Shares Footer Space Cleanly
 SETUP: Active session with at least one completed response.
 STEPS:
   1. Look at the right side of the composer footer
