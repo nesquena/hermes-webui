@@ -107,6 +107,11 @@ globalThis.api = async (url, options = {}) => {
   const body = JSON.parse(options.body || '{}');
   createWorkspaces.push(body.workspace || null);
   if (scenario === 'failure') throw new Error('create failed');
+  if (scenario === 'workspace-gone' && body.workspace) throw new Error('Path does not exist');
+  if (scenario === 'workspace-gone') return {session:{
+    session_id:'created-fallback', messages:[], model:'test-model', model_provider:'test-provider',
+    workspace:'/ws/default', message_count:0, last_usage:{},
+  }};
   if (scenario.startsWith('new-chat-during-draft-')) return {session:{
     session_id:'created-B', messages:[], model:'test-model', model_provider:'test-provider',
     workspace:'/ws/B', message_count:0, last_usage:{},
@@ -259,6 +264,16 @@ def test_failed_remembered_draft_load_falls_back_to_fresh_chat(driver):
     result = _run(driver, "draft-load-failure")
     assert result["activeSid"] == "created-A"
     assert result["createWorkspaces"] == ["/ws/A"]
+    assert result["profileWorkspace"] is None
+    assert result["superseded"] is False
+    assert result["failed"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_missing_deleted_workspace_retries_with_profile_fallback(driver):
+    result = _run(driver, "workspace-gone")
+    assert result["activeSid"] == "created-fallback"
+    assert result["createWorkspaces"] == ["/ws/A", None]
     assert result["profileWorkspace"] is None
     assert result["superseded"] is False
     assert result["failed"] is False

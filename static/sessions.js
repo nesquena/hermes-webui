@@ -10091,6 +10091,20 @@ async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=
     });
     return result&&result.superseded?{superseded:true}:{created:true};
   }catch(error){
+    // The deleted conversation's workspace may have disappeared from disk.
+    // Retry once without the explicit override so the server can fall back to
+    // the profile's current/default workspace, like the ordinary New Chat path.
+    if(deletedWorkspace&&stillOwnsPane()){
+      try{
+        const retry=await newSession(false,{
+          stillOwnsPane,
+          preserveRememberedDraftPointer:!!rememberedDraftSid,
+        });
+        return retry&&retry.superseded?{superseded:true}:{created:true};
+      }catch(retryError){
+        error=retryError;
+      }
+    }
     if(stillOwnsPane()){
       _showEmptyConversationAfterDelete();
     }
