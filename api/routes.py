@@ -7623,7 +7623,10 @@ def _context_length_lookup_inputs_for_model(
                 continue
             entry_name = str(entry.get("name") or "").strip()
             entry_slug = _custom_provider_entry_slug_for_context(
-                entry, custom_providers, providers_cfg
+                entry,
+                custom_providers,
+                providers_cfg,
+                cfg.get("model") if isinstance(cfg, dict) else None,
             )
             entry_base = str(entry.get("base_url") or "").strip()
             entry_base_norm = entry_base.rstrip("/")
@@ -7950,7 +7953,10 @@ def _repair_bare_custom_provider_model(
         for _entry in _entries:
             entry_name = str(_entry.get("name") or "").strip().lower()
             slug = _custom_provider_entry_slug_for_context(
-                _entry, _entries, _providers_cfg
+                _entry,
+                _entries,
+                _providers_cfg,
+                config_obj.get("model") if isinstance(config_obj, dict) else None,
             )
             if not slug:
                 continue

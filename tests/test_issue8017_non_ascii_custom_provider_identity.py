@@ -274,6 +274,47 @@ def test_a_model_owned_unicode_route_keeps_its_connection(monkeypatch):
     ) == ""
 
 
+def test_a_disabled_model_block_does_not_own_the_slug(monkeypatch):
+    """A switched-off ``model:`` block must not hide a valid same-slug entry (#8026 r7).
+
+    A disabled record is invisible to the Agent's resolver, so it must not own the
+    route either. Without the ``enabled`` check the model arm still claimed the
+    slug, the list entry stayed shadowed, and the named route ended up with NO
+    connection at all (and no catalog group).
+    """
+    cfg_shape = {
+        "model": {
+            "provider": "custom:晨光",
+            "default": "chat-model",
+            "base_url": "http://disabled.example/v1",
+            "api_key": "sk-disabled",
+            "enabled": False,
+        },
+        "custom_providers": [
+            {"name": "晨光", "base_url": "http://list-entry.example/v1", "api_key": "sk-list"},
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    assert config._custom_provider_identity_owners(
+        cfg_shape["custom_providers"], None, cfg_shape["model"]
+    ) == set(), "a disabled model block owns nothing"
+
+    # So the previously shadowed list entry is admitted, and its own key resolves.
+    assert (
+        config._custom_provider_entry_identity(
+            cfg_shape["custom_providers"][0],
+            cfg_shape["custom_providers"],
+            None,
+            cfg_shape["model"],
+        )
+        == "custom:晨光"
+    )
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光")
+    assert (api_key, base_url) == ("sk-list", "http://list-entry.example/v1")
+
+
 def test_two_non_ascii_providers_do_not_share_one_api_key_env(monkeypatch):
     """Two fallback non-ASCII providers must not take the shared variable (#8026).
 

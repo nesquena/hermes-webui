@@ -1527,8 +1527,15 @@ def _custom_provider_identity_owners(
                     owners.add(key)
     if isinstance(model_cfg, dict) and model_cfg:
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if model_provider.startswith("custom:") and _custom_record_owns_connection(
-            model_cfg, model_provider
+        # ``enabled`` is checked HERE as well as at selection time. A disabled
+        # record is invisible to the Agent's resolver, so it must not own a route
+        # either: without this, a switched-off ``model:`` block still claimed its
+        # slug and hid a valid same-slug ``custom_providers[]`` entry, leaving the
+        # named route with no connection at all.
+        if (
+            model_provider.startswith("custom:")
+            and _raw_provider_record_enabled(model_cfg)
+            and _custom_record_owns_connection(model_cfg, model_provider)
         ):
             key = _custom_provider_slug_key(model_provider)
             if key:
