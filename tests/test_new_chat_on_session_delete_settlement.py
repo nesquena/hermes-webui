@@ -54,7 +54,7 @@ globalThis.S = {
   activeProfile: 'default',
   _pendingSessionToolsets: null,
   _profileSwitchWorkspace: null,
-  _profileDefaultWorkspace: null,
+  _profileDefaultWorkspace: scenario === 'workspace-gone-cached-default' ? '/ws/A' : null,
   busy: scenario === 'failure',
   activeStreamId: scenario === 'failure' ? 'stream-of-deleted-A' : null,
 };
@@ -113,12 +113,12 @@ globalThis.api = async (url, options = {}) => {
     if (scenario === 'ambiguous-failure-server') error.status = 500;
     throw error;
   }
-  if (scenario === 'workspace-gone' && body.workspace) {
+  if (scenario.startsWith('workspace-gone') && body.workspace) {
     const error = new Error('Path does not exist: /ws/A');
     error.status = 400;
     throw error;
   }
-  if (scenario === 'workspace-gone') return {session:{
+  if (scenario.startsWith('workspace-gone')) return {session:{
     session_id:'created-fallback', messages:[], model:'test-model', model_provider:'test-provider',
     workspace:'/ws/default', message_count:0, last_usage:{},
   }};
@@ -282,6 +282,16 @@ def test_failed_remembered_draft_load_falls_back_to_fresh_chat(driver):
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_missing_deleted_workspace_retries_with_profile_fallback(driver):
     result = _run(driver, "workspace-gone")
+    assert result["activeSid"] == "created-fallback"
+    assert result["createWorkspaces"] == ["/ws/A", None]
+    assert result["profileWorkspace"] is None
+    assert result["superseded"] is False
+    assert result["failed"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_missing_cached_profile_default_is_explicitly_omitted_on_retry(driver):
+    result = _run(driver, "workspace-gone-cached-default")
     assert result["activeSid"] == "created-fallback"
     assert result["createWorkspaces"] == ["/ws/A", None]
     assert result["profileWorkspace"] is None

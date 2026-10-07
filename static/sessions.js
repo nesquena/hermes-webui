@@ -2035,10 +2035,13 @@ async function newSession(flash, options={}){
     clearLiveToolCards();
     // Explicit profile switch wins, then the current conversation, then the profile default.
     // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
-    const switchWs=S._profileSwitchWorkspace;
+    const hasExplicitWorkspace=options&&Object.prototype.hasOwnProperty.call(options,'workspace');
+    const switchWs=hasExplicitWorkspace?options.workspace:S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
-    const inheritWs=switchWs||sessionWs||(S._profileDefaultWorkspace||null);
+    const sessionWs=(!hasExplicitWorkspace&&!switchWs&&S.session)?S.session.workspace:null;
+    const inheritWs=hasExplicitWorkspace
+      ? switchWs
+      : switchWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
@@ -10101,6 +10104,10 @@ async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=
         const retry=await newSession(false,{
           stillOwnsPane,
           preserveRememberedDraftPointer:!!rememberedDraftSid,
+          // The rejected explicit path may also be the browser's cached profile
+          // default. Send an explicit null so the server chooses its own valid
+          // default instead of newSession() reintroducing the vanished path.
+          workspace:null,
         });
         return retry&&retry.superseded?{superseded:true}:{created:true};
       }catch(retryError){
