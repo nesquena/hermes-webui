@@ -570,6 +570,32 @@ def test_provider_resolution_uses_scoped_config_not_ambient(tmp_path, monkeypatc
         "model": {"default": "local-thinker", "provider": "anthropic"},
     }
 
+    # Snapshot BEFORE ``reload_config()``: it rebinds ``api.config.cfg`` to
+    # ``_cfg_cache`` and leaves ``_cfg_path`` / ``_cfg_mtime`` pointing at this
+    # tmp file. ``monkeypatch`` undoes neither, so any downstream test that
+    # reads config through the module global silently inherits this test's
+    # tmp config and ``eager``/``deferred`` decisions flip. Capture and restore.
+    import api.config as _cfg_mod
+
+    _cfg_snapshot = (
+        _cfg_mod.cfg,
+        _cfg_mod._cfg_path,
+        _cfg_mod._cfg_mtime,
+        _cfg_mod._cfg_fingerprint,
+        os.environ.get("HERMES_CONFIG_PATH"),
+    )
+
+    def _restore_config_state() -> None:
+        cfg_obj, cfg_path, cfg_mtime, cfg_fp, env_path = _cfg_snapshot
+        _cfg_mod.cfg = cfg_obj
+        _cfg_mod._cfg_path = cfg_path
+        _cfg_mod._cfg_mtime = cfg_mtime
+        _cfg_mod._cfg_fingerprint = cfg_fp
+        if env_path is None:
+            monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+        else:
+            monkeypatch.setenv("HERMES_CONFIG_PATH", env_path)
+
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(ambient_home / "config.yaml"))
     cfg.reload_config()
 
@@ -590,6 +616,8 @@ def test_provider_resolution_uses_scoped_config_not_ambient(tmp_path, monkeypatc
         model_id="local-thinker",
         config_data=scoped_config,
     )
+
+    _restore_config_state()
 
     assert seen.get("call") is not None, "resolve_model_provider was not called"
     called_model, called_config = seen["call"]
