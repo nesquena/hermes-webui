@@ -1403,3 +1403,43 @@ def test_issue7900_scheduled_to_ready_regates_parents(monkeypatch):
     assert child.status == "ready"
 
 
+def test_issue7900_schedule_task_reason_not_synthesized_when_omitted(monkeypatch):
+    """Moving a task to Scheduled without explicit reason must pass reason=None to schedule_task."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_todo", "Ready task", "todo", "bob")
+    fake_kanban.tasks.append(task)
+
+    passed_reasons = []
+    orig_schedule_task = fake_kanban.schedule_task
+
+    def _tracking_schedule_task(conn, task_id, reason=None):
+        passed_reasons.append(reason)
+        return orig_schedule_task(conn, task_id, reason=reason)
+
+    monkeypatch.setattr(fake_kanban, "schedule_task", _tracking_schedule_task)
+
+    with bridge._conn() as conn:
+        bridge._patch_task(conn, "t_todo", {"status": "scheduled"})
+
+    assert task.status == "scheduled"
+    assert passed_reasons == [None]
+
+
+def test_issue7900_schedule_task_raises_when_agent_lacks_schedule_task(monkeypatch):
+    """When the installed Agent lacks schedule_task, moving to Scheduled raises RuntimeError."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_todo2", "Todo task", "todo", "bob")
+    fake_kanban.tasks.append(task)
+
+    monkeypatch.delattr(fake_kanban.__class__, "schedule_task", raising=False)
+
+    import pytest
+    with pytest.raises(RuntimeError, match="scheduling requires a newer Hermes Agent"):
+        with bridge._conn() as conn:
+            bridge._patch_task(conn, "t_todo2", {"status": "scheduled"})
+
+
+
+

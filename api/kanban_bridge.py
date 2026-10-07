@@ -453,13 +453,11 @@ def _patch_task(conn, task_id: str, body: dict):
         current = kb.get_task(conn, task_id)
         if not current:
             raise LookupError("task not found")
-        if hasattr(kb, "schedule_task"):
-            reason = str(body.get("reason") or "Moved to scheduled via WebUI")
-            if not kb.schedule_task(conn, task_id, reason=reason):
-                raise ValueError(f"cannot schedule task from status: {current.status}")
-        else:
-            if not _set_status_direct(conn, task_id, "scheduled"):
-                raise LookupError("task not found")
+        if not hasattr(kb, "schedule_task"):
+            raise RuntimeError("scheduling requires a newer Hermes Agent")
+        reason = body.get("reason") or None
+        if not kb.schedule_task(conn, task_id, reason=reason):
+            raise ValueError(f"cannot schedule task from status: {current.status}")
     elif status in ("triage", "todo"):
         # Direct status write for drag-drop moves between non-running,
         # non-terminal columns. Uses the claim-aware helper that nulls out
