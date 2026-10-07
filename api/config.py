@@ -1477,14 +1477,26 @@ def _custom_provider_slug_is_fallback(name: object) -> bool:
 def _custom_provider_identity_owners(
     custom_providers: object = None,
     providers_cfg: object = None,
+    model_cfg: object = None,
 ) -> set[str]:
     """Bare slugs that an EXISTING rule already owns, ignoring fallback identities.
 
     "Existing" means a ``custom:``-prefixed name or a name with ASCII identifier
     characters (both pre-date #8017), plus every ``providers:`` record key or
-    display name. A fallback-derived identity is admissible only when this set
-    does not already contain its slug, which is what stops a legacy entry (or a
-    keyed ``providers:`` record) from being shadowed by a newer identity.
+    display name, plus an explicitly named, connection-owning ``model:`` record. A
+    fallback-derived identity is admissible only when this set does not already
+    contain its slug, which is what stops a legacy entry (or a keyed
+    ``providers:`` record) from being shadowed by a newer identity.
+
+    The ``model:`` arm is load-bearing for a real setup: with
+    ``model.provider: custom:晨光`` pointing at its own url and key, plus a list
+    entry named ``晨光``, the list entry is fallback-derived and would otherwise
+    claim ``custom:晨光`` and REPLACE the model-owned connection, so the resolved
+    key became the dummy and the request 401'd. The model block names this slug by
+    its ``provider`` field, so it is an existing owner. It counts only when it
+    actually owns a connection (see :func:`_custom_record_owns_connection`), since
+    a bare ``model:`` block that only sets ``provider`` declares no endpoint or
+    credential of its own to protect.
 
     Both vocabularies are covered the same way the rest of this module does:
     ``_custom_provider_slug_key`` for the WebUI's own mint, applied to the record
@@ -1513,6 +1525,14 @@ def _custom_provider_identity_owners(
                 key = _custom_provider_slug_key(value)
                 if key:
                     owners.add(key)
+    if isinstance(model_cfg, dict) and model_cfg:
+        model_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if model_provider.startswith("custom:") and _custom_record_owns_connection(
+            model_cfg, model_provider
+        ):
+            key = _custom_provider_slug_key(model_provider)
+            if key:
+                owners.add(key)
     return owners
 
 
@@ -1520,14 +1540,16 @@ def _custom_provider_entry_identity(
     entry: object,
     custom_providers: object = None,
     providers_cfg: object = None,
+    model_cfg: object = None,
 ) -> str:
     """The identity ONE ``custom_providers[]`` entry may own, or ``""`` when shadowed.
 
     Existing owners come first: a fallback-derived identity is admitted only when
-    no pre-existing entry or ``providers:`` record already owns its slug. A
-    shadowed entry mints nothing — exactly what it did on master, where its slug
-    was empty — so it is excluded from routing and from catalog ownership instead
-    of taking the identity of the record that was already there.
+    no pre-existing entry, ``providers:`` record or connection-owning ``model:``
+    block already owns its slug. A shadowed entry mints nothing, which is exactly
+    what it did on master for the names that produced no slug, so it is excluded
+    from routing and from catalog ownership instead of taking the identity of the
+    record that was already there.
 
     The unconstrained producer :func:`_custom_provider_slug_from_name` still mints
     the fallback id for a name in isolation; this is the cfg-aware view the
@@ -1539,7 +1561,7 @@ def _custom_provider_entry_identity(
     produced = _custom_provider_slug_from_name(name)
     if not produced or not _custom_provider_slug_is_fallback(name):
         return produced
-    owners = _custom_provider_identity_owners(custom_providers, providers_cfg)
+    owners = _custom_provider_identity_owners(custom_providers, providers_cfg, model_cfg)
     if _custom_provider_slug_key(name) in owners:
         return ""
     return produced
@@ -1673,10 +1695,11 @@ def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     source = config_obj if isinstance(config_obj, dict) else cfg
     entries = _custom_provider_entries(source)
     providers_cfg = source.get("providers") if isinstance(source, dict) else None
+    model_cfg = source.get("model") if isinstance(source, dict) else None
     return {
         slug
         for slug in (
-            _custom_provider_entry_identity(entry, entries, providers_cfg)
+            _custom_provider_entry_identity(entry, entries, providers_cfg, model_cfg)
             for entry in entries
         )
         if slug
@@ -1693,9 +1716,10 @@ def _named_custom_provider_slug_for_provider(
     raw_suffix = raw.removeprefix("custom:")
     entries = _custom_provider_entries(config_obj)
     providers_cfg = config_obj.get("providers") if isinstance(config_obj, dict) else None
+    model_cfg = config_obj.get("model") if isinstance(config_obj, dict) else None
     for entry in entries:
         entry_name = str(entry.get("name") or "").strip().lower()
-        slug = _custom_provider_entry_identity(entry, entries, providers_cfg)
+        slug = _custom_provider_entry_identity(entry, entries, providers_cfg, model_cfg)
         if not entry_name or not slug:
             continue
         if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
@@ -1928,11 +1952,12 @@ def _named_custom_provider_slug_for_base_url(
         return ""
     entries = _custom_provider_entries(config_obj)
     providers_cfg = config_obj.get("providers") if isinstance(config_obj, dict) else None
+    model_cfg = config_obj.get("model") if isinstance(config_obj, dict) else None
     for entry in entries:
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_entry_identity(entry, entries, providers_cfg) or "custom"
+        return _custom_provider_entry_identity(entry, entries, providers_cfg, model_cfg) or "custom"
     return ""
 
 
@@ -2795,7 +2820,10 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
         _entries = _custom_provider_entries()
         for entry in _entries:
             slug = _custom_provider_entry_identity(
-                entry, _entries, cfg.get("providers") if isinstance(cfg, dict) else None
+                entry,
+                _entries,
+                cfg.get("providers") if isinstance(cfg, dict) else None,
+                cfg.get("model") if isinstance(cfg, dict) else None,
             )
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
@@ -3025,6 +3053,7 @@ def _unique_custom_provider_entry(
     custom_providers: object,
     slug_key: str,
     providers_cfg: object = None,
+    model_cfg: object = None,
 ) -> dict | None:
     """Return the single named ``custom_providers`` entry matching ``slug_key``.
 
@@ -3047,7 +3076,7 @@ def _unique_custom_provider_entry(
     """
     if not slug_key or not isinstance(custom_providers, list):
         return None
-    owners = _custom_provider_identity_owners(custom_providers, providers_cfg)
+    owners = _custom_provider_identity_owners(custom_providers, providers_cfg, model_cfg)
     matches: list[dict] = []
     for entry in custom_providers:
         if not isinstance(entry, dict):
@@ -3144,6 +3173,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider),
                 cfg.get('providers'),
+                cfg.get('model'),
             )
         return model, provider, base_url
 
@@ -3251,13 +3281,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         if _active_custom_slug:
             _active_key = _custom_provider_slug_key(_active_custom_slug)
             _providers_cfg_for_identity = cfg.get('providers')
+            _model_cfg_for_identity = cfg.get('model')
             _active_owner = next(
                 (
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
                     and _custom_provider_entry_identity(
-                        e, custom_providers, _providers_cfg_for_identity
+                        e, custom_providers, _providers_cfg_for_identity, _model_cfg_for_identity
                     )
                     and _custom_provider_slug_key(e.get('name')) == _active_key
                 ),
@@ -3287,22 +3318,16 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
                 provider_hint = _custom_provider_entry_identity(
-                    entry, custom_providers, cfg.get('providers')
+                    entry, custom_providers, cfg.get('providers'), cfg.get('model')
                 )
                 if not provider_hint:
-                    # Only a FALLBACK-DERIVED name that a legacy entry already owns mints
-                    # nothing here (it did not before #8026 either), so only that case cannot
-                    # claim the model. A legacy entry with no slug for any OTHER reason (for
-                    # example the name ``-`` or ``晨光:鑫遇``) still routes its declared models
-                    # to its own URL, exactly as it did on master; skipping it dropped the
-                    # entry and sent the model to the default endpoint instead.
-                    if _custom_provider_slug_is_fallback(entry_name):
-                        continue
-                    # No slug, so return the empty provider hint together with the entry's
-                    # own URL. That is exactly master's pair: master computed the same helper
-                    # (which is empty here) and passed it to the same three-argument
-                    # _finalize with the same base_url. Substituting the raw name would invent
-                    # a provider value master never produced.
+                    # No identity at all for this entry: keep master's pair anyway, which
+                    # is the EMPTY provider plus the entry's own URL. Do NOT skip here. A
+                    # ``continue`` looks safe because a fallback-derived name mints nothing
+                    # on its own, but when a prefixed sibling already owns the identity the
+                    # skip drops the model to the DEFAULT endpoint (404) where master routed
+                    # it to this entry's URL (200). The empty hint is the answer, not a
+                    # reason to keep looking.
                     return _finalize(model_id, provider_hint, entry_base_url or None)
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
@@ -3405,6 +3430,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider_hint),
                 cfg.get('providers'),
+                cfg.get('model'),
             )
             if entry is not None:
                 base_url = str(entry.get('base_url') or '').strip() or None
@@ -3459,15 +3485,12 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
                         _slug = _custom_provider_entry_identity(
-                            _entry, _custom_cfg, cfg.get("providers")
+                            _entry, _custom_cfg, cfg.get("providers"), cfg.get("model")
                         )
-                        # Only a fallback-derived name that a legacy entry already owns mints
-                        # nothing, and that is the one case to skip. A legacy entry with no
-                        # slug for any other reason (``-``, ``晨光:鑫遇``) still routes to its
-                        # own URL on master, so it falls through to master's own return below,
-                        # which passes this same (empty) slug and this entry's base_url.
-                        if not _slug and _custom_provider_slug_is_fallback(prefix):
-                            continue
+                        # Keep master's pair even when the identity is empty: the empty
+                        # slug plus this entry's own URL. The empty slug is not a reason to
+                        # skip; skipping drops the request to the default endpoint where
+                        # master answered from this entry.
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 
@@ -4110,7 +4133,7 @@ def _select_custom_provider_record(
     # the single matching entry. Shared with resolve_model_provider so endpoint
     # and credential are always resolved from the SAME entry.
     matched_entry = _unique_custom_provider_entry(
-        custom_providers, slug, cfg_data.get("providers")
+        custom_providers, slug, cfg_data.get("providers"), cfg_data.get("model")
     )
     if matched_entry is not None:
         return matched_entry, "custom_providers", True, CUSTOM_SELECTION_EXACT
@@ -5242,6 +5265,7 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
                     custom_providers,
                     _custom_provider_slug_key(provider),
                     cfg.get("providers") if isinstance(cfg, dict) else None,
+                    cfg.get("model") if isinstance(cfg, dict) else None,
                 )
                 is not None
             ):
@@ -6090,6 +6114,7 @@ def _resolve_model_reasoning_efforts_impl(
                     _entry,
                     _re_entries,
                     cfg.get("providers") if isinstance(cfg, dict) else None,
+                    cfg.get("model") if isinstance(cfg, dict) else None,
                 ) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
@@ -7013,6 +7038,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                         config_data.get("custom_providers", []),
                         _custom_provider_slug_key(provider),
                         config_data.get("providers"),
+                        config_data.get("model"),
                     )
                     if _cp_match is not None:
                         resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
@@ -7791,10 +7817,11 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         _static_custom_entries = _custom_provider_entries(cfg)
         _static_providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else None
+        _static_model_cfg = cfg.get("model") if isinstance(cfg, dict) else None
         for entry in _static_custom_entries:
             provider_name = str(entry.get("name") or "").strip()
             provider_slug = _custom_provider_entry_identity(
-                entry, _static_custom_entries, _static_providers_cfg
+                entry, _static_custom_entries, _static_providers_cfg, _static_model_cfg
             ) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
@@ -10297,7 +10324,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     entry_name = str(entry.get("name") or "").strip()
                     if entry_name:
                         return _custom_provider_entry_identity(
-                            entry, custom_providers_cfg, cfg.get("providers")
+                            entry, custom_providers_cfg, cfg.get("providers"), cfg.get("model")
                         )
                     return "custom"
 
@@ -10643,6 +10670,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _named_custom_errors: dict[str, dict] = {}
         if isinstance(_custom_providers_cfg, list):
             _providers_cfg_for_identity = cfg.get("providers") if isinstance(cfg, dict) else None
+            _model_cfg_for_identity = cfg.get("model") if isinstance(cfg, dict) else None
             _seen_custom_ids = set()
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
@@ -10653,7 +10681,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # identity it does not own (#8026).
                 _slug = (
                     _custom_provider_entry_identity(
-                        _cp, _custom_providers_cfg, _providers_cfg_for_identity
+                        _cp, _custom_providers_cfg, _providers_cfg_for_identity, _model_cfg_for_identity
                     )
                     if _cp_name
                     else None

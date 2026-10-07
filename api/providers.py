@@ -79,10 +79,11 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
 
 
 def _custom_provider_entry_matches(
-    provider_id: str,
+    provider_id: object,
     entry: object,
     custom_providers: object = None,
     providers_cfg: object = None,
+    model_cfg: object = None,
 ) -> bool:
     """cfg-aware :func:`_custom_provider_name_matches` for one list ENTRY.
 
@@ -97,7 +98,7 @@ def _custom_provider_entry_matches(
     raw_name = str(entry.get("name") or "").strip().lower()
     if not raw_name:
         return False
-    slug = _custom_provider_entry_identity(entry, custom_providers, providers_cfg)
+    slug = _custom_provider_entry_identity(entry, custom_providers, providers_cfg, model_cfg)
     if not slug:
         return False
     return pid in {raw_name, f"custom:{raw_name}", slug}
@@ -1187,7 +1188,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
         providers_cfg = cfg.get("providers")
         for cp in custom_providers:
             if isinstance(cp, dict) and _custom_provider_entry_matches(
-                provider_id, cp, custom_providers, providers_cfg
+                provider_id, cp, custom_providers, providers_cfg, cfg.get("model")
             ):
                 cp_key = cp.get("api_key")
                 if isinstance(cp_key, str) and cp_key.startswith("${") and cp_key.endswith("}"):
@@ -1361,7 +1362,7 @@ def _provider_has_key(provider_id: str) -> bool:
         for cp in custom_providers:
             if isinstance(cp, dict):
                 if _custom_provider_entry_matches(
-                    provider_id, cp, custom_providers, providers_cfg
+                    provider_id, cp, custom_providers, providers_cfg, cfg.get("model")
                 ):
                     if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
                         return True
@@ -1412,7 +1413,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             if not isinstance(cp, dict):
                 continue
             if _custom_provider_entry_matches(
-                provider_id, cp, custom_providers, providers_cfg
+                provider_id, cp, custom_providers, providers_cfg, cfg.get("model")
             ):
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
@@ -2866,7 +2867,7 @@ def get_providers() -> dict[str, Any]:
             # providers: record already owns mints nothing (#8026), so the card
             # does not list a second row under an identity it does not own.
             cp_id = _custom_provider_entry_identity(
-                cp, custom_providers_cfg, _cp_providers_cfg
+                cp, custom_providers_cfg, _cp_providers_cfg, cfg.get("model")
             )
             if not cp_id:
                 logger.warning(
@@ -3081,7 +3082,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                 for cp in custom_providers:
                     if isinstance(cp, dict):
                         if _custom_provider_entry_matches(
-                            provider_id, cp, custom_providers, providers_cfg
+                            provider_id, cp, custom_providers, providers_cfg, cfg.get("model")
                         ):
                             if cp.get("api_key"):
                                 del cp["api_key"]

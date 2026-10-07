@@ -7395,18 +7395,20 @@ def _custom_provider_entry_slug_for_context(
     entry: object,
     custom_providers: object = None,
     providers_cfg: object = None,
+    model_cfg: object = None,
 ) -> str:
     """cfg-aware identity for ONE ``custom_providers`` entry, or ``""`` when shadowed.
 
-    A fallback-derived name that a legacy entry or ``providers:`` record already
-    owns mints nothing (#8026), so those entries are skipped instead of matching
-    an identity they do not own. Falls back to the plain producer when the
-    cfg-aware helper is unavailable (import-failure path).
+    A fallback-derived name that a legacy entry, a ``providers:`` record or a
+    connection-owning ``model:`` block already owns mints nothing (#8026), so those
+    entries are skipped instead of matching an identity they do not own. Falls back
+    to the plain producer when the cfg-aware helper is unavailable (import-failure
+    path).
     """
     try:
         from api.config import _custom_provider_entry_identity
 
-        return _custom_provider_entry_identity(entry, custom_providers, providers_cfg)
+        return _custom_provider_entry_identity(entry, custom_providers, providers_cfg, model_cfg)
     except Exception:
         name = entry.get("name") if isinstance(entry, dict) else None
         return _custom_provider_slug_for_context(name)
@@ -22906,7 +22908,7 @@ def _handle_live_models(handler, parsed):
                         # already owns mints nothing (#8026), so it is not
                         # treated as the provider this request named.
                         _slug = _custom_provider_entry_identity(
-                            _cp, _cp_entries, _cp_providers_cfg
+                            _cp, _cp_entries, _cp_providers_cfg, cfg.get("model") if isinstance(cfg, dict) else None
                         )
                         if provider.startswith("custom:"):
                             if _slug == provider:

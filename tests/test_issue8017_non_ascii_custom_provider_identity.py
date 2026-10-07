@@ -206,6 +206,74 @@ def test_a_colon_in_a_name_takes_the_keyless_pre_fix_identity():
     )
 
 
+def test_a_keyless_prefixed_entry_reads_the_convention_key(monkeypatch):
+    """A prefixed entry's key comes back from the CONNECTION resolver, end to end.
+
+    The senior review's ask: the only test red on the bounced head for the
+    prefixed-key finding was helper-level, so add the full path. A prefixed
+    ``custom:晨光`` entry with no literal key and no ``key_env`` must resolve the
+    ``CUSTOM_CUSTOM_API_KEY`` convention variable, because that name is its OWN
+    (the user typed the id). This goes through
+    ``resolve_custom_provider_connection`` rather than the name helper.
+    """
+    monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "sk-convention")
+    cfg_shape = {
+        "model": {"provider": "custom", "default": "chat-model"},
+        "custom_providers": [
+            {"name": "custom:晨光", "base_url": "http://prefixed.example/v1"},
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光")
+    assert base_url == "http://prefixed.example/v1"
+    assert api_key == "sk-convention", (
+        "an existing prefixed entry keeps the convention key it reads on master"
+    )
+
+
+def test_a_model_owned_unicode_route_keeps_its_connection(monkeypatch):
+    """An existing ``model:`` authority is not replaced by a newer list entry (#8026 r5).
+
+    With ``model.provider: custom:晨光`` pointing at its own url and key, plus a
+    list entry named ``晨光``, the list entry is fallback-derived and would
+    otherwise claim ``custom:晨光``: the resolved credential became the dummy and
+    the request 401'd, and a literal ``model.api_key`` was discarded too. The
+    model block names this slug by its ``provider`` field and owns a real
+    connection, so it is an existing owner and the list entry stays shadowed.
+
+    Asserted as a PAIR (key AND url) because a wrong route with the right url is
+    exactly the failure: the key is what went missing.
+    """
+    cfg_shape = {
+        "model": {
+            "provider": "custom:晨光",
+            "default": "chat-model",
+            "base_url": "http://model-owned.example/v1",
+            "api_key": "sk-model-owned",
+        },
+        "custom_providers": [
+            {"name": "晨光", "base_url": "http://list-entry.example/v1"},
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光")
+    assert (api_key, base_url) == ("sk-model-owned", "http://model-owned.example/v1"), (
+        "the model-owned route keeps its own key and url"
+    )
+
+    # The list entry owns nothing, so it is not catalogued under the owner's id.
+    assert config._custom_provider_entry_identity(
+        cfg_shape["custom_providers"][0],
+        cfg_shape["custom_providers"],
+        None,
+        cfg_shape["model"],
+    ) == ""
+
+
 def test_two_non_ascii_providers_do_not_share_one_api_key_env(monkeypatch):
     """Two fallback non-ASCII providers must not take the shared variable (#8026).
 
@@ -643,16 +711,15 @@ def test_ascii_punctuation_only_id_without_a_prefix_keeps_the_convention_name():
 
 
 def test_every_consumer_agrees_on_the_entry_that_owns_the_identity(monkeypatch):
-    """The shadowed entry owns nothing, on EVERY consumer of the identity (#8026).
+    """Each consumer names the right record, and routing keeps master's pair (#8026).
 
-    The first cut fixed the connection resolver but left the model router and the
-    name lookup on the unconstrained producer, so a shadowed entry could still
-    supply the owner's endpoint and be matched by the owner's slug. The router
-    assertion below reproduces that: on the previous head it returned the legacy
-    entry's port (8318) for the owner's model, so the owner's provider slug was
-    paired with an endpoint it does not own. Every consumer is asserted against
-    the entry the connection resolver names as the owner, so a fix that repairs
-    one consumer and misses another fails here.
+    Two authorities are in play for one slug, and they answer DIFFERENT questions.
+    The CREDENTIAL resolver (`custom:晨光`) must follow the prefixed owner, so the
+    keyed record's key and URL win: master returns `("sk-keyed", 8317)`.
+    ROUTING a model is a separate question: the bare entry declares `chat-model`,
+    so master routes that model to the bare entry's OWN url (8318) with an EMPTY
+    provider. Keeping the two apart is the point; a fix that makes one consumer
+    agree with the other on this config changes master's behaviour either way.
     """
     import api.providers as providers
 
@@ -669,7 +736,7 @@ def test_every_consumer_agrees_on_the_entry_that_owns_the_identity(monkeypatch):
             "model": "chat-model",
         },
     ]
-    owner, shadowed = entries[0], entries[1]
+    owner, bare = entries[0], entries[1]
     cfg_shape = {
         "model": {"provider": "custom:晨光", "default": "chat-model"},
         "custom_providers": list(entries),
@@ -679,16 +746,18 @@ def test_every_consumer_agrees_on_the_entry_that_owns_the_identity(monkeypatch):
     monkeypatch.setattr(config, "cfg", dict(cfg_shape))
     monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
 
-    # Routing must never adopt the shadowed entry's endpoint for the owner's
-    # model. This is the finding the first cut missed.
+    # Routing: the bare entry declares this model, so it answers with its own URL
+    # and the empty provider. Master's exact pair, asserted whole: a change that
+    # sends this to the prefixed owner's port 8317, or to the default endpoint,
+    # fails here.
     _, routed_provider, routed_url = config.resolve_model_provider("chat-model")
-    assert routed_url != "http://127.0.0.1:8318/v1", (
-        "a shadowed fallback entry must not supply the owner's endpoint"
+    assert (routed_provider, routed_url) == ("", "http://127.0.0.1:8318/v1"), (
+        "the bare entry's own model routes to its own url with master's empty provider"
     )
 
     # The identity view agrees with itself.
     assert config._custom_provider_entry_identity(owner, entries, None) == "custom:晨光"
-    assert config._custom_provider_entry_identity(shadowed, entries, None) == ""
+    assert config._custom_provider_entry_identity(bare, entries, None) == ""
 
     # The owner's own name maps to the identity; the shadowed entry's identity
     # is empty, so no consumer can match it to the owner's slug.
@@ -702,7 +771,7 @@ def test_every_consumer_agrees_on_the_entry_that_owns_the_identity(monkeypatch):
             "custom:晨光", owner, ordered, None
         )
         assert not providers._custom_provider_entry_matches(
-            "custom:晨光", shadowed, ordered, None
+            "custom:晨光", bare, ordered, None
         )
 
     # The resolver agrees with the router on which record owns the route.
@@ -776,13 +845,15 @@ def test_a_legacy_entry_with_no_slug_keeps_its_own_endpoint_for_a_colon_name(mon
     assert base_url == "http://colon.example/v2"
 
 
-def test_a_fallback_entry_that_owns_nothing_is_still_skipped(monkeypatch):
-    """CONTROL: the widened skip must NOT readmit the fallback case it was for (#8026).
+def test_a_bare_entry_whose_model_is_declared_keeps_routing_even_when_shadowed(monkeypatch):
+    """The bare entry still answers for a model it declares (#8026, reviewer finding 1).
 
-    A fallback-derived name whose slug an existing entry already owns mints
-    nothing (it did not before #8026 either), so it must still be skipped and the
-    model must fall through to the default endpoint. Run beside the case above, so
-    "keep every slugless entry" is distinguished from "keep the ones that existed".
+    This started life as a control asserting the OPPOSITE (that the shadowed entry
+    is skipped and the model falls to the default endpoint). That expectation was
+    wrong, and the maintainer reproduced it as a 404 against master's 200: with
+    both entries configured, master routes the bare entry's declared model to the
+    bare entry's own URL with an empty provider. The skip is gone, so assert
+    master's pair.
     """
     cfg_shape = {
         "model": {
@@ -798,7 +869,7 @@ def test_a_fallback_entry_that_owns_nothing_is_still_skipped(monkeypatch):
     monkeypatch.setattr(config, "cfg", dict(cfg_shape))
     monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
 
-    _model, _provider, base_url = config.resolve_model_provider("chat-model")
-    assert base_url == "http://default.example/v1", (
-        "a shadowed fallback entry must not claim the model; the default endpoint keeps it"
+    _model, provider, base_url = config.resolve_model_provider("chat-model")
+    assert (provider, base_url) == ("", "http://fallback.example/v1"), (
+        "the bare entry's declared model keeps its own endpoint, as on master"
     )
