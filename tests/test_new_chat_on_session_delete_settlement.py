@@ -107,7 +107,17 @@ globalThis.api = async (url, options = {}) => {
   const body = JSON.parse(options.body || '{}');
   createWorkspaces.push(body.workspace || null);
   if (scenario === 'failure') throw new Error('create failed');
-  if (scenario === 'workspace-gone' && body.workspace) throw new Error('Path does not exist');
+  if (scenario.startsWith('ambiguous-failure-')) {
+    const error = new Error(scenario === 'ambiguous-failure-network' ? 'Failed to fetch' : 'Path does not exist: /ws/A');
+    if (scenario === 'ambiguous-failure-timeout') error.name = 'TimeoutError';
+    if (scenario === 'ambiguous-failure-server') error.status = 500;
+    throw error;
+  }
+  if (scenario === 'workspace-gone' && body.workspace) {
+    const error = new Error('Path does not exist: /ws/A');
+    error.status = 400;
+    throw error;
+  }
   if (scenario === 'workspace-gone') return {session:{
     session_id:'created-fallback', messages:[], model:'test-model', model_provider:'test-provider',
     workspace:'/ws/default', message_count:0, last_usage:{},
@@ -277,6 +287,17 @@ def test_missing_deleted_workspace_retries_with_profile_fallback(driver):
     assert result["profileWorkspace"] is None
     assert result["superseded"] is False
     assert result["failed"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("kind", ["network", "timeout", "server"])
+def test_ambiguous_creation_failure_does_not_send_another_post(driver, kind):
+    result = _run(driver, f"ambiguous-failure-{kind}")
+    assert result["createWorkspaces"] == ["/ws/A"]
+    assert result["activeSid"] is None
+    assert result["profileWorkspace"] is None
+    assert result["replacedUrl"] == "/"
+    assert result["failed"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

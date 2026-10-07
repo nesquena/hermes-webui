@@ -10092,9 +10092,11 @@ async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=
     return result&&result.superseded?{superseded:true}:{created:true};
   }catch(error){
     // The deleted conversation's workspace may have disappeared from disk.
-    // Retry once without the explicit override so the server can fall back to
-    // the profile's current/default workspace, like the ordinary New Chat path.
-    if(deletedWorkspace&&stillOwnsPane()){
+    // Only the pre-creation workspace validation error permits another POST.
+    // A lost response or other ambiguous failure may already have created a chat.
+    const missingWorkspace=error&&error.status===400
+      &&String(error.message||'').startsWith('Path does not exist: ');
+    if(deletedWorkspace&&missingWorkspace&&stillOwnsPane()){
       try{
         const retry=await newSession(false,{
           stillOwnsPane,

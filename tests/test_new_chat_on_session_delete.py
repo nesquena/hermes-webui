@@ -518,9 +518,8 @@ class TestDraftWorkspaceAwareness:
     def test_new_session_failure_does_not_report_delete_as_failed(self, driver_path):
         out = _run_scenario(driver_path, "flag_on_new_session_failure")
         assert out["deleteCalls"] == 1
-        # The explicit deleted-workspace attempt and the profile/default
-        # fallback both fail in this scenario.
-        assert out["newSessionCalls"] == 2
+        # An ambiguous create failure must not send another non-idempotent POST.
+        assert out["newSessionCalls"] == 1
         assert any("session_deleted" in item for item in out["toasts"])
         assert any("starting a new chat failed" in item for item in out["toasts"])
         assert not any(item == "Delete failed: create failed" for item in out["toasts"])
