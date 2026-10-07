@@ -35,6 +35,11 @@
 
 ### Performance
 
+- **Very long conversations no longer stall on the model-context step after a reply.** Following #8072, the
+  second comparison during settlement (which keeps the model's context free of replayed blocks and repeated
+  summaries) is now linear too. 2,000 rows take about 0.3 seconds instead of over a minute, and a 66,666-row
+  conversation settles in seconds, with byte-identical results. Thanks @hejuntt1014. (#8076, fixes #8073)
+
 - **Long conversations settle a reply much faster.** Finishing a stream compared the new transcript rows with the
   saved ones in time that grew with the square of the conversation length, while holding the conversation's lock.
   A 66,666-message transcript could stay stuck for over 90 minutes, with opening or stopping the chat waiting

@@ -29,6 +29,18 @@ does not certify external provider execution or filesystem crash durability.
 
 Run `./scripts/test.sh tests/test_cancelled_history_real_producers.py` for independent Agent-flush versus WebUI-settlement clocks, later Gateway turns after a live Stop, legacy integer/fractional Stop owners, and tool-card owners on cold/cached paginated HTTP reads. A terminal Stop excludes only its proved raw execution block, including when it retained live partial output; proved later Gateway exchanges remain in display and next-send history. Ambiguous clock/content occurrences still prevent prefix restoration. Sidecar-only Stop tool-card regressions repeat full, tail, and earlier-page reads through the production handler and real HTTP for missing SQLite, empty SQLite, and native-image mirror rows fully filtered from display. Owners use exact saved message objects, including distinct assistants with identical prose; invisible and missing owners remain excluded, and saved card metadata stays unchanged. Snapshot-parent/non-cumulative child Stop coverage runs in a separate HTTP server process to exercise lineage cache store/hit paths and repeated full, tail, earlier and owner-absent pages, with missing, empty and nonempty SQLite. Cache row copies retain independently stored exact-owner provenance; reconciliation composes that map before pagination without mutating saved indices. The worker stubs write real SQLite rows and exercise production worker/HTTP paths; they do not certify a real provider call.
 
+## Context replay matching
+
+Run `./scripts/test.sh -q tests/test_context_replay_scaling.py tests/test_large_replay_settlement.py tests/test_issue1217_transcript_compaction.py tests/test_stale_user_context_contamination.py tests/test_context_message_stable_ids.py tests/test_issue6751_api_content_agent_replay.py`.
+The context suite compares serialized output against the former greedy algorithm
+over seeded adversarial sequences, checks summary identity boundaries and all
+three reconciliation branches, and counts normalization/key comparisons for
+disjoint, periodic and near-miss sequences. Operation budgets, not wall-clock
+thresholds, are the regression gate. Benchmark no-overlap histories separately
+from correctness checks; include the shared helper and its reconciliation caller,
+and report row count, interpreter and base revision with timings. Use synthetic
+rows or isolated copies, never production session state.
+
 ## Session-scoped media authorization
 
 Run `./scripts/test.sh tests/test_media_inline.py tests/test_media_session_preview_auth.py`.
