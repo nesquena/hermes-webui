@@ -114,6 +114,13 @@
 
 ### Fixed
 
+- **Cron results now raise a browser notification when the WebUI tab is in the background.** The cron completion poll
+  skipped every tick while the tab was hidden, so a job delivering to its origin chat left a transcript entry and an
+  unread dot but never a notification, which is exactly when one is useful (and the Android app relays these). The
+  poll now runs while hidden; a visible tab still shows the toast, and a hidden one sends the browser notification
+  through the existing notification setting and permission. Clicking it focuses the right chat or the Tasks panel.
+  Thanks @happy5318. (#7652, fixes #7257)
+
 - **The update banner's Force update and Clear lock buttons go away once they no longer apply.** After a failed
   Agent update armed them (a merge conflict, a diverged checkout, an untracked file in the way, or a stale
   `.git/index.lock`), they stayed until a reload even after the problem was fixed. A fresh update check now clears a

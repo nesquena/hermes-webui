@@ -3919,6 +3919,39 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
   }
+  // #7652 review round 4: a sessionless cron notification carries an explicit
+  // panel intent (e.g. ?panel=tasks) so the click lands on the panel the run
+  // belongs to instead of the last chat the user had open.
+  // Review round 5: this must NOT boot and return on its own. Round 4 switched
+  // panels and returned before the saved-session restore below, so the chat the
+  // user had open — and any live stream still running in it — stayed detached
+  // until they picked the session again. The intent is therefore only *decided*
+  // here; the normal restore runs, and `switchPanel` is applied on top of it
+  // once that path has finished. Constrained to the same intent family as
+  // profile/launch-action: only a real panel, and never when a URL session names
+  // the target already.
+  const panelIntent=(typeof _panelQueryIntentFromLocation==='function')?_panelQueryIntentFromLocation():null;
+  let pendingPanelIntent=null;
+  if(panelIntent&&panelIntent.hasParam&&panelIntent.valid&&!urlSession
+     &&typeof switchPanel==='function'&&panelIntent.name!=='chat'){
+    try{
+      _consumePanelQueryParamFromLocation();
+      pendingPanelIntent=panelIntent.name;
+    }catch(e){console.warn('[boot] panel intent launch failed', e);}
+  }
+  // Apply the honored intent over whatever the restore path below settled on.
+  // Every terminal point of that path calls this, so the panel is shown on top
+  // of a restored session (and its in-flight recovery) rather than in place of
+  // it. A missing/failed panel must never strand the user, hence the catch.
+  const _applyPendingPanelIntent=async()=>{
+    if(!pendingPanelIntent) return;
+    const _panelName=pendingPanelIntent;
+    pendingPanelIntent=null;
+    try{
+      await switchPanel(_panelName);
+      await renderSessionList();
+    }catch(e){console.warn('[boot] panel intent launch failed', e);}
+  };
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{
@@ -3941,6 +3974,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       if(_rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent)){
@@ -3953,6 +3987,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       await loadSession(saved, {preserveActiveInput:true});
@@ -3991,6 +4026,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       // Restore the panel from localStorage when the session has a workspace.
@@ -4002,7 +4038,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);
+      // Applied last on purpose: a panel intent must not come at the cost of
+      // the session restore or its in-flight stream recovery (#7652 r5).
+      await _applyPendingPanelIntent();return;}
     catch(_){/* loadSession owns targeted 404 cleanup; retain unrelated saved sessions */}
   }
   // no saved session - show empty state, wait for user to hit +
@@ -4020,6 +4059,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
+  // No saved session to restore, so the intent is simply the landing view.
+  await _applyPendingPanelIntent();
 })().catch(e=>{
   console.error('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}
