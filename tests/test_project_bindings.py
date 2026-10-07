@@ -13,6 +13,7 @@ import json
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 from tests._pytest_port import BASE
 
@@ -413,3 +414,132 @@ def test_apply_project_auto_assign_named_profile_never_sweeps_default(tmp_path, 
     assert "sess_def" not in saved, "named project must not sweep default sessions"
     assert "sess_none" not in saved, "named project must not sweep unprofiled sessions"
     assert changed == 1
+
+
+def _drive_bind(monkeypatch, project, body):
+    """Drive ``/api/projects/bind`` in-process (no live server) and return
+    ``(handled, captured_response, mutated_project)``.
+
+    Only the persistence + trust lookups are stubbed so the route's own
+    binding logic (the code under test) runs for real.
+    """
+    import api.routes as routes
+
+    projects = [project]
+    monkeypatch.setattr(routes, "load_projects", lambda: projects)
+    monkeypatch.setattr(
+        routes, "save_projects", lambda ps: projects.__setitem__(slice(None), ps)
+    )
+    # Never touch the host's real workspace registry.
+    monkeypatch.setattr(routes, "load_workspaces", lambda: [])
+    monkeypatch.setattr(routes, "save_workspaces", lambda wss: None)
+    monkeypatch.setattr(
+        routes, "resolve_trusted_workspace", lambda p, **_kw: Path(p)
+    )
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: dict(body))
+    captured = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        )
+        or True,
+    )
+    handled = routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/projects/bind"),
+    )
+    return handled, captured, projects[0]
+
+
+def test_bind_legacy_workspace_replaces_stale_default(tmp_path, monkeypatch):
+    """Greptile P1 (#6836): a legacy ``workspace=C`` bind REPLACES the whole
+    workspace set, so a ``default_workspace`` left over from the previous set
+    must not survive. Keeping it violated "default ∈ workspaces" and made
+    quick-create open a workspace the project no longer owned.
+    """
+    import api.routes as routes
+
+    ws_a = tmp_path / "legacy-a"
+    ws_b = tmp_path / "legacy-b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    a, b = str(ws_a), str(ws_b)
+
+    proj = {
+        "project_id": "proj_legacy", "name": "l", "profile": "default",
+        "workspace": a, "workspaces": [a], "default_workspace": a,
+    }
+    handled, captured, out = _drive_bind(
+        monkeypatch, proj, {"project_id": "proj_legacy", "workspace": b}
+    )
+    assert handled is True
+    assert captured["status"] == 200, captured
+    assert [Path(p) for p in out["workspaces"]] == [ws_b]
+    assert Path(out["workspace"]) == ws_b
+    assert Path(out["default_workspace"]) == ws_b, (
+        "the stale default must not outlive the replaced workspace set"
+    )
+    assert out["default_workspace"] in out["workspaces"], "default ∈ workspaces"
+    # The user-visible symptom: quick-create must open the BOUND workspace.
+    assert Path(routes._project_default_workspace(out)) == ws_b
+
+    # An explicit default_workspace in the same payload still wins (the
+    # legacy branch must not shadow it) and is auto-added to the list.
+    out2 = _drive_bind(
+        monkeypatch,
+        dict(proj),
+        {"project_id": "proj_legacy", "workspace": b, "default_workspace": a},
+    )[2]
+    assert Path(out2["default_workspace"]) == ws_a
+    assert out2["default_workspace"] in out2["workspaces"]
+    assert {Path(p) for p in out2["workspaces"]} == {ws_a, ws_b}
+
+
+def test_bind_model_update_without_provider_clears_stale_provider(
+    tmp_path, monkeypatch
+):
+    """Greptile P1 (#6836): changing a bound model without sending
+    ``model_provider`` must not keep the provider bound to the OLD model — the
+    stale pair routes quick-create to an incompatible backend.
+    """
+    base = {
+        "project_id": "proj_model", "name": "m", "profile": "default",
+        "model": "old-model", "model_provider": "old-provider",
+    }
+
+    # Model-only update → the stale provider is dropped (the new model then
+    # inherits the profile/default route instead of an incompatible pair).
+    out = _drive_bind(
+        monkeypatch, dict(base), {"project_id": "proj_model", "model": "new-model"}
+    )[2]
+    assert out["model"] == "new-model"
+    assert "model_provider" not in out, "stale provider must not survive a model swap"
+
+    # An explicit provider in the same payload still wins.
+    out = _drive_bind(
+        monkeypatch,
+        dict(base),
+        {"project_id": "proj_model", "model": "new-model", "model_provider": "custom:test"},
+    )[2]
+    assert out["model"] == "new-model"
+    assert out["model_provider"] == "custom:test"
+
+    # An @-qualified model carries its own provider → store the canonical pair
+    # (the route comment promised this; it was previously a no-op).
+    out = _drive_bind(
+        monkeypatch, dict(base), {"project_id": "proj_model", "model": "@openai:gpt-4o"}
+    )[2]
+    assert out["model"] == "gpt-4o"
+    assert out["model_provider"] == "openai"
+
+    # null still unbinds both halves of the pair.
+    out = _drive_bind(
+        monkeypatch, dict(base), {"project_id": "proj_model", "model": None}
+    )[2]
+    assert "model" not in out
+    assert "model_provider" not in out

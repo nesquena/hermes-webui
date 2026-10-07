@@ -18697,7 +18697,12 @@ def handle_post(handler, parsed) -> bool:
                 else:
                     proj["workspace"] = resolved[0]  # legacy alias
                     proj["workspaces"] = resolved
-                    proj.setdefault("default_workspace", resolved[0])
+                    # This binding REPLACES the workspace set with exactly
+                    # ``resolved``, so a default left over from the previous
+                    # set would point at an unbound workspace and send
+                    # quick-create to a path the project no longer owns.
+                    # Assign (not setdefault) so "default ∈ workspaces" holds.
+                    proj["default_workspace"] = resolved[0]
 
         # ── default_workspace ──
         if "default_workspace" in body:
@@ -18742,10 +18747,27 @@ def handle_post(handler, parsed) -> bool:
                 proj.pop("model", None)
                 proj.pop("model_provider", None)
             else:
-                proj["model"] = str(model).strip()
-                # If the caller omitted model_provider but the model carries a
-                # provider qualifier, canonicalize for storage. model_provider
-                # explicitly supplied in the same payload wins (handled below).
+                # An @-qualified model carries its own provider (see
+                # _split_provider_qualified_model), so store the pair
+                # canonically — quick-create then resolves the backend the
+                # caller actually named. A BARE model with no model_provider in
+                # this payload must NOT keep the previously stored provider:
+                # that provider belonged to the model it was bound with, and
+                # the stale pair would route quick-create to an incompatible
+                # backend (or fail session startup). An explicit
+                # model_provider in the same payload always wins (below).
+                bare_model, implied_provider = _split_provider_qualified_model(
+                    str(model).strip()
+                )
+                proj["model"] = bare_model or str(model).strip()
+                if "model_provider" not in body:
+                    if implied_provider:
+                        proj["model_provider"] = (
+                            _canonical_context_provider(implied_provider)
+                            or implied_provider
+                        )
+                    else:
+                        proj.pop("model_provider", None)
         if "model_provider" in body:
             mp = body.get("model_provider")
             if mp is None or str(mp).strip() == "":
