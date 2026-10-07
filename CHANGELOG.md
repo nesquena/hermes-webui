@@ -122,6 +122,12 @@
 
 ### Fixed
 
+- **Work you stopped survives a restart.** When you press Stop, the partial reply and its tool cards are saved, and
+  they now come back intact after the server restarts, on reload, in copies and branches, and in later turns. That
+  includes conversations where Gateway questions were queued around the Stop, and older conversations recovered
+  from the run journal. The cancelled output stays out of the model's history for later turns. Thanks
+  @franksong2702. (#7829)
+
 - **The native Windows launcher starts on Agent-managed installs again.** `start.ps1` found the hermes-agent folder
   but never passed it to the server process, so the server could not load the Agent's dependencies and exited before
   it was reachable (`ModuleNotFoundError: yaml`). The launcher now exports the folder it found. Discovery also works
