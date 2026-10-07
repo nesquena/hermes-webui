@@ -10910,7 +10910,7 @@ function _showProjectBindingsDialog(proj){
   cancelBtn.type='button';
   cancelBtn.className='app-dialog-btn';
   cancelBtn.textContent=t('pb_cancel');
-  cancelBtn.onclick=()=>{ _close(); };
+  cancelBtn.onclick=()=>{ _closeBindingsDialog(); };
   const saveBtn=document.createElement('button');
   saveBtn.type='button';
   saveBtn.className='app-dialog-btn confirm';
@@ -10964,7 +10964,7 @@ function _showProjectBindingsDialog(proj){
       fields.model=null;
       fields.model_provider=null;
     }
-    _close();
+    _closeBindingsDialog();
     await _saveProjectBindings(proj,fields);
   };
   btnRow.appendChild(cancelBtn);
@@ -10980,7 +10980,7 @@ function _showProjectBindingsDialog(proj){
   ).filter(el=>!el.disabled&&el.offsetParent!==null);
   function _onKey(e){
     if(e.key==='Escape'){
-      e.preventDefault();e.stopPropagation();_close();return;
+      e.preventDefault();e.stopPropagation();_closeBindingsDialog();return;
     }
     if(e.key==='Tab'){
       const nodes=_focusables();
@@ -10993,16 +10993,16 @@ function _showProjectBindingsDialog(proj){
       nodes[next].focus();
     }
   }
-  function _close(){
+  function _closeBindingsDialog(){
     if(_closed) return;
     _closed=true;
     document.removeEventListener('keydown',_onKey,true);
     overlay.remove();
     try{ if(_lastFocus&&typeof _lastFocus.focus==='function') _lastFocus.focus(); }catch(_){}
   }
-  closeBtn.onclick=()=>{ _close(); };
+  closeBtn.onclick=()=>{ _closeBindingsDialog(); };
   overlay.appendChild(dialog);
-  overlay.onclick=(e)=>{if(e.target===overlay) _close();};
+  overlay.onclick=(e)=>{if(e.target===overlay) _closeBindingsDialog();};
   document.addEventListener('keydown',_onKey,true);
   document.body.appendChild(overlay);
   try{overlay.querySelector('.project-bindings-combo-trigger').focus();}catch(_){}
