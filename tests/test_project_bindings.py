@@ -545,31 +545,49 @@ def test_bind_model_update_without_provider_clears_stale_provider(
     assert "model_provider" not in out
 
 
-def test_bind_default_workspace_keeps_legacy_workspace(tmp_path):
-    """A default_workspace update on a LEGACY project must not drop its workspace.
+def test_bind_default_workspace_keeps_legacy_workspace(tmp_path, monkeypatch):
+    """Greptile P1 (2026-10-07T06:37:09Z): a default_workspace update must not drop
+    a legacy project's only workspace.
 
-    Greptile P1 (2026-10-07T06:37:09Z): a legacy project carrying only
-    ``workspace: A`` that receives ``default_workspace: B`` seeded the bound
-    list as empty, stored only B and overwrote the compatibility alias — so A
-    vanished from quick-create and auto-assignment.
+    A project loaded from a pre-migration projects.json carries just
+    ``workspace: A`` (no ``workspaces`` list). Receiving
+    ``default_workspace: B`` used to seed the bound list from
+    ``proj.get("workspaces") or []``, so it stored only B and overwrote the
+    compatibility alias — A vanished from quick-create and auto-assignment.
     """
-    pid = _create_project()
     ws_a = tmp_path / "legacy-keep-a"
     ws_b = tmp_path / "legacy-keep-b"
     ws_a.mkdir()
     ws_b.mkdir()
-    a, b = str(ws_a), str(ws_b)
 
-    # Legacy bind: only the single `workspace` field, no `workspaces` list.
-    r1 = _post("/api/projects/bind", {"project_id": pid, "workspace": a})
-    assert r1.get("ok"), r1
-    assert r1["project"]["workspace"] == a
+    legacy = {
+        "project_id": "proj_legacy_default",
+        "name": "legacy",
+        "profile": "default",
+        "workspace": str(ws_a),
+    }
 
-    r2 = _post("/api/projects/bind", {"project_id": pid, "default_workspace": b})
-    assert r2.get("ok"), r2
-    proj = r2["project"]
-    bound = proj.get("workspaces") or []
-    assert a in bound, f"legacy workspace A must stay bound, got {bound}"
-    assert b in bound, f"the new default must be auto-added, got {bound}"
-    assert proj.get("default_workspace") == b
-    assert proj.get("workspace") in bound, "compatibility alias must stay bound"
+    out = _drive_bind(
+        monkeypatch,
+        dict(legacy),
+        {"project_id": "proj_legacy_default", "default_workspace": str(ws_b)},
+    )[2]
+
+    bound = {Path(p) for p in out.get("workspaces") or []}
+    assert ws_a in bound, f"legacy workspace A must stay bound, got {bound}"
+    assert ws_b in bound, f"the new default must be auto-added, got {bound}"
+    assert Path(out["default_workspace"]) == ws_b
+    assert Path(out["workspace"]) in bound, "the compatibility alias must stay bound"
+    assert {Path(p) for p in _project_workspaces_for(out)} == {ws_a, ws_b}
+
+    # And the project still resolves both workspaces for the sweep/quick-create.
+    import api.routes as routes
+
+    assert {Path(p) for p in routes._project_workspaces(out)} == {ws_a, ws_b}
+    assert Path(routes._project_default_workspace(out)) == ws_b
+
+
+def _project_workspaces_for(proj):
+    import api.routes as routes
+
+    return routes._project_workspaces(proj)
