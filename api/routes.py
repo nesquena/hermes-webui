@@ -10241,10 +10241,152 @@ def _messages_start_with_visible_prefix(messages, prefix) -> bool:
     try:
         return all(
             _session_message_visible_key(messages[idx]) == _session_message_visible_key(prefix_msg)
+            and _trusted_wakeup_delivery_id(messages[idx]) == _trusted_wakeup_delivery_id(prefix_msg)
             for idx, prefix_msg in enumerate(prefix)
         )
     except Exception:
         return False
+
+
+def _display_merge_identity_key(msg):
+    """Keep distinct durable wake deliveries out of content-key shortcuts."""
+    delivery = _trusted_wakeup_delivery_id(msg)
+    if delivery:
+        return ("process_wakeup", delivery)
+    if isinstance(msg, dict) and (
+        msg.get("display_kind") == "process_wakeup"
+        or (isinstance(msg.get("display_metadata"), dict)
+            and msg["display_metadata"].get("delivery_id"))
+    ):
+        # An incomplete or conflicting claim is not a mirror of a trusted row.
+        return ("untrusted_wakeup_provenance", id(msg))
+    return ("ordinary", _session_message_merge_key(msg))
+
+
+def _display_merge_pair_wakeup_rows(rows, origins):
+    """Collapse a trusted wake with one provenance-free copy of the same turn.
+
+    These display unions do not run the main sidecar/state.db reconciler.  Pair
+    only across the union's input stores/lineage segments, and only for an
+    unambiguous exact role/content row whose full-precision timestamp or durable
+    state.db row id matches.  Partial/conflicting provenance and different
+    delivery ids stay separate on the loss-proof side.
+    """
+    trusted = []
+    timestamp_candidates = defaultdict(list)
+    row_id_candidates = defaultdict(list)
+
+    for index, row in enumerate(rows):
+        delivery_id = _trusted_wakeup_delivery_id(row)
+        if delivery_id:
+            trusted.append((index, row))
+            continue
+        if (
+            not isinstance(row, dict)
+            or row.get("role") != "user"
+            or row.get("_source") != "process_wakeup"
+        ):
+            continue
+        if (
+            _message_display_metadata_value_present(row.get("display_kind"))
+            or _message_display_metadata_value_present(row.get("display_metadata"))
+        ):
+            continue
+        content = row.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        timestamp, timestamp_valid = _message_exact_timestamp_details(row)
+        if timestamp_valid and timestamp is not None:
+            timestamp_candidates[("user", content, timestamp)].append(index)
+        row_id, row_id_valid = _state_db_row_identity_details(row)
+        if row_id_valid and row_id is not None:
+            row_id_candidates[("user", content, row_id)].append(index)
+
+    matches_by_trusted = {}
+    trusted_by_candidate = defaultdict(list)
+    same_origin_conflicts = set()
+    for trusted_index, row in trusted:
+        content = row.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        matches = set()
+        timestamp, timestamp_valid = _message_exact_timestamp_details(row)
+        if timestamp_valid and timestamp is not None:
+            matches.update(timestamp_candidates.get(("user", content, timestamp), ()))
+        row_id, row_id_valid = _state_db_row_identity_details(row)
+        if row_id_valid and row_id is not None:
+            matches.update(row_id_candidates.get(("user", content, row_id), ()))
+        matches = {
+            candidate_index
+            for candidate_index in matches
+            if _message_private_identity_compatible(rows[candidate_index], row)
+        }
+        same_origin_conflicts.update(
+            candidate_index
+            for candidate_index in matches
+            if origins[candidate_index] == origins[trusted_index]
+        )
+        matches = {
+            candidate_index
+            for candidate_index in matches
+            if origins[candidate_index] != origins[trusted_index]
+        }
+        if matches:
+            matches_by_trusted[trusted_index] = matches
+            for candidate_index in matches:
+                trusted_by_candidate[candidate_index].append(trusted_index)
+
+    removed = set()
+    for trusted_index, matches in matches_by_trusted.items():
+        if len(matches) != 1:
+            continue
+        candidate_index = next(iter(matches))
+        if (
+            candidate_index in same_origin_conflicts
+            or len(trusted_by_candidate[candidate_index]) != 1
+        ):
+            continue
+        survivor = rows[candidate_index]
+        authoritative = rows[trusted_index]
+        if not _transfer_wakeup_provenance(survivor, authoritative):
+            continue
+        _merge_session_display_metadata(survivor, authoritative)
+        removed.add(trusted_index)
+
+    if not removed:
+        return rows
+    return [row for index, row in enumerate(rows) if index not in removed]
+
+
+def _display_merge_sorted_rows(*collections, merge_metadata=False):
+    """Preserve the historical chronological union without text-only wake dedup."""
+    merged = []
+    seen = {}
+    indexed_rows = sorted(
+        (
+            (msg, collection_index)
+            for collection_index, collection in enumerate(collections)
+            for msg in collection
+        ),
+        key=lambda item: (
+            float(item[0].get("timestamp") or 0),
+            str(item[0].get("role") or ""),
+            str(item[0].get("content") or ""),
+        ),
+    )
+    rows = [item[0] for item in indexed_rows]
+    origins = [item[1] for item in indexed_rows]
+    rows = _display_merge_pair_wakeup_rows(rows, origins)
+    for msg in rows:
+        key = _display_merge_identity_key(msg)
+        existing = seen.get(key)
+        if existing is not None:
+            if merge_metadata:
+                _merge_session_display_metadata(existing, msg)
+            continue
+        seen[key] = msg
+        merged.append(msg)
+    return _normalize_wakeup_rows_for_display(merged)
 
 
 # perf: memoized lineage-stitch results for GET /api/session. Keyed by session
@@ -10413,21 +10555,11 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                     truncation_boundary=getattr(session, "truncation_boundary", None),
                 )
-            merged_messages = []
-            seen_message_keys = set()
-            for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
-                float(m.get("timestamp") or 0),
-                str(m.get("role") or ""),
-                str(m.get("content") or ""),
-            )):
-                key = _session_message_merge_key(msg)
-                if key in seen_message_keys:
-                    continue
-                seen_message_keys.add(key)
-                merged_messages.append(msg)
-            return merged_messages
-        return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
-    return sidecar_messages
+            return _display_merge_sorted_rows(cli_messages, sidecar_messages)
+        return _normalize_wakeup_rows_for_display(
+            sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
+        )
+    return _normalize_wakeup_rows_for_display(sidecar_messages)
 
 
 
@@ -10477,22 +10609,7 @@ def _merged_webui_lineage_messages_for_display(
         return primary_messages
     if _messages_start_with_visible_prefix(primary_messages, parent_messages):
         return primary_messages
-    merged_messages = []
-    seen_message_keys = set()
-    seen_messages_by_key = {}
-    for msg in sorted(list(parent_messages) + list(primary_messages), key=lambda m: (
-        float(m.get("timestamp") or 0),
-        str(m.get("role") or ""),
-        str(m.get("content") or ""),
-    )):
-        key = _session_message_merge_key(msg)
-        if key in seen_message_keys:
-            _merge_session_display_metadata(seen_messages_by_key.get(key), msg)
-            continue
-        seen_message_keys.add(key)
-        seen_messages_by_key[key] = msg
-        merged_messages.append(msg)
-    return merged_messages
+    return _display_merge_sorted_rows(parent_messages, primary_messages, merge_metadata=True)
 
 
 def _message_summary(messages) -> dict:
@@ -11117,10 +11234,17 @@ from api.models import (
     _active_stream_ids,
     _evict_sessions_over_cap,
     _merge_session_display_metadata,
+    _message_display_metadata_value_present,
+    _transfer_wakeup_provenance,
+    _trusted_wakeup_delivery_id,
+    _normalize_wakeup_rows_for_display,
     _session_message_merge_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
+    _message_exact_timestamp_details,
+    _state_db_row_identity_details,
+    _message_private_identity_compatible,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
