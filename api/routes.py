@@ -18920,7 +18920,11 @@ def handle_post(handler, parsed) -> bool:
         # When auto_assign is (now) enabled, file every existing session whose
         # workspace is in this project's bound list under this project. Runs in
         # a background thread so a large index doesn't stall the response.
-        if proj.get("auto_assign") and proj.get("workspaces"):
+        # ``_project_workspaces`` (not the raw ``workspaces`` field) so a LEGACY
+        # project carrying only ``workspace: A`` still backfills: reading the
+        # absent multi-value field skipped the historical sweep while the
+        # future-session path (which uses the accessor) kept assigning.
+        if proj.get("auto_assign") and _project_workspaces(proj):
             from api.session_lifecycle import (
                 _register_background_commit_thread,
                 _unregister_background_commit_thread,

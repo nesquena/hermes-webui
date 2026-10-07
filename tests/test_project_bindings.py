@@ -591,3 +591,61 @@ def _project_workspaces_for(proj):
     import api.routes as routes
 
     return routes._project_workspaces(proj)
+
+
+def test_bind_auto_assign_sweeps_a_legacy_workspace_project(tmp_path, monkeypatch):
+    """Greptile P1 (2026-10-07T08:10:26Z): turning auto_assign on for a LEGACY
+    project (only ``workspace: A``) must still run the historical sweep.
+
+    Enabling it with ``default_workspace: A`` leaves the ``workspaces`` field
+    absent (the default is already the legacy workspace, so nothing is
+    auto-added), and the launch guard read exactly that absent field — so
+    existing unowned sessions in A were never filed, while future sessions were
+    (that path uses ``_project_workspaces``).
+    """
+    import threading
+
+    import api.session_lifecycle as lifecycle
+    import api.routes as routes
+
+    ws_a = tmp_path / "legacy-sweep-a"
+    ws_a.mkdir()
+    legacy = {
+        "project_id": "proj_legacy_sweep",
+        "name": "legacy-sweep",
+        "profile": "default",
+        "workspace": str(ws_a),
+    }
+
+    ran = threading.Event()
+    seen = []
+
+    def _record(proj):
+        seen.append(dict(proj))
+        ran.set()
+        return 0
+
+    monkeypatch.setattr(routes, "_apply_project_auto_assign", _record)
+    # Never touch the process-wide drain registry from a test.
+    monkeypatch.setattr(
+        lifecycle, "_register_background_commit_thread", lambda _t: True
+    )
+
+    handled, captured, out = _drive_bind(
+        monkeypatch,
+        dict(legacy),
+        {
+            "project_id": "proj_legacy_sweep",
+            "auto_assign": True,
+            "default_workspace": str(ws_a),
+        },
+    )
+    assert handled is True
+    assert captured["status"] == 200, captured
+    assert out.get("auto_assign") is True
+    assert "workspaces" not in out, (
+        "precondition: the default is the legacy workspace, so no multi-value "
+        "field is materialised"
+    )
+    assert ran.wait(5), "the historical sweep must run for a legacy-workspace project"
+    assert seen and seen[0]["project_id"] == "proj_legacy_sweep"

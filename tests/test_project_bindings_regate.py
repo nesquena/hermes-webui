@@ -479,3 +479,10 @@ def test_project_workspaces_falls_back_to_legacy_single_workspace():
     assert routes._project_workspaces({"workspaces": ["/ws/B"], "workspace": "/ws/A"}) == ["/ws/B"]
     assert routes._project_workspaces({}) == []
     assert routes._project_workspaces(None) == []
+
+
+def test_auto_assign_launch_guard_uses_canonical_workspace_accessor():
+    """The bind handler must launch the sweep for a legacy `workspace: A` project."""
+    src = _read_routes_py()
+    assert 'if proj.get("auto_assign") and _project_workspaces(proj):' in src
+    assert 'if proj.get("auto_assign") and proj.get("workspaces"):' not in src
