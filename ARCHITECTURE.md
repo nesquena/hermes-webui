@@ -298,6 +298,35 @@ covers every emitted session field, not just ID, activity time and message
 count; a changed projected title or lineage field can therefore emit
 `sessions_changed` even without message-row churn.
 
+#### Concurrent `GET /api/session` reloads share one build
+
+A reconnect storm (WebUI reload while a run is live) fans out N identical
+`GET /api/session` requests that each reconcile the full transcript
+independently (#7310). The handler now coalesces identical requests onto one
+shared projection through `_session_get_flight_key()` in `api/routes.py`:
+
+- Only a request whose key matches an in-flight build waits for that build.
+  The leader releases the flight in `finally`, and a leader failure lets
+  waiters fall through to their own build instead of waiting on a dead flight.
+- The key carries every input the payload is derived from: session id,
+  profile, CLI metadata fingerprint, pagination/window query shape, sidecar and
+  `state.db` stat signatures, compression-lineage parent sidecars (read from
+  the lineage display cache's recorded parent stats), the run-journal
+  fingerprint (`_run_journal` `*.jsonl` count/mtime/size), `settings.json`
+  stat identity, plus the active-stream, pending-message, and truncation
+  markers.
+- It declines to share — returns `None`, so the request builds its own
+  response — whenever a generation cannot be proven: a missing or changed
+  sidecar / `state.db` state, an unverifiable lineage (cold, stale, or
+  incomplete parent chain), or an active run whose journal file is not under
+  that session's own journal directory. Waiters give up after
+  `_SESSION_GET_FLIGHT_WAIT_SECONDS` (30s) and then build their own response.
+- What followers receive is the public projection produced after
+  `redact_session_data()`; no pre-redaction state crosses between requests.
+
+Start here before changing session GET concurrency, response reuse, or the
+lineage display cache (#7310).
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:
