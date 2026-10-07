@@ -13670,16 +13670,10 @@ def _app_manifest(manifest_path: Path) -> tuple[dict, bool]:
     icon_src = f"static/favicon.svg?tint={tint[1:]}"
     changed = False
     for icon in manifest.get("icons", []):
-        if isinstance(icon, dict):
-            icon.update(src=icon_src, type="image/svg+xml")
+        if (isinstance(icon, dict) and icon.get("src") == "static/favicon.svg"
+                and icon.get("type") == "image/svg+xml" and icon.get("sizes") == "any"):
+            icon["src"] = icon_src
             changed = True
-    for shortcut in manifest.get("shortcuts", []):
-        if not isinstance(shortcut, dict):
-            continue
-        for icon in shortcut.get("icons", []):
-            if isinstance(icon, dict):
-                icon.update(src=icon_src, type="image/svg+xml")
-                changed = True
     return manifest, changed
 
 
@@ -13727,7 +13721,10 @@ def _serve_app_icon(handler, parsed) -> bool:
     tint_values = parse_qs(parsed.query or "").get("tint", [])
     saved_tint = load_settings().get("icon_tint")
     tint = _normalize_icon_tint(tint_values[0] if tint_values else saved_tint)
-    icon_path = (api_config.get_static_root() / "favicon.svg").resolve()
+    static_root = api_config.get_static_root().resolve()
+    icon_path = (static_root / "favicon.svg").resolve()
+    if not icon_path.is_relative_to(static_root) or not icon_path.is_file():
+        return j(handler, {"error": "not found"}, status=404)
     svg = icon_path.read_text(encoding="utf-8")
     replacements = {
         _DEFAULT_ICON_TINT: tint,

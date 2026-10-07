@@ -1,9 +1,14 @@
 """App-icon tint settings and PWA integration."""
 
 import json
+import shutil
+import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -83,30 +88,123 @@ def test_tinted_favicon_handles_source_gradient_color_without_collision():
     assert svg.count('stop-color="#2760B1"') == 1
 
 
-def test_manifest_points_install_icons_at_current_tint(monkeypatch):
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/manifest.json",
+        "/manifest.webmanifest",
+        "/session/manifest.json",
+        "/session/manifest.webmanifest",
+    ],
+)
+def test_manifest_tints_only_svg_and_preserves_raster_icons(path, monkeypatch):
     from api import routes
 
     monkeypatch.setattr(routes, "load_settings", lambda: {"icon_tint": "#E5484D"})
-    handler = _get("/manifest.json")
+    handler = _get(path)
     manifest = json.loads(bytes(handler.body).decode("utf-8"))
+    source = json.loads((ROOT / "static" / "manifest.json").read_text(encoding="utf-8"))
 
     assert handler.status == 200
-    assert manifest["icons"]
-    assert all(
-        icon["src"].endswith("favicon.svg?tint=E5484D") for icon in manifest["icons"]
+    assert handler.header("Cache-Control") == "no-store"
+    assert manifest["icons"][0] == {
+        **source["icons"][0],
+        "src": "static/favicon.svg?tint=E5484D",
+    }
+    assert manifest["icons"][1:] == source["icons"][1:]
+    assert manifest["shortcuts"] == source["shortcuts"]
+
+
+@pytest.mark.parametrize("path", ["/static/favicon.svg", "/session/static/favicon.svg"])
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_unavailable_favicon_returns_static_404(path, kind, tmp_path, monkeypatch):
+    from api import config
+
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    if kind == "directory":
+        (static_root / "favicon.svg").mkdir()
+    monkeypatch.setattr(config, "get_static_root", lambda: static_root)
+
+    handler = _get(path)
+    assert handler.status == 404
+    assert json.loads(handler.body) == {"error": "not found"}
+
+
+class _IconLinks(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "link":
+            link = dict(attrs)
+            if (
+                "icon" in link.get("rel", "").split()
+                or link.get("rel") == "apple-touch-icon"
+            ):
+                self.links.append(link)
+
+
+def test_live_tint_changes_only_svg_favicon():
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required for the live favicon DOM test")
+    links = _IconLinks()
+    links.feed(INDEX)
+    assert any(link.get("href") == "static/favicon.ico" for link in links.links)
+    assert any(link.get("href") == "static/favicon-32.png" for link in links.links)
+    assert any(
+        link.get("href") == "static/apple-touch-icon.png" for link in links.links
     )
-    assert all(icon["type"] == "image/svg+xml" for icon in manifest["icons"])
-    assert manifest["shortcuts"][0]["icons"][0]["src"].endswith(
-        "favicon.svg?tint=E5484D"
+    assert any(link.get("href") == "static/favicon.svg" for link in links.links)
+
+    # Execute the actual production function against a minimal DOM, not a rewritten selector.
+    function = BOOT[
+        BOOT.index("function _normalizeIconTint(") : BOOT.index(
+            "function _pickIconTint("
+        )
+    ]
+    script = (
+        """
+const assert = require('node:assert/strict');
+const links = JSON.parse(process.argv[1]);
+for (const link of links) {
+  link.original = {...link};
+}
+const document = {
+  querySelectorAll(selector) {
+    return links.filter(link => selector.split(',').some(part => {
+      const match = part.match(/^link\\[rel([~=])=\\"([^\\"]+)\\"\\](?:\\[type=\\"([^\\"]+)\\"\\])?$/);
+      if (!match) throw new Error(`Unexpected selector: ${part}`);
+      const relMatches = match[1] === '~' ? (link.rel || '').split(/\\s+/).includes(match[2]) : link.rel === match[2];
+      return relMatches && (!match[3] || link.type === match[3]);
+    }));
+  }
+};
+"""
+        + function
+        + """
+_applyIconTint('#E5484D');
+for (const link of links) {
+  if (link.original.href === 'static/favicon.svg') {
+    assert.equal(link.href, 'static/favicon.svg?tint=E5484D');
+    assert.equal(link.type, 'image/svg+xml');
+  } else {
+    assert.deepEqual(link, {...link.original, original: link.original});
+  }
+}
+"""
+    )
+    subprocess.run(
+        ["node", "-e", script, json.dumps(links.links)],
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
-def test_icon_tint_control_updates_favicon_and_autosaves():
+def test_icon_tint_control_autosaves():
     assert 'id="settingsIconTint"' in INDEX
-    assert (
-        'rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png"'
-        in INDEX
-    )
     assert "function _pickIconTint(" in BOOT
     assert "_applyIconTint" in BOOT
     assert (

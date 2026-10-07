@@ -3029,9 +3029,8 @@ function _normalizeIconTint(color){
 
 function _applyIconTint(color){
   const tint=_normalizeIconTint(color).slice(1);
-  document.querySelectorAll('link[rel~="icon"],link[rel="apple-touch-icon"]').forEach(link=>{
+  document.querySelectorAll('link[rel~="icon"][type="image/svg+xml"]').forEach(link=>{
     link.href=`static/favicon.svg?tint=${tint}`;
-    link.type='image/svg+xml';
   });
 }
 
