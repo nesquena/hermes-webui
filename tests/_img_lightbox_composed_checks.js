@@ -194,6 +194,50 @@
       .then(function () { closeLightbox(); });
   }
 
+  // Fit carries over navigation, not the raw scale (reviewer re-gate
+  // 2026-10-08T23:18:39Z, static/ui.js:2800). A small image shown at its fit
+  // followed by a large one must open the large one at ITS OWN fit — keeping
+  // the numeric scale cropped a 4000x3000 image at scale 1, and the reverse
+  // navigation shrank the small image to ~25px. A genuine user zoom is still
+  // retained across the navigation.
+  async function navigationCarriesFit() {
+    var small = 100, bigW = 4000, bigH = 3000;
+    var box = await openBox(small, small, {
+      images: [
+        { src: svgDataUrl(small, small), alt: "tiny" },
+        { src: svgDataUrl(bigW, bigH), alt: "huge" },
+      ],
+      index: 0,
+    });
+    approx(box.z.scale, box.z.fitScale, 1e-9, "fixture: the tiny image must open at its fit");
+    var tinyFit = box.z.fitScale;
+    key("ArrowRight");
+    for (var i = 0; i < 240 && box.z.pendingNav; i++) await frame();
+    for (var a = 0; a < 4; a++) await frame();
+    assert_(box.z.boxW === bigW, "navigation must adopt the big image's geometry");
+    assert_(box.z.fitScale < 0.5, "fixture: the big image needs a real downscale, fit=" + box.z.fitScale);
+    approx(
+      box.z.scale, box.z.fitScale, 1e-9,
+      "an at-fit image must open the new image at its fit, not the raw scale: " +
+        box.z.scale + " vs fit " + box.z.fitScale
+    );
+    // Reverse: the big image is still at fit, so the tiny one must fit again.
+    key("ArrowLeft");
+    for (var j = 0; j < 240 && box.z.pendingNav; j++) await frame();
+    for (var b = 0; b < 4; b++) await frame();
+    assert_(box.z.boxW === small, "navigation back must adopt the tiny geometry");
+    approx(box.z.scale, tinyFit, 1e-9, "the reverse navigation must restore the tiny image's fit");
+    // Positive control: a real user zoom still survives the navigation.
+    key("+");
+    key("+");
+    var zoomed = box.z.scale;
+    assert_(zoomed > box.z.fitScale, "fixture: expected zoom-in before navigating");
+    key("ArrowRight");
+    for (var k = 0; k < 240 && box.z.pendingNav; k++) await frame();
+    for (var c = 0; c < 4; c++) await frame();
+    approx(box.z.scale, zoomed, 1e-9, "a genuine user zoom must still survive the navigation");
+  }
+
   async function runDesktop(bucket) {
     // 1. Pointer-path pan clamping / centring.
     await run("pointer_extreme_negative_clamp", bucket, async function () {
@@ -566,6 +610,8 @@
       touch(box.vp, "touchend", []);
     });
 
+    await run("navigation_carries_fit_not_raw_scale", bucket, navigationCarriesFit);
+
     // 5. Review follow-ups (greptile 2026-10-05): a second pointer must not
     // take the pan over, the document-wide shortcuts must not hijack typing
     // in a background field, focus must move into the dialog, and a failed
@@ -832,6 +878,8 @@
   }
 
   async function runMobile(bucket) {
+    await run("navigation_carries_fit_not_raw_scale", bucket, navigationCarriesFit);
+
     await run("geometry_circle_size", bucket, async function () {
       var box = await openBox(IMG_W, IMG_H);
       var fit = box.fitBtn.getBoundingClientRect();

@@ -127,16 +127,46 @@ class TestNavigationKeepsZoom:
         comparison. A small first image (fit 1.0) followed by a huge one
         (fit 0.1) would otherwise clamp zoom-out at 0.25 and make the real
         fit unreachable. The pendingNav branch must recompute fitScale from
-        the new natural size and re-clamp the kept scale to the new bounds."""
+        the new natural size and re-clamp the kept scale to the new bounds.
+        Fit is carried over, not the raw scale (re-gate 2026-10-08T23:18:39Z,
+        static/ui.js:2800): an image that was at its fit must open the new one
+        at ITS OWN fit — keeping the numeric scale crops a 4000x3000 successor
+        and shrinks a smaller one on the reverse navigation."""
         src = UI.read_text(encoding="utf-8")
-        nav_idx = src.index("if(state.pendingNav){")
+        # Scope every probe to _onImgLoad's body: an identical at-fit pattern
+        # lives in _onResize (`wasAtFit || !state.boxW`), so a file-wide index
+        # would silently match the wrong function.
+        load_start = src.index("function _onImgLoad() {")
+        load_end = src.index("function _imgOwnsDrag(e) {", load_start)
+        load = src[load_start:load_end]
+        nav_idx = load.index("if(state.pendingNav){")
         # fitScale must be recomputed inside the pendingNav branch, not only
         # by _fit() on the very first load.
-        fit_idx = src.index("state.fitScale = _imgFitScale();")
+        fit_idx = load.index("state.fitScale = _imgFitScale();")
         assert nav_idx < fit_idx
-        # The kept scale must be re-clamped against the new image's bounds
+        # The at-fit decision must be captured BEFORE state.fitScale is
+        # overwritten, inside the pendingNav branch.
+        at_fit_marker = (
+            "const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;"
+        )
+        assert at_fit_marker in load, (
+            "the pendingNav branch must capture whether the previous image was "
+            "at its fit before recomputing state.fitScale"
+        )
+        at_fit_idx = load.index(at_fit_marker)
+        assert nav_idx < at_fit_idx < fit_idx, (
+            "the at-fit test must be captured in the pendingNav branch before "
+            "state.fitScale is recomputed"
+        )
+        tail = load[fit_idx:load.index("_centerPan();", fit_idx)]
+        assert "? state.fitScale" in tail, (
+            "an image that was at its fit must open the new image at its own fit"
+        )
+        # A genuine user zoom is re-clamped against the new image's bounds
         # (min = _imgMinScale(), max = 8) before recentring.
-        assert "state.scale = Math.max(_imgMinScale(), Math.min(8, state.scale));" in src
+        assert "Math.max(_imgMinScale(), Math.min(8, state.scale))" in tail, (
+            "a retained user zoom must be re-clamped to the new image's bounds"
+        )
         # The fit formula must live in one shared helper so _fit() and the
         # pendingNav branch can never drift apart.
         assert "function _imgFitScale() {" in src

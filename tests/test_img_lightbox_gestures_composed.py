@@ -195,6 +195,16 @@ class TestComposedReviewFollowups:
         silently discarding the zoom the user had selected."""
         _check(composed.desktop, "duplicate_load_keeps_zoom")
 
+    def test_navigation_from_a_fitted_image_opens_the_new_image_at_fit(self, composed):
+        """re-gate 2026-10-08T23:18:39Z, static/ui.js:2800 — navigation kept the
+        raw scale, so a small image shown at its fit cropped a large successor
+        (scale 1 on a 4000x3000 image) and the reverse navigation shrank the
+        small one to ~25px."""
+        _check(composed.desktop, "navigation_carries_fit_not_raw_scale")
+
+    def test_navigation_from_a_fitted_image_opens_the_new_image_at_fit_mobile(self, composed):
+        _check(composed.mobile, "navigation_carries_fit_not_raw_scale")
+
 
 # Trusted-input regressions for the 2026-10-06 maintainer gate certificate.
 # These use Playwright's own input pipeline (real mouse/keyboard events), which

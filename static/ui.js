@@ -2796,8 +2796,19 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
       // would clamp zoom-out at 0.25 and make the real fit unreachable.
       // Recompute only the baseline and re-clamp the kept scale to the new
       // image's constraints.
+      //
+      // Fit is carried over, not the raw scale. If the previous image was at
+      // its fit (no user zoom), the new image must open at ITS OWN fit too —
+      // keeping the numeric scale crops a large image or shrinks a small one
+      // (reviewer re-gate 2026-10-08T23:18:39Z, static/ui.js:2800: 100×100 at
+      // fit 1 → 4000×3000 kept scale 1 and cropped; the reverse shrank the
+      // small image to ~25 px). A genuine user zoom (scale != fit) is still
+      // retained, bounded to the new image's constraints.
+      const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;
       state.fitScale = _imgFitScale();
-      state.scale = Math.max(_imgMinScale(), Math.min(8, state.scale));
+      state.scale = wasAtFit
+        ? state.fitScale
+        : Math.max(_imgMinScale(), Math.min(8, state.scale));
       _centerPan();
       // A press that began while the new image was still loading recorded its
       // baseline against the previous geometry, so its first move would undo
