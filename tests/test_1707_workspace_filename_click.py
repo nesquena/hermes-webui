@@ -251,13 +251,23 @@ const isLk = item.type === 'symlink';
 const isExternalLink = isLk && item.target_outside_workspace;
 const isDirLike = !isExternalLink && (item.type === 'dir' || (isLk && item.is_dir));
 const elideMiddle = (s) => s;
+// #7689: the handler block now marks the rename input as non-credential via
+// the shared helper; the VM driver must supply it (a helper the tested code
+// newly depends on has to be declared here, or it raises ReferenceError).
+// Keep the stub minimal — the fake element only supports plain properties.
+const _markNonCredentialInput = (inp) => {
+  if (!inp || inp.tagName !== 'INPUT') return inp;
+  inp.autocomplete = 'off';
+  return inp;
+};
 
 const runner = new Function(
   'nameEl', 'el', 'item', 'S', 't', 'loadDir', 'document', 'showToast', 'api', 'window',
   'setTimeout', 'clearTimeout', 'isLk', 'isExternalLink', 'isDirLike', 'elideMiddle',
+  '_markNonCredentialInput',
   '(()=>{' + handlerBlock + '})();'
 );
-runner(nameEl, el, item, S, t, loadDir, document, showToast, api, {}, trackedSetTimeout, trackedClearTimeout, isLk, isExternalLink, isDirLike, elideMiddle);
+runner(nameEl, el, item, S, t, loadDir, document, showToast, api, {}, trackedSetTimeout, trackedClearTimeout, isLk, isExternalLink, isDirLike, elideMiddle, _markNonCredentialInput);
 
 const evt = { stopPropagation: () => {} };
 for (let i = 0; i < clickCount; i++) {

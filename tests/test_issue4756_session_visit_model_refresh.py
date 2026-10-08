@@ -149,7 +149,7 @@ def test_session_visit_overlapping_stale_calls_coalesce_to_single_live_rebuild(t
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache, **_kwargs: None)
 
     def _load_stale_models_cache_from_disk():
         ident = threading.get_ident()
@@ -203,7 +203,7 @@ def test_force_refresh_sync_followers_wait_past_legacy_timeout(tmp_path, monkeyp
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache, **_kwargs: None)
 
     def _wait_for(self, predicate, timeout=None):
         if self is not cfg._cache_build_cv:
@@ -261,7 +261,7 @@ def test_force_refresh_sync_followers_retry_after_failed_active_rebuild(tmp_path
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache, **_kwargs: None)
 
     def _wait_for(self, predicate, timeout=None):
         if self is not cfg._cache_build_cv:
@@ -312,7 +312,7 @@ def test_force_refresh_bounded_followers_wait_only_remaining_budget(tmp_path, mo
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache, **_kwargs: None)
 
     def _wait_for(self, predicate, timeout=None):
         if self is not cfg._cache_build_cv:
@@ -365,7 +365,7 @@ def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebu
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache, **_kwargs: None)
 
     def _load_stale_models_cache_from_disk():
         ident = threading.get_ident()
@@ -427,7 +427,7 @@ def test_session_visit_force_refresh_ignores_plain_disk_publish_started_after_re
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache, **_kwargs: None)
 
     def _load_stale_models_cache_from_disk():
         ident = threading.get_ident()
@@ -521,7 +521,7 @@ def test_force_refresh_keeps_build_flag_set_until_disk_save_finishes(tmp_path, m
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
     monkeypatch.setattr(cfg, "_invoke_models_rebuild", lambda _builder: rebuilt_catalog)
 
-    def _save_and_observe(_cache):
+    def _save_and_observe(_cache, **_kwargs):
         observed.append(cfg._cache_build_in_progress)
 
     monkeypatch.setattr(cfg, "_save_models_cache_to_disk", _save_and_observe)
@@ -549,7 +549,7 @@ def test_default_disk_hit_does_not_restamp_stale_cache_for_session_visit(tmp_pat
     monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: {"profile": "demo"})
     monkeypatch.setattr(cfg, "_cfg_mtime", 0.0, raising=False)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: (_ for _ in ()).throw(
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache, **_kwargs: (_ for _ in ()).throw(
         AssertionError("plain disk hits must not rewrite the models cache file")
     ))
 

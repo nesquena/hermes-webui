@@ -146,8 +146,12 @@ def test_prefix_rule_mirrors_the_at_provider_rule_structurally():
     assert "rawId.toLowerCase().startsWith(slashPrefix)" in src, (
         "the rule must require a literal `<provider>/` prefix on the badge key"
     )
-    assert "String(entry.providerId||'').toLowerCase()===provider" in src, (
+    assert "_entryProvider(entry)===provider" in src, (
         "the rule must require an existing picker row owned by the same provider"
+    )
+    assert "(entry&&entry.providerId)||(entry&&entry.badge&&entry.badge.provider)" in src, (
+        "row provider authority must be structural providerId first, then the "
+        "configured badge provider (#7290), never a loose label comparison"
     )
     # It must run before the `@provider:` early return, which would otherwise
     # short-circuit every non-`@` alias to false.
