@@ -2961,7 +2961,17 @@
   .voice-mode-label{color:var(--muted);font-size:11px;}
   @keyframes voice-mode-pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(.85);}}
   .status-text{font-size:11px;color:var(--muted);padding-left:4px;}
-  .send-btn{width:34px;height:34px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s,transform .15s,box-shadow .15s,width .15s,padding .15s,border-radius .15s;box-shadow:0 2px 8px var(--accent-bg-strong);}
+  .send-btn{width:34px;height:34px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s,transform .15s,box-shadow .15s;box-shadow:0 2px 8px var(--accent-bg-strong);}
+  /* #1804 re-gate 10-08: width/padding/border-radius are deliberately
+     NOT transitioned. The busy-mode pill widens the button from 34px to
+     74-108px, and animating those geometry properties means
+     _fitComposerFooter()'s width probe (static/ui.js) can measure
+     mid-transition — an idle pass reads 16px for a busy button and
+     reserves a permanently-too-narrow footer. #1804 re-gate 9/24 hid
+     the label during the measurement to avoid exactly this, but the
+     transition still lets a concurrent transition leak into a later
+     pass. Colour/transform-only transitions keep the affordance
+     animation without making layout time-dependent. */
   /* #1804 re-gate 9/24: when the primary action is one of the busy-mode
      actions (stop / queue / interrupt / steer), surface a short text
      label alongside the icon so the user can see the current mode
