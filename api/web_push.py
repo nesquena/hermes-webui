@@ -572,15 +572,39 @@ def remove_subscription(endpoint: str, owner: str | None = None) -> bool:
 
 # ── delivery ─────────────────────────────────────────────────────────────────
 
+def _mask(text: str) -> str:
+    """Mask credentials before text leaves for Apple/Google push services.
+
+    Always on, independent of ``api_redact_enabled`` (that setting governs what
+    the user's own browser sees; push bodies transit third-party services). If
+    the redactor is unavailable we fail closed and drop the text.
+    """
+    text = str(text or "")
+    if not text:
+        return ""
+    try:
+        from api.helpers import _redact_text
+
+        return _redact_text(text, _enabled=True)
+    except Exception:
+        logger.debug("Web Push: redaction unavailable; dropping body text", exc_info=True)
+        return ""
+
+
+def snippets_enabled() -> bool:
+    """Set HERMES_WEBUI_PUSH_SNIPPETS=0 to send generic bodies with no reply text."""
+    return os.getenv("HERMES_WEBUI_PUSH_SNIPPETS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def notification_payload(title: str, body: str, *, session_id: str | None = None, owners=None) -> dict:
     """Build a payload. ``owners`` (list of owner ids, or ALL_OWNERS) is routing
     metadata kept under ``_owners``; it is stripped before delivery. Without it
     the payload is delivered to nobody."""
     sid = str(session_id or "").strip()
     payload = {
-        "title": str(title or "Hermes")[:120],
+        "title": _mask(str(title or "Hermes"))[:120] or "Hermes",
         "options": {
-            "body": str(body or "")[:240],
+            "body": _mask(str(body or ""))[:240],
             "tag": f"hermes-{sid}" if sid else "hermes-webui",
             "renotify": True,
             "icon": "static/favicon-192.png",
@@ -760,7 +784,9 @@ def notify_response_complete(session_id: str, answer: str) -> bool:
     owners = _targets_for_session(session_id)
     if not owners:
         return False
-    text = " ".join(str(answer or "").split())
+    # Mask the full text first, then shorten, so a secret straddling the cut
+    # can't leak a partial token.
+    text = " ".join(_mask(answer if snippets_enabled() else "").split())
     return enqueue(
         notification_payload("Response complete", text[:120] or "Task finished", session_id=session_id, owners=owners)
     )
