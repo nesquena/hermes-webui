@@ -142,6 +142,15 @@ def _install_fake_write_approval(monkeypatch, *, result="ok", raise_exc=None):
     write_approval_commands_any.handle_pending_subcommand = handle_pending_subcommand
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.write_approval_commands", write_approval_commands)
+    # Unit dispatch tests provide the complete Agent seam, including a successful
+    # profile binding. Dedicated binding tests override this to record/fail it.
+    from contextlib import nullcontext
+    from api import profiles
+
+    monkeypatch.setattr(
+        profiles, "profile_env_for_active_request_readonly",
+        lambda *_args, **_kwargs: nullcontext(True),
+    )
     return calls
 
 
@@ -509,7 +518,7 @@ def test_commands_exec_does_not_repeat_after_final_save_failure(monkeypatch):
     after_restart = _RouteHandler(retry_payload)
     routes.handle_post(after_restart, SimpleNamespace(path="/api/commands/exec", query=""))
 
-    assert after_restart.status == 409
+    assert after_restart.status == 503
     assert calls == ["/memory pending"]
 
 
@@ -619,27 +628,6 @@ def test_commands_exec_releases_session_lock_while_command_runs(monkeypatch):
     assert handler.status == 200
 
 
-def test_webui_command_run_tokens_survive_stale_finalizer_after_invalidation():
-    """Clear/truncate invalidation must prevent an old run from owning a replacement marker."""
-    from api import routes
-
-    sid = "command-generation-session"
-    command_id = "webui-command-generation"
-    routes._invalidate_webui_command_runs(sid)
-    first = routes._register_webui_command_run(sid, command_id)
-    assert first
-    assert routes._webui_command_run_is_active(sid, command_id, first)
-
-    routes._invalidate_webui_command_runs(sid)
-    assert not routes._webui_command_run_is_active(sid, command_id, first)
-
-    second = routes._register_webui_command_run(sid, command_id)
-    assert second and second != first
-    routes._unregister_webui_command_run(sid, command_id, first)
-    assert routes._webui_command_run_is_active(sid, command_id, second)
-    routes._unregister_webui_command_run(sid, command_id, second)
-
-
 def test_commands_exec_rolls_back_marker_when_run_registration_loses(monkeypatch):
     """A duplicate live owner must not leave a pending transcript row behind."""
     from api import commands, routes
@@ -659,7 +647,6 @@ def test_commands_exec_rolls_back_marker_when_run_registration_loses(monkeypatch
 
     session = Session()
     command_id = "webui-command-registration-race"
-    routes._invalidate_webui_command_runs(session.session_id)
     live_token = routes._register_webui_command_run(session.session_id, command_id)
     assert live_token
     monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
@@ -679,83 +666,6 @@ def test_commands_exec_rolls_back_marker_when_run_registration_loses(monkeypatch
         assert session.saved == 0  # registration loses before any marker is persisted
     finally:
         routes._unregister_webui_command_run(session.session_id, command_id, live_token)
-
-
-def test_commands_exec_stale_finalizer_cannot_overwrite_replacement_marker(monkeypatch):
-    """An in-flight result must not resurrect itself into a same-id row created after clear."""
-    from api import commands, routes
-
-    entered = threading.Event()
-    release = threading.Event()
-    lock = threading.RLock()
-    command_id = "webui-command-clear-race"
-
-    class Session:
-        session_id = "clear-race-session"
-        profile = "default"
-        read_only = False
-        is_read_only = False
-
-        def __init__(self):
-            self.messages = []
-
-        def save(self):
-            pass
-
-    session = Session()
-
-    def execute(_command):
-        entered.set()
-        assert release.wait(5)
-        return "stale result"
-
-    routes._invalidate_webui_command_runs(session.session_id)
-    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
-    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock)
-    monkeypatch.setattr(commands, "execute_agent_command", execute)
-    handler = _RouteHandler({
-        "command": "/memory pending",
-        "session_id": session.session_id,
-        "command_id": command_id,
-    })
-    thread = threading.Thread(
-        target=routes.handle_post,
-        args=(handler, SimpleNamespace(path="/api/commands/exec", query="")),
-        daemon=True,
-    )
-    thread.start()
-    assert entered.wait(5)
-
-    with lock:
-        routes._invalidate_webui_command_runs(session.session_id)
-        session.messages = []
-        replacement_token = routes._register_webui_command_run(session.session_id, command_id)
-        assert replacement_token
-        session.messages.extend([
-            {"role": "user", "content": "/memory pending", "_webui_command_id": command_id},
-            {
-                "role": "assistant",
-                "content": "replacement pending",
-                "_webui_command_id": command_id,
-                "_webui_command_pending": True,
-                "_webui_command_run_token": replacement_token,
-            },
-        ])
-
-    release.set()
-    thread.join(5)
-    assert not thread.is_alive()
-    assert handler.status == 200
-    assert handler.json_body()["persistence_warning"] is True
-    assert session.messages[1]["content"] == "replacement pending"
-    assert session.messages[1]["_webui_command_pending"] is True
-    assert routes._webui_command_run_is_active(
-        session.session_id, command_id, replacement_token
-    )
-    routes._unregister_webui_command_run(
-        session.session_id, command_id, replacement_token
-    )
 
 
 @pytest.mark.parametrize("mutation", ["clear", "truncate"])
@@ -924,6 +834,238 @@ def test_commands_exec_recovers_orphaned_pending_marker_without_reexecution(monk
     assert session.messages[1]["_webui_command_interrupted"] is True
 
 
+def test_commands_exec_settles_orphaned_matching_text_before_refusing_fresh_retry(monkeypatch):
+    """A fresh retry settles a matching orphan, then a deliberate retry may run."""
+    from api import commands, routes
+
+    orphan_id = "webui-command-orphan"
+    first_retry_id = "webui-command-fresh-retry"
+    deliberate_retry_id = "webui-command-deliberate-retry"
+
+    class Session:
+        session_id = "orphaned-matching-command-session"
+        profile = "default"
+        read_only = False
+        is_read_only = False
+
+        def __init__(self):
+            self.messages = [
+                {
+                    "role": "user",
+                    "content": "/memory approve stable-id",
+                    "_webui_command_id": orphan_id,
+                },
+                {
+                    "role": "assistant",
+                    "content": "Command started; its final result has not been saved yet.",
+                    "_webui_command_id": orphan_id,
+                    "_webui_command_pending": True,
+                },
+            ]
+            self.saved = 0
+
+        def save(self):
+            self.saved += 1
+
+    session = Session()
+    calls = []
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(
+        commands,
+        "execute_agent_command",
+        lambda command: calls.append(command) or "deliberate result",
+    )
+
+    first = _RouteHandler({
+        "command": "/memory approve stable-id",
+        "session_id": session.session_id,
+        "command_id": first_retry_id,
+    })
+    routes.handle_post(first, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert first.status == 409
+    first_body = first.json_body()
+    assert first_body["command_id"] == first_retry_id
+    assert first_body["recovered_interrupted"] is True
+    assert first_body["error"] == first_body["output"]
+    assert "verify the effect" in first_body["output"]
+    assert calls == []
+    assert session.saved == 1
+    assert "_webui_command_pending" not in session.messages[1]
+    assert session.messages[1]["_webui_command_interrupted"] is True
+
+    deliberate = _RouteHandler({
+        "command": "/memory approve stable-id",
+        "session_id": session.session_id,
+        "command_id": deliberate_retry_id,
+    })
+    routes.handle_post(deliberate, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert deliberate.status == 200
+    assert deliberate.json_body() == {
+        "output": "deliberate result",
+        "command_id": deliberate_retry_id,
+    }
+    assert calls == ["/memory approve stable-id"]
+
+
+@pytest.mark.parametrize("request_mode", ["same_id", "fresh_id"])
+def test_commands_exec_rolls_back_orphan_settlement_when_save_fails(monkeypatch, request_mode):
+    """A failed orphan settlement must remain pending in the cached session."""
+    from api import commands, routes
+
+    orphan_id = "webui-command-orphan-rollback"
+    first_retry_id = "webui-command-orphan-rollback-retry"
+    deliberate_retry_id = "webui-command-orphan-rollback-deliberate"
+    command = "/memory approve rollback-id"
+
+    class Session:
+        session_id = "orphan-settlement-rollback-session"
+        profile = "default"
+        read_only = False
+        is_read_only = False
+
+        def __init__(self):
+            self.messages = [
+                {
+                    "role": "user",
+                    "content": command,
+                    "_webui_command_id": orphan_id,
+                },
+                {
+                    "role": "assistant",
+                    "content": "original pending content",
+                    "_webui_command_id": orphan_id,
+                    "_webui_command_pending": True,
+                    "_webui_command_run_token": "orphan-run-token",
+                },
+            ]
+            self.save_allowed = False
+            self.save_calls = 0
+
+        def save(self):
+            self.save_calls += 1
+            if not self.save_allowed:
+                raise OSError("disk unavailable")
+
+    session = Session()
+    original_messages = [dict(message) for message in session.messages]
+    calls = []
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(
+        commands,
+        "execute_agent_command",
+        lambda value: calls.append(value) or "deliberate result",
+    )
+
+    first_id = orphan_id if request_mode == "same_id" else first_retry_id
+    for _ in range(2):
+        failed = _RouteHandler({
+            "command": command,
+            "session_id": session.session_id,
+            "command_id": first_id,
+        })
+        routes.handle_post(failed, SimpleNamespace(path="/api/commands/exec", query=""))
+        assert failed.status == 503
+        assert session.messages == original_messages
+
+    assert calls == []
+
+    session.save_allowed = True
+    settled = _RouteHandler({
+        "command": command,
+        "session_id": session.session_id,
+        "command_id": first_id,
+    })
+    routes.handle_post(settled, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert settled.status == (200 if request_mode == "same_id" else 409)
+    settled_body = settled.json_body()
+    assert settled_body["recovered_interrupted"] is True
+    assert "_webui_command_pending" not in session.messages[1]
+    assert session.messages[1]["_webui_command_interrupted"] is True
+    assert calls == []
+
+    deliberate = _RouteHandler({
+        "command": command,
+        "session_id": session.session_id,
+        "command_id": deliberate_retry_id,
+    })
+    routes.handle_post(deliberate, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert deliberate.status == 200
+    assert deliberate.json_body() == {
+        "output": "deliberate result",
+        "command_id": deliberate_retry_id,
+    }
+    assert calls == [command]
+
+
+def test_commands_exec_refuses_fresh_matching_retry_while_original_worker_is_live(monkeypatch):
+    """A live matching marker remains pending and fenced against a fresh id."""
+    from api import commands, routes
+
+    sid = "live-matching-command-session"
+    original_id = "webui-command-live-original"
+    retry_id = "webui-command-live-retry"
+
+    class Session:
+        session_id = sid
+        profile = "default"
+        read_only = False
+        is_read_only = False
+
+        def __init__(self):
+            self.messages = [
+                {
+                    "role": "user",
+                    "content": "/memory approve stable-id",
+                    "_webui_command_id": original_id,
+                },
+                {
+                    "role": "assistant",
+                    "content": "Command started; its final result has not been saved yet.",
+                    "_webui_command_id": original_id,
+                    "_webui_command_pending": True,
+                    "_webui_command_run_token": "live-token",
+                },
+            ]
+            self.saved = 0
+
+        def save(self):
+            self.saved += 1
+
+    session = Session()
+    live_token = routes._register_webui_command_run(sid, original_id)
+    assert live_token
+    session.messages[1]["_webui_command_run_token"] = live_token
+    calls = []
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(commands, "execute_agent_command", lambda command: calls.append(command))
+
+    try:
+        handler = _RouteHandler({
+            "command": "/memory approve stable-id",
+            "session_id": sid,
+            "command_id": retry_id,
+        })
+        routes.handle_post(handler, SimpleNamespace(path="/api/commands/exec", query=""))
+    finally:
+        routes._unregister_webui_command_run(sid, original_id, live_token)
+
+    assert handler.status == 409
+    assert "already in progress" in handler.json_body()["error"]
+    assert calls == []
+    assert session.saved == 0
+    assert session.messages[1]["_webui_command_pending"] is True
+
+
 def test_credits_command_returns_not_logged_in_message(monkeypatch):
     """`/credits` should degrade to a friendly login hint when Nous auth is absent."""
     _install_fake_account_usage(
@@ -1071,7 +1213,7 @@ def test_skills_write_approval_runs_inside_active_profile_context(monkeypatch):
         order.append(("exit", purpose))
 
     import api.commands as commands_mod
-    monkeypatch.setattr(commands_mod, "_bundle_profile_context", fake_profile_context)
+    monkeypatch.setattr(commands_mod, "_write_approval_profile_context", fake_profile_context)
     orig_len = len(calls)
 
     import sys
@@ -1109,7 +1251,7 @@ def test_memory_write_approval_runs_inside_active_profile_context(monkeypatch):
         order.append(("exit", purpose))
 
     import api.commands as commands_mod
-    monkeypatch.setattr(commands_mod, "_bundle_profile_context", fake_profile_context)
+    monkeypatch.setattr(commands_mod, "_write_approval_profile_context", fake_profile_context)
 
     import sys
     write_approval_commands = sys.modules["hermes_cli.write_approval_commands"]
@@ -1141,6 +1283,77 @@ def test_memory_write_approval_runs_inside_active_profile_context(monkeypatch):
         ("call_handler", "memory"),
         ("exit", "/api/commands/exec:memory"),
     ], order
+
+
+def test_write_approval_commands_bind_root_profile_and_keep_all_reads_inside_scope(monkeypatch):
+    """Both approval commands must bind the root and keep Agent reads in scope."""
+    from contextlib import contextmanager
+
+    from api import profiles
+
+    calls = _install_fake_write_approval(monkeypatch, result="ok")
+    events = []
+
+    @contextmanager
+    def fake_readonly_scope(purpose, logger_override=None, *, include_root=False):
+        events.append(("enter", purpose, include_root))
+        yield True
+        events.append(("exit", purpose, include_root))
+
+    monkeypatch.setattr(profiles, "profile_env_for_active_request_readonly", fake_readonly_scope)
+
+    import sys
+    write_approval_commands = sys.modules["hermes_cli.write_approval_commands"]
+    original_handler = write_approval_commands.handle_pending_subcommand
+
+    def recording_handler(*args, **kwargs):
+        events.append(("handler", args[0]))
+        return original_handler(*args, **kwargs)
+
+    monkeypatch.setattr(write_approval_commands, "handle_pending_subcommand", recording_handler)
+    memory_tool = sys.modules["tools.memory_tool"]
+    monkeypatch.setattr(
+        memory_tool,
+        "load_on_disk_store",
+        lambda: events.append(("load_store", None)) or _FAKE_MEMORY_STORE,
+    )
+
+    from api.commands import execute_agent_command
+
+    assert execute_agent_command("/skills pending") == "ok"
+    assert execute_agent_command("/memory pending") == "ok"
+    assert events == [
+        ("enter", "/api/commands/exec:skills", True),
+        ("handler", "skills"),
+        ("exit", "/api/commands/exec:skills", True),
+        ("enter", "/api/commands/exec:memory", True),
+        ("load_store", None),
+        ("handler", "memory"),
+        ("exit", "/api/commands/exec:memory", True),
+    ]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("command", ["/skills pending", "/memory pending"])
+def test_write_approval_commands_fail_closed_when_profile_binding_fails(monkeypatch, command):
+    """A failed readonly profile binding must not expose or mutate a pending store."""
+    from contextlib import contextmanager
+
+    from api import profiles
+
+    calls = _install_fake_write_approval(monkeypatch, result="must not run")
+
+    @contextmanager
+    def fake_readonly_scope(*_args, **_kwargs):
+        yield False
+
+    monkeypatch.setattr(profiles, "profile_env_for_active_request_readonly", fake_readonly_scope)
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(RuntimeError, match="profile"):
+        execute_agent_command(command)
+    assert calls == []
 
 
 def test_memory_pending_dispatches_to_write_approval_handler(monkeypatch):

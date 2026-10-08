@@ -2550,13 +2550,19 @@ async function loadSession(sid){
   const _expectedLoadProfile = Object.prototype.hasOwnProperty.call(opts,'ownerProfile')
     ? String(opts.ownerProfile||'default')
     : null;
+  const _expectedLoadSessionId = Object.prototype.hasOwnProperty.call(opts,'ownerSessionId')
+    ? String(opts.ownerSessionId||'')
+    : null;
   const _loadProfileIsCurrent = () => !_expectedLoadProfile
     || (typeof _profileMatchesActiveProfile==='function'
       && _profileMatchesActiveProfile(_expectedLoadProfile,S.activeProfile||'default'));
+  const _loadOwnerIsCurrent = () => _loadProfileIsCurrent()
+    && (!_expectedLoadSessionId
+      || !!(S&&S.session&&S.session.session_id===_expectedLoadSessionId));
   // An owner-scoped reconciliation must fail closed before any stream teardown,
   // draft save, transcript clear, or loading placeholder can affect another
-  // profile's visible conversation.
-  if(!_loadProfileIsCurrent())return;
+  // session/profile's visible conversation.
+  if(!_loadOwnerIsCurrent())return;
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
@@ -2613,7 +2619,7 @@ async function loadSession(sid){
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid
     && _loadSessionGeneration === _loadGeneration
-    && _loadProfileIsCurrent();
+    && _loadOwnerIsCurrent();
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -3024,7 +3030,7 @@ async function loadSession(sid){
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration, ownerProfile:_expectedLoadProfile, ownerSessionId:_expectedLoadSessionId});
     } catch(e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -3141,7 +3147,7 @@ async function loadSession(sid){
     // "messages already populated" early-return inside _ensureMessagesLoaded
     // does NOT skip the swap to the new transcript.
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration, ownerProfile:_expectedLoadProfile, ownerSessionId:_expectedLoadSessionId});
     } catch (e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -4060,7 +4066,17 @@ async function _ensureMessagesLoaded(sid, opts) {
   // S.messages in a single frame.
   opts = opts || {};
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
-  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
+  const _expectedLoadProfile = opts.ownerProfile == null ? null : String(opts.ownerProfile||'default');
+  const _expectedLoadSessionId = opts.ownerSessionId == null ? null : String(opts.ownerSessionId||'');
+  const _ownerProfileIsCurrent = () => !_expectedLoadProfile
+    || (typeof _profileMatchesActiveProfile==='function'
+      && _profileMatchesActiveProfile(_expectedLoadProfile,S.activeProfile||'default'));
+  const _ownerSessionIsCurrent = () => !_expectedLoadSessionId
+    || !!(S&&S.session&&S.session.session_id===_expectedLoadSessionId);
+  const _ownsLoad = () => _loadingSessionId === sid
+    && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration)
+    && _ownerProfileIsCurrent()
+    && _ownerSessionIsCurrent();
   if (!_ownsLoad()) return;
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
@@ -4094,8 +4110,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
+  if (!_ownsLoad()) return;
   _messagesTruncated = !!data.session._messages_truncated;
+  if (!_ownsLoad()) return;
   _oldestIdx = data.session._messages_offset || 0;
+  if (!_ownsLoad()) return;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
@@ -4108,8 +4127,10 @@ async function _ensureMessagesLoaded(sid, opts) {
   // Clearing here and then overwriting is wasteful, and if S.busy becomes true
   // before the next render, the fallback can't re-derive from messages.
   if(!(typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[sid])){
+    if (!_ownsLoad()) return;
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
   }
+  if (!_ownsLoad()) return;
   clearLiveToolCards();
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
   // _turnTps, _gatewayRouting, _statusCard, _anchor_stream_id) across the loadSession replace.
@@ -4120,13 +4141,18 @@ async function _ensureMessagesLoaded(sid, opts) {
     const _prev = (Array.isArray(_pendingCarryForwardSnapshot) && _pendingCarryForwardSnapshot.length)
       ? _pendingCarryForwardSnapshot
       : (S.messages || []);
+    if (!_ownsLoad()) return;
     msgs=window._carryForwardEphemeralTurnFields(_prev, msgs);
+    if (!_ownsLoad()) return;
     _pendingCarryForwardSnapshot = null;
   }
+  if (!_ownsLoad()) return;
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
+  if (!_ownsLoad()) return;
   S.messages = msgs;
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
+  if (!_ownsLoad()) return;
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
     // #6999: bound the auto-expansion. This number gates
     // _messageHiddenBeforeCount() (load-older / jump-to-start affordances)
@@ -4144,8 +4170,11 @@ async function _ensureMessagesLoaded(sid, opts) {
     );
   }
   if(S.session&&S.session.session_id===sid){
+    if (!_ownsLoad()) return;
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+    if (!_ownsLoad()) return;
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    if (!_ownsLoad()) return;
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
     // `todo_state` snapshot, derived server-side from the FULL untruncated
@@ -4161,14 +4190,18 @@ async function _ensureMessagesLoaded(sid, opts) {
     // cold-load vs INFLIGHT by timestamp, so calling it again here is
     // safe even when an INFLIGHT snapshot was already restored.
     if(data.session.todo_state !== undefined){
+      if (!_ownsLoad()) return;
       S.session.todo_state = data.session.todo_state;
     }else{
+      if (!_ownsLoad()) return;
       delete S.session.todo_state;
     }
     if(typeof _hydrateTodosFromSession === 'function'){
+      if (!_ownsLoad()) return;
       _hydrateTodosFromSession(S.session);
     }
     if(typeof scheduleTodosRefresh === 'function'){
+      if (!_ownsLoad()) return;
       scheduleTodosRefresh();
     }
     // Only sync the viewed count (which also clears any completion-unread
@@ -4178,9 +4211,13 @@ async function _ensureMessagesLoaded(sid, opts) {
     // read here — mirror the same _isSessionActivelyViewedForList(sid) guard
     // used on the post-load re-ack in loadSession(). (#5917 gate finding)
     if(typeof _isSessionActivelyViewedForList !== 'function' || _isSessionActivelyViewedForList(sid)){
+      if (!_ownsLoad()) return;
       _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
     }
-    if(typeof syncTopbar==='function') syncTopbar();
+    if(typeof syncTopbar==='function'){
+      if (!_ownsLoad()) return;
+      syncTopbar();
+    }
   }
 }
 

@@ -103,12 +103,9 @@ def _unregister_webui_command_run(session_id: str, command_id: str, run_token: s
             _WEBUI_COMMAND_RUNS.pop(key, None)
 
 
-def _invalidate_webui_command_runs(session_id: str) -> None:
-    """Revoke live command ownership after transcript deletion/truncation."""
-    with _WEBUI_COMMAND_RUNS_LOCK:
-        stale = [key for key in _WEBUI_COMMAND_RUNS if key[0] == session_id]
-        for key in stale:
-            _WEBUI_COMMAND_RUNS.pop(key, None)
+def _restore_webui_command_message(message: dict, snapshot: dict) -> None:
+    message.clear()
+    message.update(snapshot)
 
 
 def _publish_session_list_changed(
@@ -17898,6 +17895,7 @@ def handle_post(handler, parsed) -> bool:
                             "but its final result was not saved. Hermes did not run it again; "
                             "verify the effect before submitting a new command."
                         )
+                        message_snapshot = dict(message)
                         message["content"] = output
                         message.pop("_webui_command_pending", None)
                         message["_webui_command_interrupted"] = True
@@ -17905,6 +17903,7 @@ def handle_post(handler, parsed) -> bool:
                         try:
                             session.save()
                         except Exception:
+                            _restore_webui_command_message(message, message_snapshot)
                             logger.exception("Could not settle interrupted WebUI command for session %s", sid)
                             return bad(handler, "Could not recover interrupted command state", 503)
                         return j(handler, {
@@ -17931,7 +17930,54 @@ def handle_post(handler, parsed) -> bool:
                 and str(message.get("content") or "").strip() == command
                 for message in session.messages
             ):
-                return bad(handler, "A matching command may already have run; refusing to run it again", 409)
+                matching_pending_messages = [
+                    message
+                    for message in session.messages
+                    if isinstance(message, dict)
+                    and message.get("role") == "assistant"
+                    and message.get("_webui_command_pending")
+                    and message.get("_webui_command_id") in pending_ids
+                    and any(
+                        isinstance(user_message, dict)
+                        and user_message.get("role") == "user"
+                        and user_message.get("_webui_command_id") == message.get("_webui_command_id")
+                        and str(user_message.get("content") or "").strip() == command
+                        for user_message in session.messages
+                    )
+                ]
+                if matching_pending_messages:
+                    if any(
+                        _webui_command_run_is_active(
+                            sid,
+                            str(message.get("_webui_command_id") or ""),
+                            message.get("_webui_command_run_token"),
+                        )
+                        for message in matching_pending_messages
+                    ):
+                        return bad(handler, "Command execution is already in progress", 409)
+                    matching_pending = matching_pending_messages[0]
+                    output = (
+                        "The previous command attempt was interrupted and may have run, "
+                        "but its final result was not saved. Hermes did not run it again; "
+                        "verify the effect before submitting a new command."
+                    )
+                    matching_pending_snapshot = dict(matching_pending)
+                    matching_pending["content"] = output
+                    matching_pending.pop("_webui_command_pending", None)
+                    matching_pending["_webui_command_interrupted"] = True
+                    matching_pending["_error"] = True
+                    try:
+                        session.save()
+                    except Exception:
+                        _restore_webui_command_message(matching_pending, matching_pending_snapshot)
+                        logger.exception("Could not settle interrupted WebUI command for session %s", sid)
+                        return bad(handler, "Could not recover interrupted command state", 503)
+                    return j(handler, {
+                        "error": output,
+                        "output": output,
+                        "command_id": command_id,
+                        "recovered_interrupted": True,
+                    }, status=409)
             now = time.time()
             run_token = _register_webui_command_run(sid, command_id)
             if not run_token:

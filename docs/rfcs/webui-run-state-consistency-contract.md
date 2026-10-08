@@ -551,6 +551,31 @@ and 5; it does not mark every run-state boundary implemented.
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
 
+## Slash-command recovery ownership
+
+Approval commands use the request profile's Agent home as their durable write
+owner, including the root profile. The scoped binding must succeed before any
+shared approval handler or memory-store load runs; an unrelated worker's mirrored
+process environment must not choose the store. This boundary is independent of
+the browser's current selection.
+
+The session transcript owns command request IDs and completion markers. A live
+command worker fences duplicate submissions. A persisted pending marker without
+a live worker is an interrupted outcome, not proof that the side effect never
+occurred. A same-ID retry returns that settled outcome without executing again.
+A fresh-ID submission of the same command settles the orphan and returns a
+conflict asking the user to verify the effect; only a subsequent deliberate
+submission may execute. Recovery must not silently replay a potentially applied
+write or leave the orphan blocking all future submissions. If saving a settlement
+fails, restore the cached pending marker before returning 503 so the next request
+cannot mistake a failed durable transition for permission to execute.
+
+Browser reconciliation is only a projection update. Its captured session/profile
+owner and mutation generation must remain valid through every awaited session
+and message load, including the inner message fetch, before changing foreground
+state. New Chat, a profile switch, or retirement of the command invalidates that
+ownership. Ordinary session navigation retains its existing load semantics.
+
 ## Client-side unread persistence (sidebar layer)
 
 The sidebar unread dot is backed by two client-side stores in `static/sessions.js`.

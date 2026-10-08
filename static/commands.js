@@ -625,8 +625,8 @@ async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){
     await loadSession(ownerSid,{
       force:true,
       preserveActiveInput:true,
-      commandReconcileId:commandId,
       ownerProfile:ownerProfile,
+      ownerSessionId:ownerSid,
     });
     return !!(S&&Array.isArray(S.messages)&&S.messages.some((message)=>
       message&&message.role==='assistant'

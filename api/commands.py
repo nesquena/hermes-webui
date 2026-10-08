@@ -5,7 +5,7 @@ If hermes-agent is unavailable the endpoint degrades to an empty list
 so the frontend can still load with WEBUI_ONLY commands.
 """
 from __future__ import annotations
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import logging
 import threading
 from typing import Any
@@ -76,6 +76,31 @@ def _bundle_profile_context(purpose: str):
     except ImportError:
         return nullcontext()
     return profile_env_for_active_request(purpose, logger_override=logger)
+
+
+@contextmanager
+def _write_approval_profile_context(purpose: str):
+    """Bind the active profile before any shared pending-store read or write.
+
+    The write-approval helpers resolve their paths through Hermes Agent's
+    context-local home resolver.  Root must be explicit because a streaming
+    worker may have mirrored a named profile into ``os.environ``.  A false
+    binding result is not safe for a command that can approve or reject data,
+    so do not run the handler in that case.
+    """
+    try:
+        from api.profiles import profile_env_for_active_request_readonly
+    except Exception as exc:
+        raise RuntimeError("Write-approval profile binding unavailable") from exc
+
+    with profile_env_for_active_request_readonly(
+        purpose,
+        logger_override=logger,
+        include_root=True,
+    ) as bound:
+        if not bound:
+            raise RuntimeError("Write-approval profile binding unavailable")
+        yield
 
 
 def _normalize_agent_command_name(command: str) -> str:
@@ -469,11 +494,9 @@ def _run_skills_write_approval_command(arg_string: str) -> str:
         logger.warning("write-approval runtime unavailable for /skills", exc_info=True)
         raise RuntimeError("Skill write-approval runtime unavailable") from exc
 
-    # write_approval.py resolves the skill store via the legacy get_hermes_home() path, which
-    # reads process env / TLS rather than anything webui-request-scoped -- without this, a
-    # browser that has selected a non-root profile would read/write the WRONG profile's
-    # pending skill writes (no-op for the root/default profile, the common case).
-    with _bundle_profile_context("/api/commands/exec:skills"):
+    # Agent store paths follow get_hermes_home(), not WebUI request state.
+    # Bind root requests too, independently of another worker's process mirror.
+    with _write_approval_profile_context("/api/commands/exec:skills"):
         out = handle_pending_subcommand(wa.SKILLS, args, set_mode_fn=_write_approval_setter('skills'))
     return out if out is not None else (
         "Unknown /skills subcommand. Use: pending, approve <id>, reject <id>, diff <id>, approval <on|off>.")
@@ -501,11 +524,9 @@ def _run_memory_write_approval_command(arg_string: str) -> str:
         logger.warning("write-approval runtime unavailable for /memory", exc_info=True)
         raise RuntimeError("Memory write-approval runtime unavailable") from exc
 
-    # Both load_on_disk_store() and handle_pending_subcommand() resolve paths via the legacy
-    # get_hermes_home() path (process env / TLS, not anything webui-request-scoped) -- without
-    # this, a browser that has selected a non-root profile would read/write the WRONG
-    # profile's memory (no-op for the root/default profile, the common case).
-    with _bundle_profile_context("/api/commands/exec:memory"):
+    # Both the memory store load and the pending handler need the same explicit
+    # request profile binding, including root; neither may use a worker's mirror.
+    with _write_approval_profile_context("/api/commands/exec:memory"):
         out = handle_pending_subcommand(
             wa.MEMORY, arg_string.split(), memory_store=load_on_disk_store(),
             set_mode_fn=_write_approval_setter('memory'))
