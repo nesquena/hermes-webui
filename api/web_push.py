@@ -113,7 +113,19 @@ def _pywebpush():
     try:
         from pywebpush import WebPushException, webpush
     except ImportError:
-        return None, None
+        # The managed agent runtime relaunches with `python -I`, which ignores
+        # PYTHONPATH. Allow an explicit, opt-in directory holding pywebpush
+        # (installed with `pip install --target`) without touching that runtime.
+        extra = os.getenv("HERMES_WEBUI_PUSH_DEPS_DIR", "").strip()
+        if not extra or not os.path.isdir(extra):
+            return None, None
+        import sys
+        if extra not in sys.path:
+            sys.path.append(extra)
+        try:
+            from pywebpush import WebPushException, webpush
+        except ImportError:
+            return None, None
     return webpush, WebPushException
 
 
