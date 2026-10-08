@@ -9356,7 +9356,10 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(_dmsg&&_dmsg._composerDisabledReasons
+      &&_dmsg._composerDisabledReasons.has('profile-switch')){
+      _btnTitle=_tt('composer_disabled_profile_switch','Switching profile…');
+    }else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
@@ -9417,14 +9420,17 @@ function setBusy(v){
         // skip sending — it will drain when the user returns to that session
         // or when its next stream completes while it is the active view.
         if(S.session&&S.session.session_id!==sid){
-          queueSessionMessage(sid,next);
+          _getSessionQueue(sid,true).unshift(next);
+          _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
           updateQueueBadge(sid);
           return;
         }
         // Keep a queued turn bound to sid if a session-owner handoff started
         // during the settle window; send() must not capture it from the destination.
         if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
-          queueSessionMessage(sid,next);updateQueueBadge(sid);return;
+          _getSessionQueue(sid,true).unshift(next);
+          _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+          updateQueueBadge(sid);return;
         }
         _composerSetText(next.text||'',next.text||'',sid);
         _composerReplaceFiles(Array.isArray(next.files)?next.files:[],sid);

@@ -743,6 +743,44 @@ function _micToastKeyForRecognitionError(error){
   return msgs[error]||null;
 }
 
+function _composerProducerOwnerState(producerHandle){
+  const input=$('msg');
+  if(!producerHandle||typeof _composerProducerContext!=='function'){
+    return {
+      sid:S.session&&S.session.session_id,profile:S.activeProfile||'default',
+      text:input?input.value:'',visible:true,
+    };
+  }
+  const context=_composerProducerContext(null,producerHandle,null);
+  if(!context||context.drop)return null;
+  const visible=typeof _composerOwnerIsVisible==='function'
+    ? _composerOwnerIsVisible(context.ownerSid,context.ownerProfile)
+    : !!(S.session&&S.session.session_id===context.ownerSid);
+  if(visible){
+    return {
+      sid:context.ownerSid,profile:context.ownerProfile,
+      text:input?input.value:'',visible:true,
+    };
+  }
+  const remembered=typeof _composerRememberedOwnerSnapshot==='function'
+    ? _composerRememberedOwnerSnapshot(context.ownerSid,context.ownerProfile)
+    : null;
+  if(remembered){
+    return {sid:context.ownerSid,profile:context.ownerProfile,text:remembered.text,visible:false};
+  }
+  if(context.ownerSid==null&&producerHandle.generation!=null
+    &&typeof _composerOwnershipTransition!=='undefined'
+    &&_composerOwnershipTransition
+    &&_composerOwnershipTransition.generation===producerHandle.generation
+    &&producerHandle.ownerRole==='destination'){
+    return {
+      sid:null,profile:context.ownerProfile,
+      text:typeof _composerPendingText==='function'?_composerPendingText():'',visible:false,
+    };
+  }
+  return null;
+}
+
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
   const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
@@ -885,6 +923,8 @@ function _micToastKeyForRecognitionError(error){
 
   function _commitTranscript(text, prefixOverride, producerHandle=_micComposerProducerToken){
     if(!_micProducerIsCurrent(producerHandle))return;
+    const ownerState=_composerProducerOwnerState(producerHandle);
+    if(!ownerState)return;
     // `prefixOverride` is the composer content captured at recording start,
     // passed only by the async server-STT path (recorder.onstop → _transcribeBlob).
     // The sync browser-SR path doesn't call this function — it commits inline
@@ -903,9 +943,9 @@ function _micToastKeyForRecognitionError(error){
     const clean=(text||'').trim();
     let committed;
     if(!clean){
-      committed = ta.value;
+      committed = ownerState.text;
     }else if(_dictationAppend){
-      const base = prefixOverride !== undefined ? ta.value : (ta.value || _prefix);
+      const base = prefixOverride !== undefined ? ownerState.text : (ownerState.text || _prefix);
       if(!base){
         committed = clean;
       }else{
@@ -917,12 +957,14 @@ function _micToastKeyForRecognitionError(error){
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
     }
-    if(typeof _composerSetText==='function')_composerSetText(committed,clean,null,producerHandle);
-    else ta.value=committed;
-    autoResize();
+    const rendered=typeof _composerSetText==='function'
+      ? _composerSetText(committed,clean,null,producerHandle)
+      : (ta.value=committed,true);
+    if(rendered!==false)autoResize();
     if(window._micPendingSend){
       window._micPendingSend=false;
-      send();
+      const settledOwner=_composerProducerOwnerState(producerHandle);
+      if(settledOwner&&settledOwner.visible)send();
     }
   }
 
@@ -1073,7 +1115,6 @@ function _micToastKeyForRecognitionError(error){
   window._stopMic=_stopMic; // expose for send-guard above
 
   async function _stopAndSettleComposerDictation(){
-    window._micPendingSend=false;
     const settlement=_micSettlementPromise;
     if(window._micActive||_isRecording)_stopMic();
     await settlement;
@@ -1892,7 +1933,24 @@ window.renderTranscript=function(container, messages, opts){
 
   function _voiceModeSend(){
     if(!_voiceModeActive) return;
-    const text=(ta.value||'').trim();
+    const producerHandle=_voiceComposerProducerToken;
+    const resolveOwner=()=>_composerProducerOwnerState(producerHandle);
+    const retireStaleSend=()=>{
+      _voiceModeThinkingSid=null;
+      try{if(_recognition)_recognition.abort();}catch(_){}
+      _recognition=null;
+      _startListening();
+    };
+    const initialOwner=resolveOwner();
+    const pendingDestination=!!(
+      initialOwner&&!initialOwner.visible&&producerHandle
+      &&producerHandle.generation!=null&&producerHandle.ownerRole==='destination'
+      &&typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight
+    );
+    if(!initialOwner||(!initialOwner.visible&&!pendingDestination)){
+      retireStaleSend();return;
+    }
+    const text=String(initialOwner.text||'').trim();
     // While a New Session handoff is pending, recognised speech is buffered.
     const pendingText=!text&&typeof _composerPendingText==='function'
       ? String(_composerPendingText()||'').trim() : '';
@@ -1908,7 +1966,9 @@ window.renderTranscript=function(container, messages, opts){
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     const commitSend=()=>{
-      const settled=(ta.value||'').trim()||(typeof _composerPendingText==='function'
+      const settledOwner=resolveOwner();
+      if(!settledOwner||!settledOwner.visible){retireStaleSend();return;}
+      const settled=String(settledOwner.text||'').trim()||(typeof _composerPendingText==='function'
         ? String(_composerPendingText()||'').trim() : '');
       if(!settled){ setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300); return; }
       // Pin the receiving session so TTS won't speak another session's reply.

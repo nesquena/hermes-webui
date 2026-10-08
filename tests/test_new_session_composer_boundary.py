@@ -133,7 +133,9 @@ def _voice_mode_block() -> str:
     start = BOOT_JS.rindex("(function(){", 0, sr)
     end = BOOT_JS.index("\n})();", BOOT_JS.index(
         "window._voiceModeImmediateSend=_voiceModeSend;")) + len("\n})();")
-    return BOOT_JS[start:end]
+    owner_start = BOOT_JS.index("function _composerProducerOwnerState(")
+    owner_end = BOOT_JS.index("\n\n(function(){", owner_start)
+    return BOOT_JS[owner_start:owner_end] + "\n" + BOOT_JS[start:end]
 
 
 def _review_race_production_helpers() -> str:
@@ -1770,18 +1772,30 @@ def _run_profile_switch_settlement_harness(
           _pendingProfileModel:'prior-model',_pendingProfileModelProvider:'prior-provider',
           _profileDefaultWorkspace:'/prior-workspace',_profileSwitchWorkspace:'/prior-override',
         }};
-        const window={{_defaultModel:'prior-default',_activeProvider:'prior-provider'}};
+        const focusEvents=[];
+        let sendButtonUpdates=0;
+        const msg={{value:'source draft',disabled:false,focus(){{focusEvents.push('msg');}}}};
+        const window={{
+          _defaultModel:'prior-default',_activeProvider:'prior-provider',
+          _stopAndSettleComposerDictation(){{return Promise.resolve();}},
+        }};
         let pickedModel='prior-model';
         let reasoningModel='prior-model';
         let cachedRenders=0;
         const localStorage={{removeItem(){{}}}};
         const elements={{
+          msg,
+          fileInput:{{disabled:false}},btnAttach:{{disabled:false}},
+          btnSavedPrompts:{{disabled:false}},btnMic:{{disabled:false}},
+          btnVoiceMode:{{disabled:false}},
           profileChip:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},
           profileChipLabel:{{textContent:'default'}},
           titlebarProfileBtn:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},
           titlebarProfileLabel:{{textContent:'default'}},
         }};
         const $=id=>elements[id]||null;
+        const document={{activeElement:msg,querySelectorAll(){{return [];}}}};
+        function updateSendBtn(){{sendButtonUpdates+=1;}}
         function closeSessionActionMenu(){{}}
         function _invalidateSessionListRenders(){{}}
         function _setProfileSwitchListEmbargo(){{}}
@@ -1860,6 +1874,7 @@ def _run_profile_switch_settlement_harness(
             defaults:[window._defaultModel,window._activeProvider,S._profileDefaultWorkspace],
             pendingOverrides:[S._pendingProfileModel,S._pendingProfileModelProvider,S._profileSwitchWorkspace,S._pendingSessionToolsets],
             pickedModel,reasoningModel,cachedRenders,skeleton:_sessionListSkeletonActive,
+            focusEvents,sendButtonUpdates,msgDisabled:msg.disabled,
           }}));
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
@@ -3115,6 +3130,9 @@ def test_superseded_media_callbacks_drop_payload_before_composer_mutation():
           ta.value=value;
           routed.push({{kind:'text',value,transition,handle}});
         }}
+        function _composerProducerOwnerState(){{
+          return {{sid:null,profile:'default',text:ta.value,visible:true}};
+        }}
         function renderTray(){{trayRenders++;}}
         function send(){{sends++;}}
         function autoResize(){{resizes++;}}
@@ -3989,12 +4007,13 @@ def test_failed_new_session_reconciles_file_dropped_during_create_with_visible_t
 
 def test_profile_switch_settles_dictation_before_saving_every_writable_source():
     switch = _function(PANELS_JS, "switchToProfile", "\n\nfunction openProfileCreate")
-    settle = switch.index("await window._stopAndSettleComposerDictation()")
+    settle = switch.index("window._stopAndSettleComposerDictation()")
     save = switch.index("await _saveComposerDraftNow(")
     cookie_switch = switch.index("await api('/api/profile/switch'")
 
     assert settle < save < cookie_switch
-    assert "if (!_openingExistingSidebarSession && S.session" in switch
+    assert "if (S.session" in switch
+    assert "if (!_openingExistingSidebarSession && S.session" not in switch
     assert "if (sessionInProgress && !_openingExistingSidebarSession" not in switch
     assert "setProfileSwitchComposerPending(true)" in switch
     assert "setProfileSwitchComposerPending(false)" in switch
@@ -4010,9 +4029,140 @@ def test_dictation_settlement_waits_for_server_transcription_completion():
 
     assert "const settlement=_micSettlementPromise" in stop
     assert "await settlement" in stop
+    assert "window._micPendingSend=false" not in stop
+    switch = _function(PANELS_JS, "switchToProfile", "\n\nfunction openProfileCreate")
+    assert "Promise.race([" in switch
+    assert "setTimeout(resolve,10000)" in switch
     assert recorder.index("await _transcribeBlob(") < recorder.index(
         "settle()", recorder.index("await _transcribeBlob(")
     )
+
+
+@pytest.mark.parametrize("reject_replacement", [False, True])
+def test_profile_switch_restores_send_state_and_prior_focus(reject_replacement):
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=False, reject_replacement=reject_replacement
+    )
+
+    assert result["msgDisabled"] is False
+    assert result["sendButtonUpdates"] == 1
+    assert result["focusEvents"] == ["msg"]
+
+
+def test_failed_new_session_requeues_drained_item_at_front_without_restamping():
+    start = UI_JS.index("function setBusy(v){")
+    end = UI_JS.index("\n\n// ── Queue chip display", start)
+    settle = UI_JS[start:end]
+
+    assert settle.count("_getSessionQueue(sid,true).unshift(next)") == 2
+    assert "queueSessionMessage(sid,next)" not in settle
+    assert settle.count("_persistSessionQueueStorage(sid,_getSessionQueue(sid,false))") == 2
+
+
+def test_late_server_transcription_updates_source_owner_not_visible_destination():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    owner_start = BOOT_JS.index("function _composerProducerOwnerState(")
+    owner_end = BOOT_JS.index("\n\n(function(){", owner_start)
+    mic_start = BOOT_JS.index("function _micProducerIsCurrent(")
+    mic_end = BOOT_JS.index("\n\n  function _isServerSttUnavailable", mic_start)
+    mic_helpers = BOOT_JS[owner_start:owner_end] + "\n" + BOOT_JS[mic_start:mic_end]
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'original draft'}};
+        const ta=msg;
+        const S={{
+          session:{{session_id:'source',profile:'default'}},activeProfile:'default',
+          pendingFiles:[]
+        }};
+        const $=id=>id==='msg'?msg:null;
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,files:[...(files||[])],profile}});
+          return Promise.resolve();
+        }}
+        {authority}
+        _rememberComposerOwnerState('source','default',{{
+          text:'original draft',files:[],revision:0
+        }},1);
+        S.session={{session_id:'destination',profile:'default'}};
+        msg.value='destination private draft';
+        const handle=Object.freeze({{
+          producerToken:'mic:1',generation:null,ownerRole:'owner',
+          ownerSid:'source',ownerProfile:'default'
+        }});
+        let _micComposerProducerToken=handle;
+        let _dictationAppend=true;
+        let _prefix='original draft';
+        const window={{_micPendingSend:false}};
+        let resizes=0,sends=0;
+        function autoResize(){{resizes++;}}
+        function send(){{sends++;}}
+        function renderTray(){{}}
+        function showToast(){{}}
+        function t(value){{return value;}}
+        class File{{}}
+        {mic_helpers}
+        _commitTranscript('spoken addition','original draft',handle);
+        const source=_composerRememberedOwnerSnapshot('source','default');
+        process.stdout.write(JSON.stringify({{
+          visible:msg.value,source:source&&source.text,resizes,sends,saves
+        }}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["visible"] == "destination private draft"
+    assert result["source"] == "original draft spoken addition"
+    assert result["resizes"] == 0
+    assert result["sends"] == 0
+    assert result["saves"][-1]["sid"] == "source"
+    assert result["saves"][-1]["text"] == "original draft spoken addition"
+
+
+def test_late_voice_mode_completion_retires_before_reading_destination_draft():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("function _voiceModeSend(){")
+    end = BOOT_JS.index("\n\n  function _speakResponse", start)
+    voice_send = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const ta={{value:'destination private draft'}};
+        const oldHandle={{producerToken:'voice:old'}};
+        let _voiceComposerProducerToken=oldHandle;
+        let _voiceModeActive=true;
+        let _voiceModeState='listening';
+        let _voiceModeThinkingSid=null;
+        let _recognition={{abort(){{}}}};
+        let _newSessionInFlight=null;
+        const S={{session:{{session_id:'destination'}}}};
+        let sends=0,restarts=0;
+        function send(){{sends++;}}
+        function _startListening(){{restarts++;_voiceModeState='listening';}}
+        function _setState(value){{_voiceModeState=value;}}
+        function _composerPendingText(){{return '';}}
+        function _newSessionResultWasSuperseded(){{return false;}}
+        function _composerSetText(){{}}
+        function _composerProducerOwnerState(handle){{
+          return handle===oldHandle
+            ? {{sid:'source',profile:'default',text:'spoken prompt',visible:false}}
+            : null;
+        }}
+        {voice_send}
+        _voiceModeSend();
+        process.stdout.write(JSON.stringify({{sends,restarts,state:_voiceModeState}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "sends": 0, "restarts": 1, "state": "listening"
+    }
 
 
 def test_failed_new_session_resumes_queue_after_clearing_inflight_guard():

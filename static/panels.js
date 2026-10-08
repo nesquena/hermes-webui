@@ -7227,6 +7227,11 @@ async function switchToProfile(name) {
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
   let _savedSourceDraftForReplacement = null;
+  const _profileSwitchComposer = $('msg');
+  const _restoreComposerFocus = !!(
+    _profileSwitchComposer && typeof document !== 'undefined'
+    && document.activeElement === _profileSwitchComposer
+  );
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
@@ -7239,14 +7244,24 @@ async function switchToProfile(name) {
     setProfileSwitchComposerPending(true);
     if(typeof window!=='undefined'
       &&typeof window._stopAndSettleComposerDictation==='function'){
-      await window._stopAndSettleComposerDictation();
+      let _dictationSettlementTimeout=null;
+      try{
+        await Promise.race([
+          window._stopAndSettleComposerDictation(),
+          new Promise(resolve=>{
+            _dictationSettlementTimeout=setTimeout(resolve,10000);
+          }),
+        ]);
+      }finally{
+        if(_dictationSettlementTimeout!==null)clearTimeout(_dictationSettlementTimeout);
+      }
     }
     if(!ownsPane())return false;
     // A replacement New Chat runs after the profile cookie changes. Persist the
     // source owner's draft while the old profile still owns the cookie, then
     // hand that exact owner to newSession() so it does not repeat a cross-profile
     // draft write that the backend correctly rejects with 409.
-    if (!_openingExistingSidebarSession && S.session
+    if (S.session
         && typeof _saveComposerDraftNow === 'function'
         && !(typeof _isReadOnlySession === 'function' && _isReadOnlySession(S.session))) {
       const sourceSid = S.session.session_id;
@@ -7597,6 +7612,11 @@ async function switchToProfile(name) {
     }
     if(_switchGen===_profileSwitchGeneration){
       setProfileSwitchComposerPending(false);
+      if(typeof updateSendBtn==='function')updateSendBtn();
+      if(_restoreComposerFocus&&_profileSwitchComposer&&!_profileSwitchComposer.disabled
+        &&typeof _profileSwitchComposer.focus==='function'){
+        _profileSwitchComposer.focus();
+      }
     }
   }
   });
