@@ -127,6 +127,14 @@
 
 ### Fixed
 
+- **A Gateway conversation no longer gets stuck reloading forever.** When a Gateway-backed turn rewrote a conversation's
+  saved file, the live-update stream could keep comparing against an older cached message count, decide on every
+  reconnect that the server was ahead, and reload, reconnect and reload again, leaving the chat on "Loading
+  messages". The reconnect check now reads the current file's own message count through a small bounded read (it never
+  parses the whole transcript, and remembers the answer per file version so reconnect storms stay cheap), and files
+  written by crash recovery and repair carry a trustworthy count so a recovered conversation still catches up.
+  Thanks @alvistar. (#7673, fixes #7672)
+
 - **The Hermes dashboard link works when the dashboard is served under a sub-path.** A dashboard URL such as
   `https://host/hermes/` is now accepted and opened with its path (and its trailing slash) intact, instead of being
   rejected or cut back to the host. Backslashes and their encoded forms are still refused, and the server-side
