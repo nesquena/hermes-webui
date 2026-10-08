@@ -15027,6 +15027,7 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/session":
+        _note_session_device(handler, parse_qs(parsed.query).get("session_id", [""])[0])
         return _handle_session_get(handler, parsed)
 
     if parsed.path == "/api/session/lineage/report":
@@ -17617,6 +17618,7 @@ def handle_post(handler, parsed) -> bool:
         return _handle_bg_task_complete_ack(handler, body)
 
     if parsed.path == "/api/chat/start":
+        _note_session_device(handler, (body or {}).get("session_id"))
         return _handle_chat_start(handler, body, diag=diag)
 
     if parsed.path == "/api/chat":
@@ -17937,9 +17939,13 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/push/subscribe":
+        if not _push_csrf_ok(handler):
+            return _push_csrf_reject(handler)
         return _handle_push_subscribe(handler, body)
 
     if parsed.path == "/api/push/test":
+        if not _push_csrf_ok(handler):
+            return _push_csrf_reject(handler)
         return _handle_push_test(handler)
 
     # ── Settings (POST) ──
@@ -18937,6 +18943,8 @@ def handle_delete(handler, parsed) -> bool:
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
     if parsed.path == "/api/push/subscribe":
+        if not _push_csrf_ok(handler):
+            return _push_csrf_reject(handler)
         return _handle_push_unsubscribe(handler, body)
 
     if parsed.path == "/api/prompts":
@@ -23393,17 +23401,64 @@ def _handle_cron_status(handler, parsed):
     return j(handler, {"running": all_running})
 
 
-def _handle_push_status(handler, parsed):
-    """Web Push availability plus whether *this* endpoint is subscribed.
+def _push_owner(handler) -> str:
+    from api import web_push
 
-    Exposes only booleans/counts — never key material or other subscriptions.
+    return web_push.owner_from_headers(getattr(handler, "headers", None))
+
+
+def _push_csrf_ok(handler) -> bool:
+    """Strict CSRF for Web Push mutations.
+
+    ``_check_csrf`` deliberately admits requests without Origin/Referer (curl,
+    agents). Push routes bind a durable delivery endpoint to this browser, so
+    when auth is enabled they ALWAYS require a valid X-Hermes-CSRF-Token.
+    """
+    from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
+
+    if not is_auth_enabled():
+        return True
+    headers = getattr(handler, "headers", None)
+    submitted = (headers.get(CSRF_HEADER_NAME) if headers is not None else "") or ""
+    return verify_csrf_token(parse_cookie(handler) or "", submitted)
+
+
+def _push_csrf_reject(handler):
+    arm_connection_close_if_body_pending(handler)
+    return j(handler, {"error": "Session expired - reload the page"}, status=403)
+
+
+def _note_session_device(handler, session_id) -> None:
+    """Remember which device opened/started ``session_id`` (push targeting)."""
+    try:
+        from api import web_push
+
+        owner = web_push.owner_from_headers(handler.headers)
+        if owner and session_id and web_push.is_enabled():
+            web_push.register_session_owner(str(session_id), owner)
+    except Exception:
+        logger.debug("push session-owner note failed", exc_info=True)
+
+
+def _handle_push_status(handler, parsed):
+    """Web Push availability plus whether *this device's* endpoint is subscribed.
+
+    Exposes only booleans -- never key material, owners, or other devices'
+    subscriptions. A legacy (pre-owner) subscription whose exact endpoint the
+    caller presents is bound to the caller's device.
     """
     from api import web_push
 
     out = dict(web_push.status())
     endpoint = parse_qs(parsed.query).get("endpoint", [""])[0]
+    owner = _push_owner(handler)
     try:
-        out["subscribed"] = web_push.has_subscription(endpoint) if endpoint else False
+        subscribed = False
+        if endpoint and owner:
+            subscribed = web_push.has_subscription(endpoint, owner)
+            if not subscribed and web_push.adopt_legacy_subscription(endpoint, owner):
+                subscribed = True
+        out["subscribed"] = subscribed
     except web_push.PushStoreUnavailable as exc:
         return bad(handler, str(exc), 503)
     return j(handler, out)
@@ -23423,13 +23478,16 @@ def _handle_push_subscribe(handler, body):
 
     if not web_push.is_enabled():
         return bad(handler, "Web Push is not configured", 404)
+    owner = _push_owner(handler)
+    if not owner:
+        return bad(handler, "A valid X-Hermes-Push-Device header is required - reload the page")
     body = body if isinstance(body, dict) else {}
     subscription = body.get("subscription")
     if not isinstance(subscription, dict):
         return bad(handler, "subscription is required")
     try:
         web_push.add_subscription(
-            subscription, previous_endpoint=body.get("previous_endpoint")
+            subscription, previous_endpoint=body.get("previous_endpoint"), owner=owner
         )
     except web_push.PushStoreUnavailable as exc:
         return bad(handler, str(exc), 503)
@@ -23441,12 +23499,15 @@ def _handle_push_subscribe(handler, body):
 def _handle_push_unsubscribe(handler, body):
     from api import web_push
 
+    owner = _push_owner(handler)
+    if not owner:
+        return bad(handler, "A valid X-Hermes-Push-Device header is required - reload the page")
     body = body if isinstance(body, dict) else {}
     endpoint = str(body.get("endpoint") or "").strip()
     if not endpoint:
         return bad(handler, "endpoint is required")
     try:
-        removed = web_push.remove_subscription(endpoint)
+        removed = web_push.remove_subscription(endpoint, owner)
     except web_push.PushStoreUnavailable as exc:
         return bad(handler, str(exc), 503)
     return j(handler, {"ok": True, "removed": bool(removed)})
@@ -23457,13 +23518,16 @@ def _handle_push_test(handler):
 
     if not web_push.is_enabled():
         return bad(handler, "Web Push is not configured", 404)
+    owner = _push_owner(handler)
+    if not owner:
+        return bad(handler, "A valid X-Hermes-Push-Device header is required - reload the page")
     try:
-        count = web_push.subscription_count()
+        count = web_push.subscription_count(owner)
     except web_push.PushStoreUnavailable as exc:
         return bad(handler, str(exc), 503)
     if not count:
-        return bad(handler, "No Web Push subscriptions on this server", 409)
-    queued = web_push.send_test()
+        return bad(handler, "This device has no Web Push subscription", 409)
+    queued = web_push.send_test(owner)
     return j(handler, {"ok": bool(queued), "subscriptions": count})
 
 

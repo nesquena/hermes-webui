@@ -34,23 +34,47 @@
 <script>window.__HERMES_WEBUI_BUNDLE_VERSION__='__WEBUI_VERSION__';</script>
 <script>(function(){
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
-  if(!token||!window.fetch)return;
+  // Per-browser device id for Web Push targeting. Random, stored only in this
+  // browser's localStorage, sent as X-Hermes-Push-Device on same-origin /api/
+  // calls; the server keeps just a hash and never echoes it back.
+  var device='';
+  try{
+    device=localStorage.getItem('hermes-webui-push-device')||'';
+    if(!/^[A-Za-z0-9_-]{16,64}$/.test(device)){
+      var a=new Uint8Array(24);crypto.getRandomValues(a);
+      device=btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+      localStorage.setItem('hermes-webui-push-device',device);
+    }
+  }catch(_){device='';}
+  window.__HERMES_PUSH_DEVICE__=device;
+  if((!token&&!device)||!window.fetch)return;
   var originalFetch=window.fetch.bind(window);
-  function sameOriginUnsafe(input,init){
-    var method=((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
-    if(!/^(POST|PUT|PATCH|DELETE)$/.test(method))return false;
+  function sameOrigin(input){
     try{
       var raw=(typeof input==='string'||input instanceof URL)?input:(input&&input.url)||'';
       var url=new URL(raw,document.baseURI||location.href);
-      if(url.origin!==location.origin)return false;
-      return !/\/api\/(auth\/login|csp-report)$/.test(url.pathname);
-    }catch(_){return false;}
+      return url.origin===location.origin?url:null;
+    }catch(_){return null;}
+  }
+  function sameOriginUnsafe(input,init){
+    var method=((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
+    if(!/^(POST|PUT|PATCH|DELETE)$/.test(method))return false;
+    var url=sameOrigin(input);
+    if(!url)return false;
+    return !/\/api\/(auth\/login|csp-report)$/.test(url.pathname);
+  }
+  function wantsDevice(input){
+    var url=sameOrigin(input);
+    return !!(device&&url&&/\/api\//.test(url.pathname));
   }
   window.fetch=function(input,init){
-    if(sameOriginUnsafe(input,init)){
+    var unsafe=!!token&&sameOriginUnsafe(input,init);
+    var dev=wantsDevice(input);
+    if(unsafe||dev){
       var opts=init?Object.assign({},init):{};
       var headers=new Headers(opts.headers!==undefined?opts.headers:((input&&input.headers)||{}));
-      if(!headers.has('X-Hermes-CSRF-Token'))headers.set('X-Hermes-CSRF-Token',token);
+      if(unsafe&&!headers.has('X-Hermes-CSRF-Token'))headers.set('X-Hermes-CSRF-Token',token);
+      if(dev&&!headers.has('X-Hermes-Push-Device'))headers.set('X-Hermes-Push-Device',device);
       opts.headers=headers;
       return originalFetch(input,opts);
     }
@@ -60,8 +84,9 @@
     var originalBeacon=navigator.sendBeacon.bind(navigator);
     navigator.sendBeacon=function(url,data){
       try{
-        if(sameOriginUnsafe(url,{method:'POST'})){
+        if(token&&sameOriginUnsafe(url,{method:'POST'})){
           var headers={'X-Hermes-CSRF-Token':token};
+          if(device)headers['X-Hermes-Push-Device']=device;
           if(data&&data.type)headers['Content-Type']=data.type;
           originalFetch(url,{method:'POST',credentials:'include',headers:headers,body:data,keepalive:true});
           return true;

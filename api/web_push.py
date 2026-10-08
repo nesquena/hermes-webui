@@ -9,10 +9,25 @@ Design notes
   unset, from ``<STATE_DIR>/webui_vapid.json`` (mode 0600, created by
   ``scripts/generate_vapid_keys.py``).  The private key is never returned by any
   API and never logged.
-* One WebUI instance is one trust domain (one password), so subscriptions are
-  stored per instance in ``<STATE_DIR>/webui_push_subscriptions.json`` (0600)
-  and every notification fans out to all of them.  There is no per-browser
-  owner token.
+* Subscriptions are stored per instance in
+  ``<STATE_DIR>/webui_push_subscriptions.json`` (0600), each bound to an
+  *owner*: ``sha256`` of a random per-browser device id (``localStorage``,
+  sent as ``X-Hermes-Push-Device`` on same-origin API calls).  Only the hash is
+  stored; neither it nor any endpoint is ever returned by an API.
+* Session -> owner(s) is learned when a device starts a turn
+  (``POST /api/chat/start``) or opens a session (``GET /api/session``) and kept
+  in ``<STATE_DIR>/webui_push_session_owners.json`` (bounded, 0600).
+  Session-done/approval/clarify/bg-task pushes go only to subscriptions whose
+  owner opened that session.  A session with NO known owner (cron, gateway,
+  never opened in a push-enabled browser) is NOT broadcast -- the conservative
+  default.  ``HERMES_WEBUI_PUSH_BROADCAST_UNOWNED=1`` opts in to fan such
+  sessions out to every subscription.  ``/api/push/test`` targets only the
+  caller's own subscription(s).
+* Legacy subscriptions (stored before owners existed) have ``owner == ""``.
+  They receive nothing until bound: the owning device binds it on its next
+  ``/api/push/status?endpoint=...`` (it proves possession of the endpoint) or
+  on re-subscribe.  Nothing is lost; the user just reopens Settings (or taps
+  Enable again).
 * Subscription endpoints are SSRF-guarded: https only, no credentials, no
   localhost, and every resolved address must be globally routable (CGNAT
   100.64/10 and IPv4-mapped IPv6 are rejected too).  Delivery re-resolves,
@@ -31,11 +46,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import ipaddress
 import json
 import logging
 import os
 import queue
+import re
 import socket
 import tempfile
 import threading
@@ -266,6 +283,120 @@ def _pinned_requests_session(endpoint: str):
     return session
 
 
+# ── owners (per-device targeting) ────────────────────────────────────────────
+
+DEVICE_HEADER = "X-Hermes-Push-Device"
+_DEVICE_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+_OWNER_RE = re.compile(r"^[0-9a-f]{64}$")
+ALL_OWNERS = "*"
+
+
+def _clean_owner(value) -> str:
+    v = str(value or "").strip()
+    return v if _OWNER_RE.match(v) else ""
+
+
+def owner_for_device(device_id: str) -> str:
+    """Stable opaque owner id for a client device id ('' when malformed)."""
+    device_id = str(device_id or "").strip()
+    if not _DEVICE_RE.match(device_id):
+        return ""
+    return hashlib.sha256(("hermes-webui-push-owner:" + device_id).encode()).hexdigest()
+
+
+def owner_from_headers(headers) -> str:
+    try:
+        return owner_for_device(headers.get(DEVICE_HEADER) or "")
+    except Exception:
+        return ""
+
+
+def broadcast_unowned_enabled() -> bool:
+    return str(os.getenv("HERMES_WEBUI_PUSH_BROADCAST_UNOWNED", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+_SESSION_OWNERS_NAME = "webui_push_session_owners.json"
+_SESSION_OWNERS_MAX = 512
+_OWNERS_PER_SESSION_MAX = 8
+_SESSION_LOCK = threading.Lock()
+_SESSION_CACHE: "dict | None" = None  # {"path": str, "map": dict[str, list[str]]}
+
+
+def _session_owner_map() -> dict:
+    global _SESSION_CACHE
+    path = str(_state_dir() / _SESSION_OWNERS_NAME)
+    if _SESSION_CACHE is None or _SESSION_CACHE["path"] != path:
+        data: dict = {}
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+            for sid, owners in (raw.get("sessions") or {}).items():
+                if isinstance(owners, list):
+                    data[str(sid)] = [o for o in (_clean_owner(x) for x in owners) if o]
+        except Exception:
+            data = {}
+        _SESSION_CACHE = {"path": path, "map": data}
+    return _SESSION_CACHE["map"]
+
+
+def _persist_session_owners(m: dict) -> None:
+    path = _state_dir() / _SESSION_OWNERS_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".web_push.tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"sessions": m}, sort_keys=True) + "\n")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def register_session_owner(session_id: str, owner: str) -> bool:
+    """Record that ``owner`` (device) owns/opened ``session_id``. Cheap no-op if known."""
+    sid = str(session_id or "").strip()
+    owner = _clean_owner(owner)
+    if not sid or not owner or len(sid) > 256:
+        return False
+    try:
+        with _SESSION_LOCK:
+            m = _session_owner_map()
+            owners = m.get(sid)
+            if owners and owner in owners:
+                return False
+            owners = list(owners or [])
+            owners.append(owner)
+            m.pop(sid, None)
+            m[sid] = owners[-_OWNERS_PER_SESSION_MAX:]
+            while len(m) > _SESSION_OWNERS_MAX:
+                m.pop(next(iter(m)))
+            _persist_session_owners(m)
+            return True
+    except Exception:
+        logger.debug("Web Push session-owner registry write failed", exc_info=True)
+        return False
+
+
+def session_owners(session_id: str) -> list[str]:
+    sid = str(session_id or "").strip()
+    with _SESSION_LOCK:
+        return list(_session_owner_map().get(sid, []))
+
+
+def _targets_for_session(session_id: str):
+    """Owners to notify, ALL_OWNERS (explicit opt-in), or None (send nothing)."""
+    owners = session_owners(session_id)
+    if owners:
+        return owners
+    if broadcast_unowned_enabled():
+        return ALL_OWNERS
+    logger.debug("Web Push: session has no known owner device; not broadcasting")
+    return None
+
+
 # ── subscription store ───────────────────────────────────────────────────────
 
 def _store_path() -> Path:
@@ -315,7 +446,12 @@ def _load() -> list[dict]:
         subs = data["subscriptions"]
         if not isinstance(subs, list):
             raise ValueError("subscriptions is not a list")
-        return [_normalize(s, check_endpoint=False) for s in subs]
+        out = []
+        for s in subs:
+            n = _normalize(s, check_endpoint=False)
+            n["owner"] = _clean_owner(s.get("owner"))
+            out.append(n)
+        return out
     except Exception as exc:
         logger.warning("Web Push subscription store %s is unreadable; failing closed", path.name)
         raise PushStoreUnavailable("Web Push subscription store is unavailable") from exc
@@ -340,42 +476,94 @@ def _save(subs: list[dict]) -> None:
 
 
 def list_subscriptions() -> list[dict]:
+    """Internal only: includes ``owner``. Never return this from an API."""
     with _STORE_LOCK:
         return _load()
 
 
-def subscription_count() -> int:
-    return len(list_subscriptions())
+def subscription_count(owner: str | None = None) -> int:
+    subs = list_subscriptions()
+    if owner is None:
+        return len(subs)
+    owner = _clean_owner(owner)
+    return sum(1 for s in subs if owner and s["owner"] == owner)
 
 
-def has_subscription(endpoint: str) -> bool:
+def has_subscription(endpoint: str, owner: str | None = None) -> bool:
+    """True if ``endpoint`` is stored (and, when ``owner`` is given, owned by it)."""
     endpoint = str(endpoint or "").strip()
-    return bool(endpoint) and any(s["endpoint"] == endpoint for s in list_subscriptions())
+    if not endpoint:
+        return False
+    owner_c = None if owner is None else _clean_owner(owner)
+    return any(
+        s["endpoint"] == endpoint and (owner_c is None or (owner_c and s["owner"] == owner_c))
+        for s in list_subscriptions()
+    )
 
 
-def add_subscription(subscription: dict, *, previous_endpoint: str | None = None) -> dict:
-    """Validate and upsert. ``previous_endpoint`` replaces a rotated endpoint."""
+def adopt_legacy_subscription(endpoint: str, owner: str) -> bool:
+    """Bind a pre-owner (``owner == ""``) subscription to ``owner``.
+
+    Possession of the exact endpoint URL proves the caller is that device.
+    Subscriptions already owned by someone else are never reassigned here.
+    """
+    endpoint = str(endpoint or "").strip()
+    owner = _clean_owner(owner)
+    if not endpoint or not owner:
+        return False
+    with _STORE_LOCK:
+        subs = _load()
+        changed = False
+        for s in subs:
+            if s["endpoint"] == endpoint and not s["owner"]:
+                s["owner"] = owner
+                changed = True
+        if changed:
+            _save(subs)
+        return changed
+
+
+def add_subscription(subscription: dict, *, previous_endpoint: str | None = None, owner: str = "") -> dict:
+    """Validate and upsert for ``owner``. ``previous_endpoint`` replaces a rotated
+    endpoint, but only if it is the caller's own (or a legacy unowned) entry."""
     normalized = _normalize(subscription, check_endpoint=True)
+    owner = _clean_owner(owner)
     previous = str(previous_endpoint or "").strip()
     with _STORE_LOCK:
         subs = _load()
-        drop = {normalized["endpoint"], previous} - {""}
-        others = [s for s in subs if s["endpoint"] not in drop]
+        drop_new = normalized["endpoint"]
+        others = []
+        for s in subs:
+            if s["endpoint"] == drop_new:
+                continue
+            if previous and s["endpoint"] == previous and (not s["owner"] or s["owner"] == owner):
+                continue
+            others.append(s)
         if len(others) >= _MAX_SUBSCRIPTIONS:
             raise ValueError("too many Web Push subscriptions")
-        others.append(normalized)
+        record = dict(normalized, owner=owner)
+        others.append(record)
         if others != subs:
             _save(others)
     return normalized
 
 
-def remove_subscription(endpoint: str) -> bool:
+def remove_subscription(endpoint: str, owner: str | None = None) -> bool:
+    """Remove ``endpoint``. With ``owner`` given, only that owner's (or a legacy
+    unowned) entry is removed -- other devices' subscriptions are untouched."""
     endpoint = str(endpoint or "").strip()
     if not endpoint:
         return False
+    owner_c = None if owner is None else _clean_owner(owner)
     with _STORE_LOCK:
         subs = _load()
-        kept = [s for s in subs if s["endpoint"] != endpoint]
+
+        def _match(s):
+            if s["endpoint"] != endpoint:
+                return False
+            return owner_c is None or not s["owner"] or (bool(owner_c) and s["owner"] == owner_c)
+
+        kept = [s for s in subs if not _match(s)]
         if len(kept) == len(subs):
             return False
         _save(kept)
@@ -384,9 +572,12 @@ def remove_subscription(endpoint: str) -> bool:
 
 # ── delivery ─────────────────────────────────────────────────────────────────
 
-def notification_payload(title: str, body: str, *, session_id: str | None = None) -> dict:
+def notification_payload(title: str, body: str, *, session_id: str | None = None, owners=None) -> dict:
+    """Build a payload. ``owners`` (list of owner ids, or ALL_OWNERS) is routing
+    metadata kept under ``_owners``; it is stripped before delivery. Without it
+    the payload is delivered to nobody."""
     sid = str(session_id or "").strip()
-    return {
+    payload = {
         "title": str(title or "Hermes")[:120],
         "options": {
             "body": str(body or "")[:240],
@@ -397,16 +588,27 @@ def notification_payload(title: str, body: str, *, session_id: str | None = None
             "data": {"url": f"session/{quote(sid, safe='')}" if sid else "./"},
         },
     }
+    if owners:
+        payload["_owners"] = ALL_OWNERS if owners == ALL_OWNERS else list(owners)
+    return payload
 
 
 def _send_to_all(payload: dict) -> int:
-    """Blocking delivery to every subscription. Only call from a worker."""
-    if not is_enabled():
+    """Blocking delivery to the subscriptions selected by ``payload['_owners']``.
+
+    A payload with no ``_owners`` is delivered to nobody. Only call from a worker.
+    """
+    payload = dict(payload)
+    owners = payload.pop("_owners", None)
+    if not owners or not is_enabled():
         return 0
     try:
         subs = list_subscriptions()
     except PushStoreUnavailable:
         return 0
+    if owners != ALL_OWNERS:
+        wanted = {_clean_owner(o) for o in owners} - {""}
+        subs = [s for s in subs if s["owner"] in wanted]
     webpush_fn, _ = _pywebpush()
     if not webpush_fn or not subs:
         return 0
@@ -426,7 +628,7 @@ def _send_to_all(payload: dict) -> int:
             continue
         try:
             webpush_fn(
-                subscription_info=sub,
+                subscription_info={"endpoint": sub["endpoint"], "keys": sub["keys"]},
                 data=data,
                 vapid_private_key=_private_key(),
                 vapid_claims={"sub": subject()},
@@ -505,8 +707,12 @@ def shutdown(wait: float = 3.0) -> None:
         t.join(timeout=wait / max(1, len(workers)))
 
 
-def send_test() -> bool:
-    return enqueue(notification_payload("Hermes test", "Web Push is working."))
+def send_test(owner: str = "") -> bool:
+    """Test push to ``owner``'s own subscription(s) only (never a broadcast)."""
+    owner = _clean_owner(owner)
+    if not owner:
+        return False
+    return enqueue(notification_payload("Hermes test", "Web Push is working.", owners=[owner]))
 
 
 def _safe(fn):
@@ -551,8 +757,13 @@ def notify_session_done(session_id: str, messages) -> bool:
 
 @_safe
 def notify_response_complete(session_id: str, answer: str) -> bool:
+    owners = _targets_for_session(session_id)
+    if not owners:
+        return False
     text = " ".join(str(answer or "").split())
-    return enqueue(notification_payload("Response complete", text[:120] or "Task finished", session_id=session_id))
+    return enqueue(
+        notification_payload("Response complete", text[:120] or "Task finished", session_id=session_id, owners=owners)
+    )
 
 
 _SEEN: "dict[tuple, None]" = {}
@@ -577,8 +788,11 @@ def notify_approval_required(session_id: str, approval: dict) -> bool:
     ident = approval.get("approval_id") or approval.get("request_id") or approval.get("description")
     if not _first_time("approval", session_id, str(ident)):
         return False
+    owners = _targets_for_session(session_id)
+    if not owners:
+        return False
     body = str(approval.get("description") or "Tool approval needed")
-    return enqueue(notification_payload("Approval required", body, session_id=session_id))
+    return enqueue(notification_payload("Approval required", body, session_id=session_id, owners=owners))
 
 
 @_safe
@@ -586,12 +800,18 @@ def notify_clarify_required(session_id: str, clarify: dict) -> bool:
     ident = (clarify or {}).get("clarify_id") or (clarify or {}).get("question")
     if not _first_time("clarify", session_id, str(ident)):
         return False
+    owners = _targets_for_session(session_id)
+    if not owners:
+        return False
     body = str((clarify or {}).get("question") or "Clarification needed")
-    return enqueue(notification_payload("Clarification needed", body, session_id=session_id))
+    return enqueue(notification_payload("Clarification needed", body, session_id=session_id, owners=owners))
 
 
 @_safe
 def notify_bg_task_complete(session_id: str, payload: dict) -> bool:
     title = str((payload or {}).get("title") or "Background task complete")
+    owners = _targets_for_session(session_id)
+    if not owners:
+        return False
     body = str((payload or {}).get("message") or "Task finished")
-    return enqueue(notification_payload(title, body, session_id=session_id))
+    return enqueue(notification_payload(title, body, session_id=session_id, owners=owners))
