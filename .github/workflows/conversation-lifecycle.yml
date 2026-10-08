@@ -12,7 +12,9 @@ on:
       - 'api/**.py'
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
+      - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_reconnect_scene_redraw.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -23,7 +25,9 @@ on:
       - 'api/**.py'
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
+      - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_reconnect_scene_redraw.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -32,7 +36,8 @@ jobs:
   live-to-final:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
+    # Keep existing proof rows informational; reconnect regressions fail CI.
+    continue-on-error: ${{ matrix.name != 'reconnect-scene-redraw' }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +50,9 @@ jobs:
             scenario: terminal-error
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
+          - name: reconnect-scene-redraw
+            script: tests/browser_reconnect_scene_redraw.py
+            browsers: chromium
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +77,7 @@ jobs:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           HISTORICAL_HYDRATION_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
+          BROWSERS: ${{ matrix.browsers }}
         run: python ${{ matrix.script }}
 
       - name: Run settlement frame proof
@@ -77,6 +86,14 @@ jobs:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: normal
           LIFECYCLE_TEST_BITE: settle-worklog-frame-proof
+        run: python tests/browser_conversation_lifecycle.py
+
+      - name: Recover a missing terminal frame
+        if: matrix.scenario == 'normal'
+        env:
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/missing-terminal
+          LIFECYCLE_SCENARIO: normal
+          LIFECYCLE_TEST_BITE: sidebar-idle-missing-terminal
         run: python tests/browser_conversation_lifecycle.py
 
       - name: Upload failure artifacts

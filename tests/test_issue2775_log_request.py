@@ -1,16 +1,26 @@
 import json
+import io
+
+import pytest
 
 from server import Handler
 
 
-def test_log_request_handles_malformed_request_without_path(capsys):
+@pytest.fixture
+def log_output(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr("api.request_logging._STREAM", output)
+    return output
+
+
+def test_log_request_handles_malformed_request_without_path(log_output):
     """Malformed request lines can call log_request before path is assigned."""
     handler = Handler.__new__(Handler)
     handler.command = None
 
     Handler.log_request(handler, "400")
 
-    line = capsys.readouterr().out.strip()
+    line = log_output.getvalue().strip()
     assert line.startswith("[webui] ")
     record = json.loads(line.removeprefix("[webui] "))
     assert record["method"] == "-"
@@ -19,7 +29,7 @@ def test_log_request_handles_malformed_request_without_path(capsys):
     assert record["remote"] == "-"
 
 
-def test_log_request_includes_remote_address(capsys):
+def test_log_request_includes_remote_address(log_output):
     handler = Handler.__new__(Handler)
     handler.command = "POST"
     handler.path = "/api/auth/login"
@@ -28,13 +38,13 @@ def test_log_request_includes_remote_address(capsys):
 
     Handler.log_request(handler, "401")
 
-    line = capsys.readouterr().out.strip()
+    line = log_output.getvalue().strip()
     record = json.loads(line.removeprefix("[webui] "))
     assert record["remote"] == "192.0.2.10"
     assert "forwarded_for" not in record
 
 
-def test_log_request_includes_first_forwarded_for_address(capsys):
+def test_log_request_includes_first_forwarded_for_address(log_output):
     class Headers:
         def get(self, key):
             assert key == "X-Forwarded-For"
@@ -48,7 +58,7 @@ def test_log_request_includes_first_forwarded_for_address(capsys):
 
     Handler.log_request(handler, "401")
 
-    line = capsys.readouterr().out.strip()
+    line = log_output.getvalue().strip()
     record = json.loads(line.removeprefix("[webui] "))
     assert record["remote"] == "192.0.2.10"
     assert record["forwarded_for"] == "203.0.113.7"

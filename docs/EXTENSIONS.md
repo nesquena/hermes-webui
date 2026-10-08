@@ -289,7 +289,7 @@ Core-sanitized manifest inventory that was present at the initial page boot. It
 returns `null` for empty, malformed, unknown, or untrusted IDs without creating
 settings or storage state. Re-registering the same ID in one page returns the
 same handle object; different IDs receive different handles. The handle exposes
-only the canonical `id`, `settings`, `storage`, and `events` fields. Settings and
+only the canonical `id`, `settings`, `storage`, `events`, and `messages` fields. Settings and
 storage are backed by the same factories used by the legacy accessors.
 
 Manifest enable/disable changes still take effect after a WebUI reload. A handle
@@ -299,6 +299,119 @@ cooperative attribution convenience for extensions sharing the page—not a
 sandbox, isolation mechanism, capability or permission system, or security
 boundary. Extensions still execute with the full WebUI session authority
 described above.
+
+### Custom Configure editors
+
+Extensions with structured configuration that does not fit scalar
+`settings_schema` fields can register one custom editor entry point on their
+scoped E0 settings handle:
+
+```js
+const ext = window.hermesExt?.register?.("dictionary-manager");
+const unregister = ext?.settings?.registerConfigure?.(({ opener, restoreFocus }) => {
+  openDictionaryManager({ opener, restoreFocus });
+});
+```
+
+`registerConfigure(handler)` is available only through a valid boot-trusted E0
+handle. It does not require `settings_schema` or extension-owned storage. The
+first handler registered for an extension wins; duplicates return `null` and do
+not replace it. A successful registration returns an idempotent unregister
+function.
+
+Core shows one **Configure** button only for the extension's current
+effective-enabled row under **Settings → Extensions → Installed**. Diagnostics
+never shows the button. Late registration updates an already-mounted Installed
+row. Disable or uninstall status removes the entry point immediately; uninstall
+followed by a same-ID reinstall cannot revive the old page-local handler until a
+full WebUI reload injects and registers the new extension script.
+
+Core enters a pending state before invoking the handler and passes the activated
+button as `opener` plus a one-shot `restoreFocus()` callback. The extension owns
+its dialog, validation, persistence, and close lifecycle. It must either call
+`restoreFocus()` when its UI closes or return a thenable whose settlement means
+the Configure UI is closed. Both paths end pending and converge on Core's
+one-shot focus restoration. A synchronous non-thenable handler remains disabled
+while unsettled. If it never calls `restoreFocus()`, it remains disabled until reload.
+Core does not guess dialog lifetime with a timeout.
+
+Synchronous throws, thenable-access failures, and asynchronous rejections are
+isolated, logged with the extension ID, and surfaced as a generic failure. Focus
+returns to the connected opener when possible, otherwise to the current visible
+Configure button or the Installed tab without forcing navigation. The hook does
+not let an extension return DOM for Core to render, add a backend settings route,
+or change the trusted same-origin extension model.
+
+### Message actions
+
+Extensions can register a small, Core-rendered action on settled user and
+assistant messages without querying or rewriting private transcript DOM:
+
+```js
+const ext = window.hermesExt?.register?.("message-pins");
+const unregister = ext?.messages?.registerAction?.({
+  id: "pin",
+  label: "Toggle pin",
+  icon: "pin",
+  roles: ["user", "assistant"],
+  getPressed({ sessionId, messageIndex, role }) {
+    return isPinned(sessionId, messageIndex, role);
+  },
+  onInvoke({ sessionId, messageIndex, role, text }) {
+    togglePin({ sessionId, messageIndex, role, text });
+  },
+});
+```
+
+`registerAction(descriptor)` is available only through a valid boot-trusted E0
+handle. It does not add a manifest permission or sandbox boundary. A descriptor
+requires a stable ID (`[A-Za-z][A-Za-z0-9._-]{0,63}`), a plain-text label of at
+most 120 characters, a Core-owned icon token (`pin`, `bookmark`, or `star`), and
+an `onInvoke` function. `roles` is an optional non-empty subset of `user` and
+`assistant` and defaults to both. Malformed descriptors, duplicate
+`extensionId:actionId` identities, and registrations beyond the page-wide V1
+limit of two return `null`. A successful registration returns an idempotent
+unregister function, and unregistering releases its slot.
+
+If extension-owned state changes somewhere other than the registered action
+(for example, a pin is removed from an extension-owned header popover), call
+`ext.messages.invalidateActions()`. Core then discards transcript HTML caches
+and re-evaluates that extension's visible `getPressed` presentations. The call
+returns `true` when the extension has an active message-action registration and
+`false` otherwise.
+
+Core places accepted actions after the built-in message controls in registration
+order. It renders them only on visible, settled user/assistant message rows—not
+live partial output, hidden worklog/anchor content, process-wakeup notices, tool
+rows, or other surfaces. Core also reconciles late registration, rerender,
+session-cache restore, pagination/virtualization, unregister, effective disable,
+and uninstall. Uninstall quarantines the page-local identity until a full reload.
+
+The optional `getPressed` callback is synchronous and receives a frozen
+`{ sessionId, messageIndex, role }` object with no text. Only a strict `true`
+sets `aria-pressed="true"`; a false value, exception, thenable, or thenable-access
+failure is treated as unpressed without breaking transcript rendering.
+
+On a user click, Core resolves the row again and passes `onInvoke` a frozen
+`{ sessionId, messageIndex, role, text }` snapshot. `messageIndex` is the
+absolute index in the current persisted session message list, including the
+pagination offset. It is stable when older history is prepended, but it is not a
+durable ID across edit, regenerate, or truncate operations. `text` is the
+Core-normalized visible plain text used by that row's Copy/TTS surface—not
+rendered HTML, hidden reasoning, the complete provider payload, or a
+transcript-wide read. It is an empty string when an otherwise eligible settled
+row has visible attachments or media but no plain text.
+
+A thenable returned by `onInvoke` controls pending state. Repeated clicks on the
+same extension/action/session/message target are suppressed while it is pending;
+different targets may run concurrently. Throws, thenable-access failures, and
+rejections from the current invocation are isolated and surfaced as a generic
+failure. Once an invocation has settled, or its action is unregistered or
+uninstalled, late callbacks cannot report a failure, refresh actions, clear a
+replacement invocation's pending state, or restore stale focus. Core preserves
+and restores the connected opener when possible after settlement. There is no Core
+timeout, message/session mutation API, arbitrary row markup, extension-controlled
+ordering, or overflow menu in V1.
 
 ### Turn lifecycle events
 
@@ -434,6 +547,23 @@ Invalid sidecars are skipped with a stable warning code such as
 paths are never returned by the status endpoint. If `health_path` is omitted,
 diagnostics use `/health`; if `health_path` is present but invalid, the sidecar is
 skipped rather than probed.
+
+## Remote images (`img-src`)
+
+The default policy allows images only from the WebUI itself plus `data:` and
+`blob:`. Remote `https:` images are blocked so that a model reply cannot make
+the browser contact an arbitrary server just by rendering (#7941). In chat a
+blocked remote image shows as an "Open image · host" link instead. An extension
+page that loads images from another origin needs the operator to allow it:
+
+```bash
+# space-separated http(s) origins; optional *. subdomain wildcard and port.
+export HERMES_WEBUI_CSP_IMG_EXTRA="https://images.example.com https://*.cdn.example.com"
+```
+
+The bare scheme `https:` restores the old allow-everything behaviour. The
+same validation rules as `HERMES_WEBUI_CSP_FRAME_EXTRA` below apply, and the
+allowlist also covers images inside chat replies and public share pages.
 
 ## Embedding an external web app in an iframe
 

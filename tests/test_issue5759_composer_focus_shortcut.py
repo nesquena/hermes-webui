@@ -75,4 +75,4 @@ def test_mode_matrix_covers_focus_return_shortcut_and_unchanged_ctrl_k():
     assert "&&e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')" not in BOOT_JS
 
     assert "if(_currentSessionIsReusableEmptyChat()){" in ctrl_k
-    assert "await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();" in ctrl_k
+    assert "await newSession();closeMobileSidebar();$('msg').focus();" in ctrl_k

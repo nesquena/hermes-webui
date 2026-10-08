@@ -425,6 +425,19 @@ def _entry_exhausted_ttl_seconds(error_code):
     code = str(error_code or "").strip()
     if code == "401":
         return 5 * 60
+    if code == "402":
+        # #6626: keep WebUI's eligibility decision tied to the installed
+        # runtime contract. The runtime routes 402 via
+        # credential_pool._exhausted_ttl() (120s when the new
+        # EXHAUSTED_TTL_402_SECONDS is present, 1h fallback otherwise).
+        # Hard-coding 120s here would let display/probe code mark an entry
+        # usable before CredentialPool.select() is willing to lease it on
+        # mixed-version installations.
+        try:
+            from agent.credential_pool import _exhausted_ttl as _runtime_exhausted_ttl
+            return _runtime_exhausted_ttl(int(code))
+        except Exception:
+            return 60 * 60
     return 60 * 60
 
 
@@ -824,6 +837,19 @@ def _entry_exhausted_ttl_seconds(error_code):
     code = str(error_code or "").strip()
     if code == "401":
         return 5 * 60
+    if code == "402":
+        # #6626: keep WebUI's eligibility decision tied to the installed
+        # runtime contract. The runtime routes 402 via
+        # credential_pool._exhausted_ttl() (120s when the new
+        # EXHAUSTED_TTL_402_SECONDS is present, 1h fallback otherwise).
+        # Hard-coding 120s here would let display/probe code mark an entry
+        # usable before CredentialPool.select() is willing to lease it on
+        # mixed-version installations.
+        try:
+            from agent.credential_pool import _exhausted_ttl as _runtime_exhausted_ttl
+            return _runtime_exhausted_ttl(int(code))
+        except Exception:
+            return 60 * 60
     return 60 * 60
 
 
@@ -2667,14 +2693,11 @@ def get_providers() -> dict[str, Any]:
         models = list(_PROVIDER_MODELS.get(pid, []))
         models_total = len(models)
         # OpenAI Codex account catalogs drift independently from WebUI releases.
-        # The model picker already prefers hermes_cli + Codex local cache for
-        # this provider (the agent's `provider_model_ids("openai-codex")` filters
-        # IDs with `supported_in_api: false`, but Codex CLI still surfaces some
-        # of those — notably `gpt-5.3-codex-spark` from #1680 — in its picker).
-        # Merge both sources here so the providers card matches the picker
-        # exactly. Static entries remain the offline fallback when live
-        # discovery and the local Codex cache are both unavailable. (#1807
-        # follow-up to v0.51.19 #1812.)
+        # The model picker combines hermes_cli discovery with visible local
+        # Codex cache entries. Merge both sources here so the providers card
+        # matches the picker. Static entries are the offline fallback when live
+        # discovery and the local cache are unavailable. (#1807 follow-up to
+        # v0.51.19 #1812.)
         if pid == "openai-codex":
             live_ids = _read_live_provider_model_ids("openai-codex")
             live_id_set = set(live_ids)
@@ -2984,7 +3007,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         return
 
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
 
         changed = False
 

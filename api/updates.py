@@ -28,6 +28,15 @@ from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.subprocess_utils import (
+    clean_git_env,
+    noninteractive_git_env,
+    noninteractive_git_argv,
+    repository_git_proxy_blocks,
+    sanitize_git_diagnostic,
+    trusted_git_credential_config,
+    windows_hide_flags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +56,7 @@ CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
-_CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
-_GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
-_QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|oauth_token|private_token|client_secret|app_secret|api[_-]?key|token|password|secret|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+
 _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'could not resolve host',
     'failed to connect',
@@ -63,6 +70,13 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'ssl certificate problem',
 )
 _RELEASE_TAG_RE = re.compile(r'^v[0-9][0-9A-Za-z.+-]*$')
+_EXPERIMENTAL_RELEASE_TAG_RE = re.compile(r'^exp-v[0-9]+(?:\.[0-9]+)*$')
+_GITHUB_RELEASE_TAGS_URL = 'https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100'
+_GITHUB_EXPERIMENTAL_REFS_URL = (
+    'https://api.github.com/repos/nesquena/hermes-webui/'
+    'git/matching-refs/tags/exp-v?per_page=100'
+)
+_GITHUB_RELEASE_MAX_PAGES = 20
 # Phrases git emits when its own short-lived index/refs lock files block a
 # subsequent operation. Tuned to match only the true "lock file already exists"
 # semantics that warrant a lock-conflict response -- v2 deliberately drops the
@@ -75,6 +89,29 @@ _GIT_LOCK_SIGNATURES = (
     'another git process seems to be running',
     'unable to create .git/index.lock',
 )
+
+
+def _windows_restart_spawn(args, **kwargs):
+    """Spawn the replacement process for a Windows self-restart."""
+    return subprocess.Popen(args, **kwargs)
+
+
+def _windows_restart_exit(code):
+    """Exit the old process after a Windows replacement is running."""
+    os._exit(code)
+
+
+def _windows_restart_command():
+    """Return the canonical replacement command for the current packaging mode."""
+    if getattr(sys, "frozen", False):
+        return list(sys.argv)
+
+    executable = sys.executable
+    if executable.lower().endswith("python.exe"):
+        windowless_executable = executable[:-4] + "w.exe"
+        if os.path.isfile(windowless_executable):
+            executable = windowless_executable
+    return [executable, str(REPO_ROOT / "server.py")]
 # Lock files we previously enumerated for auto-removal in v2. v2.2 no longer
 # removes anything on the server, so the enumerable list is no longer needed;
 # ``_inventory_locks`` reports whatever ``.git/**/*.lock`` files currently exist
@@ -89,15 +126,7 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
     but strip URL userinfo, common GitHub token shapes, and secret-looking query
     parameter values before any message reaches the update-check API/UI.
     """
-    if not output:
-        return ""
-    sanitized = _CREDENTIAL_IN_URL_RE.sub(r"\1<redacted>@", str(output))
-    sanitized = _GITHUB_TOKEN_RE.sub("<redacted>", sanitized)
-    sanitized = _QUERY_SECRET_RE.sub(r"\1<redacted>", sanitized)
-    sanitized = sanitized.strip()
-    if len(sanitized) > limit:
-        sanitized = sanitized[:limit].rstrip() + "…"
-    return sanitized
+    return sanitize_git_diagnostic(output, limit=limit)
 
 
 def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
@@ -209,20 +238,51 @@ def _run_git(args, cwd, timeout=10):
 
     On failure, returns stderr (or stdout as fallback) so callers can
     surface actionable git error messages instead of empty strings.
+
+    The child gets a scrubbed environment (``clean_git_env``). Update checks run
+    unattended, so inherited desktop askpass helpers must not turn a remote 401
+    into a credential dialog the user never asked for. Credential helpers from
+    system and user config remain available; checkout config cannot add one.
     """
     git_executable = _resolve_git_executable()
     if not git_executable:
         return 'git executable not found', False
+    env = clean_git_env()
+    if repository_git_proxy_blocks(args, cwd, env, executable=git_executable):
+        return 'repository-configured core.gitProxy is not allowed for git:// update remotes', False
+    is_network_command = bool(args and args[0] in {'fetch', 'pull', 'push', 'ls-remote'})
+    credential_config = ()
+    if is_network_command:
+        credential_config = trusted_git_credential_config(
+            cwd,
+            env,
+            executable=git_executable,
+        )
+        env = noninteractive_git_env(cwd, env, executable=git_executable, args=args)
     try:
         r = subprocess.run(
-            [git_executable] + args, cwd=str(cwd), capture_output=True,
-            text=True, timeout=timeout,
-            encoding='utf-8', errors='replace',
+            noninteractive_git_argv(
+                args,
+                executable=git_executable,
+                credential_config=credential_config,
+            ) if is_network_command else [git_executable] + args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding='utf-8',
+            errors='replace',
+            env=env,
+            creationflags=windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
         # the whole import with AttributeError. Guard against None defensively.
-        stdout = (r.stdout or '').strip()
+        raw_stdout = r.stdout or ''
+        # ``-z`` output is a byte-for-byte path protocol: leading/trailing
+        # whitespace belongs to filenames and must not be stripped.  Textual
+        # commands retain the historical trimming behaviour.
+        stdout = raw_stdout if '-z' in args else raw_stdout.strip()
         stderr = (r.stderr or '').strip()
         if r.returncode == 0:
             return stdout, True
@@ -801,47 +861,99 @@ def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
 def _release_tag_sort_key(tag):
     """Return a version-sort key that keeps release tags newest-first."""
     raw = str(tag or '').strip()
-    if raw.startswith('v'):
+    if raw.startswith('exp-v'):
+        raw = raw[5:]
+    elif raw.startswith('v'):
         raw = raw[1:]
     parts = []
     for chunk in re.split(r'(\d+)', raw):
         if not chunk:
             continue
         parts.append((0, int(chunk)) if chunk.isdigit() else (1, chunk.lower()))
+    # For the same numeric release, the final tag sorts after prereleases so
+    # reverse=True puts exp-v1.2.3 ahead of exp-v1.2.3-rc1.
+    if '-' not in raw:
+        parts.append((2, ''))
     return tuple(parts)
+
+
+def _is_release_tag_for_channel(tag, channel=DEFAULT_UPDATE_CHANNEL):
+    """Return True when ``tag`` belongs to the selected release channel."""
+    raw = str(tag or '').strip()
+    channel = _normalize_channel(channel)
+    if channel == 'experimental':
+        return bool(_EXPERIMENTAL_RELEASE_TAG_RE.fullmatch(raw))
+    return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
 
 
 def _is_stable_release_tag(tag):
     """Return True for stable release tags and False for prerelease tags."""
-    raw = str(tag or '').strip()
-    return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
+    return _is_release_tag_for_channel(tag, DEFAULT_UPDATE_CHANNEL)
 
 
-def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100', *, timeout=3.0):
-    """Return GitHub release tags newest-first, including commit SHAs when available."""
-    request = urllib.request.Request(
-        url,
-        headers={
-            'Accept': 'application/vnd.github+json',
-            'User-Agent': 'hermes-webui',
-        },
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode('utf-8'))
-    if not isinstance(payload, list):
-        return []
+def _github_release_tags(
+    url=None,
+    *,
+    timeout=3.0,
+    channel=DEFAULT_UPDATE_CHANNEL,
+):
+    """Return GitHub tags for the selected channel, newest-first, with SHAs."""
+    channel = _normalize_channel(channel)
+    use_matching_refs = channel == 'experimental' and url is None
+    if url is None:
+        url = _GITHUB_EXPERIMENTAL_REFS_URL if use_matching_refs else _GITHUB_RELEASE_TAGS_URL
+    payload = []
+    next_url = url
+    seen_urls = set()
+    while next_url:
+        if next_url in seen_urls or len(seen_urls) >= _GITHUB_RELEASE_MAX_PAGES:
+            return []
+        seen_urls.add(next_url)
+        request = urllib.request.Request(
+            next_url,
+            headers={
+                'Accept': 'application/vnd.github+json',
+                'User-Agent': 'hermes-webui',
+            },
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            page = json.loads(response.read().decode('utf-8'))
+            link = getattr(response, 'headers', {}).get('Link', '')
+        if not isinstance(page, list):
+            return []
+        payload.extend(page)
+        next_url = None
+        if use_matching_refs and link:
+            match = re.search(r'<([^>]+)>;\s*rel="next"', link)
+            if match:
+                candidate = match.group(1)
+                parsed = urlparse(candidate)
+                if (
+                    parsed.scheme == 'https'
+                    and parsed.netloc == 'api.github.com'
+                    and parsed.path == (
+                        '/repos/nesquena/hermes-webui/'
+                        'git/matching-refs/tags/exp-v'
+                    )
+                ):
+                    next_url = candidate
     tags = []
     for item in payload:
         if not isinstance(item, dict):
             continue
         name = item.get('name')
+        if use_matching_refs:
+            ref = item.get('ref')
+            if not isinstance(ref, str) or not ref.startswith('refs/tags/'):
+                continue
+            name = ref[len('refs/tags/'):]
         if not isinstance(name, str):
             continue
         name = name.strip()
-        if not _is_stable_release_tag(name):
+        if not _is_release_tag_for_channel(name, channel):
             continue
         commit = item.get('commit')
-        sha = None
+        sha = name if use_matching_refs else None
         if isinstance(commit, dict):
             commit_sha = commit.get('sha')
             if isinstance(commit_sha, str):
@@ -852,29 +964,50 @@ def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui
     return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
 
 
-def _check_webui_published_release_update():
-    """Return a manual-update payload when the baked WebUI version trails GitHub tags."""
+def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
+    """Return a manual-update payload when the baked WebUI trails its channel."""
+    channel = _normalize_channel(channel)
     current_version = str(WEBUI_VERSION or '').strip()
-    if not _RELEASE_TAG_RE.fullmatch(current_version):
+    stable_to_experimental = (
+        channel == 'experimental' and _is_stable_release_tag(current_version)
+    )
+    if not (
+        _is_release_tag_for_channel(current_version, channel)
+        or stable_to_experimental
+    ):
         return None
     try:
-        tags = _github_release_tags()
+        tags = _github_release_tags(channel=channel)
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
         return None
     if not tags:
         return None
 
     tag_names = [item['name'] for item in tags]
-    if current_version not in tag_names:
-        return None
-
-    latest = tags[0]
+    if stable_to_experimental:
+        current_key = _release_tag_sort_key(current_version)
+        newer_tags = [
+            item for item in tags
+            if _release_tag_sort_key(item['name']) > current_key
+        ]
+        if not newer_tags:
+            return None
+        latest = newer_tags[0]
+        behind = len(newer_tags)
+        current = {}
+    else:
+        if current_version not in tag_names:
+            return None
+        latest = tags[0]
+        behind = _release_gap(tag_names, current_version, latest['name'])
+        current = next(
+            (item for item in tags if item['name'] == current_version),
+            None,
+        ) or {}
     latest_version = latest['name']
-    behind = _release_gap(tag_names, current_version, latest_version)
     if behind <= 0:
         return None
 
-    current = next((item for item in tags if item['name'] == current_version), None) or {}
     current_ref = current.get('sha') or current_version
     latest_ref = latest.get('sha') or latest_version
     repo_url = 'https://github.com/nesquena/hermes-webui'
@@ -890,6 +1023,7 @@ def _check_webui_published_release_update():
         'latest_version': latest_version,
         'compare_url': _build_compare_url(repo_url, current_ref, latest_ref),
         'manual_update': True,
+        'channel': channel,
     }
 
 
@@ -1203,6 +1337,125 @@ def _check_repo_branch(path, name, *, fetch=True):
     }
 
 
+def _update_recovery_hints(path: Path, compare_ref: str | None = None) -> dict:
+    """Report which update-recovery conditions a checkout still shows.
+
+    The Docker manual notice keeps Agent recovery buttons (``Force update`` /
+    ``Clear lock and retry``) alive across update checks. Persisting them
+    without re-validating the repo left a destructive force button armed after
+    the underlying conflict was resolved outside the UI (Greptile P1 on
+    #8040). Every check now answers "does the recovery condition still
+    exist?" from live repo state:
+
+    - ``force``: unresolved merge conflicts, divergent history, or an
+      untracked path that the offered ref would overwrite -- every condition
+      that can arm the destructive recovery button.
+    - ``clear_lock``: a stale ``.git/index.lock`` is present (the only lock
+      the clear-lock flow addresses).
+
+    ``None`` means "could not determine": the UI must never clear a recovery
+    button on a failed probe.
+    """
+    hints = {'force': None, 'clear_lock': None}
+    git_dir = path / '.git'
+    try:
+        git_dir_is_directory = git_dir.is_dir()
+    except OSError:
+        git_dir_is_directory = False
+    if git_dir_is_directory:
+        inv = _inventory_locks(path)
+        hints['clear_lock'] = bool(inv.get('well_known_lock_present'))
+    status_out, status_ok = _run_git(
+        [
+            '--no-optional-locks',
+            'status',
+            '--porcelain=v1',
+            '-z',
+            '--untracked-files=all',
+            '--no-renames',
+        ],
+        path,
+        timeout=5,
+    )
+    if not status_ok:
+        return hints
+
+    entries = [entry for entry in status_out.split('\0') if entry]
+    if any(
+        entry[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'}
+        for entry in entries
+    ):
+        hints['force'] = True
+        return hints
+
+    # Without a freshly fetched comparison ref, a clean index is not enough
+    # to clear Force update: the checkout may still be divergent or an
+    # untracked path may still collide with the pending update.
+    if not compare_ref:
+        return hints
+
+    counts_out, counts_ok = _run_git(
+        ['rev-list', '--left-right', '--count', f'HEAD...{compare_ref}'],
+        path,
+        timeout=5,
+    )
+    counts = counts_out.split() if counts_ok else []
+    if len(counts) != 2 or not all(part.isdigit() for part in counts):
+        return hints
+    diverged = int(counts[0]) > 0 and int(counts[1]) > 0
+
+    untracked = [entry[3:] for entry in entries if entry.startswith('?? ')]
+    # Git collapses an untracked nested repository to ``dir/`` even with
+    # --untracked-files=all.  Its contents are therefore unknown: an incoming
+    # path below it may collide, but different contents may also be harmless.
+    # Keep that state inconclusive instead of claiming either safe or unsafe.
+    collapsed_untracked_dirs = [item.rstrip('/') for item in untracked if item.endswith('/')]
+    explicit_untracked = [item for item in untracked if not item.endswith('/')]
+    collision = False
+    collapsed_overlap = False
+    if untracked:
+        added_out, added_ok = _run_git(
+            [
+                'diff-tree',
+                '-r',
+                '--no-renames',
+                '--diff-filter=A',
+                '--name-only',
+                '-z',
+                'HEAD',
+                compare_ref,
+            ],
+            path,
+            timeout=5,
+        )
+        if not added_ok:
+            return hints
+        added = [entry for entry in added_out.split('\0') if entry]
+        collision = any(
+            local == incoming
+            or local.startswith(f'{incoming}/')
+            or incoming.startswith(f'{local}/')
+            for local in explicit_untracked
+            for incoming in added
+        )
+        # Both directions matter: an incoming path at or below the collapsed
+        # directory, and a collapsed directory at or below an incoming blob
+        # (git refuses to replace a directory holding untracked content).
+        collapsed_overlap = any(
+            incoming == local_dir
+            or incoming.startswith(f'{local_dir}/')
+            or local_dir.startswith(f'{incoming}/')
+            for local_dir in collapsed_untracked_dirs
+            for incoming in added
+        )
+
+    if diverged or collision:
+        hints['force'] = True
+    elif not collapsed_overlap:
+        hints['force'] = False
+    return hints
+
+
 def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """Check if a git repo is behind its latest release. Returns dict or None.
 
@@ -1219,7 +1472,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     channel = _normalize_channel(channel)
     if path is None or not (path / '.git').exists():
         if name == 'webui':
-            release_info = _check_webui_published_release_update()
+            release_info = _check_webui_published_release_update(channel)
             if release_info is not None:
                 release_info = dict(release_info)
                 release_info['no_git'] = True
@@ -1229,6 +1482,15 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             'behind': None,
             'no_git': True,
         }
+
+    # Recovery hints are consumed by the Docker manual notice, which offers
+    # Agent-only recovery buttons; other targets keep their payload unchanged.
+    # This is what lets the frontend clear a stale recovery button once the
+    # repo no longer needs it (Greptile P1 on #8040).
+    def attach_recovery(payload, compare_ref=None):
+        if payload is not None and name == 'agent':
+            payload['recovery'] = _update_recovery_hints(path, compare_ref)
+        return payload
 
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
@@ -1250,27 +1512,28 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             release_info['error'] = message
             release_info['stale_check'] = True
             release_info['dirty'] = _is_dirty(path)
-            return release_info
-        return {
+            return attach_recovery(release_info)
+        payload = {
             'name': name,
             'behind': None,
             'error': message,
             'stale_check': True,
             'dirty': _is_dirty(path),
         }
+        return attach_recovery(payload)
 
     release_info = _check_repo_release(path, name, channel)
     if release_info is not None:
         release_info = dict(release_info)
         release_info['dirty'] = _is_dirty(path)
-        return release_info
+        return attach_recovery(release_info, release_info.get('branch'))
 
     branch_info = _check_repo_branch(path, name, fetch=False)
     if branch_info is not None:
         branch_info = dict(branch_info)
         branch_info['dirty'] = _is_dirty(path)
         branch_info['channel'] = channel
-        return branch_info
+        return attach_recovery(branch_info, branch_info.get('branch'))
     return None
 
 
@@ -1354,9 +1617,13 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             and cache_matches
             and time.time() - _update_cache['checked_at'] < CACHE_TTL
         ):
-            return dict(_update_cache)
+            cached = dict(_update_cache)
+            cached['cached'] = True
+            return cached
         if _check_in_progress and cache_matches:
-            return dict(_update_cache)  # another thread is already checking this channel
+            cached = dict(_update_cache)
+            cached['cached'] = True
+            return cached  # another thread is already checking this channel
         _check_in_progress = True
 
     try:
@@ -1711,9 +1978,9 @@ def _schedule_restart(delay: float = 2.0) -> None:
     loaded on the next request, rather than running with a mix of old and
     new Python modules in sys.modules.
 
-    os.execv() replaces the current process image with a fresh interpreter
-    running the same argv — sessions are preserved on disk, the HTTP port
-    is reclaimed within the delay window, and the client's own
+    The restart replaces the current process image or starts the canonical
+    server entrypoint, depending on platform and packaging mode. Sessions are
+    preserved on disk, the HTTP port is reclaimed within the delay window, and the client's own
     ``setTimeout(() => location.reload(), 2500)`` lands after the restart.
 
     Coordinates with ``_apply_lock``: when the user updates both webui
@@ -1751,84 +2018,47 @@ def _schedule_restart(delay: float = 2.0) -> None:
             try:
                 # Re-exec into the just-pulled image.
                 #
-                # sys.argv[0]'s meaning depends on how the server was launched:
-                #
-                #   * Source checkout (`python server.py` via bootstrap.py /
-                #     ctl.sh / start.sh): sys.argv[0] is the SCRIPT path
-                #     (e.g. "/root/hermes-webui/server.py"), sys.executable is
-                #     the interpreter. CPython treats argv[1] as the script to
-                #     run, so we must pass [sys.executable] + sys.argv.
-                #
-                #   * Frozen/packaged build (PyInstaller, embedded zipapp,
-                #     etc.): sys.argv[0] == sys.executable == <binary>. Passing
-                #     [sys.executable] + sys.argv would re-insert the binary as
-                #     argv[1] — the kernel launches it, the interpreter treats
-                #     the binary itself as the "script" to run, and execv
-                #     effectively becomes a recursive no-op that never reaches
-                #     bind(), leaving the WebUI stuck "offline" after every
-                #     self-update. Pass argv as-is instead.
-                #
-                # Distinguish the two cases with sys.frozen (set by
-                # PyInstaller / zipapp / similar). For source checkouts the
-                # `[sys.executable] + sys.argv` form is the canonical CPython
-                # re-exec idiom (same shape Flask/Django reloaders use) and
-                # is the correct path.
-                #
                 # IMPORTANT: On Windows, os.execv() does NOT replace the
                 # current process — it spawns a new process while the old
                 # one keeps running.  This causes "address already in use"
                 # because the old process still holds the port.  On Windows
-                # we use subprocess.Popen() + os._exit() instead.
+                # we use a detached spawn + exit instead.
                 if sys.platform == 'win32':
-                    import subprocess
-                    if getattr(sys, "frozen", False):
-                        args = sys.argv
-                    else:
-                        args = [sys.executable] + sys.argv
-                    # Prefer pythonw.exe over python.exe so the restarted
-                    # server does not create a visible console window.
-                    # sys.executable may point at python.exe (console
-                    # subsystem); substitute pythonw.exe if it exists
-                    # next to python.exe.
-                    _exe = sys.executable
-                    if _exe.lower().endswith('python.exe'):
-                        _w_exe = _exe[:-4] + 'w.exe'  # python.exe -> pythonw.exe
-                        if os.path.isfile(_w_exe):
-                            if getattr(sys, "frozen", False):
-                                args = sys.argv
-                            else:
-                                args = [_w_exe] + sys.argv
+                    args = _windows_restart_command()
                     # Start new process fully detached with NO console
                     # window.  DETACHED_PROCESS alone is not sufficient
                     # on modern Windows — without CREATE_NO_WINDOW a
                     # python.exe (console-subsystem) child still flashes
                     # an empty terminal window, which the user then
                     # manually kills (taking the WebUI with it).
-                    subprocess.Popen(
-                        args,
-                        cwd=os.getcwd(),
-                        creationflags=(
-                            subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP
-                            | subprocess.CREATE_NO_WINDOW
-                        ),
-                        close_fds=True,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                    try:
+                        _windows_restart_spawn(
+                            args,
+                            cwd=os.getcwd(),
+                            creationflags=(
+                                subprocess.DETACHED_PROCESS
+                                | subprocess.CREATE_NEW_PROCESS_GROUP
+                                | subprocess.CREATE_NO_WINDOW
+                            ),
+                            close_fds=True,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        logger.exception("Windows WebUI restart spawn failed")
+                        return
                     # Exit immediately — the port is released as soon as
                     # this process dies, allowing the new process to bind.
-                    os._exit(0)
+                    _windows_restart_exit(0)
                 else:
                     if getattr(sys, "frozen", False):
                         os.execv(sys.executable, sys.argv)
                     else:
                         os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception:
-                # Last-resort: if execv fails for any reason, just exit so the
-                # process supervisor (start.sh / Docker) restarts us.
-                os._exit(0)
+                # Last-resort: let the process supervisor restart us.
+                _windows_restart_exit(0)
 
     threading.Thread(target=_do, daemon=True).start()
 
@@ -2400,11 +2630,8 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             }
 
     # Schedule a self-restart so the updated code is loaded fresh.  A plain
-    # git pull leaves stale Python modules in sys.modules — agent imports that
-    # reference new symbols (functions, classes) added in the update will fail
-    # on the next request with AttributeError / ImportError.  os.execv() re-
-    # execs the same interpreter with the same argv, picking up the new code
-    # cleanly without requiring the user to restart manually.
+    # git pull leaves stale Python modules in sys.modules. Replacing the process
+    # loads the updated code cleanly without requiring a manual restart.
     #
     # The 2 s delay gives the HTTP response time to flush to the client before
     # the process replaces itself.  The client already does

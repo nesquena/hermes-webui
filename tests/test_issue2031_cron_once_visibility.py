@@ -526,7 +526,7 @@ def test_cron_form_save_payload_still_uses_visible_raw_schedule_only():
 
     assert "cronFormSchedulePreset" not in save_block
     assert "const schedule=schEl.value.trim();" in save_block
-    assert "const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications}" in panels
+    assert "const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications}" in panels
 
 
 def test_cron_form_i18n_has_preset_keys():

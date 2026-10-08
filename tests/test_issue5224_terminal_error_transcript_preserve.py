@@ -109,7 +109,6 @@ function buildRuntime() {
   globalThis.removeThinking = () => calls.push('removeThinking');
   globalThis._flushReasoningToAnchor = () => calls.push('flushReasoning');
   globalThis._applyToAnchor = () => calls.push('applyToAnchor');
-  globalThis._attachProjectedAnchorSceneToLastAssistant = () => calls.push('attachProjected');
   globalThis._hydrateTodosFromSession = () => calls.push('hydrateTodos');
   globalThis._scheduleAnchorRegistryCleanup = () => calls.push('scheduleAnchorRegistryCleanup');
   globalThis._smdEndParser = () => calls.push('smdEndParser');
@@ -141,6 +140,15 @@ function buildRuntime() {
   globalThis._messageRenderWindowSize = 20;
   globalThis._streamFinalized = !!scenario.streamFinalized;
   globalThis._persistTimer = null;
+  globalThis._oldestIdx = Number.isFinite(scenario.oldestIdx) ? scenario.oldestIdx : 0;
+  globalThis._messagesTruncated = !!scenario.messagesTruncated;
+  globalThis.oldestIdxAtAttach = null;
+  globalThis.messagesTruncatedAtAttach = null;
+  globalThis._attachProjectedAnchorSceneToLastAssistant = () => {
+    calls.push('attachProjected');
+    globalThis.oldestIdxAtAttach = globalThis._oldestIdx;
+    globalThis.messagesTruncatedAtAttach = globalThis._messagesTruncated;
+  };
   globalThis.api = async () => scenario.apiPayload || { session: null };
   globalThis.msgContent = undefined;
   globalThis._isPreservedCompressionTaskListMarkerOnlyText = () => false;
@@ -162,6 +170,10 @@ function buildRuntime() {
       status,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       terminalMarkerCount,
+      oldestIdx: globalThis._oldestIdx,
+      oldestIdxAtAttach: globalThis.oldestIdxAtAttach,
+      messagesTruncated: !!globalThis._messagesTruncated,
+      messagesTruncatedAtAttach: !!globalThis.messagesTruncatedAtAttach,
       calls,
     }));
     return;
@@ -179,6 +191,10 @@ function buildRuntime() {
       status,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       terminalMarkerCount,
+      oldestIdx: globalThis._oldestIdx,
+      oldestIdxAtAttach: globalThis.oldestIdxAtAttach,
+      messagesTruncated: !!globalThis._messagesTruncated,
+      messagesTruncatedAtAttach: !!globalThis.messagesTruncatedAtAttach,
       calls,
     }));
     return;
@@ -421,3 +437,109 @@ def test_terminal_error_marker_is_single_instance_and_not_duplicated(driver_path
 
     assert outcome["terminalMarkerCount"] == 1, f"terminal marker should be deduped to one, got {outcome['terminalMarkerCount']}"
     assert outcome["messages"][-1]["content"].startswith("**Connection interrupted:**")
+
+
+def test_bounded_tail_preserves_terminal_marker_when_server_returns_suffix(driver_path):
+    """A bounded settle tail is a suffix of the visible window, not a prefix.
+
+    Long-session recovery used to compare the 30-row tail against the start of
+    S.messages. The prefix check failed, so preserveVisibleOnShorterTerminalSnapshot
+    dropped the client-side Connection-interrupted marker (#7628).
+    """
+    historical = []
+    for i in range(2):
+        historical.append({"role": "user", "content": f"Earlier question {i}", "_ts": f"u{i}"})
+        historical.append({"role": "assistant", "content": f"Earlier answer {i}", "_ts": f"a{i}"})
+    tail = [
+        {"role": "user", "content": "Current question", "_ts": "u-cur"},
+        {"role": "assistant", "content": "Current fragment one", "_ts": "a-cur"},
+    ]
+    terminal = {
+        "role": "assistant",
+        "content": "**Connection interrupted:** The browser lost the live SSE connection before the response finished.",
+        "_ts": "err",
+    }
+    outcome = _run_scenario(driver_path, {
+        "action": "restore_shorter_terminal",
+        "oldestIdx": 0,
+        "messagesTruncated": False,
+        "state": {
+            "session": {"session_id": "session-5224", "message_count": 7},
+            "messages": historical + tail + [terminal],
+            "activeStreamId": "stream-5224",
+        },
+        "apiPayload": {
+            "session": {
+                "session_id": "session-5224",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": tail,
+                "_messages_truncated": True,
+                "_messages_offset": 4,
+            },
+        },
+        "activeSid": "session-5224",
+        "streamId": "stream-5224",
+        "isActiveSession": True,
+        "isSessionCurrentPane": True,
+        "isSessionActivelyViewed": False,
+    })
+
+    observed = [(item["role"], item["content"]) for item in outcome["messages"]]
+    assert observed == [
+        ("user", "Current question"),
+        ("assistant", "Current fragment one"),
+        ("assistant", "**Connection interrupted:** The browser lost the live SSE connection before the response finished."),
+    ], f"bounded tail must keep the terminal recovery suffix: {observed}"
+    assert outcome["terminalMarkerCount"] == 1, (
+        f"expected the terminal marker to survive a suffix-only tail, got {outcome['terminalMarkerCount']}"
+    )
+    assert outcome["oldestIdx"] == 4, f"paging offset should come from the bounded response, got {outcome['oldestIdx']}"
+    assert outcome["oldestIdxAtAttach"] == 4, (
+        f"anchor persist must see the new offset, got {outcome['oldestIdxAtAttach']}"
+    )
+    assert outcome["messagesTruncated"] is True
+    assert outcome["messagesTruncatedAtAttach"] is True
+
+
+def test_settle_refreshes_paging_offset_before_anchor_persist(driver_path):
+    """_persistSettledAnchorScene reads _oldestIdx; a stale 0 would write the scene to the wrong row."""
+    outcome = _run_scenario(driver_path, {
+        "action": "restore_fuller_terminal",
+        "oldestIdx": 0,
+        "messagesTruncated": False,
+        "state": {
+            "session": {"session_id": "session-5224", "message_count": 1},
+            "messages": [
+                {"role": "assistant", "content": "Old interrupted shell", "_ts": "old"},
+            ],
+            "activeStreamId": "stream-5224",
+        },
+        "apiPayload": {
+            "session": {
+                "session_id": "session-5224",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "Settled first segment", "_ts": "a1"},
+                    {"role": "assistant", "content": "Settled second segment", "_ts": "a2"},
+                    {"role": "assistant", "content": "Settled third segment", "_ts": "a3"},
+                ],
+                "_messages_truncated": True,
+                "_messages_offset": 40,
+            },
+        },
+        "activeSid": "session-5224",
+        "streamId": "stream-5224",
+        "isActiveSession": True,
+        "isSessionCurrentPane": True,
+        "isSessionActivelyViewed": False,
+    })
+
+    assert outcome["status"] == "restored"
+    assert outcome["oldestIdx"] == 40
+    assert outcome["oldestIdxAtAttach"] == 40, (
+        f"stale offset 0 must not leak into anchor persist, got {outcome['oldestIdxAtAttach']}"
+    )
+    assert outcome["messagesTruncatedAtAttach"] is True
