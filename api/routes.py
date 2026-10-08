@@ -21579,6 +21579,28 @@ def _handle_tts(handler, parsed):
             from api.helpers import bad as _bad
             return _bad(handler, "unauthorized", 401)
 
+    # A chunked playback captures the profile that owns it, so a mid-playback
+    # profile switch cannot stream the previous profile's text under the new
+    # profile's provider/credentials. Requests that omit the field stay accepted
+    # (legacy direct callers); only an explicit MISMATCH is rejected, and it is
+    # rejected here — before the limiter, credential lookup or config access —
+    # so a mismatched chunk costs no quota and reads no other profile's config.
+    try:
+        claimed_profile = data.get("profile")
+    except Exception:
+        claimed_profile = None
+    if isinstance(claimed_profile, str) and claimed_profile.strip():
+        from api.helpers import bad as _bad
+        from api.profiles import _profiles_match, get_active_profile_name
+
+        claimed = claimed_profile.strip()
+        if not _profiles_match(claimed, get_active_profile_name()):
+            return _bad(
+                handler,
+                "playback profile no longer active",
+                409,
+            )
+
     # High-quality per-client rate limiting for TTS.
     if not hasattr(_handle_tts, "_tts_limiter"):
         import time as _time, threading as _threading
