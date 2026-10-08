@@ -295,7 +295,98 @@ function _hasWorkspacePreviewVisible(){
   return !!(preview&&preview.classList.contains('visible'));
 }
 
-function _setWorkspacePanelMode(mode){
+// Take an off-canvas panel out of the tab order (and of AT/hit-testing) while it
+// closes. The closed panels stay laid out so their slide-out can animate, which
+// leaves their whole subtree tabbable during the closing window — the subtree only
+// becomes invisibility:hidden (and therefore untabbable) once the animation ends.
+// A keyboard user who dismisses a drawer and immediately Tabs walks back into the
+// disappearing panel, and when the visibility flip lands the focus they just moved
+// is stranded on an invisible control: the exact failure this series removes.
+// inert closes that window with no delay and -- unlike display:none -- still lets the
+// transition play, so it is set only while the panel is closed (the open state clears
+// it, and content-selection closes that re-open the panel see it cleared too).
+// The CSS property would be the declarative home for this, but it is not yet a
+// computed value in every engine we support; the reflective HTML attribute is.
+function _setPanelInert(panel, open){
+  if(!panel)return;
+  // Arm only inside the panel's own compact drawer band. At wider widths the
+  // panel is a normal, visible pane, and the inert HTML attribute would kill it
+  // there no matter what the CSS says: closeMobileSidebar() runs on desktop too
+  // (opening a session calls it unconditionally, and _applySidebarState() calls
+  // it when leaving phone widths), so arming outside the drawer band would
+  // strand the desktop sidebar — the same trap the focus-rescue phone-band guard
+  // avoids.
+  //
+  // #7924: `inert` is a DOM attribute, not a CSS state, so an out-of-band call
+  // must still RECONCILE it rather than return early. Closing at 390px and then
+  // widening to 641/804/1280px (rotation, iPad split view, window resize) used
+  // to leave the desktop sidebar inert forever: the early return skipped the
+  // clear, and neither toggleSidebar() nor _applySidebarState() recovers it.
+  // So compute the armed state and set OR remove accordingly — an out-of-band
+  // close clears, a resize back into the band arms.
+  const compact = panel.classList.contains('sidebar')
+    ? _isPhoneWidthViewport()
+    : _isCompactWorkspaceViewport();
+  const armed = !open && compact;
+  try{
+    if(armed)panel.setAttribute('inert','');
+    else panel.removeAttribute('inert');
+  }catch(_){}
+}
+
+// Park focus somewhere real when an off-canvas panel closes out from under it (#7713).
+// The closed drawer/sidebar is visibility:hidden, so the browser keeps reporting the
+// now-invisible control as document.activeElement: a subsequent Tab restarts from that
+// dead node and focus appears to vanish for a press. Only rescue the focus when it is
+// actually inside the panel being closed — grabbing it unconditionally would yank a
+// user out of the composer mid-sentence on every close.
+//
+// `fallback` is the control that opened the panel, for the explicit-dismiss paths (the
+// "Close menu" X, the overlay, the drawer's collapse button). Handing focus back to the
+// invoker is the common drawer pattern (WAI-ARIA dialog, Bootstrap Offcanvas, Radix
+// Sheet, Material nav drawer): the next Tab then continues from where the user was,
+// instead of restarting at the top of the document. Content-selection closes leave it
+// undefined — they already move focus to the composer, and stealing it back to a
+// toolbar button would undo that.
+function _releaseFocusFromClosedPanel(panel, fallback){
+  if(!panel)return;
+  const active=document.activeElement;
+  if(!active||active===document.body)return;
+  if(!panel.contains(active))return;
+  if(fallback&&_isFocusableControl(fallback)){
+    try{fallback.focus();}catch(_){}
+    // A reachable-looking control can still refuse focus() (a display:none
+    // control that slipped past the guard, or one a concurrent close hid in the
+    // same tick). Verify it actually took focus, and fall through to the blur
+    // path when it did not: staying on the dead node inside the now-hidden
+    // panel is the bug this helper exists to prevent.
+    if(document.activeElement===fallback)return;
+  }
+  // <body> is the neutral landing spot: it holds no tab stop, so the next Tab
+  // continues from the document start.
+  try{active.blur();}catch(_){}
+}
+
+// A fallback is only worth focusing if it is actually reachable right now: the panel
+// closing may be about to reveal it, or a concurrent close may have hidden it. A hidden
+// control would take focus and immediately strand it, which is the bug we just fixed.
+function _isFocusableControl(el){
+  if(!el||!el.isConnected)return false;
+  if(el.disabled)return false;
+  // offsetParent is null for display:none subtrees; getComputedStyle catches
+  // visibility:hidden, which still lays the element out.
+  if(!el.offsetParent&&getComputedStyle(el).position!=='fixed')return false;
+  if(getComputedStyle(el).visibility==='hidden')return false;
+  // getClientRects is the rendered-truth check that closes the display:none hole:
+  // offsetParent is null for a fixed element whether it is painted or not, so the
+  // position:'fixed' exemption above let a display:none control pass. The edge
+  // toggle is display:none across the whole 641-900px band, and focus() on it
+  // silently fails, which lands the user on browser chrome at the next Tab.
+  if(!el.getClientRects().length)return false;
+  return true;
+}
+
+function _setWorkspacePanelMode(mode, returnFocusTo){
   const {layout,panel}= _workspacePanelEls();
   if(!layout||!panel)return;
   _workspacePanelMode=(mode==='browse'||mode==='preview')?mode:'closed';
@@ -306,8 +397,21 @@ function _setWorkspacePanelMode(mode){
   // so that toggleWorkspacePanel(false) from the toolbar doesn't clear the setting.
   try{localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');}catch(_){}
   layout.classList.toggle('workspace-panel-collapsed',!open);
+  // #7924: reconcile the inert attribute on EVERY mode change, not just inside
+  // the compact band. `inert` is a DOM attribute, not a CSS state, so closing
+  // the drawer at 800px and then widening to 1280px used to leave it set: the
+  // desktop branch never called the setter, and reopening gave a Files panel
+  // that rejected focus and clicks. Calling it here (armed = !open && compact)
+  // clears an out-of-band close and arms an in-band one.
+  _setPanelInert(panel, open);
   if(_isCompactWorkspaceViewport()){
     panel.classList.toggle('mobile-open',open);
+    // Open panels drop inert; closed ones take it for the whole closing window,
+    // not just after the 250ms visibility flip (see _setPanelInert).
+    // returnFocusTo is set only by the explicit-dismiss path (tapping outside the
+    // drawer), so focus returns to the edge toggle; automatic mode syncs leave it
+    // undefined and keep the plain <body> landing.
+    if(!open)_releaseFocusFromClosedPanel(panel, returnFocusTo);
   }else{
     panel.classList.remove('mobile-open');
   }
@@ -352,7 +456,7 @@ function openWorkspacePanel(mode='browse'){
   _setWorkspacePanelMode(mode);
 }
 
-function closeWorkspacePanel(){
+function closeWorkspacePanel(returnFocusTo){
   // Deliberate user close. Two separate records come out of this:
   //
   // 1. The ACTION-GENERATION fence advances on EVERY viewport. It guards the
@@ -370,7 +474,7 @@ function closeWorkspacePanel(){
   // The preview (file + scroll position) stays in the DOM and is restored when
   // the user reopens the panel.
   _markWorkspacePanelClosedByUser();
-  _setWorkspacePanelMode('closed');
+  _setWorkspacePanelMode('closed', returnFocusTo);
 }
 
 function ensureWorkspacePreviewVisible(){
@@ -386,7 +490,20 @@ function handleWorkspaceClose(){
     clearPreview();
     return;
   }
-  closeWorkspacePanel();
+  // Explicit dismiss: hand focus back to the control that opened the panel, like
+  // the "Close menu" X. Capture it BEFORE closing — the panel sync disables this
+  // very button, and a disabled focused button drops focus to <body>, which once
+  // made the rescue a no-op and left the next Tab walking the hidden drawer.
+  closeWorkspacePanel(_workspacePanelInvokerForBand());
+}
+
+// The control that opens the workspace drawer in the band the code is running in.
+// The edge toggle only exists above 900px; at or below it the edge toggle is
+// display:none and the composer's workspace toggle is the reachable invoker.
+function _workspacePanelInvokerForBand(){
+  return _isCompactWorkspaceViewport()
+    ? $('btnWorkspacePanelToggle')
+    : $('btnWorkspacePanelEdgeToggle');
 }
 
 async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
@@ -493,13 +610,31 @@ function toggleMobileSidebar(){
   else{
     try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
     sidebar.classList.remove('mobile-session-page');sidebar.classList.add('mobile-panel-drawer','mobile-open');
+    _setPanelInert(sidebar, true);
   }
 }
-function closeMobileSidebar(){
+function closeMobileSidebar(returnFocusTo){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open','mobile-session-page','mobile-panel-drawer');
   if(overlay)overlay.classList.remove('visible');
+  // Out of the tab order for the whole closing window, not just once the
+  // visibility flip lands 250ms later (see _setPanelInert).
+  _setPanelInert(sidebar, false);
+  // The parked sidebar is visibility:hidden (#7713), so rescue the focus if it was
+  // inside — otherwise the next Tab restarts from an invisible control. Guard on the
+  // phone-width band where the sidebar actually hides: this function also runs on
+  // desktop (opening a session calls it unconditionally), where the sidebar stays
+  // visible and blurring would dump keyboard focus onto <body> on every session open.
+  // `returnFocusTo` is set only by the explicit-dismiss paths (the "Close menu" X and
+  // the overlay) so focus lands back on the hamburger; the many content-selection
+  // callers leave it undefined and keep the plain <body> landing.
+  if(_isPhoneWidthViewport())_releaseFocusFromClosedPanel(sidebar, returnFocusTo);
+}
+// Explicit dismiss (X / overlay) hands focus back to the hamburger that opened the
+// drawer. The default closeMobileSidebar() stays the content-selection behaviour.
+function dismissMobileSidebar(){
+  closeMobileSidebar($('btnHamburger'));
 }
 
 const _PWA_SIDEBAR_SWIPE_EDGE=80;
@@ -544,6 +679,7 @@ function _openMobileSidebarFromGesture(){
   sidebar.classList.remove('mobile-session-page');
   sidebar.classList.add('mobile-panel-drawer');
   sidebar.classList.add('mobile-open');
+  _setPanelInert(sidebar, true);
 }
 
 function _onPwaSidebarSwipeStart(e){
@@ -745,7 +881,10 @@ function closeMobileWorkspacePanelFromChat(e){
   // resize must not force the panel back open in preview mode while the
   // user is typing. The preview (file + scroll position) stays intact in
   // the DOM and is restored when the user reopens the panel.
-  closeWorkspacePanel();
+  // Tapping outside the drawer is an explicit dismiss, so hand focus back to the
+  // control that opened it (#7713 follow-up: a plain <body> landing would restart
+  // the next Tab at the top of the document).
+  closeWorkspacePanel(_workspacePanelInvokerForBand());
 }
 function toggleWorkspacePanel(force){
   const {panel}= _workspacePanelEls();
@@ -772,6 +911,11 @@ function mobileSwitchPanel(name){
     if(sidebar){
       sidebar.classList.remove('mobile-session-page');
       sidebar.classList.add('mobile-panel-drawer','mobile-open');
+      // #7924: an open drawer must never stay inert. A prior close at this
+      // width armed the attribute, and adding mobile-open alone left the
+      // drawer's controls rejecting focus and clicks (a tap on its own nav
+      // tab fell through to the hamburger beneath and closed it).
+      if(typeof _setPanelInert==='function')_setPanelInert(sidebar,true);
     }
   }
 }

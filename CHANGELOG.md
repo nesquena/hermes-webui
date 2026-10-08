@@ -135,6 +135,11 @@
 
 ### Fixed
 
+- **A closed mobile sidebar or workspace drawer is out of the keyboard's way.** Once a drawer has slid closed it is
+  inert and hidden from the tab order and screen readers, so Tab no longer walks into an invisible off-screen list;
+  closing it by tapping outside or with its own close button returns focus to the control that opened it, and the
+  hidden file-upload input is no longer a stray tab stop. Thanks @happy5318. (#7924)
+
 - **Sending uses the model's own provider.** Picking a model now sends with that model's provider instead of a stale
   provider left on the conversation, including qualified ids such as `provider:model`, new chats and conversations whose
   provider was removed. Saving Settings and reopening them no longer brings back a phantom "unsaved changes" bar.
