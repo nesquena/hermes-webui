@@ -2018,6 +2018,58 @@ def test_archive_append_restart_prune_chain_keeps_every_row(tmp_path, monkeypatc
     assert [int(e["seq"]) for e in read2["events"]] == [1, 2, 3, 4, 5]
 
 
+def test_unreadable_archive_does_not_restart_sequences(tmp_path):
+    """A corrupt archive must block appends, not restart them at seq 1.
+
+    Reproduces the Greptile finding: after archival the live file is gone; if
+    the archive cannot be read, ``_archived_next_seq`` returned 1 (treated like
+    "no archive") and a resumed writer created a NEW live journal starting at
+    seq 1 beside the real stored history. Readers union archive + live by seq
+    and drop live rows at or below the archived maximum, so the resumed rows
+    were written but never read. The seed now refuses with a clear error when
+    the archive exists but its last sequence cannot be established.
+    """
+    _write_run(tmp_path, "s1", "r1", mtime_age_days=30)
+    counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+    archive = _archive_path(tmp_path, "s1", "r1")
+    assert archive.exists()
+
+    # Corrupt the archive in place: truncated gzip member -> unreadable.
+    raw = archive.read_bytes()
+    archive.write_bytes(raw[: len(raw) // 3])
+    assert rj._read_gz_text(archive) is None
+
+    with pytest.raises(ValueError, match="archive_sequence_unavailable"):
+        rj.append_run_event("s1", "r1", "token", {"text": "after"}, session_dir=tmp_path)
+
+    # Fail closed: no row was written, so nothing can shadow the stored history,
+    # and the archive is untouched. (The open() creates an empty live file; what
+    # matters is that it stays empty rather than restarting at seq 1.)
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / "s1" / "r1.jsonl"
+    assert not live.exists() or live.read_text() == ""
+    assert archive.exists()
+
+
+def test_append_without_any_archive_still_starts_at_one(tmp_path):
+    """The refusal must not fire when there is genuinely no archive."""
+    rj.append_run_event("s1", "r1", "token", {"text": "first"}, session_dir=tmp_path)
+    read = rj.read_run_events("s1", "r1", session_dir=tmp_path)
+    assert [int(e["seq"]) for e in read["events"]] == [1]
+
+
+def test_readable_archive_still_seeds_appends(tmp_path):
+    """A readable archive keeps the continue-past-maximum behavior."""
+    _write_run(tmp_path, "s1", "r1", mtime_age_days=30)
+    counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+    row = rj.append_run_event("s1", "r1", "token", {"text": "after"}, session_dir=tmp_path)
+    assert row["seq"] == 4
+    read = rj.read_run_events("s1", "r1", session_dir=tmp_path)
+    assert [int(e["seq"]) for e in read["events"]] == [1, 2, 3, 4]
+
+
+
 def _hold_and_commit(path_str: str, ready_str: str, go_str: str) -> None:
     """Child-process worker: hold the journal lock, then commit seq 4.
 

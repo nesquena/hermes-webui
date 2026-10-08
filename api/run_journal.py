@@ -1077,21 +1077,41 @@ def _scan_validated_journal(
 
 
 def _archived_next_seq(path: Path | None) -> int:
-    """Next seq after the archived copy of ``path`` (#7613); 1 when none exists.
+    """Next seq after the archived copy of ``path`` (#7613).
 
-    A run whose live file was archived and unlinked must not restart at seq 1:
-    the readers union archive + live by seq and drop live rows at or below the
-    archived maximum, so a restarted sequence is written to disk but never read.
+    Returns 1 only when there is provably NO archive to continue from. When an
+    archive exists but its last sequence cannot be established — corrupt,
+    unreadable, or unpinnable — this refuses with ``archive_sequence_unavailable``
+    instead of restarting at 1: readers union archive + live by seq and drop
+    live rows at or below the archived maximum, so a restarted sequence would
+    be written to disk but never read, masking the stored history.
     """
     archived = _archive_path_for(path) if path is not None else None
     if archived is None:
         return 1
     try:
-        if not archived.exists():
-            return 1
-    except OSError:
+        # lstat (no symlink follow) gives a true three-state: present / absent /
+        # unknown. `Path.exists()` collapses permission errors into "absent",
+        # which would let an unreadable archive restart the sequence at 1.
+        os.lstat(archived)
+    except FileNotFoundError:
         return 1
+    except OSError as exc:
+        # Existence itself cannot be established: refuse (see docstring).
+        raise ValueError("archive_sequence_unavailable") from exc
     text = _read_gz_text(archived)
+    if text is None:
+        try:
+            # Same three-state check for the read-failed case: `_read_gz_text`
+            # returns None when the entry vanished mid-flight (then there is
+            # genuinely no archive) or when it is corrupt/unpinnable (then the
+            # stored history is real and the last seq is unknown).
+            os.lstat(archived)
+        except FileNotFoundError:
+            return 1
+        except OSError as exc:
+            raise ValueError("archive_sequence_unavailable") from exc
+        raise ValueError("archive_sequence_unavailable")
     last = 0
     for raw in (text or "").splitlines():
         stripped = raw.strip()
