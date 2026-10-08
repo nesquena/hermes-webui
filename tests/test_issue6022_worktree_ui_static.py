@@ -97,7 +97,7 @@ def test_deliberate_new_chat_paths_do_not_pin_worktree():
     for line_no in (
         i
         for i, line in enumerate(boot.splitlines(), 1)
-        if "await newSession();await renderSessionList();closeMobileSidebar();" in line
+        if "await newSession();closeMobileSidebar();" in line
     ):
         line = boot.splitlines()[line_no - 1]
         assert "worktree" not in line

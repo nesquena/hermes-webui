@@ -212,6 +212,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Code block copy button with "Copied!" feedback
 - Syntax highlighting via Prism.js (Python, JS, bash, JSON, SQL, and more)
 - Safe HTML rendering in AI responses (bold, italic, code converted to markdown)
+- Bare HTTP(S) URLs are auto-linked without absorbing adjacent CJK prose; Unicode IDN host separators and raw-CJK IRI paths remain linkable
 - rAF-throttled token streaming for smoother rendering during long responses
 - Context usage indicator in composer footer -- token count, cost, and fill bar (model-aware)
 
@@ -219,6 +220,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Create, rename, duplicate, delete, search by title and message content
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
+- Pinned-conversation limits apply separately to each session's owning profile; root/default aliases share a limit. Unpin an empty session before switching its profile through chat or `/goal`.
 - Archive sessions (hide without deleting, toggle to show)
 - Session projects -- named groups with colors for organizing sessions; delegated subagent sessions have no project of their own and follow their nearest ancestor's project in the project filter and the Unassigned chip; forks and other child sessions keep their own project, so a fork moved to "No project" stays Unassigned
 - Session tags -- add #tag to titles for colored chips and click-to-filter
@@ -301,6 +303,67 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
 
+#### Model aliases in `/model`
+
+`/model <alias>` accepts any alias configured for the profile, in either of Hermes's two formats:
+
+```yaml
+model_aliases:                     # canonical
+  sol:
+    model: gpt-5.6-sol
+    provider: openai-codex
+
+model:
+  provider: openrouter
+  aliases:                         # legacy
+    sol: openai-codex/gpt-5.6-sol  # provider-qualified
+    fast: gpt-4                    # unqualified
+```
+
+Alias resolution follows the format of the alias:
+
+- A **canonical `model_aliases` entry** and a **provider-qualified legacy target** name their own
+  route. The target is authoritative, so `/model sol` selects that provider even when a
+  same-named model exists on another provider. A canonical entry also takes precedence over a
+  legacy entry with the same name.
+- An **unqualified legacy target** names only a model, so it keeps the ordinary lookup: the
+  active provider first, then the normal fuzzy match. This is the behavior `/model` had before,
+  and it is unchanged.
+
+Aliases that carry their own endpoint or credentials are resolved server-side; the browser only
+receives the model, the provider id, and an opaque route id, never a base URL or key.
+On the in-process backend, an alias with its own `base_url` follows Hermes's direct-alias
+credential rules: its declared `api_key`/`key_env` wins; otherwise only a credential resolved
+for that endpoint's own host is sent (for example an OpenRouter key to `openrouter.ai`), never
+the provider label's key to an unrelated host. The alias's provider still selects its wire protocol.
+
+Gateway and runner chat support **provider-only aliases** by sending the resolved target model
+and provider, not the alias name: their runtime does not share WebUI's alias registry. Aliases
+that explicitly declare `base_url`, `api_key`, or `key_env` need the in-process backend. External
+chat starts, wakeups, Gateway regeneration, and Gateway goal kickoffs reject them with HTTP 400 and
+`reason: model_alias_requires_in_process_backend` before dispatch; a new Gateway goal is not
+set. Runner regeneration remains unsupported (HTTP 409), regardless of alias selection.
+Ambient credentials resolved for a provider-only alias do not count as alias overrides.
+The session retains its target model and profile-bound opaque route id, including Gateway
+success/error writeback, so a later backend switch can still resolve the original alias.
+
+A session stores that opaque route id, not the endpoint, so an alias that is later deleted or renamed
+leaves the session pointing at a route nothing owns. That send fails closed — on every backend, the
+in-process worker, the gateway and the runner alike — with a controlled "model alias unavailable"
+error instead of quietly falling back to another provider; pick the model again to store a live route.
+
+With `HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`, `/goal <text>` returns HTTP 501
+(`status: unsupported`) without changing an existing goal or starting a run. The
+runner contract does not yet provide atomic goal replacement and kickoff; WebUI
+never substitutes local goal execution. `/goal status`, `pause`, `resume`, and
+`clear` delegate to the runner when supported. Legacy-direct and legacy-journal
+goal kickoff behavior is unchanged for supported routes. Normal runner chat supports provider-only model aliases.
+
+Server-initiated turns retain the pre-session stale-Agent-runtime barrier. It
+runs before loading the session; named-profile alias and Gateway routing happen
+only after admission. A stale default local runtime can therefore reject a wakeup
+before the session's named-profile Gateway ownership is known.
+
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
@@ -368,6 +431,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
 | `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the enforced and report-only CSP `connect-src` directives for trusted reverse-proxy, tunnel, or extension sidecar deployments |
+| `HERMES_WEBUI_CSP_IMG_EXTRA` | *(unset)* | Optional space-separated `http(s)://` image origins (wildcard subdomain and port allowed), or the bare `https:` / `http:` scheme, added to the CSP `img-src`. Remote images are blocked by default so an assistant reply cannot make the browser fetch an arbitrary URL; blocked images render as an inert "Open image" link. Use this to show images from a trusted CDN inline, e.g. an image-generation provider |
 | `HERMES_WEBUI_SSE_CHUNKED` | *(unset)* | Set truthy (`1`/`true`/`yes`/`on`) to send SSE with `Transfer-Encoding: chunked`. Needed behind buffering reverse proxies (e.g. `jupyter-server-proxy`) that otherwise buffer the whole stream; harmless but unnecessary for directly-served deployments |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
 | `HERMES_WEBUI_EXTENSION_MANIFEST` | *(unset)* | Optional relative JSON manifest inside `HERMES_WEBUI_EXTENSION_DIR` listing bundled scripts/styles to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
@@ -705,6 +769,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`DESIGN.md`](DESIGN.md) — design tokens and the calm-console direction
 - [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) — UI/UX principles sourced from the design docs and visual inventories
 - [`docs/sse-streams.md`](docs/sse-streams.md) — cross-client SSE endpoint reference: session streaming, gateway SSE probe scope, heartbeats, and proxy behavior
+- [`docs/architecture/transcript-auto-follow-scroll.md`](docs/architecture/transcript-auto-follow-scroll.md) — transcript auto-follow contract: pinned/unpinned state model, input-tail re-pinning, reader-resume rules, and the transcript's overscroll suppression rationale
 - [`docs/CONTRACTS.md`](docs/CONTRACTS.md) — project contract/RFC/design index for contributors and agents
 - [`docs/rfcs/README.md`](docs/rfcs/README.md) — RFC index for larger architecture and durability proposals
 

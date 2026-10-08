@@ -60,6 +60,9 @@ def test_rename_open_then_cancel_keeps_cached_title_fields():
     let _loadingSessionId=null,_renamingSid=null;
     const S={{session:null}};
     function _isReadOnlySession(){{return false;}}
+    // #7689: the rename starter now tags its input via the shared ui.js helper;
+    // this node driver only loads sessions.js functions, so stub it here.
+    function _markNonCredentialInput(inp){{return inp;}}
     function closeSessionActionMenu(){{}}
     function renderSessionListFromCache(){{}}
     function syncTopbar(){{}}

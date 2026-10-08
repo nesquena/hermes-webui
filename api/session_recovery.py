@@ -30,7 +30,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sqlite3
 import threading
 from contextlib import closing
@@ -64,6 +63,10 @@ def _is_valid_intentional_shrink_generation(value) -> bool:
     )
 
 
+class _ReplayGuardUnavailable(RuntimeError):
+    """The parsed recovery candidate could not be guarded safely."""
+
+
 def _msg_count(p: Path) -> int:
     """Return the number of messages in a session JSON file, or -1 on read/parse error.
 
@@ -83,6 +86,65 @@ def _msg_count(p: Path) -> int:
         return -1
     msgs = data.get('messages')
     return len(msgs) if isinstance(msgs, list) else -1
+
+
+def _effective_session_payload(p: Path) -> dict | None:
+    """Return a detached, replay-guarded session payload, or None if invalid.
+
+    Recovery compares and restores the same effective transcript shape that
+    ``Session.save()`` persists. This prevents an older backup whose only extra
+    rows are exact stable replays from undoing a successful cleanup.
+    """
+    try:
+        data = json.loads(p.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get('messages'), list):
+        return None
+    try:
+        from api.models import _deduplicate_exact_stable_messages
+
+        guarded_messages, _removed = _deduplicate_exact_stable_messages(data['messages'])
+    except Exception as exc:
+        logger.debug("replay guard failed while reading recovery payload %s", p, exc_info=True)
+        raise _ReplayGuardUnavailable(str(p)) from exc
+    effective = dict(data)
+    effective['messages'] = guarded_messages
+    effective['message_count'] = len(guarded_messages)
+    return effective
+
+
+def _with_marked_message_count(payload: dict) -> dict:
+    """Return *payload* with a vouched ``message_count`` placed before ``messages``.
+
+    Recovery writers serialize a payload whose ``messages`` array they just
+    derived, so ``len(messages)`` is exact for that same atomic write. Stamping
+    it with the current writer marker (``_mc_v``) immediately before
+    ``messages`` (or a legacy leading ``anchor_activity_scenes``) lets bounded prefix readers (``_prefix_message_count``: the
+    per-subscribe SSE catch-up count, the #1558 save shrink check) trust it
+    instead of treating the restored/materialized sidecar as an unvouched
+    legacy file (#7673 gate). Every other key keeps its position.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get('messages'), list):
+        return payload
+    try:
+        from api.models import _MESSAGE_COUNT_MARKER
+    except Exception:
+        return payload
+    count = len(payload['messages'])
+    out: dict = {}
+    placed = False
+    for key, value in payload.items():
+        if key in ('message_count', '_mc_v'):
+            continue
+        # The bounded prefix reader stops at whichever of these comes first;
+        # a legacy layout serializes anchor_activity_scenes BEFORE messages.
+        if not placed and key in ('messages', 'anchor_activity_scenes'):
+            out['message_count'] = count
+            out['_mc_v'] = _MESSAGE_COUNT_MARKER
+            placed = True
+        out[key] = value
+    return out
 
 
 def _rebuild_recovery_session_index(session_dir: Path) -> None:
@@ -333,8 +395,80 @@ def _session_records_intentional_message_shrink(session_path: Path, bak_path: Pa
     return backup_generation != live_generation
 
 
+def _inspect_session_recovery_snapshot(session_path: Path) -> tuple[dict, dict | None]:
+    """Return recovery status plus the exact guarded backup snapshot to restore."""
+    bak_path = session_path.with_suffix('.json.bak')
+    if not bak_path.exists():
+        return ({
+            "session_id": session_path.stem,
+            "live_messages": _msg_count(session_path),
+            "bak_messages": -1,
+            "recommend": "no_backup",
+        }, None)
+
+    try:
+        live_payload = _effective_session_payload(session_path)
+        bak_payload = _effective_session_payload(bak_path)
+    except _ReplayGuardUnavailable:
+        # A valid parsed candidate whose replay guard failed is uncertainty,
+        # not proof that the live transcript is empty. Never let the fallback
+        # -1 count authorize replacement by a smaller stale backup.
+        return ({
+            "session_id": session_path.stem,
+            "live_messages": _msg_count(session_path),
+            "bak_messages": _msg_count(bak_path),
+            "recommend": "no_action",
+            "error": "replay_guard_failed",
+        }, None)
+    live_count = len(live_payload['messages']) if live_payload is not None else -1
+    bak_count = len(bak_payload['messages']) if bak_payload is not None else -1
+    if bak_count > live_count:
+        if (
+            _session_records_clear_sentinel(session_path, bak_path)
+            or _live_supersedes_backup_by_clear_generation(session_path, bak_path)
+        ):
+            return ({
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_clear_truncate": True,
+            }, None)
+        if (
+            _session_records_intentional_compress_shrink(session_path)
+            and _backup_predates_intentional_shrink(session_path, bak_path)
+        ):
+            return ({
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_compress_shrink": True,
+            }, None)
+        if _session_records_intentional_message_shrink(session_path, bak_path):
+            return ({
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_message_shrink": True,
+            }, None)
+        return ({
+            "session_id": session_path.stem,
+            "live_messages": live_count,
+            "bak_messages": bak_count,
+            "recommend": "restore",
+        }, bak_payload)
+    return ({
+        "session_id": session_path.stem,
+        "live_messages": live_count,
+        "bak_messages": bak_count,
+        "recommend": "no_action",
+    }, None)
+
+
 def inspect_session_recovery_status(session_path: Path) -> dict:
-    """Return a status dict describing whether recovery is recommended.
+    """Return guarded transcript counts and whether recovery is recommended.
 
     {
       "session_id": "...",
@@ -343,59 +477,8 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
       "recommend": "restore" | "no_action" | "no_backup",
     }
     """
-    bak_path = session_path.with_suffix('.json.bak')
-    live_count = _msg_count(session_path)
-    if not bak_path.exists():
-        return {
-            "session_id": session_path.stem,
-            "live_messages": live_count,
-            "bak_messages": -1,
-            "recommend": "no_backup",
-        }
-    bak_count = _msg_count(bak_path)
-    if bak_count > live_count:
-        if (
-            _session_records_clear_sentinel(session_path, bak_path)
-            or _live_supersedes_backup_by_clear_generation(session_path, bak_path)
-        ):
-            return {
-                "session_id": session_path.stem,
-                "live_messages": live_count,
-                "bak_messages": bak_count,
-                "recommend": "no_action",
-                "intentional_clear_truncate": True,
-            }
-        if (
-            _session_records_intentional_compress_shrink(session_path)
-            and _backup_predates_intentional_shrink(session_path, bak_path)
-        ):
-            return {
-                "session_id": session_path.stem,
-                "live_messages": live_count,
-                "bak_messages": bak_count,
-                "recommend": "no_action",
-                "intentional_compress_shrink": True,
-            }
-        if _session_records_intentional_message_shrink(session_path, bak_path):
-            return {
-                "session_id": session_path.stem,
-                "live_messages": live_count,
-                "bak_messages": bak_count,
-                "recommend": "no_action",
-                "intentional_message_shrink": True,
-            }
-        return {
-            "session_id": session_path.stem,
-            "live_messages": live_count,
-            "bak_messages": bak_count,
-            "recommend": "restore",
-        }
-    return {
-        "session_id": session_path.stem,
-        "live_messages": live_count,
-        "bak_messages": bak_count,
-        "recommend": "no_action",
-    }
+    status, _backup_payload = _inspect_session_recovery_snapshot(session_path)
+    return status
 
 
 def recover_session(session_path: Path) -> dict:
@@ -404,18 +487,33 @@ def recover_session(session_path: Path) -> dict:
     Returns a status dict identical to ``inspect_session_recovery_status``
     plus a "restored" boolean.
     """
-    status = inspect_session_recovery_status(session_path)
+    status, backup_payload = _inspect_session_recovery_snapshot(session_path)
     if status["recommend"] != "restore":
         return {**status, "restored": False}
-    bak_path = session_path.with_suffix('.json.bak')
-    # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
-    # cannot leave a half-written session.json.
-    tmp_path = session_path.with_suffix('.json.recover.tmp')
+    if backup_payload is None:
+        return {**status, "restored": False, "error": "backup payload is unreadable"}
+    # Serialize the exact guarded snapshot that authorized the restore. Its
+    # message_count is derived from the same rows, and tmp+fsync+replace keeps a
+    # crash from exposing a partial recovery payload.
+    tmp_path = session_path.with_suffix(
+        f'.json.recover.tmp.{os.getpid()}.{threading.current_thread().ident}'
+    )
     try:
-        shutil.copyfile(bak_path, tmp_path)
-        tmp_path.replace(session_path)
-    except OSError as exc:
-        logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
+        marked_payload = _with_marked_message_count(backup_payload)
+        payload = json.dumps(marked_payload, ensure_ascii=False, indent=2)
+        try:
+            payload.encode('utf-8')
+        except UnicodeEncodeError:
+            # Restore the same guarded snapshot losslessly, including lone
+            # provider surrogates preserved in raw or rewritten backups.
+            payload = json.dumps(marked_payload, ensure_ascii=True, indent=2)
+        with open(tmp_path, 'w', encoding='utf-8') as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, session_path)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("recover_session: guarded restore failed for %s: %s", session_path, exc)
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
@@ -667,7 +765,7 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         target = session_dir / f"{sid}.json"
         if target.exists():
             continue
-        payload = _state_db_row_to_sidecar(row)
+        payload = _with_marked_message_count(_state_db_row_to_sidecar(row))
         # Per-process/per-thread tmp suffix to avoid corruption under
         # concurrent reconciliation calls (matches api/models.py:484
         # Session.save() convention).

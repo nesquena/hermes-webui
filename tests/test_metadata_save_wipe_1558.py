@@ -389,22 +389,22 @@ def test_recover_all_sessions_on_startup_does_not_read_live_files_without_backup
 
     import api.session_recovery as sr
 
-    real_msg_count = sr._msg_count
-    msg_count_paths = []
+    real_effective_payload = sr._effective_session_payload
+    recovery_read_paths = []
 
-    def tracking_msg_count(path):
-        msg_count_paths.append(path)
-        return real_msg_count(path)
+    def tracking_effective_payload(path):
+        recovery_read_paths.append(path)
+        return real_effective_payload(path)
 
-    monkeypatch.setattr(sr, "_msg_count", tracking_msg_count)
+    monkeypatch.setattr(sr, "_effective_session_payload", tracking_effective_payload)
 
     result = sr.recover_all_sessions_on_startup(temp_session_dir)
 
     assert result["restored"] == 0
     assert result["scanned"] == 2
-    assert clean_path not in msg_count_paths
-    assert backed_path in msg_count_paths
-    assert backed_path.with_suffix('.json.bak') in msg_count_paths
+    assert clean_path not in recovery_read_paths
+    assert backed_path in recovery_read_paths
+    assert backed_path.with_suffix('.json.bak') in recovery_read_paths
 
 
 def test_recover_all_sessions_on_startup_skips_non_session_index_json(temp_session_dir):
