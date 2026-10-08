@@ -258,6 +258,14 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Appends to existing textarea content (doesn't replace)
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
 
+### Read aloud
+- Choose the read-aloud engine in Settings → TTS Engine. Browser, Edge, ElevenLabs, OpenAI, and **Gemini 3.8 Flash-Lite TTS** are supported.
+- Gemini uses `GEMINI_API_KEY` or `GOOGLE_API_KEY` from the server environment or the active profile's `.env`. Model and voice come from `tts.gemini.model` and `tts.gemini.voice` in `config.yaml`, defaulting to `gemini-3.8-flash-lite-tts` and `Kore`.
+- The WebUI selection is persisted as `tts_engine` and cached in browser localStorage; it does **not** change the Hermes-wide `tts.provider`.
+- Gemini read-aloud uses native WAV playback and sentence-aware chunks for long messages. Provider errors are shown without silently switching to browser synthesis. Rate/pitch sliders and browser voice selections do not override Gemini's server-configured voice.
+- Each chunk uses the shared TTS request scheduler and the profile captured at playback start; switching profiles rejects stale requests rather than using the new profile's credentials. Stop/replacement invalidates pending playback and releases native audio resources. Voice mode uses the existing owner-aware microphone rearm.
+- The REST request follows Google's [speech generation guide](https://ai.google.dev/gemini-api/docs/speech-generation) and [Flash-Lite TTS model reference](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash-lite-tts): `/v1beta/interactions`, single-speaker `speech_config`, and base64 WAV in `model_output` steps. Requests set `store: false` as documented in the [Interactions overview](https://ai.google.dev/gemini-api/docs/interactions-overview#data-storage-retention). Account access, quota, and live provider synthesis must be verified separately; mocked tests do not establish those.
+
 ### Profiles
 - Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
 - Gateway status dots (green = running), model info, skill count per profile

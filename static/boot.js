@@ -1716,7 +1716,7 @@ window._defaultMessageMode=_readPersistedDefaultMessageMode();
 //     synthesize(text, opts) { return Promise<ArrayBuffer|Blob>; }
 //   }) -> true on success, false if rejected
 var _HERMES_TTS_ENGINES = Object.create(null);
-var _HERMES_TTS_RESERVED = { browser:1, edge:1, elevenlabs:1, openai:1 };
+var _HERMES_TTS_RESERVED = { browser:1, edge:1, elevenlabs:1, openai:1, gemini:1 };
 function _hermesTtsValidId(id){ return typeof id==='string' && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(id); }
 function _hermesAddTtsOption(id, label){
   var sel=document.getElementById('settingsTtsEngine');
@@ -2142,6 +2142,16 @@ window.renderTranscript=function(container, messages, opts){
     _voiceTtsGenStart=_voiceGenStart;
 
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
+    if(engine==="gemini"){
+      const done=_playGeminiTtsChunked(clean, null);
+      const gen=_ttsGeneration;
+      _voiceTtsGenStart=gen;
+      done.then(function(){
+        if(!_ownsTtsPlayback(gen)) return;
+        _scheduleVoiceMicRearm(500);
+      });
+      return;
+    }
     // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
     // via the extension, then play through the same Audio lifecycle as edge.
     // The generation token gates the late synth completion: a promise that
