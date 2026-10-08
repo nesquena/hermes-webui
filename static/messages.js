@@ -1571,9 +1571,12 @@ async function send(){
       let _cmdMutationGeneration=typeof _approvalCommandMutationGeneration==='function'
         ? _approvalCommandMutationGeneration(_cmdOwner.profile,_cmdOwner.sid)
         : 0;
+      const _cmdMutationGenerationIsCurrent=()=>!_cmdOwner.sid
+        ||(Number.isFinite(_cmdMutationGeneration)
+          &&typeof _approvalCommandMutationGeneration==='function'
+          &&_approvalCommandMutationGeneration(_cmdOwner.profile,_cmdOwner.sid)===_cmdMutationGeneration);
       const _cmdLifecycleIsCurrent=()=>_cmdOwnerIsCurrent()
-        &&(typeof _approvalCommandMutationGeneration!=='function'
-          ||_approvalCommandMutationGeneration(_cmdOwner.profile,_cmdOwner.sid)===_cmdMutationGeneration);
+        &&_cmdMutationGenerationIsCurrent();
       let _cmdDraftRevision=typeof _composerDraftRevision==='function'
         ? _composerDraftRevision(_cmdOwner.profile,_cmdOwner.sid)
         : 0;
@@ -1627,7 +1630,9 @@ async function send(){
         try{
           _agentResult=typeof executeAgentCommand==='function'
             ? await executeAgentCommand(text,{
-              ...(_agentCmd||{name:_agentCmdName}),draftClearPromise:_cmdDraftClearPromise,
+              ...(_agentCmd||{name:_agentCmdName}),
+              draftClearPromise:_cmdDraftClearPromise,
+              ownerMutationGeneration:_cmdMutationGeneration,
             })
             : 'Agent command runtime unavailable in WebUI.';
         }catch(e){
@@ -1642,9 +1647,10 @@ async function send(){
             ? _agentCommandResultOutput(_agentResult)
             : String(_agentResult&&_agentResult.output||_agentResult||'(no output)'));
         let _failedDraftKept=false;
-        if(_agentFailure&&typeof _stashApprovalTransportFailure==='function'){
+        if(_agentFailure&&_cmdMutationGenerationIsCurrent()&&typeof _stashApprovalTransportFailure==='function'){
           _failedDraftKept=!!_stashApprovalTransportFailure(
-            _cmdOwner.profile,_cmdOwner.sid,text,_cmdDraftFiles,_agentCommandId
+            _cmdOwner.profile,_cmdOwner.sid,text,_cmdDraftFiles,_agentCommandId,
+            text,_cmdMutationGeneration
           );
         }
         // The server persisted the command/result pair in the originating session before
@@ -1713,7 +1719,9 @@ async function send(){
         try{
           _pluginResult=typeof executeAgentPluginCommand==='function'
             ? await executeAgentPluginCommand(text,{
-              ...(_agentCmd||{}),draftClearPromise:_pluginDraftClearPromise,
+              ...(_agentCmd||{}),
+              draftClearPromise:_pluginDraftClearPromise,
+              ownerMutationGeneration:_cmdMutationGeneration,
             })
             : 'Plugin command runtime unavailable in WebUI.';
         }catch(e){
@@ -1728,9 +1736,10 @@ async function send(){
             ? _agentCommandResultOutput(_pluginResult)
             : String(_pluginResult&&_pluginResult.output||_pluginResult||'(no output)'));
         let _failedDraftKept=false;
-        if(_pluginFailure&&typeof _stashApprovalTransportFailure==='function'){
+        if(_pluginFailure&&_cmdMutationGenerationIsCurrent()&&typeof _stashApprovalTransportFailure==='function'){
           _failedDraftKept=!!_stashApprovalTransportFailure(
-            _cmdOwner.profile,_cmdOwner.sid,text,_pluginDraftFiles,_pluginCommandId
+            _cmdOwner.profile,_cmdOwner.sid,text,_pluginDraftFiles,_pluginCommandId,
+            text,_cmdMutationGeneration
           );
         }
         if(!_cmdLifecycleIsCurrent()){

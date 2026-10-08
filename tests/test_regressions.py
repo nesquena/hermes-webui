@@ -1482,6 +1482,7 @@ def test_skills_write_approval_switch_during_reconcile_never_appends_fallback_ou
         %(subcommands_decl)s
         %(steer_owner_fn)s
         const S={session:{session_id:'sid-A'},activeProfile:'default',messages:[],pendingFiles:[]};
+        const _approvalCommandMutationGeneration=()=>0;
         const composer={value:'/skills approve abc123'};
         const $=()=>composer;
         let renders=0,warnings=0;
@@ -1690,6 +1691,15 @@ def _run_webui_agent_command_scenarios():
             },
           });
 
+          // A transcript clear invalidates the owner without changing the active
+          // pane. A delayed transport failure must not recreate a recovery draft
+          // after that mutation generation has advanced.
+          out.failureAfterOwnerClear = await runScenario('failureAfterOwnerClear', {
+            metadataImmediate: true,
+            executeReject: true,
+            during: async (env) => { env.commandGeneration++; },
+          });
+
           // A switch WHILE transcript reconciliation is awaiting its reload must
           // not let fallback output land in the newly selected session.
           out.switchDuringReconcile = await runScenario('switchDuringReconcile', {
@@ -1822,6 +1832,14 @@ def test_webui_agent_command_failure_after_switch_stashes_originating_draft():
     }]
 
 
+def test_webui_agent_command_failure_after_owner_clear_does_not_republish_draft():
+    out = _run_webui_agent_command_scenarios()["failureAfterOwnerClear"]
+    assert out["currentSid"] == "sid-A"
+    assert out["currentMessages"] == ["user:/memory pending"]
+    assert out["stashes"] == []
+    assert out["warnings"] == 1
+
+
 def test_webui_agent_command_switch_during_reconcile_never_appends_fallback_output():
     out = _run_webui_agent_command_scenarios()["switchDuringReconcile"]
     assert out["currentSid"] == "sid-B"
@@ -1860,12 +1878,13 @@ def test_webui_agent_transport_reuses_restored_command_id_and_returns_identity()
     source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
     transport = _js_block(
         source,
-        "async function _runAgentCommandTransport(text,_meta){",
+        "async function _runAgentCommandTransport(text,_meta,capturedOwnerMutationGeneration){",
         "\nasync function resolveBundleCommand",
     )
     script = textwrap.dedent(
         """
         const S={session:{session_id:'sid-A'},activeProfile:'default'};
+        const _approvalCommandMutationGeneration=()=>0;
         const calls=[];
         const cleared=[];
         const _approvalCommandRetryId=(profile,sid,text)=>'webui-command-original';
@@ -1877,7 +1896,7 @@ def test_webui_agent_transport_reuses_restored_command_id_and_returns_identity()
         };
         %(transport)s
         (async()=>{
-          const result=await _runAgentCommandTransport('/memory pending',{});
+          const result=await _runAgentCommandTransport('/memory pending',{},0);
           console.log(JSON.stringify({calls,cleared,result}));
         })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
         """
@@ -1915,7 +1934,7 @@ def test_webui_agent_transport_reuses_success_identity_until_draft_clear_succeed
     session_source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     transport = _js_block(
         command_source,
-        "async function _runAgentCommandTransport(text,_meta){",
+        "async function _runAgentCommandTransport(text,_meta,capturedOwnerMutationGeneration){",
         "\nasync function resolveBundleCommand",
     )
     profile_matcher = _js_block(
@@ -1949,11 +1968,11 @@ def test_webui_agent_transport_reuses_success_identity_until_draft_clear_succeed
         (async()=>{
           const first=await _runAgentCommandTransport('/memory pending',{
             draftClearPromise:Promise.resolve(false),
-          });
+          },0);
           const retained=_approvalCommandRetryId('default','sid-A','/memory pending');
           const second=await _runAgentCommandTransport('/memory pending',{
             draftClearPromise:Promise.resolve(true),
-          });
+          },0);
           const remaining=_approvalCommandRetryId('default','sid-A','/memory pending');
           console.log(JSON.stringify({calls,first,retained,second,remaining}));
         })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
@@ -1973,6 +1992,125 @@ def test_webui_agent_transport_reuses_success_identity_until_draft_clear_succeed
         out["first"]["command_id"],
     ]
     assert out["remaining"] is None
+
+
+def test_webui_agent_transport_success_does_not_republish_after_failed_draft_clear():
+    """A stale success must not recreate retry identity after draft clearing fails."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    transport = _js_block(
+        source,
+        "async function _runAgentCommandTransport(text,_meta,capturedOwnerMutationGeneration){",
+        "\nasync function resolveBundleCommand",
+    )
+    script = textwrap.dedent(
+        """
+        const S={session:{session_id:'sid-A'},activeProfile:'default'};
+        let generation=0;
+        const _approvalCommandMutationGeneration=()=>generation;
+        const remembered=[];
+        const cleared=[];
+        const _rememberApprovalCommandRetry=(record)=>remembered.push(record);
+        const _clearApprovalCommandRetry=(...args)=>cleared.push(args);
+        let releaseClear;
+        const draftClearPromise=new Promise((resolve)=>{releaseClear=()=>{generation++;resolve(false);};});
+        const api=async()=>({output:'saved output',command_id:'command-1'});
+        %(transport)s
+        (async()=>{
+          const done=_runAgentCommandTransport('/memory pending',{draftClearPromise},0);
+          await Promise.resolve();
+          releaseClear();
+          const result=await done;
+          console.log(JSON.stringify({result,remembered,cleared,generation}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"transport": transport}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["generation"] == 1
+    assert out["remembered"] == []
+    assert out["cleared"] == []
+    assert out["result"]["command_id"] == "command-1"
+
+
+def test_webui_command_state_writers_require_the_captured_owner_generation():
+    """Stale or missing callback generations must never publish recovery state."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static/sessions.js").read_text(encoding="utf-8")
+    profile_matcher = _js_block(
+        source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const S={activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
+        %(profile_matcher)s
+        %(helpers)s
+        const record={profile:'default',sid:'sid-A',text:'/memory pending',files:[],command_id:'command-1'};
+        const captured=_approvalCommandMutationGeneration('default','sid-A');
+        const validStash=_stashApprovalTransportFailure(
+          record.profile,record.sid,record.text,record.files,record.command_id,record.text,captured
+        );
+        const staleGeneration=_bumpApprovalCommandMutationGeneration('default','sid-A');
+        const staleStash=_stashApprovalTransportFailure(
+          record.profile,record.sid,record.text,record.files,'command-stale',record.text,captured
+        );
+        const missingStash=_stashApprovalTransportFailure(
+          record.profile,record.sid,record.text,record.files,'command-missing',record.text
+        );
+        const staleRemember=_rememberApprovalCommandRetry(record,captured);
+        const missingRemember=_rememberApprovalCommandRetry({
+          ...record,command_id:'command-missing-retry',
+        });
+        const currentRemember=_rememberApprovalCommandRetry(
+          {...record,command_id:'command-current'},staleGeneration
+        );
+        console.log(JSON.stringify({
+          validStash,staleStash,missingStash,staleRemember,missingRemember,currentRemember,
+          failures:_readApprovalTransportFailures(),retries:_readApprovalCommandRetries(),
+        }));
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["validStash"] is True
+    assert out["staleStash"] is False
+    assert out["missingStash"] is False
+    assert out["staleRemember"] is False
+    assert out["missingRemember"] is False
+    assert out["currentRemember"] is True
+    assert [record["command_id"] for record in out["failures"]] == ["command-1"]
+    assert [record["command_id"] for record in out["retries"]] == ["command-current"]
 
 
 def test_webui_command_failure_restore_runs_after_server_draft_restore():
@@ -2024,7 +2162,7 @@ def test_webui_command_failure_record_survives_until_draft_save_succeeds():
         %(helpers)s
         (async()=>{
           _stashApprovalTransportFailure(
-            'default','sid-A','/memory pending',[],'webui-command-original'
+            'default','sid-A','/memory pending',[],'webui-command-original',undefined,0
           );
           const restoring=_restoreApprovalTransportFailureForSession({session_id:'sid-A'});
           await Promise.resolve();
@@ -2049,6 +2187,100 @@ def test_webui_command_failure_record_survives_until_draft_save_succeeds():
     assert len(out["before"]["failures"]) == 1
     assert out["after"]["failures"] == []
     assert out["after"]["retryId"] == "webui-command-original"
+
+
+def test_webui_command_recovery_fences_generation_before_restore_and_after_save():
+    """Recovery must not mutate a stale composer or republish after a stale save."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static/sessions.js").read_text(encoding="utf-8")
+    profile_matcher = _js_block(
+        source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const S={session:{session_id:'sid-A'},activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
+        let generationBumpOnRead=true;
+        let composerText='';
+        const composer={
+          get value(){
+            if(generationBumpOnRead){
+              generationBumpOnRead=false;
+              _bumpApprovalCommandMutationGeneration('default','sid-A');
+            }
+            return composerText;
+          },
+          set value(value){composerText=String(value);},
+        };
+        const $=()=>composer;
+        const autoResize=()=>{};
+        const renderTray=()=>{};
+        let saveCalls=0;
+        let finishSave;
+        const _saveComposerDraftNow=()=>{
+          saveCalls++;
+          return new Promise((resolve)=>{finishSave=resolve;});
+        };
+        %(profile_matcher)s
+        %(helpers)s
+        (async()=>{
+          _stashApprovalTransportFailure('default','sid-A','/memory pending',[],'command-before',undefined,0);
+          await _restoreApprovalTransportFailureForSession({session_id:'sid-A'});
+          const before={text:composerText,saveCalls,failures:_readApprovalTransportFailures()};
+
+          sessionStorage.setItem(_APPROVAL_TRANSPORT_FAILURE_KEY,JSON.stringify([{
+            profile:'default',sid:'sid-A',text:'/memory pending',files:[],
+            command_id:'command-after',created_at:Date.now(),
+          }]));
+          generationBumpOnRead=false;
+          composerText='';
+          const restoring=_restoreApprovalTransportFailureForSession({session_id:'sid-A'});
+          await Promise.resolve();
+          _bumpApprovalCommandMutationGeneration('default','sid-A');
+          finishSave(true);
+          await restoring;
+          const after={
+            text:composerText,saveCalls,
+            failures:_readApprovalTransportFailures(),
+            retries:_readApprovalCommandRetries(),
+            retryId:_approvalCommandRetryId('default','sid-A','/memory pending'),
+          };
+          console.log(JSON.stringify({before,after}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    before = out["before"]
+    assert before["text"] == ""
+    assert before["saveCalls"] == 0
+    assert len(before["failures"]) == 1
+    assert before["failures"][0]["command_id"] == "command-before"
+    assert out["after"]["text"] == "/memory pending"
+    assert out["after"]["saveCalls"] == 1
+    assert len(out["after"]["failures"]) == 1
+    assert out["after"]["retries"] == []
 
 
 def test_webui_overlapping_command_failures_keep_each_command_identity():
@@ -2084,8 +2316,8 @@ def test_webui_overlapping_command_failures_keep_each_command_identity():
         const S={activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
         %(profile_matcher)s
         %(helpers)s
-        _stashApprovalTransportFailure('default','sid-A','/skills approve first',[],'command-first');
-        _stashApprovalTransportFailure('default','sid-A','/skills approve second',[],'command-second');
+        _stashApprovalTransportFailure('default','sid-A','/skills approve first',[],'command-first',undefined,0);
+        _stashApprovalTransportFailure('default','sid-A','/skills approve second',[],'command-second',undefined,0);
         console.log(JSON.stringify({
           failures:_readApprovalTransportFailures(),
           first:_approvalCommandRetryId('default','sid-A','/skills approve first'),
@@ -2137,10 +2369,10 @@ def test_webui_clear_command_state_removes_both_retry_stores_for_only_its_sessio
         const S={activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
         %(profile_matcher)s
         %(helpers)s
-        _stashApprovalTransportFailure('default','sid-A','/skills approve first',[],'failure-A');
-        _stashApprovalTransportFailure('default','sid-B','/skills approve second',[],'failure-B');
-        _rememberApprovalCommandRetry({profile:'default',sid:'sid-A',text:'/memory pending',command_id:'retry-A'});
-        _rememberApprovalCommandRetry({profile:'default',sid:'sid-B',text:'/memory pending',command_id:'retry-B'});
+        _stashApprovalTransportFailure('default','sid-A','/skills approve first',[],'failure-A',undefined,0);
+        _stashApprovalTransportFailure('default','sid-B','/skills approve second',[],'failure-B',undefined,0);
+        _rememberApprovalCommandRetry({profile:'default',sid:'sid-A',text:'/memory pending',command_id:'retry-A'},0);
+        _rememberApprovalCommandRetry({profile:'default',sid:'sid-B',text:'/memory pending',command_id:'retry-B'},0);
         _clearApprovalCommandStateForSession('default','sid-A');
         console.log(JSON.stringify({
           failures:_readApprovalTransportFailures(),
@@ -2300,7 +2532,7 @@ def test_reconcile_agent_command_transcript_passes_owner_profile_to_load_guard()
     assert out["messages"] == []
 
 
-def _run_webui_plugin_command_scenario(*, reject=False):
+def _run_webui_plugin_command_scenario(*, reject=False, invalidate=False):
     """Run the real awaited plugin-command branch while ownership changes."""
     import json
     import shutil
@@ -2320,14 +2552,17 @@ def _run_webui_plugin_command_scenario(*, reject=False):
     harness = textwrap.dedent(
         """
         (async () => {
-          const env = { composer: {value:'/plugin run'}, clears:[], stashes:[], warnings:0, renders:0 };
+          const env = { composer: {value:'/plugin run'}, clears:[], stashes:[], warnings:0, renders:0, commandGeneration:0 };
           const S = {session:{session_id:'sid-A'},activeProfile:'default',messages:[],pendingFiles:[]};
           const text='/plugin run';
           const _agentCmd={name:'plugin',category:'Plugin'};
           const _cmdOwner={sid:'sid-A',profile:'default'};
           const _cmdOwnerIsCurrent=()=>((S.session&&S.session.session_id)||null)===_cmdOwner.sid
             &&(S.activeProfile||'default')===_cmdOwner.profile;
-          const _cmdLifecycleIsCurrent=_cmdOwnerIsCurrent;
+          const _approvalCommandMutationGeneration=()=>env.commandGeneration;
+          const _cmdMutationGeneration=0;
+          const _cmdMutationGenerationIsCurrent=()=>_approvalCommandMutationGeneration()===_cmdMutationGeneration;
+          const _cmdLifecycleIsCurrent=()=>_cmdOwnerIsCurrent()&&_cmdMutationGenerationIsCurrent();
           let _cmdDraftRevision=0;
           const _composerDraftRevision=()=>0;
           const $=()=>env.composer;
@@ -2351,6 +2586,7 @@ def _run_webui_plugin_command_scenario(*, reject=False):
           };
           const done=run();
           await new Promise((r)=>setTimeout(r,5));
+          if(%(invalidate)s) env.commandGeneration++;
           S.session={session_id:'sid-B'};
           S.messages=[];
           env.composer.value='draft typed in B';
@@ -2366,7 +2602,11 @@ def _run_webui_plugin_command_scenario(*, reject=False):
           }));
         })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
         """
-    ) % {"block": block, "reject": "true" if reject else "false"}
+    ) % {
+        "block": block,
+        "reject": "true" if reject else "false",
+        "invalidate": "true" if invalidate else "false",
+    }
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     return json.loads(proc.stdout.strip())
@@ -2391,6 +2631,13 @@ def test_webui_plugin_command_failure_after_switch_stashes_originating_draft():
         "value": "/plugin run",
         "files": [],
     }]
+
+
+def test_webui_plugin_command_failure_after_owner_clear_does_not_republish_draft():
+    out = _run_webui_plugin_command_scenario(reject=True, invalidate=True)
+    assert out["messages"] == []
+    assert out["stashes"] == []
+    assert out["warnings"] == 1
 
 
 def test_transport_failure_draft_survives_reload_with_profile_alias_and_expires():
@@ -2435,17 +2682,17 @@ def test_transport_failure_draft_survives_reload_with_profile_alias_and_expires(
         %(profile_matcher)s
         %(helpers)s
         (async()=>{
-          const kept=_stashApprovalTransportFailure('default','sid-A','/memory pending',[]);
+          const kept=_stashApprovalTransportFailure('default','sid-A','/memory pending',[],undefined,undefined,0);
           await _restoreApprovalTransportFailureForSession({session_id:'sid-A'});
           const restored={kept,text:composer.value,saved,remaining:_readApprovalTransportFailures()};
           composer.value='';
           S.activeProfile='default';
-          _stashApprovalTransportFailure('renamed-root','sid-reverse','reverse alias',[]);
+          _stashApprovalTransportFailure('renamed-root','sid-reverse','reverse alias',[],undefined,undefined,0);
           await _restoreApprovalTransportFailureForSession({session_id:'sid-reverse'});
           const reverseRestored={text:composer.value,remaining:_readApprovalTransportFailures()};
           S.activeProfile='renamed-root';
           composer.value='';
-          _stashApprovalTransportFailure('default','sid-B','secret',[]);
+          _stashApprovalTransportFailure('default','sid-B','secret',[],undefined,undefined,0);
           _clearApprovalTransportFailuresForSession('renamed-root','sid-B');
           const cleared=_readApprovalTransportFailures();
           sessionStorage.setItem(_APPROVAL_TRANSPORT_FAILURE_KEY,JSON.stringify([{
@@ -2584,6 +2831,63 @@ def test_skills_write_approval_response_delivered_when_no_session_existed():
     assert out["lastMessageContent"] == "No pending skill writes."
     assert out["renderCalled"] == 1
     assert out["warningShown"] == 0
+
+
+def test_skills_write_approval_failure_after_owner_clear_does_not_republish_draft():
+    """A delayed /skills failure must not stash after its owner is invalidated."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    cmd_skills_fn = _js_block(src, "function cmdSkills(args){", "\nasync function cmdUse")
+    steer_owner_fn = _js_block(src, "function _steerOwnerIsCurrent(ownerSid){", "\nfunction _steerOwnerStreamIsCurrent")
+    subcommands_decl = src[src.index("const SKILLS_AGENT_SUBCOMMANDS="):src.index("\n\nfunction cmdSkills")]
+    harness = textwrap.dedent(
+        """
+        %(subcommands_decl)s
+        %(steer_owner_fn)s
+        const S={session:{session_id:'sid-A'},activeProfile:'default',messages:[],pendingFiles:[]};
+        const composer={value:'/skills approve abc'};
+        const $=()=>composer;
+        let generation=0;
+        const _approvalCommandMutationGeneration=()=>generation;
+        const stashes=[];
+        const _stashApprovalTransportFailure=(profile,sid,text,files)=>{
+          stashes.push({profile,sid,text,files}); return true;
+        };
+        const _clearComposerDraft=()=>Promise.resolve(true);
+        const showToast=()=>{};
+        const renderMessages=()=>{};
+        const autoResize=()=>{};
+        const renderTray=()=>{};
+        let rejectTransport;
+        const _runAgentCommandTransport=()=>new Promise((_resolve,reject)=>{rejectTransport=reject;});
+        %(cmd_skills_fn)s
+        cmdSkills('approve abc');
+        setTimeout(()=>{
+          generation++;
+          rejectTransport(new Error('offline'));
+        },5);
+        setTimeout(()=>console.log(JSON.stringify({stashes,messages:S.messages})),20);
+        """
+    ) % {
+        "subcommands_decl": subcommands_decl,
+        "steer_owner_fn": steer_owner_fn,
+        "cmd_skills_fn": cmd_skills_fn,
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["stashes"] == []
+    assert out["messages"] == []
+
 
 
 def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):

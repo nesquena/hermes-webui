@@ -449,6 +449,11 @@ function _bumpApprovalCommandMutationGeneration(profile,sid){
   _approvalCommandMutationGenerations.set(key,next);
   return next;
 }
+function _approvalCommandMutationGenerationMatches(profile,sid,capturedGeneration){
+  return !!sid&&Number.isFinite(capturedGeneration)
+    &&typeof _approvalCommandMutationGeneration==='function'
+    &&_approvalCommandMutationGeneration(profile,sid)===capturedGeneration;
+}
 function _readApprovalTransportFailures(){
   try{
     const parsed=JSON.parse(sessionStorage.getItem(_APPROVAL_TRANSPORT_FAILURE_KEY)||'[]');
@@ -491,8 +496,9 @@ function _writeApprovalCommandRetries(records){
     return true;
   }catch(e){return false;}
 }
-function _rememberApprovalCommandRetry(record){
-  if(!record||!record.sid||!record.command_id)return false;
+function _rememberApprovalCommandRetry(record,capturedGeneration){
+  if(!record||!record.sid||!record.command_id
+    ||!_approvalCommandMutationGenerationMatches(record.profile,record.sid,capturedGeneration))return false;
   const normalized={
     profile:String(record.profile||'default'),sid:String(record.sid),
     text:String(record.text||''),command:String(record.command||record.text||''),
@@ -526,8 +532,8 @@ function _clearApprovalCommandRetry(profile,sid,text,commandId){
   _writeApprovalTransportFailures(_readApprovalTransportFailures().filter((record)=>!matches(record)));
   _writeApprovalCommandRetries(_readApprovalCommandRetries().filter((record)=>!matches(record)));
 }
-function _stashApprovalTransportFailure(profile,sid,text,files,commandId,command){
-  if(!sid)return false;
+function _stashApprovalTransportFailure(profile,sid,text,files,commandId,command,capturedGeneration){
+  if(!sid||!_approvalCommandMutationGenerationMatches(profile,sid,capturedGeneration))return false;
   const record={
     profile:String(profile||'default'),sid:String(sid),text:String(text||''),
     command:String(command||text||'').trim(),
@@ -570,7 +576,15 @@ async function _restoreApprovalTransportFailureForSession(session){
   if(index<0)return;
   const record=records[index];
   const composer=(typeof $==='function'&&$('msg'))||null;
+  const ownerMutationGeneration=typeof _approvalCommandMutationGeneration==='function'
+    ? _approvalCommandMutationGeneration(activeProfile,sid)
+    : 0;
+  const ownerStillCurrent=()=>(!S||!S.session||S.session.session_id===sid)
+    &&_profileMatchesActiveProfile(activeProfile,S&&S.activeProfile||'default')
+    &&_approvalCommandMutationGenerationMatches(activeProfile,sid,ownerMutationGeneration);
+  if(!ownerStillCurrent())return false;
   if(composer&&!composer.value&&!((S.pendingFiles||[]).length)){
+    if(!ownerStillCurrent())return false;
     composer.value=record.text||'';
     if(Array.isArray(record.files)&&record.files.length)S.pendingFiles=[...record.files];
     if(typeof autoResize==='function')autoResize();
@@ -580,11 +594,12 @@ async function _restoreApprovalTransportFailureForSession(session){
       try{saved=(await _saveComposerDraftNow(sid,record.text,record.files,record.profile))!==false;}
       catch(e){saved=false;}
     }
+    if(!ownerStillCurrent())return false;
     // Keep the only recovery copy until the server draft confirms success.
     // Once durable, retain just the stable command identity so a later retry
     // reconciles the original server-owned transcript row instead of appending.
     if(saved){
-      if(record.command_id)_rememberApprovalCommandRetry(record);
+      if(record.command_id)_rememberApprovalCommandRetry(record,ownerMutationGeneration);
       const remaining=_readApprovalTransportFailures().filter((item)=>!(
         item.sid===record.sid&&item.profile===record.profile&&Number(item.created_at||0)===Number(record.created_at||0)
       ));

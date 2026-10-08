@@ -515,14 +515,18 @@ function cliOnlyCommandResponse(cmdName, meta){
 }
 
 async function executeAgentCommand(text,_meta){
-  return _runAgentCommandTransport(text,_meta);
+  return _runAgentCommandTransport(
+    text,_meta,_meta&&_meta.ownerMutationGeneration
+  );
 }
 
 async function executeAgentPluginCommand(text,_meta){
-  return _runAgentCommandTransport(text,_meta);
+  return _runAgentCommandTransport(
+    text,_meta,_meta&&_meta.ownerMutationGeneration
+  );
 }
 
-async function _runAgentCommandTransport(text,_meta){
+async function _runAgentCommandTransport(text,_meta,capturedOwnerMutationGeneration){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
   const ownerSid=S&&S.session&&S.session.session_id||null;
@@ -533,6 +537,11 @@ async function _runAgentCommandTransport(text,_meta){
   const commandId=ownerSid
     ? (retryId||`webui-command-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,12)}`)
     : null;
+  const ownerMutationGeneration=capturedOwnerMutationGeneration;
+  const ownerMutationGenerationStillCurrent=()=>!ownerSid
+    ||(Number.isFinite(ownerMutationGeneration)
+      &&typeof _approvalCommandMutationGeneration==='function'
+      &&_approvalCommandMutationGeneration(ownerProfile,ownerSid)===ownerMutationGeneration);
   try{
     const data=await api('/api/commands/exec',{
       method:'POST',
@@ -543,13 +552,19 @@ async function _runAgentCommandTransport(text,_meta){
     if(data&&data.persistence_warning){
       output+=`\n\n⚠️ The command ran, but its final result could not be saved. Hermes will not run this command again automatically.`;
     }
-    if(ownerSid&&responseId){
+    if(ownerSid&&responseId&&ownerMutationGenerationStillCurrent()){
       const tracksDraftClear=!!(_meta&&Object.prototype.hasOwnProperty.call(_meta,'draftClearPromise'));
       let draftCleared=true;
       if(tracksDraftClear){
         try{draftCleared=(await Promise.resolve(_meta.draftClearPromise))!==false;}
         catch(e){draftCleared=false;}
       }
+      if(!ownerMutationGenerationStillCurrent()) return {
+        output,
+        command_id:responseId,
+        persistence_warning:!!(data&&data.persistence_warning),
+        recovered_interrupted:!!(data&&data.recovered_interrupted),
+      };
       if(draftCleared&&typeof _clearApprovalCommandRetry==='function'){
         _clearApprovalCommandRetry(ownerProfile,ownerSid,command,responseId);
       }else if(!draftCleared&&typeof _rememberApprovalCommandRetry==='function'){
@@ -558,7 +573,7 @@ async function _runAgentCommandTransport(text,_meta){
         // transcript row instead of executing the command again.
         _rememberApprovalCommandRetry({
           profile:ownerProfile,sid:ownerSid,text:command,command_id:responseId,
-        });
+        },ownerMutationGeneration);
       }
     }
     return {
@@ -1389,9 +1404,12 @@ function cmdSkills(args){
   const ownerMutationGeneration=typeof _approvalCommandMutationGeneration==='function'
     ? _approvalCommandMutationGeneration(ownerProfile,ownerSid)
     : 0;
+  const ownerMutationGenerationStillValid=()=>!ownerSid
+    ||(Number.isFinite(ownerMutationGeneration)
+      &&typeof _approvalCommandMutationGeneration==='function'
+      &&_approvalCommandMutationGeneration(ownerProfile,ownerSid)===ownerMutationGeneration);
   const ownerLifecycleStillValid=()=>_skillsResponseOwnerStillValid(ownerSid,ownerProfile)
-    &&(typeof _approvalCommandMutationGeneration!=='function'
-      ||_approvalCommandMutationGeneration(ownerProfile,ownerSid)===ownerMutationGeneration);
+    &&ownerMutationGenerationStillValid();
   const commandText='/skills '+(args||'');
   const composer=(typeof $==='function'&&$('msg'))||(typeof document!=='undefined'&&document.getElementById('msg'));
   const draftText=composer?String(composer.value||''):commandText;
@@ -1405,7 +1423,9 @@ function cmdSkills(args){
     (async()=>{
       let result=null, failure=null;
       try{
-        result = await _runAgentCommandTransport(commandText,{draftClearPromise});
+        result = await _runAgentCommandTransport(
+          commandText,{draftClearPromise},ownerMutationGeneration
+        );
       }catch(e){
         failure=e;
       }
@@ -1418,9 +1438,10 @@ function cmdSkills(args){
           ? _agentCommandResultOutput(result)
           : String(result&&result.output||result||'(no output)'));
       let failedDraftKept=false;
-      if(failure&&typeof _stashApprovalTransportFailure==='function'){
+      if(failure&&ownerMutationGenerationStillValid()&&typeof _stashApprovalTransportFailure==='function'){
         failedDraftKept=!!_stashApprovalTransportFailure(
-          ownerProfile,ownerSid,draftText,draftFiles,commandId,String(commandText).trim()
+          ownerProfile,ownerSid,draftText,draftFiles,commandId,String(commandText).trim(),
+          ownerMutationGeneration
         );
       }
       if(!ownerLifecycleStillValid()){
