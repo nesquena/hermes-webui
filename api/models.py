@@ -3642,10 +3642,17 @@ def _find_journal_tool_match(
             anchor = tool_call.get('assistant_msg_idx')
             _messages = session.messages or []
             if isinstance(anchor, bool) or not isinstance(anchor, int):
-                # No usable anchor at all (a live-recorded tool, or one carried
-                # over from the core transcript): nothing contradicts the match,
-                # so keep the session-wide invariant the original repair path
-                # relies on.
+                # No usable anchor at all: the card is either a live-recorded
+                # tool or one carried over from the core transcript.
+                # * When the session has an authoritative active-turn token we
+                #   ARE inside a real recovery pass, so an anchorless card has
+                #   unknown ownership and must not swallow the current turn's
+                #   journaled tool (fail closed toward appending).
+                # * With no token (a plain lookup, e.g. the "is this tool
+                #   already in the core transcript?" invariant check) nothing
+                #   contradicts the match, so keep the session-wide behaviour.
+                if _current_turn_token(session) is not None:
+                    continue
                 return tool_idx
             if not (0 <= anchor < len(_messages)):
                 continue
@@ -6071,7 +6078,15 @@ def _apply_core_sync_or_error_marker(
                 # streams still keep a card each, ownership-unknown cards
                 # still append, and an older untagged live card is never
                 # swallowed.
-                dedupe_existing=False,
+                # Content dedupe is REQUIRED here: without it every repair
+                # cycle re-appended the journal's reasoning, which produced the
+                # 1024-duplicate transcript observed in the wild
+                # (tests/test_issue_dedupe_call_site_recovery.py::
+                #  test_repair_reuses_existing_empty_recovered_rows).
+                # ``dedupe_tools`` keeps the tool-card matcher stream-scoped and
+                # one-to-one, so identical calls from DISTINCT streams still
+                # keep a card each and ownership-unknown cards still append.
+                dedupe_existing=True,
                 dedupe_tools=True,
                 terminal_recovery=_terminal_recovery,
             )
@@ -6114,6 +6129,7 @@ def _apply_core_sync_or_error_marker(
                     resolved=bool(
                         recovered_output
                         or terminal_error_recovered
+                        or _output_accounted_for
                     ),
                     terminal_error=bool(terminal_error_recovered),
                     stream_id=_stream_id,
