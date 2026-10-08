@@ -4047,6 +4047,9 @@ def _recover_journaled_output_and_terminal_error(
         session,
         stream_id,
         dedupe_existing=dedupe_existing,
+        # #7167: pass the caller's INDEPENDENT tool-dedupe mode through
+        # instead of re-coupling it to dedupe_existing.
+        dedupe_tools=dedupe_tools,
         dedupe_min_index=dedupe_min_index,
         dedupe_max_index=dedupe_max_index,
         append_context=append_context,
@@ -4100,6 +4103,11 @@ def _append_journaled_partial_output(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    # #7167: ``dedupe_tools`` is independent of the CONTENT dedupe mode.
+    # ``None`` preserves the historical coupling to ``dedupe_existing``; the
+    # stale-pending caller passes True so tool cards dedupe by same-stream
+    # provenance even when the content path uses its own provenance-reuse mode.
+    dedupe_tools: bool | None = None,
     dedupe_min_index: int | None = None,
     dedupe_max_index: int | None = None,
     append_context: bool = True,
@@ -4594,6 +4602,9 @@ def _append_journaled_partial_output(
             # exists — only the anchor allocation is deferred.
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
+            tool_id = str(
+                payload.get('tid') or payload.get('tool_call_id') or ''
+            ).strip()
             # Immutable identity of this journal event (stream + seq). The live
             # journal shape sends ``tool`` with preview None and a real tid and
             # then overwrites the CARD's preview via ``tool_complete``, so the
@@ -5444,6 +5455,14 @@ def _retry_journal_recovery_in_place(
                     dedupe_min_index=owner_index + 1,
                     dedupe_max_index=idx,
                     append_context=False,
+                    # display_only: the cancel-marker replay must REPRESENT the
+                    # journal's visible output without appending a second copy
+                    # into session.messages. Without it the replayed row (and
+                    # its CANCELLED_REPLAY payload) survives into the merged
+                    # transcript, which is exactly what
+                    # tests/test_cancelled_journal_owner_occurrences.py
+                    # asserts must not happen.
+                    display_only=True,
                 )
             )
             # A dedupe hit (no fresh row appended this pass) still means the
@@ -5453,7 +5472,16 @@ def _retry_journal_recovery_in_place(
             # on screen (2026-09-23 re-gate, api/models.py:3789). Only a
             # genuine "nothing visible to recover" (all three False) may
             # leave the marker armed for the next lazy pass.
-            if recovered_output or terminal_error_recovered or output_accounted_for:
+            # Fail-closed: ``output_accounted_for`` is NOT accepted as recovery
+            # here. An "already represented" hit can come from rows an EARLIER
+            # repair pass reordered or from ordinary history that happens to
+            # sit inside the stream-scoped window — neither proves THIS journal
+            # produced visible output. Accepting it consumed the marker without
+            # replaying the journal, so a stale ``CANCELLED_REPLAY`` row
+            # survived into the merged transcript and the durable saved
+            # successors lost their admission (tests/
+            # test_cancelled_journal_owner_occurrences.py).
+            if recovered_output or terminal_error_recovered:
                 if not terminal_error_recovered:
                     msg['content'] = _INTERRUPTED_RECOVERED_WORDING
                     _strip_journal_retry_meta(msg)
@@ -5971,9 +5999,14 @@ def _apply_core_sync_or_error_marker(
                 _promote_or_refresh_reused_marker(
                     session,
                     _existing_marker_idx,
+                    # Same fail-closed rule as the cancel-marker path: only a
+                    # FRESH append or a materialized terminal error proves this
+                    # journal produced output. Counting ``_output_accounted_for``
+                    # promoted a marker whose journal never appended anything,
+                    # which hoisted rows above it and broke the saved-successor
+                    # admission the owner-occurrence tests assert.
                     resolved=bool(
                         recovered_output
-                        or _output_accounted_for
                         or terminal_error_recovered
                     ),
                     terminal_error=bool(terminal_error_recovered),
