@@ -24020,7 +24020,25 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     # allows state.db rows newer than the watermark, so post-edit turns
     # are not dropped. Never 0.0 (the truncate-to-empty sentinel, #2914).
     if getattr(s, "truncation_watermark", None):
-        s.truncation_watermark = user_msg.get("timestamp") or time.time()
+        # Same invariant as streaming._advance_truncation_watermark_after_commit:
+        # only ever advance to a REAL message timestamp. Falling back to
+        # time.time() here stamped the watermark newer than every sidecar row
+        # and permanently self-locked the append-only state.db merge. When
+        # started_at is absent, clamp to the newest real message instead.
+        checkpoint_ts = user_msg.get("timestamp") or user_msg.get("_ts")
+        if not (isinstance(checkpoint_ts, (int, float)) and checkpoint_ts > 0):
+            newest_real_ts = None
+            for _m in (getattr(s, "messages", None) or []):
+                if not isinstance(_m, dict):
+                    continue
+                _ts = _m.get("timestamp") or _m.get("_ts")
+                if isinstance(_ts, (int, float)) and _ts > 0:
+                    newest_real_ts = (
+                        _ts if newest_real_ts is None else max(newest_real_ts, _ts)
+                    )
+            checkpoint_ts = newest_real_ts
+        if isinstance(checkpoint_ts, (int, float)) and checkpoint_ts > 0:
+            s.truncation_watermark = float(checkpoint_ts)
 
 
 def _is_default_or_empty_session_title(title) -> bool:
