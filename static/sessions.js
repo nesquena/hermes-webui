@@ -2334,7 +2334,7 @@ async function loadSession(sid){
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
-    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
+    const resolvedSid=(typeof _sessionUrlTargetsExactSid==='function' && _sessionUrlTargetsExactSid(sid)) ? sid : _resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid){
       if(!opts._continuationParentSid) opts={...opts,_continuationParentSid:sid};
       sid=resolvedSid;
@@ -4965,6 +4965,10 @@ function _sessionUrlForSid(sid){
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
+    // `exact` is a one-shot child-row new-tab hint (see _markSessionUrlExact),
+    // not a durable page parameter: drop it so it cannot leak into the next
+    // session URL this tab navigates to.
+    current.searchParams.delete('exact');
     const retained=new URLSearchParams();
     current.searchParams.forEach((value,key)=>{
       if(key!=='action'||value!=='new-chat') retained.append(key,value);
@@ -4976,7 +4980,15 @@ function _sessionUrlForSid(sid){
 }
 function _setActiveSessionUrl(sid){
   if(typeof window==='undefined'||!window.history||!sid) return;
-  const next=_sessionUrlForSid(sid);
+  let next=_sessionUrlForSid(sid);
+  // Keep the one-shot exact-target marker while this tab stays on the same
+  // session, so a refresh of a child row's new tab still lands on the child
+  // instead of folding into its compressed parent; switching sessions drops it.
+  if(typeof _sessionUrlRequestsExactTarget==='function' && typeof _markSessionUrlExact==='function'
+     && typeof _sessionIdFromLocation==='function'
+     && _sessionIdFromLocation()===sid && _sessionUrlRequestsExactTarget()){
+    next=_markSessionUrlExact(next);
+  }
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
     let consumeLaunchAction=false;
     try{
@@ -4986,6 +4998,178 @@ function _setActiveSessionUrl(sid){
     const method=consumeLaunchAction?'replaceState':'pushState';
     window.history[method]({session_id:sid},'',next);
   }
+}
+
+/**
+ * Middle-click (or Ctrl/Cmd+click) on a sidebar session row opens that
+ * session's deep link (`/session/<id>`) in a new browser tab instead of
+ * switching the current tab. Boot already resolves the id from the URL
+ * (`_sessionIdFromLocation` + `loadSession(saved)`), so the new tab lands
+ * directly on the session. Never fires for the ⋮ action menu, checkboxes,
+ * tag chips, lineage/child toggles, while renaming, or in batch select mode.
+ */
+// Whether the row's owning agent profile can be loaded in a NEW tab without
+// breaking the tab that issued the gesture. A new tab that boots a session
+// owned by another profile switches the shared `hermes_profile` cookie, so the
+// source tab keeps its session but its next /api/chat/start, approval and
+// metadata calls fail with 409 session_profile_mismatch. With "show sessions
+// from all profiles" off every row belongs to the active profile; with it on,
+// an unknown owner is treated as unverifiable and refused.
+function _newTabOwningProfileAllowed(session){
+  const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)?S.activeProfile:'default';
+  const owningProfile=(typeof _sidebarSessionProfileName==='function')?_sidebarSessionProfileName(session):'';
+  // A KNOWN owner is authoritative regardless of the show-all toggle: turning
+  // "show sessions from all profiles" off flips `_showAllProfiles` immediately,
+  // but the sidebar keeps rendering the previous scope's foreign rows until the
+  // refetch lands. A toggle-based shortcut would wave those retained foreign
+  // rows through, switching the shared cookie and 409'ing the source tab. So
+  // always compare a known owner against the active profile.
+  if(owningProfile){
+    return _profileMatchesActiveProfile(owningProfile,activeProfile);
+  }
+  // Unknown owner: allow only when the loaded sidebar cache is definitively a
+  // single-profile scope for the active profile (show-all off). Anything else —
+  // show-all on, no scope, an all-profiles scope, or a different scope profile —
+  // is unverifiable and refused.
+  if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles) return false;
+  const scope=(typeof _allSessionsScope!=='undefined'&&_allSessionsScope)?_allSessionsScope:null;
+  if(!scope||scope.allProfiles!==false) return false;
+  const scopeProfile=(typeof scope.profile==='string')?scope.profile.trim():'';
+  if(!scopeProfile) return false;
+  return _profileMatchesActiveProfile(scopeProfile,activeProfile);
+}
+// Whether this environment can actually open a session in a second window.
+// The native macOS shell (hermes-swift-mac) exposes `window.open` but its
+// WKWebView delegate does not implement `webView(_:createWebViewWith:…)`, so
+// WebKit silently drops the tab (hermes-swift-mac#102). Callers that mutate
+// gesture state before opening must consult this *first*: otherwise they park
+// the gesture to idle and the fall-through _finishSessionGesture early-returns,
+// turning the click into a dead click instead of master's same-tab load.
+function _newTabOpenSupported(){
+  if(typeof window==='undefined'||typeof window.open!=='function') return false;
+  const wk=(window.webkit&&window.webkit.messageHandlers)?window.webkit.messageHandlers:null;
+  if(wk&&(wk.hermesNotify||wk.hermesTheme)) return false; // hermes-swift-mac#102
+  return true;
+}
+// Mark a `/session/<id>` deep link as an *exact* target. Boot honors the marker
+// (see `_sessionUrlRequestsExactTarget`) and loads that id without lineage
+// folding, so a nested child row opened in a new tab lands on the child rather
+// than on its compressed parent's lineage row (#7429 review 2026-10-08).
+function _markSessionUrlExact(url){
+  if(!url||typeof url!=='string') return url;
+  if(/([?&])exact=1(\b|$)/.test(url)) return url;
+  const hashIdx=url.indexOf('#');
+  const head=hashIdx>=0?url.slice(0,hashIdx):url;
+  const tail=hashIdx>=0?url.slice(hashIdx):'';
+  return head+(head.indexOf('?')>=0?'&':'?')+'exact=1'+tail;
+}
+// Whether the current deep link carries the exact-target marker. Boot passes
+// `skipLineageResolve` when it does, mirroring a plain child-row same-tab click
+// (`_openSidebarSession(child, {skipLineageResolve:true})`), so the child row's
+// new tab lands on the child and not on its compressed parent's lineage tip.
+// Ordinary deep links keep the lineage-tip landing an old segment URL expects.
+function _sessionUrlRequestsExactTarget(){
+  if(typeof window==='undefined'||!window.location) return false;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    return qs.get('exact')==='1';
+  }catch(_e){return false;}
+}
+// Lineage folding maps a nested child id onto its compressed parent's row. A tab
+// opened on a child via its exact-target link (`/session/<child>?exact=1`) must
+// keep showing that child on every load of it, not only at boot: browser Back
+// to that entry and same-session refreshes (poll, session-updated) also go
+// through loadSession() (#7429 release review). Only the session the URL names
+// is exempt, so navigating elsewhere from that tab folds lineage as usual.
+function _sessionUrlTargetsExactSid(sid){
+  if(!sid || typeof _sessionUrlRequestsExactTarget!=='function' || typeof _sessionIdFromLocation!=='function') return false;
+  return _sessionUrlRequestsExactTarget() && _sessionIdFromLocation()===sid;
+}
+function _openSessionUrlInNewTab(sid, session, opts){
+  if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
+  // Native macOS shell (hermes-swift-mac): its WKWebView delegate does not
+  // implement webView(_:createWebViewWith:…), so WebKit silently drops
+  // window.open(url,'_blank','noopener'), and `noopener` makes window.open
+  // return null so the drop is undetectable here. Treat the embedded shell as
+  // having no multi-window support and decline, so every tap path falls back
+  // to its same-tab load (hermes-swift-mac#102). Drop this once the app
+  // implements the delegate.
+  const _wkHandlers=(typeof window!=='undefined'&&window.webkit&&window.webkit.messageHandlers)?window.webkit.messageHandlers:null;
+  if(_wkHandlers&&(_wkHandlers.hermesNotify||_wkHandlers.hermesTheme)) return false;
+  if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
+  if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
+  // Foreign/unknown owning profile: consume the gesture (return true so callers
+  // skip the same-tab path) and surface a notice instead of switching cookies.
+  if(session&&!_newTabOwningProfileAllowed(session)){
+    if(typeof showToast==='function') showToast(t('session_new_tab_other_profile'),3000);
+    return true;
+  }
+  let url=null;
+  try{url=_sessionUrlForSid(sid);}catch(_e){return false;}
+  if(!url) return false;
+  // Child-row call sites pass {exact:true}: the deep link declares the child id
+  // authoritative so boot does not fold it into its compressed parent's row.
+  if(opts&&opts.exact) url=_markSessionUrlExact(url);
+  try{
+    window.open(url,'_blank','noopener');
+    return true;
+  }catch(_e){return false;}
+}
+// Shared choke point for the pointer-tap paths below: returns true when the
+// event was consumed as an open-in-new-tab (caller must skip same-tab open).
+// `opts.exact` (child rows) marks the deep link as the exact target.
+function _consumeSessionNewTabClick(e, sid, session, opts){
+  if(!e||!sid) return false;
+  const isModifiedClick=!!(e.ctrlKey||e.metaKey);
+  const isMiddleClick=(typeof e.button==='number'&&e.button===1)||e.which===2;
+  if(!isModifiedClick&&!isMiddleClick) return false;
+  // The class exclusion list below is the authoritative action-target guard:
+  // every row kind's ⋮ menu lives under `.session-actions` (plus the checkbox,
+  // tag, child/lineage count and lineage-segment controls). The per-row closure
+  // `_isSessionActionTarget` is not visible here and its `typeof` probe never
+  // fired, so it was removed rather than left as a dead check.
+  if(e.target&&e.target.closest){
+    try{
+      if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return false;
+    }catch(_e){}
+  }
+  if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
+  if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
+  if(typeof e.preventDefault==='function') e.preventDefault();
+  if(typeof e.stopPropagation==='function') e.stopPropagation();
+  return _openSessionUrlInNewTab(sid, session, opts);
+}
+// `auxclick` fires for the middle button where `click` never does; `mousedown`
+// also preventDefaults button-1 so the browser doesn't start autoscroll.
+function _wireSessionNewTabListeners(node, getSid, getSession, opts){
+  if(!node||typeof node.addEventListener!=='function'||typeof getSid!=='function') return;
+  node.addEventListener('auxclick',(e)=>{
+    if(!e) return;
+    const btn=(typeof e.button==='number')?e.button:(e.which===2?1:0);
+    if(btn!==1) return;
+    if(e.target&&e.target.closest){
+      try{
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return;
+      }catch(_e2){}
+    }
+    if(typeof e.preventDefault==='function') e.preventDefault();
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    _openSessionUrlInNewTab(getSid(), typeof getSession==='function'?getSession():undefined, opts);
+  });
+  node.addEventListener('mousedown',(e)=>{
+    if(!e) return;
+    const btn=(typeof e.button==='number')?e.button:(e.which===2?1:0);
+    if(btn!==1) return;
+    if(e.target&&e.target.closest){
+      try{
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return;
+      }catch(_e2){}
+    }
+    // Swallow the middle-button default (autoscroll / back-nav chord) without
+    // claiming the gesture: pointerup's _finishSessionGesture still ignores
+    // button!==0, so no swipe/rename/tap side effects can fire from this.
+    if(typeof e.preventDefault==='function') e.preventDefault();
+  });
 }
 
 // ── Batch select mode ──
@@ -7726,7 +7910,14 @@ function _lineageSegmentsForRender(s,lineageKey,skipCached){
     if(!seg||!seg.session_id||seg.session_id===currentSid||seen.has(seg.session_id)) return;
     if(seg.role==='child_session') return;
     seen.add(seg.session_id);
-    segments.push({...seg});
+    const copy={...seg};
+    // Lineage-report rows are serialised by the owning profile's state DB but
+    // ship without a `profile` field (api/agent_sessions.py), so the new-tab
+    // profile gate would treat them as unverifiable and refuse them under
+    // "show all profiles". Attribute an ownerless segment to the row that owns
+    // the report, which is always in the active profile.
+    if(!(typeof copy.profile==='string'&&copy.profile.trim())&&s&&typeof s.profile==='string'&&s.profile.trim()) copy.profile=s.profile;
+    segments.push(copy);
   };
   for(const seg of (Array.isArray(s&&s._lineage_segments)?s._lineage_segments:[])) addSegment(seg);
   if(!skipCached){
@@ -9271,8 +9462,10 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
+          if(_consumeSessionNewTabClick(e, seg.session_id, seg)) return;
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
+        _wireSessionNewTabListeners(row, ()=>seg.session_id, ()=>seg);
         lineageList.appendChild(row);
       }
       sessionText.appendChild(lineageList);
@@ -9282,7 +9475,10 @@ function renderSessionListFromCache(){
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions];
-      const openChildSession=async(childSession)=>{
+      const openChildSession=async(childSession, openOpts={})=>{
+        // A child row's deep link must land on the child, not on its
+        // compressed parent's lineage tip: mark the new-tab URL exact.
+        if(openOpts&&openOpts.newTab) return _openSessionUrlInNewTab(childSession.session_id, childSession, {exact:true});
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
@@ -9516,8 +9712,10 @@ function renderSessionListFromCache(){
               return;
             }
             e.stopPropagation();
+            if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
             await openChildSession(child);
           };
+          _wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child, {exact:true});
           row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
             mainBtn.textContent=childLabelFor(child);
           });
@@ -9568,6 +9766,7 @@ function renderSessionListFromCache(){
             e.stopPropagation();
             _openSessionActionMenu(child, actions||row);
           };
+          _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
           childList.appendChild(row);
           continue;
         }
@@ -9578,8 +9777,10 @@ function renderSessionListFromCache(){
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
+          if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
           await openChildSession(child);
         };
+        _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
         childList.appendChild(row);
       }
       sessionText.appendChild(childList);
@@ -9943,11 +10144,42 @@ function renderSessionListFromCache(){
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
+      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode && !_renamingSid && _gestureState!=='idle' && !_longPressMenuOpened && (typeof _newTabOpenSupported!=='function'||_newTabOpenSupported())){
+        // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
+        // Gated on select/rename mode: _consumeSessionNewTabClick refuses
+        // those modes, and mutating gesture state first would make the
+        // fall-through _finishSessionGesture early-return on 'idle',
+        // breaking the row (de)select toggle.
+        // Also gated on _gestureState!=='idle' (a press must have begun on
+        // THIS row: a Ctrl-release over a row the user never pressed on must
+        // do nothing, mirroring _finishSessionGesture's own first check) and
+        // on !_longPressMenuOpened (a pen long-press menu is already open, so
+        // don't stack a new tab on top of it — the open Greptile P1).
+        // Settle the gesture machine first via the shared choke point: a pen
+        // (or touch-emulated) drag may have painted swipe offsets, and a
+        // shaky click may have added the 'dragging' class — parking
+        // _gestureState alone would leave the row visually displaced.
+        // _clearPointerDragState() parks idle, disarms the long-press timer,
+        // and settles swipe paint when a drag was in flight.
+        clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
+        _clearPointerDragState();
+        el.classList.remove('loading');
+        if(_consumeSessionNewTabClick(e, s.session_id, s)) return;
+      }
       if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();
     };
+    _wireSessionNewTabListeners(el, ()=>s.session_id, ()=>s);
     // Add ondblclick for more reliable double-click detection
     el.ondblclick=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
+      // A Ctrl/Cmd+double-click is two modified clicks: each pointerup opens
+      // one new tab. Don't also start a rename in the current tab (master
+      // only renamed). Outside select mode, bail entirely.
+      if(typeof _newTabOpenSupported!=='function'||_newTabOpenSupported()){
+        if((e.ctrlKey||e.metaKey) && !_sessionSelectMode) return;
+      }
+      // On a shell with no second window _newTabOpenSupported() is false, so
+      // the bail above is skipped and master's rename path stays.
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
       if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
