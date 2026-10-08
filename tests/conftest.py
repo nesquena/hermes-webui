@@ -1485,3 +1485,33 @@ def make_session_tracked(created_list, ws=None):
     ws_path = pathlib.Path(d["session"]["workspace"])
     created_list.append(sid)
     return sid, ws_path
+
+
+# Shared by tests/test_web_push*.py (kept here so the fixture is not re-imported
+# into each module, which ruff flags as F811 when used as a parameter).
+@pytest.fixture
+def push_env(tmp_path, monkeypatch):
+    from api import web_push
+    from tests.test_web_push import _fake_dns
+
+    monkeypatch.setattr(web_push, "_state_dir", lambda: tmp_path)
+    for name in (
+        "HERMES_WEBUI_VAPID_PUBLIC_KEY",
+        "HERMES_WEBUI_VAPID_PRIVATE_KEY",
+        "HERMES_WEBUI_VAPID_SUBJECT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    _fake_dns(
+        monkeypatch,
+        {
+            "web.push.apple.com": ["17.253.1.1"],
+            "fcm.googleapis.com": ["142.250.80.10", "2607:f8b0:4004::200a"],
+            "updates.push.services.mozilla.com": ["34.107.243.93"],
+            "rebind.example": ["10.0.0.5"],
+            "mapped.example": ["::ffff:127.0.0.1"],
+            "cgnat.example": ["100.100.5.5"],
+            "ts.example": ["100.64.0.1"],
+            "mixed.example": ["8.8.8.8", "192.168.1.1"],
+        },
+    )
+    return tmp_path

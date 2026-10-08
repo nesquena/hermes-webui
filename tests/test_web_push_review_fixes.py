@@ -1,7 +1,6 @@
 """Regression tests for the PR #8101 review findings."""
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -11,7 +10,7 @@ import pytest
 
 from api import web_push
 from tests.test_web_push import (  # noqa: F401
-    APPLE, OWNER_A, _enable, _sub, push_env,
+    APPLE, OWNER_A, _enable, _sub,
 )
 
 ROOT = Path(__file__).resolve().parent.parent

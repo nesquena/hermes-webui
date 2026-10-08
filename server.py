@@ -754,10 +754,5 @@ def main() -> None:
             stop_session_channel_reaper()
         except Exception:
             logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
-        try:
-            from api.web_push import shutdown as _shutdown_web_push
-            _shutdown_web_push()
-        except Exception:
-            logger.debug("Failed to stop Web Push delivery during shutdown", exc_info=True)
 if __name__ == '__main__':
     main()

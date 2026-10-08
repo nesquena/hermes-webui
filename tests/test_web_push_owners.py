@@ -9,7 +9,7 @@ import pytest
 from api import web_push
 from tests.test_web_push import (  # noqa: F401  (fixtures/helpers)
     APPLE, FCM, MOZILLA, DEV_A, DEV_B, OWNER_A, OWNER_B, PRIVATE_MARK,
-    _H, _Capture, _enable, _sub, push_env,
+    _H, _Capture, _enable, _sub,
 )
 
 
@@ -18,6 +18,7 @@ def env(push_env, monkeypatch):
     _enable(monkeypatch, push_env)
     monkeypatch.delenv("HERMES_WEBUI_PUSH_BROADCAST_UNOWNED", raising=False)
     monkeypatch.setattr(web_push, "_SEEN", {})
+    monkeypatch.setattr(web_push, "_STOP", __import__("threading").Event())
     sent = []
 
     def fake_webpush(**kw):
