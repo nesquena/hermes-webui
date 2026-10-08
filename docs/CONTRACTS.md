@@ -96,6 +96,15 @@ contributor guidance; it does not change runtime behavior or CI gates.
   `models_cache.json` refresh timestamps), the stat-identity fallbacks, and the
   schema/version stamps. Start here before changing model-catalog caching, the
   `/api/models` cache keys, or the Codex catalog dependency (#2443, #7540).
+- [`docs/architecture/send-path-model-provider.md`](architecture/send-path-model-provider.md):
+  current contract for which provider the browser routes an outgoing chat turn
+  to: the `_modelProviderForSend()` precedence order (explicit `@provider:model`
+  tag → dropdown provider **with** session-scoped pick evidence → the loaded
+  session's own provider → persisted state → `null`), why a bare dropdown match
+  is not intent after a restore, and the lifecycle of the picker's explicit-pick
+  marker. Start here before changing provider precedence for outgoing turns,
+  the picker's pick evidence, or restored-session provider resolution
+  (#7860, #7865).
 - [`docs/architecture/live-models-allowlist.md`](architecture/live-models-allowlist.md):
   current contract for how `/api/models/live` filters a custom provider's
   upstream catalog: the four signals in evaluation order (discovered catalog
