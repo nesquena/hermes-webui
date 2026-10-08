@@ -127,6 +127,13 @@
 
 ### Fixed
 
+- **Background git operations no longer pop up a credential-manager login window.** The update check and workspace
+  git actions already turned off terminal and askpass prompts, but Git Credential Manager has its own interaction switch,
+  so a cache miss during a background fetch could open an unexpected login window. Background git now also sets
+  `GCM_INTERACTIVE=never` and `credential.interactive=false`; cached credentials and stored helpers keep working. A
+  failed login on git 2.47+ (which says "unable to get password from user") is now reported as an authentication
+  failure instead of a generic git error. Thanks @Tivonsico. (#8085)
+
 - **Conversations no longer freeze after compression or an edit and silently hide every later turn.** A turn that
   committed without a timestamped user message (a Gateway handoff or a background-process notification) stamped the
   conversation's replay cutoff with the current clock time, newer than everything already saved. From then on the
