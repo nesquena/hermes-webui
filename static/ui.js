@@ -10498,7 +10498,18 @@ function _syncChatTodosRailVisibility(){
     // hidden independently through hidden_tabs, so an explicitly hidden tab
     // reappeared immediately (or after reload). Deferring to
     // _applyTabVisibility re-derives the tab's own preference instead.
-    _applyTabVisibility(_getHiddenTabs());
+    //
+    // …but only once the mirror IS that preference. While a profile switch's
+    // /api/settings reconciliation is still in flight, localStorage still holds
+    // the PREVIOUS profile's hidden_tabs/tab_order, so re-deriving here would
+    // reimpose the old profile's tab visibility on the profile now in effect: a
+    // Todos entry the current profile hides pops back, or one it shows stays
+    // hidden, until settings refresh (greptile P1, 2026-10-08T20:06:51Z). Skip
+    // the window — the pending reconciliation re-runs _applyTabVisibility with
+    // the profile's own snapshot and already honours the tray's new state.
+    if(typeof _tabVisibilitySnapshotStale!=='function'||!_tabVisibilitySnapshotStale()){
+      _applyTabVisibility(_getHiddenTabs());
+    }
   }
   // If the sidebar Todos panel is currently open, bounce back to chat.
   if(enabled){

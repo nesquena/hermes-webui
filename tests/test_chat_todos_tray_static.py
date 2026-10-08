@@ -1323,3 +1323,197 @@ def test_workspace_todos_desc_drops_the_contradictory_sidebar_sentence():
     )
 
 
+# ── Stale tab-visibility mirror while a profile switch reconciles ──────────
+# greptile P1 (2026-10-08T20:06:51Z, static/ui.js:10501): "When a user switches
+# between profiles with different hidden_tabs settings and disables the tray
+# before the asynchronous settings reconciliation completes, this path
+# reapplies the previous profile's global localStorage snapshot." Releasing the
+# tray's forced rail hide re-derives visibility from that mirror, so it must be
+# skipped until the switch's /api/settings reconciliation lands.
+
+_RAIL_RELEASE_PROBE = """
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+function _el() {
+  const s = new Set();
+  return {classList: {
+    add(c) { s.add(c); },
+    remove(c) { s.delete(c); },
+    contains(c) { return s.has(c); },
+    toggle(c, on) { if (on) s.add(c); else s.delete(c); return !!on; },
+  }};
+}
+const todosEls = [_el(), _el()];
+globalThis.document = {
+  querySelectorAll(sel) { return sel === '[data-panel="todos"]' ? todosEls : []; },
+  getElementById() { return null; },
+  querySelector() { return null; },
+};
+let trayOn = false;
+let stale = false;
+let applied = [];
+function chatTodosEnabled() { return trayOn; }
+function _getHiddenTabs() { return ['notes']; }
+function _applyTabVisibility(h) { applied.push(h.slice()); }
+globalThis._tabVisibilitySnapshotStale = function () { return stale; };
+__HELPER__
+
+// 1. Settled mirror, tray OFF: visibility still goes back to the canonical
+//    owner (the 2026-10-07 greptile P1 behaviour must survive).
+_syncChatTodosRailVisibility();
+assert(applied.length === 1 && applied[0].join() === 'notes',
+  'a settled mirror must still hand visibility back to hidden_tabs');
+assert(todosEls.every(function (el) { return !el.classList.contains('nav-tab-hidden'); }),
+  'a settled release must not force the class either way');
+
+// 2. THE FIX: the same click while the switch's reconciliation is in flight.
+//    The mirror still holds the PREVIOUS profile's list, so re-deriving from it
+//    would reimpose that profile's tab visibility on the profile now in effect.
+applied = [];
+stale = true;
+_syncChatTodosRailVisibility();
+assert(applied.length === 0,
+  'the stale previous-profile mirror must not be re-applied mid-switch');
+
+// 3. The reconciliation lands: the release is live again.
+stale = false;
+_syncChatTodosRailVisibility();
+assert(applied.length === 1 && applied[0].join() === 'notes',
+  'the release resumes once the reconciliation settles');
+
+// 4. Tray ON is unaffected: it still force-hides the duplicate rail entry and
+//    never re-derives visibility (that is the reconciliation's job).
+todosEls.forEach(function (el) { el.classList.remove('nav-tab-hidden'); });
+applied = [];
+trayOn = true;
+stale = true;
+_syncChatTodosRailVisibility();
+assert(todosEls.every(function (el) { return el.classList.contains('nav-tab-hidden'); }),
+  'tray ON still force-hides the Todos rail entry mid-switch');
+assert(applied.length === 0, 'tray ON never re-derives tab visibility');
+
+// 5. No guard in scope (panels.js not loaded yet) keeps the previous behaviour.
+trayOn = false;
+applied = [];
+delete globalThis._tabVisibilitySnapshotStale;
+_syncChatTodosRailVisibility();
+assert(applied.length === 1, 'without the guard the release still defers to hidden_tabs');
+console.log('ok');
+"""
+
+
+def test_rail_release_skips_the_stale_mirror_during_a_profile_switch(tmp_path):
+    """greptile P1 (2026-10-08T20:06:51Z): the tray-off release must not reapply
+    the previous profile's hidden_tabs snapshot while the switch's
+    /api/settings reconciliation is still in flight."""
+    ui = _read_static("static/ui.js")
+    helper = _extract(
+        ui, "function _syncChatTodosRailVisibility(){", "let _chatTodosResizeObserver"
+    )
+    # The re-derive is wrapped in the reconciliation guard...
+    guard_at = helper.find("_tabVisibilitySnapshotStale")
+    call_at = helper.find("_applyTabVisibility(_getHiddenTabs())")
+    assert guard_at != -1, "the tray release never consults the reconciliation guard"
+    assert call_at != -1
+    assert guard_at < call_at, "the guard must wrap the re-derive, not follow it"
+    script = _RAIL_RELEASE_PROBE.replace("__HELPER__", helper)
+    assert _run_node(tmp_path, "rail_release_probe.js", script).strip() == "ok"
+
+
+def _extract_reconcile_guard(panels: str) -> tuple[str, str]:
+    counter = re.search(r"let _tabVisReconcilePending = 0;", panels)
+    assert counter, "the reconciliation guard counter is missing from static/panels.js"
+    guard = _extract(
+        panels,
+        "function _tabVisibilitySnapshotStale(){",
+        "function _refreshProfileSwitchBackground(gen){",
+    )
+    return counter.group(0), guard
+
+
+_RECONCILE_GUARD_PROBE = """
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+__COUNTER__
+__GUARD__
+globalThis.window = {};
+const S = {session: null};
+let _profileSwitchGeneration = 7;
+let fulfill = null;
+let fail = null;
+let applied = [];
+let stored = null;
+function api(path) {
+  assert(path === '/api/settings', 'unexpected api path: ' + path);
+  return new Promise(function (res, rej) { fulfill = res; fail = rej; });
+}
+function loadWorkspaceList() { return Promise.resolve(); }
+function syncTopbar() {}
+function _setHiddenTabs(h) { stored = h.slice(); }
+function _setTabOrder() {}
+function _applyTabOrder() {}
+function _applyTabVisibility(h) { applied.push(h.slice()); }
+function _ensureComposerControlVisibilityState() {}
+function _setComposerControlOrder() { return []; }
+function _renderComposerControlChips() {}
+function _renderComposerSituationalControlChips() {}
+function _applyComposerFooterVisibilitySettings() {}
+function _applyTitlebarProfileVisibility() {}
+__HELPER__
+function settled() { return new Promise(function (r) { setImmediate(r); }); }
+(async function () {
+  assert(_tabVisibilitySnapshotStale() === false, 'idle: the mirror is authoritative');
+  _refreshProfileSwitchBackground(_profileSwitchGeneration);
+  assert(_tabVisibilitySnapshotStale() === true,
+    'an in-flight /api/settings reconciliation makes the mirror stale');
+  assert(applied.length === 0 && stored === null, 'nothing is read off the stale mirror');
+
+  fulfill({hidden_tabs: ['todos'], tab_order: ['chat']});
+  await settled();
+  assert(applied.length === 1 && applied[0].join() === 'todos',
+    'the reconciliation applies the server list, not the stale mirror');
+  assert(stored.join() === 'todos', 'the mirror is rewritten from the server list');
+  assert(_tabVisibilitySnapshotStale() === false, 'the guard releases when it settles');
+
+  // A FAILED reconciliation must release the guard too, otherwise tab
+  // visibility stays pinned to the stale window for the rest of the session.
+  applied = [];
+  _refreshProfileSwitchBackground(_profileSwitchGeneration);
+  assert(_tabVisibilitySnapshotStale() === true, 'a second reconciliation re-arms the guard');
+  fail(new Error('network'));
+  await settled();
+  assert(_tabVisibilitySnapshotStale() === false, 'a failed reconciliation releases the guard');
+  console.log('ok');
+})().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def test_profile_switch_reconciliation_marks_the_tab_mirror_stale(tmp_path):
+    """The guard the tray release consults is armed by the switch's
+    /api/settings reconciliation and released on BOTH settle paths (a stranded
+    guard would pin tab visibility to the stale window for the session)."""
+    panels = _read_static("static/panels.js")
+    counter, guard = _extract_reconcile_guard(panels)
+    block = _extract(
+        panels,
+        "function _refreshProfileSwitchBackground(gen){",
+        "async function loadProfilesPanel()",
+    )
+    inc_at = block.find("_tabVisReconcilePending++;")
+    fetch_at = block.find("Promise.resolve(api('/api/settings'))")
+    release_at = block.find("_tabVisReconcilePending--;")
+    assert inc_at != -1 and fetch_at != -1 and release_at != -1
+    assert inc_at < fetch_at, "the guard must be armed before the reconciliation fetch"
+    assert fetch_at < release_at, "the guard must be released with the reconciliation"
+    assert "}).catch(function(){}).then(function(){" in block, (
+        "the release must sit after the swallowed rejection so both settle paths clear it"
+    )
+    assert block.count("_tabVisReconcilePending") == 2, (
+        "exactly one arm and one release per reconciliation"
+    )
+    script = (
+        _RECONCILE_GUARD_PROBE.replace("__COUNTER__", counter)
+        .replace("__GUARD__", guard)
+        .replace("__HELPER__", block)
+    )
+    assert _run_node(tmp_path, "reconcile_guard_probe.js", script).strip() == "ok"
+
+

@@ -6707,6 +6707,20 @@ async function _profileSwitchPanelLoad(){
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 }
 
+// ── Tab-visibility reconciliation guard ────────────────────────────────────
+// hidden_tabs / tab_order are per-profile settings mirrored into localStorage.
+// From the moment a profile switch's settings reconciliation is in flight, that
+// mirror still holds the PREVIOUS profile's snapshot. Anything that re-derives
+// tab visibility from the mirror inside that window — the in-chat todos tray
+// hands the Todos rail entry back with _applyTabVisibility(_getHiddenTabs()) —
+// would reimpose the old profile's tab visibility on the profile now in effect:
+// a Todos entry the current profile hides pops back, or one it shows stays
+// hidden, until settings refresh (greptile P1, static/ui.js:10501,
+// 2026-10-08T20:06:51Z). Callers use this to skip the stale window; the pending
+// reconciliation applies that profile's own snapshot itself.
+let _tabVisReconcilePending = 0;
+function _tabVisibilitySnapshotStale(){ return _tabVisReconcilePending > 0; }
+
 function _refreshProfileSwitchBackground(gen){
   window._modelDropdownReady=null;
   if (typeof window._ensureModelDropdownReady === 'function') {
@@ -6720,6 +6734,9 @@ function _refreshProfileSwitchBackground(gen){
   // appearance setting; without this fetch, Profile A's hidden-tabs choice
   // would remain in effect under Profile B until the user opens Settings.
   // Stage-394 follow-up to #2636 deep review.
+  // The mirror is about to be re-derived from the new profile's settings, so it
+  // is stale from here until the fetch below settles (see the guard above).
+  _tabVisReconcilePending++;
   Promise.resolve(api('/api/settings')).then(function(s){
     if (gen !== _profileSwitchGeneration) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
@@ -6740,7 +6757,12 @@ function _refreshProfileSwitchBackground(gen){
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
     window._showTitlebarProfile=!!(s&&s.show_titlebar_profile);
     if(typeof _applyTitlebarProfileVisibility==='function') _applyTitlebarProfileVisibility();
-  }).catch(function(){});
+  }).catch(function(){}).then(function(){
+    // Release on BOTH settle paths (the catch above swallows rejections), so a
+    // superseded or failed reconciliation can never strand tab visibility
+    // behind the stale-snapshot guard.
+    _tabVisReconcilePending--;
+  });
 }
 
 async function loadProfilesPanel() {
