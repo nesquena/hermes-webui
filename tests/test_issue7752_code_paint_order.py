@@ -7,7 +7,7 @@ With ``virtualize_transcript = true``, scrolling a previously-off-screen code
 block into view rebuilds the transcript, which creates a fresh ``<pre><code>``
 DOM node that no longer carries ``data-highlighted="1"``. The post-process
 pass that calls ``Prism.highlightElement`` runs one frame AFTER the render
-(``static/ui.js:18851`` → ``postProcessRenderedMessages``), so the
+(``static/ui.js:18851`` → ``_postProcessWithAnchorSuppression``), so the
 rebuilt block paints unhighlighted for one frame before snapping to its
 tokenized form. The same source text renders identically either way — the
 bug is purely a paint-order timing artifact, not a content artifact.
@@ -186,11 +186,11 @@ class TestRebuildPathCallsSyncPass:
     the deferred rAF post-process. Without this call, the helper exists but
     does nothing — the one-frame flash comes back."""
 
-    REBUILD_RAF_TOKEN = "requestAnimationFrame(()=>postProcessRenderedMessages(inner))"
+    REBUILD_RAF_TOKEN = "requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner))"
 
     def _get_rebuild_request_animation_frame_block(self) -> str:
         src = _read_ui_js()
-        # There are two rAF sites that schedule postProcessRenderedMessages(inner):
+        # There are two rAF sites that schedule _postProcessWithAnchorSuppression(inner):
         #   * the cache fast path (line ~17197) — brings back already-highlighted HTML
         #   * the full rebuild path (line ~18851) — the bug site
         # We want the LATER occurrence, which is the full rebuild path. Find all
@@ -201,7 +201,7 @@ class TestRebuildPathCallsSyncPass:
         ]
         assert positions, (
             "Could not locate the rebuild-path rAF that schedules "
-            "postProcessRenderedMessages(inner) — the path shape may "
+            "_postProcessWithAnchorSuppression(inner) — the path shape may "
             "have changed; update this test."
         )
         # Source order: the rebuild-path rAF is the SECOND occurrence (the
@@ -689,7 +689,7 @@ class TestFixDoesNotRegressExistingBehavior:
         comments) and must keep running for genuinely new code blocks."""
         src = _read_ui_js()
         assert (
-            "requestAnimationFrame(()=>postProcessRenderedMessages(inner))"
+            "requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner))"
             in src
         ), (
             "The rebuild path must still schedule the rAF post-process — "
