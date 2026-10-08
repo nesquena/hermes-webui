@@ -5476,19 +5476,28 @@ def _retry_journal_recovery_in_place(
                 )
             )
             else:
-                # No cancel hook on this marker: use the plain recovery hop
-                # (no cancel-specific dedupe window). Binding the three
-                # verdicts here is required — an unbound name raised
-                # UnboundLocalError, which the outer handler swallowed into a
-                # silent ``return False`` and left every no-hook marker
-                # unresolvable (tests/test_session_sidecar_repair.py).
-                recovered_output, terminal_error_recovered, output_accounted_for = (
-                    _recover_journaled_output_and_terminal_error(
-                        session,
-                        stream_id,
-                        dedupe_existing=True,
+                # No cancel hook on this marker. Bind the three verdicts first —
+                # an unbound name raised UnboundLocalError, which the outer
+                # handler swallowed into a silent ``return False`` and left
+                # every no-hook marker unresolvable
+                # (tests/test_session_sidecar_repair.py).
+                recovered_output = False
+                terminal_error_recovered = False
+                output_accounted_for = False
+                if not give_up:
+                    # Plain recovery hop (no cancel-specific dedupe window).
+                    # Skipped when give_up is already true: an expired marker
+                    # must demote to neutral wording, not spend a recovery pass
+                    # that would mark it resolved instead
+                    # (tests/test_session_sidecar_repair.py::
+                    #  test_demotes_to_neutral_after_giveup_seconds).
+                    recovered_output, terminal_error_recovered, output_accounted_for = (
+                        _recover_journaled_output_and_terminal_error(
+                            session,
+                            stream_id,
+                            dedupe_existing=True,
+                        )
                     )
-                )
             # A dedupe hit (no fresh row appended this pass) still means the
             # journal's visible output is represented in the transcript, so
             # the marker is resolved: keeping "reload to retry" visible would
@@ -5560,6 +5569,11 @@ def _retry_journal_recovery_in_place(
                     isinstance(row, dict) and row.get('role') == 'user'
                     for row in messages[idx + 1:]
                 )
+                # Defaults for the no-cancel-hook arm: the context hop below is
+                # gated on cancel_hook, but its results are consumed
+                # unconditionally, so they must always be bound.
+                context_owner = None
+                interrupted_snapshot = None
                 if cancel_hook:
                     owner_index = next((
                         index for index in range(idx - 1, -1, -1)
