@@ -178,3 +178,37 @@ def test_closures_delegate_to_the_pure_decisions():
     assert "'awaiting_complete': False" in src, (
         "a completion must re-arm the id so a later occurrence can settle"
     )
+
+
+# ---------------------------------------------------------------------------
+# #7653 re-gate 10/08, reviewer [silent]: a DUPLICATE completion must not
+# leave its verdict staged for a later, successful call to inherit.
+# ---------------------------------------------------------------------------
+
+def test_duplicate_completion_discards_its_staged_verdict():
+    """Static pin: the duplicate branch consumes its own verdict entries.
+
+    A repeated failed completion pair stages a second no-tid verdict that no
+    later completion ever claims. The FIFO then hands that entry to the next
+    genuinely SUCCESSFUL terminal call, painting it failed (master keeps it
+    non-error). The duplicate branch must therefore pop the authoritative
+    per-tid entry and one staged entry BEFORE the suppression, so nothing
+    leaks forward.
+    """
+    src = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+    i = src.find("_duplicate_completion = (")
+    assert i > 0, "duplicate-completion classification not found"
+    block = src[i:i + 2000]
+    assert "_authoritative_is_error_by_tid.pop(tool_call_id, None)" in block, (
+        "a duplicate completion must discard its own authoritative verdict "
+        "instead of leaving it for a later tool (#7653 silent finding)")
+    assert "_staged_no_tid_verdicts.pop(_i)" in block, (
+        "a duplicate completion must discard one staged no-tid verdict "
+        "instead of leaving it in the FIFO (#7653 silent finding)")
+    # The discard must be gated on the duplicate verdict, not run for every
+    # completion (that would eat the verdict the fresh path needs).
+    assert "if _duplicate_completion:" in block, (
+        "the discard must be gated on _duplicate_completion (#7653)")
+    assert block.find("if _duplicate_completion:") < block.find(
+        "if tool_call_id and not _duplicate_completion:"), (
+        "the discard must run BEFORE the fresh-path suppression (#7653)")

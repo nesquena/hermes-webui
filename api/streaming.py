@@ -13896,6 +13896,23 @@ def _run_agent_streaming(
                             _live_tool_event_seen_ids,
                         ) == 'duplicate'
                     )
+                    # #7653 (re-gate 10/08, reviewer [silent]): a DUPLICATE
+                    # completion must not leave its verdict staged. The Agent
+                    # emits progress+complete in pairs, so a repeated failed
+                    # pair stages a second no-tid verdict that no later
+                    # completion ever claims — and the FIFO then hands THAT
+                    # entry to the next genuinely successful terminal call,
+                    # painting it failed. Consume/discard the duplicate's own
+                    # authoritative entry and one staged entry here, before
+                    # the suppression below, so nothing leaks forward.
+                    if _duplicate_completion:
+                        if tool_call_id:
+                            _authoritative_is_error_by_tid.pop(tool_call_id, None)
+                        if _staged_no_tid_verdicts:
+                            for _i, _sv in enumerate(_staged_no_tid_verdicts):
+                                if not _sv.get('name') or _sv.get('name') == name:
+                                    _staged_no_tid_verdicts.pop(_i)
+                                    break
                     if tool_call_id and not _duplicate_completion:
                         seen_ids.add(tool_call_id)
                         # Re-arm for a possible later occurrence of the same id.

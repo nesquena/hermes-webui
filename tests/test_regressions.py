@@ -769,7 +769,13 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1200]
+    # #7653: the window is a character budget, not a semantic bound. The
+    # round-10 live-tail preparation (_prepareRunningLiveTail /
+    # _dropCurrentTurnAssistantMessages) legitimately sits between the load
+    # and the tail merge, and at the historical 1,200 chars it pushed the
+    # merge call out of the window. Widen it to keep asserting the SAME
+    # ordering inside the same branch.
+    inflight_block = src[inflight_idx:inflight_idx+2000]
 
     assert "await _ensureMessagesLoaded(sid" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
