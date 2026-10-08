@@ -41,7 +41,8 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(auth, 'is_auth_enabled', lambda: False)
     monkeypatch.setattr(config, 'get_config', lambda: {})
     monkeypatch.setattr(routes, 'load_settings', lambda: {'tts_engine': 'gemini'})
-    monkeypatch.setenv('GEMINI_API_KEY', 'test-key-not-secret')
+    (tmp_path / '.env').write_text('GEMINI_API_KEY=test-key-not-secret\n')
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     monkeypatch.delenv('GOOGLE_API_KEY', raising=False)
     monkeypatch.delattr(routes._handle_tts, '_tts_limiter', raising=False)
     yield real_get_active_home
@@ -86,7 +87,7 @@ def test_gemini_interactions_contract_and_wav(monkeypatch, engine):
 
 
 def test_gemini_config_and_google_env_file_fallback(monkeypatch, tmp_path):
-    monkeypatch.delenv('GEMINI_API_KEY')
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     (tmp_path / '.env').write_text('GOOGLE_API_KEY=test-google-key\n')
     monkeypatch.setattr(config, 'get_config', lambda: {'tts': {'provider': 'xai', 'gemini': {'model': 'custom-tts', 'voice': 'Puck'}}})
     def upstream(req, **kwargs):
@@ -99,8 +100,9 @@ def test_gemini_config_and_google_env_file_fallback(monkeypatch, tmp_path):
     assert post().status == 200
 
 
-def test_gemini_missing_key_is_503_not_edge_fallback(monkeypatch):
-    monkeypatch.delenv('GEMINI_API_KEY')
+def test_gemini_missing_key_is_503_not_edge_fallback(monkeypatch, tmp_path):
+    (tmp_path / '.env').write_text('')
+    monkeypatch.setattr(routes, '_tts_open', lambda *a, **k: pytest.fail('unexpected network'))
     assert post().status == 503
 
 
@@ -338,14 +340,119 @@ def test_gemini_profile_key_precedes_deployment_key(monkeypatch, tmp_path,
 
 
 @pytest.mark.parametrize('key', ['GEMINI_API_KEY', 'GOOGLE_API_KEY'])
-def test_gemini_process_environment_keys(monkeypatch, key):
+def test_gemini_process_environment_keys_are_not_supported(monkeypatch, tmp_path, key):
+    (tmp_path / '.env').write_text('')
     monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     monkeypatch.setenv(key, 'fake-process-key')
+    monkeypatch.setattr(routes, '_tts_open', lambda *a, **k: pytest.fail('unexpected network'))
+    h = post()
+    assert h.status == 503
+    assert h.payload()['error'] == 'Gemini API key not configured'
+
+
+@pytest.mark.parametrize('loaded_key', ['GEMINI_API_KEY', 'GOOGLE_API_KEY'])
+@pytest.mark.parametrize('request_key', ['GEMINI_API_KEY', 'GOOGLE_API_KEY', None])
+@pytest.mark.parametrize('reload_state', ['publication', 'partial_failure'])
+def test_gemini_reload_cannot_supply_another_requests_credentials(
+        monkeypatch, tmp_path, isolated, loaded_key, request_key, reload_state):
+    import os
+    import threading
+    from collections.abc import MutableMapping
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, 'get_active_hermes_home', isolated)
+    monkeypatch.setattr(profiles, '_DEFAULT_HERMES_HOME', tmp_path)
+    monkeypatch.setattr(profiles, '_is_isolated_profile_mode', lambda: False)
+    monkeypatch.setattr(profiles, '_tls', threading.local())
+    for key in ('GEMINI_API_KEY', 'GOOGLE_API_KEY'):
+        monkeypatch.delenv(key, raising=False)
+    first = tmp_path / 'profiles' / 'first'
+    second = tmp_path / 'profiles' / 'second'
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / '.env').write_text(f'{loaded_key}=fake-first-profile-key\n' +
+                              ('BAD\x00KEY=value\n' if reload_state == 'partial_failure' else ''))
+    (second / '.env').write_text(
+        f'{request_key}=fake-second-profile-key\n' if request_key else '')
+    profiles.set_request_profile('second')
+    assert profiles.get_active_hermes_home() == second
+    calls = []
+
     def upstream(req, **kwargs):
-        assert req.get_header('X-goog-api-key') == 'fake-process-key'
+        calls.append(req)
         return Response(json.dumps(audio_response()).encode())
+
     monkeypatch.setattr(routes, '_tts_open', upstream)
-    assert post().status == 200
+    published, release = threading.Event(), threading.Event()
+    original = os.environ
+
+    class PausedEnvironment(MutableMapping):
+        def __getitem__(self, key):
+            return original[key]
+
+        def __delitem__(self, key):
+            del original[key]
+
+        def __iter__(self):
+            return iter(original)
+
+        def __len__(self):
+            return len(original)
+
+        def __setitem__(self, key, value):
+            original[key] = value
+            if key == loaded_key:
+                published.set()
+                assert release.wait(10), 'dotenv publication barrier timed out'
+
+    worker = None
+    try:
+        if reload_state == 'publication':
+            monkeypatch.setattr(os, 'environ', PausedEnvironment())
+            worker = threading.Thread(target=profiles._reload_dotenv, args=(first,))
+            worker.start()
+            assert published.wait(10), 'dotenv key was not published'
+        else:
+            profiles._reload_dotenv(first)
+        # Both failure windows leave a real key without published provenance.
+        assert original[loaded_key] == 'fake-first-profile-key'
+        assert loaded_key not in profiles._loaded_profile_env_keys
+        h = post({'text': 'Private second profile text', 'engine': 'gemini',
+                  'profile': 'second'})
+    finally:
+        release.set()
+        if worker is not None:
+            worker.join(10)
+        profiles.clear_request_profile()
+        original.pop(loaded_key, None)
+    assert worker is None or not worker.is_alive()
+    if request_key:
+        assert h.status == 200
+        assert len(calls) == 1
+        assert calls[0].get_header('X-goog-api-key') == 'fake-second-profile-key'
+        assert json.loads(calls[0].data)['input'][0]['content'][0]['text'] == 'Private second profile text'
+    else:
+        assert h.status == 503
+        assert h.payload()['error'] == 'Gemini API key not configured'
+        assert calls == []
+
+
+@pytest.mark.parametrize('failure', ['home', 'dotenv'])
+def test_gemini_profile_resolution_unavailable_fails_closed(monkeypatch, failure):
+    import api.onboarding as onboarding
+    import api.profiles as profiles
+
+    def unavailable(*args):
+        raise OSError('synthetic profile resolution failure')
+
+    if failure == 'home':
+        monkeypatch.setattr(profiles, 'get_active_hermes_home', unavailable)
+    else:
+        monkeypatch.setattr(onboarding, '_load_env_file', unavailable)
+    monkeypatch.setenv('GEMINI_API_KEY', 'fake-deployment-key')
+    monkeypatch.setenv('GOOGLE_API_KEY', 'fake-other-deployment-key')
+    monkeypatch.setattr(routes, '_tts_open', lambda *a, **k: pytest.fail('unexpected network'))
+    assert post().status == 503
 
 
 def test_gemini_5000_char_boundary_and_outer_whitespace_verbatim(monkeypatch):

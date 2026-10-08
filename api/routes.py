@@ -21321,16 +21321,11 @@ def _handle_tts(handler, parsed):
         try:
             from api.onboarding import _load_env_file
             from api import profiles as _profiles
-            # Request-local profile credentials take precedence over deployment
-            # keys. Live os.environ can contain a different profile's dotenv.
+            # Only request-local profile credentials are safe: process env can
+            # contain another profile's key during or after a failed reload.
             env_cfg = _load_env_file(_profiles.get_active_hermes_home() / ".env")
             api_key = (env_cfg.get("GEMINI_API_KEY", "").strip()
                        or env_cfg.get("GOOGLE_API_KEY", "").strip())
-            if not api_key:
-                api_key = next((os.environ.get(key, "").strip()
-                                for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY")
-                                if key not in _profiles._loaded_profile_env_keys
-                                and os.environ.get(key, "").strip()), "")
         except Exception:
             # Fail closed if profile credential resolution is unavailable.
             pass
