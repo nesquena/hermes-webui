@@ -1413,8 +1413,8 @@ async function send(){
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
   _flushSelectionBlocksToComposer();
-  const _rawComposerText=String($('msg').value||'');
   text=$('msg').value.trim();
+  const _rawComposerText=String($('msg').value||'');
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
     if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
