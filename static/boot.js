@@ -3042,6 +3042,20 @@ function _syncIconTintPicker(tint){
   });
 }
 
+// Track user tint edits with a monotonic counter so an /api/settings GET that
+// started before the edit cannot revert the newer choice when it resolves — both
+// boot hydration and the Appearance panel's initial fetch race a fast pick.
+function _iconTintEditCount(){
+  return window._hermesIconTintEdit||0;
+}
+
+function _applyIconTintFromServer(tint,editCountAtRequest){
+  if(_iconTintEditCount()!==editCountAtRequest) return false;
+  localStorage.setItem('hermes-icon-tint',tint);
+  _applyIconTint(tint);
+  return true;
+}
+
 function _applyIconTint(color){
   const tint=_normalizeIconTint(color);
   const url=`static/favicon.svg?tint=${tint.slice(1)}`;
@@ -3068,6 +3082,7 @@ function _applyIconTint(color){
 
 function _pickIconTint(color){
   const tint=_normalizeIconTint(color);
+  window._hermesIconTintEdit=(window._hermesIconTintEdit||0)+1;
   localStorage.setItem('hermes-icon-tint',tint);
   _applyIconTint(tint);
   if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
@@ -3480,6 +3495,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // Load send key preference
   let _bootSettings={};
   const prefillIntent=(typeof _composerPrefillIntentFromLocation==='function')?_composerPrefillIntentFromLocation():null;
+  const iconTintEditAtRequest=_iconTintEditCount();
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
@@ -3632,8 +3648,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
     const iconTint=s.icon_tint||localStorage.getItem('hermes-icon-tint')||'#08EBF1';
-    localStorage.setItem('hermes-icon-tint',iconTint);
-    _applyIconTint(iconTint);
+    _applyIconTintFromServer(iconTint,iconTintEditAtRequest);
     if(typeof setLocale==='function'){
       // #7622 (round 3): the settings payload's `s.language` is
       // absent (None) for a fresh install, so an explicit non-empty

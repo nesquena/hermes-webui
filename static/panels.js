@@ -9158,6 +9158,7 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
 
 async function loadSettingsPanel(){
   try{
+    const iconTintEditAtRequest=(typeof _iconTintEditCount==='function')?_iconTintEditCount():0;
     const settings=await api('/api/settings');
     checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
@@ -9194,10 +9195,13 @@ async function loadSettingsPanel(){
     if(skinSel) skinSel.value=skinVal;
     if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
     const iconTintVal=settings.icon_tint||'#08EBF1';
-    localStorage.setItem('hermes-icon-tint',iconTintVal);
-    const iconTintInput=$('settingsIconTint');
-    if(iconTintInput) iconTintInput.value=iconTintVal;
-    if(typeof _applyIconTint==='function') _applyIconTint(iconTintVal);
+    const iconTintEditedDuringFetch=(typeof _iconTintEditCount==='function')&&_iconTintEditCount()!==iconTintEditAtRequest;
+    if(!iconTintEditedDuringFetch){
+      localStorage.setItem('hermes-icon-tint',iconTintVal);
+      const iconTintInput=$('settingsIconTint');
+      if(iconTintInput) iconTintInput.value=iconTintVal;
+      if(typeof _applyIconTint==='function') _applyIconTint(iconTintVal);
+    }
     const fontSizeVal=settings.font_size||localStorage.getItem('hermes-font-size')||'default';
     localStorage.setItem('hermes-font-size',fontSizeVal);
     if(typeof _applyFontSize==='function') _applyFontSize(fontSizeVal);

@@ -232,6 +232,7 @@ assert.match(html, /id="app-titlebar-mark"[\s\S]*?<stop offset="0" stop-color="#
 assert.match(html, /class="empty-logo"[\s\S]*?class="hm-g0"[\s\S]*?class="hm-g1"/);
 const stops = {'#app-titlebar-mark stop:first-child':[{style:{stopColor:''}}], '#app-titlebar-mark stop:last-child':[{style:{stopColor:''}}], '.empty-logo .hm-g0':[{style:{stopColor:''}}], '.empty-logo .hm-g1':[{style:{stopColor:''}}]};
 const cells = ['#08EBF1','#E5484D','#7C3AED','#F59E0B','custom'].map(value=>({dataset:{iconTintVal:value}, tagName:value==='custom'?'LABEL':'BUTTON', classList:{active:false, toggle(_name,on){this.active=on;}},setAttribute(name,value){this[name]=value;}}));
+const window = {};
 const input = {value:'#08EBF1'};
 const preview = {src:'static/favicon.svg?tint=08EBF1'};
 const localStorage = {values:{},setItem(key,value){this.values[key]=value;}};
@@ -280,18 +281,46 @@ const boot = fs.readFileSync('static/boot.js','utf8');
 const start = boot.indexOf("const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');");
 const end = boot.indexOf("if(typeof setLocale==='function')",start);
 assert.ok(start>=0 && end>start);
-const apply = new Function('s','localStorage','_applyFontSize','_applyIconTint',boot.slice(start,end));
-const values = {};
-const storage = {getItem:key=>values[key]||null,setItem:(key,value)=>{values[key]=value;}};
-let icon = null;
+const apply = new Function('s','localStorage','_applyFontSize','_applyIconTintFromServer','iconTintEditAtRequest',boot.slice(start,end));
+const storage = {getItem:()=>null,setItem:()=>{}};
+const calls = [];
 let font = null;
-apply({icon_tint:'#E5484D',font_size:'large'},storage,value=>{font=value;},value=>{icon=value;});
-assert.equal(icon,'#E5484D');
-assert.equal(values['hermes-icon-tint'],'#E5484D');
+apply({icon_tint:'#E5484D',font_size:'large'},storage,value=>{font=value;},(tint,edit)=>{calls.push([tint,edit]);},0);
+assert.deepEqual(calls,[['#E5484D',0]]);
 assert.equal(font,'large');
-apply({icon_tint:'#7C3AED'},storage,()=>{},value=>{icon=value;});
-assert.equal(icon,'#7C3AED');
-assert.equal(values['hermes-icon-tint'],'#7C3AED');
+apply({icon_tint:'#7C3AED'},storage,()=>{},(tint,edit)=>{calls.push([tint,edit]);},0);
+assert.deepEqual(calls[1],['#7C3AED',0]);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_icon_tint_from_server_does_not_revert_a_newer_pick():
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required for the tint GET race test")
+    script = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const boot = fs.readFileSync('static/boot.js','utf8');
+const input = {value:'#08EBF1'};
+const preview = {src:''};
+const link = {href:'static/favicon.svg'};
+const storage = {};
+const localStorage = {getItem:key=>storage[key]||null,setItem:(key,value)=>{storage[key]=value;}};
+const document = {querySelectorAll:selector=>selector==='link[rel~="icon"][type="image/svg+xml"]'?[link]:[]};
+const window = {};
+const $ = id=>({settingsIconTint:input,iconTintPreview:preview})[id]||null;
+eval(boot.slice(boot.indexOf('function _normalizeIconTint('),boot.indexOf('function _applyFontSize(')));
+const atRequest = _iconTintEditCount();
+_pickIconTint('#7C3AED'); // user picks while a settings GET is still in flight
+assert.equal(_applyIconTintFromServer('#E5484D', atRequest), false);
+assert.equal(input.value, '#7C3AED');
+assert.equal(preview.src, 'static/favicon.svg?tint=7C3AED');
+assert.equal(link.href, 'static/favicon.svg?tint=7C3AED');
+assert.equal(localStorage.getItem('hermes-icon-tint'), '#7C3AED');
+// A later GET with no intervening edit is still allowed to apply.
+assert.equal(_applyIconTintFromServer('#E5484D', _iconTintEditCount()), true);
+assert.equal(input.value, '#E5484D');
+assert.equal(localStorage.getItem('hermes-icon-tint'), '#E5484D');
 """
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
@@ -325,6 +354,7 @@ const _rememberAppearanceSaved = ()=>{};
 const _setAppearanceAutosaveStatus = ()=>{};
 const pending = [];
 const api = (_path,options)=>new Promise(resolve=>pending.push({payload:JSON.parse(options.body),resolve}));
+const _enqueueSettingsPost = options=>api('/api/settings',options);
 eval(boot.slice(boot.indexOf('function _normalizeIconTint('),boot.indexOf('function _applyFontSize(')));
 eval(panels.slice(panels.indexOf('function _scheduleAppearanceAutosave('),panels.indexOf('function _retryAppearanceAutosave(')));
 (async()=>{
