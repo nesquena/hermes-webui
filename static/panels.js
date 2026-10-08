@@ -440,6 +440,8 @@ async function switchPanel(name, opts = {}) {
     if (sidebar) {
       sidebar.classList.remove('mobile-session-page');
       sidebar.classList.add('mobile-panel-drawer', 'mobile-open');
+      // #7924: an open drawer must never stay inert (see mobileSwitchPanel).
+      if (typeof _setPanelInert === 'function') _setPanelInert(sidebar, true);
     }
   }
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
@@ -7145,6 +7147,8 @@ function _openProfileSwitchSessionBrowser(){
     try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
     sidebar.classList.remove('mobile-session-page');
     sidebar.classList.add('mobile-panel-drawer','mobile-open');
+    // #7924: an open drawer must never stay inert (see mobileSwitchPanel).
+    if(typeof _setPanelInert==='function')_setPanelInert(sidebar,true);
   }catch(_){}
 }
 

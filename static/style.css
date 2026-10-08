@@ -3082,9 +3082,25 @@
     /* Viewport-phone rules handle app chrome and touch sizing; they intentionally
        overlap the container compact rules for actual phones. */
     /* ── Sidebar: slide-in overlay instead of hidden ── */
+    /* Closed = inert (#7713 follow-up, same treatment as the compact workspace
+       drawer in #7866): the sidebar parks off-screen via translateX(-100%)
+       but stays laid out so the slide can animate, which leaves every control
+       inside it in the keyboard tab order — a keyboard user tabbing forward
+       walks off-screen into an invisible tree, and on the left edge that tree
+       holds the session list, the new-chat button and the file actions.
+       visibility:hidden, delayed past the slide-out so the closing animation
+       still runs, removes the subtree from the tab order once the animation
+       ends; closeMobileSidebar() additionally sets the inert HTML attribute the
+       moment the panel closes, so the 250ms slide-out window is inert too.
+       Both leave the transform transition running — unlike display:none.
+       pointer-events:none stops the parked panel swallowing clicks aimed at
+       the chat underneath it. */
     .sidebar{position:fixed;left:0;top:0;bottom:0;width:100vw;max-width:none;z-index:200;box-sizing:border-box;
-      transform:translateX(-100%);transition:transform .25s ease;will-change:transform;}
-    .sidebar.mobile-open{transform:translateX(0);}
+      transform:translateX(-100%);
+      transition:transform .25s ease,visibility 0s linear .25s;
+      visibility:hidden;pointer-events:none;
+      will-change:transform;}
+    .sidebar.mobile-open{transform:translateX(0);visibility:visible;pointer-events:auto;transition:transform .25s ease,visibility 0s linear 0s;}
     .sidebar .resize-handle{display:none;}
     /* Hamburger button (in app titlebar on mobile) */
     .app-titlebar{height:52px;justify-content:space-between;}
@@ -3114,8 +3130,10 @@
        display:flex so the slide can animate, which leaves its controls in the
        keyboard tab order — a keyboard user tabs off-screen into 5 invisible
        buttons and can even fire the hidden file picker. visibility:hidden
-       (delayed past the slide-out) removes the subtree from the tab order
-       while -- unlike display:none -- still letting the right transition run;
+       (delayed past the slide-out) removes the subtree from the tab order once
+       the animation ends, and _setWorkspacePanelMode() sets the inert HTML
+       attribute the moment the drawer closes, so the 250ms slide-out window is
+       inert too. Unlike display:none, neither cuts the right transition.
        pointer-events:none stops the parked panel swallowing clicks aimed at
        the chat underneath it. */
     .rightpanel{display:flex!important;position:fixed;
