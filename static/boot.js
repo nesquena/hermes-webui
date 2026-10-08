@@ -2331,6 +2331,9 @@ $('modelSelect').onchange=async()=>{
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
+  if(typeof _rememberComposerModelPick==='function'){
+    _rememberComposerModelPick(modelState.model,modelState.model_provider);
+  }
   if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
@@ -2378,11 +2381,15 @@ $('msg').addEventListener('input',()=>{
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
+  // The user edited the text, so an earlier pick/Escape no longer holds the list closed (#8050).
+  if(typeof clearSlashDropdownDismissed==='function') clearSlashDropdownDismissed();
   const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;
   if(_slashIdx>=0&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
       getSlashAutocompleteMatches(text).then(matches=>{
         if(($('msg').value||'')!==text) return;
+        // A pick or Escape that landed while this lookup was in flight wins (#8050).
+        if(typeof slashDropdownDismissedFor==='function'&&slashDropdownDismissedFor(text)) return;
         if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
       });
     }else{
@@ -2488,7 +2495,7 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='ArrowUp'){e.preventDefault();navigateCmdDropdown(-1);return;}
     if(e.key==='ArrowDown'){e.preventDefault();navigateCmdDropdown(1);return;}
     if(e.key==='Tab'){e.preventDefault();selectCmdDropdownItem();return;}
-    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();return;}
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();if(typeof markSlashDropdownDismissed==='function')markSlashDropdownDismissed();return;}
     if(e.key==='Enter'&&!e.shiftKey){
       if(_isImeEnter(e)){return;}
       if(window._sendKey==='shift+enter'){
@@ -3674,7 +3681,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
+    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
+    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d,_recoveryGenerationAtCheck);}).catch(()=>{});
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';
@@ -3911,6 +3919,39 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
   }
+  // #7652 review round 4: a sessionless cron notification carries an explicit
+  // panel intent (e.g. ?panel=tasks) so the click lands on the panel the run
+  // belongs to instead of the last chat the user had open.
+  // Review round 5: this must NOT boot and return on its own. Round 4 switched
+  // panels and returned before the saved-session restore below, so the chat the
+  // user had open — and any live stream still running in it — stayed detached
+  // until they picked the session again. The intent is therefore only *decided*
+  // here; the normal restore runs, and `switchPanel` is applied on top of it
+  // once that path has finished. Constrained to the same intent family as
+  // profile/launch-action: only a real panel, and never when a URL session names
+  // the target already.
+  const panelIntent=(typeof _panelQueryIntentFromLocation==='function')?_panelQueryIntentFromLocation():null;
+  let pendingPanelIntent=null;
+  if(panelIntent&&panelIntent.hasParam&&panelIntent.valid&&!urlSession
+     &&typeof switchPanel==='function'&&panelIntent.name!=='chat'){
+    try{
+      _consumePanelQueryParamFromLocation();
+      pendingPanelIntent=panelIntent.name;
+    }catch(e){console.warn('[boot] panel intent launch failed', e);}
+  }
+  // Apply the honored intent over whatever the restore path below settled on.
+  // Every terminal point of that path calls this, so the panel is shown on top
+  // of a restored session (and its in-flight recovery) rather than in place of
+  // it. A missing/failed panel must never strand the user, hence the catch.
+  const _applyPendingPanelIntent=async()=>{
+    if(!pendingPanelIntent) return;
+    const _panelName=pendingPanelIntent;
+    pendingPanelIntent=null;
+    try{
+      await switchPanel(_panelName);
+      await renderSessionList();
+    }catch(e){console.warn('[boot] panel intent launch failed', e);}
+  };
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{
@@ -3933,6 +3974,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       if(_rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent)){
@@ -3945,6 +3987,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       await loadSession(saved, {preserveActiveInput:true});
@@ -3983,6 +4026,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       // Restore the panel from localStorage when the session has a workspace.
@@ -3994,7 +4038,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);
+      // Applied last on purpose: a panel intent must not come at the cost of
+      // the session restore or its in-flight stream recovery (#7652 r5).
+      await _applyPendingPanelIntent();return;}
     catch(_){/* loadSession owns targeted 404 cleanup; retain unrelated saved sessions */}
   }
   // no saved session - show empty state, wait for user to hit +
@@ -4012,6 +4059,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
+  // No saved session to restore, so the intent is simply the landing view.
+  await _applyPendingPanelIntent();
 })().catch(e=>{
   console.error('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}

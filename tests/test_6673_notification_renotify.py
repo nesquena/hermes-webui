@@ -46,6 +46,7 @@ let S = { session: { session_id: 'sess-6673' } };
 global.S = S;
 global.location = { origin: 'http://localhost:8080', href: 'http://localhost:8080/' };
 global._sessionUrlForSid = (sid) => '/#/s/' + sid;
+global._appRootPath = () => '/';
 
 eval(extract(src, '_notificationOptions'));
 
@@ -53,9 +54,13 @@ const withSid = _notificationOptions('Turn done', { sid: 'sess-6673' });
 // Fallback path: no options.sid AND no session in scope -> generic tag.
 S = null;
 const withoutSid = _notificationOptions('Turn done', {});
+// #7652 review: an explicit sessionless marker must NOT inherit the current
+// session's URL/tag — it routes to the app root with its own tag.
+const sessionless = _notificationOptions('Turn done', { sid: null, sessionless: true });
 console.log(JSON.stringify({
-  withSid: { renotify: withSid.renotify, tag: withSid.tag, body: withSid.body },
-  withoutSid: { renotify: withoutSid.renotify, tag: withoutSid.tag },
+  withSid: { renotify: withSid.renotify, tag: withSid.tag, body: withSid.body, url: withSid.data.url },
+  withoutSid: { renotify: withoutSid.renotify, tag: withoutSid.tag, url: withoutSid.data.url },
+  sessionless: { renotify: sessionless.renotify, tag: sessionless.tag, url: sessionless.data.url },
 }));
 """
 
@@ -92,3 +97,15 @@ def test_fallback_tag_without_session(tmp_path):
     out = _run_driver(tmp_path)
     assert out["withoutSid"]["tag"] == "hermes-webui"
     assert out["withoutSid"]["renotify"] is True
+    # The S=null fallback targets the current page, as before.
+    assert out["withoutSid"]["url"] == "http://localhost:8080/"
+
+
+def test_sessionless_marker_routes_to_app_root_with_own_tag(tmp_path):
+    """#7652 review: a sessionless notification must not open the user's
+    current chat, and must not reuse a session-scoped tag."""
+    out = _run_driver(tmp_path)
+    assert out["sessionless"]["tag"] == "hermes-webui-sessionless"
+    assert out["sessionless"]["url"] == "http://localhost:8080/"
+    # An explicit sid keeps its session-scoped contract untouched.
+    assert out["withSid"]["url"] == "http://localhost:8080/#/s/sess-6673"

@@ -35,6 +35,24 @@ let _offlineHealthProbePromise=null;
 let _offlineFetchProbeFailures=0;
 let _offlineRawFetch=null;
 let _offlineFetchPatched=false;
+// #7542 helper: tag a free-text input (chat title, project name, file
+// rename, etc.) with the full set of attributes the WebUI's other
+// credential-shaped fields use, so Chrome and password-manager
+// extensions (1Password, LastPass, Bitwarden, Dashlane) do not
+// mis-classify it as a login form. Call from every site that creates
+// a ``createElement('input')`` text field for naming or renaming.
+function _markNonCredentialInput(inp){
+  if(!inp) return inp;
+  inp.autocomplete='off';
+  inp.setAttribute('autocorrect','off');
+  inp.setAttribute('autocapitalize','off');
+  inp.setAttribute('spellcheck','false');
+  inp.setAttribute('data-1p-ignore','true');
+  inp.setAttribute('data-lpignore','true');
+  inp.setAttribute('data-bwignore','true');
+  inp.setAttribute('data-form-type','other');
+  return inp;
+}
 function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLine!==false;}
 function _offlineHealthUrl(){const url=new URL('health',document.baseURI||location.href);url.searchParams.set('offline_probe',String(Date.now()));return url.href;}
 function _setOfflineChecking(checking){
@@ -1915,7 +1933,13 @@ function _getDashboardChipRestoreMode(){
 function _dashboardBrowserUrl(status){
   if(!status||!status.running) return '';
   if(status.browser_url||status.url){
-    try{return new URL(status.browser_url||status.url).toString().replace(/\/$/,'');}
+    try{
+      const parsed=new URL(status.browser_url||status.url);
+      if(parsed.pathname==='/' || parsed.pathname===''){
+        return parsed.toString().replace(/\/$/,'');
+      }
+      return parsed.toString();
+    }
     catch(_){}
   }
   if(!status.port) return '';
@@ -4244,11 +4268,21 @@ function _normalizeConfiguredModelKey(modelId){
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
+  // A row synthesized from an ungrouped top-level OPTION (temporary/custom
+  // entries added by _ensureModelOptionInDropdown) is stored with providerId:''
+  // even when the option carries provider identity, so that row's provider
+  // authority has to fall back to its badge provider (same fallback already
+  // used by _modelProviderForSelectedBadge below). Without it neither the
+  // same-normalized fast path nor the routed spellings can see the row as
+  // belonging to that provider (#7290).
+  const _entryProvider=(entry)=>String(
+    (entry&&entry.providerId)||(entry&&entry.badge&&entry.badge.provider)||''
+  ).toLowerCase();
   const matchingEntries=(entries||[]).filter(existing=>
     _normalizeConfiguredModelKey(existing.value)===normalized
   );
   if(matchingEntries.some(existing=>{
-    const entryProvider=String(existing.providerId||'').toLowerCase();
+    const entryProvider=_entryProvider(existing);
     return !provider||!entryProvider||entryProvider===provider;
   })) return true;
   // @provider:model is an equivalent routing spelling only when an existing
@@ -4273,7 +4307,7 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
     const slashRoutedId=rawId.slice(slashPrefix.length);
     if(slashRoutedId&&(entries||[]).some(entry=>
-      String(entry.providerId||'').toLowerCase()===provider
+      _entryProvider(entry)===provider
       &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
     )) return true;
   }
@@ -4281,7 +4315,7 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
   return (entries||[]).some(entry=>
-    String(entry.providerId||'').toLowerCase()===provider
+    _entryProvider(entry)===provider
     &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
   );
 }
@@ -4726,7 +4760,15 @@ function renderModelDropdown(){
       const displayName=rawValue.startsWith('@custom:')
         ? getModelLabel(rawValue)
         : (child.textContent||getModelLabel(rawValue));
-      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:'',badge:_getConfiguredModelBadge(child.value,_badgeMap),hiddenByDefault:false});
+      // Keep the option's own provider authority: _ensureModelOptionInDropdown
+      // stamps dataset.provider on the temporary options it adds, and that
+      // authority has to reach both places later comparisons read (the
+      // structural providerId and the configured badge lookup). Storing
+      // providerId:'' here let a badge-owned `@commandcode:model-a` row claim
+      // providerless authority and suppress another provider's
+      // same-normalized configured entries (#7290).
+      const optionProviderId=_getOptionProviderId(child);
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:optionProviderId,badge:_getConfiguredModelBadge(child.value,_badgeMap,optionProviderId),hiddenByDefault:false});
       _groupMeta.get(groupKey).modelCount++;
     }
   }
@@ -4737,6 +4779,10 @@ function renderModelDropdown(){
       name:esc(getModelLabel(modelId)),
       id:esc(modelId),
       group:'',
+      // Stamp the badge provider onto the appended row so its provider
+      // authority is structural here instead of depending on the badge
+      // fallback later (#7290).
+      providerId:String((badge&&badge.provider)||''),
       badge,
     });
   }
@@ -6365,6 +6411,16 @@ function _cancelMessageJumpScroll(){
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
+// Fast-stream shrink-clamp guard: track scrollHeight between scroll events.
+// During high-throughput streaming (200+ tok/s), content ABOVE the tail can
+// re-render SHORTER (live thinking block replaced by shorter final block, tool
+// output collapsing into a compact card, provisional markdown re-parse). When
+// scrollHeight shrinks, the browser clamps scrollTop down and fires a scroll
+// event that reads as "moved up" — with NO user input. The movedUp branch then
+// sticky-unpins and live-follow silently dies mid-stream, stranding the
+// viewport mid-transcript. Sibling of the #4702 clientHeight-grew guard: both
+// are geometry changes masquerading as user scrolls.
+let _lastMessageScrollHeight=null;
 // Sticky-unpin model (#3343 supersedes #3330's proximity re-pin): once the user
 // scrolls up, streaming stops auto-following until they return to the bottom or
 // click ↓. The upward-intent TIMEOUT mechanism (_lastMessageUpwardIntentMs /
@@ -6377,6 +6433,63 @@ let _messageUserUnpinned=false;
 // A monotonic ownership token lets delayed restores distinguish reader input
 // that happened after a snapshot from input that merely happened recently.
 let _messageScrollInputGeneration=0;
+// Capture the tail geometry at the reader input itself, before the browser
+// applies that wheel/touch/key/drag. A later scroll callback may observe a
+// taller streaming transcript, so event-to-event scrollHeight is not authority
+// for the tail the reader was actually aiming at.
+let _messageScrollInputTailHeight=null;
+let _messageScrollInputTailGeneration=0;
+let _messageScrollInputTailConsumedGeneration=0;
+function _captureMessageScrollInputTail(el){
+  _messageScrollInputGeneration++;
+  _messageScrollInputTailGeneration=_messageScrollInputGeneration;
+  _messageScrollInputTailHeight=el&&Number.isFinite(Number(el.scrollHeight))
+    ? Number(el.scrollHeight)
+    : null;
+}
+// The input tail is re-pin AUTHORITY, so it must describe input that actually
+// scrolls the transcript. Nested scroll surfaces — tool output panes, code
+// blocks, approval command views — sit inside the transcript but own their own
+// scrolling. Wheel/touch/key input consumed there never moves the transcript,
+// so a capture taken for it would sit unconsumed until a later layout-driven
+// downward transcript scroll consumed it and falsely re-pinned an intentionally
+// unpinned reader (#7494 review: Nested Input Leaves Stale Authority). Walk the
+// target's ancestors: a vertical scroller between the target and the transcript
+// scroller consumes the gesture, so only bare transcript targets capture —
+// UNLESS that scroller is pinned at the boundary in the gesture's direction and
+// the browser chains the gesture onward to the transcript itself (#7494 review:
+// Boundary Gestures Lose Re-Pinning). A downward gesture (deltaY>0 wheel, or a
+// touchmove whose finger moved UP past the pane's bottom boundary) passes
+// through such a pane and lands on the transcript, so it must retain capture.
+// The transcript scroller's own wheel/touch handler never suppresses chaining,
+// so a gesture that reached it still scrolls it regardless of its own position.
+function _isTranscriptScrollTarget(node,el,dir){
+  if(!node) return false;
+  let n=node;
+  while(n&&n!==el){
+    if(Number(n.scrollHeight)>Number(n.clientHeight)+1){
+      const cs=(typeof getComputedStyle==='function')?getComputedStyle(n):null;
+      const oy=cs?String(cs.overflowY||''):'';
+      if(oy==='auto'||oy==='scroll'){
+        // Direction-aware boundary chaining: the pane consumes the gesture
+        // only when it can actually scroll it (not pinned at the boundary in
+        // the gesture direction, within the same 1px epsilon used above).
+        // Default dir (0/undefined) stays strictly consumed: a keyboard
+        // focus-scroll into a mid-scroll pane chains nothing, and the
+        // capture-suppression contract fails closed.
+        if(!(dir>0
+          ?n.scrollTop>=n.scrollHeight-n.clientHeight-1
+          :dir<0&&n.scrollTop<=1)) return false;
+        // A nested pane with its own overscroll boundary does not chain into
+        // .messages even when it cannot scroll farther in this direction.
+        const boundary=cs?String(cs.overscrollBehaviorY||''):'';
+        if(boundary==='contain'||boundary==='none') return false;
+      }
+    }
+    n=n.parentElement;
+  }
+  return n===el;
+}
 let _bottomSettleToken=0;
 let _settleRAF=0;
 let _settleRO=null;
@@ -6467,7 +6580,22 @@ function _recordNonMessageScrollIntent(e){
   const guardedWheelUp=wheelUp&&_freshProgrammaticScrollActive();
   const jumpScrollOwned=typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner;
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
-    if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+    // Direction of the gesture in transcript coordinates: deltaY>0 = scroll
+    // down toward the tail. For touch, scrolling down = the finger moves UP
+    // (clientY decreases), so dy<0 maps to dir +1; dy>0 is upward intent.
+    let dir=0;
+    if(typeof e.deltaY==='number'&&e.deltaY!==0) dir=e.deltaY>0?1:-1;
+    else if(_touchStartY!==null&&e.touches&&e.touches[0]){
+      const dy=e.touches[0].clientY-_touchStartY;
+      if(dy<-2) dir=1;
+      else if(dy>2) dir=-1;
+    }
+    // Nested-pane consumed input must not mint re-pin authority: gate the
+    // capture on the event target actually scrolling the transcript (#7494).
+    // A pane pinned at the gesture's boundary chains the gesture to the
+    // transcript, so it must not swallow the capture (#7494, Boundary
+    // Gestures Lose Re-Pinning).
+    if(_isTranscriptScrollTarget(target,el,dir)) _captureMessageScrollInputTail(el);
     if(jumpScrollOwned||e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
     }
@@ -6582,6 +6710,9 @@ function _resetScrollDirectionTracker(){
   _clearNewMessageScrollCue();
   _lastScrollTop=null;
   _lastMessageClientHeight=null;
+  _lastMessageScrollHeight=null;
+  _messageScrollInputTailHeight=null;
+  _messageScrollInputTailConsumedGeneration=_messageScrollInputTailGeneration;
   _messageUserUnpinned=false;
   _scrollPinned=true;
   _nearBottomCount=0;
@@ -6610,6 +6741,9 @@ function _resetStreamScrollFollow(){
   _scrollPinned=true;
   _nearBottomCount=0;
   _lastScrollTop=null;
+  _lastMessageScrollHeight=null;
+  _messageScrollInputTailHeight=null;
+  _messageScrollInputTailConsumedGeneration=_messageScrollInputTailGeneration;
   // #4970 review: clear low-delta wheel intent on fresh stream start too, else a
   // gentle upward wheel within the prior 1200ms can under-suppress a genuine
   // no-intent render artifact and silently disable live follow for the new stream.
@@ -6698,7 +6832,9 @@ if(typeof window!=='undefined'){
     if(e.target===el&&e.offsetX>=el.clientWidth){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       _scrollbarDragActive=true;
-      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+      // The scrollbar belongs to the transcript itself: drag input always
+      // targets the transcript scroll surface (#7494).
+      if(typeof _captureMessageScrollInputTail==='function') _captureMessageScrollInputTail(el);
     }
   },{passive:true});
   window.addEventListener('pointerup',()=>{
@@ -6746,7 +6882,23 @@ if(typeof window!=='undefined'){
     if(a===el||el.contains(a)||el.matches(':hover')){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       const now=performance.now();
-      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+      // Nested-pane focus (tool output, code block) consumes scroll keys —
+      // such a keydown must not mint transcript re-pin authority (#7494).
+      // Resolve the key target first: when focus is on <body> but the pointer
+      // hovers the transcript, walking `a` starts outside `el` and never
+      // reaches it, so the gate would return false and a queued live-render
+      // restore would undo this scroll (#7494 re-gate).
+      const keyTarget = el.contains(a) ? a : el;
+      // Keyboard direction mirrors the browser's own key semantics: PageUp,
+      // ArrowUp, Home and Shift+Space scroll UP; every other key in this set
+      // scrolls DOWN. The nested-pane boundary check is direction-aware, so a
+      // direction-less gate would strictly consume a nested pane even when it
+      // is pinned at the boundary and the browser chains the key onward to the
+      // transcript — the scroll would land but its re-pin authority would not
+      // (#7494 re-gate: PageDown from a nested pane's boundary was undone by
+      // the queued live-render restore).
+      const keyDir=(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home'||((e.key===' '||e.key==='Spacebar')&&e.shiftKey))?-1:1;
+      if(_isTranscriptScrollTarget(keyTarget,el,keyDir)) _captureMessageScrollInputTail(el);
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
       if(bottomDistance>120) _lastMessageScrollIntentMs=now;
@@ -6776,8 +6928,40 @@ if(typeof window!=='undefined'){
       // false and behavior is byte-identical.
       const grew=_lastMessageClientHeight!==null&&el.clientHeight>_lastMessageClientHeight+1;
       _lastMessageClientHeight=el.clientHeight;
-      const movedUp=!grew&&_lastScrollTop!==null&&top<_lastScrollTop-2;
+      // Fast-stream shrink-clamp: scrollHeight shrank since the last scroll
+      // event AND there is no recent user scroll input of any kind (wheel,
+      // keyboard, touch, scrollbar drag). The browser clamped scrollTop after
+      // content above the tail re-rendered shorter — NOT a user scroll. Treat
+      // like `grew`: never read it as movedUp. Real user scrolls keep their
+      // 2px trigger because any actual input stamps one of the intent trackers.
+      const shrankNoIntent=typeof _lastMessageScrollHeight!=='undefined'
+        &&_lastScrollTop!==null
+        &&_lastMessageScrollHeight!==null
+        &&el.scrollHeight<_lastMessageScrollHeight-1
+        &&(typeof _scrollbarDragActive==='undefined'||!_scrollbarDragActive)
+        &&typeof _recentMessageTouchScrollIntent==='function'&&!_recentMessageTouchScrollIntent()
+        &&typeof _recentMessageWheelIntent==='function'&&!_recentMessageWheelIntent()
+        &&typeof _recentMessageKeyScrollIntent==='function'&&!_recentMessageKeyScrollIntent()
+        &&typeof _recentNonMessageScrollIntent==='function'&&!_recentNonMessageScrollIntent();
+      if(typeof _lastMessageScrollHeight!=='undefined') _lastMessageScrollHeight=el.scrollHeight;
+      const movedUp=!grew&&!shrankNoIntent&&_lastScrollTop!==null&&top<_lastScrollTop-2;
       const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
+      // Fast-stream re-pin race: bind the target tail to the actual reader
+      // input, not to the prior scroll callback. Streaming can add arbitrary
+      // height between callbacks; only the wheel/touch/key/drag capture says
+      // which tail the reader was aiming at. Consume each input generation once
+      // so a later programmatic/layout scroll cannot reuse stale authority.
+      const inputTailGeneration=(typeof _messageScrollInputTailGeneration==='number')
+        ?_messageScrollInputTailGeneration:0;
+      const hasUnconsumedInputTail=typeof _messageScrollInputTailConsumedGeneration==='number'
+        &&inputTailGeneration>_messageScrollInputTailConsumedGeneration;
+      const inputTailHeightForRepin=hasUnconsumedInputTail
+        &&typeof _messageScrollInputTailHeight==='number'
+        ?_messageScrollInputTailHeight:null;
+      if(hasUnconsumedInputTail) _messageScrollInputTailConsumedGeneration=inputTailGeneration;
+      const caughtInputTail=movedDown
+        &&inputTailHeightForRepin!==null
+        &&(top+el.clientHeight)>=(inputTailHeightForRepin-80);
       // Suppress the post-render scroll artifact: right after renderMessages()
       // rebuilds #msgInner, the browser can emit a non-user upward scroll event.
       // The typeof guards keep this branch inert in unit harnesses that inject
@@ -6810,22 +6994,23 @@ if(typeof window!=='undefined'){
       }
       _lastScrollTop=top;
       if(movedUp&&bottomDistance>1){
-        // Only a real scroll-away unpins. A collapse ABOVE the tail (worklog
-        // "Done" fold, thinking/tool card collapse, interim-note collapse) shrinks
-        // scrollHeight while the reader is still flush at the tail, so the browser
-        // clamps scrollTop DOWN by the collapsed height and fires a scroll event:
-        // movedUp is true while bottomDistance stays ~0. Reading that as user
-        // intent killed live-follow mid-stream on a reader who never scrolled.
-        // The render-artifact suppression below cannot cover it: it needs a
-        // renderMessages() within the last 1400ms, and the collapse paths above run
-        // from the streaming handlers, which update the DOM incrementally and never
-        // stamp _lastMessageRenderAt. A genuine upward scroll always leaves the true
-        // bottom first, so it still has bottomDistance>1 here.
+        // Only a real scroll-away unpins. A true-bottom geometry clamp keeps
+        // bottomDistance <= 1; even gentle reader input leaves that boundary.
         _cancelBottomSettle();
         _nearBottomCount=0;
         _scrollPinned=false;
         _messageUserUnpinned=true;
-      }else if(movedDown&&nearBottom){
+      }else if(movedDown&&(nearBottom||caughtInputTail)){
+        // Catching the INPUT-CAPTURED tail is decisive: re-pin immediately (no
+        // debounce — at fast stream rates a second qualifying event may never
+        // come, because each handler run re-measures against a taller
+        // transcript) and snap to the true bottom so follow resumes cleanly.
+        if(caughtInputTail){
+          _nearBottomCount=0;
+          _messageUserUnpinned=false;
+          _scrollPinned=true;
+          if(typeof window!=='undefined'&&window._autoScrollFollow&&typeof _setMessageScrollToBottom==='function') _setMessageScrollToBottom();
+        }else{
         _nearBottomCount=_nearBottomCount+1;
         if(_nearBottomCount>=2){
           // Only re-pin when the reader has genuinely reached the true bottom
@@ -6837,6 +7022,7 @@ if(typeof window!=='undefined'){
             _scrollPinned=true;
           }
           _nearBottomCount=0;
+        }
         }
       }else if(!_messageUserUnpinned){
         if(nearBottom){
@@ -7653,7 +7839,6 @@ function scrollIfPinned(){
   }
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
-  if(_messageBottomDistance()>500) _setMessageScrollToBottom();
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
@@ -8226,6 +8411,105 @@ function renderMd(raw){
   // Inline backtick spans: restore <code> tags produced in the stash callback above.
   // Must happen BEFORE bold/italic so **`code`** → <strong><code>code</code></strong>.
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
+  function _isCjkAutolinkChar(ch){
+    return /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(ch||'');
+  }
+  // Return one URL's exclusive end inside a maximal whitespace-free URL run.
+  // nextCjk and nextQuery are suffix tables shared by every URL in that run.
+  function _bareAutolinkEnd(run,start,nextCjk,nextQuery){
+    const schemeEnd=run.indexOf('://',start)+3;
+    let authorityEnd=schemeEnd;
+    while(authorityEnd<run.length&&!/[/?#]/.test(run[authorityEnd])) authorityEnd++;
+    const pathStart=run[authorityEnd]==='/'?authorityEnd:-1;
+    const queryFragmentStart=nextQuery[schemeEnd];
+    const firstCjkPath=pathStart<0?-1:nextCjk[pathStart];
+    const firstCjkQuery=queryFragmentStart<0?-1:nextCjk[queryFragmentStart+1];
+    // Closing marks and sentence punctuation end a URL. Full-width OPENING
+    // marks（【「『 also end it: prose such as `…/pull/8040（OPEN、…` starts
+    // there. The raw-CJK-path guard further down still keeps interior marks
+    // of genuine IRIs (for example `…/wiki/スター（映画）`).
+    const boundaryMarks='，。．｡；：！？、）】」》〕（【「『';
+    let currentLabelStart=schemeEnd;
+    for(let i=schemeEnd;i<run.length;i++){
+      const mark=run[i];
+      if(mark==='.'){currentLabelStart=i+1;continue;}
+      if(!boundaryMarks.includes(mark)) continue;
+      if(run.startsWith('http://',i+1)||run.startsWith('https://',i+1)) return i;
+      // U+FF0E and U+FF61 are ordinary IRI characters outside the authority.
+      // Keep them in paths, queries, and fragments just as master does.
+      if((mark==='．'||mark==='｡')&&i>=authorityEnd) continue;
+      // UTS #46 maps these three authority characters to an ASCII dot. They
+      // are label separators before an ASCII label. Also retain a CJK label
+      // when the host prefix already contains raw CJK; this covers real IDNs
+      // such as 例子。中国 without mistaking example.com。参见docs/ for one.
+      if((mark==='。'||mark==='．'||mark==='｡')&&i<authorityEnd
+         &&i+1<authorityEnd){
+        if(/[A-Za-z0-9_\-]/.test(run[i+1])){currentLabelStart=i+1;continue;}
+        // Keep a Unicode label when this is the first host separator, when the
+        // immediately preceding label is itself Unicode (www.例子。中国), or when the
+        // next label starts with a non-CJK script letter (www.example。рф). CJK,
+        // Common-script and fullwidth characters after an ASCII label are prose, so
+        // `example.com。参见` / `example.com．次に進む` / `example.com。２０２４年` still end
+        // at the TLD.
+        const firstLabelChar=String.fromCodePoint(run.codePointAt(i+1));
+        let unicodeLabel=currentLabelStart===schemeEnd
+          ||(/\p{L}/u.test(firstLabelChar)
+             &&!/[A-Za-z\p{Script=Common}\p{Script=Inherited}\uFF00-\uFFEF]/u.test(firstLabelChar)
+             &&!_isCjkAutolinkChar(firstLabelChar)
+             &&!/[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Hangul}\p{Script_Extensions=Bopomofo}]/u.test(firstLabelChar));
+        for(let j=currentLabelStart;!unicodeLabel&&j<i;){
+          const c=String.fromCodePoint(run.codePointAt(j));
+          unicodeLabel=/[\p{L}\p{M}\p{N}]/u.test(c)
+            &&!/[A-Za-z0-9]/.test(c);
+          j+=c.length;
+        }
+        for(let j=i+1;unicodeLabel&&j<authorityEnd;){
+          const c=String.fromCodePoint(run.codePointAt(j));
+          if(c==='.'||c===':'||boundaryMarks.includes(c)) break;
+          unicodeLabel=/[\p{L}\p{M}\p{N}_\-]/u.test(c);
+          j+=c.length;
+        }
+        if(unicodeLabel){currentLabelStart=i+1;continue;}
+      }
+      // Preserve marks in a query/fragment after raw CJK content. ASCII
+      // fragment continuations are also common section identifiers. A mark
+      // before the first CJK character remains a prose boundary, so
+      // `?q=1，参见` does not swallow the following sentence.
+      if(queryFragmentStart>=0&&i>queryFragmentStart&&i<run.length-1){
+        if((firstCjkQuery>=0&&firstCjkQuery<i)
+           ||(run[queryFragmentStart]==='#'&&/[A-Za-z0-9_\-]/.test(run[i+1]))) continue;
+        return i;
+      }
+      // Once a path contains raw CJK, interior CJK punctuation is a plausible
+      // IRI character, but it must not override a later query boundary.
+      if(firstCjkPath>=0&&firstCjkPath<i
+         &&(queryFragmentStart<0||i<queryFragmentStart)&&i<run.length-1) continue;
+      return i;
+    }
+    return /[.,;:!?)]$/.test(run)?run.length-1:run.length;
+  }
+  function _autolinkBareRun(run){
+    const nextCjk=new Int32Array(run.length+1);
+    const nextQuery=new Int32Array(run.length+1);
+    nextCjk[run.length]=-1;
+    nextQuery[run.length]=-1;
+    for(let i=run.length-1;i>=0;i--){
+      nextCjk[i]=_isCjkAutolinkChar(run[i])?i:nextCjk[i+1];
+      nextQuery[i]=(run[i]==='?'||run[i]==='#')?i:nextQuery[i+1];
+    }
+    const schemeRe=/https?:\/\//g;
+    let out='';
+    let cursor=0;
+    let match;
+    while((match=schemeRe.exec(run))){
+      out+=run.slice(cursor,match.index);
+      const end=_bareAutolinkEnd(run,match.index,nextCjk,nextQuery);
+      out+=_autolinkAnchor(run.slice(match.index,end));
+      cursor=end;
+      schemeRe.lastIndex=end;
+    }
+    return out+run.slice(cursor);
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -8250,7 +8534,7 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
-    t=t.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{const trail=url.match(/[.,;:!?)\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
+    t=_autolinkBareText(t);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -8612,18 +8896,23 @@ function renderMd(raw){
   // renderer's generated </p> could provide a closing ">" and turn them into
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).
   s=s.replace(/<[a-zA-Z][\w:-]*[^>\n]*$/gm,tag=>esc(tag));
-  // Autolink: convert plain URLs to clickable links.
+  // Autolink: convert plain URLs to clickable links. Both inline and block
+  // rendering use this helper so their boundary and safety rules stay equal.
+  function _autolinkAnchor(clean){
+    return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>`;
+  }
+  function _autolinkBareText(text){
+    return String(text||'').replace(
+      /(https?:\/\/[^\s<>"')\]\uFF09]+)/g,
+      run=>_autolinkBareRun(run),
+    );
+  }
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
-  s=s.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{
-    // Strip trailing punctuation that was likely not part of the URL.
-    // CJK full-width punctuation (）。，；：！？、) is included because LLMs
-    // frequently use full-width delimiters in Chinese/Japanese text.
-    const trail=url.match(/[.,;:!?)]$/)||url.match(/[\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';
-    const clean=trail?url.slice(0,-1):url;
-    return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
-  });
+  // Split high-confidence sentence boundaries while preserving valid CJK IRI
+  // content, then rescan each plain-text trail so adjacent URLs all link.
+  s=_autolinkBareText(s);
   s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);
   // Restore math stash → katex placeholder spans/divs
   // These will be rendered by renderKatexBlocks() after DOM insertion
@@ -11018,7 +11307,7 @@ function _renderUpdateWhatsNewLinks(data){
   }
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
-function _showUpdateBanner(data){
+function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
@@ -11034,10 +11323,21 @@ function _showUpdateBanner(data){
     btnApply.disabled=!hasApplyTargets;
     btnApply.style.display=hasApplyTargets?'':'none';
     if(webuiManual){
+      // Keep an Agent recovery button only while the fresh check still shows
+      // the condition it recovers from. A check that positively reports the
+      // condition gone (recovery.force / recovery.clear_lock === false) clears
+      // the stale button so a destructive force update cannot linger after the
+      // conflict was resolved outside the UI (Greptile P1 on #8040). Probes
+      // that could not determine the state stay null and never clear. Cached
+      // results also never clear buttons armed after that cache was recorded.
+      const _agentRecovery=(data&&data.agent&&data.agent.recovery)||null;
+      const _currentRecoveryGeneration=Number(window._updateRecoveryGeneration)||0;
+      const _recoveryGenerationIsCurrent=recoveryGenerationAtCheck===null||Number(recoveryGenerationAtCheck)===_currentRecoveryGeneration;
+      const _recoveryGone=(kind)=>!!(!data.cached&&_recoveryGenerationIsCurrent&&_agentRecovery&&_agentRecovery[kind]===false);
       const forceBtn=$('btnForceUpdate');
-      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent')){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
+      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent'&&!_recoveryGone('force'))){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
       const clearLockBtn=$('btnClearUpdateLock');
-      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent')){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent'&&!_recoveryGone('clear_lock'))){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
     }
   }
   if(!parts.length){
@@ -11153,6 +11453,9 @@ function _showUpdateError(target,res){
     errEl.style.display='block';
   } else {
     showToast(msg);
+  }
+  if(res.conflict||res.diverged||res.lock_conflict){
+    window._updateRecoveryGeneration=(Number(window._updateRecoveryGeneration)||0)+1;
   }
   // Show "Force update" button ONLY for errors recoverable by a destructive
   // hard reset. Lock-only failures are routed to a separate non-destructive
@@ -16856,9 +17159,19 @@ function _abandonMessageScrollSnapshot(){
 function _restorePinnedMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot||snapshot.pinned!==true||snapshot.userUnpinned===true) return false;
+  // Bounce fix (Sep 6 2026): activity-scene rebuilds capture `snapshot.bottom`
+  // (the tail gap) BEFORE the rebuild, then restore the pinned reader AFTER
+  // content has GROWN below. Restoring to maxTop-bottom used the stale
+  // pre-rebuild gap and landed the viewport up to the full growth-delta short
+  // of the tail; the follow writer's snap-to-bottom then landed in a different
+  // paint frame — the reader saw up-then-snap text bounce on every streamed
+  // scene update. A pinned reader follows the live tail by definition, so the
+  // restore target is the POST-rebuild tail (maxTop): idempotent with
+  // _setMessageScrollToBottom(), which runs immediately after. Also removes a
+  // latent pathology: a pathological shrink (stale bottom > new maxTop) used
+  // to clamp the target to scrollTop 0 — a jump to the TOP.
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-  const bottom=Number(snapshot.bottom);
-  const target=Number.isFinite(bottom)?maxTop-Math.max(0,bottom):maxTop;
+  const target=maxTop;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=Math.max(0,Math.min(target,maxTop));
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
@@ -17119,7 +17432,6 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   }
   if(!restoredViaAnchor){
     const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-    const bottom=Number(snapshot.bottom);
     // Mobile/touch viewports have native overflow anchoring to hold an
     // unpinned reader across a rebuild. Desktop deliberately disables that
     // browser behavior, so it must continue into the explicit fallback below.
@@ -17140,8 +17452,14 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
       _nearBottomCount=0;
       return;
     }
-    const target=(snapshot.pinned===true&&Number.isFinite(bottom))
-      ? maxTop-Math.max(0,bottom)
+    // Bounce fix (Sep 6 2026): same post-rebuild tail as
+    // _restorePinnedMessageScrollSnapshot — the pre-rebuild `bottom` gap is
+    // stale once the rebuild grew content, so restoring to maxTop-bottom
+    // landed short of the tail and raced the follow writer's bottom snap
+    // across paint frames (visible up-then-snap bounce mid-stream). A pinned
+    // reader follows the live tail; target the tail exactly.
+    const target=(snapshot.pinned===true)
+      ? maxTop
       : Number(snapshot.top)||0;
     // Streaming stale-snapshot guard (issue #5637). The userUnpinned check above is
     // defeated when a live stream re-pins the state machine (a scrollHeight-collapse
@@ -22259,6 +22577,8 @@ function _renderTreeItems(container, entries, depth){
       }
       const inp=document.createElement('input');
       inp.className='file-rename-input';inp.value=item.name;
+      // #7542: workspace file rename, not a credentials field.
+      _markNonCredentialInput(inp);
       inp.onclick=(e2)=>e2.stopPropagation();
       const finish=async(save)=>{
         inp.onblur=null;

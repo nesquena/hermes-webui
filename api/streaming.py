@@ -82,10 +82,13 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
+    _cancelled_journal_turn_owner,
     _WEBUI_TRUSTED_AGENT_INPUT_FIELD,
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
+    _recovered_pending_timestamp,
+    _state_db_row_identity_details,
     _validated_webui_pending_user_timestamp_identity,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -7127,6 +7130,11 @@ def _sanitize_messages_for_api(
         allowed_keys = _API_SAFE_MSG_KEYS | {"api_content"}
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
+    # Late recovery can restore display rows without proving a context owner.
+    # Filter before tool-ID collection and metadata stripping on both paths.
+    messages = [message for message in messages if not (
+        isinstance(message, dict) and message.get('_recovered_display_only') is True
+    )]
     valid_tool_call_ids: set = set()
     for msg in messages:
         if not isinstance(msg, dict):
@@ -7286,7 +7294,7 @@ def _api_safe_message_positions(messages):
     """Return [(original_index, sanitized_message)] for API-safe messages."""
     valid_tool_call_ids: set = set()
     for msg in messages:
-        if not isinstance(msg, dict):
+        if not isinstance(msg, dict) or msg.get('_recovered_display_only') is True:
             continue
         if msg.get('role') == 'assistant':
             for tc in msg.get('tool_calls') or []:
@@ -7297,7 +7305,7 @@ def _api_safe_message_positions(messages):
 
     out = []
     for idx, msg in enumerate(messages):
-        if not isinstance(msg, dict):
+        if not isinstance(msg, dict) or msg.get('_recovered_display_only') is True:
             continue
         if _is_reasoning_only_assistant_message(msg):
             continue
@@ -7721,6 +7729,12 @@ def _restore_reasoning_metadata_before_boundary(
             # with their display counterpart.
             if prev_msg.get('id') is not None and cur_msg.get('id') is None:
                 cur_msg['id'] = prev_msg['id']
+            # SQLite identity is private replay provenance, stripped before
+            # Agent input. Restore it only on this proved historical prefix,
+            # never onto the active turn even when the text is identical.
+            if (prev_msg.get('_state_db_row_id') is not None
+                    and cur_msg.get('_state_db_row_id') is None):
+                cur_msg['_state_db_row_id'] = prev_msg['_state_db_row_id']
             if (
                 prev_msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is True
                 and cur_msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is not True
@@ -7892,47 +7906,48 @@ def _strip_replayed_prefix(existing_messages, candidates):
     existing_messages = list(existing_messages or [])
     candidates = list(candidates or [])
     max_overlap = min(len(existing_messages), len(candidates))
-    for overlap in range(max_overlap, 0, -1):
-        left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
-        right = [_message_replay_key(m) for m in candidates[:overlap]]
-        if left == right:
-            return candidates[overlap:]
-    return candidates
+    if not max_overlap:
+        return candidates
+    # KMP matches the longest candidate prefix at the end of the old transcript.
+    # Each payload is keyed once; shrinking slices re-serialized O(n²) rows while
+    # settlement held the session lock. Keep the existing replay-key semantics.
+    keys = [_message_replay_key(m) for m in candidates[:max_overlap]]
+    fallback = [0] * max_overlap
+    matched = 0
+    for idx in range(1, max_overlap):
+        while matched and keys[idx] != keys[matched]:
+            matched = fallback[matched - 1]
+        if keys[idx] == keys[matched]:
+            matched += 1
+        fallback[idx] = matched
+    matched = 0
+    for message in existing_messages[-max_overlap:]:
+        key = _message_replay_key(message)
+        if matched == max_overlap:
+            matched = fallback[matched - 1]
+        while matched and key != keys[matched]:
+            matched = fallback[matched - 1]
+        if key == keys[matched]:
+            matched += 1
+    return candidates[matched:]
+
+
+def _session_arc_summary_key(message):
+    """Identify long summaries by role, provider payload and normalized prefix."""
+    if not isinstance(message, dict):
+        return None
+    text = ' '.join(_message_text(message.get('content', '')).split())
+    if len(text) < 2000 or not text.startswith('[Session Arc Summary'):
+        return None
+    api_content = message.get('api_content')
+    normalized = ' '.join(api_content.split()) if isinstance(api_content, str) and api_content else None
+    return (message.get('role'), normalized, text[:1500])
 
 
 def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
-    """Return True for repeated LCM/session summaries with refreshed hints.
-
-    LCM summary cards can be re-injected with the same long recovered context
-    and a different tail such as an expand hint. Exact identity misses those,
-    but appending both copies bloats every later model prompt.
-    """
-    if not isinstance(previous_msg, dict) or not isinstance(candidate_msg, dict):
-        return False
-    if previous_msg.get('role') != candidate_msg.get('role'):
-        return False
-    previous_api_content = previous_msg.get("api_content")
-    candidate_api_content = candidate_msg.get("api_content")
-    normalized_previous_api_content = (
-        " ".join(previous_api_content.split())
-        if isinstance(previous_api_content, str) and previous_api_content
-        else None
-    )
-    normalized_candidate_api_content = (
-        " ".join(candidate_api_content.split())
-        if isinstance(candidate_api_content, str) and candidate_api_content
-        else None
-    )
-    if normalized_previous_api_content != normalized_candidate_api_content:
-        return False
-    previous_text = " ".join(_message_text(previous_msg.get('content', '')).split())
-    candidate_text = " ".join(_message_text(candidate_msg.get('content', '')).split())
-    if len(previous_text) < 2000 or len(candidate_text) < 2000:
-        return False
-    marker = '[Session Arc Summary'
-    if not previous_text.startswith(marker) or not candidate_text.startswith(marker):
-        return False
-    return previous_text[:1500] == candidate_text[:1500]
+    """Recognize the same recovered context with a refreshed trailing hint."""
+    previous_key = _session_arc_summary_key(previous_msg)
+    return previous_key is not None and previous_key == _session_arc_summary_key(candidate_msg)
 
 
 def _strip_replayed_context_items(existing_messages, candidates):
@@ -7944,27 +7959,75 @@ def _strip_replayed_context_items(existing_messages, candidates):
 
     existing_keys = [_message_replay_key(m) for m in existing_messages]
     candidate_keys = [_message_replay_key(m) for m in candidates]
-    existing_large = [m for m in existing_messages if isinstance(m, dict)]
+    # Reversing both sequences turns a match starting at candidate idx into a
+    # match ending at the corresponding reversed position. A suffix automaton
+    # computes these longest matches without scanning every old start again.
+    transitions, links, lengths = [{}], [-1], [0]
+    last = 0
+    for key in reversed(existing_keys):
+        current = len(transitions)
+        transitions.append({})
+        lengths.append(lengths[last] + 1)
+        links.append(0)
+        parent = last
+        while parent >= 0 and key not in transitions[parent]:
+            transitions[parent][key] = current
+            parent = links[parent]
+        if parent >= 0:
+            target = transitions[parent][key]
+            if lengths[parent] + 1 == lengths[target]:
+                links[current] = target
+            else:
+                clone = len(transitions)
+                transitions.append(dict(transitions[target]))
+                lengths.append(lengths[parent] + 1)
+                links.append(links[target])
+                while parent >= 0 and transitions[parent].get(key) == target:
+                    transitions[parent][key] = clone
+                    parent = links[parent]
+                links[target] = links[current] = clone
+        last = current
+
+    matches = [0] * len(candidate_keys)
+    state = matched = 0
+    for idx in range(len(candidate_keys) - 1, -1, -1):
+        key = candidate_keys[idx]
+        while state and key not in transitions[state]:
+            state = links[state]
+            matched = min(matched, lengths[state])
+        target = transitions[state].get(key)
+        if target is None:
+            matched = 0
+        else:
+            state = target
+            matched += 1
+        matches[idx] = matched
+
+    summary_keys = set()
+    unusual_summary_keys = []
+    for message in existing_messages:
+        key = _session_arc_summary_key(message)
+        if key is not None:
+            try:
+                summary_keys.add(key)
+            except TypeError:
+                # Preserve the old equality rule for malformed, unhashable roles.
+                unusual_summary_keys.append(key)
     cleaned = []
     idx = 0
     min_block = 3
     while idx < len(candidates):
         msg = candidates[idx]
-        if any(_looks_like_replayed_session_arc_summary(prev, msg) for prev in existing_large):
+        key = _session_arc_summary_key(msg)
+        try:
+            repeated_summary = key is not None and key in summary_keys
+        except TypeError:
+            repeated_summary = key in unusual_summary_keys
+        if repeated_summary:
             idx += 1
             continue
 
-        best = 0
-        for start in range(len(existing_keys)):
-            length = 0
-            while (
-                idx + length < len(candidate_keys)
-                and start + length < len(existing_keys)
-                and candidate_keys[idx + length] == existing_keys[start + length]
-            ):
-                length += 1
-            if length > best:
-                best = length
+        best = matches[idx]
         if best >= min_block:
             idx += best
             continue
@@ -8595,7 +8658,29 @@ def _advance_truncation_watermark_after_commit(session) -> None:
             if isinstance(ts, (int, float)) and ts > 0:
                 session.truncation_watermark = float(ts)
                 return
-    session.truncation_watermark = time.time()
+    # No timestamped user row (e.g. a handoff/background-notification turn
+    # committed without one). The watermark's meaning is "suppress the
+    # REPLACED tail", so it must stay anchored to a real message timestamp --
+    # stamping wall-clock time here made the watermark NEWER than every row in
+    # the sidecar, which permanently starved the sidecar_advanced_past_watermark
+    # guard of the only signal that would let newer state.db rows merge back.
+    # That is a self-locking filter: the rows needed to advance the sidecar past
+    # the watermark are exactly the rows the watermark hides. Clamp to the
+    # newest real message instead, keeping the sidecar able to advance past it.
+    # Never 0.0 (the truncate-to-empty sentinel that must keep blocking replay,
+    # #2914) -- hence the >0 check.
+    newest_real_ts = None
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        ts = msg.get('timestamp') or msg.get('_ts')
+        if isinstance(ts, (int, float)) and ts > 0:
+            newest_real_ts = ts if newest_real_ts is None else max(newest_real_ts, ts)
+    if newest_real_ts is not None:
+        session.truncation_watermark = float(newest_real_ts)
+    # Otherwise: genuinely no timestamped row at all. Keep the existing (stale)
+    # value rather than inventing a wall-clock boundary — a too-old watermark
+    # only over-filters the replaced tail; it cannot self-lock the merge.
 
 
 def _merge_display_messages_after_agent_result(
@@ -9716,7 +9801,12 @@ def _sse_keepalive(handler) -> None:
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-    _sse_write(handler, payload.encode('utf-8'))
+    try:
+        encoded = payload.encode('utf-8')
+    except UnicodeEncodeError:
+        payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=True)}\n\n"
+        encoded = payload.encode('utf-8')
+    _sse_write(handler, encoded)
 
 
 # ── SSE write deadline (Defect A: per-connection thread exhaustion) ─────────
@@ -10324,6 +10414,118 @@ def _register_pending_user_timestamp_identity(
         save(touch_updated_at=False, skip_index=True)
 
 
+def _preserve_legacy_agent_row_identity(callable_obj, identity):
+    """Keep IDs returned by an older Agent's actual SQLite append calls.
+
+    Some Agents accept user timestamps but still discard returned row IDs.
+    Observe only this flush's calls on its own thread/DB instance, then attach
+    the returned IDs to those exact dicts. This is write provenance, not a
+    content-only guess about an independently read historical transcript.
+    """
+    agent = getattr(callable_obj, '__self__', None)
+    context = getattr(agent, '_webui_legacy_identity_context', None)
+    if not isinstance(identity, dict):
+        if isinstance(context, threading.local):
+            context.owner = None
+        return
+    flush = getattr(agent, '_flush_messages_to_session_db', None)
+    if not callable(flush):
+        return
+    if not isinstance(context, threading.local):
+        context = threading.local()
+        agent._webui_legacy_identity_context = context
+    context.owner = copy.deepcopy(identity)
+    if getattr(agent, '_webui_legacy_identity_adapter', False):
+        return
+
+    def flush_with_identity(messages, conversation_history=None):
+        owner = copy.deepcopy(getattr(context, 'owner', None))
+        if not isinstance(owner, dict):
+            return flush(messages, conversation_history)
+        db = getattr(agent, '_session_db', None)
+        append = getattr(db, 'append_message', None)
+        namespace = getattr(db, '__dict__', None)
+        if not callable(append) or not isinstance(namespace, dict):
+            return flush(messages, conversation_history)
+        lock = namespace.setdefault('_webui_legacy_identity_lock', threading.RLock())
+        with lock:
+            original_override = namespace.get('append_message')
+            had_override = 'append_message' in namespace
+            sid = getattr(agent, 'session_id', None)
+            start = max(len(conversation_history or []), getattr(agent, '_last_flushed_db_idx', 0))
+            rows = list(messages[start:])
+            observed = []
+            owner_thread = threading.get_ident()
+
+            def observed_append(*args, **kwargs):
+                row_id = append(*args, **kwargs)
+                if threading.get_ident() == owner_thread:
+                    observed.append((kwargs, row_id))
+                return row_id
+
+            db.append_message = observed_append
+            try:
+                result = flush(messages, conversation_history)
+            finally:
+                if namespace.get('append_message') is observed_append:
+                    if had_override:
+                        db.append_message = original_override
+                    else:
+                        del db.append_message
+            if (getattr(agent, '_session_db', None) is not db
+                    or getattr(agent, 'session_id', None) != sid
+                    or not rows or len(rows) != len(observed)):
+                return result
+            ids = [row_id for _, row_id in observed]
+            if not all(type(row_id) is int and row_id > 0 for row_id in ids) or len(set(ids)) != len(ids):
+                return result
+            index = getattr(agent, '_persist_user_message_idx', None)
+            for offset, (row, (written, row_id)) in enumerate(zip(rows, observed, strict=True)):
+                known_id, valid = _state_db_row_identity_details(row)
+                # Later legacy flushes apply the clean user override only to
+                # SQLite, leaving the workspace prefix in the live dict.
+                current_user_override = (
+                    type(index) is int and index == start + offset
+                    and owner.get('session_id') == sid and owner.get('token')
+                    and getattr(context, 'owner', None) == owner
+                    and written.get('role') == 'user'
+                    and written.get('content') == getattr(agent, '_persist_user_message_override', None)
+                    and written.get('content') == owner.get('text')
+                    and _active_turn_user_text_matches(row, owner.get('text'))
+                )
+                if (not isinstance(row, dict) or written.get('session_id') != sid
+                        or written.get('role') != row.get('role')
+                        or (written.get('content') != row.get('content') and not current_user_override)
+                        or not valid or known_id not in (None, str(row_id))):
+                    return result
+            # Native producers retain their own provenance and clock contract.
+            # The run signature alone does not establish that capability.
+            if all(_state_db_row_identity_details(row)[0] == str(row_id)
+                   for row, row_id in zip(rows, ids, strict=True)):
+                return result
+            for row, row_id in zip(rows, ids, strict=True):
+                row['_state_db_row_id'] = row_id
+            # The old Agent exports an index but no turn_id. Its own indexed
+            # dict plus this successful append proves the active user; retain
+            # WebUI's run token so shared settlement does not insert it again.
+            if (isinstance(owner, dict) and owner.get('session_id') == sid
+                    and getattr(context, 'owner', None) == owner
+                    and owner.get('token') and type(index) is int
+                    and start <= index < start + len(rows)
+                    and _active_turn_user_text_matches(messages[index], owner.get('text'))):
+                stamp_message_source(messages[index], owner.get('source') or 'webui',
+                                     active_turn_token=owner['token'])
+                row_timestamp, row_clock_valid = _message_exact_timestamp_details(messages[index])
+                owner_timestamp, owner_clock_valid = _message_exact_timestamp_details(
+                    {'timestamp': owner.get('timestamp')})
+                if row_clock_valid and row_timestamp is None and owner_clock_valid and owner_timestamp is not None:
+                    messages[index]['timestamp'] = owner_timestamp
+            return result
+
+    agent._flush_messages_to_session_db = flush_with_identity
+    agent._webui_legacy_identity_adapter = True
+
+
 def _build_run_conversation_kwargs(
     callable_obj,
     *,
@@ -10334,13 +10536,15 @@ def _build_run_conversation_kwargs(
     task_id,
     persist_user_message,
     persist_user_timestamp,
+    legacy_row_identity_owner=None,
 ):
-    """Build one rolling-compatible Agent invocation contract without mutation.
+    """Build one rolling-compatible Agent invocation contract.
 
     ``persist_user_timestamp`` is signature-gated (#6935): an older
     hermes-agent whose ``run_conversation()`` predates the kwarg must not
     receive it, or the call trips a TypeError before the turn starts.
     """
+    _preserve_legacy_agent_row_identity(callable_obj, legacy_row_identity_owner)
     kwargs = {
         "user_message": user_message,
         "system_message": system_message,
@@ -12896,6 +13100,8 @@ def _run_agent_streaming(
                 session_id,
                 profile=getattr(s, 'profile', None),
                 with_revision=True,
+                **({'include_row_identity': True}
+                   if _cancelled_journal_turn_owner(s.messages) else {}),
             )
 
             def _context_and_revision_from_state_snapshot(state_snapshot):
@@ -12923,6 +13129,8 @@ def _run_agent_streaming(
                     session_id,
                     profile=getattr(s, 'profile', None),
                     with_revision=True,
+                    **({'include_row_identity': True}
+                       if _cancelled_journal_turn_owner(s.messages) else {}),
                 )
                 return _context_and_revision_from_state_snapshot(fresh_state_snapshot)
 
@@ -13050,6 +13258,9 @@ def _run_agent_streaming(
                 task_id=session_id,
                 persist_user_message=msg_text,
                 persist_user_timestamp=_persist_user_timestamp,
+                legacy_row_identity_owner=(
+                    _active_turn_identity if _cancelled_journal_turn_owner(s.messages) else None
+                ),
             )
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
@@ -13663,6 +13874,9 @@ def _run_agent_streaming(
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                     persist_user_timestamp=_heal_persist_user_timestamp,
+                                    legacy_row_identity_owner=(
+                                        _active_turn_identity if _cancelled_journal_turn_owner(s.messages) else None
+                                    ),
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -15023,6 +15237,9 @@ def _run_agent_streaming(
                             task_id=session_id,
                             persist_user_message=msg_text,
                             persist_user_timestamp=_heal_persist_user_timestamp,
+                            legacy_row_identity_owner=(
+                                _active_turn_identity if _cancelled_journal_turn_owner(s.messages) else None
+                            ),
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
@@ -15879,6 +16096,12 @@ def cancel_stream(stream_id: str) -> bool:
                     )
                     _emit_cancel_event = False
                     return True
+                # Decide the saved-partial path before creating a provisional
+                # journal-only owner. Existing partials must remain available
+                # to the next-send history through the established projection.
+                _partial_msg = _build_partial_message(
+                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
+                )
                 # ── Preserve the user's typed message before clearing pending state (#1298) ──
                 # The agent's internal messages list (where the user message was appended at
                 # the start of run_conversation()) may not have been merged back into
@@ -15896,18 +16119,24 @@ def cancel_stream(stream_id: str) -> bool:
                 # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
                 # in unit tests using Mock sessions) cannot escape and skip the rest of
                 # the cleanup.
+                _cancel_turn_start = None
+                _cancel_turn_token = None
                 try:
                     _pending_user = getattr(_cs, 'pending_user_message', None)
                     _pending_source = getattr(_cs, 'pending_user_source', None)
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
+                    _cancel_turn_token = build_active_turn_token(stream_id, _pending_started)
                     _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
                     if _pending_user and _msgs_for_recovery is not None:
                         _last_user = None
-                        for _m in reversed(_msgs_for_recovery):
+                        _last_user_idx = None
+                        for _idx in range(len(_msgs_for_recovery) - 1, -1, -1):
+                            _m = _msgs_for_recovery[_idx]
                             if isinstance(_m, dict) and _m.get('role') == 'user':
                                 _last_user = _m
+                                _last_user_idx = _idx
                                 break
                         _already_persisted = False
                         if _last_user is not None:
@@ -15923,19 +16152,109 @@ def cancel_stream(stream_id: str) -> bool:
                                 # Tolerate the workspace prefix the streaming thread prepends.
                                 if _pending_user == _last_content or _pending_user in _last_content:
                                     _already_persisted = True
-                        if not _already_persisted:
-                            _recovered_ts = int(time.time())
-                            if isinstance(_pending_started, (int, float)) and _pending_started > 0:
-                                _recovered_ts = int(_pending_started)
+                        if _already_persisted:
+                            _cancel_turn_start = _last_user_idx
+                        else:
+                            _recovered_ts = _recovered_pending_timestamp(_pending_started)
                             _user_turn: dict = {
                                 'role': 'user',
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn,
+                                _pending_source,
+                                active_turn_token=_cancel_turn_token,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
+                            _cancel_turn_start = len(_msgs_for_recovery) - 1
+
+                        if isinstance(_cancel_turn_start, int):
+                            # Bind the durable cancel hook to the same exact turn
+                            # identity used by normal settlement. A display ordinal
+                            # cannot be translated into provider context after
+                            # compression because the two lists may have different
+                            # user-row counts.
+                            _cancel_owner = _msgs_for_recovery[_cancel_turn_start]
+                            if _cancel_turn_token:
+                                stamp_message_source(
+                                    _cancel_owner,
+                                    _pending_source,
+                                    active_turn_token=_cancel_turn_token,
+                                )
+
+                            if _partial_msg is None:
+                                # Provisional recovery boundary, not a queued
+                                # request. Only journal-only Stop needs an owner
+                                # awaiting durable model-visible output.
+                                _cancel_owner['_recovered'] = True
+                                # Keep the cancelled user boundary in provider context
+                                # so a later exact-stream recovery can be inserted before
+                                # a successor instead of becoming orphaned display state.
+                                from api.models import (
+                                    _append_recovered_turn_to_context,
+                                    _message_matches_pending_checkpoint,
+                                )
+
+                                _context_messages = getattr(_cs, 'context_messages', None)
+                                if not _cancel_turn_token:
+                                    _append_recovered_turn_to_context(_cs, _cancel_owner)
+                                elif not isinstance(_context_messages, list):
+                                    # Let the existing helper initialize context from
+                                    # the now-token-bearing display history.
+                                    _append_recovered_turn_to_context(_cs, _cancel_owner)
+                                else:
+                                    _token_matches = [
+                                        _row
+                                        for _row in _context_messages
+                                        if (
+                                            isinstance(_row, dict)
+                                            and _row.get('role') == 'user'
+                                            and _row.get('_active_turn_token') == _cancel_turn_token
+                                        )
+                                    ]
+                                    for _context_owner in _token_matches:
+                                        _context_owner['_recovered'] = True
+                                    if not _token_matches:
+                                        _strict_matches = [
+                                            _row
+                                            for _row in _context_messages
+                                            if _message_matches_pending_checkpoint(
+                                                _row,
+                                                _pending_user,
+                                                _pending_started,
+                                                _pending_source,
+                                                _pending_atts,
+                                            )
+                                        ]
+                                        _tail = _context_messages[-1] if _context_messages else None
+                                        if (
+                                            len(_strict_matches) == 1
+                                            and _strict_matches[0] is _tail
+                                            and isinstance(_tail, dict)
+                                            and not _tail.get('_active_turn_token')
+                                        ):
+                                            # Only a unique tokenless checkpoint at
+                                            # the exact context tail may be upgraded.
+                                            # Repeated equal prompts or a row already
+                                            # owned by another token are ambiguous and
+                                            # must remain untouched.
+                                            stamp_message_source(
+                                                _tail,
+                                                _pending_source,
+                                                active_turn_token=_cancel_turn_token,
+                                            )
+                                            _tail['_recovered'] = True
+                                        elif not _strict_matches:
+                                            # The current pending user is absent from
+                                            # provider context. Append the exact
+                                            # token-bearing owner rather than binding
+                                            # an older content-equal row.
+                                            _append_recovered_turn_to_context(
+                                                _cs, _cancel_owner
+                                            )
                 except Exception:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",
@@ -15966,9 +16285,6 @@ def cancel_stream(stream_id: str) -> bool:
                 # call and strict providers would 400 on the malformed entries.
                 # The underscore-prefixed key is not in the whitelist, so sanitize
                 # strips it. The UI reads it via static/messages.js. (v0.50.251.)
-                _partial_msg = _build_partial_message(
-                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
-                )
                 _cancel_marker_exists = _session_has_cancel_marker(_cs)
                 _cancel_marker_idx = len(_cs.messages)
                 if _cancel_marker_exists:
@@ -16006,6 +16322,42 @@ def cancel_stream(stream_id: str) -> bool:
                         'provider_details_label': 'Cancellation details',
                         'timestamp': int(time.time()),
                     })
+
+                # A journal-only turn has no in-memory partial to carry into the
+                # cancel save. Persist an exact-stream recovery capability on
+                # its marker before returning success. If this process exits
+                # while the old worker is unwinding, a later ordinary session
+                # read can recover already-emitted journal output without
+                # replaying provider execution. Live-buffer partials keep their
+                # existing path and deliberately do not opt into this slice.
+                if (
+                    _partial_msg is None
+                    and isinstance(_cancel_turn_start, int)
+                    and _cancel_turn_token
+                ):
+                    _cancel_retry_marker = None
+                    for _candidate in reversed(_cs.messages):
+                        if not isinstance(_candidate, dict) or _candidate.get('role') != 'assistant':
+                            continue
+                        _candidate_content = str(_candidate.get('content') or '').strip().lower()
+                        if (
+                            _candidate.get('_error') is True
+                            and any(pattern in _candidate_content for pattern in _CANCEL_MARKER_PATTERNS)
+                        ):
+                            _cancel_retry_marker = _candidate
+                            break
+                    if _cancel_retry_marker is not None:
+                        _cancel_retry_marker['_pending_journal_recovery'] = True
+                        _cancel_retry_marker['_journal_retry_kind'] = 'cancelled'
+                        _cancel_retry_marker['_journal_retry_stream_id'] = str(stream_id)
+                        _cancel_retry_marker['_journal_retry_attempts'] = 0
+                        _cancel_retry_marker['_journal_retry_first_seen_ts'] = int(time.time())
+                        from api.models import _JOURNAL_RECOVERY_PROCESS_TOKEN
+
+                        _cancel_retry_marker['_journal_retry_process_token'] = (
+                            _JOURNAL_RECOVERY_PROCESS_TOKEN
+                        )
+                        _cancel_retry_marker['_journal_retry_owner_token'] = _cancel_turn_token
                 _cs.save()
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:

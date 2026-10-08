@@ -278,7 +278,11 @@ def _run_git(args, cwd, timeout=10):
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
         # the whole import with AttributeError. Guard against None defensively.
-        stdout = (r.stdout or '').strip()
+        raw_stdout = r.stdout or ''
+        # ``-z`` output is a byte-for-byte path protocol: leading/trailing
+        # whitespace belongs to filenames and must not be stripped.  Textual
+        # commands retain the historical trimming behaviour.
+        stdout = raw_stdout if '-z' in args else raw_stdout.strip()
         stderr = (r.stderr or '').strip()
         if r.returncode == 0:
             return stdout, True
@@ -1333,6 +1337,125 @@ def _check_repo_branch(path, name, *, fetch=True):
     }
 
 
+def _update_recovery_hints(path: Path, compare_ref: str | None = None) -> dict:
+    """Report which update-recovery conditions a checkout still shows.
+
+    The Docker manual notice keeps Agent recovery buttons (``Force update`` /
+    ``Clear lock and retry``) alive across update checks. Persisting them
+    without re-validating the repo left a destructive force button armed after
+    the underlying conflict was resolved outside the UI (Greptile P1 on
+    #8040). Every check now answers "does the recovery condition still
+    exist?" from live repo state:
+
+    - ``force``: unresolved merge conflicts, divergent history, or an
+      untracked path that the offered ref would overwrite -- every condition
+      that can arm the destructive recovery button.
+    - ``clear_lock``: a stale ``.git/index.lock`` is present (the only lock
+      the clear-lock flow addresses).
+
+    ``None`` means "could not determine": the UI must never clear a recovery
+    button on a failed probe.
+    """
+    hints = {'force': None, 'clear_lock': None}
+    git_dir = path / '.git'
+    try:
+        git_dir_is_directory = git_dir.is_dir()
+    except OSError:
+        git_dir_is_directory = False
+    if git_dir_is_directory:
+        inv = _inventory_locks(path)
+        hints['clear_lock'] = bool(inv.get('well_known_lock_present'))
+    status_out, status_ok = _run_git(
+        [
+            '--no-optional-locks',
+            'status',
+            '--porcelain=v1',
+            '-z',
+            '--untracked-files=all',
+            '--no-renames',
+        ],
+        path,
+        timeout=5,
+    )
+    if not status_ok:
+        return hints
+
+    entries = [entry for entry in status_out.split('\0') if entry]
+    if any(
+        entry[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'}
+        for entry in entries
+    ):
+        hints['force'] = True
+        return hints
+
+    # Without a freshly fetched comparison ref, a clean index is not enough
+    # to clear Force update: the checkout may still be divergent or an
+    # untracked path may still collide with the pending update.
+    if not compare_ref:
+        return hints
+
+    counts_out, counts_ok = _run_git(
+        ['rev-list', '--left-right', '--count', f'HEAD...{compare_ref}'],
+        path,
+        timeout=5,
+    )
+    counts = counts_out.split() if counts_ok else []
+    if len(counts) != 2 or not all(part.isdigit() for part in counts):
+        return hints
+    diverged = int(counts[0]) > 0 and int(counts[1]) > 0
+
+    untracked = [entry[3:] for entry in entries if entry.startswith('?? ')]
+    # Git collapses an untracked nested repository to ``dir/`` even with
+    # --untracked-files=all.  Its contents are therefore unknown: an incoming
+    # path below it may collide, but different contents may also be harmless.
+    # Keep that state inconclusive instead of claiming either safe or unsafe.
+    collapsed_untracked_dirs = [item.rstrip('/') for item in untracked if item.endswith('/')]
+    explicit_untracked = [item for item in untracked if not item.endswith('/')]
+    collision = False
+    collapsed_overlap = False
+    if untracked:
+        added_out, added_ok = _run_git(
+            [
+                'diff-tree',
+                '-r',
+                '--no-renames',
+                '--diff-filter=A',
+                '--name-only',
+                '-z',
+                'HEAD',
+                compare_ref,
+            ],
+            path,
+            timeout=5,
+        )
+        if not added_ok:
+            return hints
+        added = [entry for entry in added_out.split('\0') if entry]
+        collision = any(
+            local == incoming
+            or local.startswith(f'{incoming}/')
+            or incoming.startswith(f'{local}/')
+            for local in explicit_untracked
+            for incoming in added
+        )
+        # Both directions matter: an incoming path at or below the collapsed
+        # directory, and a collapsed directory at or below an incoming blob
+        # (git refuses to replace a directory holding untracked content).
+        collapsed_overlap = any(
+            incoming == local_dir
+            or incoming.startswith(f'{local_dir}/')
+            or local_dir.startswith(f'{incoming}/')
+            for local_dir in collapsed_untracked_dirs
+            for incoming in added
+        )
+
+    if diverged or collision:
+        hints['force'] = True
+    elif not collapsed_overlap:
+        hints['force'] = False
+    return hints
+
+
 def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """Check if a git repo is behind its latest release. Returns dict or None.
 
@@ -1360,6 +1483,15 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             'no_git': True,
         }
 
+    # Recovery hints are consumed by the Docker manual notice, which offers
+    # Agent-only recovery buttons; other targets keep their payload unchanged.
+    # This is what lets the frontend clear a stale recovery button once the
+    # repo no longer needs it (Greptile P1 on #8040).
+    def attach_recovery(payload, compare_ref=None):
+        if payload is not None and name == 'agent':
+            payload['recovery'] = _update_recovery_hints(path, compare_ref)
+        return payload
+
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
     #
@@ -1380,27 +1512,28 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             release_info['error'] = message
             release_info['stale_check'] = True
             release_info['dirty'] = _is_dirty(path)
-            return release_info
-        return {
+            return attach_recovery(release_info)
+        payload = {
             'name': name,
             'behind': None,
             'error': message,
             'stale_check': True,
             'dirty': _is_dirty(path),
         }
+        return attach_recovery(payload)
 
     release_info = _check_repo_release(path, name, channel)
     if release_info is not None:
         release_info = dict(release_info)
         release_info['dirty'] = _is_dirty(path)
-        return release_info
+        return attach_recovery(release_info, release_info.get('branch'))
 
     branch_info = _check_repo_branch(path, name, fetch=False)
     if branch_info is not None:
         branch_info = dict(branch_info)
         branch_info['dirty'] = _is_dirty(path)
         branch_info['channel'] = channel
-        return branch_info
+        return attach_recovery(branch_info, branch_info.get('branch'))
     return None
 
 
@@ -1484,9 +1617,13 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             and cache_matches
             and time.time() - _update_cache['checked_at'] < CACHE_TTL
         ):
-            return dict(_update_cache)
+            cached = dict(_update_cache)
+            cached['cached'] = True
+            return cached
         if _check_in_progress and cache_matches:
-            return dict(_update_cache)  # another thread is already checking this channel
+            cached = dict(_update_cache)
+            cached['cached'] = True
+            return cached  # another thread is already checking this channel
         _check_in_progress = True
 
     try:

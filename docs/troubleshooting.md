@@ -128,6 +128,17 @@ startup. If a restart fails, inspect the current service journal and selected
 interpreter. This ordering repair does not remove the static fallback lock or
 change cross-profile credential handling.
 
+The native Windows launcher also decides *which* Agent root that bootstrap runs
+from, so the two have to agree. `start.ps1` normally keeps the source-first
+order from `api.config._discover_agent_dir`, but it repairs a few displaced
+layouts: a bare source checkout, the repo sibling, an Agent root (source or
+pip-style) at the repo parent, or `%USERPROFILE%\hermes-agent`, when that selection has no in-root
+venv and a later master-order install exists. For the layout-fallback cases the
+install may win even without its own venv (deps already importable); otherwise
+the install needs a `venv\Scripts\python.exe`. A source checkout that has its
+own venv keeps priority, since it is launchable on its own.
+`HERMES_WEBUI_AGENT_DIR` remains authoritative over both.
+
 Current Hermes managed environments ship `ruamel.yaml` and may not include
 PyYAML. WebUI reads and writes YAML through `api/yaml_compat.py`, which uses
 PyYAML when it is importable and falls back to `ruamel.yaml` otherwise, and the
@@ -272,7 +283,11 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 **Symptom.** The sidebar's imported/CLI session list takes seconds per refresh on a large Hermes profile, or a log line says a `state.db` read failed. Sessions still appear; nothing is lost.
 
-**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary (the listing returns empty for that profile) instead of silently reopening the file writable.
+**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary instead of silently reopening the file writable.
+
+A primary `state.db` read failure keeps the existing availability behavior: a complete same-generation stale snapshot wins when available, then the independently bounded eight-entry last-known-good cache keyed without the volatile database fingerprint preserves rows across idle and streaming-frozen refreshes. In the all-profiles view, a profile whose primary read fails makes the aggregate non-authoritative, so it is never published to either cache.
+
+The additive cron, webhook, and kanban passes, and the project-assigned recovery and unassigned refill passes, have a different failure boundary. If one of those later reads is temporarily unavailable, WebUI serves the primary rows it already loaded as an explicitly incomplete, fresh projection for that request and does not cache it; the next poll retries the optional pass. Errors while creating project metadata or building an optional row are debug-logged and skipped without misclassifying `projects.json` as an unavailable `state.db`. In all-profiles mode, an optional-pass failure therefore keeps both the affected profile's primary rows and healthy profiles' rows instead of replacing them with a stale aggregate. Claude Code discovery remains one global scan, independent of profile database availability, and runs only for unfiltered or explicit `claude-code` requests.
 
 **Diagnostic.**
 
