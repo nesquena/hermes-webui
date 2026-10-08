@@ -4979,6 +4979,34 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     return f"@{provider}:{model}"
 
 
+def _plugin_provider_is_usable(provider_id: str) -> bool:
+    """True when a plugin provider has a key or non-key auth Hermes accepts.
+
+    API-key plugins are covered by ``_provider_has_key``. Keyless plugins
+    (including external-process providers) use Hermes' auth status instead;
+    registry membership alone is not evidence of usable authentication.
+    """
+    pid = _canonicalise_provider_id(_resolve_provider_alias(provider_id))
+    if not pid or not _is_plugin_model_provider(pid):
+        return False
+    try:
+        from api.providers import _provider_has_key
+
+        if _provider_has_key(pid):
+            return True
+    except Exception:
+        logger.debug("Provider key helper unavailable", exc_info=True)
+        return False
+    try:
+        from hermes_cli.auth import get_auth_status
+
+        status = get_auth_status(pid)
+    except Exception:
+        logger.debug("Plugin provider auth status unavailable for %s", pid, exc_info=True)
+        return False
+    return bool(isinstance(status, dict) and (status.get("logged_in") or status.get("configured")))
+
+
 def canonical_model_provider_lane(model_id: str, model_provider: str | None = None) -> tuple[str, str | None]:
     """Return the runtime-resolved model/provider pair used for lane comparisons."""
     model = str(model_id or "").strip()
@@ -7493,7 +7521,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         # group when the live-rebuild cache is cold.
         try:
             for _plugin_pid in list(_plugin_model_provider_profiles().keys()):
-                if not _plugin_pid or not _provider_has_key(_plugin_pid):
+                if not _plugin_pid or not _plugin_provider_is_usable(_plugin_pid):
                     continue
                 _canonical = _canonicalise_provider_id(_plugin_pid) or _plugin_pid
                 if _canonical:
@@ -11011,7 +11039,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     detected_models = auto_detected_models_by_provider.get(pid, [])
                     if detected_models and not raw_models:
                         raw_models = copy.deepcopy(detected_models)
-                    _append_picker_group(provider_name, pid, raw_models)
+                    _append_picker_group(
+                        provider_name,
+                        pid,
+                        raw_models,
+                        allow_empty=_plugin_provider_is_usable(pid),
+                    )
                 else:
                     detected_models = auto_detected_models_by_provider.get(pid)
                     if detected_models:
@@ -11147,10 +11180,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # Custom providers from ``custom_providers`` config are exempt —
         # they may legitimately render with zero entries when the user
         # hasn't filled in models yet but wants the card visible.
+        # Authenticated plugin providers are exempt for the same reason:
+        # an empty live catalog must not make a usable plugin look missing.
         groups = [
             g for g in groups
             if g.get("models")
             or (g.get("provider_id") or "").startswith("custom:")
+            or _plugin_provider_is_usable(str(g.get("provider_id") or ""))
         ]
 
         # Sort groups: active provider first, then custom:* providers,
