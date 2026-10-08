@@ -63,6 +63,27 @@ _RESPONSE_HEADING_RE = re.compile(r"^#{1,2}\s+Response\s*$")
 # scanned for headings the prompt may legitimately quote.
 _PROMPT_HEADING_RE = re.compile(r"^#{1,2}\s+Prompt\s*$")
 
+# ── Writer length frames (producer contract) ───────────────────────────────
+# The cron writer (``cron.scheduler.run_job``) stamps the byte length of the
+# prompt and of the response OUTSIDE the user-owned text, so a reader never has
+# to search that text for a boundary. These names and values mirror
+# ``cron/scheduler_prompt.py`` in hermes-agent exactly; changing one without
+# the other silently breaks every framed run document.
+_PROMPT_FRAME = "**Prompt Characters:** "
+_RESPONSE_FRAME = "**Response Characters:** "
+_PROMPT_HEADING = "## Prompt\n\n"
+_RESPONSE_HEADING = "## Response\n\n"
+# The writer's blank line after the prompt body, and its trailing newline
+# after the response body.
+_PROMPT_SEPARATOR = "\n\n"
+_RESPONSE_TERMINATOR = "\n"
+_PROMPT_FRAME_RE = re.compile(
+    rf"(?m)^{re.escape(_PROMPT_FRAME)}(\d+)\n{re.escape(_PROMPT_HEADING)}"
+)
+_RESPONSE_FRAME_RE = re.compile(
+    rf"(?m)^{re.escape(_RESPONSE_FRAME)}(\d+)\n{re.escape(_RESPONSE_HEADING)}"
+)
+
 # A fenced code block starts with ``` or ~~~ (optionally with a language
 # tag) and ends with the same fence on its own line. We track fence
 # character AND opening delimiter length so a ```` ```` ``` ```` ```` line
@@ -128,6 +149,57 @@ class CronOutputProjection:
         }
 
 
+def _has_prompt_frame(text: str) -> bool:
+    """True when the document carries the writer's prompt length frame."""
+    return _PROMPT_FRAME_RE.search(text) is not None
+
+
+def _parse_framed_run_document(text: str) -> CronOutputProjection | None:
+    """Parse a writer-framed run document by its LENGTH frames.
+
+    Mirrors ``cron/scheduler_prompt.py::_archive_answer`` in hermes-agent, the
+    producer's own reader, so both sides agree on what a framed document means:
+
+    * the prompt is skipped by its stamped length, never by searching it;
+    * the response is taken by its stamped length and the trailing newline is
+      required, so a truncated write is rejected rather than shown;
+    * ``None`` means "not a usable framed document" and the caller decides.
+
+    Returns ``None`` for a document without a valid prompt frame (a legacy
+    unframed archive), or for a framed document whose frames do not validate.
+    """
+    prompt_frame = _PROMPT_FRAME_RE.search(text)
+    if prompt_frame is None:
+        return None
+    # The stamped prompt length only means something when the heading it
+    # announces is the document's real prompt heading, i.e. immediately after
+    # the frame. A frame quoted inside the prompt must not reposition the read.
+    if text.find(_PROMPT_HEADING) != prompt_frame.end() - len(_PROMPT_HEADING):
+        return None
+
+    response_start = prompt_frame.end() + int(prompt_frame.group(1)) + len(_PROMPT_SEPARATOR)
+    frame = _RESPONSE_FRAME_RE.match(text, response_start)
+    tail = text[frame.end():] if frame is not None else ""
+    # A missing or truncated writer-owned boundary is unusable: the length must
+    # match exactly and the terminator must be there.
+    if (
+        frame is None
+        or len(tail) != int(frame.group(1)) + len(_RESPONSE_TERMINATOR)
+        or not tail.endswith(_RESPONSE_TERMINATOR)
+    ):
+        return None
+
+    answer = tail[: -len(_RESPONSE_TERMINATOR)].strip()
+    response_line = text.count("\n", 0, frame.end()) + 1
+    return CronOutputProjection(
+        response=answer,
+        context=text[: frame.start()],
+        raw=text,
+        has_response_boundary=True,
+        response_line=response_line,
+    )
+
+
 def parse_cron_output(text: str) -> CronOutputProjection:
     """Parse a cron output artifact into a response-first projection.
 
@@ -145,39 +217,27 @@ def parse_cron_output(text: str) -> CronOutputProjection:
     lines = text.split("\n")
 
     # ---- Writer-framed envelope (producer contract) ---------------------
-    # The cron writer (``cron/scheduler.py`` ``_run_doc_header`` + success
-    # assembly) frames every agent run as ``## Prompt`` + prompt bytes +
-    # ``## Response`` + the logged answer. The assembled prompt half can
-    # legitimately QUOTE a literal ``## Response`` heading (a skill
-    # documenting its output format, an injected previous answer), so the
-    # only authoritative boundary is the LAST ``## Response`` — the
-    # producer's own reader (``_archive_answer``) splits on the last
-    # occurrence for the same reason.
+    # The cron writer (``cron.scheduler.run_job``) frames every agent run as
+    # ``**Prompt Characters:** N`` / ``## Prompt`` / the prompt / a blank line /
+    # ``**Response Characters:** M`` / ``## Response`` / the answer / a newline.
     #
-    # For a writer-framed artifact we SKIP the prompt bytes rather than
-    # scan prompt examples: fence / ``<pre>`` state from an unclosed
-    # prompt block cannot strand the scan, and a framed terminator with no
-    # usable answer (a truncated/empty response frame the producer reader
-    # rejects) is not promoted to a recognized partial answer — it stays
-    # raw-primary.
-    _prompt_idx = None
-    _resp_idx = None
-    for _i, _ln in enumerate(lines):
-        if _PROMPT_HEADING_RE.match(_ln):
-            _prompt_idx = _i
-        elif _RESPONSE_HEADING_RE.match(_ln):
-            _resp_idx = _i
-    if _prompt_idx is not None and _resp_idx is not None and _resp_idx > _prompt_idx:
-        _framed_body = "\n".join(lines[_resp_idx + 1:]).strip()
-        if _framed_body:
-            return CronOutputProjection(
-                response=_framed_body,
-                context="\n".join(lines[:_resp_idx]).strip(),
-                raw=raw,
-                has_response_boundary=True,
-                response_line=_resp_idx + 1,
-            )
-        # Empty / truncated framed terminator → not a usable answer.
+    # The lengths are the ONLY authoritative boundary: the prompt half can
+    # legitimately QUOTE a literal ``## Response`` heading (a skill documenting
+    # its output format, an injected previous answer), and the answer half can
+    # contain one too (a section with that title, an output-format example).
+    # Splitting on the last heading therefore cuts the answer at the wrong line
+    # and moves the real start of the answer into "context".
+    #
+    # A frame that does not validate (missing, or a truncated write whose length
+    # does not match) is not promoted to a partial answer — it stays
+    # raw-primary, matching the producer's own reader, which returns no usable
+    # answer for the same input.
+    _framed = _parse_framed_run_document(raw)
+    if _framed is not None:
+        return _framed
+    if _has_prompt_frame(raw):
+        # A document that CLAIMS to be framed but fails validation is never
+        # guessed at with the legacy heading rule.
         return CronOutputProjection(
             response="",
             context=raw,

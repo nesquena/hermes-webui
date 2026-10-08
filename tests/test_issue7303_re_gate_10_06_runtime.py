@@ -45,7 +45,15 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from api.cron_output_parser import parse_cron_output
+from api.cron_output_parser import (
+    _PROMPT_FRAME,
+    _PROMPT_HEADING,
+    _PROMPT_SEPARATOR,
+    _RESPONSE_FRAME,
+    _RESPONSE_HEADING,
+    _RESPONSE_TERMINATOR,
+    parse_cron_output,
+)
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS = REPO_ROOT / "static" / "panels.js"
@@ -124,27 +132,59 @@ def test_literal_pre_inside_fence_must_not_outlive_the_fence():
 # ---------------------------------------------------------------------------
 
 
-def _framed(body_after_prompt: str) -> str:
+def _framed(body_after_prompt: str, *, prompt: str | None = None) -> str:
+    """Build a run document the way the WRITER does, length frames included.
+
+    The 10/08 review found these fixtures never used the frame lines: they
+    carried a bare ``## Prompt`` heading and nothing else, so they exercised the
+    legacy unframed path while claiming to test the framed one. The writer
+    (``cron.scheduler.run_job``) stamps the byte length of the prompt and of the
+    response outside the user-owned text — see ``_PROMPT_FRAME`` /
+    ``_RESPONSE_FRAME`` in ``api/cron_output_parser`` and the identical
+    constants in hermes-agent's ``cron/scheduler_prompt.py``.
+
+    The prompt body defaults to the text the old helper passed as
+    ``body_after_prompt`` so the scenarios stay comparable.
+    """
+    if prompt is None:
+        prompt = (
+            "You are an SRE bot. The expected report format is:\n"
+            f"{body_after_prompt}"
+        )
     return (
         "# Cron Job: sre\n"
         "\n"
         "**Job ID:** abc\n"
         "\n"
-        "## Prompt\n"
-        "\n"
-        "You are an SRE bot. The expected report format is:\n"
-        f"{body_after_prompt}"
+        f"{_PROMPT_FRAME}{len(prompt)}\n"
+        f"{_PROMPT_HEADING}"
+        f"{prompt}"
+        f"{_PROMPT_SEPARATOR}"
+    )
+
+
+def _framed_with_response(prompt_body: str, answer: str) -> str:
+    """A complete framed document: prompt frame, response frame, terminator."""
+    return (
+        _framed(prompt_body)
+        + f"{_RESPONSE_FRAME}{len(answer)}\n"
+        f"{_RESPONSE_HEADING}"
+        f"{answer}"
+        f"{_RESPONSE_TERMINATOR}"
     )
 
 
 def test_prompt_example_heading_does_not_beat_the_real_answer():
     """A ``## Response`` documented inside the assembled prompt (for
     example a skill describing its own output format, or an injected
-    previous answer quoting it) must NOT be the boundary. The producer's
-    own reader keys off the LAST ``## Response``; mirror that so the real
-    reply wins.
+    previous answer quoting it) must NOT be the boundary.
+
+    The prompt is skipped by its stamped LENGTH, so a heading quoted inside it
+    can never become the boundary — the writer's own reader
+    (``_archive_answer``) jumps past the prompt the same way.
     """
-    text = _framed(
+    answer = "All 12 nodes are healthy. p99 = 142 ms."
+    text = _framed_with_response(
         "## Response\n"
         "EXAMPLE ONLY - a documented format, not the actual reply.\n"
         "\n"
@@ -152,38 +192,67 @@ def test_prompt_example_heading_does_not_beat_the_real_answer():
         "\n"
         "## Response\n"
         "\n"
-        "All 12 nodes are healthy. p99 = 142 ms.\n"
+        "This second example is quoted too.\n",
+        answer,
     )
     projection = parse_cron_output(text)
     assert projection.has_response_boundary is True
-    assert projection.response == "All 12 nodes are healthy. p99 = 142 ms.", (
-        "the prompted EXAMPLE ONLY heading was promoted as the response - "
-        "the writer's boundary is the LAST ## Response"
+    assert projection.response == answer, (
+        "a ## Response quoted inside the prompt was promoted as the response - "
+        "the prompt must be skipped by its length frame"
     )
     assert "EXAMPLE ONLY" not in projection.response
     assert "documented format" in projection.context
 
 
-def test_unclosed_prompt_fence_does_not_hide_a_valid_framed_answer():
-    """Scanning the prompt half must not strand the parser when the
-    prompt carries an unclosed Markdown fence; the writer-owned
-    terminator still delineates a valid framed answer.
+def test_answer_containing_its_own_response_heading_is_not_cut():
+    """The 10/08 [MUST-FIX]: an answer that contains a ``## Response`` line.
+
+    The old code split on the LAST ``## Response``, so an answer with a section
+    of that title (an output-format example, say) was cut at that line: the view
+    labelled only the tail as Response and moved the real start of the answer
+    into context. The producer's reader returns the whole answer.
     """
-    text = _framed(
-        "```bash\n"
-        "# this fence is intentionally never closed by a matching one\n"
-        "status --full\n"
+    answer = (
+        "Here is the report.\n"
         "\n"
         "## Response\n"
         "\n"
-        "Backup completed for 3 volumes.\n"
+        "The section above the fold, which the last-heading rule dropped.\n"
+        "\n"
+        "And the tail, which it kept."
+    )
+    text = _framed_with_response("Summarise the cluster state.", answer)
+    projection = parse_cron_output(text)
+    assert projection.has_response_boundary is True
+    assert projection.response == answer, (
+        "the answer was cut at a ## Response line inside the answer itself"
+    )
+    assert projection.response.count("## Response") == 1
+    assert "The section above the fold" in projection.response
+    assert "Summarise the cluster state." in projection.context
+
+
+def test_unclosed_prompt_fence_does_not_hide_a_valid_framed_answer():
+    """Scanning the prompt half must not strand the parser when the
+    prompt carries an unclosed Markdown fence; the writer-owned
+    length frame still delineates a valid framed answer.
+
+    The prompt is skipped by length, so its fence state is never even computed.
+    """
+    answer = "Backup completed for 3 volumes."
+    text = _framed_with_response(
+        "```bash\n"
+        "# this fence is intentionally never closed by a matching one\n"
+        "status --full\n",
+        answer,
     )
     projection = parse_cron_output(text)
     assert projection.has_response_boundary is True, (
         "an unclosed fence inside the prompt must not hide the writer's "
-        "framed ## Response answer"
+        "framed answer"
     )
-    assert projection.response == "Backup completed for 3 volumes."
+    assert projection.response == answer
     assert "status --full" in projection.context
 
 
@@ -204,6 +273,96 @@ def test_empty_framed_terminator_stays_raw_primary():
     )
     assert projection.response == ""
     assert projection.context == text
+
+
+def test_truncated_response_length_stays_raw_primary():
+    """The 10/08 [MUST-FIX], second half: a truncated response.
+
+    If the ``Response Characters`` length does not match (an interrupted write),
+    the producer returns no usable answer. The old code showed the partial text
+    as the Response whenever it was non-empty, and its comment claimed the
+    opposite. The frame must be validated, not assumed.
+    """
+    full_answer = "All 12 nodes are healthy. p99 = 142 ms."
+    text = _framed_with_response("Summarise the cluster state.", full_answer)
+    # Simulate an interrupted write: the answer is cut short but the frame still
+    # stamps the full length.
+    truncated = full_answer[: len(full_answer) // 2]
+    broken = text.replace(
+        f"{_RESPONSE_FRAME}{len(full_answer)}", f"{_RESPONSE_FRAME}{len(full_answer)}"
+    ).replace(full_answer + _RESPONSE_TERMINATOR, truncated + _RESPONSE_TERMINATOR)
+    assert broken != text, "the fixture must actually be truncated"
+
+    projection = parse_cron_output(broken)
+    assert projection.has_response_boundary is False, (
+        "a response whose stamped length does not match must not be promoted "
+        "to a partial answer - the producer reader rejects it too"
+    )
+    assert projection.response == ""
+    assert projection.context == broken
+
+
+def test_framed_document_matches_the_producer_reader():
+    """Cross-check the projection against hermes-agent's own reader.
+
+    The producer (``cron/scheduler_prompt.py::_archive_answer``) is the
+    authority on what a framed document means, so the parser must agree with it
+    on the answer text for the same input. The producer's algorithm is
+    reproduced here verbatim so a drift on either side fails this test.
+    """
+    import re as _re
+
+    prompt_frame_re = _re.compile(
+        rf"(?m)^{_re.escape(_PROMPT_FRAME)}(\d+)\n{_re.escape(_PROMPT_HEADING)}"
+    )
+    response_frame_re = _re.compile(
+        rf"(?m)^{_re.escape(_RESPONSE_FRAME)}(\d+)\n{_re.escape(_RESPONSE_HEADING)}"
+    )
+
+    def producer_answer(archive: str) -> str | None:
+        prompt_frame = prompt_frame_re.search(archive)
+        if prompt_frame is None:
+            return None
+        response_start = (
+            prompt_frame.end()
+            + int(prompt_frame.group(1))
+            + len(_PROMPT_SEPARATOR)
+        )
+        frame = response_frame_re.match(archive, response_start)
+        tail = archive[frame.end():] if frame is not None else ""
+        if frame is None:
+            return None
+        if len(tail) != int(frame.group(1)) + len(_RESPONSE_TERMINATOR):
+            return None
+        if not tail.endswith(_RESPONSE_TERMINATOR):
+            return None
+        return tail[: -len(_RESPONSE_TERMINATOR)].strip()
+
+    cases = [
+        _framed_with_response("Summarise the cluster state.", "All 12 nodes healthy."),
+        # An answer that quotes its own boundary.
+        _framed_with_response(
+            "Show the format.",
+            "## Response\n\nThe whole answer, including this heading.\n",
+        ),
+        # A prompt that quotes a whole framed block.
+        _framed_with_response(
+            "Previous run was:\n"
+            "**Prompt Characters:** 5\n"
+            "## Prompt\n\nhello\n\n"
+            "**Response Characters:** 2\n"
+            "## Response\n\nhi\n",
+            "The new answer.\n",
+        ),
+    ]
+    for text in cases:
+        expected = producer_answer(text)
+        assert expected is not None, "the fixture must be a valid framed document"
+        projection = parse_cron_output(text)
+        assert projection.response == expected, (
+            "the parser disagrees with the producer's own reader on the answer"
+        )
+        assert projection.has_response_boundary is True
 
 
 # ---------------------------------------------------------------------------
