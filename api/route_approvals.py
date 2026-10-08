@@ -178,6 +178,27 @@ def _approval_sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 _approval_sse_subscribers.pop(session_id, None)
 
 
+def _schedule_web_push_head(session_id: str, head: dict) -> None:
+    """Push for whichever approval is now the queue head, off the caller's lock.
+
+    Called from ``_approval_sse_notify_locked`` on every head change, so a
+    request that becomes active after an earlier one is resolved still gets
+    its own push. web_push dedupes per approval id. The work runs on a short
+    daemon thread so no web_push lock/IO happens while ``_lock`` is held.
+    """
+    try:
+        from api import web_push
+
+        if not web_push.is_enabled():
+            return
+        threading.Thread(
+            target=_web_push_approval, args=(session_id, head),
+            name="web-push-approval", daemon=True,
+        ).start()
+    except Exception:
+        pass
+
+
 def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int) -> None:
     """Push an approval event to all SSE subscribers for a session.
 
@@ -196,6 +217,8 @@ def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int) 
     hide its approval card.
     """
     payload = {"pending": dict(head) if head else None, "pending_count": total}
+    if head:
+        _schedule_web_push_head(session_id, dict(head))
     subs = _approval_sse_subscribers.get(session_id, ())
     for q in subs:
         try:

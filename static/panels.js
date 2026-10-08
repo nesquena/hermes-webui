@@ -13863,11 +13863,15 @@ async function updateWebPushStatus(){
 // is presented to /api/push/status. Do that once per page load without any
 // prompt, and re-register the subscription if the server lost it.
 let _webPushBootDone=false;
+const _WEB_PUSH_OPT_OUT_KEY='hermes-webui-push-opt-out';
+function _webPushOptedOut(){ try{ return localStorage.getItem(_WEB_PUSH_OPT_OUT_KEY)==='1'; }catch(_e){ return false; } }
+function _webPushSetOptOut(on){ try{ if(on) localStorage.setItem(_WEB_PUSH_OPT_OUT_KEY,'1'); else localStorage.removeItem(_WEB_PUSH_OPT_OUT_KEY); }catch(_e){} }
 async function bindWebPushOnBoot(){
   if(_webPushBootDone) return;
   _webPushBootDone=true;
   try{
     if(!_webPushSupported()||Notification.permission!=='granted') return;
+    if(_webPushOptedOut()) return;  // user explicitly turned push off on this device
     const info=await api('/api/push/status');
     if(!info||!info.enabled) return;
     const reg=await _webPushRegistration();
@@ -13888,9 +13892,20 @@ async function toggleWebPush(){
     if(!reg){ showToast(t('web_push_no_sw'),4000,'error'); return; }
     const existing=await reg.pushManager.getSubscription();
     if(toggle&&toggle.dataset.subscribed==='1'){
+      // Record the explicit "off" choice first so the boot re-bind can never
+      // silently re-enable push, even if a later step fails.
+      _webPushSetOptOut(true);
       if(existing){
-        await api('/api/push/subscribe',{method:'DELETE',headers:_webPushHeaders(),body:JSON.stringify({endpoint:existing.endpoint})});
-        await existing.unsubscribe().catch(()=>false);
+        // Unsubscribe the browser first; only then drop the server record.
+        let ok=false;
+        try{ ok=await existing.unsubscribe(); }catch(_e){ ok=false; }
+        if(!ok){
+          showToast(t('web_push_disable_failed'),4500,'error');
+          return;
+        }
+        try{
+          await api('/api/push/subscribe',{method:'DELETE',headers:_webPushHeaders(),body:JSON.stringify({endpoint:existing.endpoint})});
+        }catch(_e){ /* browser is already unsubscribed; server record is inert and pruned on send failure */ }
       }
       showToast(t('web_push_disabled_toast'),3000);
       return;
@@ -13898,6 +13913,7 @@ async function toggleWebPush(){
     // Must run inside the click gesture (iOS requires a user gesture for the prompt).
     const perm=Notification.permission==='granted'?'granted':await Notification.requestPermission();
     if(perm!=='granted'){ showToast(t('notifications_denied'),3500,'error'); return; }
+    _webPushSetOptOut(false);
     const keyInfo=await api('/api/push/vapid-public-key');
     const key=_webPushB64ToBytes(keyInfo.public_key);
     let sub=existing;
