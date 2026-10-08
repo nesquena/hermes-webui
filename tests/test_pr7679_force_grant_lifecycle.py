@@ -55,7 +55,10 @@ def extract_js_function(src, name):
 
 def _grant_block(src):
     start = src.index('let _updateCheckEpoch = 0;')
-    end = src.index('function _showUpdateBanner(data, epoch){')
+    # The banner signature gained a second counter (recoveryGenerationAtCheck)
+    # when #8040's manual-update guard was merged in — anchor on the function
+    # NAME, not the exact parameter list, so this keeps working.
+    end = src.index('function _showUpdateBanner(data,')
     return src[start:end]
 
 

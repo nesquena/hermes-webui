@@ -12067,10 +12067,14 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   const agentForceClean=_isForceCleanTarget(data.agent);
   const forceTarget=webuiForceClean?'webui':(agentForceClean?'agent':'');
   const forceable=!!forceTarget;
+  // Declared at this scope on purpose: the manual-update carve-outs further
+  // down (which protect an unrelated Agent recovery button from being retired
+  // by the dirty-affordance reset) need these three facts too, and reading
+  // block-scoped consts from an outer scope is a ReferenceError.
+  const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
+  const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
+  const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
   if(btnApply){
-    const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
-    const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
-    const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
     const hasApplyTargets=webuiUpdatable||agentUpdatable;
     btnApply.disabled=!hasApplyTargets;
     btnApply.style.display=hasApplyTargets?'':'none';
@@ -12110,7 +12114,12 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   // targets "agent", never the WebUI checkout the user did not
   // report as dirty).
   const forceBtn=$('btnForceUpdate');
-  if(forceBtn){
+  // Manual-update WebUI (#8040): the branch above may have deliberately kept
+  // this button armed on the Agent target. Do not undo that here — this block
+  // owns the *dirty* affordance, and "not forceable for a dirty reset" must
+  // not silently retire an unrelated, still-valid Agent recovery.
+  const _forceBtnManualAgentKeep=(webuiManual&&forceBtn&&forceBtn.dataset.target==='agent'&&forceBtn.style.display==='inline-block'&&!forceBtn.disabled);
+  if(forceBtn&&!_forceBtnManualAgentKeep){
     if(forceable){
       forceBtn.dataset.target=forceTarget;
       forceBtn.style.display='inline-block';
@@ -12132,7 +12141,9 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   // previous apply leaves it pinned on a target that no longer
   // applies (same stale-button class as CORE #2).
   const clearLockBtn=$('btnClearUpdateLock');
-  if(clearLockBtn&&!forceable){
+  // Same manual-update carve-out as the force button above (#8040).
+  const _lockBtnManualAgentKeep=(webuiManual&&clearLockBtn&&clearLockBtn.dataset.target==='agent'&&clearLockBtn.style.display==='inline-block'&&!clearLockBtn.disabled);
+  if(clearLockBtn&&!forceable&&!_lockBtnManualAgentKeep){
     clearLockBtn.disabled=true;
     clearLockBtn.style.display='none';
     clearLockBtn.dataset.target='';

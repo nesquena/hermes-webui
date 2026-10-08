@@ -2443,6 +2443,12 @@ if(state.btnClearUpdateLock.style.display !== 'inline-block' || state.btnClearUp
         src = read('static/ui.js')
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
+        # _showUpdateBanner calls both of these unconditionally — the dirty
+        # banner part (#4085) runs before the manual-update branch, so a
+        # harness that omits them dies on a ReferenceError instead of testing
+        # the recovery-clearing behaviour.
+        dirty_fn = extract_js_function(src, '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(src, '_isForceCleanTarget')
         show_fn = extract_js_function(src, '_showUpdateBanner')
         script = f"""
 const state = {{
@@ -2460,8 +2466,21 @@ global.t = (key, ...args) => {{
   const values = {{ settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.' }};
   return (values[key] || key).replace(/\\{{(\\d+)}}/g, (_, i) => args[Number(i)] ?? '');
 }};
+// The latest-owner machinery from the #7679 epoch commit. Without it the
+// `_showUpdateBanner(data, 0)` call below (an OLD check publishing late)
+// sails past the stale guard and reaches the manual-update branch, which
+// then treats its "recovery gone" probe as authoritative. Stub it so the
+// epoch semantics the test asserts are actually in play.
+let _updateCheckEpoch = 1;
+let _forceUpdateGrant = null;
+function _beginUpdateCheck() {{ _updateCheckEpoch += 1; _forceUpdateGrant = null; return _updateCheckEpoch; }}
+function _isUpdateCheckStale(epoch) {{ return typeof epoch === 'number' && epoch !== _updateCheckEpoch; }}
+function _retireForceUpdate() {{ _forceUpdateGrant = null; }}
+function _grantForceUpdate(target, channel) {{ _forceUpdateGrant = {{ target, channel }}; }}
 {format_fn}
 {instruction_fn}
+{dirty_fn}
+{predicate_fn}
 {show_fn}
 // A cached result predating the failure must not clear buttons that the
 // subsequent failed update just armed.
