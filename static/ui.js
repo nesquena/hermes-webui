@@ -2843,12 +2843,22 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     // in the middle of a sequence must not silently drop it. The next
     // navigation re-arms pendingNav and the next successful load re-centres at
     // the preserved scale (greptile follow-up, 2026-10-05).
+    //
+    // Keep the at-fit RELATION, not a numeric baseline. _onImgLoad decides
+    // whether the next image opens at ITS own fit with
+    // `Math.abs(state.scale - state.fitScale) < 1e-9`; resetting fitScale to 1
+    // while preserving state.scale made an image that WAS at fit (fitScale != 1)
+    // look user-zoomed, so the next working image opened cropped or undersized
+    // instead of at its own fit (greptile P1, 2026-10-08T23:43:03Z). With no
+    // geometry (boxW=0) no scale math runs anyway: _fit() and _imgSetScale()
+    // bail out on the missing box.
+    const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;
     state.pendingNav = false;
     state.dragging = false;
     state.dragPointerId = null;
     state.boxW = 0;
     state.boxH = 0;
-    state.fitScale = 1;
+    state.fitScale = wasAtFit ? state.scale : 1;
     state.x = 0;
     state.y = 0;
     // Drop the "already initialized" tracking: a failed image has no usable

@@ -264,6 +264,26 @@ class TestReviewFollowups20261005:
             "_imgOnError must not reset the user's zoom level (greptile follow-up)"
         )
 
+    def test_failed_load_keeps_the_at_fit_relation(self):
+        """greptile P1 (2026-10-08T23:43:03Z): _imgOnError must not clobber
+        fitScale to a constant 1 while preserving scale — the next load uses
+        |scale - fitScale| < 1e-9 to decide whether the new image opens at its
+        own fit, so a constant 1 made an image that WAS at fit look zoomed."""
+        src = UI.read_text(encoding="utf-8")
+        start = src.index("function _imgOnError() {")
+        end = src.index("function _imgPointOnCanvas(", start)
+        body = src[start:end]
+        marker = "const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;"
+        assert marker in body, (
+            "_imgOnError must capture the at-fit relation before rewriting fitScale"
+        )
+        assert body.index(marker) < body.index(
+            "state.fitScale = wasAtFit ? state.scale : 1;"
+        ), "the at-fit relation must be captured before fitScale is rewritten"
+        assert "state.fitScale = 1;" not in body, (
+            "_imgOnError must not reset fitScale to a constant"
+        )
+
 
 class TestMaintainerReworkup20261006:
     """Source locks for the 2026-10-06 re-warmup finding on #6896.

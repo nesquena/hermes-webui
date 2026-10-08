@@ -205,6 +205,16 @@ class TestComposedReviewFollowups:
     def test_navigation_from_a_fitted_image_opens_the_new_image_at_fit_mobile(self, composed):
         _check(composed.mobile, "navigation_carries_fit_not_raw_scale")
 
+    def test_navigation_after_a_failed_load_opens_the_next_image_at_fit(self, composed):
+        """greptile P1 (2026-10-08T23:43:03Z): _imgOnError reset fitScale to 1
+        while preserving scale, so an image that WAS at fit looked user-zoomed
+        and the next working image opened cropped/undersized instead of at its
+        own fit."""
+        _check(composed.desktop, "navigation_after_a_failed_load_carries_fit")
+
+    def test_navigation_after_a_failed_load_opens_the_next_image_at_fit_mobile(self, composed):
+        _check(composed.mobile, "navigation_after_a_failed_load_carries_fit")
+
 
 # Trusted-input regressions for the 2026-10-06 maintainer gate certificate.
 # These use Playwright's own input pipeline (real mouse/keyboard events), which
