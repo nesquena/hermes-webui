@@ -5,6 +5,9 @@
 
 ### Added
 
+- **French voices for Edge text-to-speech.** Nine French Edge TTS voices are allowed and listed in Settings, grouped by
+  language, with the child voice labelled as such. Thanks @ruizanthony. (#7444)
+
 - **Extensions can add a small action to each message without touching transcript DOM.** A new
   `ext.messages.registerAction({ id, label, icon, roles, getPressed, onInvoke })` on the boot-trusted extension handle
   lets an extension put a Core-rendered `pin`, `bookmark` or `star` button after the built-in actions on settled user
@@ -126,6 +129,13 @@
   @laitekin. (#7297, fixes #7294)
 
 ### Fixed
+
+- **The auto-scroll setting is easier to find and understand.** Settings → Appearance's "Auto-follow new content" is
+  now "Auto-scroll to new content" with clearer helper text in 15 languages, and searching Settings for "autoscroll",
+  "auto-follow", "sticky" or "bottom" finds it. The setting itself and its default are unchanged. Thanks @webtecnica. (#6248)
+- **Portuguese extension trust warning reads correctly.** The Extensions trust-model text in Portuguese is rewritten in
+  clear, correct Portuguese with the same five facts (same origin, same authenticated APIs, browser-only settings, not for
+  secrets, load only trusted local folders). Thanks @angelusbr. (#7989)
 
 - **Gateway-backend browser turns no longer hang on a run-events stream that only sends keepalives.** A wall-clock
   watchdog re-checks the run's status when the event stream makes no real progress for about two minutes: a finished
