@@ -386,6 +386,17 @@ def test_icon_tint_picker_uses_skin_rings_and_aligns_wrapped_phone_rows():
             f':root[data-skin="{skin}"] #mainSettings .icon-tint-pick-btn.active' in css
             or f':root[data-skin="{skin}"] .icon-tint-pick-btn.active' in css
         )
+    geist_rule = css[
+        css.index(':root[data-skin="geist-contrast"] .side-menu-item.active,') :
+    ]
+    geist_rule = geist_rule[
+        : geist_rule.index("{background:var(--surface-subtle)!important;")
+    ]
+    for picker in ("skin", "theme", "font-size", "icon-tint"):
+        assert (
+            f':root[data-skin="geist-contrast"] #mainSettings .{picker}-pick-btn.active'
+            in geist_rule
+        )
     assert (
         "#mainSettings .icon-tint-control{display:flex;align-items:flex-start;" in css
     )
