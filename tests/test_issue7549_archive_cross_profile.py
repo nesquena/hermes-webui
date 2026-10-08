@@ -120,6 +120,7 @@ def test_cross_profile_archive_returns_structured_409(
     the same envelope the detail-load endpoint already returns (#7710).
     """
     calls = []
+    owner_calls = []
 
     def fake_lookup(sid, *, all_profiles=False):
         calls.append(all_profiles)
@@ -127,13 +128,25 @@ def test_cross_profile_archive_returns_structured_409(
 
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", fake_lookup)
 
+    # #7826 security: the cross-profile hop is now the READ-ONLY exact-owner
+    # query. ``get_cli_sessions(all_profiles=True)`` was the defect — its
+    # projection falls back to ``Session.load`` on a legacy sidecar layout and
+    # SAVES, so a denied archive rewrote a foreign sidecar. Assert the new hop
+    # runs (and that the writing one is what is no longer called for it).
+    def fake_owner_lookup(sid, *, allowed_profiles=None):
+        owner_calls.append(allowed_profiles)
+        return CLI_META_OTHER
+
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_owner_readonly",
+                        fake_owner_lookup)
+
     status, payload = _post_archive(routes_module, {
         "session_id": "20260925_otherprof_abcd", "archived": True})
 
     assert calls[0] is False, "first lookup stays active-profile-scoped"
-    assert True in calls, (
-        "on a KeyError the handler must retry _lookup_cli_session_metadata "
-        "with all_profiles=True before giving up (#7549)")
+    assert owner_calls, (
+        "on a KeyError the handler must retry through the read-only "
+        "exact-owner lookup before giving up (#7826 security)")
     assert status == 409, f"expected 409, got {status}: {payload}"
     assert payload["code"] == "session_profile_mismatch"
     assert payload["profile"] == "work"
@@ -146,8 +159,8 @@ def test_cross_profile_409_does_not_materialize_a_session(
     """The 409 path must not materialize or save anything: archiving a
     profile-B session through profile A would write into A's store."""
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata",
-        lambda _sid, *, all_profiles=False: CLI_META_OTHER if all_profiles else {})
+        routes_module, "_lookup_cli_session_owner_readonly",
+        lambda _sid, *, allowed_profiles=None: CLI_META_OTHER)
     saved = []
     monkeypatch.setattr(routes_module, "Session", type(
         "Session", (), {"__init__": lambda self, *a, **k: saved.append("ctor"),
@@ -173,8 +186,8 @@ def test_same_profile_session_still_archives(
     archive exactly as before (the all-profiles retry is transparent)."""
     same_profile_meta = dict(CLI_META_OTHER, profile="default")
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata",
-        lambda _sid, *, all_profiles=False: same_profile_meta if all_profiles else {})
+        routes_module, "_lookup_cli_session_owner_readonly",
+        lambda _sid, *, allowed_profiles=None: same_profile_meta)
     messages = [{"role": "user", "content": "hi"},
                 {"role": "assistant", "content": "hello"}]
     monkeypatch.setattr(routes_module, "get_cli_session_messages",
@@ -235,8 +248,8 @@ def test_none_profile_session_keeps_bare_404(
     and the browser's stale-URL self-heal must keep firing."""
     legacy_meta = dict(CLI_META_OTHER, profile=None)
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata",
-        lambda _sid, *, all_profiles=False: legacy_meta if all_profiles else {})
+        routes_module, "_lookup_cli_session_owner_readonly",
+        lambda _sid, *, allowed_profiles=None: legacy_meta)
 
     status, payload = _post_archive(routes_module, {
         "session_id": "legacy-sid-no-profile", "archived": True})
@@ -255,8 +268,8 @@ def test_none_profile_messaging_row_404s_without_materializing(
     Session ctor, no save, no publish, and no import_cli_session."""
     legacy_meta = dict(CLI_META_OTHER, profile=None)
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata",
-        lambda _sid, *, all_profiles=False: legacy_meta if all_profiles else {})
+        routes_module, "_lookup_cli_session_owner_readonly",
+        lambda _sid, *, allowed_profiles=None: legacy_meta)
     # Make the row look like a messaging-session record — the rejection must
     # happen before this check is even consulted.
     monkeypatch.setattr(routes_module, "_is_messaging_session_record",
@@ -298,8 +311,8 @@ def test_none_profile_non_messaging_nonempty_transcript_404s_without_import(
     get_cli_session_messages/import_cli_session are reached."""
     legacy_meta = dict(CLI_META_OTHER, profile=None)
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata",
-        lambda _sid, *, all_profiles=False: legacy_meta if all_profiles else {})
+        routes_module, "_lookup_cli_session_owner_readonly",
+        lambda _sid, *, allowed_profiles=None: legacy_meta)
     # Non-messaging row (fixture default) but with a rich transcript — the
     # old bare-404 test's empty-messages 404 must not be what saves us.
     monkeypatch.setattr(routes_module, "_is_messaging_session_record",
@@ -326,16 +339,30 @@ def test_none_profile_non_messaging_nonempty_transcript_404s_without_import(
 
 
 def test_archive_handler_passes_all_profiles_on_retry():
-    """Static pin: the handler's fallback retry uses all_profiles=True."""
+    """Static pin: the handler's fallback retry uses the READ-ONLY
+    cross-profile lookup (#7826 security).
+
+    The #7549 version of this pin asserted ``all_profiles=True`` on
+    ``_lookup_cli_session_metadata``. That call is exactly the defect: it
+    routes through ``get_cli_sessions()``, whose projection falls back to
+    ``Session.load`` on a legacy sidecar layout and SAVES (with a ``.bak``).
+    A denied archive therefore rewrote a foreign sidecar. The pin now
+    requires the sidecar-free, read-only, exact-owner query instead — and
+    forbids the writing one on this path.
+    """
     src = ROUTES_PY.read_text(encoding="utf-8")
     i = src.find('if parsed.path == "/api/session/archive":')
     assert i > 0, "archive handler not found"
     block = src[i:i + 8000]
     retry = [ln.strip() for ln in block.splitlines()
-             if "_lookup_cli_session_metadata" in ln]
+             if "_lookup_cli_session" in ln]
     assert retry, "archive handler lost its CLI metadata fallback"
-    assert any("all_profiles=True" in ln for ln in retry), (
-        f"the KeyError fallback must retry with all_profiles=True (#7549): {retry}")
+    assert any("_lookup_cli_session_owner_readonly" in ln for ln in retry), (
+        f"the KeyError fallback must use the read-only exact-owner lookup "
+        f"(#7826 security — never get_cli_sessions() here): {retry}")
+    assert not any("all_profiles=True" in ln for ln in retry), (
+        f"the archive fallback must NOT call the writing all-profiles "
+        f"projection (#7826 security): {retry}")
     assert 'session_profile_mismatch' in block, (
         "archive handler must emit the structured 409 envelope (#7710 contract)")
 
@@ -359,6 +386,11 @@ def test_profile_scoped_archive_of_foreign_session_succeeds(
         return CLI_META_OTHER if all_profiles else {}
 
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", fake_lookup)
+    # #7826 security: the cross-profile hop uses the read-only exact-owner
+    # query (see test_cross_profile_archive_returns_structured_409).
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_owner_readonly",
+        lambda _sid, *, allowed_profiles=None: CLI_META_OTHER)
     monkeypatch.setattr(routes_module, "_get_active_profile_name",
                         lambda: active_calls.append("get") or "default")
     side_effects = []
@@ -463,6 +495,11 @@ def test_profile_field_wrong_owner_409s_with_real_owner(
         return CLI_META_OTHER if all_profiles else {}
 
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", fake_lookup)
+    # #7826 security: the second (all-profiles) hop no longer goes through the
+    # writing projection — it uses the read-only exact-owner query.
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_owner_readonly",
+        lambda _sid, *, allowed_profiles=None: CLI_META_OTHER)
     monkeypatch.setattr(routes_module, "_get_active_profile_name",
                         lambda: "default")
     side_effects = []
@@ -502,8 +539,8 @@ def test_profile_field_does_not_rescue_profile_less_row(
     field is supplied, with zero materialization side effects."""
     legacy_meta = dict(CLI_META_OTHER, profile=None)
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata",
-        lambda _sid, *, all_profiles=False: legacy_meta if all_profiles else {})
+        routes_module, "_lookup_cli_session_owner_readonly",
+        lambda _sid, *, allowed_profiles=None: legacy_meta)
     side_effects = []
 
     class _SpySession:
