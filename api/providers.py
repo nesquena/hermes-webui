@@ -41,10 +41,12 @@ from api.config import (
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
+    _provider_models_are_discovered_catalog,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
     _thread_local_env_value,
+    get_available_models,
     get_config,
     invalidate_models_cache,
     reload_config,
@@ -2821,6 +2823,7 @@ def get_providers() -> dict[str, Any]:
 
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
     custom_providers_cfg = cfg.get("custom_providers", [])
+    discovered_catalog = None
     if isinstance(custom_providers_cfg, list):
         for cp in custom_providers_cfg:
             if not isinstance(cp, dict) or not cp.get("name"):
@@ -2847,6 +2850,23 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
+            if _provider_models_are_discovered_catalog(cp):
+                # Reuse the picker catalog's probe, fallback, profile scope and
+                # cache. Resolve once per response, even with several providers.
+                if discovered_catalog is None:
+                    discovered_catalog = get_available_models()
+                group = next(
+                    (g for g in discovered_catalog.get("groups", [])
+                     if g.get("provider_id") == cp_id),
+                    None,
+                )
+                if group is not None:
+                    rows = group.get("models", []) + group.get("extra_models", [])
+                    cp_models = [
+                        {"id": str(row["id"]).removeprefix(f"@{cp_id}:"),
+                         "label": row.get("label") or str(row["id"])}
+                        for row in rows if row.get("id")
+                    ]
             # Check for env var reference (${VAR_NAME} pattern)
             cp_api_key = str(cp.get("api_key") or "")
             cp_has_key = bool(cp_api_key.strip())
