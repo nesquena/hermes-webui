@@ -19,34 +19,37 @@ def _is_local_interactive_persisted_source(source):
 def durable_compression_continuation(session):
     """Return (sealed, resumable tip), without making a recovery write.
 
-    A known sealed parent without a safe tip stays sealed (no sidecar fallback).
-    Older Agent installations without this read API retain legacy behavior.
+    ``sealed`` is tri-state: ``False`` means SQLite verified a live origin,
+    ``True`` means it verified a compression-sealed origin, and ``None`` means
+    durable authority was unavailable. A known sealed parent without a safe tip
+    stays sealed (no sidecar fallback). Older Agent installations without this
+    read API retain legacy behavior in callers that support sidecar recovery.
     """
     from api.profiles import _PROFILE_ID_RE, _resolve_profile_home_for_name
 
     sid = str(getattr(session, "session_id", "") or "")
     profile = str(getattr(session, "profile", None) or "default")
     if not sid or (profile != "default" and not _PROFILE_ID_RE.fullmatch(profile)):
-        return False, None
+        return None, None
     db = None
-    sealed = False
+    sealed = None
     try:
         from hermes_state import SessionDB
 
         path = Path(_resolve_profile_home_for_name(profile)) / "state.db"
         if not path.is_file():
-            return False, None
+            return None, None
         db = SessionDB(path, read_only=True)
         # Establish the complete read API before accepting SQLite authority.
         # Old Agents must retain legacy sidecar recovery, not a sealed null tip.
         for name in ('get_session', 'get_compression_tip'):
             method = getattr(db, name, None)
             if not callable(method):
-                return False, None
+                return None, None
             try:
                 inspect.signature(method).bind(sid)
             except (TypeError, ValueError):
-                return False, None
+                return None, None
         parent = db.get_session(sid)
         if not parent or parent.get("end_reason") != "compression":
             return False, None

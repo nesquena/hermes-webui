@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._wakeup_helpers import live_wakeup_origin  # noqa: F401 — autouse fixture
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

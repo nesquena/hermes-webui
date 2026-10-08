@@ -13,6 +13,7 @@ from __future__ import annotations
 # rest of this module is unchanged.
 from tests._wakeup_helpers import FakeProcessRegistry as _FakeProcessRegistry
 from tests._wakeup_helpers import install_fake_registry as _install_fake_registry
+from tests._wakeup_helpers import live_wakeup_origin  # noqa: F401 — autouse fixture
 
 
 def _reset_state(bp):
