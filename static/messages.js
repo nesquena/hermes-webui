@@ -1413,6 +1413,7 @@ async function send(){
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
   _flushSelectionBlocksToComposer();
+  const _rawComposerText=String($('msg').value||'');
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
@@ -1607,6 +1608,8 @@ async function send(){
           if(!_cmdLifecycleIsCurrent()) return;
         }
         const _cmdUserMessage={role:'user',content:text,_ts:Date.now()/1000};
+        const _cmdRawComposerText=typeof _rawComposerText==='string'
+          ? _rawComposerText : String($('msg').value||'');
         S.messages.push(_cmdUserMessage);
         const _cmdDraftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
         // Clear both the visible textarea and the originating session's persisted draft before
@@ -1620,7 +1623,7 @@ async function send(){
           $('msg').value='';autoResize();
           if(_cmdOwner.sid&&typeof _clearComposerDraft==='function'){
             _cmdDraftClearPromise=_clearComposerDraft(
-              _cmdOwner.sid,text,_cmdDraftFiles,_cmdOwner.profile,_cmdDraftRevision
+              _cmdOwner.sid,_cmdRawComposerText,_cmdDraftFiles,_cmdOwner.profile,_cmdDraftRevision
             );
           }
         }
@@ -1649,7 +1652,7 @@ async function send(){
         let _failedDraftKept=false;
         if(_agentFailure&&_cmdMutationGenerationIsCurrent()&&typeof _stashApprovalTransportFailure==='function'){
           _failedDraftKept=!!_stashApprovalTransportFailure(
-            _cmdOwner.profile,_cmdOwner.sid,text,_cmdDraftFiles,_agentCommandId,
+            _cmdOwner.profile,_cmdOwner.sid,_cmdRawComposerText,_cmdDraftFiles,_agentCommandId,
             text,_cmdMutationGeneration
           );
         }
@@ -1680,7 +1683,7 @@ async function send(){
         if(_agentFailure&&typeof _restoreApprovalCommandDraft==='function'){
           await Promise.resolve(_cmdDraftClearPromise).catch(()=>{});
           if(!_cmdLifecycleIsCurrent())return;
-          _restoreApprovalCommandDraft(_cmdOwner.profile,_cmdOwner.sid,text,_cmdDraftFiles);
+          _restoreApprovalCommandDraft(_cmdOwner.profile,_cmdOwner.sid,_cmdRawComposerText,_cmdDraftFiles);
         }
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();

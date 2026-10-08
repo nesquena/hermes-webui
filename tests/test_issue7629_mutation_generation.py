@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS = ROOT.joinpath("static", "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
+UI_JS = ROOT.joinpath("static", "ui.js").read_text(encoding="utf-8")
 
 
 def _block(source: str, start: str, end: str) -> str:
@@ -71,6 +72,11 @@ PLUGIN_CALLER = _block(
     MESSAGES_JS,
     "if(_agentCmd&&_agentCmd.category==='Plugin'){",
     "if(_agentCmdName==='moa'){",
+)
+SUBMIT_EDIT = _block(
+    UI_JS,
+    "let _submitEditInFlight = false;",
+    "\nasync function regenerateResponse",
 )
 
 
@@ -127,7 +133,10 @@ def _caller_body(caller: str, retirement: str) -> str:
         const getAgentCommandMetadata = async () => ({name:'memory'});
         const renderSessionList = async () => {};
         const newSession = async () => { S.session={session_id:'sid-NEW'}; S.messages=[]; };
-        const text='/memory pending';
+        const rawText='/MEMORY  pending   ';
+        composer.value=rawText;
+        const _rawComposerText=rawText;
+        const text=rawText.trim();
         const _parsedCmd={name:'memory',args:'pending'};
         async function runCaller(){
           %(generic)s
@@ -227,6 +236,16 @@ def test_switch_away_keeps_origin_failure_for_real_callers(caller: str):
     assert out["warnings"] == 1
 
 
+def test_generic_memory_failure_preserves_raw_draft_and_canonical_command():
+    """Generic /memory recovery keeps raw composer text but canonical identity."""
+    out = _run_node(_caller_body("memory", ""))
+    assert len(out["failures"]) == 1
+    assert out["failures"][0]["text"] == "/MEMORY  pending   "
+    assert out["failures"][0]["command"] == "/MEMORY  pending"
+    assert out["failures"][0]["command_id"]
+    assert out["retries"] == []
+
+
 def test_success_with_failed_draft_clear_cannot_recreate_retry_after_retirement():
     """A successful command's late failed draft-clear must not resurrect its retry ID."""
     out = _run_node(
@@ -303,3 +322,54 @@ def test_recovery_save_after_retirement_keeps_composer_and_allows_fresh_identity
     assert out["newRetryId"] == "new-command"
     assert out["finalFailures"] == []
     assert [item["command_id"] for item in out["finalRetries"]] == ["new-command"]
+
+
+def test_submit_edit_truncate_retirement_uses_origin_profile_and_fences_late_callback():
+    """A deferred truncate must retire the origin profile, not the current one."""
+    body = """
+    %(submit_edit)s
+    let releaseTruncate;
+    let truncateCalls=0;
+    let sendCalls=0;
+    const _oldestIdx=0;
+    const _deliberateSessionModelPick=()=>null;
+    const _reArmRecoveryPick=()=>{};
+    const _ensureAllMessagesLoaded=async()=>{};
+    const send=async()=>{ sendCalls+=1; };
+    S.activeProfile='profile-A';
+    S.activeProfileIsDefault=false;
+    S.session={session_id:'sid-A'};
+    S.messages=[{role:'user',content:'before'}];
+    api=async()=>{
+      truncateCalls+=1;
+      return new Promise((resolve)=>{ releaseTruncate=resolve; });
+    };
+    _stashApprovalTransportFailure(
+      'profile-A','sid-A','/memory pending   ',[],'failed-command','/memory pending',0
+    );
+    _rememberApprovalCommandRetry({
+      profile:'profile-A',sid:'sid-A',text:'/memory pending',command_id:'retry-command'
+    },0);
+    const editDone=submitEdit(0,'edited');
+    await new Promise((resolve)=>setTimeout(resolve,0));
+    S.activeProfile='profile-B';
+    S.activeProfileIsDefault=false;
+    S.session={session_id:'sid-B'};
+    releaseTruncate({ok:true});
+    await editDone;
+    console.log(JSON.stringify({
+      truncateCalls,
+      sendCalls,
+      session:S.session&&S.session.session_id,
+      failures:_readApprovalTransportFailures(),
+      retries:_readApprovalCommandRetries(),
+      messages:S.messages,
+    }));
+    """ % {"submit_edit": SUBMIT_EDIT}
+    out = _run_node(body)
+    assert out["truncateCalls"] == 1
+    assert out["sendCalls"] == 0, "late truncate callback must not send into the switched profile"
+    assert out["session"] == "sid-B"
+    assert out["failures"] == [], "origin failure store must be retired"
+    assert out["retries"] == [], "origin retry store must be retired"
+    assert out["messages"] == [{"role": "user", "content": "before"}]
