@@ -304,3 +304,40 @@ def test_client_sends_csrf_and_device_headers():
     assert "X-Hermes-CSRF-Token" in panels and "X-Hermes-Push-Device" in panels
     assert panels.count("headers:_webPushHeaders()") >= 4
     assert "hermes-webui-push-device" in html and "X-Hermes-Push-Device" in html
+
+
+# ── boot-time silent re-bind + session-owner hygiene ─────────────────────────
+
+def test_boot_rebind_wiring():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    panels = (root / "static" / "panels.js").read_text()
+    boot = (root / "static" / "boot.js").read_text()
+    start = panels.index("async function bindWebPushOnBoot")
+    body = panels[start:panels.index("async function toggleWebPush")]
+    assert "_webPushBootDone" in body  # once per load
+    assert "Notification.permission!=='granted'" in body and "_webPushSupported()" in body
+    assert "info.enabled" in body  # no-op when push is disabled
+    assert "requestPermission" not in body  # never prompts
+    assert "/api/push/status?endpoint=" in body and "headers:_webPushHeaders()" in body
+    assert "st.subscribed===false" in body and "/api/push/subscribe" in body
+    assert "bindWebPushOnBoot" in boot
+
+
+def test_session_owner_only_recorded_for_existing_sessions(env, tmp_path, monkeypatch):
+    import api.models as models
+    from api import routes
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path / "sessions")
+    (tmp_path / "sessions").mkdir()
+    (tmp_path / "sessions" / "real123.json").write_text("{}")
+    seen = []
+    monkeypatch.setattr(web_push, "register_session_owner", lambda sid, owner: seen.append(sid) or True)
+    h = _H(DEV_A)
+    routes._note_session_device(h, "ghost999")
+    routes._note_session_device(h, "../etc/passwd")
+    routes._note_session_device(h, "")
+    assert seen == []
+    routes._note_session_device(h, "real123")
+    assert seen == ["real123"]
