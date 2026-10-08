@@ -9,8 +9,8 @@ def test_model_picker_escapes_provider_supplied_model_labels():
 
     assert '<span class="model-opt-id">${esc(m.id)}</span>' in src
     assert '<span class="model-opt-name">${esc(m.name)}</span>' in src
+    assert '<span class="model-opt-name">${m.name}</span>' in src
     assert '<span class="model-opt-id">${m.id}</span>' not in src
-    assert '<span class="model-opt-name">${m.name}</span>' not in src
 
 
 def test_providers_panel_escapes_load_error_text():

@@ -175,6 +175,77 @@ def test_get_cli_sessions_cache_invalidates_when_sqlite_wal_changes(monkeypatch,
     assert second[0]["message_count"] == 5
 
 
+def test_get_cli_sessions_preserves_last_known_good_rows_when_db_fingerprint_changes(
+    monkeypatch, tmp_path
+):
+    import api.models as models
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    db_path = home / "state.db"
+    db_path.write_text("db", encoding="utf-8")
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    monkeypatch.setattr(models, "get_claude_code_sessions", lambda: [])
+    models.clear_cli_sessions_cache()
+    revision = ["first"]
+    calls = 0
+    rows = [{"session_id": "cli-1", "title": "Known good"}]
+
+    def resolve(_source_filter=None, **_kwargs):
+        return home, db_path, "default", ("single", str(home), "default", str(db_path), revision[0])
+
+    def load(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise OSError("state.db temporarily unavailable")
+        return list(rows)
+
+    monkeypatch.setattr(models, "_resolve_cli_sessions_context", resolve)
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", load)
+
+    assert models.get_cli_sessions() == rows
+    revision[0] = "unavailable"
+    assert models.get_cli_sessions() == rows
+    assert calls == 2
+
+
+def test_get_cli_sessions_all_profiles_preserves_last_known_good_rows_when_db_fails(
+    monkeypatch, tmp_path
+):
+    import api.models as models
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    db_path = home / "state.db"
+    db_path.write_text("db", encoding="utf-8")
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    monkeypatch.setattr(models, "get_claude_code_sessions", lambda: [])
+    monkeypatch.setattr(models, "_default_claude_code_projects_dir", lambda: None)
+    models.clear_cli_sessions_cache()
+    revision = ["first"]
+    calls = 0
+    rows = [{"session_id": "cli-all-1", "title": "Known good all-profile row"}]
+
+    def contexts():
+        return [(home, db_path, "default")], ((str(home), "default", revision[0]),)
+
+    def load(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise OSError("state.db temporarily unavailable")
+        return list(rows)
+
+    monkeypatch.setattr(models, "_all_profiles_cli_contexts", contexts)
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", load)
+
+    assert models.get_cli_sessions(all_profiles=True) == rows
+    revision[0] = "unavailable"
+    assert models.get_cli_sessions(all_profiles=True) == rows
+    assert calls == 2
+
+
 def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, tmp_path):
     import api.routes as routes
 

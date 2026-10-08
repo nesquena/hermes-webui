@@ -67,7 +67,22 @@ def _build_status_callback():
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "_agent_status_callback"
     )
-    module = ast.Module(body=[fn], type_ignores=[])
+    # The callback is a closure inside ``_run_agent_streaming`` and may declare
+    # ``nonlocal`` state (e.g. the runtime-model dedupe identity it resets on a
+    # fallback warning). Compiled alone at module level, ``nonlocal`` has no
+    # binding and raises SyntaxError, so wrap it in an enclosing function that
+    # binds every nonlocal name it declares, then return the inner callback.
+    nonlocals = sorted({
+        name
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Nonlocal)
+        for name in node.names
+    })
+    binds = "".join(f"    {name} = None\n" for name in nonlocals)
+    outer = ast.parse(f"def _status_callback_scope():\n{binds}    pass\n").body[0]
+    assert isinstance(outer, ast.FunctionDef)
+    outer.body[-1:] = [fn, ast.Return(value=ast.Name(id=fn.name, ctx=ast.Load()))]
+    module = ast.fix_missing_locations(ast.Module(body=[outer], type_ignores=[]))
     events = []
     ns = {
         "put": lambda event, data: events.append((event, data)),
@@ -78,7 +93,7 @@ def _build_status_callback():
         "_is_session_lease_wait_message": streaming._is_session_lease_wait_message,
     }
     exec(compile(module, "streaming_status_callback", "exec"), ns)
-    return ns["_agent_status_callback"], events
+    return ns["_status_callback_scope"](), events
 
 
 @pytest.mark.parametrize(

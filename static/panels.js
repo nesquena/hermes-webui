@@ -25,6 +25,7 @@ let _currentCronDetail = null; // full cron job object
 let _currentCronDetailKey = '';
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _cronModelPickerTouched = false; // true once the user changes the model picker in the current form
 let _showAllCronProfiles = false;
 let _cronOtherProfileCount = 0;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
@@ -111,6 +112,14 @@ function syncAppTitlebar() {
       inp.type = 'text';
       inp.className = 'app-titlebar-rename-input';
       inp.value = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
+      // #7542: this is a chat-title editor, not a credentials field.
+      // Chrome and password-manager extensions (1Password, LastPass,
+      // Bitwarden, Dashlane) mis-classify it as a login form because
+      // it accepts arbitrary user input and is rendered next to the
+      // chat UI. Disable autofill / form-fill explicitly so the
+      // browser does not surface the "save password" dialog after
+      // the user renames a conversation.
+      _markNonCredentialInput(inp);
 
       // Prevent click/dblclick on the input from bubbling — we don't want
       // panel switches, session switches, or any other handler firing.
@@ -1232,8 +1241,29 @@ function _renderCronDetail(job){
   if (!title || !body) return;
   title.textContent = job.name || job.schedule_display || '(unnamed)';
   const status = _cronStatusMeta(job);
-  const nextRun = job.next_run_at ? new Date(job.next_run_at).toLocaleString() : t('not_available');
-  const lastRun = job.last_run_at ? new Date(job.last_run_at).toLocaleString() : t('never');
+  // #7140: render `next_run_at` / `last_run_at` in the zone the timestamp
+  // itself was stamped in — NOT the operator's browser zone, and NOT a
+  // single process-wide server zone.
+  //
+  // The agent serialises these timestamps with the offset of the zone the
+  // job was scheduled in (per-profile: `hermes_time._resolve_timezone_name()`
+  // reads the ACTIVE PROFILE's config.yaml `timezone`).  So on a UTC
+  // container whose profile configures `timezone: America/New_York` the
+  // value on the wire is "2026-09-24T09:00:00-07:00" and the operator must
+  // read 9:00 AM — neither the browser zone nor `_server_tz_offset()` knows
+  // that, and per-profile the same process can host jobs on different
+  // offsets (DST flips the offset twice a year too).
+  //
+  // `_formatInIsoTz()` parses the ±HH:MM out of the string, shifts the
+  // instant by it and formats with timeZone:'UTC' — so the wall clock comes
+  // from the job's own data.  Fallback for a value with no offset (naive):
+  // render it in the browser zone exactly like the pre-fix panel did
+  // (`new Date(value).toLocaleString()`) — a naive string has no
+  // trustworthy server offset to apply, so the panel always renders.
+  const _isoTz = (typeof _formatInIsoTz === 'function') ? _formatInIsoTz : () => null;
+  const _fmtDate = (value) => _isoTz(value) || new Date(value).toLocaleString();
+  const nextRun = job.next_run_at ? _fmtDate(job.next_run_at) : t('not_available');
+  const lastRun = job.last_run_at ? _fmtDate(job.last_run_at) : t('never');
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
@@ -1273,6 +1303,7 @@ function _renderCronDetail(job){
         <p>Switch to ${esc(ownerProfileLabel)} to run, edit, or inspect live status and output for this cron job.</p>
       </div>` : '';
   const toastNotifications = job.toast_notifications !== false;
+  const badgeNotifications = job.badge_notifications !== false;
   const outputTitle = _cronOutputTitle(job);
   const skillsRow = isNoAgent ? '' : `<div class="detail-row"><div class="detail-row-label">${esc(t('cron_skills_label') || 'Skills')}</div><div class="detail-row-value">${esc(skills)}</div></div>`;
   const instructionCard = isNoAgent ? _cronScriptCardHtml(job) : _cronAgentPromptCardHtml(job);
@@ -1292,6 +1323,7 @@ function _renderCronDetail(job){
         ${showOwnerRow ? `<div class="detail-row"><div class="detail-row-label">Owner profile</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? (t('cron_toast_notifications_enabled') || 'Enabled') : (t('cron_toast_notifications_disabled') || 'Disabled'))}</span></div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('cron_badge_notifications_label') || 'Tasks badge')}</div><div class="detail-row-value"><span class="detail-badge ${badgeNotifications ? 'active' : ''}">${esc(badgeNotifications ? (t('cron_badge_notifications_enabled') || 'Enabled') : (t('cron_badge_notifications_disabled') || 'Disabled'))}</span></div></div>
         ${skillsRow}
         ${lastError}
       </div>
@@ -1550,6 +1582,7 @@ function duplicateCurrentCron(){
   const job = _currentCronDetail;
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
   _cronPreFormDetail = { ...job };
+  _cronModelPickerTouched = false;
   _editingCronId = null;
   _cronMode = 'create';
   _cronIsDuplicate = true;
@@ -1572,6 +1605,7 @@ function duplicateCurrentCron(){
     deliver: job.deliver || 'local',
     profile: job.profile || '',
     toast_notifications: job.toast_notifications !== false,
+    badge_notifications: job.badge_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
     model: job.model || '',
@@ -1606,6 +1640,7 @@ let _cronDeliveryOptionsCache=null;
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
   _cronPreFormDetail = _currentCronDetail ? { ..._currentCronDetail } : null;
+  _cronModelPickerTouched = false;
   _editingCronId = null;
   _cronMode = 'create';
   _cronIsDuplicate = false;
@@ -1623,6 +1658,7 @@ function openCronCreate(){
 function openCronEdit(job){
   if (!job) return;
   _cronPreFormDetail = { ...job };
+  _cronModelPickerTouched = false;
   _editingCronId = job.id;
   _cronMode = 'edit';
   _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
@@ -1633,6 +1669,7 @@ function openCronEdit(job){
     deliver: job.deliver || 'local',
     profile: job.profile || '',
     toast_notifications: job.toast_notifications !== false,
+    badge_notifications: job.badge_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
     model: job.model || '',
@@ -1647,13 +1684,14 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, badge_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
   if (!body || !title) return;
   const isNoAgent = !!no_agent;
   const toastNotifications = toast_notifications !== false;
+  const badgeNotifications = badge_notifications !== false;
   title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
   const promptBlock = isNoAgent ? '' : `
         <div class="detail-form-row">
@@ -1756,6 +1794,13 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
             <span>${esc(t('cron_toast_notifications_hint') || 'Show a toast when this cron finishes.')}</span>
           </label>
         </div>
+        <div class="detail-form-row">
+          <label for="cronFormBadgeNotifications">${esc(t('cron_badge_notifications_label') || 'Tasks badge')}</label>
+          <label class="detail-form-check" for="cronFormBadgeNotifications">
+            <input type="checkbox" id="cronFormBadgeNotifications" ${badgeNotifications ? 'checked' : ''}>
+            <span>${esc(t('cron_badge_notifications_hint') || 'Count this job\u0027s completions in the Tasks badge and new-run marker. Turn off for high-frequency silent jobs.')}</span>
+          </label>
+        </div>
         ${skillsBlock}
         <div id="cronFormError" class="detail-form-error" style="display:none"></div>
       </form>
@@ -1855,6 +1900,9 @@ async function _populateCronFormModelSelect(selectedModel, selectedProvider, dis
       sel.appendChild(opt);
     }
     sel.dataset.loaded = '1';
+    // Track deliberate picker changes so an untouched "Default" can keep a
+    // hidden provider-only pin on save (see _cronProviderForClear).
+    sel.addEventListener('change', () => { _cronModelPickerTouched = true; });
   } catch (e) {
     console.warn('Failed to load cron model picker:', e.message);
     // Load failed: dataset.loaded stays unset so saveCronForm omits model/provider
@@ -1940,6 +1988,18 @@ function _cronModelBareName(model, provider) {
   return _modelBareNameForProvider(model, provider);
 }
 
+function _cronProviderForClear(prevDetail, pickerTouched) {
+  // Provider to submit when the picker shows "Default" (no model) on save.
+  // An explicit return to Default honors "Default = no overrides" (#4030) and
+  // clears the provider. An untouched picker must not: provider-only jobs
+  // (a pinned provider with no model) render as "Default" in the combined
+  // picker, so saving any other field would silently erase the pin the user
+  // never touched.
+  const prev = prevDetail || {};
+  if (pickerTouched) return null;
+  return (prev.model == null) ? prev.provider : null;
+}
+
 async function saveCronForm(){
   const nameEl=$('cronFormName');
   const schEl=$('cronFormSchedule');
@@ -1947,6 +2007,7 @@ async function saveCronForm(){
   const delivEl=$('cronFormDeliver');
   const profileEl=$('cronFormProfile');
   const toastEl=$('cronFormToastNotifications');
+  const badgeEl=$('cronFormBadgeNotifications');
   const errEl=$('cronFormError');
   if(!schEl||!errEl) return;
   const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
@@ -1957,6 +2018,7 @@ async function saveCronForm(){
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
   const toastNotifications=toastEl?!!toastEl.checked:true;
+  const badgeNotifications=badgeEl?!!badgeEl.checked:true;
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
@@ -1965,7 +2027,7 @@ async function saveCronForm(){
     const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
     const selectedModel = modelEl ? (modelEl.value || '').trim() : '';
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
+      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications};
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       if (deliver) updates.deliver = deliver;
@@ -1977,8 +2039,11 @@ async function saveCronForm(){
           updates.model = _cronModelBareName(modelState.model, modelState.model_provider) || null;
           updates.provider = modelState.model_provider || null;
         } else if (modelLoaded) {
+          // "Default" selected (no model). An untouched picker preserves a
+          // hidden provider-only pin; a deliberate return to Default clears
+          // it (#4030 "Default = no overrides").
           updates.model = null;
-          updates.provider = null;
+          updates.provider = _cronProviderForClear(_cronPreFormDetail, _cronModelPickerTouched);
         }
         // else: select not yet populated — omit model/provider to preserve saved value
       }
@@ -1992,7 +2057,7 @@ async function saveCronForm(){
       if (job) openCronDetail(job);
       return;
     }
-    const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications};
+    const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications};
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
@@ -5393,8 +5458,13 @@ function _renderExternalNotesSources() {
   const recall = data.automatic_recall_unchanged !== false
     ? `<div class="memory-detail-mtime">${esc(t('external_notes_auto_recall_hint'))}</div>`
     : '';
+  // Same withheld-runtime state as the MCP panel: sources still list, but their
+  // live status/tools are hidden until the profile's runtime scope is confirmed.
+  const scopeNotice = data.runtime_scope === 'unavailable'
+    ? `<div class="memory-detail-mtime">${esc(t('mcp_runtime_scope_unavailable'))}</div>`
+    : '';
   if (!sources.length) {
-    body.innerHTML = `<div class="main-view-content">${recall}<div class="memory-empty">${esc(t('external_notes_empty'))}</div></div>`;
+    body.innerHTML = `<div class="main-view-content">${recall}${scopeNotice}<div class="memory-empty">${esc(t('external_notes_empty'))}</div></div>`;
   } else {
     const selected = sources.find(src => (src.name || '').toLowerCase() === (_notesSelectedSource || '').toLowerCase()) || sources[0];
     _notesSelectedSource = (selected && selected.name) || 'joplin';
@@ -5441,7 +5511,7 @@ function _renderExternalNotesSources() {
       ${searchError}
       ${resultHtml}
     </section>`;
-    body.innerHTML = `<div class="main-view-content">${recall}${recentAiHtml}${searchUi}${previewHtml}${cards}</div>`;
+    body.innerHTML = `<div class="main-view-content">${recall}${scopeNotice}${recentAiHtml}${searchUi}${previewHtml}${cards}</div>`;
   }
   body.style.display = '';
   if (empty) empty.style.display = 'none';
@@ -9673,13 +9743,35 @@ async function loadSettingsPanel(){
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
           {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
+          {value:'fr-FR-RemyMultilingualNeural',label:'Rémy (French, Male, Multilingual)'},
+          {value:'fr-FR-VivienneMultilingualNeural',label:'Vivienne (French, Female, Multilingual)'},
+          {value:'fr-FR-DeniseNeural',label:'Denise (French, Female)'},
+          {value:'fr-FR-EloiseNeural',label:'Eloise (French, Female, Child)'},
+          {value:'fr-FR-HenriNeural',label:'Henri (French, Male)'},
+          {value:'fr-CA-AntoineNeural',label:'Antoine (French Canadian, Male)'},
+          {value:'fr-CA-JeanNeural',label:'Jean (French Canadian, Male)'},
+          {value:'fr-CA-SylvieNeural',label:'Sylvie (French Canadian, Female)'},
+          {value:'fr-CA-ThierryNeural',label:'Thierry (French Canadian, Male)'},
         ];
         ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
-        edgeVoices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.value;opt.textContent=v.label;
-          if(v.value===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
+        // Group by language (macOS / Windows / Edge Read Aloud convention) now that
+        // the list spans five locales; order inside each group is unchanged.
+        const edgeVoiceGroups=[
+          ['zh-CN','Chinese'],['en-US','English'],['id-ID','Indonesian'],
+          ['fr-FR','French'],['fr-CA','French (Canada)'],
+        ];
+        edgeVoiceGroups.forEach(([prefix,groupLabel])=>{
+          const voices=edgeVoices.filter(v=>v.value.startsWith(prefix+'-'));
+          if(!voices.length) return;
+          const og=document.createElement('optgroup');
+          og.label=groupLabel;
+          voices.forEach(v=>{
+            const opt=document.createElement('option');
+            opt.value=v.value;opt.textContent=v.label;
+            if(v.value===current) opt.selected=true;
+            og.appendChild(opt);
+          });
+          ttsVoiceSel.appendChild(og);
         });
       } else {
         if(!('speechSynthesis' in window)){
@@ -9687,7 +9779,10 @@ async function loadSettingsPanel(){
           return;
         }
         const voices=speechSynthesis.getVoices();
-        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
+        // #7582: the rebuilt default option would otherwise be hardcoded
+        // English; route it through the same key the static HTML option
+        // uses so locale switching keeps both call sites in sync.
+        ttsVoiceSel.innerHTML=`<option value="" data-i18n="settings_tts_voice_default_system">${t('settings_tts_voice_default_system')}</option>`;
         voices.forEach(v=>{
           const opt=document.createElement('option');
           opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
@@ -12245,6 +12340,7 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
+    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
@@ -12280,14 +12376,14 @@ async function checkUpdatesNow(channelOverride){
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       }
     }
   } catch(e){
@@ -13043,11 +13139,20 @@ let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
 let _cronPollGeneration=0;
+// #7652 review follow-up: completions that fired while the tab was hidden
+// but reached no surface (the user has notifications disabled or denied) are
+// queued here so a reload of the page (or a visibility change) can flush them
+// as a toast. Without this the completion is consumed with no surface at all.
+const _cronPendingToasts=[];
+let _cronPollInFlight=false;  // one tick at a time (overlapping ticks double-notify)
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
 
 function _resetCronUnreadForProfileSwitch(){
   _cronPollGeneration++;
   _cronNewJobIds.clear();
+  // Queued completions belong to the profile being left; never flush their
+  // toasts into the incoming profile's timeline (#5960 gate).
+  _cronPendingToasts.length=0;
   _cronPollSince=Date.now()/1000;
   // Clear persisted cron sidebar markers from the profile we left. Non-cron
   // completion unread stays intact (#5960 gate: sticky all-profile leak).
@@ -13066,32 +13171,128 @@ window.addEventListener('hermes:cron_created', () => {
 
 function startCronPolling(){
   if(_cronPollTimer) return;
-  _cronPollTimer=setInterval(async()=>{
-    if(document.hidden) return;  // don't poll when tab is in background
-    try{
-      const pollGeneration=_cronPollGeneration;
-      const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
-      if(pollGeneration!==_cronPollGeneration) return;
-      if(data.completions&&data.completions.length>0){
-        for(const c of data.completions){
-          if(c.toast_notifications !== false){
-            showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
-          }
-          _cronPollSince=Math.max(_cronPollSince,c.completed_at);
-          if(c.job_id) _cronNewJobIds.add(String(c.job_id));
-          if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
-            const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
-            _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
-              source:'cron',
-              profile:activeProfile,
-            });
+  _cronPollTimer=setInterval(_runCronPollTick,30000);
+}
+
+// One recent-completions tick. Split out of the interval callback so the
+// in-flight guard can span the whole await (see _cronPollInFlight): two
+// overlapping ticks would each read the same _cronPollSince and each notify
+// the same completion (#7652 review).
+async function _runCronPollTick(){
+  if(_cronPollInFlight) return;
+  _cronPollInFlight=true;
+  try{
+    const pollGeneration=_cronPollGeneration;
+    const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+    if(pollGeneration!==_cronPollGeneration) return;
+    if(data.completions&&data.completions.length>0){
+      for(const c of data.completions){
+        if(c.toast_notifications !== false){
+          // #7257: even when the tab is backgrounded we still want the
+          // user to know a cron job just completed. With the old
+          // ``if(document.hidden) return`` gate, the entire recent-fetch
+          // skipped silently and no surface (toast or notification) ever
+          // fired. Now: visible tabs keep the existing showToast,
+          // hidden tabs get a browser notification routed through
+          // sendBrowserNotification (which itself honors the user's
+          // notification permission and enabled setting). _cronPollSince,
+          // _cronNewJobIds, and the session-unread marker all advance
+          // regardless of which surface fires.
+          const statusText = c.status==='error' ? t('status_failed') : t('status_completed');
+          if(document.hidden){
+            // A hidden completion only counts as delivered when the
+            // notification actually reached the user's channel. The helper
+            // awaits the real display result, so a display failure is NOT
+            // mistaken for delivery and the completion is queued instead
+            // (#7652 review: SILENT gap).
+            const notified=await _cronSendHiddenCompletionNotification(c.name,statusText,c.session_id);
+            // The await yields: the profile may have switched (the queue
+            // state belongs to the old profile) or the tab may have become
+            // visible (the user is already looking at a live surface). Skip
+            // a stale tick's fallback entirely.
+            if(pollGeneration!==_cronPollGeneration) return;
+            if(!notified){
+              if(typeof document!=='undefined'&&document.hidden){
+                // Notification channel closed or the display failed: queue
+                // the completion so the user still gets it as a toast when
+                // the tab comes back. Otherwise _cronPollSince advances past
+                // it and the completion is consumed with no surface at all.
+                _cronPendingToasts.push({name:c.name,statusText});
+              }else{
+                // The tab became visible while the delivery was pending:
+                // surface it immediately rather than waiting for another
+                // visibility change.
+                showToast(t('cron_completion_status', c.name, statusText), 4000);
+              }
+            }
+          } else {
+            showToast(t('cron_completion_status', c.name, statusText), 4000);
           }
         }
-        // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
-        updateCronBadge();
+        _cronPollSince=Math.max(_cronPollSince,c.completed_at);
+        if(c.job_id && c.badge_notifications !== false) _cronNewJobIds.add(String(c.job_id));
+        if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
+          const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+          _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
+            source:'cron',
+            profile:activeProfile,
+          });
+        }
       }
-    }catch(e){}
-  },30000);
+      // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
+      updateCronBadge();
+    }
+  }catch(e){}
+  finally{ _cronPollInFlight=false; }
+}
+
+// True when a notification for a completion would actually reach the user
+// right now. sendBrowserNotification silently no-ops otherwise, so a hidden
+// tab must not treat its completion as delivered (#7652 review).
+function _cronCanNotify(){
+  return !!(window._notificationsEnabled && typeof Notification!=='undefined'
+    && Notification.permission==='granted');
+}
+
+// Notify for a completion that arrived while the tab was hidden. Resolves true
+// only when sendBrowserNotification reports that the notification actually
+// reached the user's notification channel, so the caller can decide whether to
+// queue a fallback toast. This must be AWAITED: `_cronCanNotify()` is only a
+// permission pre-check, and the real primitive still resolves false when the
+// service-worker path finds no active registration while the direct
+// Notification constructor throws — the normal case on some mobile browsers
+// and installed-PWA contexts that only allow SW notifications. Returning true
+// without awaiting made such a completion vanish (#7652 review).
+async function _cronSendHiddenCompletionNotification(name,statusText,sessionId){
+  if(!_cronCanNotify()) return false;
+  if(typeof sendBrowserNotification!=='function') return false;
+  // #7652 review: pass an explicit sessionless marker when the completion has
+  // no session_id. Without it _notificationOptions falls back to the user's
+  // CURRENT session, so clicking the notification opens the wrong chat (and
+  // reuses that session's notification tag). The `panel` intent is the click
+  // target: a sessionless completion belongs to no chat, so the click must
+  // land on the Tasks panel the run lives in — not the root, which would
+  // restore the last chat the user had open (#7652 review round 4).
+  try{
+    const delivered=await sendBrowserNotification(name,statusText,{sid:sessionId||null,sessionless:!sessionId,panel:!sessionId?'tasks':''});
+    // Fail closed on anything that is not an explicit success: the primitive
+    // returns undefined when it short-circuits before delivery.
+    return delivered===true;
+  }catch(_err){
+    return false;
+  }
+}
+
+// Flush completions that arrived while hidden but reached no surface, as
+// toasts. Runs from the visibilitychange handler below; a no-op while the
+// document is still hidden.
+function _flushCronPendingToasts(){
+  if(!_cronPendingToasts.length) return;
+  if(typeof document!=='undefined'&&document.hidden) return;
+  while(_cronPendingToasts.length){
+    const queued=_cronPendingToasts.shift();
+    showToast(t('cron_completion_status', queued.name, queued.statusText), 4000);
+  }
 }
 
 function updateCronBadge(){
@@ -13127,6 +13328,14 @@ switchPanel=async function(name,opts){ return _origSwitchPanel(name,opts); };
 
 // Start polling on page load
 startCronPolling();
+
+// #7652 review: a completion that fired while the tab was hidden and could not
+// notify (notifications disabled/denied) is queued in _cronPendingToasts.
+// Flushing on becoming visible is what turns it into a toast — without this
+// listener the queued completion would sit there forever.
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden) _flushCronPendingToasts();
+});
 
 // ── Background agent error tracking ──────────────────────────────────────────
 
@@ -13212,7 +13421,12 @@ function loadMcpServers(){
       list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;
     }
-    list.innerHTML=r.servers.map(s=>{
+    // Live status is withheld while the profile's runtime scope cannot be confirmed
+    // (e.g. a chat turn on this profile is running); say so instead of "not connected".
+    const scopeNotice=r.runtime_scope==='unavailable'
+      ?`<div class="mcp-runtime-notice" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_runtime_scope_unavailable'))}</div>`
+      :'';
+    list.innerHTML=scopeNotice+r.servers.map(s=>{
       const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+(s.transport||'unknown'));
       const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
       const transportBadge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;

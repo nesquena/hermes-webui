@@ -689,6 +689,72 @@ def test_streaming_next_turn_claims_and_completes_without_registry_growth(monkey
     assert registry._completion_consumed == set()
 
 
+def test_streaming_drain_restores_durable_completions_before_reading(monkeypatch):
+    """Current Agent restores its ledger on first consume, not on import."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_durable_delivery_api(monkeypatch)
+    restores: list[int] = []
+
+    def _restore_completions():
+        restores.append(1)
+        if len(restores) == 1:
+            registry.completion_queue.put(_async_delegation_event())
+        return 1
+
+    registry.restore_completions = _restore_completions
+
+    notifications = streaming._drain_webui_process_notifications("webui-session-1")
+
+    assert restores == [1]
+    assert len(notifications) == 1
+    assert "ASYNC DELEGATION BATCH COMPLETE" in notifications[0]
+
+
+def test_streaming_drain_survives_durable_restore_failure(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_durable_delivery_api(monkeypatch)
+    registry.completion_queue.put(_async_delegation_event())
+
+    def _restore_completions():
+        raise RuntimeError("ledger unavailable")
+
+    registry.restore_completions = _restore_completions
+
+    notifications = streaming._drain_webui_process_notifications("webui-session-1")
+
+    assert len(notifications) == 1
+
+
+def test_background_drain_restores_durable_completions_on_start(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    processed: list[dict] = []
+
+    def _restore_completions():
+        registry.completion_queue.put(_async_delegation_event())
+        return 1
+
+    def _process_one(evt):
+        processed.append(evt)
+        bp._DRAIN_STOP.set()
+
+    registry.restore_completions = _restore_completions
+    monkeypatch.setattr(bp, "_process_one", _process_one)
+    bp._DRAIN_STOP.clear()
+    drain = threading.Thread(target=bp._drain_loop, daemon=True)
+    try:
+        drain.start()
+        drain.join(timeout=3.0)
+    finally:
+        bp._DRAIN_STOP.set()
+        drain.join(timeout=3.0)
+        bp._DRAIN_STOP.clear()
+
+    assert [evt["delegation_id"] for evt in processed] == ["deleg_test123"]
+
+
 def test_streaming_live_turn_defers_ack_until_agent_acceptance_boundary(monkeypatch):
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)

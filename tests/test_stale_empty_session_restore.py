@@ -1,17 +1,14 @@
 """Regression tests for stale empty sessions after a WebUI restart.
 
-When a saved session ID returns 404 (e.g. the session was deleted from another
-browser, or a state DB rotation removed it), the prior behavior was to show
-\"Session not available in web UI.\" and stick there forever — the saved
-localStorage entry never got cleared, so every reload reproduced the broken
-state.
+When a route names a missing session while localStorage still names a valid
+one, boot must remove only the stale route. A genuinely stale saved pointer and
+matching route still clear together.
 
 These tests lock in:
   1. ``api()`` attaches HTTP context (``.status``, ``.statusText``, ``.body``)
      to thrown errors so callers can branch on status without re-parsing text.
-  2. ``loadSession()`` clears the stale ``hermes-webui-session`` key on a 404
-     and strips the ``/session/<id>`` URL, then rethrows only at boot time so
-     boot can fall through to the empty state (#2798, #2782).
+  2. ``loadSession()`` clears only route/localStorage values that still name a
+     missing requested ID; boot must preserve an unrelated saved restore target.
   3. The server 404s a deleted *WebUI* session on ``GET /api/session`` instead
      of synthesising a read-only CLI stub, so ``GET`` and the ``POST`` write
      paths agree on whether a session exists and the client can self-heal
@@ -19,49 +16,68 @@ These tests lock in:
      is gone.
 """
 
+import json
+import re
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
-import re
+
+from tests.test_issue3993_session_load_self_heal import NODE, _run_load_session_failures
 
 
 REPO = Path(__file__).parent.parent
 WORKSPACE_JS = (REPO / "static" / "workspace.js").read_text(encoding="utf-8")
-SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+
+
+def _run_final_fresh_boot_fallback(saved_session):
+    assert NODE, "node is required"
+    boot = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    final_fallback = boot.index("  // no saved session - show empty state, wait for user to hit +")
+    start = boot.index("  const _freshPanelPref=", final_fallback)
+    end = boot.index("\n  syncWorkspacePanelState();", start)
+    snippet = boot[start:end]
+    source = f"""
+const vm=require('node:vm');
+const snippet={json.dumps(snippet)};
+const savedSession={json.dumps(saved_session)};
+const values=new Map([['hermes-webui-workspace-panel-pref','open']]);
+if(savedSession!==null) values.set('hermes-webui-session',savedSession);
+const localStorage={{
+  getItem(key){{return values.has(key)?values.get(key):null;}},
+  setItem(key,value){{values.set(key,String(value));}},
+  removeItem(key){{values.delete(key);}}
+}};
+const bindCalls=[];
+const context=vm.createContext({{
+  localStorage,prefillIntent:null,
+  _workspacePanelMode:'closed',
+  _isCompactWorkspaceViewport:()=>false,
+  _maybeBindFreshDefaultWorkspaceSession:async(intent)=>{{
+    bindCalls.push(intent);
+    localStorage.setItem('hermes-webui-session','fresh-session');
+    return true;
+  }}
+}});
+(async()=>{{
+  await vm.runInContext('(async()=>{{'+snippet+'}})()',context);
+  process.stdout.write(JSON.stringify({{
+    saved:localStorage.getItem('hermes-webui-session'),
+    bindCalls:bindCalls.length
+  }}));
+}})().catch(error=>{{process.stderr.write(error.stack);process.exit(1);}});
+"""
+    out = subprocess.run([NODE, "-e", source], capture_output=True, text=True, timeout=20)
+    assert out.returncode == 0, f"node failed: {out.stderr}"
+    return json.loads(out.stdout)
 
 
 def _api_body() -> str:
     m = re.search(r"async function api\(path,opts=.*?\n\}", WORKSPACE_JS, re.DOTALL)
     assert m, "api() function must exist in workspace.js"
     return m.group(0)
-
-
-def _load_session_error_block() -> str:
-    start = SESSIONS_JS.find("data = await api(`/api/session?")
-    assert start > 0, "loadSession metadata request not found"
-    catch_idx = SESSIONS_JS.find("} catch(e) {", start)
-    assert catch_idx > start, "loadSession metadata catch block not found"
-    # The catch opens with a stale-load guard that itself contains an early
-    # `return;` (#3993 Codex race fix). Skip past that guard so we extract the
-    # 404 / non-404 self-heal body, not just the guard.
-    body_start = SESSIONS_JS.find("if(_msgInner){", catch_idx)
-    assert body_start > catch_idx, "loadSession catch body not found"
-    end = SESSIONS_JS.find("return;", body_start)
-    assert end > body_start, "loadSession metadata catch return not found"
-    return SESSIONS_JS[catch_idx:end]
-
-
-def _load_session_404_block() -> str:
-    """The body of the `if(e.status===404){ ... }` arm only."""
-    block = _load_session_error_block()
-    start = block.find("if(e.status===404){")
-    assert start >= 0, "loadSession 404 arm not found"
-    # The 404 arm is closed by the `} else {` of the outer status check.
-    end = block.find("} else {", start)
-    assert end > start, "loadSession 404 arm terminator not found"
-    return block[start:end]
 
 
 def _send_catch_block() -> str:
@@ -90,52 +106,62 @@ def test_api_http_errors_preserve_response_status():
     )
 
 
-def test_load_session_clears_saved_stale_404_and_rethrows_to_boot():
-    """A missing saved session should be removed and let boot show the empty state."""
-    block = _load_session_error_block()
-    assert "e.status===404" in block, "loadSession must keep a 404-specific branch"
-    assert "localStorage.removeItem('hermes-webui-session')" in block, (
-        "loadSession must clear stale saved session IDs on 404"
+def test_missing_route_clears_only_route_and_boot_keeps_other_saved_session():
+    """A route-only 404 removes that route while retaining a different valid
+    saved session, including across boot's outer restore catch."""
+    data = _run_load_session_failures(
+        statuses=[404, 500], sid="missing-session", route="/session/missing-session",
+        saved="valid-session", run_boot_catch=True,
     )
-    assert "history.replaceState" in block, (
-        "loadSession must strip stale /session/{id} from the URL so a refresh "
-        "doesn't re-trigger the 404 loop"
-    )
-    assert "_loadingSessionId = null" in block, (
-        "loadSession must clear the in-flight load marker on 404"
-    )
-    # Boot-time (!currentSid) rethrow so boot falls through to the empty state.
-    assert "!currentSid" in block, (
-        "loadSession must keep the !currentSid gate around the boot-time rethrow"
-    )
-    assert re.search(r"throw\s+e", block), (
-        "loadSession must rethrow the stale saved-session 404 so boot can fall "
-        "through to the no-session empty state"
-    )
+    assert data["requests"] == ["missing-session", "valid-session"]
+    assert data["saved"] == "valid-session"
+    assert data["routeSid"] is None
+    assert data["pathname"] == "/"
 
 
-def test_load_session_404_self_heal_gated_to_active_or_boot():
-    """#2782: the localStorage clear + URL strip self-heal runs only when the
-    404'd id is the one being activated, gated on (!currentSid || currentSid===sid):
-    a boot-time restore (#2798) or a reload of the *current* session whose sidecar
-    was deleted. A click into a *different* dead session preserves the live
-    session's saved id and URL. Only the rethrow stays gated on !currentSid."""
-    arm = _load_session_404_block()
-    self_heal = "if(!currentSid || currentSid===sid)"
-    assert self_heal in arm, (
-        "self-heal must be gated to boot or the active session, not unconditional"
+def test_final_boot_fallback_preserves_saved_restore_target_but_binds_fresh_boot():
+    """Auto-binding must not overwrite a surviving saved target after route 404."""
+    restored = _run_final_fresh_boot_fallback("valid-session")
+    assert restored["saved"] == "valid-session"
+    assert restored["bindCalls"] == 0
+
+    fresh = _run_final_fresh_boot_fallback(None)
+    assert fresh["saved"] == "fresh-session"
+    assert fresh["bindCalls"] == 1
+
+
+def test_genuine_saved_session_404_clears_matching_route_and_pointer():
+    """A saved ID and route that both name the missing session are both stale."""
+    data = _run_load_session_failures(
+        statuses=[404], sid="missing-session", route="/session/missing-session",
+        saved="missing-session", run_boot_catch=True,
     )
-    heal_idx = arm.find(self_heal)
-    clear_idx = arm.find("localStorage.removeItem('hermes-webui-session')")
-    strip_idx = arm.find("history.replaceState")
-    assert clear_idx > heal_idx, "localStorage clear must run inside the self-heal gate"
-    assert strip_idx > heal_idx, "URL strip must run inside the self-heal gate"
-    # The boot-time rethrow stays nested on !currentSid, inside the self-heal gate.
-    rethrow_gate_idx = arm.find("if(!currentSid)")
-    assert rethrow_gate_idx > heal_idx, "the !currentSid rethrow gate must remain"
-    assert re.search(r"throw\s+e", arm[rethrow_gate_idx:]), (
-        "the !currentSid gate must still contain the boot-time rethrow"
+    assert data["requests"] == ["missing-session"]
+    assert data["saved"] is None
+    assert data["routeSid"] is None
+
+
+def test_missing_saved_pointer_preserves_unrelated_route():
+    """A stale saved pointer must not remove a route that names another target."""
+    data = _run_load_session_failures(
+        statuses=[404], sid="missing-session", route="/session/valid-session",
+        saved="missing-session", run_boot_catch=True,
     )
+    assert data["requests"] == ["missing-session"]
+    assert data["saved"] is None
+    assert data["routeSid"] == "valid-session"
+    assert data["pathname"] == "/session/valid-session"
+
+
+def test_clicking_missing_other_session_preserves_active_navigation():
+    """A 404 from a different target must not clear the live session's state."""
+    data = _run_load_session_failures(
+        statuses=[404], sid="missing-session", route="/session/valid-session",
+        saved="valid-session", current_sid="valid-session",
+    )
+    assert data["requests"] == ["missing-session"]
+    assert data["saved"] == "valid-session"
+    assert data["routeSid"] == "valid-session"
 
 
 def test_send_chat_start_404_self_heals_instead_of_error_bubble():

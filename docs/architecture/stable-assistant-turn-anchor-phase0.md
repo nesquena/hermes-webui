@@ -64,6 +64,22 @@ when that slice landed; they do not override the current coverage summary above.
 
 ## State Layers
 
+Settled reasoning reconciliation allocates transcript slots only for reasoning
+that survives the visible-prose duplicate and final-answer filters. Filtered
+metadata must not consume or discard a distinct saved reasoning event. Durable
+event identity remains authoritative for deduplication and reload.
+Without a `content[]` `tool_use` boundary, only reasoning metadata emits a
+transcript Thinking row. Missing or empty metadata must not turn unrendered
+thinking/reasoning content parts into slots that discard distinct saved events.
+Top-level `tool_calls`, partial calls, and external tool records do not change
+that content boundary.
+When a saved identified prose event matches an identity-less transcript row,
+inherit only its durable identity fields (`event_id`, `row_id`, or legacy
+`local_id`). The transcript row retains its exact Markdown text, payload, source,
+and grouping metadata; whitespace-normalized equality does not make a trimmed
+or flattened live prose copy authoritative for the body. Thinking reconciliation
+continues to preserve the saved event's text and identity.
+
 | Layer | Current surface | Phase 0 anchor policy |
 | --- | --- | --- |
 | RuntimeAdapter / run-journal Event Envelope | `event_id`, `run_id`, `seq`, `Last-Event-ID` / `after_seq` | Preferred identity and replay dedupe source. |

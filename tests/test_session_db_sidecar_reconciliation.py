@@ -45,7 +45,52 @@ def test_recover_missing_sidecars_from_state_db_materializes_webui_row(tmp_path)
     assert data["parent_session_id"] == "parent-1"
     assert data["source_tag"] == "webui"
     assert data["session_source"] == "webui"
+    assert data["message_count"] == 2
     assert [m["content"] for m in data["messages"]] == ["message 1", "message 2"]
+
+
+def test_recovered_sidecar_derives_message_count_from_materialized_rows(tmp_path, monkeypatch):
+    """Recovery must not copy a stale state.db summary into a live sidecar.
+
+    `Session.save()` relies on sidecar `message_count` for both #1558 guards.
+    A recovery row whose denormalized DB count says zero but whose canonical
+    message rows contain five messages must therefore refuse an empty active
+    snapshot and preserve a five-message backup on a later shrink.
+    """
+    import api.models as models
+
+    sid = _make_state_db(tmp_path / "state.db", sid="recovered_stale_count", messages=5)
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("UPDATE sessions SET message_count = 0 WHERE id = ?", (sid,))
+
+    assert recover_missing_sidecars_from_state_db(tmp_path, tmp_path / "state.db")["materialized"] == 1
+    sidecar = tmp_path / f"{sid}.json"
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["message_count"] == 5
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    active_empty = models.Session(
+        session_id=sid,
+        title="Recovered from DB",
+        workspace=str(tmp_path),
+        model="openai/gpt-5",
+        messages=[],
+        active_stream_id="a" * 32,
+        pending_user_message="still typing",
+    )
+    active_empty.save()
+    assert len(json.loads(sidecar.read_text(encoding="utf-8"))["messages"]) == 5
+
+    shrinking = models.Session(
+        session_id=sid,
+        title="Recovered from DB",
+        workspace=str(tmp_path),
+        model="openai/gpt-5",
+        messages=[{"role": "user", "content": f"replacement {i}"} for i in range(3)],
+    )
+    shrinking.save()
+    backup = sidecar.with_suffix(".json.bak")
+    assert len(json.loads(backup.read_text(encoding="utf-8"))["messages"]) == 5
 
 
 def test_recover_missing_sidecars_from_state_db_skips_deleted_webui_tombstone(tmp_path, monkeypatch):

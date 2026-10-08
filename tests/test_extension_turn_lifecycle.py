@@ -250,7 +250,7 @@ def test_registered_extension_receives_bounded_turn_lifecycle_events():
 
         const alpha = window.hermesExt.register('alpha.ext');
         const beta = window.hermesExt.register('beta.ext');
-        assert.deepStrictEqual(Object.keys(alpha).sort(), ['events', 'id', 'settings', 'storage']);
+        assert.deepStrictEqual(Object.keys(alpha).sort(), ['events', 'id', 'messages', 'settings', 'storage']);
         assert.strictEqual(Object.isFrozen(alpha.events), true);
 
         const alphaEvents = [];

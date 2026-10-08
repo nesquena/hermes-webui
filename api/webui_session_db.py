@@ -57,6 +57,8 @@ _METADATA_FIELDS = frozenset(
         "compression_recovery_action",
         "truncation_watermark",
         "truncation_boundary",
+        "transcript_generation",
+        "transcript_generation_baseline",
         "gateway_routing",
         "gateway_routing_history",
         "llm_title_generated",
