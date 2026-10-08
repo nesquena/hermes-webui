@@ -171,7 +171,15 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
         cb = _gateway_notify_cbs.get(session_key)
         # Notify SSE subscribers from inside _lock for ordering guarantees.
         _clarify_sse_notify(session_key, dict(gw_queue[0].data), len(gw_queue))
+        push_data = dict(entry.data) if len(gw_queue) == 1 else None
     publish_session_list_changed("attention_pending")
+    if push_data:
+        try:
+            from api.web_push import notify_clarify_required
+
+            notify_clarify_required(session_key, push_data)
+        except Exception:
+            pass
     if cb:
         try:
             cb(data)

@@ -14954,6 +14954,12 @@ def handle_get(handler, parsed) -> bool:
             pass
         return j(handler, settings)
 
+    if parsed.path == "/api/push/status":
+        return _handle_push_status(handler, parsed)
+
+    if parsed.path == "/api/push/vapid-public-key":
+        return _handle_push_vapid_public_key(handler)
+
     if parsed.path == "/api/transcribe/capability":
         return handle_transcribe_capability(handler)
 
@@ -17930,6 +17936,12 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, str(e), 409)
 
+    if parsed.path == "/api/push/subscribe":
+        return _handle_push_subscribe(handler, body)
+
+    if parsed.path == "/api/push/test":
+        return _handle_push_test(handler)
+
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
         from api.auth import (
@@ -18924,6 +18936,9 @@ def handle_delete(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
+    if parsed.path == "/api/push/subscribe":
+        return _handle_push_unsubscribe(handler, body)
+
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
         if not pid:
@@ -23376,6 +23391,80 @@ def _handle_cron_status(handler, parsed):
     with _RUNNING_CRON_LOCK:
         all_running = {jid: round(time.time() - t, 1) for jid, t in _RUNNING_CRON_JOBS.items()}
     return j(handler, {"running": all_running})
+
+
+def _handle_push_status(handler, parsed):
+    """Web Push availability plus whether *this* endpoint is subscribed.
+
+    Exposes only booleans/counts — never key material or other subscriptions.
+    """
+    from api import web_push
+
+    out = dict(web_push.status())
+    endpoint = parse_qs(parsed.query).get("endpoint", [""])[0]
+    try:
+        out["subscribed"] = web_push.has_subscription(endpoint) if endpoint else False
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    return j(handler, out)
+
+
+def _handle_push_vapid_public_key(handler):
+    from api import web_push
+
+    st = web_push.status()
+    if not st["enabled"]:
+        return bad(handler, "Web Push is not configured", 404)
+    return j(handler, {"public_key": web_push.public_key()})
+
+
+def _handle_push_subscribe(handler, body):
+    from api import web_push
+
+    if not web_push.is_enabled():
+        return bad(handler, "Web Push is not configured", 404)
+    body = body if isinstance(body, dict) else {}
+    subscription = body.get("subscription")
+    if not isinstance(subscription, dict):
+        return bad(handler, "subscription is required")
+    try:
+        web_push.add_subscription(
+            subscription, previous_endpoint=body.get("previous_endpoint")
+        )
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    return j(handler, {"ok": True})
+
+
+def _handle_push_unsubscribe(handler, body):
+    from api import web_push
+
+    body = body if isinstance(body, dict) else {}
+    endpoint = str(body.get("endpoint") or "").strip()
+    if not endpoint:
+        return bad(handler, "endpoint is required")
+    try:
+        removed = web_push.remove_subscription(endpoint)
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    return j(handler, {"ok": True, "removed": bool(removed)})
+
+
+def _handle_push_test(handler):
+    from api import web_push
+
+    if not web_push.is_enabled():
+        return bad(handler, "Web Push is not configured", 404)
+    try:
+        count = web_push.subscription_count()
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    if not count:
+        return bad(handler, "No Web Push subscriptions on this server", 409)
+    queued = web_push.send_test()
+    return j(handler, {"ok": bool(queued), "subscriptions": count})
 
 
 def _handle_cron_recent(handler, parsed):

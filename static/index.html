@@ -1287,6 +1287,15 @@
                 <button type="button" class="sm-btn" onclick="sendBrowserNotification('Hermes test','Notifications are ready.',{force:true});" style="padding:5px 10px;font-size:12px" data-i18n="notifications_test_btn">Send test</button>
                 <span id="notificationPermissionStatus" style="font-size:11px;color:var(--muted)"></span>
               </div>
+              <div id="webPushSettings" style="display:none;margin-top:10px">
+                <div style="font-size:12px;font-weight:600" data-i18n="web_push_title">Push when the app is closed</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="web_push_desc">Receive a push notification on this device even when Hermes is fully closed (iPhone/iPad: install to Home Screen first).</div>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+                  <button type="button" class="sm-btn" id="webPushToggleButton" onclick="toggleWebPush()" style="padding:5px 10px;font-size:12px" data-i18n="web_push_enable_btn">Enable closed-app push</button>
+                  <button type="button" class="sm-btn" id="webPushTestButton" onclick="sendWebPushTest()" style="padding:5px 10px;font-size:12px" data-i18n="web_push_test_btn">Send test push</button>
+                  <span id="webPushStatus" style="font-size:11px;color:var(--muted)"></span>
+                </div>
+              </div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

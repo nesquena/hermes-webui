@@ -13643,7 +13643,7 @@ async function _gatewayAction(action){
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name, opts){
   _origSwitchSettings(name, opts);
-  if(name==='preferences') updateNotificationPermissionStatus();
+  if(name==='preferences'){ updateNotificationPermissionStatus(); updateWebPushStatus(); }
   if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
 };
 
@@ -13784,4 +13784,113 @@ function updateNotificationPermissionStatus(){
     btn.setAttribute('aria-disabled', granted?'true':'false');
   }
   if(btnWrap) btnWrap.title=label;
+}
+
+// ── Web Push (closed-app notifications; iOS/iPadOS needs the Home Screen PWA) ──
+// Opt-in: the Settings block stays hidden unless the server reports
+// /api/push/status {enabled:true} (pywebpush installed + VAPID keys configured).
+function _webPushB64ToBytes(b64){
+  const pad='='.repeat((4-b64.length%4)%4);
+  const raw=atob((b64+pad).replace(/-/g,'+').replace(/_/g,'/'));
+  const out=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) out[i]=raw.charCodeAt(i);
+  return out;
+}
+function _webPushSameKey(a,b){
+  if(!a||!b||a.byteLength!==b.length) return false;
+  const x=new Uint8Array(a);
+  for(let i=0;i<b.length;i++){ if(x[i]!==b[i]) return false; }
+  return true;
+}
+function _webPushSupported(){
+  return !!(window.isSecureContext&&'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window);
+}
+async function _webPushRegistration(){
+  if(!navigator.serviceWorker) return null;
+  return Promise.race([
+    navigator.serviceWorker.ready.catch(()=>null),
+    new Promise(res=>setTimeout(()=>res(null),4000))
+  ]);
+}
+function _webPushSetStatus(text){
+  const el=$('webPushStatus');
+  if(el) el.textContent=text||'';
+}
+async function updateWebPushStatus(){
+  const block=$('webPushSettings');
+  if(!block) return;
+  let info=null;
+  try{ info=await api('/api/push/status'); }catch(_e){ info=null; }
+  if(!info||!info.enabled){ block.style.display='none'; return; }
+  block.style.display='';
+  const toggle=$('webPushToggleButton');
+  const test=$('webPushTestButton');
+  if(!_webPushSupported()){
+    _webPushSetStatus(t('web_push_unsupported'));
+    if(toggle) toggle.disabled=true;
+    if(test) test.disabled=true;
+    return;
+  }
+  const reg=await _webPushRegistration();
+  const sub=reg?await reg.pushManager.getSubscription().catch(()=>null):null;
+  let subscribed=false;
+  if(sub){
+    try{
+      const st=await api('/api/push/status?endpoint='+encodeURIComponent(sub.endpoint));
+      subscribed=!!(st&&st.subscribed);
+    }catch(_e){ subscribed=false; }
+  }
+  if(toggle){
+    toggle.disabled=false;
+    toggle.textContent=subscribed?t('web_push_disable_btn'):t('web_push_enable_btn');
+    toggle.dataset.subscribed=subscribed?'1':'';
+  }
+  if(test) test.disabled=!subscribed;
+  const perm=('Notification' in window)?Notification.permission:'default';
+  _webPushSetStatus(subscribed?t('web_push_status_on'):(perm==='denied'?t('notifications_denied'):t('web_push_status_off')));
+}
+async function toggleWebPush(){
+  const toggle=$('webPushToggleButton');
+  if(toggle) toggle.disabled=true;
+  try{
+    if(!_webPushSupported()){ showToast(t('web_push_unsupported'),4000,'error'); return; }
+    const reg=await _webPushRegistration();
+    if(!reg){ showToast(t('web_push_no_sw'),4000,'error'); return; }
+    const existing=await reg.pushManager.getSubscription();
+    if(toggle&&toggle.dataset.subscribed==='1'){
+      if(existing){
+        await api('/api/push/subscribe',{method:'DELETE',body:JSON.stringify({endpoint:existing.endpoint})});
+        await existing.unsubscribe().catch(()=>false);
+      }
+      showToast(t('web_push_disabled_toast'),3000);
+      return;
+    }
+    // Must run inside the click gesture (iOS requires a user gesture for the prompt).
+    const perm=Notification.permission==='granted'?'granted':await Notification.requestPermission();
+    if(perm!=='granted'){ showToast(t('notifications_denied'),3500,'error'); return; }
+    const keyInfo=await api('/api/push/vapid-public-key');
+    const key=_webPushB64ToBytes(keyInfo.public_key);
+    let sub=existing;
+    let previous='';
+    if(sub&&!_webPushSameKey(sub.options&&sub.options.applicationServerKey,key)){
+      previous=sub.endpoint;
+      await sub.unsubscribe().catch(()=>false);
+      sub=null;
+    }
+    if(!sub) sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
+    await api('/api/push/subscribe',{method:'POST',body:JSON.stringify({subscription:sub.toJSON(),previous_endpoint:previous})});
+    showToast(t('web_push_enabled_toast'),3000);
+  }catch(e){
+    showToast(t('web_push_error')+': '+(e&&e.message?e.message:e),5000,'error');
+  }finally{
+    await updateWebPushStatus();
+  }
+}
+async function sendWebPushTest(){
+  try{
+    await api('/api/push/test',{method:'POST',body:'{}'});
+    showToast(t('web_push_test_sent'),4000);
+  }catch(e){
+    showToast(t('web_push_error')+': '+(e&&e.message?e.message:e),5000,'error');
+  }
 }

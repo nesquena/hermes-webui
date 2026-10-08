@@ -649,6 +649,16 @@ def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str 
     return None
 
 
+def _web_push_approval(session_key: str, approval: dict) -> None:
+    """Best-effort, non-blocking closed-app push (no-op unless Web Push is enabled)."""
+    try:
+        from api.web_push import notify_approval_required
+
+        notify_approval_required(session_key, approval)
+    except Exception:
+        pass
+
+
 def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dict | None, int]:
     """Mirror the live gateway head into WebUI polling state under a typed tag.
 
@@ -848,6 +858,8 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_pending")
+    if head:
+        _web_push_approval(session_key, head)
     return (dict(head) if head else None), total
 
 
@@ -1056,6 +1068,8 @@ def submit_pending(session_key: str, approval: dict) -> None:
         # notify arriving before T1's earlier notify with a stale count).
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_pending")
+    if total == 1:
+        _web_push_approval(session_key, head)
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism
