@@ -5,6 +5,11 @@
 
 ### Added
 
+- **Middle-click or Ctrl/Cmd-click a conversation in the sidebar to open it in a new tab.** The new tab lands directly
+  on that conversation through its existing `/session/<id>` link, the current tab stays where it is, and conversations
+  from another profile aren't opened that way. In the macOS app shell, which can't open browser tabs, a modified click
+  still opens the conversation in place instead of doing nothing. Thanks @red4711. (#7429)
+
 - **Extensions can add a small action to each message without touching transcript DOM.** A new
   `ext.messages.registerAction({ id, label, icon, roles, getPressed, onInvoke })` on the boot-trusted extension handle
   lets an extension put a Core-rendered `pin`, `bookmark` or `star` button after the built-in actions on settled user
