@@ -135,6 +135,11 @@
 
 ### Fixed
 
+- **Sending uses the model's own provider.** Picking a model now sends with that model's provider instead of a stale
+  provider left on the conversation, including qualified ids such as `provider:model`, new chats and conversations whose
+  provider was removed. Saving Settings and reopening them no longer brings back a phantom "unsaved changes" bar.
+  Thanks @happy5318. (#7865, #7860)
+
 - **OpenAI text-to-speech starts sooner and plays to the end.** Long replies are split into chunks that play as they
   arrive instead of waiting for the whole clip; a rate-limited (429) chunk is retried without stopping playback, and
   every chunk request (OpenAI and Edge) stays pinned to the profile the reply started on, even if you switch profiles
