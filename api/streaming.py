@@ -18581,6 +18581,13 @@ def _run_agent_streaming(
                     _done_payload['terminal_reason'] = 'max_iterations'
                 put('done', _done_payload)
                 _success_terminal_published = True
+                try:
+                    from api.web_push import notify_session_done
+
+                    notify_session_done(session_id, raw_session.get('messages'))
+                except Exception:
+                    logger.debug("Web Push completion fanout failed", exc_info=True)
+
                 # Emit one last metering packet for the live message-header TPS label.
                 meter_stats = meter().get_stats(stream_id)
                 meter_stats['session_id'] = session_id
