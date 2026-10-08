@@ -101,7 +101,7 @@ class TestOrdering1InFlightStartRejectedUnderLoad:
         assert PENDING_GOAL_CONTINUATION_RECORDS.get(sid, {}).get(
             "continuation_id"
         ) == "tok-first"
-        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-first") is True
+        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-first")== store.CONSUME_COMMITTED
 
 
 class TestOrdering2ClearBeforeTheRollback:

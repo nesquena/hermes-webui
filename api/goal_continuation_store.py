@@ -103,6 +103,16 @@ _RETIRED_GENERATIONS: "dict[str, int]" = {}
 # in-memory dict could not (#7862 round 6). Compared against a receipt's own
 # generation, never against the live counter, so it cannot go stale.
 _TOMBSTONES: "dict[str, int]" = {}
+# #7862 round 8 (CORE): ``consume_pending_goal_continuation`` returned a bare
+# bool, so the route could not tell "this turn is NOT the continuation" (leave
+# the intent pending, classify the turn normally) from "this turn IS the
+# continuation but the durable removal did not commit" (must refuse admission,
+# or the registry bytes survive and a restart restores a claimable record after
+# the turn was already spent). Both returned False, so a failed commit was
+# admitted as an ordinary turn. The store now answers with one of these.
+CONSUME_NOT_MATCHING = "not_matching"
+CONSUME_COMMITTED = "committed"
+CONSUME_COMMIT_FAILED = "commit_failed"
 # Durable continuation-handoff tokens (#7862 round 7, finding 2). A consume
 # deletes the durable record and keeps the in-memory rollback receipt, so a
 # process loss between that delete and
@@ -716,14 +726,18 @@ def consume_pending_goal_continuation(
     committed, the intent is left in place as well and the return is False, so
     the caller must not acknowledge the consumption.
 
-    Returns True when the intent was consumed AND durably removed. Never raises
-    into the chat path.
+    Returns one of the ``CONSUME_*`` constants: ``CONSUME_NOT_MATCHING`` when the
+    turn is not this continuation (the intent stays pending), ``CONSUME_COMMITTED``
+    when it was consumed and durably removed, and ``CONSUME_COMMIT_FAILED`` when
+    the turn IS the continuation but the durable removal did not commit — the
+    caller must refuse admission rather than treat it as an ordinary turn. Never
+    raises into the chat path.
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
     sid = str(session_id or "").strip()
     if not sid:
-        return False
+        return CONSUME_NOT_MATCHING
     with _LOCK:
         record = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
         if record is None:
@@ -732,73 +746,57 @@ def consume_pending_goal_continuation(
             # Leave it alone rather than retire an intent we cannot verify --
             # expiry bounds it, and swallowing an unrelated turn is the exact
             # data-loss bug this function exists to prevent.
-            return False
+            return CONSUME_NOT_MATCHING
         recorded_id = str(record.get("continuation_id") or "")
         request_id = str(continuation_id or "")
         if recorded_id and request_id and recorded_id != request_id:
             # A token was carried, but not THIS continuation's token: another
             # (already consumed or restarted) generation. Treat it like any
             # other non-matching turn.
-            return False
+            return CONSUME_NOT_MATCHING
         # Identity narrows the candidate set to this exact continuation; the
         # recorded prompt still has to be present (verbatim or wrapped by the
         # known forced-skill envelope), so a replayed token carrying unrelated
         # text is never swallowed.
         if not _continuation_text_matches(record.get("prompt") or "", incoming_text):
-            return False
+            return CONSUME_NOT_MATCHING
         _next_generation_unlocked()
         PENDING_GOAL_CONTINUATION.discard(sid)
         popped = PENDING_GOAL_CONTINUATION_RECORDS.pop(sid)
+        # #7862 round 8 (CORE, finding 2): the record removal and the handoff that
+        # replaces it must land in ONE os.replace. Round 7 wrote them in two
+        # passes (record gone at the first replace, handoff added at the second),
+        # so a process loss between them left records=[] handoffs=[] and the retry
+        # ran as an ordinary turn; and when the second write failed the handoff was
+        # dropped while the consume still returned True. Both halves are staged in
+        # memory first and committed together, so the durable snapshot shows either
+        # "record present, no handoff" or "record absent, handoff present" — never
+        # the empty middle.
+        _record_rollback_receipt_unlocked(sid, record, attempt_id)
+        _record_continuation_handoff_unlocked(sid, record, attempt_id)
         if not _write_registry_unlocked(
             PENDING_GOAL_CONTINUATION_RECORDS,
-            context=f"consume sid={sid}",
+            context=f"consume+handoff sid={sid}",
         ):
-            # #7862 round 7 (CORE): the durable removal did NOT commit. Put the
-            # in-memory state back so this process still describes the intent,
-            # and refuse the admission: admitting a turn whose removal is not
-            # durable means the old registry bytes stay on disk and a restart
-            # restores a claimable record after the turn was already spent.
+            # Nothing became durable: undo BOTH halves so this process still
+            # describes the pre-consume state, and refuse the admission.
+            # The handoff key must be normalised the same way the writer
+            # normalises it, or an empty attempt_id leaves the token behind
+            # under a key this pop cannot reach.
+            _CONTINUATION_HANDOFF_TOKENS.pop(
+                (sid, str(attempt_id or "") or "attempt"), None
+            )
+            _drop_rollback_receipt_unlocked(sid)
             PENDING_GOAL_CONTINUATION.add(sid)
             PENDING_GOAL_CONTINUATION_RECORDS[sid] = popped
             logger.warning(
                 "Refused to consume goal continuation for session %s: the "
-                "durable record could not be removed",
+                "durable record could not be removed atomically with its handoff",
                 sid,
             )
-            return False
+            return CONSUME_COMMIT_FAILED
         _RETIRED_LOG.append({"session_id": sid, "reason": "consumed", "at": time.time()})
-        # Keep the popped record as a rollback receipt: a chat start that is
-        # rejected AFTER the consume (stream-registration / worker-start
-        # failure, a 409) must be able to re-arm marker + record together,
-        # otherwise the retry runs as an ordinary turn and the goal loop
-        # loses its continuation. The receipt is claimed by
-        # ``pop_goal_continuation_rollback_receipt`` (rejected-start paths),
-        # dropped by ``discard_goal_continuation_rollback_receipt`` (a launch
-        # that succeeded) or when a newer intent is armed for the same session.
-        _record_rollback_receipt_unlocked(sid, record, attempt_id)
-        # #7862 round 7 (finding 2): the same admission leaves a DURABLE handoff.
-        # A consume deletes the durable record, and the rollback receipt is
-        # in-memory only -- so a process loss between here and
-        # ``_prepare_chat_start_session_for_stream`` would strand the intent
-        # with no recoverable evidence at all (cold restore: zero records, and
-        # the retry classified as an ordinary turn). The handoff token is what
-        # makes that seam crash-reconcilable: the writer persists it in the
-        # registry payload, so a cold restore can still re-adopt the recorded
-        # continuation. It is discharged on the successful launch paths
-        # (``discard_goal_continuation_handoff``).
-        _record_continuation_handoff_unlocked(sid, record, attempt_id)
-        if not _write_registry_unlocked(
-            PENDING_GOAL_CONTINUATION_RECORDS,
-            context=f"consume-handoff sid={sid}",
-        ):
-            # The handoff is not durable; drop it so no path believes it is.
-            _CONTINUATION_HANDOFF_TOKENS.pop((sid, attempt_id), None)
-            logger.warning(
-                "No durable goal-continuation handoff for session %s (attempt %s)",
-                sid,
-                attempt_id,
-            )
-        return True
+        return CONSUME_COMMITTED
 
 
 def pop_goal_continuation_rollback_receipt(

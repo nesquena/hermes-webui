@@ -142,7 +142,7 @@ class TestFailedRegistryWriteIsNotAcknowledged:
         admitted = store.consume_pending_goal_continuation(
             sid, PROMPT, "tok-f1", "att-fail-1"
         )
-        assert admitted is False, (
+        assert admitted == store.CONSUME_COMMIT_FAILED, (
             "an admitted consume reported success while its durable removal failed"
         )
 
@@ -396,7 +396,7 @@ class TestRegistryToSessionHandoffIsCrashReconcilable:
         assert sid in PENDING_GOAL_CONTINUATION
         assert PENDING_GOAL_CONTINUATION_RECORDS.get(sid, {}).get("prompt") == PROMPT
         # The retry matches on identity AND text.
-        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-hrb") is True
+        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-hrb")== store.CONSUME_COMMITTED
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +452,7 @@ class TestElapsedAgeIsNotAttemptCompletion:
 
         # So its rejection can still restore intent, and the retry consumes.
         assert store.restore_pending_goal_continuation(sid, receipt) is True
-        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-live") is True
+        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-live")== store.CONSUME_COMMITTED
 
     def test_a_live_attempt_is_reclaimed_not_rejected_after_a_sweep(
         self, clean_registry, monkeypatch

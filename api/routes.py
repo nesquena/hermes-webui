@@ -3018,6 +3018,8 @@ from api.config import (
 )
 from api import config as api_config
 from api.goal_continuation_store import (
+    CONSUME_COMMITTED,
+    CONSUME_COMMIT_FAILED,
     consume_pending_goal_continuation,
     discard_goal_continuation_handoff,
     discard_goal_continuation_rollback_receipt,
@@ -3050,6 +3052,23 @@ from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
+
+
+class _GoalContinuationCommitFailed(Exception):
+    """A matched goal continuation could not be durably removed.
+
+    #7862 round 8 (CORE): ``consume_pending_goal_continuation`` answers
+    ``CONSUME_COMMIT_FAILED`` when the turn IS the continuation but the registry
+    replacement did not commit. That is not the same as "this turn is not the
+    continuation", and it must not be admitted: the turn would be spent while the
+    old registry bytes survive, so a restart restores a claimable record. Raising
+    this keeps the failure out of the generic ``except Exception`` that used to
+    swallow it into an ordinary-turn classification.
+    """
+
+    def __init__(self, session_id: str = ""):
+        super().__init__(f"goal continuation commit failed for {session_id!r}")
+        self.session_id = session_id
 
 
 # ── Non-streaming custom-provider connection authority ───────────────────────
@@ -25009,12 +25028,13 @@ def _start_chat_stream_for_session(
         # (round-3 core finding).
         if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
             try:
-                if consume_pending_goal_continuation(
+                _consume_outcome = consume_pending_goal_continuation(
                     s.session_id,
                     msg,
                     goal_continuation_id,
                     goal_continuation_attempt_id,
-                ):
+                )
+                if _consume_outcome == CONSUME_COMMITTED:
                     goal_related = True
                     consumed_goal_continuation = True
                     # #7862 round 7 (finding 3): this start is now admitted
@@ -25027,6 +25047,23 @@ def _start_chat_stream_for_session(
                     reclaim_goal_continuation_receipt(
                         s.session_id, goal_continuation_attempt_id
                     )
+                elif _consume_outcome == CONSUME_COMMIT_FAILED:
+                    # #7862 round 8 (CORE): the turn IS the continuation, but the
+                    # durable removal did not commit. Admitting it would spend
+                    # the turn while the registry bytes survive, so a restart
+                    # restores a claimable record after the turn was already
+                    # used. Refuse the admission instead of letting it fall
+                    # through as an ordinary turn.
+                    logger.error(
+                        "Refusing chat start for session %s: the goal "
+                        "continuation was matched but could not be durably "
+                        "removed (attempt %s)",
+                        s.session_id,
+                        goal_continuation_attempt_id,
+                    )
+                    raise _GoalContinuationCommitFailed(session_id=s.session_id)
+            except _GoalContinuationCommitFailed:
+                raise
             except Exception:
                 logger.debug(
                     "Failed to consume pending goal continuation for session %s",

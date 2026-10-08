@@ -69,7 +69,7 @@ class TestReceiptSurvivesUnrelatedTraffic:
 
         a = "sess-A"
         store.arm_pending_goal_continuation(a, PROMPT, continuation_id="tok-A")
-        assert store.consume_pending_goal_continuation(a, PROMPT, "tok-A", "attempt-A") is True
+        assert store.consume_pending_goal_continuation(a, PROMPT, "tok-A", "attempt-A")== store.CONSUME_COMMITTED
 
         # 64 unrelated sessions consume, then their launches succeed (which
         # discards their receipts). This is what used to push A out.
@@ -88,7 +88,7 @@ class TestReceiptSurvivesUnrelatedTraffic:
         assert a in PENDING_GOAL_CONTINUATION
         assert PENDING_GOAL_CONTINUATION_RECORDS.get(a) is not None
         # And the retry consumes as the continuation (not a bare marker).
-        assert store.consume_pending_goal_continuation(a, PROMPT, "tok-A", "attempt-A2") is True
+        assert store.consume_pending_goal_continuation(a, PROMPT, "tok-A", "attempt-A2")== store.CONSUME_COMMITTED
 
     def test_successful_launch_discards_its_receipt(self, clean_registry):
         """A launch that got past thr.start() has no rollback consumer."""
@@ -96,7 +96,7 @@ class TestReceiptSurvivesUnrelatedTraffic:
 
         sid = "sess-success"
         store.arm_pending_goal_continuation(sid, PROMPT, continuation_id="tok-s")
-        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-s", "att-s") is True
+        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-s", "att-s")== store.CONSUME_COMMITTED
         assert store.durability_diagnostics()["pending_rollback_receipts"] == 1
         store.discard_goal_continuation_rollback_receipt(sid, "att-s")
         assert store.durability_diagnostics()["pending_rollback_receipts"] == 0
@@ -109,7 +109,7 @@ class TestReceiptSurvivesUnrelatedTraffic:
 
         sid = "sess-two-attempts"
         store.arm_pending_goal_continuation(sid, PROMPT, continuation_id="tok-1")
-        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-1", "att-1") is True
+        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-1", "att-1")== store.CONSUME_COMMITTED
         # A different attempt id must not claim it...
         assert store.pop_goal_continuation_rollback_receipt(sid, "att-other") is None
         # ...and the real owner still can.
@@ -167,7 +167,7 @@ class TestReceiptSurvivesUnrelatedTraffic:
 
         sid = "sess-retire-drops"
         store.arm_pending_goal_continuation(sid, PROMPT, continuation_id="tok-r")
-        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-r", "att-r") is True
+        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-r", "att-r")== store.CONSUME_COMMITTED
         store.retire_pending_goal_continuation(sid, reason="cleared")
         assert store.pop_goal_continuation_rollback_receipt(sid, "att-r") is None
 
@@ -181,7 +181,7 @@ class TestLateRollbackCannotUndoRetirement:
 
         sid = "sess-cleared-midflight"
         store.arm_pending_goal_continuation(sid, PROMPT, continuation_id="tok-c")
-        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-c", "att-c") is True
+        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-c", "att-c")== store.CONSUME_COMMITTED
         receipt = store.pop_goal_continuation_rollback_receipt(sid, "att-c")
         assert receipt is not None
 
@@ -200,11 +200,11 @@ class TestLateRollbackCannotUndoRetirement:
 
         sid = "sess-clear-then-arm"
         store.arm_pending_goal_continuation(sid, PROMPT, continuation_id="tok-old")
-        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-old", "att-old") is True
+        assert store.consume_pending_goal_continuation(sid, PROMPT, "tok-old", "att-old")== store.CONSUME_COMMITTED
         store.retire_pending_goal_continuation(sid, reason="cleared")
         # The goal loop arms a NEW intent after the clear.
         store.arm_pending_goal_continuation(sid, "A fresh continuation.", continuation_id="tok-new")
-        assert store.consume_pending_goal_continuation(sid, "A fresh continuation.", "tok-new", "att-new") is True
+        assert store.consume_pending_goal_continuation(sid, "A fresh continuation.", "tok-new", "att-new")== store.CONSUME_COMMITTED
         receipt = store.pop_goal_continuation_rollback_receipt(sid, "att-new")
         assert receipt is not None
         # Its rejected start rolls back normally.

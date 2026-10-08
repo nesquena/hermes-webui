@@ -150,7 +150,7 @@ class TestRestoreConsumptionIsMatchGated:
         sid = self._arm_then_simulate_restart()
 
         # The user's next message after the restart, unrelated to the goal.
-        assert store.consume_pending_goal_continuation(sid, "thanks, also what time is it?") is False
+        assert store.consume_pending_goal_continuation(sid, "thanks, also what time is it?")== store.CONSUME_NOT_MATCHING
 
         # Not consumed: the pending intent is still there for the real continuation.
         assert sid in PENDING_GOAL_CONTINUATION
@@ -164,13 +164,13 @@ class TestRestoreConsumptionIsMatchGated:
 
         sid = self._arm_then_simulate_restart()
 
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT) is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT)== store.CONSUME_COMMITTED
         assert sid not in PENDING_GOAL_CONTINUATION
         assert sid not in PENDING_GOAL_CONTINUATION_RECORDS
         assert sid not in store.load_pending_goal_continuations()
 
         # Exactly once: a replay of the same text cannot consume a second time.
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT) is False
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT)== store.CONSUME_NOT_MATCHING
 
     def test_whitespace_tolerant_but_not_widened(self, clean_registry):
         """Cosmetic whitespace differences match; different text still does not."""
@@ -180,12 +180,12 @@ class TestRestoreConsumptionIsMatchGated:
 
         assert store.consume_pending_goal_continuation(
             sid, "  Continue the goal:   finish it.  "
-        ) is True
+        ) == store.CONSUME_COMMITTED
 
         sid2 = self._arm_then_simulate_restart(prompt="Continue the goal.", sid="sess-restore-2")
         assert store.consume_pending_goal_continuation(
             sid2, "Continue the goal please, but differently."
-        ) is False
+        ) == store.CONSUME_NOT_MATCHING
 
     def test_promptless_record_is_never_consumed(self, clean_registry):
         """A v1-upgraded record carries no prompt, so it cannot be matched safely.
@@ -199,7 +199,7 @@ class TestRestoreConsumptionIsMatchGated:
         store._PENDING_GOAL_FILE.write_text(json.dumps(["sess-v1"]), encoding="utf-8")
         assert store.restore_goal_continuations() == 1
 
-        assert store.consume_pending_goal_continuation("sess-v1", "anything at all") is False
+        assert store.consume_pending_goal_continuation("sess-v1", "anything at all")== store.CONSUME_NOT_MATCHING
         assert "sess-v1" in PENDING_GOAL_CONTINUATION
         assert "sess-v1" in PENDING_GOAL_CONTINUATION_RECORDS
 
@@ -212,18 +212,18 @@ class TestRestoreConsumptionIsMatchGated:
         store.arm_pending_goal_continuation("sess-2", "Do the second thing.", reason="goal_continue")
 
         # sess-2 sends its own continuation -> only sess-2 is consumed.
-        assert store.consume_pending_goal_continuation("sess-2", "Do the second thing.") is True
+        assert store.consume_pending_goal_continuation("sess-2", "Do the second thing.")== store.CONSUME_COMMITTED
         assert "sess-2" not in PENDING_GOAL_CONTINUATION
         assert "sess-1" in PENDING_GOAL_CONTINUATION
         assert "sess-1" in PENDING_GOAL_CONTINUATION_RECORDS
 
         # sess-1's own continuation still works afterwards.
-        assert store.consume_pending_goal_continuation("sess-1", "Do the first thing.") is True
+        assert store.consume_pending_goal_continuation("sess-1", "Do the first thing.")== store.CONSUME_COMMITTED
 
     def test_unknown_session_and_empty_ids_are_noops(self, clean_registry):
         from api import goal_continuation_store as store
-        assert store.consume_pending_goal_continuation("sess-nope", "hello") is False
-        assert store.consume_pending_goal_continuation("", "hello") is False
+        assert store.consume_pending_goal_continuation("sess-nope", "hello")== store.CONSUME_NOT_MATCHING
+        assert store.consume_pending_goal_continuation("", "hello")== store.CONSUME_NOT_MATCHING
 
 
 class TestConcurrentWriters:
@@ -548,7 +548,7 @@ class TestRejectedStartRollback:
         assert sid in PENDING_GOAL_CONTINUATION
         assert PENDING_GOAL_CONTINUATION_RECORDS.get(sid) is not None
         # 2. the consume for the start that is about to be rejected
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-1") is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-1")== store.CONSUME_COMMITTED
         assert sid not in PENDING_GOAL_CONTINUATION
         assert PENDING_GOAL_CONTINUATION_RECORDS.get(sid) is None
         # 3. rollback, as restore_consumed_continuation_markers() now does:
@@ -561,7 +561,7 @@ class TestRejectedStartRollback:
         assert PENDING_GOAL_CONTINUATION_RECORDS.get(sid) is not None
         assert PENDING_GOAL_CONTINUATION_RECORDS[sid]["prompt"] == self.PROMPT
         # 4. the retry still consumes as the continuation
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-1") is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-1")== store.CONSUME_COMMITTED
 
     def test_rollback_survives_the_disk_registry(self, clean_registry):
         """The restored intent is durable, not just an in-memory marker."""
@@ -569,7 +569,7 @@ class TestRejectedStartRollback:
 
         sid = "sess-durable-rollback"
         store.arm_pending_goal_continuation(sid, self.PROMPT, continuation_id="tok-2")
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-2") is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-2")== store.CONSUME_COMMITTED
         receipt = store.pop_goal_continuation_rollback_receipt(sid)
         assert receipt is not None
         assert store.restore_pending_goal_continuation(sid, receipt) is True
@@ -577,7 +577,7 @@ class TestRejectedStartRollback:
         disk = store.load_pending_goal_continuations()
         assert disk[sid]["prompt"] == self.PROMPT
         assert disk[sid]["continuation_id"] == "tok-2"
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-2") is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-2")== store.CONSUME_COMMITTED
         assert store.load_pending_goal_continuations() == {}
     def test_rollback_receipt_is_single_use(self, clean_registry):
         """Popping the receipt twice yields None the second time."""
@@ -585,7 +585,7 @@ class TestRejectedStartRollback:
 
         sid = "sess-single-use"
         store.arm_pending_goal_continuation(sid, self.PROMPT)
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT) is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT)== store.CONSUME_COMMITTED
         first = store.pop_goal_continuation_rollback_receipt(sid)
         assert first is not None
         assert store.pop_goal_continuation_rollback_receipt(sid) is None
@@ -598,7 +598,7 @@ class TestRejectedStartRollback:
 
         sid = "sess-supersede"
         store.arm_pending_goal_continuation(sid, self.PROMPT, continuation_id="tok-old")
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-old") is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-old")== store.CONSUME_COMMITTED
         # A newer intent arrives (e.g. the goal loop queued a fresh one).
         store.arm_pending_goal_continuation(
             sid, "A NEWER continuation prompt.", continuation_id="tok-new"
@@ -609,7 +609,7 @@ class TestRejectedStartRollback:
         assert PENDING_GOAL_CONTINUATION_RECORDS[sid]["prompt"] == "A NEWER continuation prompt."
         assert store.consume_pending_goal_continuation(
             sid, "A NEWER continuation prompt.", "tok-new"
-        ) is True
+        ) == store.CONSUME_COMMITTED
 
     def test_stale_receipt_cannot_overwrite_newer_generation(self, clean_registry):
         """Even a hand-held receipt must not clobber a newer live intent."""
@@ -618,7 +618,7 @@ class TestRejectedStartRollback:
 
         sid = "sess-gen-guard"
         store.arm_pending_goal_continuation(sid, self.PROMPT, continuation_id="tok-old")
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-old") is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-old")== store.CONSUME_COMMITTED
         receipt = store.pop_goal_continuation_rollback_receipt(sid)
         assert receipt is not None
         # Newer intent armed before the (late) rollback tries to land.
@@ -696,11 +696,11 @@ class TestRejectedStartRollback:
 
         sid = "sess-unrelated"
         store.arm_pending_goal_continuation(sid, self.PROMPT, continuation_id="tok-3")
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-3") is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT, "tok-3")== store.CONSUME_COMMITTED
         receipt = store.pop_goal_continuation_rollback_receipt(sid)
         assert store.restore_pending_goal_continuation(sid, receipt) is True
         # An unrelated human message still does NOT consume the intent.
-        assert store.consume_pending_goal_continuation(sid, "unrelated chatter", "") is False
+        assert store.consume_pending_goal_continuation(sid, "unrelated chatter", "")== store.CONSUME_NOT_MATCHING
 
     def test_pending_receipts_are_observable_in_diagnostics(self, clean_registry):
         """Pending rollback receipts surface in durability_diagnostics."""
@@ -709,7 +709,7 @@ class TestRejectedStartRollback:
         sid = "sess-diag"
         store.arm_pending_goal_continuation(sid, self.PROMPT)
         assert store.durability_diagnostics()["pending_rollback_receipts"] == 0
-        assert store.consume_pending_goal_continuation(sid, self.PROMPT) is True
+        assert store.consume_pending_goal_continuation(sid, self.PROMPT)== store.CONSUME_COMMITTED
         assert store.durability_diagnostics()["pending_rollback_receipts"] == 1
         assert store.pop_goal_continuation_rollback_receipt(sid) is not None
         assert store.durability_diagnostics()["pending_rollback_receipts"] == 0

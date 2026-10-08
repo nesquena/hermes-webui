@@ -115,14 +115,14 @@ class TestIdIdentityConsumption:
         wrapped = _wrapped(self.PROMPT)
 
         assert (
-            store.consume_pending_goal_continuation(sid, wrapped, self.TOKEN) is True
+            store.consume_pending_goal_continuation(sid, wrapped, self.TOKEN)== store.CONSUME_COMMITTED
         )
         assert sid not in PENDING_GOAL_CONTINUATION
         assert sid not in PENDING_GOAL_CONTINUATION_RECORDS
         assert sid not in store.load_pending_goal_continuations()
         # Exactly once: a replay of the same wrapped text + token is rejected.
         assert (
-            store.consume_pending_goal_continuation(sid, wrapped, self.TOKEN) is False
+            store.consume_pending_goal_continuation(sid, wrapped, self.TOKEN)== store.CONSUME_NOT_MATCHING
         )
 
     def test_wrapped_text_without_token_still_matches(self):
@@ -130,7 +130,7 @@ class TestIdIdentityConsumption:
         from api import goal_continuation_store as store
 
         sid = self._arm_simulate_restart()
-        assert store.consume_pending_goal_continuation(sid, _wrapped(self.PROMPT)) is True
+        assert store.consume_pending_goal_continuation(sid, _wrapped(self.PROMPT))== store.CONSUME_COMMITTED
 
     def test_wrong_token_behaves_like_unrelated_message(self):
         from api import goal_continuation_store as store
@@ -141,7 +141,7 @@ class TestIdIdentityConsumption:
             store.consume_pending_goal_continuation(
                 sid, _wrapped(self.PROMPT), "gc-sess-use-STALE0000"
             )
-            is False
+            == store.CONSUME_NOT_MATCHING
         )
         assert sid in PENDING_GOAL_CONTINUATION
         assert sid in PENDING_GOAL_CONTINUATION_RECORDS
@@ -161,7 +161,7 @@ class TestIdIdentityConsumption:
             store.consume_pending_goal_continuation(
                 sid, "thanks, also what time is it?", self.TOKEN
             )
-            is False
+            == store.CONSUME_NOT_MATCHING
         )
         assert sid in PENDING_GOAL_CONTINUATION
 
@@ -171,7 +171,7 @@ class TestIdIdentityConsumption:
         sid = self._arm_simulate_restart()
         assert store.load_pending_goal_continuations()[sid]["continuation_id"] == self.TOKEN
         assert (
-            store.consume_pending_goal_continuation(sid, self.PROMPT, self.TOKEN) is True
+            store.consume_pending_goal_continuation(sid, self.PROMPT, self.TOKEN)== store.CONSUME_COMMITTED
         )
 
     def test_restore_then_unrelated_message_stays_pending(self):
@@ -179,7 +179,7 @@ class TestIdIdentityConsumption:
         from api.config import PENDING_GOAL_CONTINUATION
 
         sid = self._arm_simulate_restart()
-        assert store.consume_pending_goal_continuation(sid, "hello, unrelated") is False
+        assert store.consume_pending_goal_continuation(sid, "hello, unrelated")== store.CONSUME_NOT_MATCHING
         assert sid in PENDING_GOAL_CONTINUATION
 
 
