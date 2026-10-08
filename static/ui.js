@@ -3090,7 +3090,12 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   fitBtn.className = 'img-lightbox-fit';
   fitBtn.setAttribute('aria-label', t('img_lightbox_fit_title'));
   fitBtn.setAttribute('title', t('img_lightbox_fit_title'));
-  fitBtn.textContent = t('img_lightbox_fit');
+  // Icon-only 36px circle matching the close button: the shared `fit` glyph
+  // from the Mermaid icon set removes the text pill that overlapped the image
+  // band and lost legibility over light images, and is language-neutral. The
+  // translated title/aria-label above keep the control announced for screen
+  // readers (maintainer visual review of #6896, 2026-10-08).
+  fitBtn.innerHTML = _mermaidViewerIcon('fit');
   fitBtn.onclick = e => { e.stopPropagation(); if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); };
   lb.appendChild(viewport);
   lb.appendChild(cls);

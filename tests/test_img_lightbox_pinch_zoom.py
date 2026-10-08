@@ -11,6 +11,7 @@ lightbox stage.
 This file pins the wiring at the source level, mirroring
 tests/test_issue4075_mermaid_lightbox.py.
 """
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -321,13 +322,21 @@ class TestBackdropDismissalPreserved:
             src = UI.read_text(encoding="utf-8")
             assert "fitBtn" in src
             assert "fitBtn.className = 'img-lightbox-fit';" in src
+            assert "_mermaidViewerIcon('fit')" in src
             assert "fitBtn.onclick" in src
             assert "lb._zoom.fit" in src
             assert "lb.appendChild(fitBtn);" in src
 
         def test_fit_button_css(self):
-            """The .img-lightbox-fit selector must exist in style.css with
-            positioning and hover state matching the lightbox button style."""
+            """The .img-lightbox-fit selector must exist in style.css as a
+            36px circle matching the close button, with the counter's dark
+            recipe for legibility over light images."""
             css = STYLE.read_text(encoding="utf-8")
             assert ".img-lightbox-fit{" in css
             assert ".img-lightbox-fit:hover" in css
+            assert ".img-lightbox-fit svg{" in css
+            rule = re.search(r"\.img-lightbox-fit\s*\{[^}]*\}", css).group(0)
+            assert "width:36px" in rule
+            assert "height:36px" in rule
+            assert "border-radius:50%" in rule
+            assert "background:rgba(0,0,0,.5)" in rule

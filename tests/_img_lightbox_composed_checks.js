@@ -18,9 +18,12 @@
  *   3. left-edge touch inside the lightbox never arms the sidebar swipe
  *      recogniser (with a positive control proving the recogniser is live)
  *   4. Fit click + F / + / = / - / _ change and reset production zoom state
- *   5. selected non-English locale renders the Fit button text/title/aria
- *   6. measured 44x44 touch target and Fit/close non-overlap at desktop and
- *      mobile widths (real getBoundingClientRect, not source strings)
+ *   5. selected non-English locale localizes the Fit control's title/aria and
+ *      it renders the shared fit glyph
+ *   6. the Fit control measures as the close button's 36px circle with the
+ *      counter's dark recipe behind both, and the two never overlap at
+ *      desktop and mobile widths (real getBoundingClientRect, not source
+ *      strings)
  *   7. the 2026-10-05 greptile follow-ups: a second pointer cannot take the
  *      pan over, the document-wide shortcuts never hijack a background
  *      editable field, focus moves into the dialog on open, and a failed
@@ -711,34 +714,51 @@
       );
     });
 
-    // 6. Locale rendering of the Fit control.
+    // 6. Locale rendering of the Fit control. The control is icon-only since
+    //    the 2026-10-08 visual review: it renders the shared fit glyph and its
+    //    accessible name (title + aria-label) stays translated.
     await run("locale_zh_renders", bucket, async function () {
       window.setLocale("zh");
       var box = await openBox(IMG_W, IMG_H);
-      var zh = "\u9002\u5e94";
-      assert_(box.fitBtn.textContent === zh, "zh Fit text expected " + zh + " got " + box.fitBtn.textContent);
+      assert_(box.fitBtn.querySelector("svg"), "Fit button must render the shared fit icon");
+      var zh = "\u91cd\u7f6e\u7f29\u653e\u4ee5\u9002\u5e94 (F)";
       var title = box.fitBtn.getAttribute("title");
       var aria = box.fitBtn.getAttribute("aria-label");
-      assert_(title && title !== "Reset zoom to fit (F)" && title !== "Fit", "zh title must be localized: " + title);
+      assert_(title === zh, "zh Fit title expected " + zh + " got " + title);
       assert_(aria === title, "aria-label must mirror the localized title");
     });
 
     await run("locale_ja_renders", bucket, async function () {
       window.setLocale("ja");
       var box = await openBox(IMG_W, IMG_H);
-      var ja = "\u30d5\u30a3\u30c3\u30c8";
-      assert_(box.fitBtn.textContent === ja, "ja Fit text expected " + ja + " got " + box.fitBtn.textContent);
+      assert_(box.fitBtn.querySelector("svg"), "Fit button must render the shared fit icon");
+      var ja = "\u30ba\u30fc\u30e0\u3092\u30d5\u30a3\u30c3\u30c8\u306b\u30ea\u30bb\u30c3\u30c8 (F)";
+      assert_(box.fitBtn.getAttribute("title") === ja,
+        "ja Fit title expected " + ja + " got " + box.fitBtn.getAttribute("title"));
       window.setLocale("en");
     });
 
-    // 7. Measured geometry at the desktop width.
-    await run("geometry_min_touch_target", bucket, async function () {
+    // 7. Measured geometry + dark recipe at the desktop width. Fit must be the
+    //    close button's 36px circle (maintainer visual review of #6896,
+    //    2026-10-08: the old 44px text pill overlapped the image band).
+    await run("geometry_circle_size", bucket, async function () {
       var box = await openBox(IMG_W, IMG_H);
       var fit = box.fitBtn.getBoundingClientRect();
-      assert_(fit.width >= 44 - 0.5, "Fit button measured width " + fit.width + " < 44");
-      assert_(fit.height >= 44 - 0.5, "Fit button measured height " + fit.height + "<44");
-      var style = getComputedStyle(box.fitBtn);
-      assert_(parseFloat(style.minHeight) >= 44, "min-height contract lost: " + style.minHeight);
+      var close = box.closeBtn.getBoundingClientRect();
+      assert_(Math.abs(fit.width - 36) <= 0.5, "Fit circle measured width " + fit.width + " != 36");
+      assert_(Math.abs(fit.height - 36) <= 0.5, "Fit circle measured height " + fit.height + " != 36");
+      assert_(Math.abs(fit.width - close.width) <= 0.5 && Math.abs(fit.height - close.height) <= 0.5,
+        "Fit must match the close circle: fit " + fit.width + "x" + fit.height + " close " + close.width + "x" + close.height);
+      assert_(Math.abs(fit.top - close.top) <= 0.5, "Fit and close must share a top edge: " + fit.top + " vs " + close.top);
+      var icon = box.fitBtn.querySelector("svg");
+      assert_(icon, "Fit must render the shared fit icon");
+      var glyph = icon.querySelector("path") && icon.querySelector("path").getAttribute("d");
+      assert_(glyph && glyph.indexOf("M4 9V4h5") === 0, "Fit must use the shared Mermaid fit glyph, got " + glyph);
+      // The counter's dark recipe, so both controls stay legible over light images.
+      assert_(getComputedStyle(box.fitBtn).backgroundColor === "rgba(0, 0, 0, 0.5)",
+        "Fit must use the counter's dark background, got " + getComputedStyle(box.fitBtn).backgroundColor);
+      assert_(getComputedStyle(box.closeBtn).backgroundColor === "rgba(0, 0, 0, 0.5)",
+        "Close must use the counter's dark background, got " + getComputedStyle(box.closeBtn).backgroundColor);
     });
 
     await run("geometry_no_overlap", bucket, async function () {
@@ -752,11 +772,15 @@
   }
 
   async function runMobile(bucket) {
-    await run("geometry_min_touch_target", bucket, async function () {
+    await run("geometry_circle_size", bucket, async function () {
       var box = await openBox(IMG_W, IMG_H);
       var fit = box.fitBtn.getBoundingClientRect();
-      assert_(fit.width >= 44 - 0.5, "mobile Fit button measured width " + fit.width + " < 44");
-      assert_(fit.height >= 44 - 0.5, "mobile Fit button measured height " + fit.height + " < 44");
+      var close = box.closeBtn.getBoundingClientRect();
+      assert_(Math.abs(fit.width - 36) <= 0.5, "mobile Fit circle measured width " + fit.width + " != 36");
+      assert_(Math.abs(fit.height - 36) <= 0.5, "mobile Fit circle measured height " + fit.height + " != 36");
+      assert_(Math.abs(fit.width - close.width) <= 0.5 && Math.abs(fit.height - close.height) <= 0.5,
+        "mobile Fit must match the close circle: fit " + fit.width + "x" + fit.height + " close " + close.width + "x" + close.height);
+      assert_(Math.abs(fit.top - close.top) <= 0.5, "mobile Fit and close must share a top edge: " + fit.top + " vs " + close.top);
     });
 
     await run("geometry_no_overlap", bucket, async function () {

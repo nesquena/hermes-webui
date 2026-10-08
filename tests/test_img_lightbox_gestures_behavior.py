@@ -133,22 +133,32 @@ class TestKeyboardAndButton:
 
     def test_fit_button_uses_i18n(self):
         src = UI.read_text(encoding="utf-8")
-        assert "t('img_lightbox_fit')" in src
+        # Icon-only control (maintainer visual review of #6896, 2026-10-08):
+        # the accessible name is the translated title and the glyph is the
+        # shared Mermaid `fit` icon, so it needs no visible text of its own.
         assert "t('img_lightbox_fit_title')" in src
+        assert "_mermaidViewerIcon('fit')" in src
 
     def test_non_english_label_exists(self):
         i18n = I18N.read_text(encoding="utf-8")
-        assert "img_lightbox_fit" in i18n
-        assert "img_lightbox_fit: '\u9002\u5e94'" in i18n
+        assert "img_lightbox_fit_title" in i18n
+        assert "img_lightbox_fit_title: '\u91cd\u7f6e\u7f29\u653e\u4ee5\u9002\u5e94 (F)'" in i18n
         assert "Reset zoom to fit (F)" in i18n
 
     def test_fit_button_geometry_and_focus_scoped_to_rule(self):
         rule = _fit_rule()
-        assert "min-height:44px" in rule, "fit rule must have min-height:44px"
-        assert "min-width:44px" in rule, "fit rule must have min-width:44px"
-        assert "height:44px" in rule, "fit rule must have height:44px"
+        # A 36px circle matching .img-lightbox-close -- the old 44px text pill
+        # overlapped the image band and lost legibility over light images.
+        assert "width:36px" in rule, "fit rule must be a 36px circle"
+        assert "height:36px" in rule, "fit rule must be a 36px circle"
+        assert "border-radius:50%" in rule, "fit rule must match the close circle"
+        # The same dark recipe as the counter, so both controls stay legible
+        # over light images at every width.
+        assert "background:rgba(0,0,0,.5)" in rule, "fit rule must use the counter's dark recipe"
         css = STYLE.read_text(encoding="utf-8")
         assert ".img-lightbox-fit:focus-visible" in css
+        # The shared Mermaid `fit` glyph is stroked, not filled.
+        assert ".img-lightbox-fit svg{" in css
         assert "safe-area-inset-top" in css
         assert "safe-area-inset-right" in css
         # rule itself must reference safe-area so the button, not some other element, is safe-area-aware

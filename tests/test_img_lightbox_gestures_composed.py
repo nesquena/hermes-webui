@@ -695,19 +695,19 @@ class TestComposedReworkup20261006:
 
 
 class TestComposedI18n:
-    def test_zh_locale_renders_fit_text_title_aria(self, composed):
+    def test_zh_locale_localizes_fit_title_and_renders_icon(self, composed):
         _check(composed.desktop, "locale_zh_renders")
 
-    def test_ja_locale_renders_fit_text(self, composed):
+    def test_ja_locale_localizes_fit_title_and_renders_icon(self, composed):
         _check(composed.desktop, "locale_ja_renders")
 
 
 class TestComposedGeometry:
-    def test_fit_button_meets_44px_touch_target_on_desktop(self, composed):
-        _check(composed.desktop, "geometry_min_touch_target")
+    def test_fit_button_matches_close_circle_on_desktop(self, composed):
+        _check(composed.desktop, "geometry_circle_size")
 
-    def test_fit_button_meets_44px_touch_target_on_mobile(self, composed):
-        _check(composed.mobile, "geometry_min_touch_target")
+    def test_fit_button_matches_close_circle_on_mobile(self, composed):
+        _check(composed.mobile, "geometry_circle_size")
 
     def test_fit_and_close_do_not_overlap_on_desktop(self, composed):
         _check(composed.desktop, "geometry_no_overlap")
@@ -742,5 +742,5 @@ class TestComposedGeometry:
         assert measured["focusVisible"] is True, "keyboard focus must produce a :focus-visible state"
         assert measured["outlineStyle"] != "none", "focus-visible must render an outline"
         assert measured["outlineWidth"] >= 2, f"focus outline too thin: {measured['outlineWidth']}"
-        assert measured["width"] >= 44 - 0.5, f"focused Fit width {measured['width']} < 44"
-        assert measured["height"] >= 44 - 0.5, f"focused Fit height {measured['height']} < 44"
+        assert abs(measured["width"] - 36) <= 0.5, f"focused Fit circle width {measured['width']} != 36"
+        assert abs(measured["height"] - 36) <= 0.5, f"focused Fit circle height {measured['height']} != 36"
