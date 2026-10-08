@@ -3990,7 +3990,15 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         await _applyPendingPanelIntent();
         return;
       }
-      await loadSession(saved, {preserveActiveInput:true});
+      // A child row's new-tab link marks its URL exact (`?exact=1`) so this new
+      // tab lands on that child instead of folding it into its compressed
+      // parent's lineage row (#7429 review 2026-10-08). Ordinary deep links —
+      // e.g. a historical lineage segment URL — keep landing on the tip.
+      if(!!urlSession&&typeof _sessionUrlRequestsExactTarget==='function'&&_sessionUrlRequestsExactTarget()){
+        await loadSession(saved, {preserveActiveInput:true, skipLineageResolve:true});
+      }else{
+        await loadSession(saved, {preserveActiveInput:true});
+      }
       // Hard refresh starts from the static HTML model list. Hydrate the live
       // catalog after the saved session is known, then re-apply that session's
       // model before S._bootReady lets syncModelChip reveal the composer label.
