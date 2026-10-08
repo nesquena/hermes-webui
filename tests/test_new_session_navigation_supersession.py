@@ -658,6 +658,11 @@ def test_late_navigation_supersedes_created_session(
         sr = boot.rindex("const SpeechRecognition=window.SpeechRecognition")
         start = boot.rindex("(function(){", 0, sr)
         end = boot.index("\n})();", boot.index("window._voiceModeImmediateSend=_voiceModeSend;")) + len("\n})();")
+        # The voice IIFE calls the composer-owner helper declared immediately
+        # above it in boot.js, so the composed slice must carry that
+        # declaration too (same composition as _voice_mode_block()).
+        owner_start = boot.index("function _composerProducerOwnerState(")
+        owner_end = boot.index("\n\n(function(){", owner_start)
         page.evaluate(r"""() => {
           document.body.insertAdjacentHTML('beforeend', '<div id="voiceModeBar"></div><div id="voiceModeIndicator"></div><div id="voiceModeLabel"></div>');
           window.SpeechRecognition = class { start() {} abort() {} stop() {} };
@@ -667,7 +672,7 @@ def test_late_navigation_supersedes_created_session(
           window._clearBrowserTtsRecovery = () => {};
           window.stopTTS = () => {};
         }""")
-        page.add_script_tag(content=boot[start:end])
+        page.add_script_tag(content=boot[owner_start:owner_end] + "\n" + boot[start:end])
         page.evaluate("() => { $('btnVoiceMode').onclick(); window._voiceModeImmediateSend(); }")
     elif worktree is not None:
         page.evaluate("() => { window.__sendDone = send().catch(e => { window.__actionError = String(e.stack || e); }); }")
