@@ -26,6 +26,7 @@ pkgs.stdenv.mkDerivation {
     cp "${./../bootstrap.py}" "$out/${runtimeDir}/bootstrap.py"
     cp "${./../server.py}" "$out/${runtimeDir}/server.py"
     cp "${./../mcp_server.py}" "$out/${runtimeDir}/mcp_server.py"
+    cp "${./../managed_agent_startup.py}" "$out/${runtimeDir}/managed_agent_startup.py"
     cp "${./../requirements.txt}" "$out/${runtimeDir}/requirements.txt"
     cp -r "${./../api}" "$out/${runtimeDir}/api"
     chmod u+w "$out/${runtimeDir}/api"

@@ -39,7 +39,19 @@ def env(tmp_path: Path, monkeypatch):
     saved_cfg = dict(cfg._cfg_cache)
     cfg.invalidate_models_cache(delete_disk=False)
     cfg.reload_config()  # the default profile's config is loaded, as at server boot
+    workers = []
+    original_start = threading.Thread.start
+
+    def start(thread, *args, **kwargs):
+        if thread.name == "models-catalog-rebuild":
+            workers.append(thread)
+        return original_start(thread, *args, **kwargs)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
     yield SimpleNamespace(home=demo_home, cache=tmp_path / "models_cache.demo.json")
+    for thread in workers:
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "catalog worker outlived profile test"
     profiles.clear_request_profile()
     cfg.invalidate_models_cache(delete_disk=False)
     cfg._cfg_cache.clear()
@@ -77,7 +89,14 @@ def _switch_to_demo_and_fetch() -> str:
 def _write_plugin(home: Path, version: str = "1.0.0", *, flat: bool = False, code: str | None = None, sub: str | None = None, kind: str = "model-provider") -> Path:
     d = home / "plugins" / ("" if flat else "model-providers") / "acme"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "plugin.yaml").write_text(f"name: acme\nkind: {kind}\nversion: {version}\n", encoding="utf-8")
+    manifest = d / "plugin.yaml"
+    # The cache contract uses (mtime_ns, size), not manifest content. A same-size
+    # version bump within one filesystem clock tick must explicitly advance the
+    # fixture's stat identity, just like _write_demo_config does for config.yaml.
+    previous_mtime = manifest.stat().st_mtime_ns if manifest.exists() else 0
+    manifest.write_text(f"name: acme\nkind: {kind}\nversion: {version}\n", encoding="utf-8")
+    stamp = max(manifest.stat().st_mtime_ns, previous_mtime + 1_000_000_000)
+    os.utime(manifest, ns=(stamp, stamp))
     for name, text in (("__init__.py", code), ("models.py", sub)):
         if text is not None:
             (d / name).write_text(text, encoding="utf-8")

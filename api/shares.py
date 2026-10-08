@@ -9,6 +9,7 @@ links do not leak local workspace paths, profile details, or raw tool payloads.
 from __future__ import annotations
 
 import base64
+import binascii
 import html
 import io
 import json
@@ -24,7 +25,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from api.config import STATE_DIR
-from api.helpers import redact_session_data
+from api.helpers import _json_response_body, redact_session_data, split_media_token_ref
 # _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
 # force=True + local fallback regex). Unlike redact_session_data it does NOT
 # consult the user-toggleable api_redact_enabled setting — a public share is a
@@ -52,16 +53,16 @@ def _share_path(token: str) -> Path:
 
 
 def _write_json_atomic(path: Path, payload: dict) -> None:
+    body = _json_response_body(payload, pretty=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         dir=str(path.parent),
         prefix=f"{path.stem}.",
         suffix=".tmp",
-        text=True,
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(body)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_name, path)
@@ -120,9 +121,28 @@ def _redact_share_paths(text: str, extra_paths) -> str:
 # Excludes MEDIA: followed by http/https URLs so external images pass
 # through unchanged.  file:// references are NOT matched here — they are
 # always rejected at the public-share boundary (absolute, un-scoped).
+# `data:` URIs DO match: _replace_ref() routes them to _embed_share_data_uri(),
+# which applies the same public-share policy as a local file (raster MIME
+# allow-list, byte cap, magic-byte check) and never touches the filesystem.
+# Feeding a multi-KB base64 blob to Path(...).resolve()/stat() raised OSError
+# ENAMETOOLONG (errno 36) and 500'd share creation (#7949); passing every data:
+# URI through unchanged would instead republish arbitrary bytes (text/plain,
+# octet-stream, SVG) that credential redaction cannot see.
 _SHARE_MEDIA_RE = re.compile(
     r"MEDIA:(?!https?://)([^\s\)\]>]+)"
 )
+
+# Strict shape for an inline data URI: data:<type/subtype>[;param...];base64,<payload>.
+# Parameters (e.g. charset, name) are tolerated before the mandatory ;base64.
+_DATA_URI_RE = re.compile(
+    r"^data:(?P<mime>[a-z0-9.+-]+/[a-z0-9.+-]+)(?P<params>(?:;[^;,]*)*?);base64,(?P<payload>[A-Za-z0-9+/]*={0,2})$",
+    re.IGNORECASE,
+)
+# Normalise common aliases to the canonical names used by _SHARE_ALLOWED_MIME_TYPES.
+_DATA_URI_MIME_ALIASES = {"image/jpg": "image/jpeg", "image/pjpeg": "image/jpeg"}
+# Upper bound on the ENCODED payload, checked before decoding so an oversized
+# blob is refused without allocating its decoded bytes.
+_SHARE_EMBED_MAX_B64_CHARS = ((512 * 1024 + 2) // 3) * 4
 
 # Max size (in bytes) for files we'll embed as base64 in a share snapshot.
 _SHARE_EMBED_MAX_BYTES = 512 * 1024  # 512 KiB
@@ -236,6 +256,44 @@ def _sanitize_svg_bytes(data: bytes) -> bytes:
     return buf.getvalue()
 
 
+def _embed_share_data_uri(raw: str) -> str:
+    """Validate an inline ``data:`` media reference for a public share.
+
+    Applies the same policy as an embedded local file: only the raster types in
+    ``_SHARE_ALLOWED_MIME_TYPES``, strictly valid base64, at most
+    ``_SHARE_EMBED_MAX_BYTES`` decoded, and magic bytes that match the declared
+    type. A valid image is re-emitted as a canonical ``<img>`` built from the
+    decoded bytes; anything else (non-image, SVG, malformed, oversized,
+    mismatched magic, non-base64) becomes ``_PLACEHOLDER`` so none of its bytes
+    reach the public snapshot. Never touches the filesystem (#7949).
+    """
+    if len(raw) > _SHARE_EMBED_MAX_B64_CHARS + 256:
+        return _PLACEHOLDER
+    m = _DATA_URI_RE.match(raw)
+    if not m:
+        return _PLACEHOLDER
+    mime_type = m.group("mime").lower()
+    mime_type = _DATA_URI_MIME_ALIASES.get(mime_type, mime_type)
+    if mime_type not in _SHARE_ALLOWED_MIME_TYPES:
+        return _PLACEHOLDER
+    payload = m.group("payload")
+    if not payload or len(payload) > _SHARE_EMBED_MAX_B64_CHARS:
+        return _PLACEHOLDER
+    try:
+        data = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        return _PLACEHOLDER
+    if not data or len(data) > _SHARE_EMBED_MAX_BYTES:
+        return _PLACEHOLDER
+    if not _check_image_magic(data, mime_type):
+        return _PLACEHOLDER
+    b64 = base64.b64encode(data).decode("ascii")
+    return (
+        f'<img src="data:{mime_type};base64,{b64}"'
+        f' class="msg-media-img" alt="image" loading="lazy">'
+    )
+
+
 def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> str:
     """Find local MEDIA: references and replace them with inline <img> tags.
 
@@ -266,52 +324,71 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
         if raw.startswith("file://"):
             return None
 
+        # Defensive length / newline guard (#7949). A real local attachment
+        # path is short; an over-long or newline-bearing token (e.g. a
+        # data:...;base64,<blob> URI that slipped past the caller) is never a
+        # valid file and must never be handed to the filesystem — a stat() on
+        # an over-length path raises OSError ENAMETOOLONG (errno 36), and that
+        # stat happens inside .is_file() below, OUTSIDE the resolve()
+        # try/except, so the error would otherwise escape and 500 the caller.
+        # 4096 comfortably exceeds any real PATH_MAX-bounded attachment path.
+        if len(raw) > 4096 or "\n" in raw or "\x00" in raw:
+            return None
+
         # --- Absolute paths: resolve as-is, then allow-list check ------------
         if raw.startswith("/") or raw.startswith("~"):
             try:
                 p = Path(raw).expanduser().resolve(strict=False)
+                if not allowed or not any(p.is_relative_to(r) for r in allowed):
+                    return None
+                return p if p.is_file() else None
             except (OSError, ValueError, RuntimeError):
                 return None
-            if not allowed or not any(p.is_relative_to(r) for r in allowed):
-                return None
-            return p if p.is_file() else None
 
         # --- Relative paths: try each allowed root as the anchor -------------
         for root in allowed:
             try:
                 candidate = (root / raw).resolve(strict=False)
+                # Path traversal guard: resolved path must still be under root.
+                if not candidate.is_relative_to(root):
+                    continue
+                if candidate.is_file():
+                    return candidate
             except (OSError, ValueError, RuntimeError):
                 continue
-            # Path traversal guard: resolved path must still be under the root.
-            if not candidate.is_relative_to(root):
-                continue
-            if candidate.is_file():
-                return candidate
         return None
 
     def _replace_ref(m: re.Match) -> str:
-        raw = (m.group(1) or "").strip()
+        parts = split_media_token_ref(text, m)
+        if not parts:
+            return m.group(0)
+        raw, suffix = parts
+        raw = raw.strip()
         if not raw:
             return m.group(0)
+
+        # --- Inline data: URI — validate in memory, never resolve as a path ---
+        if raw[:5].lower() == "data:":
+            return _embed_share_data_uri(raw) + suffix
 
         # --- Resolve and validate against allowed roots -----------------------
         p = _resolve_against_roots(raw)
         if p is None:
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
         # --- Size guard -------------------------------------------------------
         try:
             size = p.stat().st_size
         except OSError:
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
         if size > _SHARE_EMBED_MAX_BYTES:
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
         # --- MIME allow-list (images only) ------------------------------------
         mime_type, _ = mimetypes.guess_type(str(p))
         if not mime_type or mime_type not in _SHARE_ALLOWED_MIME_TYPES:
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
         # --- Embed as base64 <img> -------------------------------------------
         try:
@@ -320,7 +397,7 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
             # matches the claimed MIME type — catches extension-spoofed files
             # (e.g. a script renamed to .png).
             if not _check_image_magic(data, mime_type):
-                return _PLACEHOLDER
+                return _PLACEHOLDER + suffix
             # Sanitise SVG content before embedding — SVG can carry
             # <script> elements and on* event handlers that could leak
             # credentials in the context of a public share page.
@@ -335,9 +412,9 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
                 f'<img src="data:{mime_type};base64,{b64}"'
                 f' class="msg-media-img" alt="{safe_name}"'
                 f' loading="lazy">'
-            )
+            ) + suffix
         except (OSError, MemoryError):
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
     return _SHARE_MEDIA_RE.sub(_replace_ref, text)
 

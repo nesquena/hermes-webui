@@ -81,8 +81,11 @@ correct visible session target, not moving execution ownership.
    representative for a lineage should match the target opened by `loadSession()`
    for that lineage during ordinary navigation.
 7. **404 self-heal is separate from lineage resolution.** Missing/deleted sessions
-   should still use the stale-route recovery path. A present archived parent with
-   a live continuation is not a 404; it is a canonicalization problem.
+   should still use the stale-route recovery path. Clear route and localStorage
+   independently only while each still identifies the missing requested ID; a
+   route-only 404 must preserve a different saved ID for the next boot restore.
+   A present archived parent with a live continuation is not a 404; it is a
+   canonicalization problem.
 
 ## Entry Point Matrix
 
