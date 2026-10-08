@@ -135,6 +135,11 @@
 
 ### Fixed
 
+- **OpenAI text-to-speech starts sooner and plays to the end.** Long replies are split into chunks that play as they
+  arrive instead of waiting for the whole clip; a rate-limited (429) chunk is retried without stopping playback, and
+  every chunk request (OpenAI and Edge) stays pinned to the profile the reply started on, even if you switch profiles
+  mid-reply. Thanks @happy5318. (#7529)
+
 - **Conversation titles recover after a bad model reply.** When the title model returns a list of options, a menu or
   other unusable text, the WebUI now rejects it and keeps or regenerates a proper title instead of saving the junk.
   Genuine titles with commas or two parts are kept. A title generated while you reconnected to a continued
