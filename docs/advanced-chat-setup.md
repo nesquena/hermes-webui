@@ -200,6 +200,42 @@ assistant replies in, and it has no effect when
 `auxiliary.title_generation.enabled` is `false`, since no LLM title is
 generated at all in that case.
 
+### Invalid model output and title recovery
+
+A title model occasionally replies with an options menu instead of one title
+(for example `Good title options: "A", "B"`). WebUI rejects structurally
+multi-candidate replies — a menu preamble followed by two or more list
+entries, semicolon/newline-separated candidates, explicitly quoted or
+bulleted alternatives, or at least three short standalone comma-separated
+alternatives — instead of persisting the raw menu as the title. A plain
+two-part comma phrase such as `Title Suggestions: OAuth Tokens, Explained`
+is ambiguous, so it stays valid. A comma joining grammatical clauses or a
+comparison within one title (for example
+`Title Suggestions: Compare REST, GraphQL and gRPC`) does not
+prove a menu; neither do delimiters inside quoted terms.
+`Title Suggestions: Comparing "REST" and "GraphQL"` stays valid.
+A preamble with a single remaining phrase (for example
+`Title Suggestions: Migration Strategy`) is kept, since that is a legitimate
+title.
+
+While a rejected reply leaves the automatic title unresolved, the provisional
+title stays in place and the next completed exchange is used as the source for
+a retry, so a session that opens with a warm-up message can still get a real
+title from the substantive request that follows. The same recovery applies to
+sessions that already persisted a menu-style title before this behavior
+existed: they re-enter self-heal on the next turn. Manual renames always win;
+recovery never overrides a user-set title. An unfinished latest turn is never
+paired with an older assistant response, including during adaptive refresh.
+
+After compression rotates a session ID (A→B), background title events target
+the continuation directly — `session_id` and `target_session_id` carry B, and
+`stream_owner_session_id` carries the original SSE owner A. The browser
+listener accepts either identifier: a reattached B tab and an A tab that
+rotates to B both apply the title, fencing on `expectedCurrent` so a manual
+rename is kept. A title model that keeps returning unusable output is capped
+at 3 recovery exchanges per session before it stops retrying. `stream_end`
+still closes the original stream.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced

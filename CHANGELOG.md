@@ -135,6 +135,11 @@
 
 ### Fixed
 
+- **Conversation titles recover after a bad model reply.** When the title model returns a list of options, a menu or
+  other unusable text, the WebUI now rejects it and keeps or regenerates a proper title instead of saving the junk.
+  Genuine titles with commas or two parts are kept. A title generated while you reconnected to a continued
+  conversation now reaches that conversation, a title you renamed by hand is never overwritten, and repeated bad
+  replies from a model are capped. Thanks @CharlesMcquade. (#7318)
 - **A workspace panel you closed stays closed.** On phones, the on-screen keyboard (a viewport resize) no longer
   reopens the workspace panel after you dismissed it. File and artifact previews are now owned by the open that started
   them: a slow preview that finishes after you switched conversations, opened another file or closed the panel no longer
