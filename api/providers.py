@@ -2870,8 +2870,12 @@ def get_providers() -> dict[str, Any]:
                 cp, custom_providers_cfg, _cp_providers_cfg, cfg.get("model")
             )
             if not cp_id:
-                logger.warning(
-                    "Custom provider entry %r produced empty slug; skipping",
+                # An entry with no identity of its own: either a name the
+                # convention cannot slug (a colon name), or a fallback-derived
+                # name an existing owner already claims (#8026). Both are
+                # expected and must not warn on every providers-panel load.
+                logger.debug(
+                    "Custom provider entry %r resolves no identity of its own; skipping",
                     cp_name,
                 )
                 continue

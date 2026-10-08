@@ -1039,14 +1039,30 @@ endpoint. Two rules:
   all-ASCII name reaches it exactly when its fold was empty (`-`, `()`), and
   those minted nothing before either, so their behaviour is unchanged.
 - **Existing owners come first.** A fallback-derived identity is admitted only
-  when no pre-existing entry or `providers:` record already owns that slug.
+  when no pre-existing entry, `providers:` record or connection-owning `model:`
+  block already owns that slug.
   A config holding both `custom:晨光` and `晨光` (or a `providers: {"custom:晨光":
   ...}` record plus a legacy `晨光` list entry) keeps resolving the record it
   always did: the legacy name owns `晨光`, so the fallback entry mints nothing
   and is excluded from routing, catalog ownership and collision detection
   (`_unique_custom_provider_entry`). Without this, the new identity would turn a
   working config into `AmbiguousCustomProviderError` and silently re-point an
-  existing keyed route at the other entry's endpoint and key.
+  existing keyed route at the other entry's endpoint and key. The `model:` arm
+  counts only when it owns a real connection, and does NOT count when it is a
+  copy the picker wrote: `set_hermes_default_model` persists the selected entry's
+  `provider` and `base_url` into the `model:` block, so a block whose endpoint
+  equals a same-slug fallback entry's own endpoint
+  (`_model_block_mirrors_fallback_entry`) is that entry's connection, not a
+  second authority — counting it would hide the entry the moment it was selected.
+  A block at a different endpoint, or with none, still owns the slug.
+
+The connection a named route resolves and the slug it routes under are separate
+answers. An EXACT fallback entry that declares no credential of its own and either
+shares the configured model connection's endpoint or declares none keeps that
+connection (`model.base_url` and `key_env`): before #8017 the entry minted nothing,
+so `model:` served its declared model, and the exact-row rule returning the bare
+entry instead sent `dummy-key` (401) or left the route
+`custom_provider_endpoint_unresolved`.
 
 The fallback is name-derived, not endpoint-derived: two providers sharing one
 `base_url` are two identities and must stay two entries. The same rule governs

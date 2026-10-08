@@ -914,3 +914,136 @@ def test_a_bare_entry_whose_model_is_declared_keeps_routing_even_when_shadowed(m
     assert (provider, base_url) == ("", "http://fallback.example/v1"), (
         "the bare entry's declared model keeps its own endpoint, as on master"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round six: a written model block is not an authority, and a keyless or
+# endpoint-less fallback entry keeps the model connection (#8026 r6)
+# ---------------------------------------------------------------------------
+
+
+def test_a_model_block_written_from_a_fallback_entry_does_not_shadow_it(monkeypatch):
+    """The picker's own ``model:`` write does not hide the entry it came from (#8026).
+
+    Selecting a model in the picker runs ``set_hermes_default_model``, which copies
+    the entry's ``provider`` and ``base_url`` into the ``model:`` block. That block
+    then holds the same endpoint as the entry, but it is a COPY of the entry's
+    connection, not a separate authority. Counting it as an owner shadowed the
+    non-ASCII entry after one click: it minted nothing, lost its credential, and
+    the next send went out with the keyless placeholder (401 against an
+    authenticated endpoint). An ASCII entry in the identical shape kept its
+    identity, so this is the Unicode row failing to match the ASCII one.
+
+    Asserted as a PAIR on the resolver (key AND url) and on the routed slug,
+    because a wrong route with the right url is exactly the failure: the key is
+    what went missing.
+    """
+    u = "http://one.example/v1"
+    cfg_shape = {
+        "model": {"provider": "custom:晨光鑫遇专用", "base_url": u, "default": "chat-model"},
+        "custom_providers": [
+            {"name": "晨光鑫遇专用", "base_url": u, "api_key": "sk-entry", "model": "chat-model"},
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    assert config._custom_provider_identity_owners(
+        cfg_shape["custom_providers"], None, cfg_shape["model"]
+    ) == set(), "a model block that mirrors the entry's own endpoint owns nothing"
+
+    assert (
+        config._custom_provider_entry_identity(
+            cfg_shape["custom_providers"][0],
+            cfg_shape["custom_providers"],
+            None,
+            cfg_shape["model"],
+        )
+        == "custom:晨光鑫遇专用"
+    )
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光鑫遇专用")
+    assert (api_key, base_url) == ("sk-entry", u), (
+        "the entry the model block was written from keeps its identity and key"
+    )
+
+    _model, provider, routed_url = config.resolve_model_provider("chat-model")
+    assert (provider, routed_url) == ("custom:晨光鑫遇专用", u)
+
+    # A model block at a DIFFERENT endpoint is a real authority, so the entry
+    # stays shadowed (the maintainer's model-owned scenario is unchanged).
+    u2 = "http://model-owned.example/v1"
+    cfg_own = {
+        "model": {"provider": "custom:晨光", "base_url": u2, "default": "chat-model", "api_key": "***"},
+        "custom_providers": [{"name": "晨光", "base_url": "http://list-entry.example/v1"}],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_own))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_own))
+    assert "晨光" in config._custom_provider_identity_owners(
+        cfg_own["custom_providers"], None, cfg_own["model"]
+    ), "a model block at its own endpoint still owns the slug"
+
+
+def test_a_keyless_fallback_entry_sharing_the_model_endpoint_keeps_the_connection(monkeypatch):
+    """A keyless fallback entry does not replace the model connection (#8026 r6 CORE).
+
+    ``model: {provider: custom, base_url: U, key_env: MODEL_KEY}`` plus a keyless
+    non-ASCII entry at the same U served the model on master. Admitting the entry
+    as a fallback identity made the exact-row rule return IT instead, so the
+    resolved credential became the keyless placeholder and an authenticated
+    endpoint answered 401. The model block supplied the connection, so it is the
+    authority here; a same-endpoint entry that declares its OWN key is untouched.
+    """
+    monkeypatch.setenv("MODEL_KEY", "sk-modelkey")
+    u = "http://127.0.0.1:8317/v1"
+    cfg_shape = {
+        "model": {"provider": "custom", "base_url": u, "default": "chat-model", "key_env": "MODEL_KEY"},
+        "custom_providers": [{"name": "晨光鑫遇专用", "base_url": u}],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光鑫遇专用")
+    assert (api_key, base_url) == ("sk-modelkey", u), (
+        "the model connection's key and endpoint are kept, not the keyless entry's"
+    )
+
+    # The constructor-ready bundle: this is what the send path applies, so assert
+    # the endpoint AND the credential the request goes out with, not just the URL.
+    _m, provider, routed_url = config.resolve_model_provider("chat-model")
+    bundle = config.merge_custom_provider_runtime_bundle(
+        provider, "dummy-key", routed_url, runtime_provider=None, lookup_provider=provider
+    )
+    assert bundle["base_url"] == u, "the merged route keeps the model connection's endpoint"
+    assert bundle["api_key"] == "sk-modelkey", "and its key, not the placeholder"
+    assert bundle.get(config.CUSTOM_ROUTE_ERROR_FIELD) is None
+
+
+def test_a_fallback_entry_with_no_endpoint_keeps_the_model_connection(monkeypatch):
+    """A fallback entry with no endpoint inherits ``model.base_url`` (#8026 r6 CORE).
+
+    Omitting the entry's ``base_url`` previously let the configured model
+    connection serve its declared model (master: 200). The new named route instead
+    failed with ``custom_provider_endpoint_unresolved`` because the endpoint-less
+    entry owned the route. The model block is the connection, so it is the
+    authority for a fallback entry that declares no endpoint of its own.
+    """
+    u = "http://127.0.0.1:8317/v1"
+    cfg_shape = {
+        "model": {"provider": "custom", "base_url": u, "default": "chat-model", "api_key": "sk-model"},
+        "custom_providers": [{"name": "晨光鑫遇专用", "model": "chat-model"}],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光鑫遇专用")
+    assert (api_key, base_url) == ("sk-model", u), (
+        "an endpoint-less fallback entry inherits the model connection"
+    )
+
+    _m, provider, routed_url = config.resolve_model_provider("chat-model")
+    bundle = config.merge_custom_provider_runtime_bundle(
+        provider, "dummy-key", routed_url, runtime_provider=None, lookup_provider=provider
+    )
+    assert bundle["base_url"] == u, "the merged route is not left endpoint-unresolved"
+    assert bundle.get(config.CUSTOM_ROUTE_ERROR_FIELD) is None

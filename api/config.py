@@ -1536,11 +1536,56 @@ def _custom_provider_identity_owners(
             model_provider.startswith("custom:")
             and _raw_provider_record_enabled(model_cfg)
             and _custom_record_owns_connection(model_cfg, model_provider)
+            # A ``model:`` block that the default-model picker wrote carries the
+            # entry's OWN endpoint (see ``set_hermes_default_model``). It names the
+            # slug, but it is a copy of the entry's connection rather than a
+            # separate authority, so it must not shadow the entry it was written
+            # from — otherwise the first click removes the entry from the picker
+            # and routes the next send by the keyless placeholder (401). A model
+            # block at a DIFFERENT endpoint, or with none, is a real authority and
+            # still counts.
+            and not _model_block_mirrors_fallback_entry(model_cfg, model_provider, custom_providers)
         ):
             key = _custom_provider_slug_key(model_provider)
             if key:
                 owners.add(key)
     return owners
+
+
+def _model_block_mirrors_fallback_entry(
+    model_cfg: object,
+    model_provider: object,
+    custom_providers: object = None,
+) -> bool:
+    """True when a ``model:`` block is a WRITTEN COPY of a same-slug fallback entry.
+
+    The default-model picker persists the selected entry's provider and
+    ``base_url`` into the ``model:`` block. For a non-ASCII entry the persisted
+    ``base_url`` is the entry's own endpoint, so the block adds no authority the
+    entry does not already hold — treating it as an owner hides the entry from
+    the picker and drops its credential. Count it as mirrored (not an owner) only
+    when the endpoint matches a same-slug fallback-derived entry's own endpoint;
+    a different or absent endpoint stays a genuine owner.
+    """
+    if not isinstance(model_cfg, dict) or not isinstance(custom_providers, list):
+        return False
+    model_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
+    if not model_url:
+        return False
+    key = _custom_provider_slug_key(model_provider)
+    if not key:
+        return False
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not str(name or "").strip() or not _custom_provider_slug_is_fallback(name):
+            continue
+        if _custom_provider_slug_key(name) != key:
+            continue
+        if _normalize_base_url_for_match(entry.get("base_url")) == model_url:
+            return True
+    return False
 
 
 def _custom_provider_entry_identity(
@@ -4135,6 +4180,44 @@ def _select_custom_provider_record(
     custom_providers = cfg_data.get("custom_providers", [])
     if not isinstance(custom_providers, list):
         custom_providers = []
+
+    # An EXACT list entry that declares no credential of its own, and either
+    # shares the configured model connection's endpoint or declares no endpoint
+    # at all, adds no authority: before #8017 it minted nothing, so it was never
+    # reached and ``model.base_url``/``key_env`` served its declared model. Once
+    # it is admitted as a fallback identity the exact-row rule would replace that
+    # complete connection with the keyless or endpoint-less entry, so the send
+    # went out with ``dummy-key`` (401) or failed with
+    # ``custom_provider_endpoint_unresolved``. Return the model block instead,
+    # which is the connection that actually served this endpoint. A same-endpoint
+    # entry that declares its OWN credential is a real authority and is left
+    # untouched.
+    model_cfg_for_conn = cfg_data.get("model")
+    if (
+        isinstance(model_cfg_for_conn, dict)
+        and str(model_cfg_for_conn.get("provider") or "").strip().lower() == "custom"
+        and _raw_provider_record_enabled(model_cfg_for_conn)
+        and _custom_record_owns_connection(model_cfg_for_conn, pid)
+    ):
+        model_url = _normalize_base_url_for_match(model_cfg_for_conn.get("base_url"))
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if (
+                not str(name or "").strip()
+                or not _custom_provider_slug_is_fallback(name)
+                or _custom_provider_slug_key(name) != slug
+            ):
+                continue
+            if entry.get("api_key") or str(entry.get("key_env") or "").strip():
+                # The entry declares its own credential -> a real authority.
+                break
+            entry_url = _normalize_base_url_for_match(entry.get("base_url"))
+            # No endpoint of its own (inherits the model connection), or exactly
+            # that endpoint: either way the model block is the authority.
+            if not entry_url or entry_url == model_url:
+                return model_cfg_for_conn, "model", False, CUSTOM_SELECTION_KEYED
 
     # Fail closed when the slug maps to multiple entries (raises); otherwise use
     # the single matching entry. Shared with resolve_model_provider so endpoint
