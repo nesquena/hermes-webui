@@ -19115,15 +19115,24 @@ def handle_post(handler, parsed) -> bool:
         #
         # Body fields:
         #   workspaces: [str]  — the workspace list the dialog is about to save
+        #   project_id: str    — the project the dialog belongs to (optional)
         #
         # The profile is deliberately NOT a caller input. Forwarding a
         # request-selected profile into the counter made the shared session
         # index filterable by the caller, so a POSTed profile name returned
         # that foreign profile's unowned-session count (Greptile P1 + security,
-        # 2026-10-07T22:59:48Z). The count is pinned to the ACTIVE profile the
-        # request runs under, which is also what the sweep files
+        # 2026-10-07T22:59:48Z). The count is pinned to the project's own
+        # profile, which is also what the sweep files
         # (``_auto_assign_sweep_body`` uses the project's own profile, and a
         # profile can only see its own projects).
+        #
+        # ``project_id`` IS an input and is authorized exactly like
+        # /api/projects/bind: the caller may only preview a project the ACTIVE
+        # profile owns, and the count then runs under that project's profile.
+        # Without it a dialog left open across a profile switch previewed the
+        # other profile's workspaces (count 0), cached that as "nothing to
+        # file", and reused it for its own project — filing chats with no
+        # confirmation (re-gate 2026-10-08T02:11:02Z, [SILENT] 2.).
         raw_ws = body.get("workspaces")
         if raw_ws is None:
             ws_list = []
@@ -19131,9 +19140,25 @@ def handle_post(handler, parsed) -> bool:
             ws_list = [str(w) for w in raw_ws if w]
         else:
             return bad(handler, "workspaces must be a list")
+        profile = None
+        project_id = body.get("project_id")
+        if project_id:
+            try:
+                projects = load_projects()
+            except Exception:
+                projects = []
+            proj = next(
+                (p for p in projects if p.get("project_id") == project_id), None
+            )
+            # #1614: a project can only be previewed by the profile that owns it.
+            if not proj or not _profiles_match(
+                proj.get("profile"), get_active_profile_name()
+            ):
+                return bad(handler, "Project not found", 404)
+            profile = proj.get("profile") or "default"
         return j(
             handler,
-            {"count": _auto_assign_candidate_count(ws_list)},
+            {"count": _auto_assign_candidate_count(ws_list, profile=profile)},
         )
 
     if parsed.path == "/api/projects/bind":
@@ -19349,8 +19374,22 @@ def handle_post(handler, parsed) -> bool:
             )
 
             def _file_existing_sessions(_proj=None):
+                target = _proj if _proj is not None else proj
                 try:
-                    _apply_project_auto_assign(_proj if _proj is not None else proj)
+                    # A detached worker inherits NEITHER the spawning request's
+                    # profile TLS nor its os.environ, so a NAMED-profile
+                    # project's sweep resolved the DEFAULT profile: it read that
+                    # profile's session store and filed rows the profile
+                    # boundary (and /api/session/move) refuses to touch — the
+                    # sweep happily wrote a delegated alpha-profile child's
+                    # project id while a manual Move of the same child 403'd.
+                    # Enter the project's own profile for the whole sweep
+                    # (re-gate 2026-10-08T02:11:02Z, [SILENT] 4.).
+                    with profile_scope_for_detached_worker(
+                        (target or {}).get("profile") or "default",
+                        "project auto-assign",
+                    ):
+                        _apply_project_auto_assign(target)
                 except Exception as exc:
                     logger.warning("auto-assign for project %s failed: %s",
                                    (proj or {}).get("project_id"), exc)

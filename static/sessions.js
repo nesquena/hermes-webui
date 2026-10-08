@@ -11115,9 +11115,16 @@ function _showProjectBindingsDialog(proj){
   // chats before the user answered the confirm, and a workspace ADDED after the
   // box was ticked was never counted at all. The confirmation is keyed on the
   // exact workspace snapshot it covered, so any change to the list re-arms it.
-  let _aaConfirmedKey=null;     // JSON of the workspace list the user confirmed
+  let _aaConfirmedKey=null;     // JSON of the snapshot (profile+project+list) the user confirmed
   let _aaConfirmInFlight=null;  // at most one confirmation at a time (toggle + Save share it)
-  const _wsKey=(paths)=>JSON.stringify(paths||[]);
+  // The confirmation is keyed on the ACTIVE PROFILE + the project + the exact
+  // workspace snapshot it covered. Keying it on the workspace paths alone let a
+  // dialog left open across a profile switch keep the OTHER profile's cached
+  // answer, so switching back and saving filed this profile's chats with no
+  // prompt at all (re-gate 2026-10-08T02:11:02Z, [SILENT] 2.).
+  const _dlgProfile=()=>((typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+    ? S.activeProfile.trim() : 'default');
+  const _wsKey=(paths)=>JSON.stringify([_dlgProfile(),proj.project_id,paths||[]]);
   const _aaPathsNow=()=>wsList.map(x=>x.value).filter(Boolean);
   const _aaConfirmed=()=>_aaConfirmedKey!==null&&_aaConfirmedKey===_wsKey(_aaPathsNow());
   const _autoAssignCount=async(wsPaths)=>{
@@ -11136,6 +11143,10 @@ function _showProjectBindingsDialog(proj){
     _aaConfirmInFlight=(async()=>{
       const key=_wsKey(wsPaths);
       const count=await _autoAssignCount(wsPaths);
+      // Cancel/Escape can close the dialog while this preview is in flight; a
+      // closed dialog must neither prompt nor hand back a confirmation its
+      // owner never gave (re-gate 2026-10-08T02:11:02Z, [SILENT] 3.).
+      if(_closed) return false;
       // A definite 0 means the sweep would file nothing, so there is nothing to
       // guard (the counter may over-count view-only rows but never under-counts).
       if(count===0){ _aaConfirmedKey=key; return true; }
@@ -11147,6 +11158,7 @@ function _showProjectBindingsDialog(proj){
         confirmLabel:t('pb_auto_assign_confirm_btn'),
         cancelLabel:t('pb_cancel'),
       });
+      if(_closed) return false;
       if(ok) _aaConfirmedKey=key;
       return ok;
     })().finally(()=>{ _aaConfirmInFlight=null; });
@@ -11157,7 +11169,12 @@ function _showProjectBindingsDialog(proj){
     const wsPaths=wsList.map(x=>x.value).filter(Boolean);
     if(!wsPaths.length) return;   // nothing bound yet => no sweep to guard
     const confirmed=await _ensureAutoAssignConfirmed(wsPaths);
-    if(!confirmed) aaCb.checked=false;
+    if(_closed) return;
+    // Declining leaves the STORED flag untouched: put the box back to the value
+    // the project already carries, so a later Save re-submits what is stored
+    // instead of silently turning auto-assign off (re-gate 2026-10-08T02:11:02Z,
+    // [should-fix] 5.).
+    if(!confirmed) aaCb.checked=!!proj.auto_assign;
   };
 
   _seedWsList();
@@ -11188,10 +11205,17 @@ function _showProjectBindingsDialog(proj){
       // flight (filing chats nobody had agreed to yet), and a workspace added
       // AFTER the box was ticked was never counted at all.
       const ok=await _ensureAutoAssignConfirmed(wsPaths);
+      // Cancel/Escape while the preview/confirmation was in flight leaves this
+      // dialog closed: never POST the bind the user cancelled
+      // (re-gate 2026-10-08T02:11:02Z, [SILENT] 3.).
+      if(_closed) return;
       if(!ok){
-        // Declining must prevent the bind POST; put the box back (the same
-        // contract the toggle has) and leave the dialog open.
-        aaCb.checked=false;
+        // Declining must leave the STORED flag untouched — put the box back to
+        // the value the project already has (not a hard false), so a later Save
+        // re-submits what is stored instead of silently turning auto-assign off
+        // — and leave the dialog open. (re-gate 2026-10-08T02:11:02Z,
+        // [should-fix] 5.)
+        aaCb.checked=!!proj.auto_assign;
         _aaConfirmedKey=null;
         return;
       }
@@ -11268,6 +11292,15 @@ function _showProjectBindingsDialog(proj){
     // first, the shared dialog is open. (re-gate 2026-10-07T22:04:16Z —
     // [CORE] static/sessions.js:10981 + senior-review MUST-FIX.)
     if(e.defaultPrevented||_isAppDialogOpen()) return;
+    // A combobox dropdown open INSIDE this dialog owns Escape: close only the
+    // dropdown and consume the key so the dialog and its unsaved workspace/model
+    // edits stay. The trigger's own keydown handler cannot do this alone — this
+    // listener is installed on the document in the CAPTURE phase, so it runs
+    // first and used to close the whole dialog with the dropdown still open
+    // (re-gate 2026-10-08T02:11:02Z, [CORE] 1.).
+    if(e.key==='Escape'&&_closeOpenCombo()){
+      e.preventDefault();e.stopPropagation();return;
+    }
     if(e.key==='Escape'){
       e.preventDefault();e.stopPropagation();_closeBindingsDialog();return;
     }
@@ -11288,6 +11321,19 @@ function _showProjectBindingsDialog(proj){
     document.removeEventListener('keydown',_onKey,true);
     overlay.remove();
     try{ if(_lastFocus&&typeof _lastFocus.focus==='function') _lastFocus.focus(); }catch(_){}
+  }
+  // Close an open binding-combobox dropdown inside this dialog, mirroring the
+  // combo's own _close() (the same two classes + aria-expanded). Returns true
+  // when a dropdown was actually open, so Escape can be consumed by it instead
+  // of closing the dialog (re-gate 2026-10-08T02:11:02Z, [CORE] 1.).
+  function _closeOpenCombo(){
+    const menu=overlay.querySelector('.project-bindings-combo-menu.open');
+    if(!menu) return false;
+    menu.classList.remove('open');
+    const wrap=menu.closest('.project-bindings-combo');
+    const trigger=wrap&&wrap.querySelector('.project-bindings-combo-trigger');
+    if(trigger){trigger.classList.remove('open');trigger.setAttribute('aria-expanded','false');}
+    return true;
   }
   closeBtn.onclick=()=>{ _closeBindingsDialog(); };
   overlay.appendChild(dialog);

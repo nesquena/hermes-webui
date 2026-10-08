@@ -470,7 +470,9 @@ def test_bind_auto_assign_worker_self_unregisters():
     """The auto-assign bind worker must not leak a dead Thread in the registry."""
     src = _read_routes_py()
     i = src.index("def _file_existing_sessions(")
-    seg = src[i:i + 1600]
+    # The window covers the whole worker body, including the profile scope it now
+    # enters (re-gate 2026-10-08T02:11:02Z, [SILENT] 4.).
+    seg = src[i:i + 2600]
     assert "finally:" in seg
     assert "_unregister_background_commit_thread(threading.current_thread())" in seg
 
@@ -1389,7 +1391,9 @@ def test_auto_assign_toggle_is_guarded_by_a_count_confirmation():
     assert "aaCb.onchange=async()=>{" in seg
     assert "'/api/projects/auto-assign-preview'" in seg
     assert "pb_auto_assign_confirm" in seg
-    assert "if(!confirmed) aaCb.checked=false;" in seg
+    # Declining restores the STORED value (re-gate 2026-10-08T02:11:02Z,
+    # [should-fix] 5.) — a hard false would be persisted as "off" by the next Save.
+    assert "if(!confirmed) aaCb.checked=!!proj.auto_assign;" in seg
     # The count is what the sweep's metadata gate would file.
     assert "_auto_assign_candidate_count" in _read_routes_py()
 
@@ -1580,8 +1584,10 @@ def test_save_awaits_the_auto_assign_confirmation_for_its_exact_snapshot():
     assert "fields.auto_assign=autoAssign;" in seg
     assert "fields.auto_assign=!!aaCb.checked;" not in seg
     # Declining the confirmation returns BEFORE the POST (the only one in the
-    # handler) and puts the checkbox back.
-    decline = seg.index("aaCb.checked=false;", confirm)
+    # handler) and puts the checkbox back to the STORED value — never a hard
+    # false, which the next Save would persist as "off" (re-gate
+    # 2026-10-08T02:11:02Z, [should-fix] 5.).
+    decline = seg.index("aaCb.checked=!!proj.auto_assign;", confirm)
     assert confirm < decline < post
     assert "return;" in seg[decline:post]
     # The confirmation is keyed on the whole workspace list, so adding or
