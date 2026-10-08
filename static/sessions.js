@@ -3724,8 +3724,16 @@ function _messageReloadLimitForSession(sid){
 // Client-side projection fields (_live, _journal_snapshot, _turnUsage, ...)
 // never reach the server, so a row the server compacts/edits out of the
 // prefixed transcript changes this fingerprint while a purely client-side
-// re-render does not. Must stay byte-compatible with the server's
-// api/routes.py:_transcript_prefix_proof() over the same fields.
+// re-render does not. Mirrors api/routes.py:_transcript_prefix_proof() over the
+// same fields.
+//
+// #7925 SHOULD-FIX: the agreement is BEST-EFFORT, not byte-identical. The two
+// digests diverge on float 1e-7, a BOM, dict/numeric content, integers above
+// 2^53, 1e21 and \x1f, and a tool row clipped above 4,096 characters by
+// _tool_message_for_limited_payload can never hash to the server's digest for
+// the row it was clipped from. Every one of those fails CLOSED (the stitch is
+// refused and the authoritative full fetch runs), so none is a correctness
+// risk — but calling the match "byte-identical" overstates what is guaranteed.
 function _reloadPrefixRowFingerprint(row){
   if(!row || typeof row!=='object') return null;
   const role=String(row.role||'');
@@ -4035,7 +4043,18 @@ async function _ensureMessagesLoaded(sid, opts) {
   const _reloadOffset = Number(data.session._messages_offset) || 0;
   // Set by the stitch below so the cursor fixup runs exactly once.
   let _stitchedFromPrefix = false;
-  if (_reloadOffset > 0 && Array.isArray(S.messages) && S.messages.length > 0) {
+  // #7925 MUST-FIX: enter only when the window actually MOVED FORWARD. A window
+  // whose origin is at or before the already-rendered origin covers every
+  // rendered row, so master's plain replace is both correct and cheap — entering
+  // the stitch here made the trust gate fail (``newOffset <= prevOrigin``) and
+  // dropped every such refresh into the full-transcript fallback, so a long
+  // session downloaded its whole transcript on the first focus and then on every
+  // later poll and focus. That is precisely what #7899 set out to remove.
+  if (
+    _reloadOffset > _previousReloadOffset &&
+    Array.isArray(S.messages) &&
+    S.messages.length > 0
+  ) {
     msgs = _stitchBoundedReloadTail(S.messages, _previousReloadOffset, _reloadOffset, msgs,
       _boundedReloadPrefixIsTrustworthy(S.messages, _previousReloadOffset, _reloadOffset, msgs,
         _serverPrefixProof));

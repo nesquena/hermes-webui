@@ -336,8 +336,21 @@ def _run_digest(rows, prefix_length):
 
 
 def _proof_for(rows, prefix_length):
-    """The server-minted proof string for rows [0, prefix_length)."""
-    return _run_digest(rows, prefix_length)
+    """The server-minted proof string for rows [0, prefix_length).
+
+    #7925 SHOULD-FIX: this used to call the CLIENT digest, so every test that
+    "verified the server proof agrees" was really verifying the client against
+    itself — there was no cross-language coverage at all, and a server-side
+    change to the digest would have passed every one of them.
+
+    It now calls the real ``api/routes.py:_transcript_prefix_proof``. The two
+    implementations agree on realistic shapes but NOT on float ``1e-7``, a BOM,
+    dict/numeric content, integers above ``2**53``, ``1e21`` or ``\\x1f`` — all of
+    which fail closed, so the tests below use plain string rows.
+    """
+    from api.routes import _transcript_prefix_proof
+
+    return _transcript_prefix_proof(list(rows), prefix_length)
 
 
 def _row(i):

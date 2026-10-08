@@ -9624,7 +9624,26 @@ def _canonical_proof_scalar(value) -> str:
     return str(value)
 
 
-def _transcript_prefix_proof(all_messages, prefix_length) -> str:
+# #7925 MUST-FIX: the proof is minted for EVERY windowed ``messages=1``
+# response — the initial ``msg_limit=50`` open, every refresh, every
+# ``msg_before`` page — and the digest walks the prefix in pure Python
+# (307 ms at 1 MB, 1.5 s at 5 MB, 3.0 s at 10 MB). A 32 MiB transcript hit an
+# 8 s TimeoutError where master returned the same window in 141 ms.
+#
+# The proof is a pure function of (row count, the identity fields of rows
+# [0, prefix_length)), so it is memoised per transcript revision: successive
+# pages of the SAME transcript reuse the first digest, and any change that
+# rewrites the prefix changes the row count or the revision key and misses.
+_PROOF_CACHE_MAX_ENTRIES = 32
+# #7925 MUST-FIX: how many prefix rows the digest will actually walk. The
+# WebUI retains at most its own bounded window plus paged rows, so hashing
+# beyond this protects nothing the client holds while costing seconds per
+# request on a long transcript.
+_PROOF_MAX_HASHED_ROWS = 5_000
+_transcript_proof_cache: "OrderedDict[tuple, str]" = OrderedDict()
+
+
+def _transcript_prefix_proof(all_messages, prefix_length, _revision=None) -> str:
     """Mint a server-issued proof covering rows ``[0, prefix_length)``.
 
     #7925 (finding 4): the WebUI bounded reload stitches a fresh tail window
@@ -9653,6 +9672,34 @@ def _transcript_prefix_proof(all_messages, prefix_length) -> str:
     if prefix_length <= 0 or not isinstance(all_messages, list):
         return ""
     rows = all_messages[:prefix_length]
+    # #7925 MUST-FIX: memoise per (revision, row count, prefix length). The
+    # revision is the caller's transcript identity; without it a cache keyed
+    # only on shape would serve a stale digest after a compaction rewrote the
+    # prefix, which is the exact failure the proof exists to catch.
+    # #7925 MUST-FIX: the cache is ONLY consulted when the caller supplies a
+    # revision. Deriving a key from the rows themselves is unsound — a
+    # compaction that rewrites rows INSIDE the prefix keeps the row count and
+    # the first/last row identities, so a shape-derived key serves the
+    # pre-compaction digest for a transcript that no longer matches it. That is
+    # precisely the failure the proof exists to detect, so a shape key would
+    # turn the safety check into a lie. Callers that cannot name a revision pay
+    # the full digest and get a correct answer.
+    if _revision is not None:
+        _cache_key = (_revision, prefix_length)
+        _cached = _transcript_proof_cache.get(_cache_key)
+        if _cached is not None:
+            _transcript_proof_cache.move_to_end(_cache_key)
+            return _cached
+    # #7925 MUST-FIX: bound the hashed length. The client only ever stitches a
+    # prefix it retained from a bounded window plus what it paged, and the
+    # proof's job is to detect a rewrite of THAT prefix. Hashing 32 MiB of
+    # omitted history on every windowed response costs seconds to protect a
+    # prefix the client does not hold. Past the cap the proof still covers the
+    # geometry, and the client's geometry checks (1)-(3) remain in force — the
+    # digest simply stops claiming coverage it was never asked for.
+    _proof_cap = _PROOF_MAX_HASHED_ROWS
+    if prefix_length > _proof_cap:
+        rows = rows[:_proof_cap]
     # Cheap identity pre-check: two rows that differ only in fields the client
     # never sees cannot change this digest, and rows the client projects
     # (client-side-only fields) are excluded by construction.
@@ -9700,7 +9747,14 @@ def _transcript_prefix_proof(all_messages, prefix_length) -> str:
         # pair = two units, while Python iterates it as a single character.
         # Mixing the two makes the digests diverge on the first transcript
         # containing an emoji.
-        encoded = payload.encode("utf-16-le")
+        #
+        # #7925 MUST-FIX: ``errors="surrogatepass"`` is load-bearing. A
+        # JSON-escaped lone surrogate (``\ud800``) in an OMITTED historical row
+        # makes the default strict encoder raise UnicodeEncodeError, which
+        # turned a 200-with-30-rows windowed response into a 500. The client
+        # never sees that row — only its digest — and surrogatepass emits the
+        # same UTF-16 units the browser's charCodeAt would read.
+        encoded = payload.encode("utf-16-le", errors="surrogatepass")
         for offset in range(0, len(encoded), 2):
             hash_value ^= encoded[offset] | (encoded[offset + 1] << 8)
             hash_value = (hash_value * 0x01000193) & 0xFFFFFFFF
@@ -9711,7 +9765,21 @@ def _transcript_prefix_proof(all_messages, prefix_length) -> str:
     # string from the rows it retained, and comparing the two IS the
     # prefix-freshness proof. Fixed width keeps the field length constant so a
     # shorter digest cannot trivially match a longer one.
-    return f"{len(rows)}:{_base36_fixed_width(hash_value)}"
+    #
+    # #7925 SHOULD-FIX: the agreement is BEST-EFFORT, not byte-identical. The
+    # client digest diverges on float 1e-7, a BOM, dict/numeric content,
+    # integers above 2^53, 1e21 and \x1f, and a tool row clipped above 4,096
+    # characters by _tool_message_for_limited_payload can never hash to this
+    # digest for the row it was clipped from. Every one of those fails CLOSED
+    # (the client refuses the stitch and performs the authoritative full
+    # fetch), so none is a correctness risk — but "byte-identical" overstates
+    # the guarantee.
+    _proof = f"{prefix_length}:{_base36_fixed_width(hash_value)}"
+    if _revision is not None:
+        _transcript_proof_cache[_cache_key] = _proof
+        while len(_transcript_proof_cache) > _PROOF_CACHE_MAX_ENTRIES:
+            _transcript_proof_cache.popitem(last=False)
+    return _proof
 
 
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
@@ -14188,7 +14256,22 @@ def _handle_session_get(handler, parsed) -> bool:
             # transcript. Emitted for every windowed response, including the
             # offset==0 full-window case, so a client that later stitches onto
             # it has something authoritative to compare against.
-            _prefix_proof = _transcript_prefix_proof(_all_msgs, _messages_offset)
+            #
+            # #7925 MUST-FIX: the digest walks the prefix per UTF-16 code unit
+            # in pure Python (307 ms at 1 MB, 3.0 s at 10 MB) and was being
+            # minted on EVERY windowed response — a 32 MiB transcript hit an
+            # 8 s TimeoutError where master returned the same window in 141 ms.
+            # It is now memoised on the session's state-store revision, which
+            # every supported writer bumps, so successive windows of the same
+            # transcript reuse one digest. That revision is fail-closed by
+            # construction (``_state_db_target_session_revision``): a same-length
+            # raw SQL rewrite that bypasses session metadata is outside the
+            # writer contract and would serve a stale digest, which is why the
+            # cache is keyed on the revision rather than on the rows themselves.
+            _proof_revision = _state_db_session_signature(s.session_id)
+            _prefix_proof = _transcript_prefix_proof(
+                _all_msgs, _messages_offset, _revision=_proof_revision
+            )
             if msg_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
