@@ -1729,7 +1729,8 @@ def test_voice_mode_send_preserves_buffered_transcript_across_new_session_handof
 def _run_profile_switch_settlement_harness(
     *, reject_pending: bool, reject_replacement: bool = False,
     supersede_pane: bool = False, reject_rollback: bool = False,
-    supersede_after_switch: bool = False,
+    supersede_after_switch: bool = False, send_during_settle: bool = False,
+    focus_moved_elsewhere: bool = False,
 ) -> dict:
     """Run real switchToProfile through success/failure settlement to completion."""
     node = shutil.which("node")
@@ -1774,10 +1775,27 @@ def _run_profile_switch_settlement_harness(
         }};
         const focusEvents=[];
         let sendButtonUpdates=0;
-        const msg={{value:'source draft',disabled:false,focus(){{focusEvents.push('msg');}}}};
+        let _sendInProgress=false;
+        const otherInput={{focus(){{focusEvents.push('other');}}}};
+        const document={{activeElement:null,querySelectorAll(){{return [];}}}};
+        const msg={{
+          value:'source draft',_disabled:false,
+          get disabled(){{return this._disabled;}},
+          set disabled(value){{
+            this._disabled=value;
+            // Disabling a focused textarea blurs it; the browser parks focus on
+            // <body> (null here) until something else claims it.
+            if(value&&document.activeElement===this)document.activeElement=null;
+          }},
+          focus(){{focusEvents.push('msg');document.activeElement=this;}},
+        }};
+        document.activeElement=msg;
         const window={{
           _defaultModel:'prior-default',_activeProvider:'prior-provider',
-          _stopAndSettleComposerDictation(){{return Promise.resolve();}},
+          _stopAndSettleComposerDictation(){{
+            if({str(send_during_settle).lower()}){{_sendInProgress=true;}}
+            return Promise.resolve();
+          }},
         }};
         let pickedModel='prior-model';
         let reasoningModel='prior-model';
@@ -1794,7 +1812,6 @@ def _run_profile_switch_settlement_harness(
           titlebarProfileLabel:{{textContent:'default'}},
         }};
         const $=id=>elements[id]||null;
-        const document={{activeElement:msg,querySelectorAll(){{return [];}}}};
         function updateSendBtn(){{sendButtonUpdates+=1;}}
         function closeSessionActionMenu(){{}}
         function _invalidateSessionListRenders(){{}}
@@ -1832,6 +1849,9 @@ def _run_profile_switch_settlement_harness(
         function api(path,options){{
           apiCalls.push(path);
           if(path==='/api/profile/switch'){{
+            // A user who moves to another input while the switch is in flight must
+            // keep that focus once the frozen composer is released.
+            if({str(focus_moved_elsewhere).lower()})document.activeElement=otherInput;
             const requested=JSON.parse(options.body).name;
             if(requested==='default'&&{str(reject_rollback).lower()}){{
               return Promise.reject(new Error('rollback failed'));
@@ -4032,7 +4052,8 @@ def test_dictation_settlement_waits_for_server_transcription_completion():
     assert "window._micPendingSend=false" not in stop
     switch = _function(PANELS_JS, "switchToProfile", "\n\nfunction openProfileCreate")
     assert "Promise.race([" in switch
-    assert "setTimeout(resolve,10000)" in switch
+    assert "setTimeout(" in switch
+    assert ",10000)" in switch
     assert recorder.index("await _transcribeBlob(") < recorder.index(
         "settle()", recorder.index("await _transcribeBlob(")
     )
@@ -4175,3 +4196,182 @@ def test_failed_new_session_resumes_queue_after_clearing_inflight_guard():
     assert "focusRestoredComposerAfterAbort" in boundary
     assert "_composerOwnerIsVisible" in boundary
     assert "!S.busy" in boundary
+
+
+def test_profile_switch_settlement_timeout_aborts_with_visible_error():
+    switch = _function(PANELS_JS, "switchToProfile", "\n\nfunction openProfileCreate")
+    settle = switch.index("window._stopAndSettleComposerDictation()")
+    guard = switch.index("_sendInProgress&&!_sendInProgressAtSettle")
+    save = switch.index("await _saveComposerDraftNow(")
+    cookie_switch = switch.index("await api('/api/profile/switch'")
+
+    assert "reject(new Error(t('profile_switch_dictation_pending')))" in switch
+    # The bound must surface a visible error instead of silently resolving, and it
+    # must fire before the draft snapshot and the cookie change so a late
+    # transcription can never write under the new profile.
+    assert switch.index("_sendInProgressAtSettle") < settle < guard < save < cookie_switch
+
+
+def test_dictation_owned_send_during_settlement_blocks_the_profile_switch():
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=False, send_during_settle=True,
+    )
+
+    assert result["switched"] is False
+    assert result["apiCalls"] == []
+    assert result["activeProfile"] == "default"
+    assert result["newSessionCalls"] == 0
+    assert any(
+        "profile_switch_dictation_pending" in toast for toast in result["toasts"]
+    ), result["toasts"]
+    assert result["msgDisabled"] is False
+    assert result["focusEvents"] == ["msg"]
+
+
+def test_profile_switch_release_does_not_steal_focus_from_another_input():
+    result = _run_profile_switch_settlement_harness(
+        reject_pending=False, focus_moved_elsewhere=True,
+    )
+
+    assert result["switched"] is True
+    assert result["focusEvents"] == []
+
+
+def test_superseded_append_transcript_still_updates_its_own_owner():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("function _micProducerIsCurrent(")
+    end = BOOT_JS.index("\n\n  function _isServerSttUnavailable", start)
+    helpers = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const handleA={{producerToken:'A'}};
+        const handleB={{producerToken:'B'}};
+        let _micComposerProducerToken=handleB;
+        let _dictationAppend=true;
+        let _prefix='B prefix';
+        const ta={{value:'destination draft'}};
+        const S={{pendingFiles:[]}};
+        const window={{_micPendingSend:true}};
+        let sends=0,resizes=0;
+        const routed=[];
+        function renderTray(){{}}
+        function send(){{sends++;}}
+        function autoResize(){{resizes++;}}
+        function showToast(){{}}
+        function t(value){{return value;}}
+        class File{{constructor(_parts,name,options){{this.name=name;this.type=options.type;}}}}
+        function _composerAddFiles(){{}}
+        function _composerSetText(value,transition,_sid,handle){{
+          routed.push({{value,transition,handle}});
+        }}
+        function _composerProducerOwnerState(handle){{
+          return handle===handleA
+            ? {{sid:'source',profile:'default',text:'original draft',visible:false}}
+            : {{sid:'destination',profile:'default',text:ta.value,visible:true}};
+        }}
+        {helpers}
+        _commitTranscript('spoken addition','original draft',handleA);
+        const appended=routed.slice();
+        routed.length=0;
+        _dictationAppend=false;
+        _commitTranscript('replace-mode late text','original draft',handleA);
+        process.stdout.write(JSON.stringify({{
+          appended,replaceMode:routed,sends,resizes,pendingSend:window._micPendingSend,
+        }}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+
+    assert result["appended"] == [{
+        "value": "original draft spoken addition",
+        "transition": "spoken addition",
+        "handle": {"producerToken": "A"},
+    }]
+    # Replace mode stays current-producer only: a superseded recording is dropped.
+    assert result["replaceMode"] == []
+    # A superseded producer must not consume the visible composer's pending send.
+    assert result["sends"] == 0
+    assert result["pendingSend"] is True
+
+
+def test_dictation_end_without_final_text_keeps_the_owner_snapshot():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("function _ensureSpeechRecognition(")
+    end = BOOT_JS.index("\n\n  if(!_forceMediaRecorder)", start)
+    ensure_speech = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        class FakeSpeechRecognition {{ start(){{}} }}
+        const SpeechRecognition=FakeSpeechRecognition;
+        let recognition=null;
+        let _micComposerProducerToken='initial';
+        let _prefix='original draft';
+        let _finalText='';
+        let _micRestartCount=0;
+        const _micMaxRestarts=20;
+        let _speechStopRequested=true;
+        let _isRecording=true;
+        let _activeCaptureMode='speech';
+        const window={{_micActive:true,_micPendingSend:false}};
+        const ta={{value:'destination private draft'}};
+        const calls=[];
+        let resizes=0,recordingStops=0,ownerResolved=true;
+        function _micDictationContinuous(){{return false;}}
+        function _micShouldRestartDictation(){{return false;}}
+        function _releaseMicWakeLock(){{return Promise.resolve();}}
+        function _setRecording(){{recordingStops++;}}
+        function _applyDeferredServerSttFlip(){{}}
+        function _micToastKeyForRecognitionError(){{return null;}}
+        function showToast(){{}}
+        function t(value){{return value;}}
+        function send(){{}}
+        function autoResize(){{resizes++;}}
+        function _composerProducerOwnerState(){{
+          return ownerResolved
+            ? {{sid:'source',profile:'default',text:'original draft',visible:false}}
+            : null;
+        }}
+        function _composerSetText(value,transition,_owner,handle){{
+          calls.push({{value,transition,handle}});
+        }}
+        {ensure_speech}
+
+        const handle={{producerToken:'A'}};
+        recognition=_ensureSpeechRecognition(handle);
+        recognition.onstart();
+        recognition.onend();
+        const resolvedCalls=calls.slice();
+        calls.length=0;
+        ownerResolved=false;
+        _speechStopRequested=true;
+        _isRecording=true;
+        recognition=_ensureSpeechRecognition(handle);
+        recognition.onstart();
+        recognition.onend();
+        process.stdout.write(JSON.stringify({{
+          resolvedCalls,droppedCalls:calls,visible:ta.value,resizes,recordingStops,
+        }}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+
+    # The dictation wrote its own owner's snapshot, never the destination draft the
+    # visible composer now shows.
+    assert result["resolvedCalls"] == [{
+        "value": "original draft",
+        "transition": "original draft",
+        "handle": {"producerToken": "A"},
+    }]
+    # An unresolvable owner skips the text mutation but still finishes cleanup.
+    assert result["droppedCalls"] == []
+    assert result["recordingStops"] == 2
+    assert result["visible"] == "destination private draft"
+    assert result["resizes"] == 1

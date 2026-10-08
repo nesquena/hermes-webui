@@ -922,7 +922,10 @@ function _composerProducerOwnerState(producerHandle){
   }
 
   function _commitTranscript(text, prefixOverride, producerHandle=_micComposerProducerToken){
-    if(!_micProducerIsCurrent(producerHandle))return;
+    // In append mode a superseded producer's transcript still belongs to its own
+    // recorded owner (routed by _composerSetText), so a newer recording must not
+    // discard it. Replace mode stays current-producer only.
+    if(!_micProducerIsCurrent(producerHandle)&&!_dictationAppend)return;
     const ownerState=_composerProducerOwnerState(producerHandle);
     if(!ownerState)return;
     // `prefixOverride` is the composer content captured at recording start,
@@ -961,7 +964,7 @@ function _composerProducerOwnerState(producerHandle){
       ? _composerSetText(committed,clean,null,producerHandle)
       : (ta.value=committed,true);
     if(rendered!==false)autoResize();
-    if(window._micPendingSend){
+    if(_micProducerIsCurrent(producerHandle)&&window._micPendingSend){
       window._micPendingSend=false;
       const settledOwner=_composerProducerOwnerState(producerHandle);
       if(settledOwner&&settledOwner.visible)send();
@@ -1172,16 +1175,25 @@ function _composerProducerOwnerState(producerHandle){
 
     sr.onend=()=>{
       if(recognition!==sr)return;
+      // The visible composer may no longer belong to this producer's owner (a New
+      // Chat or profile switch re-bound the pane while dictating). Resolve the
+      // owner's own snapshot — live text or remembered draft — instead of reading
+      // ta.value, and skip the write entirely when that owner can't be resolved.
+      const lifecycleOwner=typeof _composerProducerOwnerState==='function'
+        ? _composerProducerOwnerState(lifecycleProducerHandle)
+        : {sid:null,profile:null,text:(recognition===sr?ta.value:_prefixForLifecycle),visible:true};
       const committed=lifecycleFinalText
         ? (_prefixForLifecycle&&!_prefixForLifecycle.endsWith(' ')&&!_prefixForLifecycle.endsWith('\n')
             ? _prefixForLifecycle+' '+lifecycleFinalText.trimStart()
             : _prefixForLifecycle+lifecycleFinalText)
-        : (recognition===sr?ta.value:_prefixForLifecycle);
-      if(typeof _composerSetText==='function')_composerSetText(
-        committed,lifecycleFinalText||committed,null,lifecycleProducerHandle
-      );
-      else if(recognition===sr)ta.value=committed;
-      if(recognition===sr)autoResize();
+        : (lifecycleOwner?lifecycleOwner.text:null);
+      if(committed!==null){
+        if(typeof _composerSetText==='function')_composerSetText(
+          committed,lifecycleFinalText||committed,null,lifecycleProducerHandle
+        );
+        else if(recognition===sr)ta.value=committed;
+        if(recognition===sr)autoResize();
+      }
       _finalText=lifecycleFinalText;
       _prefix=_prefixForLifecycle;
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
@@ -1189,9 +1201,10 @@ function _composerProducerOwnerState(producerHandle){
       // (one-shot) and intentional stops (_speechStopRequested) skip this and
       // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
       if(_micShouldRestartDictation()){
-        _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
-          ? committed+' '
-          : committed;
+        const _continuationBase=committed===null?_prefixForLifecycle:committed;
+        _prefix=_continuationBase&&!_continuationBase.endsWith(' ')&&!_continuationBase.endsWith('\n')
+          ? _continuationBase+' '
+          : _continuationBase;
         _finalText='';
         _micRestartCount++;
         try{

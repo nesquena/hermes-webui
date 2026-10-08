@@ -7242,19 +7242,32 @@ async function switchToProfile(name) {
     // server transcription, so settle it before snapshotting the source draft
     // and before changing the profile cookie.
     setProfileSwitchComposerPending(true);
+    const _sendInProgressAtSettle=typeof _sendInProgress!=='undefined'&&_sendInProgress;
     if(typeof window!=='undefined'
       &&typeof window._stopAndSettleComposerDictation==='function'){
       let _dictationSettlementTimeout=null;
       try{
         await Promise.race([
           window._stopAndSettleComposerDictation(),
-          new Promise(resolve=>{
-            _dictationSettlementTimeout=setTimeout(resolve,10000);
+          new Promise((_resolve,reject)=>{
+            _dictationSettlementTimeout=setTimeout(()=>{
+              // A settlement that outruns the bound must abort the switch with a
+              // visible error: changing the profile cookie under a still-pending
+              // transcription drops the source draft (409). The finally below
+              // restores the frozen composer and its prior focus.
+              reject(new Error(t('profile_switch_dictation_pending')));
+            },10000);
           }),
         ]);
       }finally{
         if(_dictationSettlementTimeout!==null)clearTimeout(_dictationSettlementTimeout);
       }
+    }
+    if(typeof _sendInProgress!=='undefined'&&_sendInProgress&&!_sendInProgressAtSettle){
+      // A dictation-owned send started while the composer was frozen. That turn
+      // belongs to the outgoing profile's session, so committing this switch would
+      // leave its stream unattached — surface it instead of moving the pane.
+      throw new Error(t('profile_switch_dictation_pending'));
     }
     if(!ownsPane())return false;
     // A replacement New Chat runs after the profile cookie changes. Persist the
@@ -7613,7 +7626,12 @@ async function switchToProfile(name) {
     if(_switchGen===_profileSwitchGeneration){
       setProfileSwitchComposerPending(false);
       if(typeof updateSendBtn==='function')updateSendBtn();
-      if(_restoreComposerFocus&&_profileSwitchComposer&&!_profileSwitchComposer.disabled
+      // Only hand focus back when nothing else claimed it meanwhile: freezing the
+      // composer blurred #msg (activeElement falls back to body/null), but a user
+      // who moved to another input during the switch must keep that focus.
+      const _focusIsFree=typeof document==='undefined'||!document.activeElement
+        ||document.activeElement===document.body;
+      if(_restoreComposerFocus&&_focusIsFree&&_profileSwitchComposer&&!_profileSwitchComposer.disabled
         &&typeof _profileSwitchComposer.focus==='function'){
         _profileSwitchComposer.focus();
       }
