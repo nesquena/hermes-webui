@@ -5476,14 +5476,19 @@ def _retry_journal_recovery_in_place(
                 )
             )
             else:
-                # No cancel hook on this marker: nothing was recovered on this
-                # path, and the three verdicts must still be bound for the
-                # resolution check below (an unbound name raised
+                # No cancel hook on this marker: use the plain recovery hop
+                # (no cancel-specific dedupe window). Binding the three
+                # verdicts here is required — an unbound name raised
                 # UnboundLocalError, which the outer handler swallowed into a
-                # silent ``return False``).
-                recovered_output = False
-                terminal_error_recovered = False
-                output_accounted_for = False
+                # silent ``return False`` and left every no-hook marker
+                # unresolvable (tests/test_session_sidecar_repair.py).
+                recovered_output, terminal_error_recovered, output_accounted_for = (
+                    _recover_journaled_output_and_terminal_error(
+                        session,
+                        stream_id,
+                        dedupe_existing=True,
+                    )
+                )
             # A dedupe hit (no fresh row appended this pass) still means the
             # journal's visible output is represented in the transcript, so
             # the marker is resolved: keeping "reload to retry" visible would
@@ -5507,14 +5512,14 @@ def _retry_journal_recovery_in_place(
                     # #7167: the rows this pass just recovered were APPENDED at
                     # the tail, i.e. AFTER this carrier. Tag them as belonging
                     # to THIS cancelled stream and rehome them above the
-                    # carrier before returning — otherwise the carrier's
-                    # segment is empty (or carries only untagged rows),
+                    # carrier — otherwise the carrier's segment is empty (or
+                    # carries only untagged rows),
                     # ``_cancelled_journal_turn_owner`` cannot prove the Stop,
                     # the merge never bounds the cancel turn, and the state.db
                     # replay row survives into the merged transcript while the
                     # durable saved successors lose their admission
                     # (tests/test_cancelled_journal_owner_occurrences.py).
-                    # master does the same tag+rehome on this branch.
+                    # master does the same tag + rehome on this branch.
                     for row in session.messages:
                         if (
                             isinstance(row, dict)
@@ -5533,7 +5538,6 @@ def _retry_journal_recovery_in_place(
                             getattr(session, 'session_id', '?'),
                             exc_info=True,
                         )
-                    return False
                 if give_up:
                     msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
                     _strip_journal_retry_meta(msg)
