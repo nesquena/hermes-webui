@@ -5551,30 +5551,36 @@ def _retry_journal_recovery_in_place(
                         )
                     return False
                 # Display successors alone do not establish context placement.
+                # The context hop is ONLY meaningful for a cancel hook: for a
+                # plain interrupted marker the plain recovery above already
+                # produced the verdicts, and re-running it here with a
+                # cancel-scoped window re-consumed an already-empty journal and
+                # overwrote the True verdict with False.
                 has_successor = any(
                     isinstance(row, dict) and row.get('role') == 'user'
                     for row in messages[idx + 1:]
                 )
-                owner_index = next((
-                    index for index in range(idx - 1, -1, -1)
-                    if isinstance(messages[index], dict)
-                    and messages[index].get('role') == 'user'
-                ), None)
-                context_owner = (
-                    _interrupted_journal_context_owner(session, idx, owner_index)
-                    if has_successor else None
-                )
-                interrupted_snapshot = snapshot_cancel_projection() if context_owner is not None else None
-                recovered_output, terminal_error_recovered = (
-                    _recover_journaled_output_and_terminal_error(
-                        session,
-                        stream_id,
-                        dedupe_existing=True,
-                        append_context=not has_successor,
-                        dedupe_min_index=owner_index + 1 if owner_index is not None else idx,
-                        dedupe_max_index=idx,
+                if cancel_hook:
+                    owner_index = next((
+                        index for index in range(idx - 1, -1, -1)
+                        if isinstance(messages[index], dict)
+                        and messages[index].get('role') == 'user'
+                    ), None)
+                    context_owner = (
+                        _interrupted_journal_context_owner(session, idx, owner_index)
+                        if has_successor else None
                     )
-                )
+                    interrupted_snapshot = snapshot_cancel_projection() if context_owner is not None else None
+                    recovered_output, terminal_error_recovered, _ = (
+                        _recover_journaled_output_and_terminal_error(
+                            session,
+                            stream_id,
+                            dedupe_existing=True,
+                            append_context=not has_successor,
+                            dedupe_min_index=owner_index + 1 if owner_index is not None else idx,
+                            dedupe_max_index=idx,
+                        )
+                    )
 
             if recovered_output or terminal_error_recovered:
                 if cancel_hook:
