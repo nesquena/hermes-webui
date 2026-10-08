@@ -53,32 +53,6 @@ def _fake_dns(monkeypatch, mapping):
 
     monkeypatch.setattr(web_push.socket, "getaddrinfo", fake)
 
-
-@pytest.fixture
-def push_env(tmp_path, monkeypatch):
-    monkeypatch.setattr(web_push, "_state_dir", lambda: tmp_path)
-    for name in (
-        "HERMES_WEBUI_VAPID_PUBLIC_KEY",
-        "HERMES_WEBUI_VAPID_PRIVATE_KEY",
-        "HERMES_WEBUI_VAPID_SUBJECT",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    _fake_dns(
-        monkeypatch,
-        {
-            "web.push.apple.com": ["17.253.1.1"],
-            "fcm.googleapis.com": ["142.250.80.10", "2607:f8b0:4004::200a"],
-            "updates.push.services.mozilla.com": ["34.107.243.93"],
-            "rebind.example": ["10.0.0.5"],
-            "mapped.example": ["::ffff:127.0.0.1"],
-            "cgnat.example": ["100.100.5.5"],
-            "ts.example": ["100.64.0.1"],
-            "mixed.example": ["8.8.8.8", "192.168.1.1"],
-        },
-    )
-    return tmp_path
-
-
 def _enable(monkeypatch, tmp_path):
     (tmp_path / "webui_vapid.json").write_text(
         json.dumps({"public_key": "PUBKEY", "private_key": PRIVATE_MARK, "subject": "mailto:a@b.co"})
@@ -419,7 +393,7 @@ def test_producers_are_wired():
     assert "notify_approval_required" in src["route_approvals.py"]
     assert "notify_clarify_required" in src["clarify.py"]
     assert "notify_bg_task_complete" in src["background_process.py"]
-    assert "web_push" in (ROOT / "server.py").read_text()
+    assert "atexit.register(shutdown" in (ROOT / "api" / "web_push.py").read_text()
 
 
 def test_settings_ui_opt_in_wiring():

@@ -44,6 +44,7 @@ Design notes
 
 from __future__ import annotations
 
+import atexit
 import base64
 import binascii
 import hashlib
@@ -77,6 +78,7 @@ _QUEUE: "queue.Queue[dict | None]" = queue.Queue(maxsize=_MAX_PENDING)
 _QUEUE_LOCK = threading.Lock()
 _WORKERS: list[threading.Thread] = []
 _STOP = threading.Event()
+_ATEXIT = [False]  # shutdown() registered with atexit (server.py stays under its line cap)
 
 
 class PushStoreUnavailable(RuntimeError):
@@ -703,6 +705,9 @@ def _ensure_workers() -> None:
             t = threading.Thread(target=_worker, name=f"web-push-{i + 1}", daemon=True)
             t.start()
             _WORKERS.append(t)
+        if not _ATEXIT[0]:
+            _ATEXIT[0] = True
+            atexit.register(shutdown, 1.0)
 
 
 def enqueue(payload: dict) -> bool:
