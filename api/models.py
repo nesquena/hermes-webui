@@ -4056,6 +4056,7 @@ def _recover_journaled_output_and_terminal_error(
     append_context: bool = True,
     dedupe_min_index: int | None = None,
     dedupe_max_index: int | None = None,
+    authorize_core_rows: bool = False,
 ) -> tuple[bool, bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error.
 
@@ -4087,6 +4088,7 @@ def _recover_journaled_output_and_terminal_error(
         dedupe_max_index=dedupe_max_index,
         append_context=append_context,
         display_only=not append_context,
+        authorize_core_rows=authorize_core_rows,
     )
     terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
         session,
@@ -4145,6 +4147,11 @@ def _append_journaled_partial_output(
     dedupe_max_index: int | None = None,
     append_context: bool = True,
     display_only: bool = False,
+    # #7167: when True, a candidate row that came from the authoritative core
+    # transcript is accepted as proof the journal output is already
+    # represented. Default False keeps every existing caller byte-identical;
+    # only the core-sync repair path opts in.
+    authorize_core_rows: bool = False,
 ) -> tuple[bool, bool]:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -4458,6 +4465,33 @@ def _append_journaled_partial_output(
                 # Ownership gate applies to EVERY match, reasoning or not.
                 # Unproven ownership => fall through to append.
                 if not content_match_owned_by_current_turn(candidate_idx):
+                    search_excluded.add(candidate_idx)
+                    continue
+                # #7167: ownership alone is NOT authorization to reuse a row.
+                # Only provenance (this same stream already recovered the row)
+                # or, when the caller opts in, the authoritative core
+                # transcript proves the journal output is already represented.
+                # An ordinary session row that merely shares the text is the
+                # journal's own output and must still be appended.
+                _cand = session.messages[candidate_idx]
+                _authorized = (
+                    _is_own_stream_recovery_artifact(_cand, stream_id)
+                    or (
+                        authorize_core_rows
+                        and _cand.get('_from_core_transcript') is True
+                    )
+                    # The core transcript is also projected into
+                    # context_messages; a row the projection already carries is
+                    # the durable copy the journal is replayed against.
+                    or any(
+                        isinstance(_cm, dict)
+                        and _cm.get('role') == 'assistant'
+                        and _normalize_journal_recovery_text(_cm.get('content'))
+                        == _normalize_journal_recovery_text(_cand.get('content'))
+                        for _cm in (session.context_messages or [])
+                    )
+                )
+                if not _authorized:
                     search_excluded.add(candidate_idx)
                     continue
                 if not reasoning or content_match_can_receive_reasoning(candidate_idx):
@@ -6196,6 +6230,16 @@ def _apply_core_sync_or_error_marker(
         core_messages = core.get('messages', [])
         if core_messages:
             session.messages = core_messages
+            # #7167: these rows come from the authoritative core transcript,
+            # so a journal event whose text is already here is a genuine
+            # duplicate. Tag them so the recovery dedupe can tell "the core
+            # transcript already holds this output" (dedupe) from "the session
+            # merely contains the same text" (append — a turn whose completion
+            # can no longer be proven, tests/test_issue6366_stale_cancel_recovery.py::
+            # test_full_recovery_appends_rows_on_turn_journal_completion_loss).
+            for _row in session.messages:
+                if isinstance(_row, dict):
+                    _row['_from_core_transcript'] = True
             session.tool_calls = core.get('tool_calls', [])
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
                 if core.get(field) is not None:
@@ -6236,6 +6280,11 @@ def _apply_core_sync_or_error_marker(
                     _stream_id,
                     dedupe_existing=True,
                     terminal_recovery=_terminal_recovery,
+                    # #7167: this branch has just synced session.messages FROM
+                    # the core transcript, so a journal event already present
+                    # there is a genuine duplicate. Ordinary callers keep the
+                    # stricter default.
+                    authorize_core_rows=True,
                 )
             )
             _pending_started_at = session.pending_started_at
