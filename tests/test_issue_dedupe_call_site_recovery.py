@@ -188,3 +188,79 @@ def test_repair_preserves_current_turn_recovered_rows_when_older_identical_histo
         "Current turn's identical recovered tool card was dropped due to session-wide dedupe"
     )
 
+
+
+# ---------------------------------------------------------------------------
+# Re-gate 2026-08-21 (nesquena-hermes), CORE#2:
+#   "Ordinary persisted tool summaries have NO stream tag, so the
+#    _stream_id/_recovered_stream_id guard doesn't protect them — an older
+#    `terminal: ls` still suppresses the current recovered tool."
+#
+# The pre-existing test above does NOT bite this, because it gives the older
+# tool card an ARTIFICIAL stream tag (`_recovered_stream_id: "older-stream"`),
+# which routes matching into the tagged branch and skips the real defect.
+#
+# This test uses the true persisted shape: an UNTAGGED card with the same
+# name+preview, anchored at an EARLIER turn's assistant row, and drives the
+# real `get_session()` cache-miss repair path (the reviewer's reproduction
+# entry point) rather than calling the repair helper directly.
+# ---------------------------------------------------------------------------
+
+
+def test_older_untagged_tool_card_does_not_suppress_current_recovery(hermes_home):
+    """CORE#2: an older UNTAGGED tool card must not swallow the current turn's
+    recovered tool card."""
+    import api.models as models
+
+    sid = "regate_untagged_tool"
+    stream_id = "regate-untagged-stream"
+
+    append_run_event(sid, stream_id, "token", {"text": "all clear"})
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls -la"})
+
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 111},
+            {"role": "assistant", "content": "all clear", "timestamp": 112},
+            {"role": "user", "content": "run the check", "timestamp": 222},
+        ],
+    )
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_attachments = []
+    session.pending_started_at = 222
+    session.pending_user_source = None
+    # The real persisted shape: NO _stream_id / _recovered_stream_id, anchored
+    # at the OLDER turn's assistant row (index 1).
+    session.tool_calls = [
+        {
+            "name": "terminal",
+            "preview": "ls -la",
+            "snippet": "ls -la",
+            "assistant_msg_idx": 1,
+            "done": True,
+        },
+    ]
+    session.save()
+    models.SESSIONS.pop(sid, None)          # force the cache-miss repair path
+
+    reloaded = models.get_session(sid)
+
+    recovered_tools = [
+        tc for tc in (reloaded.tool_calls or [])
+        if tc.get("_recovered_from_run_journal")
+    ]
+    assert len(recovered_tools) == 1, (
+        "CORE#2: the current turn's recovered tool card was dropped because an "
+        "older UNTAGGED card shared name+preview "
+        f"(tool_calls={reloaded.tool_calls!r})"
+    )
+    assert recovered_tools[0].get("_recovered_stream_id") == stream_id
+
+    # The pre-existing untagged card must still be there (no data destroyed).
+    assert any(
+        tc.get("assistant_msg_idx") == 1 and not tc.get("_recovered_from_run_journal")
+        for tc in (reloaded.tool_calls or [])
+    ), "the older untagged tool card must be preserved, not replaced"
