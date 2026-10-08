@@ -12465,6 +12465,16 @@ async function checkUpdatesNow(channelOverride){
     if(epoch!==null && typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
+      // #7679 finding 3 (round 2): reconcile the banner on EVERY terminal
+      // branch, not just the ones that have something to announce. A dirty
+      // result leaves the previous render's Force button visible and enabled,
+      // and the grant that made it operable was retired at the top of this
+      // render — so the control now does nothing when clicked.
+      //
+      // Passing the payload through the normal render path hides, disables and
+      // detargets the obsolete controls, and re-arms only what this check still
+      // validates (a live Agent recovery keeps its operable Force).
+      if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
     } else {
       const errorParts=[];
       const formatUpdateError=(typeof _formatUpdateCheckError==='function')
@@ -12500,16 +12510,43 @@ async function checkUpdatesNow(channelOverride){
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+        // #7679 finding 3 (round 2): reconcile the banner on this branch too —
+        // an error is a terminal state and the previous render's Force is now
+        // inert.
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
+        // #7679 finding 3 (round 2): same reconciliation for a no-git target.
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       } else {
-        if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
+        // #7679 round 2: a dirty-at-latest install has no "N updates
+        // available" parts, no error and is not no-git, so it landed here and
+        // the Settings line read "Up to date ✓" while the banner directly above
+        // it said "Local changes detected". The banner was right; this line was
+        // contradicting it. Report the dirty state here too.
+        const _dirtyParts=[];
+        if(data.webui&&data.webui.dirty&&!data.webui.manual_update) _dirtyParts.push('WebUI');
+        if(data.agent&&data.agent.dirty&&!data.agent.ignored) _dirtyParts.push('Agent');
+        if(_dirtyParts.length){
+          if(status){status.textContent=t('update_dirty_local_changes','Local changes detected')+': '+_dirtyParts.join(', ');status.style.color='var(--muted)';}
+        } else {
+          if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
+        }
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       }
     }
   } catch(e){
     // Never expose raw e.message in UI — log to console for debugging only
     console.warn('[checkUpdatesNow]', e);
+    // #7679 finding 2 (round 2): an OLDER check that REJECTS after a newer one
+    // began must not overwrite the newer status. The success path has had an
+    // epoch guard since the last round; the rejection path never did, so a
+    // stale failure erased a fresh "up to date" / "available" line and left the
+    // banner describing a state that no longer exists.
+    //
+    // Note the guard is on the REJECTION, not on the error text: a genuinely
+    // current failure still reports, so this narrows nothing but the race.
+    if(epoch!==null && typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
     // Show a generic user-facing error; if the API returned a message body use it
     let userMsg=t('settings_update_check_failed');
     if(e&&e.response){
@@ -12520,6 +12557,15 @@ async function checkUpdatesNow(channelOverride){
     }
     if(status){status.textContent=userMsg;status.style.color='var(--error)';}
   } finally {
+    // #7679 finding 2 (round 2): the SAME ownership question applies to the
+    // control restoration. A stale request's finally re-enabled Check, cleared
+    // the spinner and reset the label while the NEWER request was still
+    // pending — the button then read "Check now" and was clickable during an
+    // in-flight check, and the spinner vanished mid-flight.
+    //
+    // Only the latest owner may restore the controls; an older one leaves them
+    // exactly as the newer request set them.
+    if(epoch!==null && typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
     btn.disabled=false;
     if(spinner) spinner.style.display='none';
     if(label) label.textContent=t('settings_check_now');

@@ -12135,6 +12135,32 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
       forceBtn.style.display='none';
       forceBtn.dataset.target='';
     }
+  }else if(forceBtn&&_forceBtnManualAgentKeep){
+    // #7679 finding 1 (round 2): the manual-Agent preservation branch above
+    // kept the control VISIBLE and ENABLED while this render had already
+    // retired every grant. The button therefore looked operable and did
+    // nothing: forceUpdate() found no grant, opened zero confirmations and
+    // sent zero POSTs.
+    //
+    // Keeping the button without re-arming it is only half the fix. Re-arm it
+    // here, but ONLY with authority this payload actually validates — the same
+    // ``agentUpdatable && !recoveryGone`` predicate the block above uses to
+    // decide an Agent recovery is live. Granting unconditionally would be worse
+    // than the original bug: it would arm the destructive control on a payload
+    // that no longer supports it, and the next click would POST without
+    // authority.
+    //
+    // ``_recoveryGone`` is deliberately NOT referenced here: it is declared
+    // inside the block above and is out of scope at this point, so calling it
+    // would throw a ReferenceError from inside the banner render. The predicate
+    // is re-derived from the same three inputs instead.
+    const _keptRecovery=(data&&data.agent&&data.agent.recovery)||null;
+    const _keptGenerationCurrent=recoveryGenerationAtCheck===null||Number(recoveryGenerationAtCheck)===(Number(window._updateRecoveryGeneration)||0);
+    const _keptRecoveryGone=!!(!data.cached&&_keptGenerationCurrent&&_keptRecovery&&_keptRecovery.force===false);
+    if(typeof _grantForceUpdate==='function'&&agentUpdatable&&!_keptRecoveryGone){
+      _grantForceUpdate('agent', data&&data.agent?data.agent.channel:null);
+    }
+    forceBtn.dataset.target='agent';
   }
   // Clear-lock is a conflict/lock recovery control, not a dirty-state
   // one, so it is reset here too — otherwise a lock error from a
@@ -12464,6 +12490,31 @@ async function forceUpdate(btn){
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
+    // #7679 finding 4 (round 2): the grant was validated BEFORE the confirm,
+    // but this health read is another await on the same path — and a check that
+    // completes while it is in flight retires the grant, hides the button and
+    // leaves the handler still holding a snapshot it already proved stale.
+    //
+    // Deterministic replay: confirm a stable Force, pause health, let a newer
+    // clean experimental check complete (grant null, button hidden, zero POSTs),
+    // then settle health. The old handler still posted
+    // {target:'webui',channel:'stable'}. Recheck the exact grant identity, the
+    // check epoch and the button's live target immediately after health returns
+    // and BEFORE the destructive POST.
+    const staleAfterHealth=(typeof _forceUpdateGrant==='undefined')||_forceUpdateGrant!==grantSnapshot
+      || (typeof _isUpdateCheckStale==='function'&&_isUpdateCheckStale(grantSnapshot.epoch))
+      || target!==(btn&&btn.dataset.target)
+      || !(btn&&btn.dataset.target);
+    if(staleAfterHealth){
+      const msg=((typeof t==='function')?t('force_no_longer_applicable','Force update is no longer applicable — the update state changed. Please check again.'):'Force update is no longer applicable — the update state changed. Please check again.');
+      const errEl2=$('updateError');
+      if(errEl2){errEl2.textContent=msg;errEl2.style.display='block';}
+      else showToast(msg,5000,'error');
+      // Restore the control so the user can act on the newer state instead of
+      // being left with a dead button.
+      btn.disabled=false;btn.textContent=t('update_force','Force update');
+      return;
+    }
     // Use the grant's FROZEN channel, not a live re-read of the latest state:
     // a channel switch that races the confirm must not silently change the
     // destructive action's target channel (stale-authority bug).
@@ -12473,6 +12524,16 @@ async function forceUpdate(btn){
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
+      return;
+    }
+    // #7679 round 2: a backend no-op (``{ok:true,up_to_date:true}``) is NOT a
+    // restart. Announcing one and running the restart waiter left the Force
+    // button disabled for the whole poll window on an install that never
+    // restarted, so the user's only destructive recovery path was dead until
+    // they reloaded. Handle the no-op as its own outcome.
+    if(res.up_to_date){
+      showToast('Already up to date — nothing to reset.','4000');
+      btn.disabled=false;btn.textContent=t('update_force','Force update');
       return;
     }
     showToast('Force update applied — restarting…');
