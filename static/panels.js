@@ -15123,6 +15123,15 @@ function _webPushSameKey(a,b){
   for(let i=0;i<b.length;i++){ if(x[i]!==b[i]) return false; }
   return true;
 }
+// Explicit CSRF + device headers (the global fetch wrapper in index.html adds
+// them too; this keeps push working if the wrapper is bypassed).
+function _webPushHeaders(){
+  const h={'Content-Type':'application/json'};
+  const cfg=window.__HERMES_CONFIG__||{};
+  if(cfg.csrfToken) h['X-Hermes-CSRF-Token']=cfg.csrfToken;
+  if(window.__HERMES_PUSH_DEVICE__) h['X-Hermes-Push-Device']=window.__HERMES_PUSH_DEVICE__;
+  return h;
+}
 function _webPushSupported(){
   return !!(window.isSecureContext&&'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window);
 }
@@ -15157,7 +15166,7 @@ async function updateWebPushStatus(){
   let subscribed=false;
   if(sub){
     try{
-      const st=await api('/api/push/status?endpoint='+encodeURIComponent(sub.endpoint));
+      const st=await api('/api/push/status?endpoint='+encodeURIComponent(sub.endpoint),{headers:_webPushHeaders()});
       subscribed=!!(st&&st.subscribed);
     }catch(_e){ subscribed=false; }
   }
@@ -15180,7 +15189,7 @@ async function toggleWebPush(){
     const existing=await reg.pushManager.getSubscription();
     if(toggle&&toggle.dataset.subscribed==='1'){
       if(existing){
-        await api('/api/push/subscribe',{method:'DELETE',body:JSON.stringify({endpoint:existing.endpoint})});
+        await api('/api/push/subscribe',{method:'DELETE',headers:_webPushHeaders(),body:JSON.stringify({endpoint:existing.endpoint})});
         await existing.unsubscribe().catch(()=>false);
       }
       showToast(t('web_push_disabled_toast'),3000);
@@ -15199,7 +15208,7 @@ async function toggleWebPush(){
       sub=null;
     }
     if(!sub) sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
-    await api('/api/push/subscribe',{method:'POST',body:JSON.stringify({subscription:sub.toJSON(),previous_endpoint:previous})});
+    await api('/api/push/subscribe',{method:'POST',headers:_webPushHeaders(),body:JSON.stringify({subscription:sub.toJSON(),previous_endpoint:previous})});
     showToast(t('web_push_enabled_toast'),3000);
   }catch(e){
     showToast(t('web_push_error')+': '+(e&&e.message?e.message:e),5000,'error');
@@ -15209,7 +15218,7 @@ async function toggleWebPush(){
 }
 async function sendWebPushTest(){
   try{
-    await api('/api/push/test',{method:'POST',body:'{}'});
+    await api('/api/push/test',{method:'POST',headers:_webPushHeaders(),body:'{}'});
     showToast(t('web_push_test_sent'),4000);
   }catch(e){
     showToast(t('web_push_error')+': '+(e&&e.message?e.message:e),5000,'error');

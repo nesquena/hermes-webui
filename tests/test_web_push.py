@@ -16,6 +16,16 @@ APPLE = "https://web.push.apple.com/QGxyz"
 FCM = "https://fcm.googleapis.com/fcm/send/abc"
 MOZILLA = "https://updates.push.services.mozilla.com/wpush/v2/abc"
 PRIVATE_MARK = "PRIVATE-KEY-MATERIAL-SHOULD-NEVER-LEAK"
+DEV_A = "deviceAAAAAAAAAAAAAAAAAAAAAAAA"
+DEV_B = "deviceBBBBBBBBBBBBBBBBBBBBBBBB"
+OWNER_A = web_push.owner_for_device(DEV_A)
+OWNER_B = web_push.owner_for_device(DEV_B)
+
+
+class _H:
+    def __init__(self, dev=DEV_A, extra=None):
+        self.headers = {web_push.DEVICE_HEADER: dev} if dev else {}
+        self.headers.update(extra or {})
 
 
 def _b64(raw: bytes) -> str:
@@ -203,11 +213,11 @@ def test_unsafe_endpoints_rejected(push_env, endpoint):
 def test_delivery_rechecks_endpoint_and_skips_rebound_dns(push_env, monkeypatch):
     """Stored endpoint that later resolves to a private IP must not be contacted."""
     _enable(monkeypatch, push_env)
-    web_push.add_subscription(_sub(APPLE))
+    web_push.add_subscription(_sub(APPLE), owner=OWNER_A)
     calls = []
     monkeypatch.setattr(web_push, "_pywebpush", lambda: (lambda **kw: calls.append(kw), Exception))
     _fake_dns(monkeypatch, {"web.push.apple.com": ["10.0.0.9"]})
-    assert web_push._send_to_all({"title": "x"}) == 0
+    assert web_push._send_to_all({"title": "x", "_owners": [OWNER_A]}) == 0
     assert calls == []
 
 
@@ -225,8 +235,8 @@ def test_pinned_session_refuses_redirects_proxies_and_http(push_env):
 
 def test_send_passes_pinned_session_and_vapid_and_prunes_410(push_env, monkeypatch):
     _enable(monkeypatch, push_env)
-    web_push.add_subscription(_sub(APPLE))
-    web_push.add_subscription(_sub(FCM))
+    web_push.add_subscription(_sub(APPLE), owner=OWNER_A)
+    web_push.add_subscription(_sub(FCM), owner=OWNER_A)
     seen = []
 
     class Gone(Exception):
@@ -238,7 +248,7 @@ def test_send_passes_pinned_session_and_vapid_and_prunes_410(push_env, monkeypat
             raise Gone()
 
     monkeypatch.setattr(web_push, "_pywebpush", lambda: (fake_webpush, Exception))
-    sent = web_push._send_to_all(web_push.notification_payload("T", "B", session_id="s1"))
+    sent = web_push._send_to_all(web_push.notification_payload("T", "B", session_id="s1", owners=[OWNER_A]))
     assert sent == 1 and len(seen) == 2
     for kw in seen:
         assert kw["vapid_claims"] == {"sub": "mailto:a@b.co"}
@@ -264,6 +274,7 @@ def test_delivery_is_off_thread_and_enqueue_never_blocks(push_env, monkeypatch):
     import queue as _q
 
     monkeypatch.setattr(web_push, "_QUEUE", _q.Queue(maxsize=3))
+    web_push.register_session_owner("sid", OWNER_A)
     try:
         t0 = time.monotonic()
         assert web_push.notify_response_complete("sid", "done") is True
@@ -287,6 +298,8 @@ def test_approval_and_clarify_deduped(push_env, monkeypatch):
     queued = []
     monkeypatch.setattr(web_push, "enqueue", lambda p: queued.append(p) or True)
     monkeypatch.setattr(web_push, "_SEEN", {})
+    for sid in ("s",):
+        web_push.register_session_owner(sid, OWNER_A)
     a = {"approval_id": "a1", "description": "rm -rf /tmp/x"}
     assert web_push.notify_approval_required("s", a) is True
     assert web_push.notify_approval_required("s", a) is False
@@ -299,6 +312,7 @@ def test_session_done_uses_last_assistant_text(push_env, monkeypatch):
     queued = []
     monkeypatch.setattr(web_push, "is_enabled", lambda: True)
     monkeypatch.setattr(web_push, "enqueue", lambda p: queued.append(p) or True)
+    web_push.register_session_owner("sid/1", OWNER_A)
     msgs = [
         {"role": "assistant", "content": "old"},
         {"role": "user", "content": "q"},
@@ -327,12 +341,12 @@ def test_handlers_never_disclose_private_key_or_subscriptions(push_env, monkeypa
     _enable(monkeypatch, push_env)
     cap = _Capture(monkeypatch)
     r = cap.routes
-    r._handle_push_status(None, urlparse("/api/push/status"))
-    r._handle_push_vapid_public_key(None)
-    r._handle_push_subscribe(None, {"subscription": _sub(APPLE)})
-    r._handle_push_status(None, urlparse("/api/push/status?endpoint=" + APPLE))
-    r._handle_push_unsubscribe(None, {"endpoint": APPLE})
-    r._handle_push_subscribe(None, {"subscription": _sub("https://127.0.0.1/x")})
+    r._handle_push_status(_H(), urlparse("/api/push/status"))
+    r._handle_push_vapid_public_key(_H())
+    r._handle_push_subscribe(_H(), {"subscription": _sub(APPLE)})
+    r._handle_push_status(_H(), urlparse("/api/push/status?endpoint=" + APPLE))
+    r._handle_push_unsubscribe(_H(), {"endpoint": APPLE})
+    r._handle_push_subscribe(_H(), {"subscription": _sub("https://127.0.0.1/x")})
     blob = json.dumps(cap.out)
     assert PRIVATE_MARK not in blob
     assert "private" not in blob.lower()
@@ -346,9 +360,9 @@ def test_handlers_never_disclose_private_key_or_subscriptions(push_env, monkeypa
 def test_handlers_404_when_not_configured(push_env, monkeypatch):
     cap = _Capture(monkeypatch)
     r = cap.routes
-    r._handle_push_vapid_public_key(None)
-    r._handle_push_subscribe(None, {"subscription": _sub()})
-    r._handle_push_test(None)
+    r._handle_push_vapid_public_key(_H())
+    r._handle_push_subscribe(_H(), {"subscription": _sub()})
+    r._handle_push_test(_H())
     assert [s for s, _ in cap.out] == [404, 404, 404]
 
 
@@ -359,9 +373,9 @@ def test_corrupt_store_gives_503_from_handlers(push_env, monkeypatch):
     (push_env / "webui_push_subscriptions.json").write_text("garbage")
     cap = _Capture(monkeypatch)
     r = cap.routes
-    r._handle_push_status(None, urlparse("/api/push/status?endpoint=" + APPLE))
-    r._handle_push_subscribe(None, {"subscription": _sub()})
-    r._handle_push_test(None)
+    r._handle_push_status(_H(), urlparse("/api/push/status?endpoint=" + APPLE))
+    r._handle_push_subscribe(_H(), {"subscription": _sub()})
+    r._handle_push_test(_H())
     assert [s for s, _ in cap.out] == [503, 503, 503]
 
 
