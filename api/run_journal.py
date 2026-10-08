@@ -1123,6 +1123,13 @@ def _archived_next_seq(path: Path | None) -> int:
             continue
         if seq > last:
             last = seq
+    if last <= 0:
+        # A READABLE archive yielded no valid positive sequence: every row is
+        # malformed JSON, a non-object, or missing ``seq`` (or there are no
+        # rows at all). The stored bytes are real but their last seq cannot be
+        # established, so refuse rather than restart at 1 and mask them — the
+        # same fail-closed rule as the unreadable case above.
+        raise ValueError("archive_sequence_unavailable")
     return last + 1
 
 

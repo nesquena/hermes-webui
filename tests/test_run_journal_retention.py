@@ -2058,6 +2058,52 @@ def test_append_without_any_archive_still_starts_at_one(tmp_path):
     assert [int(e["seq"]) for e in read["events"]] == [1]
 
 
+def test_readable_but_invalid_archive_does_not_restart_sequences(tmp_path):
+    """A readable archive with no valid seq must block appends, not restart them.
+
+    Reproduces the Greptile follow-up: the archive DEcompresses fine but every
+    row is malformed JSON, a non-object, or missing ``seq`` — the max-seq scan
+    skipped them all and returned 1, so a resumed writer restarted at seq 1
+    beside the stored bytes. Refused now, same fail-closed rule as the
+    unreadable case.
+    """
+    _write_run(tmp_path, "s1", "r1", mtime_age_days=30)
+    counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+    archive = _archive_path(tmp_path, "s1", "r1")
+    assert archive.exists()
+
+    # Valid gzip, but no row yields a valid positive seq.
+    payload = (b"not json at all\n"
+               + json.dumps({"nope": 1}).encode() + b"\n"
+               + json.dumps([1, 2, 3]).encode() + b"\n")
+    with gzip.open(archive, "wb") as gz:
+        gz.write(payload)
+    assert rj._read_gz_text(archive) is not None  # readable...
+
+    with pytest.raises(ValueError, match="archive_sequence_unavailable"):
+        rj.append_run_event("s1", "r1", "token", {"text": "after"}, session_dir=tmp_path)
+
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / "s1" / "r1.jsonl"
+    assert not live.exists() or live.read_text() == ""
+    assert archive.exists()
+
+
+def test_partially_valid_archive_still_seeds_from_max_valid_seq(tmp_path):
+    """Recoverable archives keep seeding: garbage rows are skipped, valid rows count."""
+    _write_run(tmp_path, "s1", "r1", mtime_age_days=30)
+    counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+    archive = _archive_path(tmp_path, "s1", "r1")
+    raw = gzip.decompress(archive.read_bytes())
+    with gzip.open(archive, "wb") as gz:
+        gz.write(raw + b"garbage tail\n")
+    row = rj.append_run_event("s1", "r1", "token", {"text": "after"}, session_dir=tmp_path)
+    assert row["seq"] == 4  # max valid archived seq is 3; garbage rows are skipped
+    read = rj.read_run_events("s1", "r1", session_dir=tmp_path)
+    assert [int(e["seq"]) for e in read["events"]] == [1, 2, 3, 4]
+
+
 def test_readable_archive_still_seeds_appends(tmp_path):
     """A readable archive keeps the continue-past-maximum behavior."""
     _write_run(tmp_path, "s1", "r1", mtime_age_days=30)
