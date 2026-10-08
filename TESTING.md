@@ -459,6 +459,12 @@ EXPECT:
     context metadata, usage snapshot, token/cost counters, or response-driven UI.
     Hold the update response (and separately its JSON decoding for `/model`),
     switch from session A to B, then release it. Repeat after closing A.
+  - `/model` captures its session before fetching the catalog, not just before
+    posting the model update. Hold `/api/models` response and JSON decoding
+    separately, then switch/close the session: no update POST, dropdown mutation,
+    persistence, or command feedback may follow. Repeat for a dropdown match and
+    no-match fallback, and for an empty composer that gains a session while waiting.
+    Same-session and still-empty composer commands retain their normal behavior.
   - Explicit foreign `session_id` payloads are rejected. Legacy responses without
     that field still work for the captured active request target, but cannot be
     applied after that target is replaced.
@@ -467,7 +473,7 @@ EXPECT:
 FAIL: The badge snaps back to the previous model's window after refresh, the new
 session response has no resolved window when one is known, or late hydration
 changes another conversation.
-Automated coverage: `./scripts/test.sh -q tests/test_issue_grok46_context_window_mismatch.py tests/test_grok_context_window_runtime.py tests/test_model_response_session_ownership.py`.
+Automated coverage: `./scripts/test.sh -q tests/test_issue_grok46_context_window_mismatch.py tests/test_grok_context_window_runtime.py tests/test_model_response_session_ownership.py tests/test_slash_model_catalog_ownership.py`.
 The runtime tests execute real frontend functions in Node.js with isolated API
 boundaries and explicitly deferred response/JSON promises (no timing sleeps); they do not certify browser layout or a provider's current catalog.
 

@@ -768,6 +768,9 @@ async function cmdModel(args){
   if(!args){showToast(t('model_usage'));return;}
   const sel=$('modelSelect');
   if(!sel)return;
+  // Own the command before catalog awaits, including the empty-composer path.
+  const sessionId=(S&&S.session&&S.session.session_id)||null;
+  const ownsSession=()=>((S&&S.session&&S.session.session_id)||null)===sessionId;
   let q=args.toLowerCase();
   // Fetch /api/models once: it carries both the alias map AND the full catalog
   // groups (featured `models` + truncated `extra_models`). Resolve aliases, then
@@ -780,8 +783,10 @@ async function cmdModel(args){
   let aliasTarget=null;
   try {
     const resp=await fetch(new URL('api/models',document.baseURI||location.href).href);
+    if(!ownsSession())return;
     if(resp.ok){
       modelsData=await resp.json();
+      if(!ownsSession())return;
       let routedAliasMatched=false;
       const routedAliases=modelsData.model_alias_routes||{};
       for(const [alias,target] of Object.entries(routedAliases)){
@@ -804,6 +809,7 @@ async function cmdModel(args){
       }
     }
   } catch(_){/* non-critical, fall through to fuzzy match */}
+  if(!ownsSession())return;
   const {options:candidates,providerMap}=_buildModelCandidates(sel,modelsData&&modelsData.groups);
   const aliasRoute=aliasTarget?_resolveModelAliasTarget(candidates,providerMap,aliasTarget):null;
   // A provider-qualified alias is authoritative. For ordinary text, first try an
@@ -835,7 +841,6 @@ async function cmdModel(args){
     // different provider not in the dropdown. Call /api/session/update directly.
     if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
       const provider=q.slice(0,q.indexOf('/'));
-      const sessionId=S.session.session_id;
       try{
         const resp=await fetch(new URL('api/session/update',document.baseURI||location.href).href,{
           method:'POST',
@@ -865,6 +870,7 @@ async function cmdModel(args){
           return;
         }
       }catch(_){/* fall through to "no model match" */}
+      if(!ownsSession())return;
     }
   }
   if(!match){
@@ -895,6 +901,7 @@ async function cmdModel(args){
     sel.value=match;
   }
   await sel.onchange();
+  if(!ownsSession())return;
   showToast(t('switched_to')+match);
 }
 
