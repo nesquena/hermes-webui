@@ -5454,15 +5454,14 @@ def _retry_journal_recovery_in_place(
                     dedupe_existing=True,
                     dedupe_min_index=owner_index + 1,
                     dedupe_max_index=idx,
+                    # append_context=False is what makes the cancel-marker
+                    # replay REPRESENT the journal's visible output without
+                    # appending a second copy into session.messages:
+                    # _recover_journaled_output_and_terminal_error forwards
+                    # ``display_only=not append_context`` to
+                    # _append_journaled_partial_output. Do NOT pass
+                    # display_only here — this wrapper does not accept it.
                     append_context=False,
-                    # display_only: the cancel-marker replay must REPRESENT the
-                    # journal's visible output without appending a second copy
-                    # into session.messages. Without it the replayed row (and
-                    # its CANCELLED_REPLAY payload) survives into the merged
-                    # transcript, which is exactly what
-                    # tests/test_cancelled_journal_owner_occurrences.py
-                    # asserts must not happen.
-                    display_only=True,
                 )
             )
             # A dedupe hit (no fresh row appended this pass) still means the
