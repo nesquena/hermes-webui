@@ -201,14 +201,17 @@ class TestZoomableStageCss:
         else:
             raise AssertionError(".img-lightbox-canvas selector not found in style.css")
 
-    def test_image_fills_canvas_and_does_not_capture_pointer(self):
-        """The img must fill its natural-size canvas and let pointer events
-        fall through to the viewport so gestures stay on one element."""
+    def test_image_fills_canvas_and_keeps_native_context_menu(self):
+        """The img must fill its natural-size canvas and stay a real hit
+        target so the browser's image context menu (Save image as, Copy
+        image, Open image in new tab) keeps working; gestures bubble to the
+        viewport anyway."""
         src = STYLE.read_text(encoding="utf-8")
         for line in src.splitlines():
             if line.strip().startswith(".img-lightbox-canvas img{"):
                 assert "max-width:none" in line and "max-height:none" in line
-                assert "pointer-events:none" in line
+                assert "pointer-events:none" not in line
+                assert "-webkit-user-drag:none" in line
                 break
         else:
             raise AssertionError(".img-lightbox-canvas img selector not found in style.css")

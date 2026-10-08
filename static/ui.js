@@ -2877,6 +2877,18 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     }
     state.dragPointerId = null;
     viewport.classList.remove('is-panning');
+    // Chromium withholds the synthesized click of a touch tap that lands in
+    // its post-fling tap-suppression window on a touch-action:none surface,
+    // so a clean letterbox tap right after a flick-pan never reached
+    // _onViewportClick and the dialog stayed open (release gate of #6896,
+    // 2026-10-08: first tap swallowed 4/4, master closed 6/6). Dismiss from
+    // the pointer sequence itself; marking dragged suppresses the click the
+    // browser does synthesize so the close never runs twice.
+    if(e && e.type === 'pointerup' && e.pointerType === 'touch' && !state.dragged && !state.pressOnImage &&
+       !_imgPointOnCanvas(Number(e.clientX), Number(e.clientY))){
+      state.dragged = true;
+      _closeImgLightbox(lb);
+    }
   }
 
   // A navigation swaps the image under an in-flight pan. The old gesture's
@@ -2921,8 +2933,9 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     // transformed canvas (image pixels). An undragged click on the
     // viewport's own letterboxed area must bubble to the lightbox backdrop
     // handler so clicking empty space around a fitted image still closes
-    // the dialog — the img is pointer-events:none, so clicks on visible
-    // pixels target the canvas while letterboxed clicks target the viewport.
+    // the dialog — clicks on visible pixels target the img/canvas while
+    // letterboxed clicks target the viewport (the img keeps pointer events so
+    // the native image context menu still works).
     //
     // The click's target alone cannot decide that: the pointer capture taken
     // in _imgOnPointerDown retargets the click of a real mouse press on image

@@ -62,9 +62,10 @@ class TestDismissalSemantics:
         assert "state.pressOnImage = !!((e.target && e.target !== viewport) ||" in src
         assert "e.stopPropagation" in src
 
-    def test_image_is_pointer_events_none(self):
+    def test_image_keeps_pointer_events_for_native_context_menu(self):
         css = STYLE.read_text(encoding="utf-8")
-        assert "pointer-events:none" in css
+        line = next(l for l in css.splitlines() if l.strip().startswith(".img-lightbox-canvas img{"))
+        assert "pointer-events:none" not in line
 
 
 class TestMaintainerGate20261006:
