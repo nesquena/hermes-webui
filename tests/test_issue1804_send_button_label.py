@@ -334,18 +334,22 @@ def test_helper_actually_inserts_label_span_in_node_vm():
     assert out["steer"]["has_label"] is True, out
     assert out["send"]["has_label"] is False, out
     assert out["disabled"]["has_label"] is False, out
-    # The label text must be the (untranslated) i18n key when t() is
-    # the identity function, so locale-restamp can re-run t() and
-    # swap the text in place.
-    for action, key in (
-        ("stop", "composer_action_stop"),
-        ("queue", "composer_action_queue"),
-        ("interrupt", "composer_action_interrupt"),
-        ("steer", "composer_action_steer"),
+    # The label text must be the English word when t() is the identity
+    # function. #7686 finding 5: an identity t() is what a locale with no
+    # composer_action_* entry actually sees (the keys live only in the English
+    # block), and echoing the KEY there made Chinese users read "Stop" as the
+    # literal string "composer_action_stop" in earlier revisions of this
+    # helper. The English fallback is the correct text to show.
+    for action, english in (
+        ("stop", "Stop"),
+        ("queue", "Queue"),
+        ("interrupt", "Interrupt"),
+        ("steer", "Steer"),
     ):
-        assert out[action]["label_text"] == key, (
-            f"label text for {action!r} should equal i18n key {key!r} "
-            f"when t() is the identity function, got {out[action]['label_text']!r}"
+        assert out[action]["label_text"] == english, (
+            f"label text for {action!r} should fall back to the English word "
+            f"{english!r} when t() is the identity function, got "
+            f"{out[action]['label_text']!r}"
         )
 
 
@@ -468,7 +472,6 @@ def test_update_send_btn_mirrors_title_into_data_tooltip():
     # title (_btnTitle), not a hard-coded "Send message" string —
     # otherwise the tooltip would still read "Send message" on the
     # busy modes, the exact regression the 9/24 review flagged.
-    snippet = body[title_idx:tooltip_idx]
     # Find the exact line that sets data-tooltip.
     tooltip_line = body[tooltip_idx:body.find("\n", tooltip_idx)]
     assert "_btnTitle" in tooltip_line, (

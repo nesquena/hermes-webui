@@ -7284,8 +7284,24 @@ function _fitComposerFooter(){
   // freeze: commit nothing to the screen, restore both in `finally`.
   const sendBtn=document.getElementById('btnSend');
   const sendBtnLabel=sendBtn&&sendBtn.querySelector('.send-btn-label');
+  // #7686 finding 1 (must fix): reserve the WIDEST busy footprint during BOTH
+  // idle and busy fitting. The old code hid the label while measuring, so the
+  // stage was sized for the 34px idle button; restoring the wider Stop/Interrupt
+  // pill in `finally` then shrank .composer-left (overflow-x:auto, scrollbar
+  // hidden) and clipped its chips with no cue. Measuring with the label VISIBLE
+  // makes overflows() see the worst case, so the committed stage has room for
+  // the pill that is actually about to be painted.
   const prevLabelDisplay=sendBtnLabel?sendBtnLabel.style.display:'';
-  if(sendBtnLabel) sendBtnLabel.style.display='none';
+  const _btnStyle=sendBtn&&sendBtn.style?sendBtn.style:null;
+  const prevBtnWidth=_btnStyle?_btnStyle.width:'';
+  const prevBtnMinWidth=_btnStyle?_btnStyle.minWidth:'';
+  if(sendBtnLabel) sendBtnLabel.style.display='';
+  if(_btnStyle){
+    // width:auto + a min-width that survives the burger stage's width:34px, so
+    // the measured footprint is the pill's own, never the circle's.
+    _btnStyle.width='auto';
+    _btnStyle.minWidth='0';
+  }
   // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
   // boundary crossing (this fit path measures real overflow at any width,
   // e.g. a constant 760px viewport). CSS hides the inline model/reasoning/
@@ -7330,6 +7346,10 @@ function _fitComposerFooter(){
       footer.style.visibility=prevVisibility;
     }
     if(sendBtnLabel) sendBtnLabel.style.display=prevLabelDisplay;
+    if(_btnStyle){
+      _btnStyle.width=prevBtnWidth;
+      _btnStyle.minWidth=prevBtnMinWidth;
+    }
   }
   // Post-restore transition check: fire the same composer menu cleanup used
   // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
@@ -11081,11 +11101,18 @@ function _setComposerPrimaryButtonIcon(btn,action){
   // hover tooltip. The text is resolved through t() so non-English
   // locales get the translated name.
   const _labelKeys={stop:'composer_action_stop',queue:'composer_action_queue',interrupt:'composer_action_interrupt',steer:'composer_action_steer'};
+  // #7686 finding 5 (should fix): the composer_action_* keys live only in the
+  // English block of static/i18n.js, so t() returns the KEY for every other
+  // locale and Chinese users saw the English word "Stop". Resolve through the
+  // English string explicitly instead of falling back to the key name.
+  const _labelFallback={stop:'Stop',queue:'Queue',interrupt:'Interrupt',steer:'Steer'};
   let _fullInner=icons[action]||icons.send;
   if(_labelKeys[action]){
     const _key=_labelKeys[action];
-    const _val=(typeof t==='function')?t(_key):_key;
-    const _text=_val||_key;
+    const _val=(typeof t==='function')?t(_key):'';
+    // t() echoes the key when the locale has no entry; that is not a
+    // translation, so fall through to the English word.
+    const _text=(_val&&_val!==_key)?_val:(_labelFallback[action]||_key);
     // Escape for safe innerHTML injection of translator-controlled text.
     const _esc=String(_text).replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
     _fullInner+='<span class="send-btn-label">'+_esc+'</span>';

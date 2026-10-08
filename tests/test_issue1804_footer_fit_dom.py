@@ -40,7 +40,6 @@ page. Playwright is required; CI runs this file explicitly.
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 
 import pytest
@@ -333,9 +332,15 @@ def test_busy_pill_is_wider_than_idle(footer_page, width):
         )
         idle_w = _send_width(page_busy)
         if "cf-burger" in stage:
-            assert busy_w <= 35 and idle_w <= 35, (
-                f"viewport {width}px: burger stage must keep the 34px circle "
-                f"for both modes, got busy={busy_w}px idle={idle_w}px"
+            # #7686 finding 2: the phone 44px touch-target contract outranks
+            # the 34px circle. The top-level cf-burger rule still asks for
+            # width:34px, but the 640px block now pins min-width/min-height:44px
+            # (higher need, lower specificity — min-* is not overridden by a
+            # plain width), so phone widths measure 44px, not 34px.
+            expected = 44 if width <= 640 else 34
+            assert busy_w <= expected + 1 and idle_w <= expected + 1, (
+                f"viewport {width}px: burger stage must keep the {expected}px "
+                f"target for both modes, got busy={busy_w}px idle={idle_w}px"
             )
         else:
             assert busy_w > idle_w + 1, (
@@ -381,9 +386,12 @@ def test_footer_stage_is_stable_across_a_busy_idle_cycle(footer_page, width):
         # display:none, not clipped, so scrollWidth may exceed clientWidth.
         # Neither is a defect; assert the burger-stage button shape instead.
         if "cf-burger" in stage_busy:
-            assert _send_width(page_busy) <= 35, (
-                f"viewport {width}px: burger stage must force the 34px circle "
-                f"back, measured {_send_width(page_busy)}px"
+            # #7686 finding 2: 44px at phone widths (see the note above),
+            # 34px from 641px up.
+            expected = 44 if width <= 640 else 34
+            assert _send_width(page_busy) <= expected + 1, (
+                f"viewport {width}px: burger stage must force the {expected}px "
+                f"target back, measured {_send_width(page_busy)}px"
             )
     finally:
         ctx.close()

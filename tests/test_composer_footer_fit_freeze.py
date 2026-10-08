@@ -508,24 +508,30 @@ def test_harness_detects_unfrozen_probe(outcome):
 # overflow measurement itself blows up.
 
 
-def test_label_pinned_hidden_during_probe(outcome):
-    """Every fit pass must write ``display:none`` onto the busy-mode
-    label *before* the first class mutation of the probe, so the
-    measurement sees the idle (icon-only) button width. The write log is
-    checked for both halves of the freeze+release: the first write is
-    ``display="none"`` and the last write restores the prior value.
+def test_label_pinned_visible_during_probe(outcome):
+    """Every fit pass must leave the busy-mode label VISIBLE while it
+    measures, so the button is at its widest (busy) footprint *before*
+    any class mutation.
+
+    #7686 finding 1 (must fix): the 9/24 fix pinned the label to
+    ``display:none`` during the measurement, which sized the stage for the
+    34px idle button; restoring the wider Stop/Interrupt pill in the
+    ``finally`` block then shrank ``.composer-left`` (overflow-x:auto,
+    scrollbar hidden) and clipped its chips with no cue. Measuring with the
+    label visible makes ``overflows()`` see the worst case, so the committed
+    stage has room for the pill that is actually about to be painted.
     """
     for run in outcome["runs"]:
         writes = run["labelStyleWrites"]
         assert writes, (
             f"{_label(run)}: fit pass never touched the send-btn-label "
-            "display — the busy-mode pill is not being pinned to the "
-            "idle width during the measurement (#1804 re-gate 9/24)."
+            "display — the busy-mode pill footprint is not being reserved "
+            "during the measurement (#7686 finding 1)."
         )
-        assert writes[0] == 'display="none"', (
-            f"{_label(run)}: the first label write must be display=none "
-            f"so the button is at idle width *before* any class mutation; "
-            f"got {writes!r}"
+        assert writes[0] == 'display=""', (
+            f"{_label(run)}: the first label write must pin the label "
+            f"visible so the widest busy footprint is reserved before any "
+            f"class mutation; got {writes!r}"
         )
         # The final write must restore the prior display — for the
         # default prior of '' (empty) the restore is ``display=""``;
@@ -565,9 +571,10 @@ def test_label_restored_on_measurement_exception(outcome):
         f"behind: got {run['labelDisplay']!r}, expected ''"
     )
     writes = run["labelStyleWrites"]
-    assert writes and writes[0] == 'display="none"', (
-        f"the label must be pinned hidden at the start of the probe "
-        f"even when the measurement will throw: {writes!r}"
+    assert writes and writes[0] == 'display=""', (
+        f"the label must be pinned visible at the start of the probe "
+        f"even when the measurement will throw, so the busy footprint is "
+        f"reserved: {writes!r}"
     )
     assert writes[-1] == 'display=""', (
         f"the label must be restored after the probe even when the "
@@ -618,15 +625,15 @@ def test_width_sweep_idle_matches_busy(outcome):
         assert row["busy"]["error"] is None, (
             f"vw={vw} busy: {row['busy']['error']}"
         )
-        # The label must be pinned to display:none at the start of
-        # the probe and restored to the prior display in the finally
-        # block, in both runs.
+        # The label must be pinned VISIBLE at the start of the probe so the
+        # widest busy footprint is reserved (#7686 finding 1), and restored to
+        # the prior display in the finally block, in both runs.
         for state, run, prev in (
             ("idle", row["idle"], ""),
             ("busy", row["busy"], "inline"),
         ):
             writes = run["labelStyleWrites"]
-            assert writes and writes[0] == 'display="none"', (
+            assert writes and writes[0] == 'display=""', (
                 f"vw={vw} {state}: label pin write missing: {writes!r}"
             )
             assert writes[-1] == f'display="{prev}"', (

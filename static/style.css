@@ -3478,7 +3478,12 @@
     /* icon-only composer chips continue below mobile widths */
     .composer-divider{display:none;}
     .composer-status{flex:0 1 auto;min-width:0;max-width:96px;font-size:10px;text-align:right;}
-    .send-btn{width:44px;height:44px;}
+    .send-btn{width:44px;height:44px;min-width:44px;min-height:44px;}
+    /* #7686 finding 1 (must fix): hide the busy label at phone widths
+       regardless of footer stage. The pill steals room .composer-left
+       cannot spare on a phone, and the burger-stage rule below only
+       covers one of the three stages. */
+    .send-btn-label{display:none!important;}
     .ctx-indicator-wrap{display:none!important;}
     .ctx-indicator{width:44px;height:44px;}
     .ctx-tooltip{right:-4px;min-width:190px;max-width:220px;}

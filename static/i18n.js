@@ -28300,6 +28300,13 @@ function applyLocaleToDOM() {
   if (_sendBtnLocaleRestamp && typeof _setComposerPrimaryButtonIcon === 'function') {
     _setComposerPrimaryButtonIcon(_sendBtnLocaleRestamp, _sendBtnLocaleRestamp.dataset.action || 'send');
   }
+  // #7686 finding 4 (should fix): the generic [data-i18n-title] restamp above
+  // writes the *send* key ("Nachricht senden") into data-tooltip/aria-label,
+  // while the pill can be showing Stop/Interrupt/Steer. The label restamp only
+  // redraws the <span>, so the tooltip and the screen-reader name contradict
+  // the visible pill. updateSendBtn is the single owner of both attributes and
+  // resolves the title from the live action, so re-run it after the restamp.
+  if (typeof updateSendBtn === 'function') updateSendBtn();
 }
 
 // Apply saved locale immediately so there's no flash of English on reload.
