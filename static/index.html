@@ -30,7 +30,7 @@
      641-900px compact band. If the helper's logic changes, update this too. -->
 <script>(function(){try{var p=localStorage.getItem('hermes-webui-sidebar-collapsed');var compact=(window.matchMedia('(max-width: 900px)').matches&&window.matchMedia('(min-width: 641px)').matches);if(p==='1'||(p==null&&compact))document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
-<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
+<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__,imgSrcExtra:__CSP_IMG_EXTRA_JSON__};</script>
 <script>window.__HERMES_WEBUI_BUNDLE_VERSION__='__WEBUI_VERSION__';</script>
 <script>(function(){
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
@@ -1073,12 +1073,12 @@
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_transparent_stream_event_timestamps">Keeps the response footer time visible while hiding the per-event timestamp chips.</div>
             </div>
-            <div class="settings-field" style="margin-top:8px">
+            <div class="settings-field" style="margin-top:8px" data-settings-search="autoscroll auto-follow follow sticky bottom streaming">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsAutoScrollFollow" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span data-i18n="settings_label_auto_scroll_follow">Auto-follow new content</span>
+                <span data-i18n="settings_label_auto_scroll_follow">Auto-scroll to new content</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_auto_scroll_follow">When enabled, the view scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_auto_scroll_follow">When enabled, the view auto-scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.</div>
             </div>
             <div class="settings-field" style="margin-top:8px">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

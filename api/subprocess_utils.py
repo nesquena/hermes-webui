@@ -79,6 +79,9 @@ def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
         if key.startswith(GIT_ENV_SCRUB_PREFIXES):
             env.pop(key, None)
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # Git Credential Manager can use GUI/browser prompts independently of Git's
+    # terminal prompt. Cached credentials still work when interaction is disabled.
+    env["GCM_INTERACTIVE"] = "never"
     return env
 
 
@@ -361,6 +364,7 @@ def noninteractive_git_argv(
         ("core.askPass", ""),
         ("protocol.ext.allow", "never"),
         ("credential.helper", ""),
+        ("credential.interactive", "false"),
     ):
         argv.extend(["-c", f"{key}={value}"])
     for key, value in credential_config:

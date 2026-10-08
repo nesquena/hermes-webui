@@ -20,3 +20,18 @@ def test_bottom_button_has_dead_zone_and_no_platform_scroll_shim():
     assert 'const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;' in scroll_listener
     assert '_isIosStandalonePwa' not in UI_JS
     assert '_messagePanePreferredBottomScrollTop' not in UI_JS
+
+
+def test_messages_scroller_suppresses_elastic_bottom_overscroll():
+    """The transcript boundary must not rubber-band against the live-tail writer.
+
+    `contain` prevents scroll chaining but deliberately keeps the platform's
+    elastic overscroll effect. While live-tail follow writes the hard bottom on
+    streamed updates, that elastic transform is repeatedly cancelled and looks
+    like a vibration. `none` preserves the isolated scroll surface while also
+    suppressing the boundary effect.
+    """
+    start = STYLE_CSS.index('.messages{')
+    rule = STYLE_CSS[start:STYLE_CSS.index('}', start)]
+    assert 'overscroll-behavior-y:none' in rule
+    assert 'overscroll-behavior-y:contain' not in rule

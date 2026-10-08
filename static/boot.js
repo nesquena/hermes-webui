@@ -2163,7 +2163,9 @@ $('btnNewChat').onclick=async()=>{
      && await _restoreRememberedNewChatDraftSession()){
     await renderSessionList();closeMobileSidebar();$('msg').focus();return;
   }
-  await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+  // newSession() schedules the sidebar refresh itself; awaiting another here
+  // queued a second full list read in front of the composer focus (#7936).
+  await newSession();closeMobileSidebar();$('msg').focus();
 };
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
@@ -2329,6 +2331,9 @@ $('modelSelect').onchange=async()=>{
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
+  if(typeof _rememberComposerModelPick==='function'){
+    _rememberComposerModelPick(modelState.model,modelState.model_provider);
+  }
   if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
@@ -2376,11 +2381,15 @@ $('msg').addEventListener('input',()=>{
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
+  // The user edited the text, so an earlier pick/Escape no longer holds the list closed (#8050).
+  if(typeof clearSlashDropdownDismissed==='function') clearSlashDropdownDismissed();
   const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;
   if(_slashIdx>=0&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
       getSlashAutocompleteMatches(text).then(matches=>{
         if(($('msg').value||'')!==text) return;
+        // A pick or Escape that landed while this lookup was in flight wins (#8050).
+        if(typeof slashDropdownDismissedFor==='function'&&slashDropdownDismissedFor(text)) return;
         if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
       });
     }else{
@@ -2486,7 +2495,7 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='ArrowUp'){e.preventDefault();navigateCmdDropdown(-1);return;}
     if(e.key==='ArrowDown'){e.preventDefault();navigateCmdDropdown(1);return;}
     if(e.key==='Tab'){e.preventDefault();selectCmdDropdownItem();return;}
-    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();return;}
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();if(typeof markSlashDropdownDismissed==='function')markSlashDropdownDismissed();return;}
     if(e.key==='Enter'&&!e.shiftKey){
       if(_isImeEnter(e)){return;}
       if(window._sendKey==='shift+enter'){
@@ -2577,7 +2586,8 @@ document.addEventListener('keydown',async e=>{
     // a long generation to finish before they could start something new — exactly
     // the moment they want to switch context. newSession() leaves the in-flight
     // stream running on its own session; the user just gets a fresh blank one.
-    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+    // As in $('btnNewChat').onclick: newSession() owns the sidebar refresh.
+    await newSession();closeMobileSidebar();$('msg').focus();
   }
   // Cmd/Ctrl+, opens/closes Settings (VS Code convention).
   // Fire globally — like VS Code, don't skip text inputs.
@@ -2743,30 +2753,77 @@ if(window.visualViewport){
       if(saved) targetEl.style.width = saved + 'px';
     }
 
-    let startX=0, startW=0;
+    let startX=0, startW=0, activePointer=null, fallbackDoc=false;
+    const endResize=()=>{
+      if(activePointer===null) return;
+      const id=activePointer;
+      activePointer=null;
+      try{ handle.releasePointerCapture(id); }catch(_){}
+      if(fallbackDoc){
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        document.removeEventListener('pointercancel', onCancel);
+        fallbackDoc=false;
+      }
+      handle.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      const w=parseInt(targetEl.style.width,10);
+      if(Number.isFinite(w)){ try{ localStorage.setItem(storageKey, w); }catch(_){} }
+    };
+    const onMove = ev=>{
+      if(activePointer===null || ev.pointerId!==activePointer) return;
+      ev.preventDefault();
+      const delta = edge==='right' ? ev.clientX - startX : startX - ev.clientX;
+      const newW = Math.min(maxW, Math.max(minW, startW + delta));
+      targetEl.style.width = newW + 'px';
+    };
+    const onUp = ev=>{
+      if(activePointer===null || (ev.pointerId!==undefined && ev.pointerId!==activePointer)) return;
+      endResize();
+    };
+    // Cancel/revoke events from OTHER pointers (a pen or touch contact
+    // elsewhere) must not end this drag; only the active pointer's own
+    // cancel does. Window blur still ends the drag unconditionally.
+    const onCancel = ev=>{
+      if(activePointer===null || ev.pointerId!==activePointer) return;
+      endResize();
+    };
 
-    handle.addEventListener('mousedown', e=>{
-      e.preventDefault();
-      startX = e.clientX;
+    handle.addEventListener('pointerdown', ev=>{
+      if(ev.pointerType==='touch') return;
+      // A second pointer pressing the handle mid-drag must not take the drag
+      // over: without this guard the new press replaces the active pointer and
+      // starting width, the original pointer's move/release is ignored, and the
+      // panel unexpectedly follows the second pointer (greptile review of the
+      // merged #7954 fix).
+      if(activePointer!==null) return;
+      ev.preventDefault();
+      activePointer=ev.pointerId;
+      startX = ev.clientX;
       startW = targetEl.getBoundingClientRect().width;
       handle.classList.add('dragging');
       document.body.classList.add('resizing');
-
-      const onMove = ev=>{
-        const delta = edge==='right' ? ev.clientX - startX : startX - ev.clientX;
-        const newW = Math.min(maxW, Math.max(minW, startW + delta));
-        targetEl.style.width = newW + 'px';
-      };
-      const onUp = ()=>{
-        handle.classList.remove('dragging');
-        document.body.classList.remove('resizing');
-        localStorage.setItem(storageKey, parseInt(targetEl.style.width));
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      // Pointer capture keeps move/up routed to the handle even when the
+      // pointer leaves the window, so a release can never be lost (#7954).
+      let captured=false;
+      try{ handle.setPointerCapture(ev.pointerId); captured=true; }catch(_){ captured=false; }
+      if(!captured){
+        // Capture is unavailable or threw: without a document-level fallback
+        // the drag would stall the moment the pointer leaves this handle, and
+        // the drag state would stick (the #7954 regression this must avoid).
+        fallbackDoc=true;
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+        document.addEventListener('pointercancel', onCancel);
+      }
     });
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onCancel);
+    // The platform can still revoke capture (tab switch, OS gesture); that
+    // must end the drag instead of leaving the panel stuck to the cursor.
+    handle.addEventListener('lostpointercapture', onCancel);
+    window.addEventListener('blur', endResize);
   }
 
   // Run after DOM ready (called from boot)
@@ -3624,7 +3681,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
+    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
+    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d,_recoveryGenerationAtCheck);}).catch(()=>{});
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';
@@ -3861,6 +3919,39 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
   }
+  // #7652 review round 4: a sessionless cron notification carries an explicit
+  // panel intent (e.g. ?panel=tasks) so the click lands on the panel the run
+  // belongs to instead of the last chat the user had open.
+  // Review round 5: this must NOT boot and return on its own. Round 4 switched
+  // panels and returned before the saved-session restore below, so the chat the
+  // user had open — and any live stream still running in it — stayed detached
+  // until they picked the session again. The intent is therefore only *decided*
+  // here; the normal restore runs, and `switchPanel` is applied on top of it
+  // once that path has finished. Constrained to the same intent family as
+  // profile/launch-action: only a real panel, and never when a URL session names
+  // the target already.
+  const panelIntent=(typeof _panelQueryIntentFromLocation==='function')?_panelQueryIntentFromLocation():null;
+  let pendingPanelIntent=null;
+  if(panelIntent&&panelIntent.hasParam&&panelIntent.valid&&!urlSession
+     &&typeof switchPanel==='function'&&panelIntent.name!=='chat'){
+    try{
+      _consumePanelQueryParamFromLocation();
+      pendingPanelIntent=panelIntent.name;
+    }catch(e){console.warn('[boot] panel intent launch failed', e);}
+  }
+  // Apply the honored intent over whatever the restore path below settled on.
+  // Every terminal point of that path calls this, so the panel is shown on top
+  // of a restored session (and its in-flight recovery) rather than in place of
+  // it. A missing/failed panel must never strand the user, hence the catch.
+  const _applyPendingPanelIntent=async()=>{
+    if(!pendingPanelIntent) return;
+    const _panelName=pendingPanelIntent;
+    pendingPanelIntent=null;
+    try{
+      await switchPanel(_panelName);
+      await renderSessionList();
+    }catch(e){console.warn('[boot] panel intent launch failed', e);}
+  };
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{
@@ -3883,6 +3974,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       if(_rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent)){
@@ -3895,9 +3987,18 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
-      await loadSession(saved, {preserveActiveInput:true});
+      // A child row's new-tab link marks its URL exact (`?exact=1`) so this new
+      // tab lands on that child instead of folding it into its compressed
+      // parent's lineage row (#7429 review 2026-10-08). Ordinary deep links —
+      // e.g. a historical lineage segment URL — keep landing on the tip.
+      if(!!urlSession&&typeof _sessionUrlRequestsExactTarget==='function'&&_sessionUrlRequestsExactTarget()){
+        await loadSession(saved, {preserveActiveInput:true, skipLineageResolve:true});
+      }else{
+        await loadSession(saved, {preserveActiveInput:true});
+      }
       // Hard refresh starts from the static HTML model list. Hydrate the live
       // catalog after the saved session is known, then re-apply that session's
       // model before S._bootReady lets syncModelChip reveal the composer label.
@@ -3933,6 +4034,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       // Restore the panel from localStorage when the session has a workspace.
@@ -3944,7 +4046,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);
+      // Applied last on purpose: a panel intent must not come at the cost of
+      // the session restore or its in-flight stream recovery (#7652 r5).
+      await _applyPendingPanelIntent();return;}
     catch(_){/* loadSession owns targeted 404 cleanup; retain unrelated saved sessions */}
   }
   // no saved session - show empty state, wait for user to hit +
@@ -3962,6 +4067,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
+  // No saved session to restore, so the intent is simply the landing view.
+  await _applyPendingPanelIntent();
 })().catch(e=>{
   console.error('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}

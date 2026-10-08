@@ -42,10 +42,12 @@ this module routes them to the same listener so the frontend's single
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Optional
 
 from api.process_event_utils import (
@@ -370,6 +372,13 @@ def active_stream_id_for_session(session_id: str) -> Optional[str]:
     return matches[0] if matches else None
 
 
+# Bounded per-file-version memo for persisted_message_count_for_session().
+_PERSISTED_COUNT_MEMO: "OrderedDict[tuple, Optional[int]]" = OrderedDict()
+_PERSISTED_COUNT_MEMO_LOCK = threading.Lock()
+_PERSISTED_COUNT_MEMO_MAX = 512
+_PERSISTED_COUNT_MEMO_MIN_AGE_S = 2.0
+
+
 def persisted_message_count_for_session(session_id: str) -> Optional[int]:
     """Cheap, metadata-only persisted ``message_count`` for *session_id*, or None.
 
@@ -385,23 +394,62 @@ def persisted_message_count_for_session(session_id: str) -> Optional[int]:
     compares the freshly-(re)subscribed tab's last-known count against this
     persisted count; a server that is AHEAD means a turn landed during the gap.
 
-    Reads via ``metadata_only=True`` so it never parses the full transcript
-    (this runs on every per-session SSE (re)connect). The persisted count is
-    written by ``Session.save`` as ``meta['message_count'] = len(messages)`` —
-    the SAME basis the frontend's ``S.session.message_count`` is built from —
-    so the comparison is apples-to-apples. Returns None when the count is
-    unknown (legacy sidecars without a persisted count); the caller treats
-    None as "cannot tell, do nothing", never as a trigger.
+    Reads the CURRENT on-disk sidecar instead of the generic ``get_session``
+    resolver.  The generic resolver may return a cached metadata stub whose
+    count predates a gateway-backed sidecar rewrite; comparing that stale count
+    with the fresh ``/api/session`` response creates an endless
+    ``session-updated`` reconnect/reload loop (#7672).
+
+    The read is bounded and count-only (``_prefix_message_count``: a 64 KiB
+    first stage, 1 MiB hard cap, never a full transcript parse).  This runs on
+    every per-session SSE (re)connect, so it must not fall back to
+    ``Session.load()`` the way ``Session.load_metadata_only()`` does for an
+    oversized metadata prefix: on a ~30 MiB sidecar that fallback costs ~0.9 s
+    per subscribe, multiplied by every reconnecting tab.
+
+    The count is trusted only when the writer marker (``_mc_v``) vouches that
+    the same atomic write produced both the count and the messages array; an
+    unvouched count can be stale against its rows, which is exactly the shape
+    that drives the reload loop.  The persisted count is written by
+    ``Session.save`` as ``meta['message_count'] = len(messages)`` -- the SAME
+    basis the frontend's ``S.session.message_count`` is built from.
+
+    Returns None whenever the count cannot be cheaply established (missing,
+    legacy/unmarked, corrupt or oversized metadata); the caller treats None as
+    "cannot tell, do nothing", never as a trigger.
     """
     try:
-        from api.models import get_session
+        import api.models as _models
 
-        s = get_session(session_id, metadata_only=True)
-        count = getattr(s, "_metadata_message_count", None)
-        if count is None:
-            msgs = getattr(s, "messages", None)
-            count = len(msgs) if isinstance(msgs, list) and msgs else None
-        return int(count) if count is not None else None
+        if not _models.is_safe_session_id(session_id):
+            return None
+        path = _models.SESSION_DIR / f"{session_id}.json"
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        # Memoize per file version so a legacy sidecar whose metadata overflows
+        # the 64 KiB first stage does not pay the bounded 1 MiB scan on every
+        # reconnect (#7673 gate). Sidecar writers publish through tmp +
+        # os.replace, so (path, inode, size, mtime_ns) changes on every write in
+        # practice. The one theoretical collision -- several same-size rewrites
+        # inside one mtime tick -- could serve a stale-HIGH count and re-emit
+        # session-updated on each reconnect until the next write (the #7672
+        # shape), so a version younger than _PERSISTED_COUNT_MEMO_MIN_AGE_S is
+        # never memoized: the mtime must be settled before its count is cached.
+        key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns)
+        with _PERSISTED_COUNT_MEMO_LOCK:
+            if key in _PERSISTED_COUNT_MEMO:
+                _PERSISTED_COUNT_MEMO.move_to_end(key)
+                return _PERSISTED_COUNT_MEMO[key]
+        count = _models._prefix_message_count(path)
+        if time.time() - st.st_mtime >= _PERSISTED_COUNT_MEMO_MIN_AGE_S:
+            with _PERSISTED_COUNT_MEMO_LOCK:
+                _PERSISTED_COUNT_MEMO[key] = count
+                _PERSISTED_COUNT_MEMO.move_to_end(key)
+                while len(_PERSISTED_COUNT_MEMO) > _PERSISTED_COUNT_MEMO_MAX:
+                    _PERSISTED_COUNT_MEMO.popitem(last=False)
+        return count
     except Exception:
         logger.debug(
             "persisted_message_count_for_session lookup failed for %s",

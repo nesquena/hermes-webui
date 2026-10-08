@@ -76,7 +76,13 @@ eval(extractFunc('renderMd'));
 
 let buf = '';
 process.stdin.on('data', c => { buf += c; });
-process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
+process.stdin.on('end', () => {
+  const started = process.hrtime.bigint();
+  const rendered = renderMd(buf);
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  process.stdout.write(rendered);
+  if (process.env.RENDER_TIMING === '1') process.stderr.write(String(elapsedMs));
+});
 """
 
 
@@ -100,6 +106,21 @@ def _render(driver_path, markdown: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
     return result.stdout
+
+
+def _render_timed(driver_path, markdown: str) -> tuple[str, float]:
+    """Return rendered HTML and renderer-only time, excluding Node startup."""
+    result = subprocess.run(
+        [NODE, driver_path, str(UI_JS_PATH)],
+        input=markdown,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": str(Path(NODE).parent), "RENDER_TIMING": "1"},
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node driver failed: {result.stderr}")
+    return result.stdout, float(result.stderr)
 
 
 # Every CJK full-width mark the fix adds to the trailing-punctuation strip:
@@ -201,3 +222,339 @@ class TestAutolinkInlinePass:
         out = _render(driver_path, "> [link](https://example.com/x)")
         assert 'href="https://example.com/x"' in out
         assert out.count("<a ") == 1, f"Inline markdown link double-wrapped. Got: {out!r}"
+
+
+# ── Follow-up fix: URL + CJK punctuation + CONTINUED prose ────────────────
+#
+# The #6792 strip could only drop a single mark sitting at the very END of the
+# matched run. When a URL was followed by a full-width mark and then MORE prose
+# before the closing mark — e.g. 「（https://example.com/x/，節錄原文）」 — the
+# whole 「，節錄原文」 was swallowed into href, because the match never stopped
+# at the interior mark. Fix: the match now STOPS at the high-confidence CJK
+# sentence marks and closing brackets needed by the report, so the prose stays
+# outside the anchor without truncating other valid Unicode IRI characters.
+# Reported shape: （https://opencode.ai/docs/go/，節錄原文） and
+# （https://opencode.ai/auth；文件也寫用量在那裡看） both clicked through to a
+# broken URL.
+
+CJK_CONTINUATION_MARKS = ["，", "。", "；", "：", "！", "？", "、", "）", "】", "」", "》", "〕"]
+
+
+class TestAutolinkCjkProseContinuation:
+    """A CJK mark between a URL and continued prose must end the link."""
+
+    @pytest.mark.parametrize("mark", CJK_CONTINUATION_MARKS)
+    def test_outer_pass_mark_terminates_and_prose_stays_visible(self, driver_path, mark):
+        out = _render(driver_path, f"See https://example.com/menu{mark}節錄原文）")
+        assert 'href="https://example.com/menu"' in out, (
+            f"CJK mark {mark!r} must end the URL match. Got: {out!r}"
+        )
+        assert f'href="https://example.com/menu{mark}' not in out, (
+            f"CJK mark {mark!r} leaked into href with following prose. Got: {out!r}"
+        )
+        assert f"</a>{mark}節錄原文）" in out, (
+            f"Prose after {mark!r} must stay visible outside the anchor. Got: {out!r}"
+        )
+
+    @pytest.mark.parametrize("mark", ["，", "；", "）", "」"])
+    def test_inline_pass_mark_terminates_and_prose_stays_visible(self, driver_path, mark):
+        out = _render(driver_path, f"- See https://example.com/menu{mark}後續文字")
+        assert 'href="https://example.com/menu"' in out, (
+            f"Inline pass: CJK mark {mark!r} must end the URL match. Got: {out!r}"
+        )
+        assert f'href="https://example.com/menu{mark}' not in out
+        assert f"</a>{mark}後續文字" in out
+
+    def test_reported_shape_fullwidth_parens_with_interior_marks(self, driver_path):
+        """The reported message shape: （URL，說明） and URL；說明） in one line."""
+        out = _render(
+            driver_path,
+            "來源（https://example.com/docs/go/，節錄原文）以及 https://example.com/auth；文件也寫用量在那裡看）",
+        )
+        assert 'href="https://example.com/docs/go/"' in out
+        assert 'href="https://example.com/auth"' in out
+        assert 'href="https://example.com/docs/go/，' not in out
+        assert 'href="https://example.com/auth；' not in out
+        assert "</a>，節錄原文）" in out
+        assert "</a>；文件也寫用量在那裡看）" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    @pytest.mark.parametrize("dot", ["。", "．", "｡"])
+    def test_uts46_dot_variant_remains_in_authority(self, driver_path, prefix, dot):
+        url = f"https://example{dot}com/path"
+        out = _render(driver_path, prefix + url)
+        assert f'href="{url}"' in out
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    @pytest.mark.parametrize("mark", ["，", "。", "；"])
+    def test_raw_cjk_path_preserves_interior_cjk_punctuation(
+        self, driver_path, prefix, mark
+    ):
+        url = f"https://example.com/日本語{mark}続き"
+        out = _render(driver_path, prefix + url)
+        assert f'href="{url}"' in out
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    def test_adjacent_fullwidth_parenthesized_urls_stay_separate(
+        self, driver_path, prefix
+    ):
+        first = "https://example.com/a"
+        second = "https://example.org/b"
+        out = _render(driver_path, f"{prefix}（{first}）（{second}）")
+        assert f'href="{first}"' in out
+        assert f'href="{second}"' in out
+        assert out.count("<a ") == 2
+        assert f'href="{first}）（https://' not in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    def test_every_url_after_cjk_boundaries_is_autolinked(self, driver_path, prefix):
+        urls = ["https://a.com/x", "https://b.com/y", "https://c.com/z"]
+        out = _render(driver_path, prefix + "参见 " + "，".join(urls))
+        for url in urls:
+            assert f'href="{url}"' in out
+        assert out.count("<a ") == 3
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com?q=你好，世界",
+            "https://example.com/?q=你好，世界",
+            "https://example.com/#section，two",
+        ],
+    )
+    def test_query_and_fragment_keep_interior_cjk_punctuation(
+        self, driver_path, prefix, url
+    ):
+        out = _render(driver_path, prefix + url)
+        assert f'href="{url}"' in out
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    def test_query_mark_before_cjk_prose_ends_link(self, driver_path, prefix):
+        out = _render(driver_path, prefix + "https://example.com?q=1，参见")
+        assert 'href="https://example.com?q=1"' in out
+        assert 'href="https://example.com?q=1，参见"' not in out
+        assert "</a>，参见" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    def test_cjk_path_does_not_override_query_prose_boundary(
+        self, driver_path, prefix
+    ):
+        out = _render(driver_path, prefix + "https://example.com/日本語?q=1，参见")
+        assert 'href="https://example.com/日本語?q=1"' in out
+        assert 'href="https://example.com/日本語?q=1，参见"' not in out
+        assert "</a>，参见" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    def test_later_slash_does_not_reclassify_authority_full_stop(
+        self, driver_path, prefix
+    ):
+        out = _render(driver_path, prefix + "https://example.com。参见docs/guide.md")
+        assert 'href="https://example.com"' in out
+        assert 'href="https://example.com。参见docs/guide.md"' not in out
+        assert "</a>。参见docs/guide.md" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    @pytest.mark.parametrize(
+        "url", ["https://例子。中国/路径", "https://例え。日本/パス"]
+    )
+    def test_unicode_idn_labels_remain_linked(self, driver_path, prefix, url):
+        out = _render(driver_path, prefix + url)
+        assert f'href="{url}"' in out
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    def test_bare_host_full_stop_before_prose_ends_link(self, driver_path, prefix):
+        out = _render(driver_path, prefix + "请访问 https://example.com。然后登录")
+        assert 'href="https://example.com"' in out
+        assert 'href="https://example.com。然后登录"' not in out
+        assert "</a>。然后登录" in out
+
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    def test_cjk_ascii_host_full_stop_before_prose_ends_link(
+        self, driver_path, prefix
+    ):
+        out = _render(driver_path, prefix + "https://例子.com。然后登录")
+        assert 'href="https://例子.com"' in out
+        assert 'href="https://例子.com。然后登录"' not in out
+        assert "</a>。然后登录" in out
+
+    def test_long_boundary_run_completes_without_quadratic_scan(self, driver_path):
+        def render_size(size):
+            markdown = "https://example.com/" + ("a" * size) + "日" + ("，" * size)
+            return _render_timed(driver_path, markdown)
+
+        small_out, small_ms = render_size(30000)
+        large_out, large_ms = render_size(60000)
+        assert 'href="https://example.com/' in small_out
+        assert 'href="https://example.com/' in large_out
+        assert large_ms <= small_ms * 3 + 25, (
+            f"doubling input grew render time from {small_ms:.2f} to {large_ms:.2f} ms"
+        )
+
+    def test_thousands_of_urls_do_not_recurse(self, driver_path):
+        small_urls = [f"https://example.com/{i}" for i in range(2500)]
+        large_urls = [f"https://example.com/{i}" for i in range(5000)]
+        _, small_ms = _render_timed(driver_path, "，".join(small_urls))
+        out, large_ms = _render_timed(driver_path, "，".join(large_urls))
+        assert out.count("<a ") == len(large_urls)
+        assert 'href="https://example.com/4999"' in out
+        assert large_ms <= small_ms * 3 + 25, (
+            f"doubling URL count grew render time from {small_ms:.2f} "
+            f"to {large_ms:.2f} ms"
+        )
+
+    @pytest.mark.parametrize("iri_char", ["—", "’"])
+    def test_outer_pass_preserves_unicode_iri_path_characters(self, driver_path, iri_char):
+        url = f"https://example.com/owner{iri_char}s-guide"
+        out = _render(driver_path, f"See {url}")
+        assert f'href="{url}"' in out, (
+            f"Unicode IRI character {iri_char!r} must remain inside a bare URL. Got: {out!r}"
+        )
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("iri_char", ["—", "’"])
+    def test_inline_pass_preserves_unicode_iri_path_characters(self, driver_path, iri_char):
+        url = f"https://example.com/owner{iri_char}s-guide"
+        out = _render(driver_path, f"- See {url}")
+        assert f'href="{url}"' in out, (
+            f"Inline pass must preserve {iri_char!r} in a bare Unicode IRI. Got: {out!r}"
+        )
+        assert f">{url}</a>" in out
+
+    @pytest.mark.parametrize("iri_char", ["—", "’"])
+    def test_explicit_markdown_link_preserves_unicode_iri_path_characters(
+        self, driver_path, iri_char
+    ):
+        url = f"https://example.com/owner{iri_char}s-guide"
+        out = _render(driver_path, f"[guide]({url})")
+        assert f'href="{url}"' in out
+        assert ">guide</a>" in out
+        assert out.count("<a ") == 1
+
+
+# ── Follow-up fix: URL directly followed by a full-width OPENING mark ─────
+#
+# The #7979 boundary scan stopped only at closing marks and sentence
+# punctuation. When a URL was immediately followed by a full-width opening
+# mark and an ASCII label — e.g. `…/pull/8040（OPEN、非草稿、5 檔案…` — the
+# next stop was the first interior mark, so `（OPEN` stayed glued to href and
+# the link clicked through to a broken URL. Fix: the opening marks
+# （ (U+FF08), 【 (U+3010), 「 (U+300C), 『 (U+300E) also end the URL when no
+# raw CJK path content precedes them; raw-CJK IRI paths keep interior marks
+# exactly as before (same guard the closing marks use).
+# Reported shape: https://github.com/nesquena/hermes-webui/pull/8040（OPEN、非草稿、5 檔案 +210/-14、MERGEABLE；內文與你核准的稿逐字相同）
+
+CJK_OPENING_MARKS = ["（", "【", "「", "『"]
+
+
+class TestAutolinkCjkOpeningMarks:
+    """A full-width opening mark right after a URL must end the link."""
+
+    @pytest.mark.parametrize("mark", CJK_OPENING_MARKS)
+    def test_outer_pass_opening_mark_terminates_and_prose_stays_visible(self, driver_path, mark):
+        out = _render(driver_path, f"See https://example.com/x{mark}OPEN、後續說明）")
+        assert 'href="https://example.com/x"' in out, (
+            f"Opening mark {mark!r} must end the URL match. Got: {out!r}"
+        )
+        assert f'href="https://example.com/x{mark}' not in out, (
+            f"Opening mark {mark!r} leaked into href. Got: {out!r}"
+        )
+        assert f"</a>{mark}OPEN、後續說明）" in out, (
+            f"Prose after {mark!r} must stay visible outside the anchor. Got: {out!r}"
+        )
+
+    @pytest.mark.parametrize("mark", ["（", "「"])
+    def test_inline_pass_opening_mark_terminates_and_prose_stays_visible(self, driver_path, mark):
+        out = _render(driver_path, f"- See https://example.com/x{mark}OPEN、後續")
+        assert 'href="https://example.com/x"' in out, (
+            f"Inline pass: opening mark {mark!r} must end the URL match. Got: {out!r}"
+        )
+        assert f'href="https://example.com/x{mark}' not in out
+        assert f"</a>{mark}OPEN、後續" in out
+
+    def test_reported_shape_pr_8040_with_ascii_label(self, driver_path):
+        """The reported message shape: URL（OPEN、非草稿、5 檔案 +210/-14、…）."""
+        out = _render(
+            driver_path,
+            "https://github.com/nesquena/hermes-webui/pull/8040"
+            "（OPEN、非草稿、5 檔案 +210/-14、MERGEABLE；內文與你核准的稿逐字相同）",
+        )
+        assert 'href="https://github.com/nesquena/hermes-webui/pull/8040"' in out
+        assert 'href="https://github.com/nesquena/hermes-webui/pull/8040（' not in out
+        assert "</a>（OPEN、非草稿、5 檔案 +210/-14、MERGEABLE；內文與你核准的稿逐字相同）" in out
+
+    def test_raw_cjk_iri_path_keeps_opening_mark(self, driver_path):
+        """No regression:（ inside a raw-CJK IRI path must NOT split the URL."""
+        out = _render(driver_path, "see https://ja.wikipedia.org/wiki/スター（映画）ok")
+        assert 'href="https://ja.wikipedia.org/wiki/スター（映画"' in out
+        assert 'href="https://ja.wikipedia.org/wiki/スター"' not in out
+
+    def test_raw_cjk_path_with_open_mark_and_prose_unchanged(self, driver_path):
+        """No regression: prose after（ inside a raw-CJK path behaves as before."""
+        out = _render(driver_path, "見 https://example.com/日本語（続きはこちら）d")
+        assert 'href="https://example.com/日本語（続きはこちら"' in out
+        assert 'href="https://example.com/日本語"' not in out
+
+
+# IDN hosts written with UTS #46 full-stop variants must remain whole in both
+# paragraph and inline/list rendering.
+REVIEW_IDN_ROWS = [
+    ("https://例子。中国", ["https://例子。中国"]),
+    ("https://example。中国/路径", ["https://example。中国/路径"]),
+    ("https://www。例子。中国/path", ["https://www。例子。中国/path"]),
+    ("https://例子。中国。中国/path", ["https://例子。中国。中国/path"]),
+    ("https://例子。中国:8080/x", ["https://例子。中国:8080/x"]),
+    ("https://例子。中国，https://b.com", ["https://例子。中国", "https://b.com"]),
+    ("https://www。例子.com/path", ["https://www。例子.com/path"]),
+    ("https://www.例子。中国", ["https://www.例子。中国"]),
+    ("https://example。рф", ["https://example。рф"]),
+    ("https://example.com/Foo．bar", ["https://example.com/Foo．bar"]),
+    ("https://example.com/Foo｡bar", ["https://example.com/Foo｡bar"]),
+    ("https://example.com/?q=Foo．bar", ["https://example.com/?q=Foo．bar"]),
+    ("https://example.com/?q=Foo｡bar", ["https://example.com/?q=Foo｡bar"]),
+    ("https://example.com/#Foo．bar", ["https://example.com/#Foo．bar"]),
+    ("https://example.com/#Foo｡bar", ["https://example.com/#Foo｡bar"]),
+    # Release gate 2026-10-06 (maintainer follow-up): labels with combining marks
+    # (Devanagari, Bengali, Thai vowel signs/tone marks) and supplementary-plane
+    # characters, and a Unicode label after an ASCII label joined by ．/｡/。.
+    ("https://example。भारत/path", ["https://example。भारत/path"]),
+    ("https://भारत。भारत/path", ["https://भारत。भारत/path"]),
+    ("https://example．বাংলা", ["https://example．বাংলা"]),
+    ("https://example。ตัวอย่าง", ["https://example。ตัวอย่าง"]),
+    ("https://example。𠀀𠀁/x", ["https://example。𠀀𠀁/x"]),
+    ("https://www.example。рф/path", ["https://www.example。рф/path"]),
+    ("https://www.example．рф/path", ["https://www.example．рф/path"]),
+    # ．/｡ follow the same rule as 。: CJK after an ASCII label is prose.
+    ("https://www.example｡中国/path", ["https://www.example"]),
+    # Supplementary-plane Han after a full ASCII host is prose, not a label
+    # (_isCjkAutolinkChar covers only the BMP ranges).
+    ("https://example.com。𠮷田", ["https://example.com"]),
+    ("请访问 https://example.com。𠮷田さんの説明", ["https://example.com"]),
+    # Common-script characters whose script extension is CJK (〆, 々, ー) are prose too.
+    ("https://example.com。〆切は明日", ["https://example.com"]),
+    ("https://example.com。々の説明", ["https://example.com"]),
+    # Fullwidth digits/Latin, circled numbers and halfwidth/fullwidth-stop variants of
+    # 。 after a full ASCII host are prose, as on the contributor head.
+    ("https://example.com。２０２４年４月より", ["https://example.com"]),
+    ("https://example.com。①ログイン", ["https://example.com"]),
+    ("https://example.com｡然后登录", ["https://example.com"]),
+    ("https://example.com．次に進む", ["https://example.com"]),
+    ("https://example.com。ㄅㄆㄇ", ["https://example.com"]),
+]
+
+
+class TestAutolinkIdnHostReviewTable:
+    @pytest.mark.parametrize("prefix", ["", "- "])
+    @pytest.mark.parametrize("markdown,expected", REVIEW_IDN_ROWS)
+    def test_idn_host_rows_link_whole(self, driver_path, prefix, markdown, expected):
+        import re as _re
+
+        out = _render(driver_path, prefix + markdown)
+        hrefs = _re.findall(r'href="([^"]*)"', out)
+        assert hrefs == expected, (
+            f"{markdown!r} -> {hrefs!r}, expected {expected!r}. Got: {out!r}"
+        )

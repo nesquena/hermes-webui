@@ -437,7 +437,7 @@ def _session_row_lineage_root_id(session, sessions_by_id) -> str:
     return current or sid
 
 
-def _visible_pinned_lineage_ids(session_rows) -> set[str]:
+def _visible_pinned_lineage_ids(session_rows, excluding=None, profiles=None) -> set[str]:
     sessions_by_id = {}
     for row in session_rows:
         sid = str(_session_field(row, "session_id", "") or "")
@@ -447,9 +447,13 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
     for row in session_rows:
         if not _session_counts_toward_pin_quota(row):
             continue
+        if profiles is not None and str(_session_field(row, "profile", None) or "default") not in profiles:
+            continue
         root = _session_row_lineage_root_id(row, sessions_by_id)
         if root:
             roots.add(root)
+    if excluding is not None:
+        roots.discard(_session_row_lineage_root_id(excluding, sessions_by_id))
     return roots
 
 
@@ -474,6 +478,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     _profiles_match,
     _is_isolated_profile_mode,
     _is_root_profile,
+    _root_profile_names_snapshot,
     _SKILLS_STATS_CACHE,
     get_active_profile_name,
     get_active_profile_name as _get_active_profile_name,
@@ -535,6 +540,45 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     if not isinstance(session_profile, str):
         session_profile = None
     return _profiles_match(session_profile, active_profile)
+
+
+def _retag_empty_session_profile(session, requested_profile):
+    """Atomically retag an empty, unpinned placeholder with pin admission."""
+    # Warm the canonical root-alias cache before LOCK, then use its snapshot
+    # below so a concurrent cache invalidation cannot trigger listing in-LOCK.
+    _profiles_match(getattr(session, "profile", None), requested_profile)
+    root_profile_names = set(_root_profile_names_snapshot() or ()) | {"default"}
+    with LOCK:
+        session_profile = getattr(session, "profile", None)
+        row_profile = session_profile or "default"
+        requested_owner = requested_profile or "default"
+        if row_profile == requested_owner or (
+            row_profile in root_profile_names and requested_owner in root_profile_names
+        ):
+            return session_profile, "same_owner"
+        has_persisted_turns = bool(
+            getattr(session, "messages", None)
+            or getattr(session, "context_messages", None)
+            or getattr(session, "pending_user_message", None)
+        )
+        is_pinned = bool(getattr(session, "pinned", False))
+        if has_persisted_turns:
+            return session_profile, "nonempty"
+        if is_pinned:
+            return session_profile, "pinned_empty"
+        session.profile = requested_profile
+        return requested_profile, "retagged"
+
+
+def _session_profile_mismatch_response(handler, session_id, session_profile):
+    if session_profile:
+        return j(handler, {
+            "error": "Session belongs to a different profile",
+            "code": "session_profile_mismatch",
+            "session_id": session_id,
+            "profile": session_profile,
+        }, status=409)
+    return bad(handler, "Session not found", 404)
 
 
 def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
@@ -2989,6 +3033,7 @@ from api.helpers import (
     safe_resolve,
     arm_connection_close_if_body_pending,
     j,
+    _json_response_body,
     t,
     read_body,
     MAX_BODY_BYTES,
@@ -3172,7 +3217,7 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
-def _clear_stale_stream_state(session) -> bool:
+def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
     A server restart or worker crash can leave active_stream_id/pending_* in the
@@ -3249,6 +3294,13 @@ def _clear_stale_stream_state(session) -> bool:
         )
         return False
 
+    # Observation must not queue behind a worker committing a large transcript.
+    # The locked() probe avoids a needless full reload; acquire below is the
+    # actual synchronization check and also covers a writer starting afterward.
+    session_lock = _get_session_agent_lock(session.session_id)
+    if not wait_for_writer and session_lock.locked():
+        return False
+
     # ── #1558 P0 safety: if we were handed a metadata-only stub, reload the
     # full session before touching persisted state. The original
     # metadata-only object is left untouched so the caller's read path is
@@ -3299,7 +3351,9 @@ def _clear_stale_stream_state(session) -> bool:
     # active_stream_id under it. A concurrent chat_start may have already
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
-    with _get_session_agent_lock(session.session_id):
+    if not session_lock.acquire(blocking=wait_for_writer):
+        return False
+    try:
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
         if getattr(session, "pending_user_message", None):
@@ -3357,6 +3411,8 @@ def _clear_stale_stream_state(session) -> bool:
                 "_clear_stale_stream_state: save() failed for session %s",
                 getattr(session, "session_id", "?"),
             )
+    finally:
+        session_lock.release()
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.
     if original_stub is not session:
@@ -5870,6 +5926,8 @@ def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = Non
     current_messages = list(getattr(session, "messages", None) or [])
     if not sid:
         return current_messages
+    if _cancelled_journal_turn_owner(current_messages):
+        return reconciled_state_db_messages_for_session(session)
     profile = getattr(session, "profile", None)
     is_messaging = (
         _is_messaging_session_record(session)
@@ -9484,6 +9542,7 @@ def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
         msg_before is not None
         or getattr(session, "truncation_watermark", None) not in (None, "")
         or getattr(session, "truncation_boundary", None) not in (None, "")
+        or _cancelled_journal_turn_owner(getattr(session, "messages", None) or []) is not None
     )
     return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
 
@@ -9568,7 +9627,43 @@ def _display_merge_session_is_active(session) -> bool:
     )
 
 
-def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None):
+def _display_exact_owner_positions(session, messages):
+    """Map saved row positions before display/cache copies lose object identity."""
+    projected = {id(row): index for index, row in enumerate(messages)}
+    return {
+        index: projected[id(row)]
+        for index, row in enumerate(getattr(session, "messages", None) or [])
+        if id(row) in projected
+    }
+
+
+def _display_projected_owner_positions(source_messages, messages, source_owners):
+    """Compose saved-to-source positions with an exact-object display projection."""
+    projected = {id(row): index for index, row in enumerate(messages)}
+    return {
+        owner: projected[id(source_messages[index])]
+        for owner, index in source_owners.items()
+        if 0 <= index < len(source_messages) and id(source_messages[index]) in projected
+    }
+
+
+def _display_rebased_tool_calls(tool_calls, owner_positions):
+    """Project cards onto proven owners without changing persisted metadata."""
+    projected = []
+    for card in tool_calls or []:
+        if not isinstance(card, dict):
+            projected.append(card)
+            continue
+        owner = card.get("assistant_msg_idx")
+        if type(owner) is int:
+            if owner not in owner_positions:
+                continue
+            card = dict(card, assistant_msg_idx=owner_positions[owner])
+        projected.append(card)
+    return projected
+
+
+def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None):
     """Return the memoized merged transcript, or None when it can't be reused.
 
     Lets GET /api/session skip loading the state.db rows entirely on a hit. That
@@ -9608,6 +9703,11 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
         entry = _display_merge_cache.get(sid)
         if not _display_merge_cache_entry_usable(entry, cache_key):
             return None
+        if owner_positions is not None:
+            if "owner_positions" not in entry:
+                return None
+            owner_positions.clear()
+            owner_positions.update(entry["owner_positions"])
         _display_merge_cache.move_to_end(sid, last=True)
         return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
 
@@ -9622,19 +9722,32 @@ def _limited_webui_messages_for_display_with_sidecar(
     *,
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
     msg_before=None,
+    owner_positions=None,
 ) -> list:
+    sidecar_owners = dict(owner_positions or {})
     if sidecar_messages is None:
-        sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+        sidecar_owners = {}
+        sidecar_messages = _webui_sidecar_lineage_messages_for_display(
+            session, owner_positions=sidecar_owners,
+        )
     else:
         sidecar_messages = list(sidecar_messages or [])
+        if not sidecar_owners:
+            sidecar_owners = _display_exact_owner_positions(session, sidecar_messages)
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
+        if owner_positions is not None:
+            owner_positions.clear()
+            owner_positions.update(sidecar_owners)
         return sidecar_messages
     state_db_messages = _suppress_native_image_display_mirrors(
         session,
         state_db_messages,
     )
     if not state_db_messages:
+        if owner_positions is not None:
+            owner_positions.clear()
+            owner_positions.update(sidecar_owners)
         return sidecar_messages
 
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
@@ -9687,7 +9800,11 @@ def _limited_webui_messages_for_display_with_sidecar(
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
             entry = _display_merge_cache.get(sid)
-            if _display_merge_cache_entry_usable(entry, cache_key):
+            if (_display_merge_cache_entry_usable(entry, cache_key)
+                    and (owner_positions is None or "owner_positions" in entry)):
+                if owner_positions is not None:
+                    owner_positions.clear()
+                    owner_positions.update(entry["owner_positions"])
                 _display_merge_cache.move_to_end(sid, last=True)
                 return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
     merged = merge_session_messages_append_only(
@@ -9696,12 +9813,17 @@ def _limited_webui_messages_for_display_with_sidecar(
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
+        cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
     )
     merged = _project_native_image_payload_conflicts_for_display(
         sidecar_messages,
         state_db_messages,
         merged,
     )
+    projected_owners = _display_projected_owner_positions(sidecar_messages, merged, sidecar_owners)
+    if owner_positions is not None:
+        owner_positions.clear()
+        owner_positions.update(projected_owners)
     if cache_key is not None:
         _state_key = cache_key[4]
         _streaming_key = (
@@ -9725,6 +9847,7 @@ def _limited_webui_messages_for_display_with_sidecar(
             _display_merge_cache[sid] = {
                 "key": cache_key,
                 "messages": merged,
+                "owner_positions": projected_owners,
                 "stored_at": time.monotonic(),
             }
             _display_merge_cache.move_to_end(sid, last=True)
@@ -10128,7 +10251,7 @@ def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
         return False
 
 
-def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
+def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None, *, owner_positions=None):
     """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
 
     The display window limit counts visible transcript rows after WebUI sidecar
@@ -10144,8 +10267,10 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, None
     if getattr(session, "truncation_boundary", None) not in (None, ""):
         return None, None
+    if _cancelled_journal_turn_owner(getattr(session, "messages", None) or []):
+        return None, None  # The exact cancelled owner is needed before slicing.
 
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session, owner_positions=owner_positions)
     if not sidecar_messages:
         return None, sidecar_messages
     sidecar_timestamps = [_message_timestamp_as_float(msg) for msg in sidecar_messages]
@@ -10223,7 +10348,7 @@ _lineage_display_cache: "OrderedDict[str, dict]" = OrderedDict()
 _lineage_display_cache_lock = threading.Lock()
 
 
-def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
+def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20, owner_positions=None) -> list:
     """Return WebUI sidecar messages stitched across compression snapshots.
 
     WebUI compression continuations persist the archived transcript in a parent
@@ -10255,6 +10380,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             entry is not None
             and entry.get("provenance_complete") is True
             and entry.get("self_sig") == self_sig
+            and (owner_positions is None or "owner_positions" in entry)
         ):
             stale = False
             for parent_path, parent_sig in entry.get("parent_sigs") or []:
@@ -10266,6 +10392,9 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
                     current_entry = _lineage_display_cache.get(sid)
                     if current_entry is entry:
                         _lineage_display_cache.move_to_end(sid, last=True)
+                        if owner_positions is not None:
+                            owner_positions.clear()
+                            owner_positions.update(entry["owner_positions"])
                         return [
                             dict(m) if isinstance(m, dict) else m
                             for m in entry["messages"]
@@ -10312,6 +10441,9 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             session_messages,
             getattr(parent, "messages", []) or [],
         ):
+            if owner_positions is not None:
+                owner_positions.clear()
+                owner_positions.update(_display_exact_owner_positions(session, session_messages))
             return session_messages
         segments.append(parent)
         seen.add(parent_id)
@@ -10322,7 +10454,10 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         parent_signatures_complete = False
 
     if not segments:
-        return list(getattr(session, "messages", []) or [])
+        if owner_positions is not None:
+            owner_positions.clear()
+            owner_positions.update(_display_exact_owner_positions(session, session_messages))
+        return session_messages
 
     merged = []
     for segment in reversed(segments):
@@ -10337,6 +10472,10 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         getattr(session, "messages", []) or [],
         truncation_watermark=None,
     )
+    projected_owners = _display_exact_owner_positions(session, merged)
+    if owner_positions is not None:
+        owner_positions.clear()
+        owner_positions.update(projected_owners)
     if (
         cache_allowed
         and self_sig is not None
@@ -10349,6 +10488,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
                 "parent_sigs": parent_sigs,
                 "provenance_complete": True,
                 "messages": merged,
+                "owner_positions": projected_owners,
             }
             _lineage_display_cache.move_to_end(sid, last=True)
             while len(_lineage_display_cache) > _LINEAGE_DISPLAY_CACHE_MAX:
@@ -11076,6 +11216,9 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    reconciled_state_db_messages_for_session,
+    _cancelled_journal_turn_owner,
+    _reindex_tool_owners_after_message_reorder,
     _project_native_image_payload_conflicts_for_display,
     _suppress_native_image_display_mirrors,
     _reconcile_api_content_sidecars,
@@ -13715,6 +13858,9 @@ def _handle_session_get(handler, parsed) -> bool:
         # branch below, including the ones that never probe the cache.
         _display_cache_hit = None
         _display_state_db_signature = None
+        _display_owner_positions = ({} if load_messages and _cancelled_journal_turn_owner(
+            getattr(s, "messages", None) or [], include_live_partial=True
+        ) else None)
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
@@ -13726,8 +13872,11 @@ def _handle_session_get(handler, parsed) -> bool:
                     s,
                     msg_limit,
                     msg_before=msg_before,
+                    owner_positions=_display_owner_positions,
                 )
             _state_db_reader_kwargs = {"profile": _session_profile}
+            if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
+                _state_db_reader_kwargs["include_row_identity"] = True
             if state_db_since_timestamp is not None:
                 _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
             # Apply the display-path row backstop ONLY on provably-safe
@@ -13761,6 +13910,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     s,
                     limited_sidecar_messages,
                     msg_before=msg_before,
+                    owner_positions=_display_owner_positions,
                 )
             if _display_cache_hit is not None:
                 state_db_messages = []
@@ -13824,13 +13974,17 @@ def _handle_session_get(handler, parsed) -> bool:
                         state_db_messages,
                         state_db_signature=_display_state_db_signature,
                         msg_before=msg_before,
+                        owner_positions=_display_owner_positions,
                     )
             else:
                 state_db_messages = _suppress_native_image_display_mirrors(
                     s,
                     state_db_messages,
                 )
-                sidecar_messages = _webui_sidecar_lineage_messages_for_display(s)
+                lineage_owners = {}
+                sidecar_messages = _webui_sidecar_lineage_messages_for_display(
+                    s, owner_positions=lineage_owners,
+                )
                 lineage_parent = _webui_lineage_parent_session_for_display(s)
                 projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
                     s,
@@ -13842,6 +13996,8 @@ def _handle_session_get(handler, parsed) -> bool:
                     state_db_messages,
                     truncation_watermark=getattr(s, "truncation_watermark", None),
                     truncation_boundary=getattr(s, "truncation_boundary", None),
+                    incoming_provenance="state_db",
+                    cancelled_journal_owner_messages=getattr(s, "messages", None) or [],
                 )
                 _all_msgs = _merged_webui_lineage_messages_for_display(
                     s,
@@ -13853,6 +14009,11 @@ def _handle_session_get(handler, parsed) -> bool:
                     state_db_messages,
                     _all_msgs,
                 )
+                if _display_owner_positions is not None:
+                    _display_owner_positions.clear()
+                    _display_owner_positions.update(_display_projected_owner_positions(
+                        sidecar_messages, _all_msgs, lineage_owners,
+                    ))
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
@@ -13882,6 +14043,13 @@ def _handle_session_get(handler, parsed) -> bool:
         else:
             _summary_message_count = None
             _summary_last_message_at = None
+        _display_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+        if _display_owner_positions is not None:
+            if msg_limit is None:
+                _display_owner_positions.update(_display_exact_owner_positions(s, _all_msgs))
+            _display_tool_calls = _display_rebased_tool_calls(
+                _display_tool_calls, _display_owner_positions
+            )
         if load_messages:
             _truncated_msgs, _messages_offset = _message_window_for_display(
                 _all_msgs,
@@ -13895,7 +14063,7 @@ def _handle_session_get(handler, parsed) -> bool:
                 _truncated_msgs,
                 getattr(s, "anchor_activity_scenes", None),
                 message_offset=_messages_offset,
-                tool_calls=getattr(s, "tool_calls", None),
+                tool_calls=_display_tool_calls,
             )
         else:
             _truncated_msgs = []
@@ -13967,7 +14135,7 @@ def _handle_session_get(handler, parsed) -> bool:
                         _fb_cl,
                     )
                 _persisted_cl = _fb_cl
-        _session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+        _session_tool_calls = _display_tool_calls
         # Always include session-level tool_calls so the browser can merge
         # them with per-message tool_calls for messages that lack the
         # per-message variant (older messages whose tool_calls live only
@@ -14278,9 +14446,21 @@ def handle_get(handler, parsed) -> bool:
 
             # The disk read + process-constant token substitutions are cached;
             # only the per-session CSRF token and per-request extension tags are
-            # applied here (see _render_index_shell_base).
-            html = _render_index_shell_base().replace(
-                "__CSRF_TOKEN_JSON__", json.dumps(csrf_token)
+            # applied here (see _render_index_shell_base). The CSP image
+            # allowlist is computed once and shared with the header via
+            # _csp_extra_img_src_preset, so the renderer's inert-placeholder
+            # decision always matches what the browser will enforce (#7941).
+            from api.helpers import _csp_extra_img_src, csp_img_extra_sources
+
+            extra_img_src = _csp_extra_img_src()
+            handler._csp_extra_img_src_preset = extra_img_src
+            html = (
+                _render_index_shell_base()
+                .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
+                .replace(
+                    "__CSP_IMG_EXTRA_JSON__",
+                    json.dumps(csp_img_extra_sources(extra_img_src)).replace("<", "\\u003c"),
+                )
             )
             return t(
                 handler,
@@ -14292,9 +14472,20 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/share" or parsed.path.startswith("/share/"):
         share_path = (Path(__file__).parent.parent / "static" / "share.html").resolve()
+        # Same contract as the app shell: the share page renders with renderMd(),
+        # so it needs the validated CSP image allowlist, computed once and shared
+        # with this response's header (#7941).
+        from api.helpers import _csp_extra_img_src, csp_img_extra_sources
+
+        share_img_src = _csp_extra_img_src()
+        handler._csp_extra_img_src_preset = share_img_src
+        share_html = share_path.read_text(encoding="utf-8").replace(
+            "__CSP_IMG_EXTRA_JSON__",
+            json.dumps(csp_img_extra_sources(share_img_src)).replace("<", "\\u003c"),
+        )
         return t(
             handler,
-            share_path.read_text(encoding="utf-8"),
+            share_html,
             content_type="text/html; charset=utf-8",
             extra_headers={
                 "X-Robots-Tag": "noindex, nofollow",
@@ -16350,6 +16541,19 @@ def handle_post(handler, parsed) -> bool:
                 # 404, not 400 — missing resource, not a malformed request.
                 return bad(handler, "Session not found", status=404)
 
+            copy_messages = session.messages
+            copy_context = getattr(session, "context_messages", None) or []
+            if _cancelled_journal_turn_owner(session.messages, include_live_partial=True):
+                # Read one complete private snapshot for both persisted layers.
+                # A recovered sidecar can predate later Gateway exchanges.
+                copy_state = get_state_db_session_messages(
+                    sid, profile=getattr(session, "profile", None), include_row_identity=True,
+                )
+                copy_messages = reconciled_state_db_messages_for_session(session, state_messages=copy_state)
+                copy_context = reconciled_state_db_messages_for_session(
+                    session, prefer_context=True, state_messages=copy_state,
+                )
+
             # Deep-copy mutable lists so the duplicate is *actually* independent.
             # `Session.__init__` does `self.messages = messages or []` — plain
             # assignment, no copy. Without deepcopy, both sessions share the same
@@ -16364,7 +16568,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace=session.workspace,
                 model=session.model,
                 model_provider=session.model_provider,
-                messages=copy.deepcopy(session.messages),
+                messages=copy.deepcopy(copy_messages),
                 tool_calls=copy.deepcopy(session.tool_calls),
                 # Reset ephemeral / per-session-instance flags. Duplicating an
                 # archived conversation should produce a visible (un-archived)
@@ -16391,7 +16595,7 @@ def handle_post(handler, parsed) -> bool:
                 # context_messages is the authoritative model-facing prefix — must be
                 # deepcopied so the duplicate has its own independent context that won't
                 # be mutated when the original session's context changes (#2914).
-                context_messages=copy.deepcopy(getattr(session, "context_messages", None) or []),
+                context_messages=copy.deepcopy(copy_context),
                 # Gateway routing — if the user customized routing for this session,
                 # the duplicate should behave identically.
                 gateway_routing=copy.deepcopy(getattr(session, "gateway_routing", None)),
@@ -16407,6 +16611,13 @@ def handle_post(handler, parsed) -> bool:
                 context_engine_state=copy.deepcopy(getattr(session, "context_engine_state", None) or {}),
                 created_at=time.time(),
                 updated_at=time.time(),
+            )
+
+            # Reconciliation can insert SQLite rows before a saved tool owner.
+            # Map the original row objects before deepcopy, but update only the
+            # copy's tool dictionaries. Equal assistant prose is not ownership.
+            _reindex_tool_owners_after_message_reorder(
+                copied_session, session.messages, after_messages=copy_messages,
             )
 
             with LOCK:
@@ -16864,6 +17075,18 @@ def handle_post(handler, parsed) -> bool:
                 close_terminal(body["session_id"])
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
+            # Keep state.db's cwd in step with the new workspace so clients that
+            # group by cwd (Hermes Desktop) move the session with it. No-op when
+            # the session has no state.db row yet (never sent a message).
+            # Background: SessionDB retries for ~20 s on a busy state.db and the
+            # response must not wait for optional metadata.
+            try:
+                from api.state_sync import sync_session_cwd_background
+                sync_session_cwd_background(
+                    lambda _sid=s.session_id: _current_cwd_sync_target(_sid)
+                )
+            except Exception:
+                logger.debug("Failed to schedule session cwd sync after workspace update")
         set_last_workspace(new_ws, profile=getattr(s, "profile", None))
         return j(
             handler,
@@ -17205,6 +17428,7 @@ def handle_post(handler, parsed) -> bool:
         cli_meta = _lookup_cli_session_metadata(source.session_id) if _session_requires_cli_metadata_lookup(source) else {}
         is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
         cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
+        source_context = getattr(source, "context_messages", None)
         if is_messaging_session:
             if cli_messages:
                 source_messages = _merged_session_messages_for_display(source, cli_messages)
@@ -17230,19 +17454,26 @@ def handle_post(handler, parsed) -> bool:
             _state_db_reader_kwargs = {
                 "profile": getattr(source, "profile", None) or None,
             }
+            cancelled_owner = _cancelled_journal_turn_owner(source.messages, include_live_partial=True)
+            if cancelled_owner:
+                _state_db_reader_kwargs["include_row_identity"] = True
             _backstop = _state_db_backstop_limit_for_display(source, None)
             if _backstop is not None:
                 _state_db_reader_kwargs["limit"] = _backstop
+            source_state = get_state_db_session_messages(source.session_id, **_state_db_reader_kwargs)
             source_messages = merge_session_messages_append_only(
                 _webui_sidecar_lineage_messages_for_display(source),
-                get_state_db_session_messages(
-                    source.session_id,
-                    **_state_db_reader_kwargs,
-                ),
+                source_state,
                 truncation_watermark=getattr(source, "truncation_watermark", None),
                 truncation_boundary=getattr(source, "truncation_boundary", None),
+                **({"incoming_provenance": "state_db", "cancelled_journal_owner_messages": source.messages}
+                   if cancelled_owner else {}),
             )
             source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
+            if cancelled_owner:
+                source_context = reconciled_state_db_messages_for_session(
+                    source, prefer_context=True, state_messages=source_state,
+                )
         if keep_count is not None:
             forked_messages = source_messages[:keep_count]
         else:
@@ -17261,7 +17492,7 @@ def handle_post(handler, parsed) -> bool:
         fork_keep = keep_count if keep_count is not None else len(source_messages)
         forked_context = copy.deepcopy(
             truncate_context_for_display_keep(
-                getattr(source, "context_messages", None),
+                source_context,
                 source_messages,
                 fork_keep,
             )
@@ -17976,25 +18207,41 @@ def handle_post(handler, parsed) -> bool:
         # persisted index outside the lock, then re-check the in-memory
         # mutation set inside the lock and commit the pin atomically.
         if pin_requested and not getattr(s, "pinned", False):
+            try:
+                profiles = list_profiles_api()
+            except Exception:
+                profiles = []
+            root_profile_names = set(_root_profile_names_snapshot() or ()) | {"default"}
+            listed_root_names = {str(p["name"]) for p in profiles or [] if p.get("name") and p.get("is_default") is True}
+            nonroot_names = {str(p["name"]) for p in profiles or [] if p.get("name") and p.get("is_default") is False}
+            root_profile_names.update(listed_root_names)
+            conflicts = (root_profile_names - {"default"}) & nonroot_names
+            known_nonroots = nonroot_names - conflicts - {"default"}
+            pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
             # Pre-snapshot from persisted index (acquires LOCK internally,
             # so must run outside our own LOCK acquire below).
             persisted_rows = [
                 existing for existing in all_sessions()
                 if _session_counts_toward_pin_quota(existing)
             ]
+            admission_error = None
             with LOCK:
+                owner_profile = str(_session_field(s, "profile", None) or "default")
+                uncertain_owner = owner_profile in conflicts or owner_profile not in root_profile_names | nonroot_names
+                root_owner = owner_profile not in known_nonroots
+                quota_profile_names = root_profile_names - conflicts if root_owner else {owner_profile}
+                candidate_rows = list(persisted_rows)
                 # Final authoritative count: merge persisted pinned rows with the
                 # in-memory SESSIONS snapshot. Count logical sidebar-visible pin
                 # lineages rather than raw session rows so continuation siblings
                 # in the same visible lineage do not consume extra pin quota.
-                candidate_rows = list(persisted_rows)
                 candidate_rows.extend(
                     existing.compact() for existing in SESSIONS.values()
                     if _session_counts_toward_pin_quota(existing)
                 )
                 target_row = s.compact()
                 candidate_rows.append(target_row)
-                pinned_lineage_ids = _visible_pinned_lineage_ids(candidate_rows)
+                pinned_lineage_ids = _visible_pinned_lineage_ids(candidate_rows, profiles=quota_profile_names)
                 target_lineage = _session_row_lineage_root_id(
                     target_row,
                     {
@@ -18004,13 +18251,26 @@ def handle_post(handler, parsed) -> bool:
                     },
                 )
                 pinned_lineage_ids.discard(target_lineage)
-                pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
-                if len(pinned_lineage_ids) >= pinned_sessions_limit:
-                    return bad(handler, f"Up to {pinned_sessions_limit} sessions can be pinned. Unpin one before pinning another.", 400)
-                # Mark in-memory pin state under LOCK so concurrent pin
-                # requests see the increment immediately, even before
-                # save() finishes flushing to disk.
-                s.pinned = True
+                pinned_count = len(pinned_lineage_ids)
+                if root_owner:
+                    upper_profiles = {str(_session_field(row, "profile", None) or "default") for row in candidate_rows} - known_nonroots
+                    upper_count = len(_visible_pinned_lineage_ids(candidate_rows, target_row, upper_profiles))
+                if uncertain_owner:
+                    own_count = len(_visible_pinned_lineage_ids(candidate_rows, target_row, {owner_profile}))
+                if (own_count if uncertain_owner else pinned_count) >= pinned_sessions_limit:
+                    admission_error = (
+                        f"Up to {pinned_sessions_limit} sessions can be pinned. Unpin one before pinning another.",
+                        400,
+                    )
+                elif root_owner and upper_count >= pinned_sessions_limit:
+                    admission_error = ("Session profile information is incomplete; please retry.", 503)
+                else:
+                    # Mark in-memory pin state under LOCK so concurrent pin
+                    # requests see the increment immediately, even before
+                    # save() finishes flushing to disk.
+                    s.pinned = True
+            if admission_error:
+                return bad(handler, *admission_error)
             with _get_session_agent_lock(body["session_id"]):
                 s.save()
         else:
@@ -18855,7 +19115,16 @@ def _handle_session_export(handler, parsed):
     # ``public_session_projection`` supersedes the narrower
     # ``redact_session_data`` path so export context_messages uses the same
     # alias-stripping boundary as the visible transcript.
-    safe = public_session_projection(s.__dict__)
+    snapshot = dict(s.__dict__)
+    if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
+        state_messages = get_state_db_session_messages(
+            sid, profile=getattr(s, "profile", None), include_row_identity=True,
+        )
+        snapshot["messages"] = reconciled_state_db_messages_for_session(s, state_messages=state_messages)
+        snapshot["context_messages"] = reconciled_state_db_messages_for_session(
+            s, prefer_context=True, state_messages=state_messages
+        )
+    safe = public_session_projection(snapshot)
     qs = parse_qs(parsed.query)
     fmt = qs.get("format", ["json"])[0].lower()
     if fmt == "html":
@@ -18874,11 +19143,19 @@ def _handle_session_export(handler, parsed):
                         palette = parsed_palette
             except Exception:
                 palette = None
-        payload = render_session_html(safe, theme=theme, palette=palette)
+        html = render_session_html(safe, theme=theme, palette=palette)
+        # Join provider UTF-16 halves for presentation, while leaving durable
+        # session/journal text unchanged. Lone halves retain replacement output.
+        html = html.encode('utf-16-le', errors='surrogatepass').decode(
+            'utf-16-le', errors='replace'
+        )
+        payload = html.encode(
+            "utf-8", errors="replace"
+        )
         content_type = "text/html; charset=utf-8"
         ext = "html"
     else:
-        payload = json.dumps(safe, ensure_ascii=False, indent=2)
+        payload = _json_response_body(safe, pretty=True)
         content_type = "application/json; charset=utf-8"
         ext = "json"
     handler.send_response(200)
@@ -18886,10 +19163,10 @@ def _handle_session_export(handler, parsed):
     handler.send_header(
         "Content-Disposition", f'attachment; filename="hermes-{sid}.{ext}"'
     )
-    handler.send_header("Content-Length", str(len(payload.encode("utf-8"))))
+    handler.send_header("Content-Length", str(len(payload)))
     handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
-    handler.wfile.write(payload.encode("utf-8"))
+    handler.wfile.write(payload)
     return True
 
 
@@ -21196,6 +21473,7 @@ def _handle_tts(handler, parsed):
         "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
         "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
+        "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
         "id-ID-GadisNeural",
     }
     if voice not in allowed:
@@ -23759,7 +24037,25 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     # allows state.db rows newer than the watermark, so post-edit turns
     # are not dropped. Never 0.0 (the truncate-to-empty sentinel, #2914).
     if getattr(s, "truncation_watermark", None):
-        s.truncation_watermark = user_msg.get("timestamp") or time.time()
+        # Same invariant as streaming._advance_truncation_watermark_after_commit:
+        # only ever advance to a REAL message timestamp. Falling back to
+        # time.time() here stamped the watermark newer than every sidecar row
+        # and permanently self-locked the append-only state.db merge. When
+        # started_at is absent, clamp to the newest real message instead.
+        checkpoint_ts = user_msg.get("timestamp") or user_msg.get("_ts")
+        if not (isinstance(checkpoint_ts, (int, float)) and checkpoint_ts > 0):
+            newest_real_ts = None
+            for _m in (getattr(s, "messages", None) or []):
+                if not isinstance(_m, dict):
+                    continue
+                _ts = _m.get("timestamp") or _m.get("_ts")
+                if isinstance(_ts, (int, float)) and _ts > 0:
+                    newest_real_ts = (
+                        _ts if newest_real_ts is None else max(newest_real_ts, _ts)
+                    )
+            checkpoint_ts = newest_real_ts
+        if isinstance(checkpoint_ts, (int, float)) and checkpoint_ts > 0:
+            s.truncation_watermark = float(checkpoint_ts)
 
 
 def _is_default_or_empty_session_title(title) -> bool:
@@ -25035,7 +25331,9 @@ def _start_chat_stream_for_session(
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
-            cleared = _clear_stale_stream_state(s)
+            # chat_start is itself a writer that just released this lock: wait for a
+            # transient holder instead of answering 409 for a dead stream (#8072 review).
+            cleared = _clear_stale_stream_state(s, wait_for_writer=True)
             if not cleared and getattr(s, "active_stream_id", None):
                 diag.stage("response_write") if diag else None
                 return {
@@ -25831,13 +26129,13 @@ def _handle_goal_command(handler, body):
         except ImportError:
             requested_profile = ""
     if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-        has_persisted_turns = bool(
-            getattr(s, "messages", None)
-            or getattr(s, "context_messages", None)
-            or getattr(s, "pending_user_message", None)
+        session_profile, retag_result = _retag_empty_session_profile(
+            s, requested_profile
         )
-        if not has_persisted_turns:
-            s.profile = requested_profile
+        if retag_result == "pinned_empty":
+            return _session_profile_mismatch_response(
+                handler, body.get("session_id", ""), session_profile
+            )
 
     current_stream_id = getattr(s, "active_stream_id", None)
     stream_running = False
@@ -26222,33 +26520,22 @@ def _handle_chat_start(handler, body, diag=None):
             except ImportError:
                 requested_profile = ""
         session_profile = getattr(s, "profile", None)
-        has_persisted_turns = bool(
-            getattr(s, "messages", None)
-            or getattr(s, "context_messages", None)
-            or getattr(s, "pending_user_message", None)
-        )
         if not _session_visible_to_active_profile(session_profile, handler):
             if (
                 requested_profile
                 and _profiles_match(requested_profile, active_profile)
-                and not has_persisted_turns
             ):
-                # Empty placeholders can still be retagged when the
-                # requested profile matches the active request profile.
-                s.profile = requested_profile
-            elif session_profile:
-                # #7710: known other profile → 409 ``session_profile_mismatch``
-                # so the client can offer to switch to it (#5419).
-                # 404 is preserved only for the None-profile
-                # (unknown/legacy) self-heal case.
-                return j(handler, {
-                    "error": "Session belongs to a different profile",
-                    "code": "session_profile_mismatch",
-                    "session_id": body.get("session_id", ""),
-                    "profile": session_profile,
-                }, status=409)
+                session_profile, retag_result = (
+                    _retag_empty_session_profile(s, requested_profile)
+                )
+                if retag_result not in ("same_owner", "retagged"):
+                    return _session_profile_mismatch_response(
+                        handler, body.get("session_id", ""), session_profile
+                    )
             else:
-                return bad(handler, "Session not found", 404)
+                return _session_profile_mismatch_response(
+                    handler, body.get("session_id", ""), session_profile
+                )
         # Resolve durable rotations before any workspace/model/pending mutation.
         # GET navigation adopts the tip; POST never silently replays a user turn.
         from api.compression_continuation import durable_compression_continuation
@@ -26391,13 +26678,25 @@ def _handle_chat_start(handler, body, diag=None):
                 or explicit_model_pick
             ):
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
-        elif model_provider == "moa" and moa_config is None:
-            from api.commands import resolve_moa_config
+        elif model_provider == "moa":
+            from api.commands import agent_has_moa_virtual_provider, resolve_moa_config
 
-            try:
-                moa_config = resolve_moa_config(model)
-            except RuntimeError as e:
-                return bad(handler, str(e), 503)
+            if agent_has_moa_virtual_provider():
+                # hermes-agent serves the virtual ``moa`` provider itself and runs
+                # the selected preset through its MoA facade (profile-scoped
+                # config, fan-out cadence, degraded-reference policy). Also
+                # passing a per-turn ``moa_config`` makes run_conversation() run
+                # a SECOND, legacy fan-out + synthesis on every tool iteration,
+                # and the rewritten user message defeats the facade's per-turn
+                # reference cache. Never stack the two paths.
+                moa_config = None
+            elif moa_config is None:
+                # Older hermes-agent without the virtual provider: keep the
+                # legacy per-turn MoA path so a ``moa`` session still runs MoA.
+                try:
+                    moa_config = resolve_moa_config(model)
+                except RuntimeError as e:
+                    return bad(handler, str(e), 503)
         # NOTE: runtime-adapter selection is delegated to _start_run (shared
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
@@ -26547,6 +26846,24 @@ def _normalize_chat_attachments(raw_attachments):
             if value:
                 normalized.append({"name": value, "path": "", "mime": ""})
     return normalized
+
+
+def _current_cwd_sync_target(sid):
+    """Resolve ``(session_id, workspace, profile)`` for a delayed cwd sync.
+
+    Runs when the background write executes, not when it is scheduled. A
+    ``Session`` captured at schedule time can be replaced in ``SESSIONS`` (LRU
+    eviction, disk-ahead reload, metadata-stub upgrade), so the current object
+    is looked up by id under the per-session agent lock, the same way the
+    streaming teardown does. Returns ``None`` (skip the write) when the session
+    no longer resolves.
+    """
+    with _get_session_agent_lock(sid):
+        try:
+            cur = get_session(sid)
+        except KeyError:
+            return None
+        return (cur.session_id, cur.workspace, getattr(cur, "profile", None))
 
 
 def _handle_chat_sync(handler, body):
@@ -26717,6 +27034,16 @@ def _handle_chat_sync(handler, body):
                 persist_user_message=msg,
             )
     finally:
+        # Same as the streaming worker's teardown: mirror the workspace into the
+        # Agent-created state.db row on every exit, including a raised turn.
+        try:
+            from api.state_sync import sync_session_cwd_background
+
+            sync_session_cwd_background(
+                lambda _sid=s.session_id: _current_cwd_sync_target(_sid)
+            )
+        except Exception:
+            logger.debug("Failed to schedule session cwd sync", exc_info=True)
         with _ENV_LOCK:
             if old_cwd is None:
                 os.environ.pop("TERMINAL_CWD", None)

@@ -128,6 +128,17 @@ startup. If a restart fails, inspect the current service journal and selected
 interpreter. This ordering repair does not remove the static fallback lock or
 change cross-profile credential handling.
 
+The native Windows launcher also decides *which* Agent root that bootstrap runs
+from, so the two have to agree. `start.ps1` normally keeps the source-first
+order from `api.config._discover_agent_dir`, but it repairs a few displaced
+layouts: a bare source checkout, the repo sibling, an Agent root (source or
+pip-style) at the repo parent, or `%USERPROFILE%\hermes-agent`, when that selection has no in-root
+venv and a later master-order install exists. For the layout-fallback cases the
+install may win even without its own venv (deps already importable); otherwise
+the install needs a `venv\Scripts\python.exe`. A source checkout that has its
+own venv keeps priority, since it is launchable on its own.
+`HERMES_WEBUI_AGENT_DIR` remains authoritative over both.
+
 Current Hermes managed environments ship `ruamel.yaml` and may not include
 PyYAML. WebUI reads and writes YAML through `api/yaml_compat.py`, which uses
 PyYAML when it is importable and falls back to `ruamel.yaml` otherwise, and the
@@ -232,6 +243,14 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 **Why.** WebUI imports `run_agent.AIAgent` into its long-lived Python process. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision. Local Agent-backed actions return a retryable `409 agent_runtime_stale` with `restart_scheduled: false` before accepting a new turn. Gateway- and runner-owned chat keep their existing runtime ownership. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare; losing a previously known revision remains fail-closed.
 
+Revision checks allow up to 10 seconds total across the three local Git reads
+(worktree root, tracked module, and HEAD). Each read receives only the time
+remaining before one monotonic deadline, so slow reads that finish within the
+total budget do not falsely look like a changed runtime. An exhausted budget or
+failed read still blocks a previously identified Git runtime; this does not
+bypass the revision guard or schedule an automatic restart. This is a per-check
+budget, not an end-to-end chat-request timeout; chat admission can check twice.
+
 **Diagnostic.** The stale-runtime response includes `agent_update_state`, also preserved in asynchronous compression error status:
 
 | Value | Observation |
@@ -264,7 +283,11 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 **Symptom.** The sidebar's imported/CLI session list takes seconds per refresh on a large Hermes profile, or a log line says a `state.db` read failed. Sessions still appear; nothing is lost.
 
-**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary (the listing returns empty for that profile) instead of silently reopening the file writable.
+**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary instead of silently reopening the file writable.
+
+A primary `state.db` read failure keeps the existing availability behavior: a complete same-generation stale snapshot wins when available, then the independently bounded eight-entry last-known-good cache keyed without the volatile database fingerprint preserves rows across idle and streaming-frozen refreshes. In the all-profiles view, a profile whose primary read fails makes the aggregate non-authoritative, so it is never published to either cache.
+
+The additive cron, webhook, and kanban passes, and the project-assigned recovery and unassigned refill passes, have a different failure boundary. If one of those later reads is temporarily unavailable, WebUI serves the primary rows it already loaded as an explicitly incomplete, fresh projection for that request and does not cache it; the next poll retries the optional pass. Errors while creating project metadata or building an optional row are debug-logged and skipped without misclassifying `projects.json` as an unavailable `state.db`. In all-profiles mode, an optional-pass failure therefore keeps both the affected profile's primary rows and healthy profiles' rows instead of replacing them with a stale aggregate. Claude Code discovery remains one global scan, independent of profile database availability, and runs only for unfiltered or explicit `claude-code` requests.
 
 **Diagnostic.**
 
@@ -303,12 +326,20 @@ python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confir
 ## Update check reports a Git authentication or fetch failure
 
 **Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or
-`could not read Username`. No terminal or desktop credential prompt appears.
+`could not read Username`, or `unable to get password from user` (Git 2.47+).
+Git's own prompts are disabled; credential-helper UI depends on the helper.
 
 **Why.** Update checks are unattended. WebUI removes inherited askpass, SSH-command, proxy, and Git
 config injection settings; disables checkout-controlled askpass and credential helpers; and forces
 SSH batch mode. Generic and URL-scoped credential helpers from trusted user and system Git config
-remain available when declared directly in the primary system/global files. `include` and
+remain available when declared directly in the primary system/global files.
+Git Credential Manager also receives `GCM_INTERACTIVE=never` and
+`credential.interactive=false`: cached credentials may authenticate a check, but a GCM cache miss
+must fail without opening its GUI or browser login. Git itself honors
+`credential.interactive` starting in 2.47; other credential helpers may ignore
+these controls and still open a browser or GUI. These controls follow
+[GCM's environment contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/environment.md#gcm_interactive)
+and [configuration contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/configuration.md#credentialinteractive). `include` and
 `includeIf` are not followed for credential helpers, `core.sshCommand`, or `ssh.variant`:
 included files may be checkout-controlled even when Git labels their scope global. Move these
 settings into the main user/system config if needed. The explicit scope reads also work on
