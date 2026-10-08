@@ -4295,9 +4295,23 @@ def _append_journaled_partial_output(
         # Legacy journal replay has no pending turn metadata.  In that mode,
         # the latest user row is the only available ownership boundary; this
         # preserves replay idempotence without weakening active-turn checks.
-        if not _normalize_journal_recovery_text(
+        # The same relaxation is REQUIRED when the pending turn carries no
+        # timestamp and no active-turn token: ``_message_matches_pending_
+        # checkpoint`` cannot prove anything then, so an already-recovered
+        # same-stream row sitting inside the current-turn window would be
+        # re-appended on every repair pass (5 rows after 5 cycles instead
+        # of 1 — tests/test_issue7167_stale_pending_content_reuse.py).
+        _pending_text = _normalize_journal_recovery_text(
             getattr(session, 'pending_user_message', None)
-        ) and owner_idx >= current_turn_min_idx:
+        )
+        _pending_ts = getattr(session, 'pending_started_at', None)
+        _has_turn_identity = (
+            _current_turn_token(session) is not None or _pending_ts is not None
+        )
+        if (
+            (not _pending_text or not _has_turn_identity)
+            and owner_idx >= current_turn_min_idx
+        ):
             return True
         return False
 
@@ -4313,7 +4327,19 @@ def _append_journaled_partial_output(
             return False
 
         pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-        if pending_text and not _message_owns_current_turn(messages[owner_idx], session):
+        # Same relaxation as the ownership gate above: without an active-turn
+        # token or a pending timestamp there is no way to prove the owner row,
+        # so a same-stream recovered row inside the current-turn window must be
+        # reusable instead of re-appended every repair pass.
+        _has_turn_identity = (
+            _current_turn_token(session) is not None
+            or getattr(session, 'pending_started_at', None) is not None
+        )
+        if (
+            pending_text
+            and _has_turn_identity
+            and not _message_owns_current_turn(messages[owner_idx], session)
+        ):
             return False
 
         for candidate_idx in range(existing_idx + 1, initial_message_count):
