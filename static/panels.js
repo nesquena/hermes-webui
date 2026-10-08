@@ -7170,6 +7170,12 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  // Stale-snapshot guard ownership for THIS switch: armed the instant
+  // S.activeProfile changes (see below), handed to the settings reconciliation
+  // on success, released in `finally` on every other exit. The counter arms are
+  // `typeof`-tolerant because the frontend test harnesses eval this function in
+  // isolation, without panels.js's module scope (where the counter lives).
+  let _tabVisGuardHeld = false;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
@@ -7201,6 +7207,19 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // The switch's optimistic chip already claims the new profile, but the
+    // localStorage hidden_tabs / tab_order mirror still holds the PREVIOUS
+    // profile's snapshot until _refreshProfileSwitchBackground()'s
+    // /api/settings reconciliation settles. Arm the stale-snapshot guard at
+    // THIS instant rather than inside that reconciliation: everything between
+    // here and the call at the bottom of this function is async, and a tray-off
+    // release landing in the gap would re-derive tab visibility from the
+    // previous profile's mirror — revealing a Todos entry the new profile hides
+    // or keeping a visible one hidden until settings refresh (greptile P1,
+    // static/panels.js:6741, 2026-10-08T22:06:59Z). Ownership is handed to the
+    // reconciliation below; every other exit releases it in `finally`.
+    _tabVisGuardHeld = true;
+    if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7389,6 +7408,13 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
+    // Hand the stale-snapshot guard over to the /api/settings reconciliation
+    // (it releases on both settle paths). The decrement here and the
+    // synchronous re-arm at the top of _refreshProfileSwitchBackground are
+    // neighbours in the same task, so no handler can observe a zero counter
+    // between them.
+    if (_tabVisGuardHeld && typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending--;
+    _tabVisGuardHeld = false;
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 
@@ -7429,6 +7455,12 @@ async function switchToProfile(name) {
     if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
+    // Release the stale-snapshot guard on every exit that did NOT hand it to the
+    // settings reconciliation (switch failure, superseded switch, early return).
+    // The count is a plain counter and this arm is ours, so the release is
+    // unconditional; a stranded arm would pin tab visibility to the stale window
+    // for the rest of the session (greptile P1, static/panels.js:6741).
+    if (_tabVisGuardHeld) { _tabVisGuardHeld = false; if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending--; }
   }
 }
 

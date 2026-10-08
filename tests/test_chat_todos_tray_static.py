@@ -1517,3 +1517,149 @@ def test_profile_switch_reconciliation_marks_the_tab_mirror_stale(tmp_path):
     assert _run_node(tmp_path, "reconcile_guard_probe.js", script).strip() == "ok"
 
 
+def _extract_switch_guard_arms(panels: str) -> tuple[str, str, str]:
+    """The three shipped statements of the switch's stale-snapshot guard:
+    arm (at S.activeProfile), handoff (to the reconciliation), finally release."""
+    switch = _extract(
+        panels, "async function switchToProfile(name) {", "function openProfileCreate(){"
+    )
+    assign_at = switch.find("S.activeProfile = data.active || name;")
+    arm = re.search(
+        r"_tabVisGuardHeld = true;\s*\n\s*if \(typeof _tabVisReconcilePending === 'number'\) _tabVisReconcilePending\+\+;",
+        switch,
+    )
+    handoff = re.search(
+        r"if \(_tabVisGuardHeld && typeof _tabVisReconcilePending === 'number'\) "
+        r"_tabVisReconcilePending--;\s*\n\s*_tabVisGuardHeld = false;\s*\n\s*"
+        r"_refreshProfileSwitchBackground\(_switchGen\);",
+        switch,
+    )
+    release = re.search(
+        r"if \(_tabVisGuardHeld\) \{ _tabVisGuardHeld = false; if \(typeof "
+        r"_tabVisReconcilePending === 'number'\) _tabVisReconcilePending--; \}",
+        switch,
+    )
+    assert assign_at != -1 and arm and handoff and release, (
+        "the switch must arm the stale-snapshot guard at S.activeProfile, hand it "
+        "to the reconciliation, and release it on the other exits"
+    )
+    assert assign_at < arm.start(), (
+        "the guard must be armed when S.activeProfile changes, not later"
+    )
+    assert arm.start() < handoff.start() < release.start(), (
+        "the arm must precede the handoff, which must precede the finally release"
+    )
+    finally_at = switch.find("} finally {")
+    assert finally_at != -1 and finally_at < release.start(), (
+        "the switch-owned release must live in the finally block"
+    )
+    return arm.group(0), handoff.group(0), release.group(0)
+
+
+_SWITCH_GUARD_PROBE = r"""
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+__COUNTER__
+__GUARD__
+let _tabVisGuardHeld = false;
+globalThis.window = {};
+const S = {session: null};
+let _profileSwitchGeneration = 11;
+const _switchGen = _profileSwitchGeneration;
+let fulfill = null;
+let applied = [];
+let stored = null;
+function api(path) {
+  assert(path === '/api/settings', 'unexpected api path: ' + path);
+  return new Promise(function (res) { fulfill = res; });
+}
+function loadWorkspaceList() { return Promise.resolve(); }
+function syncTopbar() {}
+function _setHiddenTabs(h) { stored = h.slice(); }
+function _setTabOrder() {}
+function _applyTabOrder() {}
+function _applyTabVisibility(h) { applied.push(h.slice()); }
+function _ensureComposerControlVisibilityState() {}
+function _setComposerControlOrder() { return []; }
+function _renderComposerControlChips() {}
+function _renderComposerSituationalControlChips() {}
+function _applyComposerFooterVisibilitySettings() {}
+function _applyTitlebarProfileVisibility() {}
+__RECONCILE__
+let trayOn = false;
+function chatTodosEnabled() { return trayOn; }
+function _getHiddenTabs() { return ['notes']; }
+const todosEls = [{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},contains(c){return this._s.has(c);}}}];
+globalThis.document = {
+  querySelectorAll(sel) { return sel === '[data-panel="todos"]' ? todosEls : []; },
+  getElementById() { return null; },
+  querySelector() { return null; },
+};
+globalThis._tabVisibilitySnapshotStale = _tabVisibilitySnapshotStale;
+__RAIL__
+function settled() { return new Promise(function (r) { setImmediate(r); }); }
+(async function () {
+  assert(_tabVisibilitySnapshotStale() === false, 'idle: the mirror is authoritative');
+  // The switch arms the guard the instant S.activeProfile changes (SHIPPED).
+  __ARM__
+  assert(_tabVisibilitySnapshotStale() === true,
+    'S.activeProfile changing must arm the guard, not only the later reconciliation');
+  // ...so a tray-off click in the gap before the reconciliation starts cannot
+  // re-derive visibility from the previous profile's hidden_tabs mirror.
+  applied = [];
+  _syncChatTodosRailVisibility();
+  assert(applied.length === 0,
+    'a tray-off release in the gap must not re-derive the previous profile mirror');
+  // The switch then hands ownership to the reconciliation (SHIPPED statements).
+  __HANDOFF__
+  assert(_tabVisibilitySnapshotStale() === true,
+    'the handed-off reconciliation keeps the mirror stale while it is in flight');
+  fulfill({hidden_tabs: ['todos'], tab_order: ['chat']});
+  await settled();
+  assert(applied.length === 1 && applied[0].join() === 'todos',
+    'the reconciliation applies the new profile list off the server, not the stale mirror');
+  assert(stored.join() === 'todos', 'the mirror is rewritten from the server list');
+  assert(_tabVisibilitySnapshotStale() === false,
+    'the switch-armed guard is released once the reconciliation settles');
+
+  // A switch that never reaches the reconciliation must release its own arm,
+  // otherwise tab visibility stays pinned to the stale window for the session.
+  applied = [];
+  __ARM__
+  assert(_tabVisibilitySnapshotStale() === true, 're-armed for the non-success exit');
+  __FINALLY_RELEASE__
+  assert(_tabVisibilitySnapshotStale() === false,
+    'a failed / superseded switch releases its own arm');
+  console.log('ok');
+})().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def test_profile_switch_arms_the_tab_mirror_guard_at_active_profile_change(tmp_path):
+    """greptile P1 (2026-10-08T22:06:59Z): the tray-off release must be guarded
+    from the instant S.activeProfile changes, not only once
+    _refreshProfileSwitchBackground() starts — everything between is async, so a
+    click landing in the gap re-derived the previous profile's hidden_tabs."""
+    panels = _read_static("static/panels.js")
+    ui = _read_static("static/ui.js")
+    counter, guard = _extract_reconcile_guard(panels)
+    reconcile = _extract(
+        panels,
+        "function _refreshProfileSwitchBackground(gen){",
+        "async function loadProfilesPanel()",
+    )
+    rail = _extract(
+        ui, "function _syncChatTodosRailVisibility(){", "let _chatTodosResizeObserver"
+    )
+    arm, handoff, release = _extract_switch_guard_arms(panels)
+    script = (
+        _SWITCH_GUARD_PROBE.replace("__COUNTER__", counter)
+        .replace("__GUARD__", guard)
+        .replace("__RECONCILE__", reconcile)
+        .replace("__RAIL__", rail)
+        .replace("__ARM__", arm)
+        .replace("__HANDOFF__", handoff)
+        .replace("__FINALLY_RELEASE__", release)
+    )
+    assert _run_node(tmp_path, "switch_guard_probe.js", script).strip() == "ok"
+
+
