@@ -104,6 +104,7 @@ PROJECT_DYNAMIC_GLOBALS = {
     "placeLiveToolCardsHost": "typeof-guarded optional (ui/sessions/messages call sites)",
     "watchInflightSession": "typeof-guarded optional fallback (sessions.js)",
     "_applyMediaPlaybackPreferences": "typeof-guarded optional (ui.js / workspace.js)",
+    "_isSessionActionTarget": "typeof-guarded row predicate nested in the session-row closure (captures its `actions`), so it cannot be hoisted; called from the top-level new-tab choke points (#7429)",
 }
 
 
