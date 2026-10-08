@@ -336,3 +336,67 @@ class TestMaintainerReworkup20261006:
         assert helper.index("state.pinching = false;") < helper.index(
             "if(!state.dragging) return;"
         ), "the pinch reset must come before the drag-only early return"
+
+
+class TestRegate20261008:
+    """Source locks for the 2026-10-08 re-gate item on #6896.
+
+    " Cached image previews silently lose selected zoom. " — a cached image
+    initializes synchronously at mount (``img.complete``) and the browser still
+    dispatches its queued ``load`` afterwards, which re-ran the initializer
+    through ``_fit()`` and dropped the user's zoom (observed 1.7578125 -> 0.9).
+    The behavioural proof lives in the composed Chromium checks
+    (``duplicate_load_keeps_zoom``); these locks keep a marker regression
+    failing fast without a browser.
+    """
+
+    def _on_load(self) -> str:
+        src = UI.read_text(encoding="utf-8")
+        return src[
+            src.index("function _onImgLoad() {"):
+            src.index("function _imgOwnsDrag(e) {")
+        ]
+
+    def test_on_img_load_is_idempotent_for_an_initialized_frame(self):
+        body = self._on_load()
+        # The initialized frame is identified by source + natural size...
+        assert "let _imgInitSrc = null;" in UI.read_text(encoding="utf-8")
+        assert "const src = img.currentSrc || img.src || '';" in body
+        assert (
+            "if(!state.pendingNav && _imgInitSrc === src && _imgInitW === nw && _imgInitH === nh){"
+            in body
+        ), "a duplicate load for the already initialized frame must return early"
+        # ...recorded on EVERY initialization (mount, navigation, duplicate-of-
+        # a-new-frame), so the next duplicate can be recognised.
+        assert "_imgInitSrc = src;" in body
+        assert "_imgInitW = nw;" in body
+        assert "_imgInitH = nh;" in body
+        # A navigation must still initialize (that is the new image's geometry):
+        # the early return is gated on `pendingNav` being false.
+        guard = body.index(
+            "if(!state.pendingNav && _imgInitSrc === src && _imgInitW === nw && _imgInitH === nh){"
+        )
+        assert body.index("state.boxW = nw || 800;") > guard
+
+    def test_stale_event_does_not_consume_the_pending_navigation(self):
+        body = self._on_load()
+        # The reported ordering: the late event lands after the src swap. It
+        # cannot be the frame that navigation asked for (a src swap reports its
+        # own source), so it must leave pendingNav armed for the real load.
+        # Consuming it made the next load re-fit and lost the zoom.
+        stale = body.index("if(state.pendingNav && src && _imgInitSrc === src")
+        consume = body.index("state.pendingNav = false;", body.index("state.boxW = nw || 800;"))
+        assert stale < consume, "the stale-event guard must run before pendingNav is consumed"
+
+    def test_img_error_clears_the_initialized_frame_tracking(self):
+        src = UI.read_text(encoding="utf-8")
+        err = src[
+            src.index("function _imgOnError() {"):
+            src.index("function _imgPointOnCanvas(")
+        ]
+        assert "_imgInitSrc = null;" in err, (
+            "a failed load must drop the initialized-frame tracking, otherwise a "
+            "later load of the same source is skipped as a duplicate"
+        )
+        assert "_imgInitW = 0;" in err
+        assert "_imgInitH = 0;" in err

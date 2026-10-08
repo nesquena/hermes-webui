@@ -714,6 +714,66 @@
       );
     });
 
+    // 5b. A duplicate `load` for the frame we already initialized must not
+    //     re-fit the stage (re-gate 2026-10-08T19:21:38Z: cached previews lost
+    //     the user's selected zoom — 1.7578125 -> 0.9 — because a cached image
+    //     initializes synchronously at mount (`img.complete`) and the browser
+    //     still dispatches its queued `load` afterwards). The duplicate is
+    //     invoked directly here so the check is deterministic; the natural
+    //     ordering is covered by the trusted-input probe in the PR notes.
+    await run("duplicate_load_keeps_zoom", bucket, async function () {
+      var box = await openBox(IMG_W, IMG_H, {
+        images: [
+          { src: svgDataUrl(IMG_W, IMG_H), alt: "a" },
+          { src: svgDataUrl(1600, 900), alt: "b" },
+        ],
+        index: 0,
+      });
+      key("+");
+      key("+");
+      var zoomed = box.z.scale;
+      assert_(zoomed > box.z.fitScale, "fixture: expected zoom-in before the duplicate");
+      assert_(box.z.pendingNav === false, "fixture: no navigation may be armed yet");
+      var boxW = box.z.boxW;
+      // The production `load` handler, same source, same natural size, no
+      // navigation pending: the duplicate the browser dispatches for an
+      // already initialized frame.
+      box.img.onload();
+      assert_(
+        Math.abs(box.z.scale - zoomed) < 1e-9,
+        "a duplicate load for an initialized frame must not re-fit: " + box.z.scale +
+          " vs " + zoomed
+      );
+      assert_(
+        Math.abs(box.z.boxW - boxW) < 1e-9,
+        "a duplicate load must not change the initialized geometry"
+      );
+      // The other ordering: the duplicate lands while a navigation is armed.
+      // It cannot be the frame that navigation asked for (a src swap reports
+      // its own source), so it must leave `pendingNav` armed for the real load
+      // instead of consuming it — consuming it made the next load re-fit.
+      box.z.pendingNav = true;
+      box.img.onload();
+      assert_(
+        box.z.pendingNav === true,
+        "a duplicate load for the already initialized frame must not consume pendingNav"
+      );
+      assert_(
+        Math.abs(box.z.scale - zoomed) < 1e-9,
+        "the stale event must leave the zoom untouched: " + box.z.scale + " vs " + zoomed
+      );
+      box.z.pendingNav = false;
+      // ...and the navigation it was armed for still works.
+      key("ArrowRight");
+      for (var i = 0; i < 180 && box.z.pendingNav; i++) await frame();
+      assert_(box.z.pendingNav === false, "the real navigation load must consume pendingNav");
+      assert_(box.z.boxW === 1600, "the navigation must adopt the new image's geometry");
+      assert_(
+        Math.abs(box.z.scale - zoomed) < 1e-9,
+        "navigation keeps the user's zoom level: " + box.z.scale + " vs " + zoomed
+      );
+    });
+
     // 6. Locale rendering of the Fit control. The control is icon-only since
     //    the 2026-10-08 visual review: it renders the shared fit glyph and its
     //    accessible name (title + aria-label) stays translated.

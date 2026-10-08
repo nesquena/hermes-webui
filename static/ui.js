@@ -2746,9 +2746,43 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     _imgApplyTransform();
   }
 
+  // The source + natural size of the frame whose geometry is already
+  // initialized. A cached image is decoded synchronously at mount
+  // (`img.complete`), yet the browser still dispatches its `load` event
+  // afterwards; that duplicate re-ran this initializer (through `_fit()`) after
+  // a navigation had already consumed `pendingNav`, silently dropping the
+  // user's zoom (trusted-Chromium reproduction: 1.7578125 → 0.9 — re-gate
+  // 2026-10-08T19:21:38Z, static/ui.js:3049 vs :2774). The pair is cleared by
+  // `_imgOnError()` so a failed image never looks "already initialized".
+  let _imgInitSrc = null;
+  let _imgInitW = 0;
+  let _imgInitH = 0;
+
   function _onImgLoad() {
     const nw = img.naturalWidth || img.width || 0;
     const nh = img.naturalHeight || img.height || 0;
+    const src = img.currentSrc || img.src || '';
+    // Idempotent for an already initialized frame: a duplicate `load` for the
+    // SAME source and natural size, with no navigation pending, must not
+    // re-initialize (that re-fit is the zoom reset above). A pending navigation
+    // always initializes — that is the new image's geometry — and so does any
+    // change of source or natural size.
+    if(!state.pendingNav && _imgInitSrc === src && _imgInitW === nw && _imgInitH === nh){
+      return;
+    }
+    // A navigation is armed, yet the frame that just finished loading is the
+    // one already initialized: that event cannot be the frame the navigation
+    // asked for (the src swap reports its own source), so it is the previous
+    // image's late `load`. Leave `pendingNav` armed for the real one — this
+    // event used to consume the flag, and the next load then re-fit, silently
+    // discarding the user's zoom. The natural twin of the guard above.
+    if(state.pendingNav && src && _imgInitSrc === src
+       && _imgInitW === nw && _imgInitH === nh){
+      return;
+    }
+    _imgInitSrc = src;
+    _imgInitW = nw;
+    _imgInitH = nh;
     state.boxW = nw || 800;
     state.boxH = nh || 450;
     canvas.style.width = state.boxW + 'px';
@@ -2806,6 +2840,13 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     state.fitScale = 1;
     state.x = 0;
     state.y = 0;
+    // Drop the "already initialized" tracking: a failed image has no usable
+    // geometry, so a later load of the very same source must initialize for
+    // real instead of being skipped as a duplicate (re-gate
+    // 2026-10-08T19:21:38Z).
+    _imgInitSrc = null;
+    _imgInitW = 0;
+    _imgInitH = 0;
     canvas.style.width = '';
     canvas.style.height = '';
     canvas.style.transform = '';

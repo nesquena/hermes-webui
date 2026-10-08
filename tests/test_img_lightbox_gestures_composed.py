@@ -189,6 +189,12 @@ class TestComposedReviewFollowups:
     def test_failed_load_drops_the_stale_geometry(self, composed):
         _check(composed.desktop, "img_error_keeps_zoom_drops_stale_geometry")
 
+    def test_duplicate_load_does_not_drop_the_selected_zoom(self, composed):
+        """re-gate 2026-10-08T19:21:38Z — a cached image initializes
+        synchronously at mount and its queued `load` event re-fit the stage,
+        silently discarding the zoom the user had selected."""
+        _check(composed.desktop, "duplicate_load_keeps_zoom")
+
 
 # Trusted-input regressions for the 2026-10-06 maintainer gate certificate.
 # These use Playwright's own input pipeline (real mouse/keyboard events), which
