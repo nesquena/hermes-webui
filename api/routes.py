@@ -19115,7 +19115,15 @@ def handle_post(handler, parsed) -> bool:
         #
         # Body fields:
         #   workspaces: [str]  — the workspace list the dialog is about to save
-        #   profile: str       — optional; defaults to the active profile
+        #
+        # The profile is deliberately NOT a caller input. Forwarding a
+        # request-selected profile into the counter made the shared session
+        # index filterable by the caller, so a POSTed profile name returned
+        # that foreign profile's unowned-session count (Greptile P1 + security,
+        # 2026-10-07T22:59:48Z). The count is pinned to the ACTIVE profile the
+        # request runs under, which is also what the sweep files
+        # (``_auto_assign_sweep_body`` uses the project's own profile, and a
+        # profile can only see its own projects).
         raw_ws = body.get("workspaces")
         if raw_ws is None:
             ws_list = []
@@ -19123,10 +19131,9 @@ def handle_post(handler, parsed) -> bool:
             ws_list = [str(w) for w in raw_ws if w]
         else:
             return bad(handler, "workspaces must be a list")
-        preview_profile = str(body.get("profile") or "").strip() or None
         return j(
             handler,
-            {"count": _auto_assign_candidate_count(ws_list, preview_profile)},
+            {"count": _auto_assign_candidate_count(ws_list)},
         )
 
     if parsed.path == "/api/projects/bind":

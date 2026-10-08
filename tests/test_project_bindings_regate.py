@@ -1469,6 +1469,54 @@ def test_auto_assign_preview_route_returns_the_count(tmp_path, monkeypatch):
     assert [r["status"] for r in responses] == [400], responses
 
 
+def test_auto_assign_preview_ignores_a_caller_supplied_profile(tmp_path, monkeypatch):
+    """Greptile P1 + security: the preview must not be profile-selectable.
+
+    The route used to forward ``body.profile`` into the counter, so any caller
+    could count another profile's unowned sessions through the shared session
+    index (finding 2026-10-07T22:59:48Z). The count is pinned to the ACTIVE
+    profile instead: a ``profile`` field in the body is ignored, and the same
+    request under a different active profile counts that profile's rows.
+    """
+    import api.routes as routes
+
+    ws = tmp_path / "ws-preview-profile"
+    ws.mkdir()
+    ws_str = str(ws)
+    index = tmp_path / "_index.json"
+    index.write_text(json.dumps([
+        {"session_id": "d1", "workspace": ws_str, "profile": "default", "project_id": None},
+        {"session_id": "w1", "workspace": ws_str, "profile": "work", "project_id": None},
+        {"session_id": "w2", "workspace": ws_str, "profile": "work", "project_id": None},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: str(a) == str(b))
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+
+    # A foreign profile in the body changes nothing: only "default" is counted.
+    responses = []
+    assert _post_project_route(
+        monkeypatch,
+        "/api/projects/auto-assign-preview",
+        {"workspaces": [ws_str], "profile": "work"},
+        responses,
+    ) is True
+    assert [r["status"] for r in responses] == [200], responses
+    assert responses[0]["payload"] == {"count": 1}, responses
+
+    # The active profile is what moves the number.
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
+    responses = []
+    _post_project_route(
+        monkeypatch,
+        "/api/projects/auto-assign-preview",
+        {"workspaces": [ws_str], "profile": "default"},
+        responses,
+    )
+    assert responses[0]["payload"] == {"count": 2}, responses
+
+
 def test_retired_bindings_i18n_keys_are_gone_from_every_locale():
     """The keys the menu/effort cleanup retired must not linger anywhere."""
     src = _read_static("i18n.js")
