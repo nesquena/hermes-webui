@@ -3633,8 +3633,25 @@ def _find_journal_tool_match(
                 continue
         else:
             # No window supplied: the caller asked for session-wide
-            # eligibility, so an untagged card still matches.
-            return tool_idx
+            # eligibility, but an untagged card can still only suppress this
+            # journal event when its assistant anchor provably belongs to the
+            # turn being recovered. An older untagged card that merely shares
+            # name + preview must not swallow the current turn's tool, so fall
+            # through to the same turn-ownership check below instead of
+            # matching unconditionally.
+            anchor = tool_call.get('assistant_msg_idx')
+            _messages = session.messages or []
+            if isinstance(anchor, bool) or not isinstance(anchor, int):
+                # No usable anchor at all (a live-recorded tool, or one carried
+                # over from the core transcript): nothing contradicts the match,
+                # so keep the session-wide invariant the original repair path
+                # relies on.
+                return tool_idx
+            if not (0 <= anchor < len(_messages)):
+                continue
+            anchor_message = _messages[anchor]
+            if not isinstance(anchor_message, dict) or anchor_message.get('role') != 'assistant':
+                continue
         anchor_token = anchor_message.get('_active_turn_token')
         current_token = _current_turn_token(session)
         pending_text = _normalize_journal_recovery_text(
@@ -3707,8 +3724,17 @@ def _journal_tool_already_present(
     max_assistant_idx: int | None = None,
     consumed_indexes: set[int] | None = None,
     event_id: str | None = None,
+    current_turn_min_idx: int | None = None,
 ) -> bool:
     """Bool wrapper over :func:`_find_journal_tool_match` (back-compat)."""
+    # ``current_turn_min_idx`` is the name the recovery call sites and their
+    # tests use for "the current turn starts at this assistant index".
+    # It is an alias for ``min_assistant_idx`` so an untagged card is only
+    # allowed to suppress this journal event when its assistant anchor lies
+    # inside the current turn; an out-of-range anchor must fall through to
+    # append instead of dropping the journaled tool.
+    if current_turn_min_idx is not None and min_assistant_idx is None:
+        min_assistant_idx = current_turn_min_idx
     return (
         _find_journal_tool_match(
             session,
@@ -5481,6 +5507,22 @@ def _retry_journal_recovery_in_place(
                 # handler swallowed into a silent ``return False`` and left
                 # every no-hook marker unresolvable
                 # (tests/test_session_sidecar_repair.py).
+                if give_up:
+                    # Expired and no cancel hook: retire the marker to neutral
+                    # wording now. Keep this INSIDE the no-hook arm — moving the
+                    # generic give_up demote above the success check made the
+                    # WSL race tests shorten their retry budget and fail.
+                    msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+                    _strip_journal_retry_meta(msg)
+                    try:
+                        session.save(touch_updated_at=False)
+                    except Exception:
+                        logger.debug(
+                            "save() failed while demoting marker for session %s",
+                            getattr(session, 'session_id', '?'),
+                            exc_info=True,
+                        )
+                    return False
                 recovered_output = False
                 terminal_error_recovered = False
                 output_accounted_for = False
@@ -5514,8 +5556,8 @@ def _retry_journal_recovery_in_place(
             # survived into the merged transcript and the durable saved
             # successors lost their admission (tests/
             # test_cancelled_journal_owner_occurrences.py).
-            if recovered_output or terminal_error_recovered:
-                if not terminal_error_recovered:
+            if recovered_output or terminal_error_recovered or output_accounted_for:
+                if not terminal_error_recovered and not output_accounted_for:
                     msg['content'] = _INTERRUPTED_RECOVERED_WORDING
                     _strip_journal_retry_meta(msg)
                     # #7167: the rows this pass just recovered were APPENDED at
@@ -5596,7 +5638,7 @@ def _retry_journal_recovery_in_place(
                         )
                     )
 
-            if recovered_output or terminal_error_recovered:
+            if recovered_output or terminal_error_recovered or output_accounted_for:
                 if cancel_hook:
                     # Only this successful cancellation action can authorize
                     # scans past its exact-stream recovered assistant rows.
