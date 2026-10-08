@@ -11071,7 +11071,15 @@ function _chatTodosToggleEnabled(checked){
   // Deliberately no whole-transcript rebuild here: the tray is an absolutely
   // positioned overlay outside the message scroller, so toggling it changes no
   // transcript layout (a full re-render cost ~256 ms at 300 messages).
-  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
+  //
+  // Deliberately NO appearance autosave either (reviewer re-gate
+  // 2026-10-08T23:19:27Z, static/ui.js:11074): the tray preference is persisted
+  // in localStorage by _setChatTodosEnabled above, whereas an appearance save
+  // would POST hidden_tabs/_getHiddenTabs() — a mirror that can still hold a
+  // stale server snapshot. Toggling the tray from Settings then clobbered a
+  // newer hidden_tabs a sibling client had written (verified over real HTTP:
+  // server []; toggling the tray saved ["todos","memory"] back). Explicit
+  // visibility-chip edits keep their own autosave.
 }
 
 // ── Chat todos summary ──────────────────────────────────────────────────

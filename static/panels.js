@@ -6764,6 +6764,17 @@ function _refreshProfileSwitchBackground(gen){
     // superseded or failed reconciliation can never strand tab visibility
     // behind the stale-snapshot guard.
     _tabVisReconcilePending--;
+    // Replay the tray's rail release once the mirror is authoritative again
+    // (reviewer re-gate 2026-10-08T23:19:27Z, static/panels.js:6766). Every
+    // release path cleared the guard by skipping _syncChatTodosRailVisibility
+    // while the mirror still held the PREVIOUS profile's snapshot, but nothing
+    // re-ran it afterwards: disabling the tray during a failed reconciliation
+    // left the Todos entry hidden although the guard was already clear. The
+    // reconciliation above applies the profile's own snapshot; this resyncs
+    // the tray-owned hide on top of it (idempotent when the tray is on).
+    if(_tabVisReconcilePending <= 0 && typeof _syncChatTodosRailVisibility === 'function'){
+      _syncChatTodosRailVisibility();
+    }
   });
 }
 
@@ -9382,9 +9393,13 @@ async function loadSettingsPanel(){
     const chatTodosCb=$('settingsChatTodosInChat');
     if(chatTodosCb){
       chatTodosCb.checked=!!(typeof chatTodosEnabled==='function'&&chatTodosEnabled());
+      // No appearance autosave here (reviewer re-gate 2026-10-08T23:19:27Z,
+      // static/panels.js:9355): the checkbox only drives the tray preference
+      // (localStorage), and an appearance save would POST this client's stale
+      // hidden_tabs mirror, overwriting a newer server snapshot written by
+      // another client. Explicit visibility-chip edits still autosave.
       chatTodosCb.onchange=function(){
         if(typeof _chatTodosToggleEnabled==='function') _chatTodosToggleEnabled(this.checked);
-        _scheduleAppearanceAutosave();
       };
     }
     const autoScrollFollowCb=$('settingsAutoScrollFollow');

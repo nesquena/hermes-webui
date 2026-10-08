@@ -54,6 +54,32 @@ def test_chat_todos_settings_checkbox_wired_in_settings_panel():
     assert "typeof chatTodosEnabled==='function'" in panels
 
 
+def test_chat_todos_checkbox_handler_does_not_autosave_the_appearance_payload():
+    """Reviewer re-gate 2026-10-08T23:19:27Z (static/panels.js:9355): the
+    Settings tray checkbox only drives the tray preference (localStorage); the
+    appearance autosave it used to schedule POSTed this client's stale
+    hidden_tabs mirror and overwrote a newer server preference set by another
+    client (the reviewer verified it through real HTTP). An explicit
+    visibility-chip edit keeps its own autosave."""
+    panels = _read_static("static/panels.js")
+    handler = _extract(
+        panels,
+        "const chatTodosCb=$('settingsChatTodosInChat');",
+        "const autoScrollFollowCb=",
+    )
+    assert "_chatTodosToggleEnabled(this.checked)" in handler
+    assert "_scheduleAppearanceAutosave" not in handler, (
+        "the tray checkbox handler must not autosave the appearance payload"
+    )
+    # Positive control: the explicit visibility-chip edit still autosaves.
+    chip = _extract(
+        panels,
+        "function _toggleTabVisibilityChip(panel){",
+        "function _toggleDashboardVisibilityChip",
+    )
+    assert "_scheduleAppearanceAutosave()" in chip
+
+
 def test_i18n_keys_registered_in_english_locale():
     i18n = _read_static("static/i18n.js")
     assert "settings_label_chat_todos_in_chat: 'Show task list in chat'" in i18n
@@ -656,7 +682,8 @@ let renderCalls = 0;
 function _setChatTodosEnabled(v) { enabledSet = !!v; }
 function _syncChatTodosExpanded(v) { expandedCalls.push(!!v); }
 function renderChatTodos() { renderCalls++; }
-function _scheduleAppearanceAutosave() {}
+let autosaves = 0;
+function _scheduleAppearanceAutosave() { autosaves++; }
 function $() { return null; }
 var _renderTabVisibilityChips = function () { chipsRendered++; };
 __HELPER__
@@ -668,6 +695,11 @@ assert(renderCalls === 1, 'tray contents are repainted');
 _chatTodosToggleEnabled(false);
 assert(enabledSet === false, 'disabling writes through');
 assert(chipsRendered === 2, 'disabling must repaint the chips too');
+// Reviewer re-gate 2026-10-08T23:19:27Z (static/ui.js:11074): the tray toggle
+// must NOT schedule an appearance autosave — that save POSTs this client's
+// hidden_tabs mirror, which can still hold another profile's stale snapshot,
+// clobbering a newer server preference.
+assert(autosaves === 0, 'toggling the tray must not autosave the appearance payload');
 console.log('ok');
 """
 
@@ -1457,6 +1489,8 @@ function _renderComposerControlChips() {}
 function _renderComposerSituationalControlChips() {}
 function _applyComposerFooterVisibilitySettings() {}
 function _applyTitlebarProfileVisibility() {}
+let resyncs = 0;
+function _syncChatTodosRailVisibility() { resyncs++; }
 __HELPER__
 function settled() { return new Promise(function (r) { setImmediate(r); }); }
 (async function () {
@@ -1465,6 +1499,7 @@ function settled() { return new Promise(function (r) { setImmediate(r); }); }
   assert(_tabVisibilitySnapshotStale() === true,
     'an in-flight /api/settings reconciliation makes the mirror stale');
   assert(applied.length === 0 && stored === null, 'nothing is read off the stale mirror');
+  assert(resyncs === 0, 'the tray rail sync must not replay inside the stale window');
 
   fulfill({hidden_tabs: ['todos'], tab_order: ['chat']});
   await settled();
@@ -1472,15 +1507,22 @@ function settled() { return new Promise(function (r) { setImmediate(r); }); }
     'the reconciliation applies the server list, not the stale mirror');
   assert(stored.join() === 'todos', 'the mirror is rewritten from the server list');
   assert(_tabVisibilitySnapshotStale() === false, 'the guard releases when it settles');
+  assert(resyncs === 1,
+    'the release must replay the tray rail sync once the mirror is authoritative');
 
   // A FAILED reconciliation must release the guard too, otherwise tab
   // visibility stays pinned to the stale window for the rest of the session.
+  // The rail sync must also still replay: the release path used to skip it
+  // while the mirror was stale and never re-run it, so a tray disabled during
+  // a failed reconciliation left the Todos entry hidden (reviewer re-gate
+  // 2026-10-08T23:19:27Z, static/panels.js:6766).
   applied = [];
   _refreshProfileSwitchBackground(_profileSwitchGeneration);
   assert(_tabVisibilitySnapshotStale() === true, 'a second reconciliation re-arms the guard');
   fail(new Error('network'));
   await settled();
   assert(_tabVisibilitySnapshotStale() === false, 'a failed reconciliation releases the guard');
+  assert(resyncs === 2, 'a failed reconciliation must still replay the tray rail sync');
   console.log('ok');
 })().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
 """
@@ -1506,8 +1548,18 @@ def test_profile_switch_reconciliation_marks_the_tab_mirror_stale(tmp_path):
     assert "}).catch(function(){}).then(function(){" in block, (
         "the release must sit after the swallowed rejection so both settle paths clear it"
     )
-    assert block.count("_tabVisReconcilePending") == 2, (
-        "exactly one arm and one release per reconciliation"
+    # arm + release + the zero-check that replays the tray rail sync.
+    assert block.count("_tabVisReconcilePending") == 3, (
+        "exactly one arm, one release, and one zero-check per reconciliation"
+    )
+    resync_at = block.find("_syncChatTodosRailVisibility();", release_at)
+    assert resync_at != -1, (
+        "the release must replay the tray's rail sync once the mirror is "
+        "authoritative (re-gate 2026-10-08T23:19:27Z, static/panels.js:6766)"
+    )
+    zero_check_at = block.rfind("_tabVisReconcilePending <= 0", release_at, resync_at)
+    assert zero_check_at != -1, (
+        "the rail sync must be gated on the counter reaching zero"
     )
     script = (
         _RECONCILE_GUARD_PROBE.replace("__COUNTER__", counter)
@@ -1568,13 +1620,14 @@ const _switchGen = _profileSwitchGeneration;
 let fulfill = null;
 let applied = [];
 let stored = null;
+let mirror = ['notes'];  // the PREVIOUS profile's hidden_tabs mirror
 function api(path) {
   assert(path === '/api/settings', 'unexpected api path: ' + path);
   return new Promise(function (res) { fulfill = res; });
 }
 function loadWorkspaceList() { return Promise.resolve(); }
 function syncTopbar() {}
-function _setHiddenTabs(h) { stored = h.slice(); }
+function _setHiddenTabs(h) { stored = h.slice(); mirror = h.slice(); }
 function _setTabOrder() {}
 function _applyTabOrder() {}
 function _applyTabVisibility(h) { applied.push(h.slice()); }
@@ -1587,7 +1640,7 @@ function _applyTitlebarProfileVisibility() {}
 __RECONCILE__
 let trayOn = false;
 function chatTodosEnabled() { return trayOn; }
-function _getHiddenTabs() { return ['notes']; }
+function _getHiddenTabs() { return mirror.slice(); }
 const todosEls = [{classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},contains(c){return this._s.has(c);}}}];
 globalThis.document = {
   querySelectorAll(sel) { return sel === '[data-panel="todos"]' ? todosEls : []; },
@@ -1615,8 +1668,14 @@ function settled() { return new Promise(function (r) { setImmediate(r); }); }
     'the handed-off reconciliation keeps the mirror stale while it is in flight');
   fulfill({hidden_tabs: ['todos'], tab_order: ['chat']});
   await settled();
-  assert(applied.length === 1 && applied[0].join() === 'todos',
+  // The reconciliation applies the server list first; its release then replays
+  // the tray rail sync (reviewer re-gate 2026-10-08T23:19:27Z), which re-derives
+  // from the NOW-rewritten mirror — so the only list that may ever appear is the
+  // server's, never the previous profile's ['notes'].
+  assert(applied.length >= 1 && applied[0].join() === 'todos',
     'the reconciliation applies the new profile list off the server, not the stale mirror');
+  assert(applied.every(function (h) { return h.join() !== 'notes'; }),
+    'nothing may re-derive visibility from the previous profile mirror');
   assert(stored.join() === 'todos', 'the mirror is rewritten from the server list');
   assert(_tabVisibilitySnapshotStale() === false,
     'the switch-armed guard is released once the reconciliation settles');
