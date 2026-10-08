@@ -21235,7 +21235,11 @@ function renderMessages(options){
     const renderSignature=_messageRenderCacheSignature();
     cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
+    // #7778: the snapshot may hold blocks already stamped data-highlighted='1'
+    // (sync cache apply); refuse it once the Prism grammar state has moved on so
+    // the rebuild path re-highlights instead of restoring stale tokens.
+    const prismSigNow=(typeof _prismGrammarSignature==='function')?_prismGrammarSignature():0;
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature&&cached.prismSig===prismSigNow){
       inner.innerHTML=cached.html;
       _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
@@ -23024,6 +23028,9 @@ function renderMessages(options){
     if(_html&&_html.length<300_000){
       const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
       _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});
+      // #7778: record the Prism grammar state this snapshot was taken under
+      // (see the fast-path check above).
+      _sessionHtmlCache.get(sid).prismSig=(typeof _prismGrammarSignature==='function')?_prismGrammarSignature():0;
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
     // #7677: an unarmed render supersedes any pending settle stash.
@@ -24457,6 +24464,28 @@ function _applyCachedCodeHighlights(container){
     // marking the block as highlighted would cause the rAF post-process
     // to skip it forever — the user sees un-tokenized code indefinitely.
     if(!_CODE_HIGHLIGHT_TOKEN_RE.test(cached)) continue;
+    // Reproduce the element setup Prism.highlightElement (1.29) performs on a
+    // live highlight so a cache hit is indistinguishable from one: normalise
+    // the language class on <code> and its <pre> (Prism theme CSS keys off
+    // `pre[class*="language-"]`) and make the <pre> keyboard-focusable (Prism
+    // sets tabindex="0"; the renderer never does). Plain className string ops
+    // so this also runs under minimal DOM shims (no classList).
+    {
+      const langMatch = String(block.className || '').match(/(?:^|\s)lang(?:uage)?-([\w-]+)(?=\s|$)/i);
+      const lang = (langMatch ? langMatch[1] : 'none').toLowerCase();
+      const normalise = (el) => {
+        const rest = String(el.className || '').replace(/(?:^|\s)lang(?:uage)?-([\w-]+)(?=\s|$)/gi, ' ').trim();
+        el.className = (rest ? rest + ' ' : '') + 'language-' + lang;
+      };
+      normalise(block);
+      const pre = block.parentElement;
+      if(pre && pre.nodeName && String(pre.nodeName).toLowerCase() === 'pre'){
+        normalise(pre);
+        if(typeof pre.hasAttribute === 'function' && typeof pre.setAttribute === 'function' && !pre.hasAttribute('tabindex')){
+          pre.setAttribute('tabindex', '0');
+        }
+      }
+    }
     block.innerHTML = cached;
     block.dataset.highlighted = '1';
     applied++;
