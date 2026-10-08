@@ -127,6 +127,12 @@
 
 ### Fixed
 
+- **Gateway-backend browser turns no longer hang on a run-events stream that only sends keepalives.** A wall-clock
+  watchdog re-checks the run's status when the event stream makes no real progress for about two minutes: a finished
+  run settles from that status, and a running one reconnects from the last event without repeating tokens. A Gateway
+  that keeps closing the stream immediately is paced with a capped backoff instead of a reconnect storm, and Stop still
+  cancels promptly during a wait. Thanks @Ejmathewp. (#7978 by @Ejmathewp)
+
 - **Background git operations no longer pop up a credential-manager login window.** The update check and workspace
   git actions already turned off terminal and askpass prompts, but Git Credential Manager has its own interaction switch,
   so a cache miss during a background fetch could open an unexpected login window. Background git now also sets
