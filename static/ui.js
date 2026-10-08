@@ -9847,13 +9847,81 @@ let _ttsChunkIndex=0;
 let _ttsActiveBtn=null;
 let _playingEdgeAudio=null;
 
+// ── Language-aware TTS voice selection ──────────────────────────────────────
+// The default voice was a fixed Chinese neural voice (zh-CN-XiaoxiaoNeural).
+// Reading Cyrillic (or any other non-Latin script) with it produces gibberish.
+// Detect the dominant script of the spoken text and pick a matching voice, so
+// "listen to message" speaks Russian text in Russian. An explicit saved voice
+// still wins for Latin text and for a matching script.
+function _ttsDetectLang(text){
+  if(/[\u0400-\u04FF]/.test(text)) return 'ru';   // Cyrillic
+  if(/[\u3040-\u30FF]/.test(text)) return 'ja';   // Kana (before Han: JA shares Han)
+  if(/[\uAC00-\uD7AF]/.test(text)) return 'ko';   // Hangul
+  if(/[\u4E00-\u9FFF]/.test(text)) return 'zh';   // Han
+  if(/[\u0600-\u06FF]/.test(text)) return 'ar';
+  if(/[\u0590-\u05FF]/.test(text)) return 'he';
+  if(/[\u0370-\u03FF]/.test(text)) return 'el';
+  return '';                                       // Latin / undetermined
+}
+
+// Edge TTS is server-side: choose the voice the SERVER will use. A saved voice
+// wins; otherwise match the text's language (Dmitry = the male RU default used
+// by hermes-agent itself).
+function _edgeVoiceForText(text){
+  const lang=_ttsDetectLang(text);
+  const byScript=function(){
+    if(lang==='ru') return 'ru-RU-DmitryNeural';
+    if(lang==='zh') return 'zh-CN-XiaoxiaoNeural';
+    if(lang==='fr') return 'fr-FR-HenriNeural';
+    if(lang==='ja') return 'ja-JP-KeitaNeural';
+    return 'en-US-AriaNeural';
+  };
+  const saved=localStorage.getItem('hermes-tts-voice');
+  // A saved voice wins ONLY when it can read THIS text's script. A saved zh/en
+  // voice on Cyrillic silently drops the Russian — the reported "reads only
+  // English and digits" bug. Edge voice names carry their locale prefix
+  // (e.g. ru-RU-DmitryNeural), so a prefix match is enough.
+  if(saved){
+    if(!lang || saved.toLowerCase().startsWith(lang)) return saved;
+    return byScript();
+  }
+  return byScript();
+}
+
+// Browser (Web Speech API) path: an explicit saved voice wins unless it clearly
+// mismatches a non-Latin script, in which case a same-language system voice is
+// preferred so Cyrillic is not read by a Chinese/English voice.
+function _pickBrowserVoice(text){
+  const voices=('speechSynthesis' in window)?speechSynthesis.getVoices():[];
+  if(!voices.length) return null;
+  const lang=_ttsDetectLang(text);
+  const saved=localStorage.getItem('hermes-tts-voice');
+  const findLang=l=>{
+    if(!l) return null;
+    const want=l.toLowerCase();
+    return voices.find(v=>String(v.lang||'').toLowerCase().startsWith(want))
+        || voices.find(v=>String(v.lang||'').toLowerCase().replace('_','-').startsWith(want))
+        || null;
+  };
+  if(saved){
+    const m=voices.find(v=>v.name===saved);
+    if(m){
+      const mLang=String(m.lang||'').toLowerCase();
+      // Keep the explicit choice unless it can't read this text's script.
+      if(!lang||mLang.startsWith(lang)) return m;
+      return findLang(lang)||m;
+    }
+  }
+  const want=lang||((typeof _locale!=='undefined'&&_locale._speech)?String(_locale._speech).split('-')[0]:'');
+  return findLang(want);
+}
+
 function _buildBrowserUtterance(text, btn){
   const utter=new SpeechSynthesisUtterance(text);
-  const savedVoice=localStorage.getItem('hermes-tts-voice');
-  const voices=speechSynthesis.getVoices();
-  if(savedVoice&&voices.length){
-    const match=voices.find(v=>v.name===savedVoice);
-    if(match) utter.voice=match;
+  const voice=_pickBrowserVoice(text);
+  if(voice){
+    utter.voice=voice;
+    if(voice.lang) utter.lang=voice.lang;
   }
   const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
   if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
@@ -9892,7 +9960,7 @@ function _playEdgeTtsChunked(text, btn){
       return;
     }
     const chunk=chunks[idx];
-    const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
+    const voice=(typeof _edgeVoiceForText==='function')?_edgeVoiceForText(chunk):(localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural');
     const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
     const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
     let rate='', pitch='';

@@ -1958,7 +1958,7 @@ window.renderTranscript=function(container, messages, opts){
       return;
     }
     if(engine==="edge"){
-      const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
+      const voice=(typeof _edgeVoiceForText==='function')?_edgeVoiceForText(clean):(localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural");
       const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
       const savedPitch=parseFloat(localStorage.getItem("hermes-tts-pitch"));
       let rate='', pitch='';
@@ -2008,12 +2008,13 @@ window.renderTranscript=function(container, messages, opts){
     }
     const utter=new SpeechSynthesisUtterance(clean);
 
-    // Apply saved voice preferences
-    const savedVoice=localStorage.getItem('hermes-tts-voice');
-    const voices=speechSynthesis.getVoices();
-    if(savedVoice&&voices.length){
-      const match=voices.find(v=>v.name===savedVoice);
-      if(match) utter.voice=match;
+    // Apply saved voice preferences (language-aware: a Chinese/English voice
+    // must not read Cyrillic — pick a same-script voice when the saved one
+    // mismatches).
+    const _chosenVoice=(typeof _pickBrowserVoice==='function')?_pickBrowserVoice(clean):null;
+    if(_chosenVoice){
+      utter.voice=_chosenVoice;
+      if(_chosenVoice.lang) utter.lang=_chosenVoice.lang;
     }
     const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
     if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));

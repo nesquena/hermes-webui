@@ -117,6 +117,8 @@ def test_play_edge_tts_chunked_sends_explicit_engine_when_server_still_elevenlab
         [
             extract_function(UI_JS, "_stripForTTS"),
             extract_function(UI_JS, "_splitForTTS"),
+            extract_function(UI_JS, "_ttsDetectLang"),
+            extract_function(UI_JS, "_edgeVoiceForText"),
             extract_function(UI_JS, "_playEdgeTtsChunked"),
             extract_function(UI_JS, "stopTTS"),
             extract_function(UI_JS, "speakMessage"),
@@ -128,7 +130,35 @@ def test_play_edge_tts_chunked_sends_explicit_engine_when_server_still_elevenlab
     assert requests[0]["url"].endswith("/api/tts")
     assert requests[0]["body"]["engine"] == "edge"
     assert requests[0]["body"]["text"] == "Hello from Edge"
+    # An explicit saved voice still wins for matching-script (Latin/English) text.
     assert requests[0]["body"]["voice"] == "en-US-AriaNeural"
+
+
+def test_edge_voice_matches_script_when_no_voice_saved():
+    """With no saved voice, Cyrillic text must NOT go out with the default
+    Chinese voice — it must select a Russian voice."""
+    fns = "\n".join(
+        [
+            extract_function(UI_JS, "_stripForTTS"),
+            extract_function(UI_JS, "_splitForTTS"),
+            extract_function(UI_JS, "_ttsDetectLang"),
+            extract_function(UI_JS, "_edgeVoiceForText"),
+            extract_function(UI_JS, "_playEdgeTtsChunked"),
+            extract_function(UI_JS, "stopTTS"),
+            extract_function(UI_JS, "speakMessage"),
+        ]
+    )
+    harness = _UI_HARNESS.replace(
+        "'hermes-tts-voice': 'en-US-AriaNeural',", ""
+    ).replace(
+        "{ dataset: { rawText: 'Hello from Edge' } }",
+        "{ dataset: { rawText: 'Привет, сэр. Русский текст.' } }",
+    )
+    requests = _run_node(harness.replace("__UI_FNS__", fns))
+
+    assert len(requests) == 1
+    assert requests[0]["body"]["engine"] == "edge"
+    assert requests[0]["body"]["voice"] == "ru-RU-DmitryNeural"
 
 
 def test_voice_mode_edge_branch_sends_explicit_engine_when_server_still_openai():

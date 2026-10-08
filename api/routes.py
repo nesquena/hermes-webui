@@ -21450,6 +21450,14 @@ def _handle_tts(handler, parsed):
         return True
 
     # ── Edge TTS ────────────────────────────────────────────────────────
+    # A voice whose script can't read the text silently drops it: a zh/en
+    # Microsoft voice on Cyrillic reads only the Latin letters and digits (the
+    # reported "reads only English and numbers" bug). When the text is Cyrillic,
+    # never send a non-Russian voice — fall back to the male RU default Hermes
+    # Agent itself uses. This also rescues a client that still sends the old
+    # default (zh-CN-XiaoxiaoNeural) for Russian text.
+    if re.search(r"[\u0400-\u04FF]", text) and not str(voice).lower().startswith("ru"):
+        voice = "ru-RU-DmitryNeural"
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
@@ -21459,6 +21467,10 @@ def _handle_tts(handler, parsed):
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
         "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
         "id-ID-GadisNeural",
+        # Russian — Cyrillic read by a zh/en/fr/id voice is gibberish or silently
+        # dropped, so the RU neural voices must be selectable (Dmitry is the male
+        # default Hermes Agent uses for Russian).
+        "ru-RU-DmitryNeural", "ru-RU-SvetlanaNeural", "ru-RU-DariyaNeural",
     }
     if voice not in allowed:
         from api.helpers import bad as _bad
