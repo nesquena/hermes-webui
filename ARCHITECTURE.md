@@ -765,10 +765,15 @@ calls before submitting `auto_assign: true`. Its body takes
 `workspaces: [str]` (canonicalized through the same
 `validate_workspace_to_add` → `resolve_trusted_workspace` chain the bind stores,
 so a typed `alpha/`, `~/ws/alpha` or `/ws/./alpha` counts the chats in the
-canonical path) and `profile` (optional, defaults to the active profile); it
+canonical path) and `project_id` (optional; authorized exactly like
+`/api/projects/bind` — 404 unless the ACTIVE profile owns that project, whose
+own profile then runs the count); it
 answers `{"count": N}` — how many unfiled sessions in those workspaces a sweep
 would file. It reads the session index only, so it may over-count the
-read-only/subagent rows the sweep skips but never under-counts.
+read-only/subagent rows the sweep skips but never under-counts. The caller's
+`profile` is deliberately **not** an input — the route has ignored a body
+`profile` since the c16 fix, because a caller-selected profile made the shared
+session index filterable by the caller (see the route's own comment).
 
 `reasoning_effort` is applied through the **profile-wide** preference, not a
 session-local override: for a bound workspace/model/effort session the sidebar

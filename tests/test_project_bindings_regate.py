@@ -1594,11 +1594,86 @@ def test_save_awaits_the_auto_assign_confirmation_for_its_exact_snapshot():
     # removing a workspace re-arms it (that is the SHOULD-FIX 2 case: the flag
     # was already on and a workspace was added after the tick).
     assert "const _aaConfirmed=()=>_aaConfirmedKey!==null&&_aaConfirmedKey===_wsKey(_aaPathsNow());" in seg
-    assert "if(!_aaConfirmed()) return;" in seg
+    # ...and Save re-checks the confirmed key against its OWN snapshot, not the
+    # live list (re-gate 2026-10-08T19:21:36Z):
+    #   A's preview delayed, B added, Save, B removed, then confirm A's count.
+    #   `_aaConfirmed()` re-read the list at that moment, saw [A] again and
+    #   passed while Save still POSTed [A, B] — B's chat got the project ID with
+    #   no confirmation. The guard is therefore a snapshot comparison.
+    assert "if(_aaConfirmedKey!==_wsKey(wsPaths)) return;" in seg
+    assert "if(!_aaConfirmed()) return;" not in seg
     # A definite 0-count preview needs no prompt (the sweep would file nothing);
     # an unavailable preview fails CLOSED and still confirms.
     assert "if(count===0){ _aaConfirmedKey=key; return true; }" in seg
     assert "pb_auto_assign_confirm_unknown" in seg
+
+
+# ---------------------------------------------------------------------------
+# Re-gate 2026-10-08T19:21:36Z — Save must re-check the snapshot it POSTs
+# ---------------------------------------------------------------------------
+
+_SAVE_GUARD_PROBE = """
+const proj = {project_id: 'p1'};
+let S = {activeProfile: 'default'};
+const wsList = [];
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+
+__HELPERS__
+__SAVE_GUARD__
+
+// The maintainer's reproduction on head 1ad78dc2676a: delay A's preview, add B,
+// click Save, remove B, then confirm A's count. Save captures [A, B] and posts
+// that snapshot, but the confirmation it waited for was written for [A] — and
+// the old guard re-read the LIVE list at that moment, saw [A] again and passed.
+const A = '/ws/a';
+const B = '/ws/b';
+const snapshot = [A, B];                 // what Save captured and will POST
+wsList.length = 0;                       // the live list at guard time: B removed
+wsList.push({value: A});
+_aaConfirmedKey = _wsKey([A]);           // the only count the user ever confirmed
+
+assert(
+  _wsKey(_aaPathsNow()) === _aaConfirmedKey,
+  'precondition: the live list is back to [A], so the old guard would pass'
+);
+assert(
+  _aaConfirmedKey !== _wsKey(snapshot),
+  'precondition: the [A, B] snapshot was never confirmed'
+);
+assert(
+  _saveGuard(snapshot) !== 'POST',
+  'Save must not post the [A, B] snapshot the user never confirmed'
+);
+
+// Positive control: the snapshot the user DID confirm still saves.
+wsList.push({value: B});
+_aaConfirmedKey = _wsKey([A, B]);
+assert(
+  _saveGuard([A, B]) === 'POST',
+  'the confirmed snapshot still saves'
+);
+console.log('ok');
+"""
+
+
+def test_save_guard_rechecks_the_snapshot_it_posts(tmp_path):
+    """[SILENT] static/sessions.js:11222 (re-gate 2026-10-08T19:21:36Z).
+
+    The shipped guard line and the shipped key helpers are extracted and run
+    under node — the reproduction above is the maintainer's own, so the old
+    ``if(!_aaConfirmed()) return;`` semantics really does fail this probe.
+    """
+    src = _read_sessions_js()
+    helpers = src[
+        src.index("let _aaConfirmedKey=null;") : src.index("const _ensureAutoAssignConfirmed=")
+    ]
+    assert "_wsKey=(paths)=>JSON.stringify(" in helpers
+    guard_at = src.index("if(_aaConfirmedKey!==_wsKey(wsPaths)) return;")
+    guard_line = src[guard_at : src.index("\n", guard_at)] + "\n"
+    guard_fn = "function _saveGuard(wsPaths){\n" + guard_line + "  return 'POST';\n}\n"
+    probe = _SAVE_GUARD_PROBE.replace("__HELPERS__", helpers).replace("__SAVE_GUARD__", guard_fn)
+    assert "if(!_aaConfirmed()) return;" not in probe
+    assert _run_node(tmp_path, "save_guard_snapshot_probe.js", probe).strip() == "ok"
 
 
 def test_auto_assign_preview_canonicalizes_typed_paths(tmp_path, monkeypatch):

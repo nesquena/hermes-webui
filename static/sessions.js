@@ -11219,7 +11219,12 @@ function _showProjectBindingsDialog(proj){
         _aaConfirmedKey=null;
         return;
       }
-      if(!_aaConfirmed()) return;   // the list moved while prompting: save again
+      // Compare the CONFIRMED key against Save's OWN snapshot (`wsPaths`), not
+      // against the live list: `_aaConfirmed()` re-reads the list now, so
+      // removing a workspace that was added while the prompt was open made it
+      // pass again while Save still posted the wider snapshot the user never
+      // confirmed (re-gate 2026-10-08T19:21:36Z).
+      if(_aaConfirmedKey!==_wsKey(wsPaths)) return;   // the snapshot moved while prompting: save again
       autoAssign=!!aaCb.checked;
     }
     const modelVal=modelCombo.getValue();
