@@ -67,6 +67,10 @@ def _run_failure_case(api_js: str) -> dict:
             _extract_fn(MESSAGES_JS, "_getDismissedApprovals"),
             _extract_fn(MESSAGES_JS, "_isApprovalDismissed"),
             _extract_fn(MESSAGES_JS, "_unmarkApprovalDismissed"),
+            _extract_fn(MESSAGES_JS, "_promptNotifyKey"),
+            _extract_fn(MESSAGES_JS, "_retirePromptNotifyKey"),
+            _extract_fn(MESSAGES_JS, "_approvalPromptGeneration"),
+            _extract_fn(MESSAGES_JS, "_bumpApprovalPromptGeneration"),
             _extract_fn(MESSAGES_JS, "_promptActiveSessionId"),
             _extract_fn(MESSAGES_JS, "_approvalPromptBelongsToActiveSession"),
             _extract_fn(MESSAGES_JS, "_rememberApprovalPending"),
@@ -103,6 +107,7 @@ let renderCalls = 0;
 let _approvalSessionId = 'sess-1';
 let _approvalCurrentId = 'appr-1';
 let _approvalPendingBySession = new Map();
+const _approvalPromptGenerationBySession = new Map();
 let _loadSessionGeneration = 1;
 let _approvalResponding = null;
 let _approvalClearedOwner = null;
@@ -111,6 +116,7 @@ let _approvalSignature = '';
 let _approvalVisibleSince = 0;
 let _approvalHideTimer = null;
 const _clarifyPendingBySession = new Map();
+const _promptNotifySeen = new Map();
 const buttons = new Map();
 function makeButton(id) {{
   return {{
@@ -258,6 +264,10 @@ def test_poll_rerender_keeps_inflight_buttons_disabled_and_blocks_duplicates():
             _extract_fn(MESSAGES_JS, "_getDismissedApprovals"),
             _extract_fn(MESSAGES_JS, "_isApprovalDismissed"),
             _extract_fn(MESSAGES_JS, "_unmarkApprovalDismissed"),
+            _extract_fn(MESSAGES_JS, "_promptNotifyKey"),
+            _extract_fn(MESSAGES_JS, "_retirePromptNotifyKey"),
+            _extract_fn(MESSAGES_JS, "_approvalPromptGeneration"),
+            _extract_fn(MESSAGES_JS, "_bumpApprovalPromptGeneration"),
             _extract_fn(MESSAGES_JS, "_promptActiveSessionId"),
             _extract_fn(MESSAGES_JS, "_approvalPromptBelongsToActiveSession"),
             _extract_fn(MESSAGES_JS, "_rememberApprovalPending"),
@@ -289,6 +299,7 @@ const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 let _approvalSessionId = 'sess-1';
 let _approvalCurrentId = 'appr-1';
 let _approvalPendingBySession = new Map();
+const _approvalPromptGenerationBySession = new Map();
 let _loadSessionGeneration = 1;
 let _approvalResponding = null;
 let _approvalClearedOwner = null;
@@ -297,6 +308,7 @@ let _approvalSignature = '';
 let _approvalVisibleSince = 0;
 let _approvalHideTimer = null;
 const _clarifyPendingBySession = new Map();
+const _promptNotifySeen = new Map();
 let resolveApi;
 let apiCalls = 0;
 const buttons = new Map();

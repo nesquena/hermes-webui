@@ -179,13 +179,21 @@ def apply_regeneration_plan(
     return _result(True, retained_context_user)
 
 
-def snapshot_regeneration_state(session):
+def snapshot_session_state(session):
     return copy.deepcopy(session.__dict__)
 
 
-def restore_regeneration_state(session, snapshot):
+def restore_session_state(session, snapshot):
     session.__dict__.clear()
     session.__dict__.update(copy.deepcopy(snapshot))
+
+
+def snapshot_regeneration_state(session):
+    return snapshot_session_state(session)
+
+
+def restore_regeneration_state(session, snapshot):
+    restore_session_state(session, snapshot)
 
 
 def regeneration_revision_for(rows, *, session=None, context=None) -> str:
@@ -343,12 +351,14 @@ def regeneration_state(session, *, use_sidecar=False):
     otherwise the read falls back to the full transcript.
     """
     from api.models import (
+        _cancelled_journal_turn_owner,
         get_state_db_session_messages,
         reconciled_state_db_messages_for_session,
     )
 
     bounded_tail = None
-    if use_sidecar:
+    cancelled_owner = _cancelled_journal_turn_owner(getattr(session, 'messages', None) or [], include_live_partial=True)
+    if use_sidecar and not cancelled_owner:
         read_floor = _sidecar_regeneration_read_floor(session)
         if read_floor is not None:
             bounded_tail = _bounded_tail_snapshot_if_safe(session, read_floor)
@@ -358,6 +368,7 @@ def regeneration_state(session, *, use_sidecar=False):
         state_messages = get_state_db_session_messages(
             getattr(session, "session_id", None),
             profile=getattr(session, "profile", None),
+            **({'include_row_identity': True} if cancelled_owner else {}),
         )
     return (
         reconciled_state_db_messages_for_session(
@@ -608,6 +619,8 @@ def _stamp_intentional_shrink_generation(session, old_message_count: int, new_me
     if new_message_count >= old_message_count:
         return False
     session.intentional_shrink_generation = uuid.uuid4().hex
+    session.transcript_generation = max(0, int(getattr(session, 'transcript_generation', 0) or 0)) + 1
+    session.transcript_generation_baseline = max(0, int(new_message_count))
     return True
 
 

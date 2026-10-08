@@ -48,7 +48,7 @@ class _FakeSession:
 
 
 def test_stale_stream_cleanup_helper_exists():
-    assert "def _clear_stale_stream_state(session)" in ROUTES_SRC
+    assert "def _clear_stale_stream_state(session, *, wait_for_writer: bool = False)" in ROUTES_SRC
     assert "stream_id in STREAMS" in ROUTES_SRC
     assert "session.active_stream_id = None" in ROUTES_SRC
     assert "session.pending_user_message = None" in ROUTES_SRC

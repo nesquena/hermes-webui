@@ -689,6 +689,41 @@ function _buildModelCandidates(sel,groups){
   }
   return {options,providerMap};
 }
+// Configured aliases are routing instructions, not fuzzy search terms. Hermes
+// encodes them as `provider/model`, while duplicate-provider picker rows use
+// `@provider:model`. Preserve that provider across the representation boundary;
+// if the model is not currently catalogued, keep the explicit routed value so
+// the eventual provider error is visible rather than silently choosing a
+// same-named model from another provider.
+function _resolveModelAliasTarget(options,providerMap,target){
+  if(target&&typeof target==='object'){
+    const model=String(target.model||'').trim();
+    const routeProvider=String(target.route_provider||'').trim();
+    if(model&&routeProvider){
+      return {value:`@${routeProvider}:${model}`,provider:routeProvider};
+    }
+    return null;
+  }
+  const raw=String(target||'').trim();
+  const slash=raw.indexOf('/');
+  if(slash<=0||slash===raw.length-1) return null;
+  const provider=raw.slice(0,slash);
+  const model=raw.slice(slash+1);
+  const routedPrefix=`@${provider}:`;
+  for(const option of (options||[])){
+    const value=String(option&&option.value!==undefined?option.value:option);
+    let optionProvider=String((providerMap&&providerMap[value])||'');
+    if(!optionProvider&&typeof _providerFromModelValue==='function'){
+      optionProvider=String(_providerFromModelValue(value)||'');
+    }
+    if(optionProvider.toLowerCase()!==provider.toLowerCase()) continue;
+    const nativeModel=value.toLowerCase().startsWith(routedPrefix.toLowerCase())
+      ?value.slice(routedPrefix.length)
+      :value;
+    if(nativeModel.toLowerCase()===model.toLowerCase()) return {value,provider};
+  }
+  return {value:`${routedPrefix}${model}`,provider};
+}
 function _bestModelMatch(options,query){
   let best=null;
   const versioned=_looksLikeVersionedModel(query);
@@ -742,24 +777,42 @@ async function cmdModel(args){
   // models; the rest live in extra_models and are absent from sel.options. The
   // CLI resolves against the full catalog, so /model must too. (#3368)
   let modelsData=null;
+  let aliasTarget=null;
   try {
     const resp=await fetch(new URL('api/models',document.baseURI||location.href).href);
     if(resp.ok){
       modelsData=await resp.json();
-      const aliases=modelsData.aliases||{};
-      for(const [alias,modelId] of Object.entries(aliases)){
+      let routedAliasMatched=false;
+      const routedAliases=modelsData.model_alias_routes||{};
+      for(const [alias,target] of Object.entries(routedAliases)){
         if(alias.toLowerCase()===q){
-          q=modelId.toLowerCase(); // resolve alias to real model id e.g. "deepseek/deepseek-v4-flash"
+          routedAliasMatched=true;
+          aliasTarget=target;
+          q=String(target&&typeof target==='object'?target.model:target).toLowerCase();
           break;
+        }
+      }
+      if(!routedAliasMatched){
+        const aliases=modelsData.aliases||{};
+        for(const [alias,modelId] of Object.entries(aliases)){
+          if(alias.toLowerCase()===q){
+            aliasTarget=modelId;
+            q=String(modelId||'').toLowerCase();
+            break;
+          }
         }
       }
     }
   } catch(_){/* non-critical, fall through to fuzzy match */}
   const {options:candidates,providerMap}=_buildModelCandidates(sel,modelsData&&modelsData.groups);
-  // First: try exact match within active provider's optgroup.
-  // Use _findModelInDropdown (ui.js) which supports preferredProviderId.
-  const preferred=(S&&S.session&&S.session.model_provider)||window._activeProvider||null;
-  let match=(typeof _findModelInDropdown==='function')?_findModelInDropdown(q,sel,preferred):null;
+  const aliasRoute=aliasTarget?_resolveModelAliasTarget(candidates,providerMap,aliasTarget):null;
+  // A provider-qualified alias is authoritative. For ordinary text, first try an
+  // exact match within the active provider's optgroup, then retain the existing
+  // fuzzy lookup behavior.
+  const preferred=(aliasRoute&&aliasRoute.provider)||(S&&S.session&&S.session.model_provider)||window._activeProvider||null;
+  let match=aliasRoute
+    ?aliasRoute.value
+    :(typeof _findModelInDropdown==='function'?_findModelInDropdown(q,sel,preferred):null);
   // Fallback: fuzzy match across the FULL catalog (featured + extras), so an
   // exact bare model living in the extras tail (e.g. "mimo-v2.5" alongside the
   // featured "mimo-v2.5-pro") still wins — exact/shortest-match in _bestModelMatch.
@@ -823,8 +876,9 @@ async function cmdModel(args){
   // end-to-end. _ensureModelOptionInDropdown reuses the existing option when one
   // is already rendered. (#3368)
   const hasOption=Array.from(sel.options||[]).some(o=>o.value===match);
-  if(!hasOption && typeof _ensureModelOptionInDropdown==='function'){
-    _ensureModelOptionInDropdown(match,sel,providerMap[match]||null);
+  const matchProvider=(aliasRoute&&aliasRoute.provider)||providerMap[match]||null;
+  if((aliasRoute||!hasOption) && typeof _ensureModelOptionInDropdown==='function'){
+    _ensureModelOptionInDropdown(match,sel,matchProvider);
   }else{
     sel.value=match;
   }
@@ -868,7 +922,6 @@ async function cmdTerminal(){
     // System-minted session (#6022): opening the terminal auto-creates a
     // session — explicit worktree:false so the config default can't leak.
     await newSession(false, {worktree: false});
-    if(typeof renderSessionList==='function') await renderSessionList();
   }
   if(!S.session||!S.session.workspace){
     showToast(t('terminal_no_workspace_title'),2600,'warning');
@@ -880,8 +933,9 @@ async function cmdTerminal(){
 
 async function cmdNew(){
   if(typeof clearCompressionUi==='function') clearCompressionUi();
+  // newSession() refreshes the sidebar itself; a second awaited render only
+  // queued another full list read in front of the focus (#7996).
   await newSession();
-  await renderSessionList();
   $('msg').focus();
   showToast(t('new_session'));
 }
@@ -930,6 +984,12 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
       clearLiveToolCards();
       try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
       if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+      // Restore paging signals from the (possibly full) transcript response.
+      // A successful /compress returns the full transcript, so the bounded
+      // preflight's _messagesTruncated/_oldestIdx must be reset before render
+      // (#7628). Same restore-before-render ordering as the settle/cancel paths.
+      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!data.session._messages_truncated;
+      if(typeof _oldestIdx!=='undefined') _oldestIdx=data.session._messages_offset||0;
       syncTopbar();
       renderMessages();
       await renderSessionList();
@@ -1028,14 +1088,18 @@ async function _runManualCompression(focusTopic){
     // Preflight: verify the viewed session still exists before compressing.
     // This avoids a confusing "not found" toast when the UI is stale.
     try{
-      const live=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
+      // Bounded tail: a bare preflight used to pull and re-redact the whole
+      // transcript before every manual compression (#7310/#7625). Session
+      // existence + the current tail is all this preflight needs.
+      const live=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('session no longer available');
       }
       S.session=live.session;
       S.messages=live.session.messages||[];
       S.toolCalls=live.session.tool_calls||[];
-      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
+      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!(live.session._messages_truncated);
+      if(typeof _oldestIdx!=='undefined') _oldestIdx=live.session._messages_offset||0;
     }catch(preflightErr){
       if(typeof clearCompressionUi==='function') clearCompressionUi();
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
@@ -1303,7 +1367,7 @@ async function cmdStop(){
 }
 
 async function cmdGoal(args){
-  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session){await newSession();}
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=S.session.session_id;
   try{
@@ -1823,11 +1887,13 @@ async function cmdRetry(){
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    // Bounded tail: a bare reload used to pull and re-redact the whole
+    // transcript on every /retry recovery (#7310/#7625).
+    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid)+'&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1');
     // #5924 SILENT-race guard: a session switch during the GET await must not let
     // this recovery apply session A's intent to whatever session is now visible.
     if(!S.session||S.session.session_id!==activeSid)return;
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!(data.session._messages_truncated);if(typeof _oldestIdx!=='undefined')_oldestIdx=data.session._messages_offset||0;renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
     // Re-arm the single-shot explicit-pick marker from the captured non-default
     // pick — but only if it's still safe at fire time (session unchanged, current
@@ -1845,8 +1911,10 @@ async function cmdUndo(){
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    // Bounded tail: a bare reload used to pull and re-redact the whole
+    // transcript on every /undo recovery (#7310/#7625).
+    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid)+'&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1');
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!(data.session._messages_truncated);if(typeof _oldestIdx!=='undefined')_oldestIdx=data.session._messages_offset||0;renderMessages();}
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
 }
@@ -2245,12 +2313,30 @@ async function getBundleCommandMetadata(name){
   const bundles=await loadBundleCommands();
   return bundles.find(bundle=>String(bundle&&bundle.name||'').toLowerCase()===needle)||null;
 }
+// The composer text the user last closed the list on, by picking a command or pressing
+// Escape. A refresh that was not caused by typing (a slash-command loader landing late,
+// or a lookup still in flight) must not re-open the list for that same text; any edit
+// clears it. Without this, a failing /api/skills (agent-free server) is retried on every
+// keystroke and its late refresh re-opened the list after `/new` was taken, so the next
+// Enter picked again instead of sending (#8050). Closing because nothing matched is not
+// a dismissal: a loader that lands later may still have matches to show.
+let _slashDismissedText=null;
+function markSlashDropdownDismissed(){
+  const ta=$('msg');
+  _slashDismissedText=ta?String(ta.value||''):null;
+}
+function clearSlashDropdownDismissed(){ _slashDismissedText=null; }
+function slashDropdownDismissedFor(text){
+  return _slashDismissedText!==null&&_slashDismissedText===String(text||'');
+}
 function refreshSlashCommandDropdown(){
   const ta=$('msg');if(!ta)return;
   const text=ta.value||'';
   if(text.indexOf('\n')!==-1||_activeSlashCommandOffset(text)<0){hideCmdDropdown();return;}
+  if(slashDropdownDismissedFor(text)) return;
   getSlashAutocompleteMatches(text).then(matches=>{
     if(($('msg').value||'')!==text) return;
+    if(slashDropdownDismissedFor(text)) return;
     if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
   });
 }
@@ -2333,6 +2419,7 @@ function showCmdDropdown(matches){
         });
       }else{
         hideCmdDropdown();
+        markSlashDropdownDismissed();
       }
     };
     dd.appendChild(el);
@@ -2369,6 +2456,10 @@ function selectCmdDropdownItem(){
     items[_cmdSelectedIdx].onmousedown({preventDefault:()=>{}});
   } else if(items.length===1){
     items[0].onmousedown({preventDefault:()=>{}});
+  } else {
+    hideCmdDropdown();
+    markSlashDropdownDismissed();
+    return;
   }
   hideCmdDropdown();
 }
