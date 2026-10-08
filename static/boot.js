@@ -3521,6 +3521,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
+    // Silently re-bind an existing Web Push subscription to this device (no prompts).
+    if(typeof bindWebPushOnBoot==='function'){try{setTimeout(bindWebPushOnBoot,1500);}catch(_){}}
     if(typeof checkWebUIVersionSkew==='function'){try{checkWebUIVersionSkew(s);}catch(_){}}
     window._sendKey=s.send_key||'enter';
     // Persist default workspace so the blank new-chat page can show it

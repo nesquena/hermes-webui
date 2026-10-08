@@ -13858,6 +13858,27 @@ async function updateWebPushStatus(){
   const perm=('Notification' in window)?Notification.permission:'default';
   _webPushSetStatus(subscribed?t('web_push_status_on'):(perm==='denied'?t('notifications_denied'):t('web_push_status_off')));
 }
+// Boot-time silent re-bind: a subscription created before per-device owners
+// (or by another browser profile) only binds to this device when its endpoint
+// is presented to /api/push/status. Do that once per page load without any
+// prompt, and re-register the subscription if the server lost it.
+let _webPushBootDone=false;
+async function bindWebPushOnBoot(){
+  if(_webPushBootDone) return;
+  _webPushBootDone=true;
+  try{
+    if(!_webPushSupported()||Notification.permission!=='granted') return;
+    const info=await api('/api/push/status');
+    if(!info||!info.enabled) return;
+    const reg=await _webPushRegistration();
+    const sub=reg?await reg.pushManager.getSubscription().catch(()=>null):null;
+    if(!sub) return;
+    const st=await api('/api/push/status?endpoint='+encodeURIComponent(sub.endpoint),{headers:_webPushHeaders()});
+    if(st&&st.subscribed===false){
+      await api('/api/push/subscribe',{method:'POST',headers:_webPushHeaders(),body:JSON.stringify({subscription:sub.toJSON(),previous_endpoint:''})});
+    }
+  }catch(_e){ /* best effort; Settings still offers manual control */ }
+}
 async function toggleWebPush(){
   const toggle=$('webPushToggleButton');
   if(toggle) toggle.disabled=true;

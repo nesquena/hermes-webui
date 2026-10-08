@@ -23428,13 +23428,27 @@ def _push_csrf_reject(handler):
     return j(handler, {"error": "Session expired - reload the page"}, status=403)
 
 
+def _push_session_exists(session_id) -> bool:
+    """True only for a real session (in memory or persisted), so unknown ids
+    from the query string never create owner records."""
+    sid = str(session_id or "")
+    if not sid or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", sid):
+        return False
+    try:
+        from api.models import SESSIONS, SESSION_DIR
+
+        return sid in SESSIONS or (SESSION_DIR / f"{sid}.json").exists()
+    except Exception:
+        return False
+
+
 def _note_session_device(handler, session_id) -> None:
     """Remember which device opened/started ``session_id`` (push targeting)."""
     try:
         from api import web_push
 
         owner = web_push.owner_from_headers(handler.headers)
-        if owner and session_id and web_push.is_enabled():
+        if owner and session_id and web_push.is_enabled() and _push_session_exists(session_id):
             web_push.register_session_owner(str(session_id), owner)
     except Exception:
         logger.debug("push session-owner note failed", exc_info=True)
