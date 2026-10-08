@@ -8658,7 +8658,29 @@ def _advance_truncation_watermark_after_commit(session) -> None:
             if isinstance(ts, (int, float)) and ts > 0:
                 session.truncation_watermark = float(ts)
                 return
-    session.truncation_watermark = time.time()
+    # No timestamped user row (e.g. a handoff/background-notification turn
+    # committed without one). The watermark's meaning is "suppress the
+    # REPLACED tail", so it must stay anchored to a real message timestamp --
+    # stamping wall-clock time here made the watermark NEWER than every row in
+    # the sidecar, which permanently starved the sidecar_advanced_past_watermark
+    # guard of the only signal that would let newer state.db rows merge back.
+    # That is a self-locking filter: the rows needed to advance the sidecar past
+    # the watermark are exactly the rows the watermark hides. Clamp to the
+    # newest real message instead, keeping the sidecar able to advance past it.
+    # Never 0.0 (the truncate-to-empty sentinel that must keep blocking replay,
+    # #2914) -- hence the >0 check.
+    newest_real_ts = None
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        ts = msg.get('timestamp') or msg.get('_ts')
+        if isinstance(ts, (int, float)) and ts > 0:
+            newest_real_ts = ts if newest_real_ts is None else max(newest_real_ts, ts)
+    if newest_real_ts is not None:
+        session.truncation_watermark = float(newest_real_ts)
+    # Otherwise: genuinely no timestamped row at all. Keep the existing (stale)
+    # value rather than inventing a wall-clock boundary — a too-old watermark
+    # only over-filters the replaced tail; it cannot self-lock the merge.
 
 
 def _merge_display_messages_after_agent_result(

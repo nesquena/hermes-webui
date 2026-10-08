@@ -13931,6 +13931,74 @@ def _merge_session_messages_append_only_impl(
         and boundary_ts is not None
         and boundary_ts < watermark_timestamp
     )
+    # Self-heal for a STALE (wall-clock) watermark left by the pre-fix
+    # advance helper. A legitimate watermark always equals a real message
+    # timestamp (session_ops._truncation_watermark_for uses the last kept
+    # row's timestamp), so a watermark NEWER than every sidecar row cannot be a
+    # real truncate cutoff -- it is an invented boundary. Because
+    # sidecar_advanced_past_watermark then stays False forever, the filter
+    # below hides exactly the state.db rows that would advance the sidecar past
+    # the watermark: a self-locked transcript that silently drops every later
+    # turn. Detect that and drop the watermark, restoring normal merge order
+    # (fail OPEN toward data, matching the intent of session_recovery's
+    # watermark guards). The replaced-tail suppression still works via the
+    # legitimate boundary/watermark values, which are always <= max_sidecar.
+    #
+    # Provenance guard (#7946 review): manual compression is a LEGITIMATE cutoff
+    # writer that CAN exceed every timestamped sidecar row -- it stamps the
+    # missing timestamps on a compressed COPY with the current time and leaves
+    # session.messages unchanged, so whenever the sidecar's newest row has no
+    # timestamp the real cutoff sits above every timestamped sidecar row.
+    # Every such writer persists truncation_boundary at the SAME value as the
+    # watermark (routes compression, session_ops truncate/retry/undo), while
+    # the pre-fix wall-clock advance never touched the boundary. A watermark
+    # that matches the persisted boundary is therefore a real cutoff and must
+    # keep suppressing the pre-compression rows (#4836); only an unmatched
+    # watermark above the sidecar is the invented wall-clock value.
+    watermark_matches_persisted_boundary = (
+        watermark_timestamp is not None
+        and boundary_ts is not None
+        and boundary_ts == watermark_timestamp
+    )
+    # Ambiguous shape (#7946 gate c17, Codex): a recorded cutoff that EQUALS
+    # the newest timestamped sidecar row (a truncate/edit/undo whose post-edit
+    # turn never reached the sidecar with a timestamp). Nothing persisted marks
+    # where the deleted suffix ends, so state.db rows after the cutoff may be
+    # the rows the user deleted; healing would resurrect them. Stay
+    # conservative there (master behaviour); the writer clamp above prevents
+    # new occurrences.
+    cutoff_is_newest_sidecar_row = (
+        boundary_ts is not None
+        and max_sidecar_timestamp is not None
+        and boundary_ts == max_sidecar_timestamp
+    )
+    watermark_is_stale_wall_clock = (
+        watermark_timestamp is not None
+        and watermark_timestamp != 0
+        and max_sidecar_timestamp is not None
+        and watermark_timestamp > max_sidecar_timestamp
+        and not watermark_matches_persisted_boundary
+        and not cutoff_is_newest_sidecar_row
+    )
+    healed_to_recorded_cutoff = False
+    if watermark_is_stale_wall_clock:
+        # Heal to the newest REAL cutoff instead of dropping the watermark
+        # (#7946 gate, Codex + senior review): clearing it would replay rows a
+        # recorded cutoff deliberately hid -- e.g. a session manually compressed
+        # at C and only later hit by the wall-clock advance (W > C > every
+        # timestamped sidecar row) would get its discarded pre-compression
+        # state.db rows back (#4836). The newest real cutoff is the later of the
+        # recorded boundary and the newest timestamped sidecar row: unseen
+        # state.db rows at or below it stay suppressed exactly as on master
+        # (compression-discarded rows, a truncate's deleted suffix that predates
+        # the newest sidecar row), and the advance guard below is released so
+        # every state.db turn AFTER it -- the turns the self-lock was hiding --
+        # merges back (#7945).
+        heal_candidates = [max_sidecar_timestamp]
+        if boundary_ts is not None and boundary_ts > 0 and boundary_ts < watermark_timestamp:
+            heal_candidates.append(boundary_ts)
+        watermark_timestamp = max(heal_candidates)
+        healed_to_recorded_cutoff = True
 
     def _state_row_is_truncated(
         msg, key, content_key, timestamp, checkpoint_consumed,
@@ -13965,8 +14033,9 @@ def _merge_session_messages_append_only_impl(
         sidecar_advanced_past_watermark = (
             watermark_timestamp is not None
             and (
-                (max_sidecar_timestamp is not None
-                 and max_sidecar_timestamp > watermark_timestamp)
+                healed_to_recorded_cutoff
+                or (max_sidecar_timestamp is not None
+                    and max_sidecar_timestamp > watermark_timestamp)
                 or (watermark_advanced_by_boundary and checkpoint_consumed)
             )
         )
