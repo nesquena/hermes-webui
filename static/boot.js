@@ -2545,6 +2545,16 @@ $('modelSelect').onchange=async()=>{
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
+  // #7865: record THIS pick as explicit picker evidence for the active session,
+  // so _modelProviderForSend may let the dropdown's provider win over the
+  // session's on the next send. Session-scoped and NOT consumed by send()
+  // (unlike the _pendingSessionModel family) — the evidence must survive until
+  // the session is switched or reloaded. Cleared in the session load/switch
+  // paths so a stale pick can never authorize an override for a restored
+  // session whose provider the session itself holds.
+  if(typeof _rememberExplicitPickerPick==='function'&&S.session){
+    _rememberExplicitPickerPick(S.session.session_id,selectedModel,modelState.model_provider);
+  }
   if(!S.session){
     if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
     if(typeof syncModelChip==='function') syncModelChip();

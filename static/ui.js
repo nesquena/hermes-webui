@@ -3956,21 +3956,66 @@ function _modelStateForSelect(sel, modelId){
     // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
     const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
     // Normally-rendered catalog options only carry the qualified
-    // @custom:<slug>:<model> value — data-model is set solely by the fallback
+    // @<provider>:<model> value — data-model is set solely by the fallback
     // injection path (_ensureModelOptionInDropdown). When it is missing, strip
-    // the @custom:<slug>: prefix instead of sending the raw dropdown value as
-    // the model id (#6884). The prefix must come from the option metadata's
-    // authoritative provider (routedProvider), NOT from explicitProvider: the
-    // latter re-parses the value at its LAST colon, so a colon-bearing model
-    // id like @custom:backup:model-a:free would otherwise strip to just
-    // "free" (re-gate on the #6221 family). Only custom providers are
-    // stripped: a non-custom qualified id like @safe:gpt-4o-mini is a real
-    // provider namespace and must be preserved (#1771).
+    // the leading @<provider>: prefix instead of storing the raw dropdown
+    // value as the model id (#6884, #7860).
+    //
+    // The prefix must come from the option metadata's authoritative provider
+    // (routedProvider), NOT from explicitProvider: the latter re-parses the
+    // value at its LAST colon, so a colon-bearing model id like
+    // @custom:backup:model-a:free would otherwise strip to just "free"
+    // (re-gate on the #6221 family).
+    //
+    // The strip is NOT limited to custom providers: any provider that renders
+    // its options as @<provider>:<model> would otherwise persist the provider
+    // twice (once in model, once in model_provider) and the upstream answers
+    // 404 Model-not-found (#7860). A qualified id whose prefix belongs to a
+    // DIFFERENT provider than the option's own metadata is left intact — that
+    // is a real provider namespace (#1771), and stripping it would silently
+    // re-route the selection to the group's provider.
     const effectiveProvider=routedProvider||explicitProvider;
     const effectiveProviderLc=effectiveProvider.toLowerCase();
     const isCustomProvider=effectiveProviderLc==='custom'||effectiveProviderLc.startsWith('custom:');
     const explicitPrefix=`@${effectiveProvider}:`;
-    const strippedModel=isCustomProvider&&value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+    const valueCarriesPrefix=value.toLowerCase().startsWith(explicitPrefix.toLowerCase());
+    // Two ways the leading @<provider>: prefix is a genuine duplication we must
+    // strip:
+    //  (a) a custom provider's qualified id (#6884, and the value-encoded
+    //      variant where the option is missing from the catalog), or
+    //  (b) the dropdown rendered the option with a provider prefix that the
+    //      option's own metadata repeats (#7860: a non-default provider such
+    //      as @claude-subscription-…:claude-sonnet-5[1m] used to persist the
+    //      provider twice — once in `model`, once in `model_provider` — and
+    //      the upstream answered 404 Model-not-found).
+    // Anything else keeps the qualified form: a namespace like
+    // @safe:gpt-4o-mini is a real provider namespace and must be preserved
+    // (#1771). The account's configured default (window._defaultModel, e.g.
+    // "@safe:gpt-4o-mini") is the canonical standing default of the active
+    // provider — it is the session model on a missing/unknown-model fallback,
+    // not a catalog group's option, so it must NOT be stripped even though its
+    // own prefix happens to match the routed group provider.
+    const configuredDefault=(typeof window!=='undefined'&&window&&window._defaultModel)?String(window._defaultModel||'').trim():'';
+    const isConfiguredDefault=!!configuredDefault&&value.toLowerCase()===configuredDefault.toLowerCase();
+    // #7865 CORE (Codex): the second disjunct is gone. It stripped the
+    // @<provider>: prefix for ANY provider whose dropdown option carried one,
+    // on the reasoning that the prefix was then a duplication of
+    // model_provider. It is not: for a non-custom provider the qualified form is
+    // the session's model, and stripping it persisted the pair
+    // ``mistral-large`` / ``removed`` — a model id no provider owns plus a
+    // provider the account no longer has. The server fast path accepts that
+    // pair unchanged, and the installed Agent then raises
+    // ``AuthError: Unknown provider 'removed'`` on the next send, so a session
+    // whose provider was removed stopped recovering at all.
+    //
+    // Only a CUSTOM provider's qualified id is a genuine duplication: the
+    // custom namespace encodes the provider inside the model id itself, so
+    // keeping both repeats it and the upstream answers 404 Model-not-found.
+    // Non-custom @provider:model qualifiers stay in session state; stripping
+    // belongs at the native/Gateway provider-call boundaries, which is where it
+    // already happens.
+    const prefixIsDuplicated=!isConfiguredDefault&&isCustomProvider&&valueCarriesPrefix;
+    const strippedModel=prefixIsDuplicated
       ?value.slice(explicitPrefix.length)
       :value;
     return {model:routedModel||strippedModel||value,model_provider:effectiveProvider};
@@ -4004,24 +4049,103 @@ function _captureModelDropdownSelection(sel){
   }catch(_){}
   return {model:String(sel.value||''),model_provider:null};
 }
+// #7860/#7865: the picker's own "the user picked this here" evidence, kept
+// SEPARATE from the _pendingSessionModel family (that one is consumed by send()
+// and gone after the first turn). The send-path precedence needs the opposite
+// lifetime: a marker that says "the dropdown selection was authored by the user
+// for THIS session, after this session loaded", so a matching dropdown option
+// may override a loaded session's provider. Without it, any selection that the
+// catalog repaint leaves in the box (e.g. session restore syncs the topbar
+// before the catalog refresh — sessions.js ~2535 — and another provider's
+// identically-valued option ends up selected) would hijack the provider.
+function _pickerExplicitPickKey(sessionId){
+  return 'hermes-webui-explicit-picker-pick:'+String(sessionId||'');
+}
+function _rememberExplicitPickerPick(sessionId, value, provider){
+  const sid=String(sessionId||'').trim();
+  const val=String(value||'').trim();
+  if(!sid||!val) return;
+  try{
+    sessionStorage.setItem(_pickerExplicitPickKey(sid), JSON.stringify({
+      value:val,
+      model_provider:provider?String(provider):null,
+    }));
+  }catch(_){}
+}
+function _readExplicitPickerPick(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return null;
+  try{
+    const raw=sessionStorage.getItem(_pickerExplicitPickKey(sid));
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    const value=String(parsed&&parsed.value||'').trim();
+    if(!value) return null;
+    return {
+      value,
+      model_provider:parsed&&parsed.model_provider?String(parsed.model_provider):null,
+    };
+  }catch(_){
+    return null;
+  }
+}
+function _clearExplicitPickerPick(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return;
+  try{sessionStorage.removeItem(_pickerExplicitPickKey(sid));}catch(_){}
+}
 function _modelProviderForSend(modelId){
-  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
-  if(sessionProvider) return sessionProvider;
   const model=String(modelId||'').trim();
   if(!model) return null;
+  // An explicit provider embedded in a qualified id (@provider:model) is
+  // authoritative. (#7860, unchanged)
   const explicitProvider=typeof _providerFromModelValue==='function'
     ? _providerFromModelValue(model)
     : '';
   if(explicitProvider) return explicitProvider;
+  // The dropdown's option provider may win over a loaded session's provider
+  // ONLY with evidence the user picked in the dropdown for THIS session —
+  // the session-scoped explicit-pick marker written by the picker's change
+  // handler. A bare dropdown match alone is NOT evidence: after a session
+  // restore the catalog repaint can leave another provider's identically-
+  // valued option selected (e.g. gpt-5.5 offered by both OpenAI and OpenAI
+  // Codex), and letting that win routes the turn to a provider the user
+  // never picked (#7865, maintainer-flagged CORE regression). Always scoped
+  // to the ACTIVE session so a marker left over from another session can't
+  // authorize an override here.
   const sel=typeof $==='function' ? $('modelSelect') : null;
-  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
+  const activeSid=(S&&S.session&&S.session.session_id)||null;
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  const pick=(typeof _readExplicitPickerPick==='function')
+    ? _readExplicitPickerPick(activeSid)
+    : null;
+  // The gate only guards the session's own provider: without a loaded session
+  // provider there is nothing to protect, and master's behavior (the dropdown
+  // wins when its option matches the sent model) is preserved for the empty
+  // composer / new-session case.
+  if(sel&&(!sessionProvider||pick)&&String(sel.value||'').trim()===model
+     &&(!pick||String(pick.value||'').trim()===model)
+     &&typeof _modelStateForSelect==='function'){
     try{
       const dropdownState=_modelStateForSelect(sel,sel.value);
       if(dropdownState&&String(dropdownState.model||'').trim()===model){
-        return dropdownState.model_provider||null;
+        const dropdownProvider=dropdownState.model_provider;
+        // #7865: the marker is evidence of WHICH option the user picked, not
+        // just that some pick happened. A stale marker (surviving a reload, see
+        // the loadSession target-sid clear) authorizes the dropdown only when
+        // the option now selected is still the very provider that was picked.
+        // If the catalog repaint left a different provider's identically-valued
+        // option selected (gpt-5.5 offered by both openai and openai-codex),
+        // the pick must NOT authorize that wrong provider — fall through to the
+        // session's own provider instead.
+        const pickProvider=pick?String(pick.model_provider||'').trim().toLowerCase():'';
+        const dropdownProviderLc=String(dropdownProvider||'').trim().toLowerCase();
+        const pickAuthorizes=!pick||!!dropdownProviderLc&&!!pickProvider&&pickProvider===dropdownProviderLc;
+        if(dropdownProvider&&pickAuthorizes) return dropdownProvider;
       }
     }catch(_){}
   }
+  if(sessionProvider) return sessionProvider;
   if(typeof _readPersistedModelState==='function'){
     try{
       const persisted=_readPersistedModelState();
