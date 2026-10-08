@@ -35,14 +35,16 @@ def audio_response(data=None):
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):
     import api.profiles as profiles
+    real_get_active_home = profiles.get_active_hermes_home
     monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: tmp_path)
+    monkeypatch.setattr(profiles, '_loaded_profile_env_keys', set())
     monkeypatch.setattr(auth, 'is_auth_enabled', lambda: False)
     monkeypatch.setattr(config, 'get_config', lambda: {})
     monkeypatch.setattr(routes, 'load_settings', lambda: {'tts_engine': 'gemini'})
     monkeypatch.setenv('GEMINI_API_KEY', 'test-key-not-secret')
     monkeypatch.delenv('GOOGLE_API_KEY', raising=False)
     monkeypatch.delattr(routes._handle_tts, '_tts_limiter', raising=False)
-    yield
+    yield real_get_active_home
     monkeypatch.delattr(routes._handle_tts, '_tts_limiter', raising=False)
 
 
@@ -267,6 +269,72 @@ const localStorage={getItem:()=> 'gemini'};
 function _playGeminiTtsChunked(text,btn){calls.push({text,btn});return new Promise(()=>{});}
 ''' + fn + '\n_speakResponse();console.log(JSON.stringify(calls));')
     assert observed == [{'text': 'Read this verbatim.', 'btn': None}]
+
+
+@pytest.mark.parametrize('loaded_key', ['GEMINI_API_KEY', 'GOOGLE_API_KEY'])
+@pytest.mark.parametrize('request_key', ['GEMINI_API_KEY', 'GOOGLE_API_KEY', None])
+def test_gemini_two_profile_credential_isolation(monkeypatch, tmp_path, isolated,
+                                                loaded_key, request_key):
+    import os
+    import threading
+    import api.profiles as profiles
+
+    # Real dotenv reload and request-local resolution; only transport is fake.
+    monkeypatch.setattr(profiles, 'get_active_hermes_home', isolated)
+    monkeypatch.setattr(profiles, '_DEFAULT_HERMES_HOME', tmp_path)
+    monkeypatch.setattr(profiles, '_is_isolated_profile_mode', lambda: False)
+    monkeypatch.setattr(profiles, '_tls', threading.local())
+    for key in ('GEMINI_API_KEY', 'GOOGLE_API_KEY'):
+        monkeypatch.delenv(key, raising=False)
+    first = tmp_path / 'profiles' / 'first'
+    second = tmp_path / 'profiles' / 'second'
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / '.env').write_text(f'{loaded_key}=fake-first-profile-key\n')
+    (second / '.env').write_text(
+        f'{request_key}=fake-second-profile-key\n' if request_key else '')
+    profiles._reload_dotenv(first)
+    assert os.environ[loaded_key] == 'fake-first-profile-key'
+    assert loaded_key in profiles._loaded_profile_env_keys
+    calls = []
+
+    def upstream(req, **kwargs):
+        calls.append(req)
+        return Response(json.dumps(audio_response()).encode())
+
+    monkeypatch.setattr(routes, '_tts_open', upstream)
+    profiles.set_request_profile('second')
+    try:
+        assert profiles.get_active_hermes_home() == second
+        h = post({'text': 'Private second profile text', 'engine': 'gemini',
+                  'profile': 'second'})
+    finally:
+        profiles.clear_request_profile()
+    if request_key:
+        assert h.status == 200
+        assert len(calls) == 1
+        assert calls[0].get_header('X-goog-api-key') == 'fake-second-profile-key'
+        assert json.loads(calls[0].data)['input'][0]['content'][0]['text'] == 'Private second profile text'
+    else:
+        assert h.status == 503
+        assert h.payload()['error'] == 'Gemini API key not configured'
+        assert calls == []
+
+
+@pytest.mark.parametrize('deployment_key', ['GEMINI_API_KEY', 'GOOGLE_API_KEY'])
+@pytest.mark.parametrize('profile_key', ['GEMINI_API_KEY', 'GOOGLE_API_KEY'])
+def test_gemini_profile_key_precedes_deployment_key(monkeypatch, tmp_path,
+                                                    deployment_key, profile_key):
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.setenv(deployment_key, 'fake-deployment-key')
+    (tmp_path / '.env').write_text(f'{profile_key}=fake-profile-key\n')
+
+    def upstream(req, **kwargs):
+        assert req.get_header('X-goog-api-key') == 'fake-profile-key'
+        return Response(json.dumps(audio_response()).encode())
+
+    monkeypatch.setattr(routes, '_tts_open', upstream)
+    assert post().status == 200
 
 
 @pytest.mark.parametrize('key', ['GEMINI_API_KEY', 'GOOGLE_API_KEY'])

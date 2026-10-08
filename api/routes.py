@@ -21317,17 +21317,23 @@ def _handle_tts(handler, parsed):
     # ── Gemini TTS (Interactions API, native WAV) ────────────────────────
     if engine == "gemini":
         from api.helpers import bad as _bad
-        api_key = (os.getenv("GEMINI_API_KEY", "").strip()
-                   or os.getenv("GOOGLE_API_KEY", "").strip())
-        if not api_key:
-            try:
-                from api.onboarding import _load_env_file
-                from api.profiles import get_active_hermes_home
-                env_cfg = _load_env_file(get_active_hermes_home() / ".env")
-                api_key = (env_cfg.get("GEMINI_API_KEY", "").strip()
-                           or env_cfg.get("GOOGLE_API_KEY", "").strip())
-            except Exception:
-                pass
+        api_key = ""
+        try:
+            from api.onboarding import _load_env_file
+            from api import profiles as _profiles
+            # Request-local profile credentials take precedence over deployment
+            # keys. Live os.environ can contain a different profile's dotenv.
+            env_cfg = _load_env_file(_profiles.get_active_hermes_home() / ".env")
+            api_key = (env_cfg.get("GEMINI_API_KEY", "").strip()
+                       or env_cfg.get("GOOGLE_API_KEY", "").strip())
+            if not api_key:
+                api_key = next((os.environ.get(key, "").strip()
+                                for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+                                if key not in _profiles._loaded_profile_env_keys
+                                and os.environ.get(key, "").strip()), "")
+        except Exception:
+            # Fail closed if profile credential resolution is unavailable.
+            pass
         if not api_key:
             return _bad(handler, "Gemini API key not configured", 503)
 
