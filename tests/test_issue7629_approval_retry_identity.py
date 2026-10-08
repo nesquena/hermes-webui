@@ -35,7 +35,7 @@ def _run_scenario(typed_text: str, *, restore_via_session: bool = False) -> dict
     parse_command = _block(COMMANDS_JS, "function parseCommand(text){", "\nconst DESKTOP_COMPANION_EXTENSION_ID")
     transport = _block(
         COMMANDS_JS,
-        "async function _runAgentCommandTransport(text,_meta){",
+        "async function _runAgentCommandTransport(text,_meta,capturedOwnerMutationGeneration){",
         "\nasync function resolveBundleCommand",
     )
     cmd_skills = _block(COMMANDS_JS, "function cmdSkills(args){", "\nasync function cmdUse")
