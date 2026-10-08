@@ -835,25 +835,31 @@ async function cmdModel(args){
     // different provider not in the dropdown. Call /api/session/update directly.
     if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
       const provider=q.slice(0,q.indexOf('/'));
+      const sessionId=S.session.session_id;
       try{
         const resp=await fetch(new URL('api/session/update',document.baseURI||location.href).href,{
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body:JSON.stringify({
-            session_id:S.session.session_id,
+            session_id:sessionId,
             model:q,
             model_provider:provider,
           }),
         });
+        if(!S.session||S.session.session_id!==sessionId)return;
         if(resp.ok){
+          let payload=null;
+          try{
+            payload=await resp.json();
+          }catch(_){}
+          // JSON decoding is another await: revalidate before any active-session/UI mutation.
+          if(!S.session||S.session.session_id!==sessionId)return;
+          if(payload&&payload.session&&payload.session.session_id!=null&&payload.session.session_id!==sessionId)return;
           S.session.model=q;
           S.session.model_provider=provider;
-          try{
-            const payload=await resp.json();
-            if(typeof _applySessionContextMetadataUpdate==='function'){
-              _applySessionContextMetadataUpdate(payload);
-            }
-          }catch(_){}
+          if(typeof _applySessionContextMetadataUpdate==='function'){
+            _applySessionContextMetadataUpdate(payload);
+          }
           if(typeof syncTopbar==='function') syncTopbar();
           showToast(t('switched_to')+q);
           return;

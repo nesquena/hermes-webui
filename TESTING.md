@@ -454,16 +454,22 @@ EXPECT:
     not the previous model's usage snapshot (for example, 500k rather than 272k).
   - `S.session` and an existing `S.lastUsage` agree on the resolved window and
     threshold; cumulative input/output token counts and cost are retained.
-  - A deferred response for a session that is no longer active does not change
-    the active session or its usage snapshot.
+  - A deferred, model-selector, or cross-provider `/model` response for a session
+    that is no longer active does not change the active session's model, provider,
+    context metadata, usage snapshot, token/cost counters, or response-driven UI.
+    Hold the update response (and separately its JSON decoding for `/model`),
+    switch from session A to B, then release it. Repeat after closing A.
+  - Explicit foreign `session_id` payloads are rejected. Legacy responses without
+    that field still work for the captured active request target, but cannot be
+    applied after that target is replaced.
   - New plain conversations remain ephemeral until normal persistence; this
     check does not require a new empty session file to be written.
 FAIL: The badge snaps back to the previous model's window after refresh, the new
 session response has no resolved window when one is known, or late hydration
 changes another conversation.
-Automated coverage: `./scripts/test.sh -q tests/test_issue_grok46_context_window_mismatch.py tests/test_grok_context_window_runtime.py`.
+Automated coverage: `./scripts/test.sh -q tests/test_issue_grok46_context_window_mismatch.py tests/test_grok_context_window_runtime.py tests/test_model_response_session_ownership.py`.
 The runtime tests execute real frontend functions in Node.js with isolated API
-boundaries; they do not certify browser layout or a provider's current catalog.
+boundaries and explicitly deferred response/JSON promises (no timing sleeps); they do not certify browser layout or a provider's current catalog.
 
 ---
 
