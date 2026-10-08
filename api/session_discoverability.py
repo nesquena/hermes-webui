@@ -492,14 +492,18 @@ def _materialize_sidecar_from_state_db(session_dir: Path, state_db_path: Path | 
     if target.exists():
         return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "sidecar_exists"}
     try:
-        from api.session_recovery import _read_state_db_missing_sidecar_rows, _state_db_row_to_sidecar
+        from api.session_recovery import (
+            _read_state_db_missing_sidecar_rows,
+            _state_db_row_to_sidecar,
+            _with_marked_message_count,
+        )
     except Exception as exc:
         return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "error": f"recovery_import_failed:{exc}"}
     rows = {str(row.get("id") or ""): row for row in _read_state_db_missing_sidecar_rows(session_dir, state_db_path)}
     row = rows.get(sid)
     if not row:
         return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "state_row_not_repairable"}
-    payload = _state_db_row_to_sidecar(row)
+    payload = _with_marked_message_count(_state_db_row_to_sidecar(row))
     _backup_file(state_db_path, backup_dir, backed_up)
     session_dir.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}")
