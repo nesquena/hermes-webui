@@ -4771,9 +4771,18 @@ def _journal_retry_lock_for_sid(sid: str) -> threading.Lock:
 
 def _build_recovery_marker_with_retry_hook(
     *, recovered_output: bool, stream_id: str | None, pending_started_at=None,
+    retry_kind: str | None = None,
 ) -> dict:
     """Build an interrupted-turn marker, arming the lazy-retry hook when
-    visible output was not recovered yet but a stream id is available."""
+    visible output was not recovered yet but a stream id is available.
+
+    ``retry_kind`` records WHICH interruption this marker stands for. The
+    cancel-journal recovery passes ``'cancelled'`` so the owner lookup can
+    still recognise the segment as a user Stop even though the
+    interrupted-recovery path re-words the carrier and stamps
+    ``type='interrupted'`` (the agent *process* is what stopped). A real
+    crash/provider interruption leaves it unset and stays excluded.
+    """
     if recovered_output:
         return _interrupted_recovery_marker(
             recovered_output=True,
@@ -4793,6 +4802,8 @@ def _build_recovery_marker_with_retry_hook(
     marker['_journal_retry_stream_id'] = str(stream_id)
     marker['_journal_retry_attempts'] = 0
     marker['_journal_retry_first_seen_ts'] = int(time.time())
+    if retry_kind:
+        marker['_journal_retry_kind'] = str(retry_kind)
     return marker
 
 
@@ -5464,6 +5475,15 @@ def _retry_journal_recovery_in_place(
                     append_context=False,
                 )
             )
+            else:
+                # No cancel hook on this marker: nothing was recovered on this
+                # path, and the three verdicts must still be bound for the
+                # resolution check below (an unbound name raised
+                # UnboundLocalError, which the outer handler swallowed into a
+                # silent ``return False``).
+                recovered_output = False
+                terminal_error_recovered = False
+                output_accounted_for = False
             # A dedupe hit (no fresh row appended this pass) still means the
             # journal's visible output is represented in the transcript, so
             # the marker is resolved: keeping "reload to retry" visible would
@@ -5484,6 +5504,27 @@ def _retry_journal_recovery_in_place(
                 if not terminal_error_recovered:
                     msg['content'] = _INTERRUPTED_RECOVERED_WORDING
                     _strip_journal_retry_meta(msg)
+                    # #7167: the rows this pass just recovered were APPENDED at
+                    # the tail, i.e. AFTER this carrier. Tag them as belonging
+                    # to THIS cancelled stream and rehome them above the
+                    # carrier before returning — otherwise the carrier's
+                    # segment is empty (or carries only untagged rows),
+                    # ``_cancelled_journal_turn_owner`` cannot prove the Stop,
+                    # the merge never bounds the cancel turn, and the state.db
+                    # replay row survives into the merged transcript while the
+                    # durable saved successors lose their admission
+                    # (tests/test_cancelled_journal_owner_occurrences.py).
+                    # master does the same tag+rehome on this branch.
+                    for row in session.messages:
+                        if (
+                            isinstance(row, dict)
+                            and row.get('role') == 'assistant'
+                            and not row.get('_error')
+                            and row.get('_recovered_from_run_journal') is True
+                            and str(row.get('_recovered_stream_id') or '') == str(stream_id)
+                        ):
+                            row['_recovered_from_cancel_journal'] = True
+                    _rehome_cancel_journal_rows(session, idx, str(stream_id))
                     try:
                         session.save(touch_updated_at=False)
                     except Exception:
@@ -6023,6 +6064,13 @@ def _apply_core_sync_or_error_marker(
                         recovered_output=recovered_output or _output_accounted_for,
                         stream_id=_stream_id,
                         pending_started_at=_pending_started_at,
+                        # #7167: this marker stands for a USER Stop. The
+                        # interrupted-recovery wording and type describe why
+                        # the agent process died, not who asked it to stop, so
+                        # record the kind explicitly — otherwise
+                        # _cancelled_journal_turn_owner skips the segment and
+                        # the state.db replay row survives the merge.
+                        retry_kind='cancelled',
                     )
                 )
         session.save(touch_updated_at=touch_updated_at)
@@ -14377,8 +14425,25 @@ def _cancelled_journal_turn_owner(
             continue
         segment = messages[owner_idx + 1:error_idx]
         has_partial = any(row.get('_partial') for row in segment)
+        # #7167 re-gate: the interrupted-recovery path RE-WORDS an existing
+        # user-Stop carrier in place (``msg['content'] =
+        # _INTERRUPTED_RECOVERED_WORDING``) and then strips its retry meta, so
+        # neither ``type`` nor ``_journal_retry_kind`` survives to say "this
+        # was a user Stop". The rows it recovered DO carry
+        # ``_recovered_from_run_journal``, which is never stripped — treat that
+        # as the durable proof and keep the segment admissible. Without it the
+        # owner lookup skipped the segment, the merge never proved the cancel
+        # bounds, and the state.db replay row survived into the merged
+        # transcript while the durable saved successors lost their admission
+        # (tests/test_cancelled_journal_owner_occurrences.py).
+        # A real crash/provider interruption recovers no run-journal rows, so
+        # the exemption cannot admit one.
+        segment_recovers_run_journal = any(
+            row.get('_recovered_from_run_journal') is True for row in segment
+        )
         if has_partial and (not include_live_partial
-                            or carrier.get('type') not in (None, '', 'cancelled')):
+                            or (carrier.get('type') not in (None, '', 'cancelled')
+                                and not segment_recovers_run_journal)):
             continue  # A typed crash/provider interruption is not a user Stop.
         if (has_partial or any(row.get('_recovered_from_cancel_journal') is True for row in segment)):
             return messages[owner_idx], carrier
