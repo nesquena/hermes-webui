@@ -459,6 +459,19 @@ class TestComposedTrustedInput:
             "return (lb._zoom && lb._zoom.scale) || 0; }"
         )
         try:
+            # Re-establish the precondition the open path guarantees: the
+            # document-level handler deliberately ignores keys whose target is
+            # an editable field, and this scenario shares the module page with
+            # earlier ones, so an ambient input/textarea left focused would
+            # silently swallow the unmodified '=' below. Verified root cause of
+            # the 2026-10-08 red on the 3.11/shard-3 job (which otherwise
+            # passed the identical shard order on the sibling head): with an
+            # editable target, '=' left the scale at 1; after re-focusing the
+            # dialog it zooms to 1.25.
+            page.evaluate(
+                "() => { const lb = document.querySelector('.img-lightbox'); "
+                "if (lb && typeof lb.focus === 'function') lb.focus({ preventScroll: true }); }"
+            )
             before = page.evaluate(scale_of)
             page.keyboard.press("Control+Equal")
             page.keyboard.press("Control+Minus")
