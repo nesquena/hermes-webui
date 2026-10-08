@@ -9285,6 +9285,11 @@ function _sidebarUserTurnCountRenderOK(s){
   const collapsed=Number(s._lineage_collapsed_count||0);
   if(s._lineage_root_id||s.pre_compression_snapshot||seg>1||collapsed>1)return false;
   if(s.active_stream_id||s.pending_user_message)return false;
+  // #7681 finding 3: the default compaction mode is in-place, so a compacted
+  // session stays ONE segment and would otherwise render a total that still
+  // counts rows the agent has compacted away (and rows removed by /undo). The
+  // backend flags such rows; omit the label rather than show a wrong number.
+  if(s.has_inactive_user_rows)return false;
   if(typeof s.user_message_count==='undefined'||s.user_message_count===null)return false;
   const turns=Number(s.user_message_count);
   return Number.isFinite(turns)&&turns>=0;
@@ -9396,8 +9401,25 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
     const inFlight=typeof _sendInProgress!=='undefined'&&!!_sendInProgress
       && (typeof _sendInProgressSid==='undefined'||_sendInProgressSid===null
         || _sendInProgressSid===S.session.session_id);
+    // #7681 finding 4 (should fix): the +1 must be IDEMPOTENT per pending turn.
+    // send() runs three update passes and the second one fires before the
+    // stream id exists, so an unconditional +1 compounded 41 → 42 → 43 and the
+    // sidebar briefly showed a number two turns too high. Remember which
+    // session already received the optimistic bump and only apply it once.
     if(userTurns===serverUserTurns&&serverUserTurns>0&&optimisticUserTurns<serverUserTurns&&inFlight){
-      userTurns=serverUserTurns+1;
+      const _bumpSid=(typeof _optimisticTurnBumpSid!=='undefined')?_optimisticTurnBumpSid:null;
+      const _bumpBase=(typeof _optimisticTurnBumpBase!=='undefined')?_optimisticTurnBumpBase:null;
+      const alreadyBumped=_bumpSid===sid&&_bumpBase===serverUserTurns;
+      if(!alreadyBumped){
+        userTurns=serverUserTurns+1;
+        _optimisticTurnBumpSid=sid;
+        _optimisticTurnBumpBase=serverUserTurns;
+      }
+    } else if(!inFlight){
+      // A turn that is no longer in flight clears the marker so the NEXT send
+      // can bump again.
+      if(typeof _optimisticTurnBumpSid!=='undefined') _optimisticTurnBumpSid=null;
+      if(typeof _optimisticTurnBumpBase!=='undefined') _optimisticTurnBumpBase=null;
     }
     S.session.user_message_count=userTurns;
   }

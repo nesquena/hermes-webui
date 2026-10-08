@@ -554,6 +554,10 @@ def test_user_turn_parity_db_vs_sidecar_and_predicate(tmp_path):
     )
 
     # SQL producer: build a state.db carrying the SAME content matrix.
+    # #7681 finding 2: the schema MUST include `display_kind` — the earlier
+    # version of this test omitted the column, so the new display_kind guard was
+    # silently skipped (`if 'display_kind' in message_cols`) and the test stayed
+    # green while the counter still over-reported.
     db = tmp_path / "state.db"
     conn = sqlite3.connect(str(db))
     conn.executescript(
@@ -566,7 +570,8 @@ def test_user_turn_parity_db_vs_sidecar_and_predicate(tmp_path):
         );
         CREATE TABLE messages (
             id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
-            timestamp REAL, _compressed_summary INTEGER NOT NULL DEFAULT 0
+            timestamp REAL, _compressed_summary INTEGER NOT NULL DEFAULT 0,
+            display_kind TEXT
         );
         CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
         """
@@ -580,8 +585,8 @@ def test_user_turn_parity_db_vs_sidecar_and_predicate(tmp_path):
     for mid, role, content, flag in matrix:
         conn.execute(
             "INSERT INTO messages (id, session_id, role, content, timestamp,"
-            " _compressed_summary) VALUES (?,?,?,?,?,?)",
-            (mid, "parity_a", role, content, 100.0, flag),
+            " _compressed_summary, display_kind) VALUES (?,?,?,?,?,?,?)",
+            (mid, "parity_a", role, content, 100.0, flag, None),
         )
     conn.commit()
     conn.close()

@@ -268,7 +268,13 @@ def _as_score(*values) -> float:
 
 
 def _count_user_turns(row: dict) -> int:
-    user_turns = row.get("actual_user_message_count")
+    # #7681 finding 1: the collapsed-lineage row nulls its DISPLAYED count, but
+    # the count it had is still the right answer for "does this row have any
+    # user turn at all". Read the internal field first so an ACP chain with real
+    # turns stays visible.
+    user_turns = row.get("lineage_user_message_count")
+    if user_turns is None:
+        user_turns = row.get("actual_user_message_count")
     if user_turns is None:
         user_turns = row.get("user_message_count")
     if user_turns is None:
@@ -760,8 +766,16 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         # tip segment's `actual_user_message_count` — a compressed chain keeps
         # several segments and the tip slice alone is never the whole-lineage
         # user-turn total (the agent's own lineage count differs). A stale tip
-        # count shown as the lineage total actively misleads, so emit "unknown"
-        # and let the client omit the label for collapsed rows instead.
+        # count shown as the lineage total actively misleads, so null only the
+        # DISPLAYED count and let the client omit the label for collapsed rows.
+        #
+        # The count used for VISIBILITY is a separate field: nulling the display
+        # count must not make an ACP chain with real user turns vanish from the
+        # sidebar (`_acp_row_is_visible` runs `_count_user_turns(row) > 0`
+        # BEFORE the lineage check, and `_count_user_turns` falls back through
+        # `user_message_count` → `messages` → 0).
+        if merged.get('actual_user_message_count') is not None:
+            merged['lineage_user_message_count'] = merged['actual_user_message_count']
         merged['actual_user_message_count'] = None
         if lineage_project_id:
             merged['project_id'] = lineage_project_id
@@ -962,6 +976,8 @@ def read_importable_agent_session_rows(
             # know the real count, so nothing to estimate there.
             user_message_count_estimate_expr = "NULL"
             user_message_count_unknown_expr = "0"
+            # Default: no messages table reachable → no inactive-row evidence.
+            inactive_user_rows_expr = "0"
             if 'role' in message_cols:
                 # #7681: exclude EVERY synthetic user-role row, not just the
                 # durable compression flag. The agent persists the continuation
@@ -976,13 +992,44 @@ def read_importable_agent_session_rows(
                     if '_compressed_summary' in message_cols
                     else ""
                 )
+                # #7681 finding 3: the default compaction mode is in-place, so a
+                # compacted session stays ONE segment and the client's
+                # `_sidebarUserTurnCountRenderOK` still renders its count. That
+                # count includes rows the agent has already compacted away (and
+                # rows removed by /undo), so it over-reports. Emit a flag saying
+                # "this session has inactive (compacted or rewound) user rows"
+                # and let the client null the DISPLAYED count for it.
+                inactive_user_rows_expr = (
+                    "MAX(CASE WHEN COALESCE(m._compressed_summary, 0) <> 0"
+                    " AND LOWER(m.role) = 'user' THEN 1 ELSE 0 END)"
+                    if '_compressed_summary' in message_cols
+                    else "0"
+                )
+                # #7681 finding 2: `display_kind` is the agent's own marker for
+                # scaffolding rows that carry role='user' but are not human
+                # input (async-delegation, hidden operational notices). The
+                # Python classifier rejects every non-empty value except
+                # 'steer'; the SQL must do the same or the two counters drift.
+                display_kind_guard = (
+                    " AND COALESCE(m.display_kind, '') IN ('', 'steer')"
+                    if 'display_kind' in message_cols
+                    else ""
+                )
                 if 'content' in message_cols:
                     content_expr = "LOWER(LTRIM(COALESCE(m.content, '')))"
                     internal_exclusions = user_turn_sql_exclusions(content_expr)
+                    # #7681 finding 2: SQLite's TRIM() strips SPACES only, so a
+                    # whitespace-only row holding a tab or a newline used to
+                    # count as a user turn. Trim the full ASCII whitespace set.
+                    content_guard = (
+                        " AND TRIM(COALESCE(m.content, ''), ' ' || char(9)"
+                        " || char(10) || char(13)) != ''"
+                    )
                     user_message_count_expr = (
                         "COUNT(CASE WHEN LOWER(m.role) = 'user'"
                         f"{marker_guard}"
-                        " AND TRIM(COALESCE(m.content, '')) != ''"
+                        f"{display_kind_guard}"
+                        f"{content_guard}"
                         f" AND NOT ({internal_exclusions})"
                         " THEN 1 END)"
                     )
@@ -1016,6 +1063,7 @@ def read_importable_agent_session_rows(
             user_message_count_expr = "NULL"
             user_message_count_estimate_expr = "s.message_count"
             user_message_count_unknown_expr = "1"
+            inactive_user_rows_expr = "0"
             last_activity_expr = "NULL"
             join_clause = ""
             group_by_clause = ""
@@ -1179,6 +1227,7 @@ def read_importable_agent_session_rows(
                    {archived_expr},
                    {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
+                   {inactive_user_rows_expr} AS has_inactive_user_rows,
                    {user_message_count_estimate_expr} AS user_message_count_estimate,
                    {user_message_count_unknown_expr} AS user_message_count_unknown,
                    {last_activity_expr} AS last_activity

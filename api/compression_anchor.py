@@ -217,6 +217,8 @@ def _is_internal_user_row(message) -> bool:
 
 _AGENT_USER_PREDICATE = None
 _AGENT_USER_PREDICATE_ATTEMPTED = False
+_AGENT_SPLIT_PREDICATE = None
+_AGENT_SPLIT_PREDICATE_ATTEMPTED = False
 
 
 def _agent_user_originated_turn(message):
@@ -255,12 +257,82 @@ def is_user_originated_turn(message) -> bool:
         return False
     display_kind = message.get("display_kind")
     if display_kind and display_kind not in ("", _USER_STEER_DISPLAY_KIND):
-        return False
+        # #7681 finding 2: 'hidden' is the one non-empty display_kind that can
+        # still wrap a live human ask (the legacy compaction wrapper). The
+        # agent's own split keeps that ask as a user turn; mirror it instead of
+        # rejecting every non-empty kind.
+        if display_kind != "hidden":
+            return False
+        if not _summary_carrier_has_live_user_ask(message):
+            return False
+        return True
     if _is_internal_user_row(message):
         return False
     if message.get("_compressed_summary"):
-        return False
+        # A summary carrier whose display_kind is empty still carries its
+        # handoff, and the agent counts a live ask embedded in it.
+        return not _summary_carrier_has_live_user_ask(message)
     return True
+
+
+def _summary_carrier_has_live_user_ask(message: dict) -> bool:
+    """True when a compaction-summary row still embeds a live human ask.
+
+    Mirrors the agent's ``_strip_context_summary_handoff_message``: a summary
+    carrier splits at the merged-prior-context delimiter (or the legacy end
+    marker), and whatever remains after the summary block is the live ask. A
+    standalone summary with nothing after it is pure scaffolding.
+
+    Without this, a merged summary carrier is invisible to the sidecar counter
+    while the agent still counts it (#7681 finding 2).
+    """
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    split = _agent_split_user_originated_turn()
+    if split is not None:
+        try:
+            return split(message)[1] is not None
+        except Exception:
+            pass
+    content = message.get("content")
+    if not isinstance(content, str):
+        return False
+    if _MERGED_SUMMARY_DELIMITER in content:
+        # Merged form: the delimiter separates the reference-only prior context
+        # from the summary block; anything after the SUMMARY is the live ask.
+        tail = content.split(_MERGED_SUMMARY_DELIMITER, 1)[1]
+        for marker in (_SUMMARY_END_MARKER,):
+            if marker in tail:
+                tail = tail.split(marker, 1)[1]
+                break
+        return bool(tail.strip())
+    if _SUMMARY_END_MARKER in content:
+        # Legacy form: the live ask follows the end marker directly.
+        tail = content.split(_SUMMARY_END_MARKER, 1)[1]
+        return bool(tail.strip())
+    return False
+
+
+# Shapes copied from agent/context_compressor.py so the mirror does not drift.
+_SUMMARY_END_MARKER = (
+    "--- END OF CONTEXT SUMMARY — respond to the message below, "
+    "not the summary above ---"
+)
+_MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+
+
+def _agent_split_user_originated_turn():
+    """The agent's splitter, or ``None`` when it is not importable."""
+    global _AGENT_SPLIT_PREDICATE, _AGENT_SPLIT_PREDICATE_ATTEMPTED
+    if not _AGENT_SPLIT_PREDICATE_ATTEMPTED:
+        _AGENT_SPLIT_PREDICATE_ATTEMPTED = True
+        try:
+            from agent.context_compressor import split_user_originated_turn
+
+            _AGENT_SPLIT_PREDICATE = split_user_originated_turn
+        except Exception:
+            _AGENT_SPLIT_PREDICATE = None
+    return _AGENT_SPLIT_PREDICATE
 
 
 def user_turn_sql_exclusions(content_expr: str) -> str:
