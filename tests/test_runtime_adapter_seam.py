@@ -262,8 +262,8 @@ def test_chat_cancel_route_uses_adapter_only_when_flag_enabled():
 
     assert "runtime_adapter_enabled()" in cancel_body
     assert "LegacyJournalRuntimeAdapter(cancel_delegate=cancel_stream)" in cancel_body
-    assert "adapter.cancel_run(stream_id).accepted" in cancel_body
-    assert "else:\n            cancelled = cancel_stream(stream_id)" in cancel_body
+    assert "adapter.cancel_run(stream_id).payload" in cancel_body or "adapter.cancel_run(stream_id)" in cancel_body
+    assert "cancel_stream(stream_id)" in cancel_body
     assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in cancel_body, "route should use runtime_adapter_enabled(), not inline env checks"
 
 

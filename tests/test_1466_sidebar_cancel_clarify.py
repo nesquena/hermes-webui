@@ -29,7 +29,9 @@ class TestSidebarCancelAction:
         # The `session.active_stream_id` / cancelSessionStream / delete checks
         # are positional further down in the function, so growing the prefix
         # required growing this read window.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 7600)
+        # Window bumped 7600 → 8400 in #6405: the structured tri-state return
+        # caller (gate-certifier blocker #2) grew the stop-action block.
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8400)
         assert "session.active_stream_id" in body, (
             "sidebar action menu must detect per-session active_stream_id instead of S.activeStreamId"
         )
@@ -42,7 +44,12 @@ class TestSidebarCancelAction:
 
     def test_cancel_session_stream_uses_session_owned_stream_id(self):
         """Cancel-from-sidebar must call /api/chat/cancel with the row's stream id."""
-        body = _function_body(BOOT_JS, "cancelSessionStream")
+        # Window bumped 1800 → 2400 in #6405: the persistence_failed branch
+        # added to cancelSessionStream() (greptile P1 streaming-state fix)
+        # grew the function past the default 1800-char read window.
+        # Window bumped 2400 → 2600 for the structured tri-state return
+        # (gate-certifier blocker #2: sidebar Stop toast override).
+        body = _function_body(BOOT_JS, "cancelSessionStream", 2600)
         assert "session&&session.active_stream_id" in body or "session && session.active_stream_id" in body
         assert "stream_id=${encodeURIComponent(streamId)}" in body
         assert "S.activeStreamId" not in body.split("const streamId", 1)[1].split("fetch", 1)[0], (
@@ -51,7 +58,9 @@ class TestSidebarCancelAction:
 
     def test_cancel_session_stream_clears_only_owned_clarify_and_approval_cards(self):
         """Cancelling A from sidebar must not blanket-clear B's clarify/approval cards."""
-        body = _function_body(BOOT_JS, "cancelSessionStream")
+        # Window bumped 1800 → 2400 in #6405 (see test above for rationale).
+        # Window bumped 2400 → 2600 for the structured tri-state return.
+        body = _function_body(BOOT_JS, "cancelSessionStream", 2600)
         assert "_clarifySessionId===sid" in body, (
             "clarify card cleanup must be gated to the cancelled session id"
         )
