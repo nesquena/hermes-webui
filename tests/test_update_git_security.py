@@ -700,3 +700,77 @@ def test_update_git_diagnostic_does_not_relay_credential_helper_stderr(
     assert secret not in output
     assert private_path not in output
     assert "origin is unreachable or authentication failed" in output
+
+
+@pytest.mark.parametrize("caller", ["updates", "workspace"])
+@pytest.mark.parametrize("cached_credentials", [False, True])
+def test_credential_manager_contract_is_noninteractive_with_trusted_helpers(
+    tmp_path, monkeypatch, caller, cached_credentials,
+):
+    """Exercise real Git/HTTP with a helper honoring GCM's documented controls.
+
+    The helper is a contract fixture, not a native Windows GCM installation.
+    Stored credentials remain usable; a cache miss must fail without interaction.
+    """
+    if os.name == "nt":
+        pytest.skip("executable credential helper setup is POSIX-only")
+
+    import json
+
+    _, origin = _make_bare_origin(tmp_path)
+    username, password = "fixture-user", "fixture-password"
+    authorization = base64.b64encode(f"{username}:{password}".encode()).decode()
+    _AuthenticatedGitHandler.expected_authorization = f"Basic {authorization}"
+    handler = functools.partial(_AuthenticatedGitHandler, directory=str(origin.parent))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        home = tmp_path / "isolated-home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
+        monkeypatch.setenv("GCM_INTERACTIVE", "always")
+        observed = tmp_path / "helper-controls.json"
+        prompt = tmp_path / "interaction-attempted"
+        helper = tmp_path / "manager-contract.py"
+        helper.write_text(
+            "import json, os, pathlib, subprocess, sys\n"
+            "sys.stdin.read()\n"
+            "if sys.argv[-1] != 'get': raise SystemExit(0)\n"
+            "config = subprocess.run(['git', 'config', '--get', 'credential.interactive'], "
+            "capture_output=True, text=True).stdout.strip()\n"
+            f"pathlib.Path({str(observed)!r}).write_text(json.dumps({{'env': "
+            "os.environ.get('GCM_INTERACTIVE'), 'config': config}))\n"
+            f"if not {cached_credentials!r}:\n"
+            "    if os.environ.get('GCM_INTERACTIVE') not in ('never', 'false') "
+            "and config not in ('false', '0', 'no', 'off'):\n"
+            f"        pathlib.Path({str(prompt)!r}).touch()\n"
+            "    raise SystemExit(0)\n"
+            f"print('username={username}\\npassword={password}\\n')\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        _git(repo, "remote", "add", "origin", f"http://127.0.0.1:{server.server_port}/origin.git")
+        _git(repo, "config", "--global", "credential.interactive", "true")
+        _git(repo, "config", "--global", "credential.helper",
+             f"!{shlex.quote(sys.executable)} {shlex.quote(str(helper))}")
+        if caller == "updates":
+            output, ok = updates._run_git(["fetch", "origin"], repo, timeout=30)
+            assert ok is cached_credentials, output
+        elif cached_credentials:
+            assert git_fetch(repo)["ok"] is True
+        else:
+            with pytest.raises(GitWorkspaceError) as exc:
+                git_fetch(repo)
+            assert exc.value.code == "auth_failed"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+    assert observed.exists(), "the 401 challenge never reached the trusted helper"
+    assert not prompt.exists(), "the helper was allowed to request interaction"
+    assert json.loads(observed.read_text()) == {"env": "never", "config": "false"}
