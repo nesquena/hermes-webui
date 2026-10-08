@@ -135,6 +135,12 @@
 
 ### Fixed
 
+- **A workspace panel you closed stays closed.** On phones, the on-screen keyboard (a viewport resize) no longer
+  reopens the workspace panel after you dismissed it. File and artifact previews are now owned by the open that started
+  them: a slow preview that finishes after you switched conversations, opened another file or closed the panel no longer
+  pops the panel back open or overwrites the newer selection, and a slow HTML preview still opens. HTML previews are also
+  downloaded once instead of twice. Thanks @sand01chi. (#6710)
+
 - **The auto-scroll setting is easier to find and understand.** Settings → Appearance's "Auto-follow new content" is
   now "Auto-scroll to new content" with clearer helper text in 15 languages, and searching Settings for "autoscroll",
   "auto-follow", "sticky" or "bottom" finds it. The setting itself and its default are unchanged. Thanks @webtecnica. (#6248)
