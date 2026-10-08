@@ -1640,6 +1640,8 @@ window.renderTranscript=function(container, messages, opts){
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
+  // Owning session captured when a silence timer arms — consumed by _voiceModeSend.
+  let _voiceSendOwner=null;
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
@@ -1647,6 +1649,11 @@ window.renderTranscript=function(container, messages, opts){
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
+  let _thinkingWatchdog=null;
+  // Deferred done->speak timer and the turn that scheduled it: every fresh
+  // 'thinking' claim bumps the seq so a stale timer can't speak over a new turn.
+  let _voiceModeResponseTimer=null;
+  let _voiceModeTurnSeq=0;
   // Configurable via localStorage keys (set from dev console or a future settings panel).
   //   hermes-voice-silence-ms, pause duration before auto-send (ms, default 1800)
   //   hermes-voice-continuous, keep mic open across natural pauses ("true"/"false", default false)
@@ -1692,8 +1699,45 @@ window.renderTranscript=function(container, messages, opts){
     },10000);
   }
 
+  function _clearThinkingWatchdog(){
+    if(_thinkingWatchdog){
+      clearInterval(_thinkingWatchdog);
+      _thinkingWatchdog=null;
+    }
+  }
+
+  // The 'thinking' pin is released by a stream terminal reaching
+  // window._voiceModeOnResponseComplete. A turn that dies with no terminal
+  // (e.g. send() failed before the SSE opened) leaves nothing to re-arm the
+  // mic, so poll for a sustained idle stretch and recover to listening.
+  function _armThinkingWatchdog(){
+    _clearThinkingWatchdog();
+    let idlePolls=0;
+    _thinkingWatchdog=setInterval(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='thinking'){ _clearThinkingWatchdog(); return; }
+      // Liveness belongs to the pinned turn's inflight run — the visible
+      // session's own stream counts as busy too, so neither an idle-switch
+      // nor a background terminal can reopen the mic over a live run.
+      const pin=_voiceModeThinkingSid;
+      idlePolls=(pin&&INFLIGHT[pin])||S.busy||S.activeStreamId?0:idlePolls+1;
+      // A restored draft in the composer must survive — resuming recognition
+      // would overwrite it; keep polling until the user retries or clears it.
+      if(idlePolls>=3&&!(ta.value&&ta.value.trim())){
+        _clearThinkingWatchdog();
+        _voiceModeThinkingSid=null;
+        _startListening();
+      }
+    },4000);
+  }
+
   function _setState(state){
     _voiceModeState=state;
+    if(state==='thinking'){
+      _voiceModeTurnSeq+=1;
+      clearTimeout(_voiceModeResponseTimer);_voiceModeResponseTimer=null;
+      _armThinkingWatchdog();
+    }
+    else _clearThinkingWatchdog();
     indicator.className='voice-mode-indicator '+state;
     label.textContent=state==='listening'?t('voice_listening')
       :state==='speaking'?t('voice_speaking')
@@ -1724,6 +1768,7 @@ window.renderTranscript=function(container, messages, opts){
     _recognition.onresult=(event)=>{
       // Reset silence timer on any result
       clearTimeout(_silenceTimer);
+      _silenceTimer=null;
       let interim='';
       let final=_finalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
@@ -1736,17 +1781,20 @@ window.renderTranscript=function(container, messages, opts){
 
       // Auto-send on silence after final result
       if(_finalText){
-        _silenceTimer=setTimeout(()=>{
-          _voiceModeSend();
-        },_voiceSilenceMs());
+        _armSilenceTimer();
       }
     };
 
     _recognition.onend=()=>{
-      clearTimeout(_silenceTimer);
-      // If we have text and haven't sent yet, send it
+      // Chromium endpointing fires onend well before the configured silence
+      // grace elapses, so an armed _silenceTimer must keep sole ownership of
+      // the auto-send — clearing it here and sending immediately cuts paused
+      // utterances short. Arm it only if none is pending (e.g. onend without
+      // a preceding final result).
       if(_finalText&&_voiceModeActive&&_voiceModeState==='listening'){
-        _voiceModeSend();
+        if(!_silenceTimer){
+          _armSilenceTimer();
+        }
       } else if(_voiceModeActive&&_voiceModeState==='listening'){
         // No speech detected — restart listening
         setTimeout(()=>{ if(_voiceModeActive) _startListening(); },500);
@@ -1755,6 +1803,7 @@ window.renderTranscript=function(container, messages, opts){
 
     _recognition.onerror=(event)=>{
       clearTimeout(_silenceTimer);
+      _silenceTimer=null;
       if(event.error==='no-speech'||event.error==='aborted'){
         // Restart if still active
         if(_voiceModeActive){
@@ -1780,8 +1829,25 @@ window.renderTranscript=function(container, messages, opts){
     }
   }
 
+  function _armSilenceTimer(){
+    // Bind the pending send to whoever armed it: _voiceModeSend bails if the
+    // session changed before the grace fired.
+    _voiceSendOwner={sid:S.session&&S.session.session_id};
+    _silenceTimer=setTimeout(()=>{_voiceModeSend();},_voiceSilenceMs());
+  }
+
   function _voiceModeSend(){
+    const owner=_voiceSendOwner;_voiceSendOwner=null;
+    clearTimeout(_silenceTimer);
+    _silenceTimer=null;
     if(!_voiceModeActive) return;
+    // A mid-grace session switch cancels the armed send outright — bailing to
+    // listening keeps this chat's composer untouched. Within the same session
+    // a changed composer is the user correcting the recognized utterance, so
+    // whatever the composer holds at the deadline is the text to send.
+    if(owner&&(S.session&&S.session.session_id)!==owner.sid){
+      _startListening(); return;
+    }
     const text=(ta.value||'').trim();
     if(!text){
       ta.value='';
@@ -2048,24 +2114,29 @@ window.renderTranscript=function(container, messages, opts){
   // We patch setComposerStatus to detect when a response completes
   const _origSetComposerStatus=(typeof setComposerStatus==='function')?setComposerStatus.bind(window):null;
 
-  window._voiceModeOnResponseComplete=function(){
-    if(_voiceModeActive&&_voiceModeState==='thinking'){
-      // Small delay to let DOM render the final message
-      setTimeout(()=>{
-        if(_voiceModeActive&&_voiceModeState==='thinking'){
-          _speakResponse();
-        }
-      },400);
+  window._voiceModeOnResponseComplete=function(details){
+    if(!_voiceModeActive||_voiceModeState!=='thinking') return;
+    // The idle funnel reports {outcome, sessionId, streamId} for the stream
+    // that settled; a no-arg call (legacy/extension callers) speaks as before.
+    // A terminal from another session's stream must not release this
+    // session's pinned owner.
+    if(details&&details.sessionId&&details.sessionId!==_voiceModeThinkingSid) return;
+    if(((details&&details.outcome)||'done')!=='done'){
+      // cancel/error/settled: the last row is a partial reply or a marker —
+      // resume listening silently, unless the composer holds a restored draft.
+      _voiceModeThinkingSid=null;
+      if(!(ta.value&&ta.value.trim())) _startListening();
+      return;
     }
+    // Delayed speak owned by this turn: a newer 'thinking' claim bumps the
+    // seq, invalidating any stale timer.
+    const seq=_voiceModeTurnSeq;
+    clearTimeout(_voiceModeResponseTimer);
+    _voiceModeResponseTimer=setTimeout(()=>{
+      _voiceModeResponseTimer=null;
+      if(_voiceModeActive&&_voiceModeState==='thinking'&&seq===_voiceModeTurnSeq) _speakResponse();
+    },400);
   };
-
-  // Observe S.busy changes to detect response completion
-  // The existing code calls setBusy(false) when response completes
-  const _origSetBusy=(typeof setBusy==='function')?setBusy.bind(window):null;
-  if(_origSetBusy){
-    // We use a MutationObserver-style approach via polling S.busy
-    // Actually, we'll use a simpler approach: hook into the message stream completion
-  }
 
   // Most reliable hook: use the existing autoReadLastAssistant call site.
   // We override autoReadLastAssistant so that if voice mode is active, we use our
@@ -2107,7 +2178,11 @@ window.renderTranscript=function(container, messages, opts){
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
     clearTimeout(_silenceTimer);
+    _silenceTimer=null;
+    _voiceSendOwner=null;
+    clearTimeout(_voiceModeResponseTimer);_voiceModeResponseTimer=null;
     _clearBrowserTtsRecovery();
+    _clearThinkingWatchdog();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
@@ -2130,7 +2205,32 @@ window.renderTranscript=function(container, messages, opts){
   // Expose for external use
   window._voiceModeActive=()=>_voiceModeActive;
   window._voiceModeDeactivate=_deactivate;
-  window._voiceModeImmediateSend=_voiceModeSend;
+  // Explicit sends bypass the pending-send owner guard.
+  window._voiceModeImmediateSend=function(){_voiceSendOwner=null;_voiceModeSend();};
+  window._voiceModeCancelPendingSend=function(){
+    clearTimeout(_silenceTimer);
+    _silenceTimer=null;
+    _voiceSendOwner=null;
+  };
+  // loadSession calls this once a cross-session switch has finished and the
+  // new session's composer state (restored draft or empty) is in place. A
+  // recognizer bound to the outgoing session is stale — Chromium fires onend
+  // early, so the one still referenced may already be dead while the
+  // indicator reads 'listening'. Detach its handlers so late callbacks can't
+  // write into this composer, then reopen the mic only when the new chat is
+  // idle with an empty composer; a restored draft or a live run stays paused.
+  window._voiceModeOnSessionLoaded=function(sid){
+    if(!_voiceModeActive||_voiceModeState!=='listening') return;
+    const sess=(typeof S!=='undefined')?S.session:null;
+    if(sid&&sess&&sess.session_id!==sid) return;
+    if(_recognition){
+      try{_recognition.onresult=null;_recognition.onend=null;_recognition.onerror=null;_recognition.abort();}catch(_){}
+      _recognition=null;
+    }
+    if(S.busy||S.activeStreamId||(typeof INFLIGHT!=='undefined'&&INFLIGHT[sid])) return;
+    if(ta.value&&ta.value.trim()) return;
+    _startListening();
+  };
 })();
 function _currentSessionIsReusableEmptyChat(){
   if(!S.session) return false;

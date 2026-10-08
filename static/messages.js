@@ -2395,11 +2395,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       content:'**Connection interrupted:** The browser lost the live SSE connection before the response finished. If the worker completed, reopening this session should restore the settled transcript.',
     });
   }
+  // Terminal paths set this before calling _setActivePaneIdleIfOwner so the
+  // voice hook learns whether the last assistant row is speakable ('done'
+  // only). The no-arg call shape is pinned by upstream tests.
+  let _terminalOutcome='settled';
   function _setActivePaneIdleIfOwner(){
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
+      // #5867: every stream terminal funnels here — release voice mode's
+      // 'thinking' pin with _terminalOutcome (only 'done' may speak the last
+      // row; the rest resume silently) and this stream's ids so a background
+      // terminal can't release a different session's owner.
+      if(typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({outcome:_terminalOutcome||'settled',sessionId:activeSid,streamId:streamId});
     }
   }
   function persistInflightState(){
@@ -2506,7 +2515,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderMessages({preserveScroll:true});
     }
     renderSessionList();
-    _setActivePaneIdleIfOwner();
+    _terminalOutcome='error';_setActivePaneIdleIfOwner();
     _closeSource(source);
   }
   async function _runStreamEndRecovery(source){
@@ -6554,7 +6563,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
-        _setActivePaneIdleIfOwner();
+        _terminalOutcome='done';_setActivePaneIdleIfOwner();
         _dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId,{
           status:d.status||'completed',
           endedAt:Date.now()/1000,
@@ -6844,7 +6853,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
         trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
-      _setActivePaneIdleIfOwner();
+      _terminalOutcome='error';_setActivePaneIdleIfOwner();
       renderSessionList(); // clear streaming indicator immediately on apperror
       _dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId,{
         status:d.status||d.type||(_extensionErrorType==='turn:cancel'?'cancelled':'error'),
@@ -7057,7 +7066,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // the fallback "Task cancelled" marker (#4076).
       const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;
       renderSessionList();
-      _setActivePaneIdleIfOwner();
+      _terminalOutcome='cancel';_setActivePaneIdleIfOwner();
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
@@ -7285,7 +7294,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
-      _setActivePaneIdleIfOwner();
+      // Restored with no terminal event seen — could be a completed turn or
+      // a cancelled one; 'settled' resumes listening without speech either way.
+      _terminalOutcome='settled';_setActivePaneIdleIfOwner();
       return returnStatus?'restored':true;
     }catch(_){
       return returnStatus?'error':false;
@@ -7359,7 +7370,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
       }
     }
-    _setActivePaneIdleIfOwner();
+    _terminalOutcome='error';_setActivePaneIdleIfOwner();
     _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
       status:'connection_lost',
       endedAt:Date.now()/1000,
@@ -7394,7 +7405,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             clearLiveToolCards();
             removeThinking();
             if(_isActiveSession()) _queueDrainSid=activeSid;
-            _setActivePaneIdleIfOwner();
+            _terminalOutcome='error';_setActivePaneIdleIfOwner();
             renderMessages({preserveScroll:true});
             if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
             renderSessionList();
