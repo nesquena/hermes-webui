@@ -383,16 +383,16 @@ globalThis._newSessionInFlight = params.newSessionInFlightReject
       ? Promise.resolve(params.newSessionInFlight)
       : null);
 
-// The + button forwards the project's pinned bindings (workspace/model/
-// effort) alongside project_id. A bare {project_id} project yields no
-// bindings, matching the pre-bindings behavior.
+// The + button forwards the project's pinned bindings (workspace/model)
+// alongside project_id. A bare {project_id} project yields no bindings,
+// matching the pre-bindings behavior. reasoning_effort is deliberately NOT
+// forwarded (UX re-gate 2026-10-08T23:39:33Z, item A).
 globalThis._projectBindingsForNewSession = (project) => {
   const o = {};
   if (project) {
     if (project.workspace) o.workspace = project.workspace;
     if (project.model) o.model = project.model;
     if (project.model_provider) o.model_provider = project.model_provider;
-    if (project.reasoning_effort) o.reasoning_effort = project.reasoning_effort;
   }
   return o;
 };

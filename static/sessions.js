@@ -2008,7 +2008,7 @@ async function newSession(flash, options={}){
     _oldestIdx=0;
     clearLiveToolCards();
     // Chat-header/rail "+" (btnNewChat) with an active project filter applies
-    // that project's bindings (default workspace / model / effort) exactly
+    // that project's bindings (default workspace / model) exactly
     // like the project-chip quick-create (+): selecting a project then
     // pressing the top-level New Chat button must open the session in the
     // project's pinned workspace. Only merge when the caller did NOT pass an
@@ -2031,7 +2031,6 @@ async function newSession(flash, options={}){
         if(_pb.workspace&&!Object.prototype.hasOwnProperty.call(_merged,'workspace')) _merged.workspace=_pb.workspace;
         if(_pb.model&&!Object.prototype.hasOwnProperty.call(_merged,'model')) _merged.model=_pb.model;
         if(_pb.model_provider&&!Object.prototype.hasOwnProperty.call(_merged,'model_provider')) _merged.model_provider=_pb.model_provider;
-        if(_pb.reasoning_effort&&!Object.prototype.hasOwnProperty.call(_merged,'reasoning_effort')) _merged.reasoning_effort=_pb.reasoning_effort;
         options=_merged;
       }
     }
@@ -2164,6 +2163,13 @@ async function newSession(flash, options={}){
     // /api/reasoning), not a session-local override. Nathan to decide if
     // project/session-local scoping is desired — current contract matches
     // the existing global reasoning_effort model.
+    //
+    // DORMANT since the UX re-gate 2026-10-08T23:39:33Z (item A): no caller
+    // forwards reasoning_effort any more — _projectBindingsForNewSession no
+    // longer does — because the per-project dialog cannot show or clear the
+    // stored value, so applying it read as a silent profile-wide change. The
+    // branch stays for per-session effort (#7881), which will re-supply the
+    // option.
     const boundEffort=(options&&options.reasoning_effort)||null;
     if(boundEffort&&typeof api==='function'){
       const effModel=boundModel||(data.session&&data.session.model)||null;
@@ -8716,9 +8722,17 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
 
 function _projectBindingsForNewSession(project){
   // Assemble the newSession options that carry a project's pinned context:
-  // default workspace / model / model_provider / reasoning_effort. Only
-  // fields that are actually bound are forwarded — an unbound project
-  // creates sessions with the usual defaults.
+  // default workspace / model / model_provider. Only fields that are actually
+  // bound are forwarded — an unbound project creates sessions with the usual
+  // defaults.
+  //
+  // reasoning_effort is deliberately NOT forwarded (UX re-gate
+  // 2026-10-08T23:39:33Z, item A). The dialog can no longer show or clear a
+  // stored effort, yet forwarding it made the project's + (new chat) silently
+  // change the PROFILE-wide effort for that model family (POST /api/reasoning)
+  // while the chip read "Default". The binding itself is still stored by
+  // /api/projects/bind; it comes back into play with per-session effort
+  // (#7881).
   const o={};
   if(project){
     // Profile boundary: never forward a project's bindings across a profile
@@ -8739,7 +8753,6 @@ function _projectBindingsForNewSession(project){
     if(ws) o.workspace=ws;
     if(project.model) o.model=project.model;
     if(project.model_provider) o.model_provider=project.model_provider;
-    if(project.reasoning_effort) o.reasoning_effort=project.reasoning_effort;
   }
   return o;
 }
@@ -10858,6 +10871,17 @@ function _bindingModelKeyFor(proj, modelOptions, opts){
   return savedKey;
 }
 
+function _wsPathPlaceholderFor(path){
+  // UX re-gate 2026-10-08T23:39:33Z (item B): the "Type a path…" prompt used to
+  // hard-code the Windows drive in `D:\projects\…` on every host. Derive the
+  // hint from a path the dialog already shows so it matches the local path
+  // style (a POSIX host gets `/home/…`, Windows `D:\projects\…`), and fall back
+  // to the localized instruction when there is no path to learn from.
+  const s=String(path||'').trim();
+  const cut=Math.max(s.lastIndexOf('/'),s.lastIndexOf('\\'));
+  return cut>=0 ? s.slice(0,cut+1)+'…' : t('pb_enter_ws_path');
+}
+
 function _showProjectBindingsDialog(proj){
   // The dialog is built on the app's shared dialog classes (.app-dialog*) so
   // the registered skins (light mode / geist-contrast / zeus) restyle it, the
@@ -11015,7 +11039,10 @@ function _showProjectBindingsDialog(proj){
         title:t('pb_add_workspace_title'),
         message:t('pb_add_workspace_message'),
         value:'',
-        placeholder:'D:\\projects\\…',
+        placeholder:_wsPathPlaceholderFor(
+          (wsList[0]&&wsList[0].value)
+          ||(typeof S!=='undefined'&&S.session&&S.session.workspace)
+          ||(typeof S!=='undefined'&&S._profileDefaultWorkspace)),
         confirmLabel:t('pb_add'),
       }).then(inp=>{
         if(inp===null||inp===undefined) return;

@@ -2266,6 +2266,14 @@
   .project-bindings-ws-row .ws-row-default.is-default{border-color:var(--accent);}
   .project-bindings-ws-row .ws-row-remove{flex:0 0 auto;width:22px;height:22px;border:1px solid var(--border2);border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;font-size:12px;line-height:1;display:inline-flex;align-items:center;justify-content:center;}
   .project-bindings-ws-row .ws-row-remove:hover{color:var(--error,#e94560);border-color:var(--error,#e94560);}
+  /* Touch targets on the phone dialog (UX re-gate 2026-10-08T23:39:33Z, item C):
+     the per-row remove button and the default pill render ~22px, below the 32px
+     minimum for a finger. Slightly wider pill padding keeps the label legible
+     once the row is tall enough to tap. */
+  @media (max-width:640px){
+    .project-bindings-ws-row .ws-row-remove{width:32px;height:32px;}
+    .project-bindings-ws-row .ws-row-default{min-height:32px;display:inline-flex;align-items:center;justify-content:center;padding:2px 12px;}
+  }
   .project-bindings-ws-add{display:flex;gap:6px;align-items:center;}
   .project-bindings-ws-add .project-bindings-combo{flex:1;margin-bottom:0;}
   .project-bindings-ws-add .ws-add-btn{flex:0 0 auto;padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);cursor:pointer;font-size:12px;}
