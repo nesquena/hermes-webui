@@ -175,3 +175,94 @@ def test_real_wildcard_check_catches_interface_only_listener() -> None:
         assert "already in use" in str(excinfo.value)
     finally:
         sock.close()
+
+
+# ---------- review follow-up (#8112): an occupied port may be our own WebUI --
+
+
+def _raise_in_use(*_args: object, **_kwargs: object) -> None:
+    raise RuntimeError("Port 8787 on 127.0.0.1 is already in use by another service.")
+
+
+def _stub_main_up_to_preflight(monkeypatch: pytest.MonkeyPatch, argv: list) -> None:
+    """Stub what main() touches before the preflight; pin argv and supervisor env."""
+    monkeypatch.setattr(bootstrap, "ensure_supported_platform", lambda: None)
+    monkeypatch.setattr(bootstrap, "open_browser", lambda url: None)
+    monkeypatch.setattr(sys, "argv", ["bootstrap.py"] + argv)
+    for name in (
+        "INVOCATION_ID",
+        "JOURNAL_STREAM",
+        "NOTIFY_SOCKET",
+        "XPC_SERVICE_NAME",
+        "SUPERVISOR_ENABLED",
+        "HERMES_WEBUI_FOREGROUND",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize("host", ["", "0.0.0.0", "::", "[::]"])
+def test_already_serving_scheme_probes_localhost_for_wildcard(
+    monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    seen: list = []
+
+    def fake_wait(url: str, timeout: float = 0.0) -> str:
+        seen.append((url, timeout))
+        return "http"
+
+    monkeypatch.setattr(bootstrap, "wait_for_health", fake_wait)
+    assert bootstrap._already_serving_scheme(host, 8787) == "http"
+    assert seen == [("http://localhost:8787/health", 1.0)]
+
+
+def test_already_serving_scheme_empty_when_nothing_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bootstrap, "wait_for_health", lambda url, timeout=0.0: "")
+    assert bootstrap._already_serving_scheme("127.0.0.1", 8787) == ""
+
+
+def test_occupied_port_with_healthy_webui_reports_ready(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    _stub_main_up_to_preflight(monkeypatch, ["--no-browser"])
+    monkeypatch.setattr(bootstrap, "_check_port_available", _raise_in_use)
+    monkeypatch.setattr(bootstrap, "_already_serving_scheme", lambda host, port: "http")
+
+    assert bootstrap.main() == 0
+    assert "already running" in capsys.readouterr().out
+
+
+def test_occupied_port_with_healthy_webui_opens_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_main_up_to_preflight(monkeypatch, [])
+    monkeypatch.setattr(bootstrap, "_check_port_available", _raise_in_use)
+    monkeypatch.setattr(bootstrap, "_already_serving_scheme", lambda host, port: "http")
+    opened: list = []
+    monkeypatch.setattr(bootstrap, "open_browser", opened.append)
+
+    assert bootstrap.main() == 0
+    assert opened == ["http://localhost:" + str(bootstrap.DEFAULT_PORT)]
+
+
+def test_occupied_port_by_foreign_listener_still_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_main_up_to_preflight(monkeypatch, ["--no-browser"])
+    monkeypatch.setattr(bootstrap, "_check_port_available", _raise_in_use)
+    monkeypatch.setattr(bootstrap, "_already_serving_scheme", lambda host, port: "")
+
+    with pytest.raises(RuntimeError, match="already in use"):
+        bootstrap.main()
+
+
+def test_occupied_port_in_foreground_keeps_duplicate_start_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_main_up_to_preflight(monkeypatch, ["--foreground"])
+    monkeypatch.setattr(bootstrap, "_check_port_available", _raise_in_use)
+    monkeypatch.setattr(bootstrap, "_already_serving_scheme", lambda host, port: "http")
+
+    with pytest.raises(RuntimeError, match="already in use"):
+        bootstrap.main()

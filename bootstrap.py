@@ -655,13 +655,46 @@ def _check_port_available(host: str, port: int) -> None:
         sock.close()
 
 
+def _already_serving_scheme(host: str, port: int) -> str:
+    """Scheme of a healthy Hermes WebUI already answering on host:port, else "".
+
+    Bounded, TLS-aware probe (``wait_for_health``, one second) of the port the
+    bind preflight just found occupied. The listener there may be OUR OWN
+    healthy WebUI: re-running bootstrap, or ``start.sh`` falling through to
+    bootstrap when neither curl nor wget is installed. Advising a second
+    instance on the same state dir in that case is wrong. Wildcard binds are
+    probed on localhost, where a server bound to 0.0.0.0 answers.
+    """
+    probe_host = "localhost" if host in ("", "0.0.0.0", "::", "[::]") else host
+    return wait_for_health(f"http://{probe_host}:{port}/health", timeout=1.0)
+
+
 def main() -> int:
     args = parse_args()
     ensure_supported_platform()
 
     # Preflight: fail fast on an occupied port before installing the agent,
     # setting up dependencies, creating state, or launching the server.
-    _check_port_available(args.host, args.port)
+    try:
+        _check_port_available(args.host, args.port)
+    except RuntimeError:
+        # 10.10 (review #8112, fix 1): an occupied port is not automatically a
+        # foreign service. If a healthy WebUI already answers there, take the
+        # already-running path - report it ready and leave it untouched. A
+        # foreground/supervisor launch would be a second server on the same
+        # port, so it keeps the duplicate-start error.
+        _scheme = _already_serving_scheme(args.host, args.port)
+        if not _scheme or args.foreground or _detect_supervisor():
+            raise
+        _url = (
+            f"{_scheme}://localhost:{args.port}"
+            if args.host in ("127.0.0.1", "localhost")
+            else f"{_scheme}://{args.host}:{args.port}"
+        )
+        info(f"Web UI is already running: {_url}")
+        if not args.no_browser:
+            open_browser(_url)
+        return 0
 
     agent_dir = discover_agent_dir()
     if not agent_dir and not hermes_command_exists():

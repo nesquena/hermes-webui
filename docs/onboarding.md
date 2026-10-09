@@ -86,6 +86,11 @@ Nothing is reconfigured for you: the running service is untouched and `.env`
 is not rewritten. Re-run with the suggested port as the argument
 (`./start.sh 8789`) or put `HERMES_WEBUI_PORT=8789` in `.env`.
 
+A port held by a healthy WebUI is not a conflict: re-running bootstrap (or
+`start.sh` falling back to it without curl/wget) reports the already-running
+instance ready and exits 0. Only a foreground/supervisor launch, which
+would be a second server on the same port, reports the duplicate start.
+
 ## What the wizard checks
 
 The first screen reports the runtime state WebUI can see:
