@@ -1523,6 +1523,25 @@ function settled() { return new Promise(function (r) { setImmediate(r); }); }
   await settled();
   assert(_tabVisibilitySnapshotStale() === false, 'a failed reconciliation releases the guard');
   assert(resyncs === 2, 'a failed reconciliation must still replay the tray rail sync');
+
+  // A SUPERSEDED reconciliation (a newer switch bumped the generation) never
+  // rewrote the mirror, so its release must NOT replay the rail sync — it can
+  // be the last release to see a zero counter while the newer switch is still
+  // awaiting its POST, and re-deriving from the stale mirror would reimpose the
+  // previous profile's hidden_tabs (greptile P1, 2026-10-08T23:51:52Z).
+  var supersededGen = _profileSwitchGeneration;
+  _profileSwitchGeneration++;              // the newer switch
+  applied = [];
+  _refreshProfileSwitchBackground(supersededGen);
+  assert(_tabVisibilitySnapshotStale() === true,
+    'a superseded reconciliation still arms the guard');
+  fulfill({hidden_tabs: ['notes'], tab_order: ['chat']});
+  await settled();
+  assert(_tabVisibilitySnapshotStale() === false,
+    'a superseded reconciliation still releases the guard');
+  assert(applied.length === 0,
+    'a superseded reconciliation must not apply its stale snapshot');
+  assert(resyncs === 2, 'a superseded reconciliation must not replay the tray rail sync');
   console.log('ok');
 })().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
 """
@@ -1560,6 +1579,10 @@ def test_profile_switch_reconciliation_marks_the_tab_mirror_stale(tmp_path):
     zero_check_at = block.rfind("_tabVisReconcilePending <= 0", release_at, resync_at)
     assert zero_check_at != -1, (
         "the rail sync must be gated on the counter reaching zero"
+    )
+    assert "gen === _profileSwitchGeneration && _tabVisReconcilePending <= 0" in block, (
+        "only the CURRENT reconciliation's release may replay the tray rail sync "
+        "(a superseded one never rewrote the mirror: greptile P1, 2026-10-08T23:51:52Z)"
     )
     script = (
         _RECONCILE_GUARD_PROBE.replace("__COUNTER__", counter)

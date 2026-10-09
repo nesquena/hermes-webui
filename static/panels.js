@@ -6769,10 +6769,17 @@ function _refreshProfileSwitchBackground(gen){
     // release path cleared the guard by skipping _syncChatTodosRailVisibility
     // while the mirror still held the PREVIOUS profile's snapshot, but nothing
     // re-ran it afterwards: disabling the tray during a failed reconciliation
-    // left the Todos entry hidden although the guard was already clear. The
-    // reconciliation above applies the profile's own snapshot; this resyncs
-    // the tray-owned hide on top of it (idempotent when the tray is on).
-    if(_tabVisReconcilePending <= 0 && typeof _syncChatTodosRailVisibility === 'function'){
+    // left the Todos entry hidden although the guard was already clear.
+    //
+    // Only the CURRENT reconciliation may replay. A SUPERSEDED one (a newer
+    // switch bumped the generation) never rewrote the mirror — it early-returns
+    // above — so re-deriving from it would reimpose the previous profile's
+    // hidden_tabs on the profile now in effect, and it can be the last release
+    // to see a zero counter while the newer switch is still awaiting its POST
+    // (greptile P1, 2026-10-08T23:51:52Z). A failed-but-current reconciliation
+    // still replays: that is the case the reviewer reproduced over Chromium.
+    if(gen === _profileSwitchGeneration && _tabVisReconcilePending <= 0
+       && typeof _syncChatTodosRailVisibility === 'function'){
       _syncChatTodosRailVisibility();
     }
   });
