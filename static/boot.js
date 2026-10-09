@@ -1127,6 +1127,8 @@ function _composerProducerOwnerState(producerHandle){
 
   async function _sendRawAudio(blob,producerHandle=_micComposerProducerToken){
     if(!_micProducerIsCurrent(producerHandle))return;
+    const ownerState=_composerProducerOwnerState(producerHandle);
+    if(!ownerState)return;
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
     if(typeof _composerAddFiles==='function')_composerAddFiles([file],null,producerHandle);
@@ -1139,8 +1141,8 @@ function _composerProducerOwnerState(producerHandle){
     // user can keep composing.
     if(window._micPendingSend){
       window._micPendingSend=false;
-      send();
-    }else if(!ta.value.trim()){
+      if(ownerState.visible)send();
+    }else if(ownerState.visible&&!String(ownerState.text||'').trim()){
       send();
     }else{
       showToast(t('voice_raw_attached'));
@@ -1447,9 +1449,12 @@ function _composerProducerOwnerState(producerHandle){
       _micRestartCount=0;
       void _releaseMicWakeLock();
       _setRecording(false);
-      if(window._micPendingSend){
+      if(_micProducerIsCurrent(lifecycleProducerHandle)&&window._micPendingSend){
         window._micPendingSend=false;
-        send();
+        const settledOwner=typeof _composerProducerOwnerState==='function'
+          ? _composerProducerOwnerState(lifecycleProducerHandle)
+          : {visible:true};
+        if(settledOwner&&settledOwner.visible)send();
       }
       _applyDeferredServerSttFlip();
       if(settleCapture)settleCapture();
@@ -2279,7 +2284,7 @@ window.renderTranscript=function(container, messages, opts){
     };
     if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
       // Let the handoff settle first: its drained transcript is what send() captures.
-      Promise.resolve(_newSessionInFlight).catch(()=>{}).then(result=>{
+      Promise.resolve(_newSessionInFlight).then(result=>{
         if(!_voiceModeActive)return;
         if(typeof _newSessionResultWasSuperseded==='function'
           &&_newSessionResultWasSuperseded(result)){
@@ -2288,6 +2293,8 @@ window.renderTranscript=function(container, messages, opts){
           return;
         }
         commitSend();
+      },()=>{
+        if(_voiceModeActive)retireStaleSend();
       });
       return;
     }

@@ -4144,6 +4144,49 @@ def test_late_server_transcription_updates_source_owner_not_visible_destination(
     assert result["saves"][-1]["text"] == "original draft spoken addition"
 
 
+def test_late_raw_audio_attaches_to_owner_without_sending_visible_draft():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("async function _sendRawAudio(")
+    end = BOOT_JS.index("\n\n  function _commitTranscript", start)
+    send_raw = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const handle={{producerToken:'mic:source'}};
+        let _micComposerProducerToken=handle;
+        let _composerOwnershipTransition=null;
+        const ta={{value:'destination private draft'}};
+        const S={{pendingFiles:[]}};
+        const window={{_micPendingSend:true}};
+        let sends=0,attachments=0,toasts=0;
+        class File{{constructor(_parts,name,options){{this.name=name;this.type=options.type;}}}}
+        function _micProducerIsCurrent(value){{return value===handle;}}
+        function _composerProducerOwnerState(){{
+          return {{sid:'source',profile:'default',text:'source draft',visible:false}};
+        }}
+        function _composerAddFiles(_files,_sid,value){{if(value===handle)attachments++;}}
+        function renderTray(){{}}
+        function send(){{sends++;}}
+        function showToast(){{toasts++;}}
+        function t(value){{return value;}}
+        {send_raw}
+        _sendRawAudio({{type:'audio/webm'}},handle).then(()=>{{
+          process.stdout.write(JSON.stringify({{
+            sends,attachments,toasts,pendingSend:window._micPendingSend,
+            visible:ta.value,
+          }}));
+        }});
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "sends": 0, "attachments": 1, "toasts": 0,
+        "pendingSend": False, "visible": "destination private draft",
+    }
+
+
 def test_late_voice_mode_completion_retires_before_reading_destination_draft():
     node = shutil.which("node")
     if not node:
@@ -4186,6 +4229,49 @@ def test_late_voice_mode_completion_retires_before_reading_destination_draft():
     }
 
 
+def test_voice_mode_retires_pending_send_when_new_session_rejects():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("function _voiceModeSend(){")
+    end = BOOT_JS.index("\n\n  function _speakResponse", start)
+    voice_send = BOOT_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const handle={{producerToken:'voice:source',generation:1,ownerRole:'destination'}};
+        let _voiceComposerProducerToken=handle;
+        let _voiceModeActive=true;
+        let _voiceModeState='listening';
+        let _voiceModeThinkingSid=null;
+        let _recognition={{abort(){{}}}};
+        let rejectCreation;
+        let _newSessionInFlight=new Promise((_resolve,reject)=>{{rejectCreation=reject;}});
+        const S={{session:{{session_id:'source'}}}};
+        let sends=0,restarts=0;
+        function send(){{sends++;}}
+        function _startListening(){{restarts++;_voiceModeState='listening';}}
+        function _setState(value){{_voiceModeState=value;}}
+        function _composerPendingText(){{return 'spoken prompt';}}
+        function _newSessionResultWasSuperseded(){{return false;}}
+        function _composerSetText(){{}}
+        function _composerProducerOwnerState(){{
+          return {{sid:null,profile:'default',text:'spoken prompt',visible:false}};
+        }}
+        {voice_send}
+        _voiceModeSend();
+        rejectCreation(new Error('create failed'));
+        setTimeout(()=>process.stdout.write(JSON.stringify({{
+          sends,restarts,state:_voiceModeState,thinking:_voiceModeThinkingSid,
+        }})),0);
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "sends": 0, "restarts": 1, "state": "listening", "thinking": None,
+    }
+
+
 def test_failed_new_session_resumes_queue_after_clearing_inflight_guard():
     new_session = _new_session_function()
     clear = new_session.index("_newSessionInFlight=null")
@@ -4196,6 +4282,37 @@ def test_failed_new_session_resumes_queue_after_clearing_inflight_guard():
     assert "focusRestoredComposerAfterAbort" in boundary
     assert "_composerOwnerIsVisible" in boundary
     assert "!S.busy" in boundary
+
+
+def test_queue_drain_does_not_replace_a_restored_unsent_composer():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = UI_JS.index("function setBusy(v){")
+    end = UI_JS.index("\n\n// ── Queue chip display", start)
+    set_busy = UI_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'restored source draft'}};
+        const S={{busy:true,session:{{session_id:'source'}},pendingFiles:[]}};
+        let _queueDrainSid='source';
+        let shifts=0;
+        function $(id){{return id==='msg'?msg:null;}}
+        function updateSendBtn(){{}}
+        function setStatus(){{}}
+        function setComposerStatus(){{}}
+        function updateQueueBadge(){{}}
+        function shiftQueuedSessionMessage(){{shifts++;return {{text:'queued turn'}};}}
+        {set_busy}
+        setBusy(false);
+        process.stdout.write(JSON.stringify({{shifts,text:msg.value,drainSid:_queueDrainSid}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "shifts": 0, "text": "restored source draft", "drainSid": None,
+    }
 
 
 def test_profile_switch_settlement_timeout_aborts_with_visible_error():
@@ -4318,7 +4435,7 @@ def test_dictation_end_without_final_text_keeps_the_owner_snapshot():
         let _speechStopRequested=true;
         let _isRecording=true;
         let _activeCaptureMode='speech';
-        const window={{_micActive:true,_micPendingSend:false}};
+        const window={{_micActive:true,_micPendingSend:true}};
         const ta={{value:'destination private draft'}};
         const calls=[];
         let resizes=0,recordingStops=0,ownerResolved=true;
@@ -4330,8 +4447,10 @@ def test_dictation_end_without_final_text_keeps_the_owner_snapshot():
         function _micToastKeyForRecognitionError(){{return null;}}
         function showToast(){{}}
         function t(value){{return value;}}
-        function send(){{}}
+        let sends=0;
+        function send(){{sends++;}}
         function autoResize(){{resizes++;}}
+        function _micProducerIsCurrent(){{return true;}}
         function _composerProducerOwnerState(){{
           return ownerResolved
             ? {{sid:'source',profile:'default',text:'original draft',visible:false}}
@@ -4355,7 +4474,7 @@ def test_dictation_end_without_final_text_keeps_the_owner_snapshot():
         recognition.onstart();
         recognition.onend();
         process.stdout.write(JSON.stringify({{
-          resolvedCalls,droppedCalls:calls,visible:ta.value,resizes,recordingStops,
+          resolvedCalls,droppedCalls:calls,visible:ta.value,resizes,recordingStops,sends,
         }}));
         """
     )
@@ -4375,3 +4494,4 @@ def test_dictation_end_without_final_text_keeps_the_owner_snapshot():
     assert result["recordingStops"] == 2
     assert result["visible"] == "destination private draft"
     assert result["resizes"] == 1
+    assert result["sends"] == 0

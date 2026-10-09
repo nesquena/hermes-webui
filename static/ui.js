@@ -9823,7 +9823,16 @@ function setBusy(v){
     updateQueueBadge(sid);
     // Drain one queued message for the finished session after UI settles
     const _isViewedSid=!S.session||sid===S.session.session_id;
-    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
+    // Never replace an unsent composer with an automatic queue drain. This is
+    // especially important after a failed New Chat restores its source draft:
+    // the queued turn remains a chip and drains after the recovered draft has
+    // been sent, instead of overwriting and then clearing that draft.
+    const _composerHasUnsentContent=_isViewedSid&&(
+      String(($('msg')&&$('msg').value)||'').trim()
+      ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length)
+    );
+    const next=sid&&_isViewedSid&&!_composerHasUnsentContent
+      ?shiftQueuedSessionMessage(sid):null;
     if(next){
       updateQueueBadge(sid);
       setTimeout(()=>{

@@ -175,6 +175,8 @@ def test_send_raw_audio_honors_explicit_pending_send():
     end = _BOOT_JS.index("function _commitTranscript", idx)
     body = _BOOT_JS[idx:end]
     assert "window._micPendingSend" in body and "send()" in body
+    assert "if(ownerState.visible)send()" in body
+    assert "ownerState.visible&&!String(ownerState.text||'').trim()" in body
 
 
 def test_commit_transcript_appends_to_live_text_not_stale_snapshot():
