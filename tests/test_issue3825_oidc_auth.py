@@ -301,6 +301,9 @@ def test_login_route_composes_auth_modes(
     )
     monkeypatch.setattr("api.auth_oidc.is_oidc_enabled", lambda: oidc_enabled)
     monkeypatch.setattr(
+        "api.auth.are_passkeys_enabled", lambda: expected == "passkey"
+    )
+    monkeypatch.setattr(
         routes,
         "t",
         lambda _handler, body, *, content_type=None, **_kwargs: captured.update(
