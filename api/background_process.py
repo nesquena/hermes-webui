@@ -42,16 +42,32 @@ this module routes them to the same listener so the frontend's single
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Optional
+
+from api.process_event_utils import (
+    ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    claim_async_delegation_delivery,
+    complete_async_delegation_delivery,
+    completion_delivery_id,
+    release_async_delegation_delivery,
+    requeue_async_delegation_event,
+    restore_durable_process_completions,
+    schedule_async_delegation_claim_retry,
+)
 
 logger = logging.getLogger(__name__)
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
 _DRAIN_STOP = threading.Event()
+_PROCESS_RECOVERY_DONE = False
+_PROCESS_CHECKPOINT_RECOVERED = False
+_PROCESS_RECOVERY_LOCK = threading.Lock()
 
 _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
@@ -258,6 +274,77 @@ def subscribe_to_session_channel(
         return ch, q
 
 
+# Bounded window a cancelling worker may stay lifecycle-busy before an entry
+# with no live SSE channel is treated as an orphan. Matches the unwind ceiling
+# used by the chat-start successor guard in ``api.routes``.
+_ACTIVE_RUN_CANCEL_UNWIND_SECONDS = 180.0
+
+
+def _active_run_ids_for_session(
+    session_id: str,
+    *,
+    attachable_only: bool,
+) -> list[str]:
+    """Return this session's run stream ids under the requested semantics.
+
+    ``attachable_only`` selects browser-recovery semantics and drops every
+    ``phase="cancelling"`` row: cancellation is already terminal for the client
+    even while the worker unwinds. Busy checks pass ``False`` so a freshly
+    cancelled run still blocks a successor for its bounded unwind window.
+
+    A cancelling row past that window with no live ``STREAMS`` channel is an
+    orphan: it is dropped from ``ACTIVE_RUNS`` and its stream-owner entry is
+    released, so a wedged worker cannot suppress background wakeups forever.
+    """
+    from api import config as _cfg
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    try:
+        with _cfg.STREAMS_LOCK:
+            live_stream_ids = set((_cfg.STREAMS or {}).keys())
+        now = time.time()
+        matches: list[str] = []
+        stale_keys: list[str] = []
+        with _cfg.ACTIVE_RUNS_LOCK:
+            for run_key, meta in list((_cfg.ACTIVE_RUNS or {}).items()):
+                if not isinstance(meta, dict) or meta.get("session_id") != sid:
+                    continue
+                stream_id = str(meta.get("stream_id") or run_key or "").strip()
+                if not stream_id:
+                    continue
+                cancelling = not _cfg.active_run_is_attachable(meta)
+                stale_cancel = (
+                    cancelling
+                    and _cfg.active_run_cancel_is_stale(
+                        meta,
+                        grace_seconds=_ACTIVE_RUN_CANCEL_UNWIND_SECONDS,
+                        now=now,
+                    )
+                    and run_key not in live_stream_ids
+                    and stream_id not in live_stream_ids
+                )
+                if stale_cancel:
+                    stale_keys.append(run_key)
+                    continue
+                if attachable_only and cancelling:
+                    continue
+                matches.append(stream_id)
+            for run_key in stale_keys:
+                (_cfg.ACTIVE_RUNS or {}).pop(run_key, None)
+        for run_key in stale_keys:
+            _cfg.unregister_stream_owner(run_key)
+        return matches
+    except Exception:
+        logger.debug(
+            "ACTIVE_RUNS lookup failed for %s",
+            sid,
+            exc_info=True,
+        )
+        return []
+
+
 def active_stream_id_for_session(session_id: str) -> Optional[str]:
     """Return the stream_id of the live run for *session_id*, or None.
 
@@ -275,25 +362,21 @@ def active_stream_id_for_session(session_id: str) -> Optional[str]:
 
     Keys on ACTIVE_RUNS (worker-lifecycle registry) — the same source
     ``_session_has_active_turn`` / ``_emit_to_session_streams`` already trust
-    to map a stream back to its owning session. Returns the first matching
-    stream_id (a session has at most one live run; cancel/reconnect can
-    briefly hold two — either is a valid attach target, the frontend dedupes
-    by stream_id).
+    to map a stream back to its owning session — but returns only rows that
+    are still ATTACHABLE. A ``phase="cancelling"`` row stays lifecycle-busy
+    while its worker unwinds, yet the client already reached a terminal state
+    for that run, so replaying ``server_turn_started`` for it makes the tab
+    attach, receive the terminal event, resubscribe, and loop forever.
     """
-    from api import config as _cfg
+    matches = _active_run_ids_for_session(session_id, attachable_only=True)
+    return matches[0] if matches else None
 
-    try:
-        with _cfg.ACTIVE_RUNS_LOCK:
-            for _stream_id, meta in (_cfg.ACTIVE_RUNS or {}).items():
-                if isinstance(meta, dict) and meta.get("session_id") == session_id:
-                    return str(_stream_id)
-    except Exception:
-        logger.debug(
-            "active_stream_id_for_session lookup failed for %s",
-            session_id,
-            exc_info=True,
-        )
-    return None
+
+# Bounded per-file-version memo for persisted_message_count_for_session().
+_PERSISTED_COUNT_MEMO: "OrderedDict[tuple, Optional[int]]" = OrderedDict()
+_PERSISTED_COUNT_MEMO_LOCK = threading.Lock()
+_PERSISTED_COUNT_MEMO_MAX = 512
+_PERSISTED_COUNT_MEMO_MIN_AGE_S = 2.0
 
 
 def persisted_message_count_for_session(session_id: str) -> Optional[int]:
@@ -311,23 +394,62 @@ def persisted_message_count_for_session(session_id: str) -> Optional[int]:
     compares the freshly-(re)subscribed tab's last-known count against this
     persisted count; a server that is AHEAD means a turn landed during the gap.
 
-    Reads via ``metadata_only=True`` so it never parses the full transcript
-    (this runs on every per-session SSE (re)connect). The persisted count is
-    written by ``Session.save`` as ``meta['message_count'] = len(messages)`` —
-    the SAME basis the frontend's ``S.session.message_count`` is built from —
-    so the comparison is apples-to-apples. Returns None when the count is
-    unknown (legacy sidecars without a persisted count); the caller treats
-    None as "cannot tell, do nothing", never as a trigger.
+    Reads the CURRENT on-disk sidecar instead of the generic ``get_session``
+    resolver.  The generic resolver may return a cached metadata stub whose
+    count predates a gateway-backed sidecar rewrite; comparing that stale count
+    with the fresh ``/api/session`` response creates an endless
+    ``session-updated`` reconnect/reload loop (#7672).
+
+    The read is bounded and count-only (``_prefix_message_count``: a 64 KiB
+    first stage, 1 MiB hard cap, never a full transcript parse).  This runs on
+    every per-session SSE (re)connect, so it must not fall back to
+    ``Session.load()`` the way ``Session.load_metadata_only()`` does for an
+    oversized metadata prefix: on a ~30 MiB sidecar that fallback costs ~0.9 s
+    per subscribe, multiplied by every reconnecting tab.
+
+    The count is trusted only when the writer marker (``_mc_v``) vouches that
+    the same atomic write produced both the count and the messages array; an
+    unvouched count can be stale against its rows, which is exactly the shape
+    that drives the reload loop.  The persisted count is written by
+    ``Session.save`` as ``meta['message_count'] = len(messages)`` -- the SAME
+    basis the frontend's ``S.session.message_count`` is built from.
+
+    Returns None whenever the count cannot be cheaply established (missing,
+    legacy/unmarked, corrupt or oversized metadata); the caller treats None as
+    "cannot tell, do nothing", never as a trigger.
     """
     try:
-        from api.models import get_session
+        import api.models as _models
 
-        s = get_session(session_id, metadata_only=True)
-        count = getattr(s, "_metadata_message_count", None)
-        if count is None:
-            msgs = getattr(s, "messages", None)
-            count = len(msgs) if isinstance(msgs, list) and msgs else None
-        return int(count) if count is not None else None
+        if not _models.is_safe_session_id(session_id):
+            return None
+        path = _models.SESSION_DIR / f"{session_id}.json"
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        # Memoize per file version so a legacy sidecar whose metadata overflows
+        # the 64 KiB first stage does not pay the bounded 1 MiB scan on every
+        # reconnect (#7673 gate). Sidecar writers publish through tmp +
+        # os.replace, so (path, inode, size, mtime_ns) changes on every write in
+        # practice. The one theoretical collision -- several same-size rewrites
+        # inside one mtime tick -- could serve a stale-HIGH count and re-emit
+        # session-updated on each reconnect until the next write (the #7672
+        # shape), so a version younger than _PERSISTED_COUNT_MEMO_MIN_AGE_S is
+        # never memoized: the mtime must be settled before its count is cached.
+        key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns)
+        with _PERSISTED_COUNT_MEMO_LOCK:
+            if key in _PERSISTED_COUNT_MEMO:
+                _PERSISTED_COUNT_MEMO.move_to_end(key)
+                return _PERSISTED_COUNT_MEMO[key]
+        count = _models._prefix_message_count(path)
+        if time.time() - st.st_mtime >= _PERSISTED_COUNT_MEMO_MIN_AGE_S:
+            with _PERSISTED_COUNT_MEMO_LOCK:
+                _PERSISTED_COUNT_MEMO[key] = count
+                _PERSISTED_COUNT_MEMO.move_to_end(key)
+                while len(_PERSISTED_COUNT_MEMO) > _PERSISTED_COUNT_MEMO_MAX:
+                    _PERSISTED_COUNT_MEMO.popitem(last=False)
+        return count
     except Exception:
         logger.debug(
             "persisted_message_count_for_session lookup failed for %s",
@@ -541,9 +663,9 @@ def _build_payload(evt: dict, session_id: str) -> dict:
       ``(session_id, event_id)`` to dedupe across reconnects.
     """
     # ProcessRegistry completion events use the field name ``session_id`` for
-    # the process id. Alias it locally before exposing it as payload ``task_id``
-    # to avoid confusing that wire-format name with the WebUI session id.
-    process_id = str(evt.get("session_id") or "")
+    # the process id. Async delegation completions carry ``delegation_id``
+    # instead; expose either stable delivery id as payload ``task_id``.
+    process_id = completion_delivery_id(evt)
     payload: dict[str, Any] = {
         "session_id": str(session_id),
         "task_id": process_id,
@@ -822,7 +944,12 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
 # registry, pre-Option-1 spawns) it is a PURE PASS-THROUGH — it never
 # suppresses a legitimate Option Z wakeup on uncertainty (Option Z must keep
 # working).
-_ENV_IMMUNE_OWNER_ATTRS = ("spawn_session_id", "owner_session_id", "turn_session_id")
+_ENV_IMMUNE_OWNER_ATTRS = (
+    "origin_ui_session_id",  # modern hermes-agent exact browser-tab return address
+    "spawn_session_id",
+    "owner_session_id",
+    "turn_session_id",
+)
 
 
 def _env_immune_spawn_owner(proc_session) -> str:
@@ -872,6 +999,357 @@ def _resolve_wakeup_target(
     return owner
 
 
+def _requeue_async_delegation_event(
+    process_registry,
+    evt: dict,
+    *,
+    claim=None,
+    delay: float = 0.5,
+) -> bool:
+    """Retry without enqueueing new work once drain shutdown has started."""
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    return requeue_async_delegation_event(
+        evt,
+        completion_queue,
+        delay=delay,
+        stop_event=_DRAIN_STOP,
+        durable=(bool(getattr(claim, "durable", False)) if claim is not None else None),
+    )
+
+
+def _retry_unclaimed_async_delegation_event(
+    process_registry,
+    evt: dict,
+    *,
+    keep_legacy_retrying: bool = False,
+) -> None:
+    """Retry from durable state, or make a bounded legacy routing pass.
+
+    ``keep_legacy_retrying`` is reserved for a completion whose target session
+    is known but currently busy. That wait state is neither an unroutable event
+    nor a failed delivery attempt, so compatibility-mode delivery must keep
+    backing off until the session becomes idle.
+    """
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    if schedule_async_delegation_claim_retry(
+        evt,
+        completion_queue,
+        delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    ):
+        return
+    if not keep_legacy_retrying and evt.get("_webui_routing_retry_attempted"):
+        return
+    retry_evt = dict(evt)
+    if not keep_legacy_retrying:
+        retry_evt["_webui_routing_retry_attempted"] = True
+    _requeue_async_delegation_event(
+        process_registry,
+        retry_evt,
+        delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    )
+
+
+def _record_async_delegation_accepted(
+    evt: dict,
+    *,
+    session_id: str,
+    claim,
+) -> None:
+    """ACK durable delivery and publish live-view state after turn acceptance."""
+
+    complete_async_delegation_delivery(evt, claim)
+    payload = _build_payload(evt, session_id)
+    try:
+        _emit_bg_task_complete_events_coalesced(session_id, payload)
+    except Exception:
+        logger.debug(
+            "async delegation live-view emit failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _wakeup_refusal_is_transient(resp: dict | None, status: int) -> bool:
+    """True when the target refused the wake-up for a reason it will recover from.
+
+    Such refusals are not delivery failures of the completion itself, so they
+    must not consume its bounded durable delivery budget. Otherwise a burst of
+    refusals (e.g. ``agent_runtime_stale`` answers while the Agent runtime is
+    being replaced) terminally drops a completion whose origin session is alive:
+
+    * any payload that explicitly says ``retryable: True`` (stale runtime);
+    * the paused-wakeup contract (``process_wakeup_paused``);
+    * a session busy with another turn (``active_stream_id`` on a 409).
+    """
+    if not isinstance(resp, dict):
+        return False
+    if resp.get("retryable") is True:
+        return True
+    if status != 409:
+        return False
+    if resp.get("error") == "process_wakeup_paused":
+        return True
+    return bool(resp.get("active_stream_id"))
+
+
+def _start_async_delegation_wakeup_turn(
+    session_id: str,
+    wakeup_prompt: str,
+    *,
+    delegation_id: str,
+    evt: dict,
+    claim,
+    process_registry,
+) -> None:
+    """Start one autonomous delegation turn and ACK only after acceptance."""
+
+    def _runner() -> None:
+        try:
+            from api.routes import start_session_turn
+
+            resp = start_session_turn(
+                session_id,
+                wakeup_prompt,
+                source="process_wakeup",
+            )
+            raw_status = (resp or {}).get("_status")
+            if raw_status is None:
+                status = 200 if (resp or {}).get("stream_id") else 500
+            else:
+                status = int(raw_status)
+            if 200 <= status < 300:
+                _record_async_delegation_accepted(
+                    evt,
+                    session_id=session_id,
+                    claim=claim,
+                )
+                logger.info(
+                    "async delegation wakeup turn accepted for session %s "
+                    "(stream_id=%s)",
+                    session_id,
+                    (resp or {}).get("stream_id"),
+                )
+                return
+
+            transient = _wakeup_refusal_is_transient(resp, status)
+            if transient:
+                release_async_delegation_delivery(evt, claim, retryable=True)
+            else:
+                release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
+            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                logger.info(
+                    "async delegation wakeup paused for session %s; delivery remains retryable",
+                    session_id,
+                )
+            elif transient:
+                logger.info(
+                    "async delegation wakeup refused transiently for session %s "
+                    "(status=%s err=%r); attempt refunded, durable retry scheduled",
+                    session_id,
+                    status,
+                    (resp or {}).get("error"),
+                )
+            else:
+                logger.debug(
+                    "async delegation wakeup not accepted for session %s: "
+                    "status=%s err=%r; durable retry scheduled",
+                    session_id,
+                    status,
+                    (resp or {}).get("error"),
+                )
+        except Exception:
+            release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
+            logger.warning(
+                "async delegation wakeup turn failed for session %s; durable retry scheduled",
+                session_id,
+                exc_info=True,
+            )
+        finally:
+            # The wakeup turn has resolved (accepted, rejected, or raised): the
+            # per-origin admission slot is free for the next backlogged
+            # completion. Never release earlier — the slot must stay reserved
+            # for the whole claim→turn window so siblings defer without
+            # consuming the finite delivery budget (#6959).
+            _release_async_delegation_wakeup_admission(session_id)
+
+    threading.Thread(
+        target=_runner,
+        name=f"hermes-webui-delegation-wakeup-{str(session_id)[:8]}",
+        daemon=True,
+    ).start()
+
+
+# ── Per-origin wakeup admission reservation (#6959) ────────────────────────
+# A durable claim has a finite delivery-attempt budget, and the pre-claim busy
+# check is NOT atomic with turn publication: several completed delegations for
+# one idle origin can all pass it, each obtain a durable claim, then race for a
+# single ``start_session_turn`` admission slot. The losers' transient 409s
+# release already-counted claims, and repeated rounds can drive completed rows
+# to the terminal ``dropped`` state. Reserve the per-origin admission slot
+# ATOMICALLY before claiming so at most one async-delegation wakeup per session
+# is in flight at a time; siblings that lose the reservation defer WITHOUT
+# claiming (no delivery attempt consumed). The reservation is in-process only:
+# the wakeup thread releases it on every exit path and it vanishes on restart,
+# so it can never strand a durable claim.
+_ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK = threading.Lock()
+_ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT: set[str] = set()
+
+
+def _try_reserve_async_delegation_wakeup_admission(session_id: str) -> bool:
+    """Atomically reserve the single in-flight wakeup slot for *session_id*.
+
+    Returns False when another async-delegation wakeup for the same origin is
+    already in flight (claimed but not yet resolved), so the caller can defer
+    without touching the finite delivery budget.
+    """
+    with _ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        if session_id in _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT:
+            return False
+        _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT.add(session_id)
+        return True
+
+
+def _release_async_delegation_wakeup_admission(session_id: str) -> None:
+    """Release the in-flight wakeup slot for *session_id* (idempotent)."""
+    with _ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT.discard(session_id)
+
+
+def _process_async_delegation_event(
+    evt: dict,
+    *,
+    session_id: str,
+    delegation_id: str,
+    process_registry,
+) -> None:
+    """Claim and route one async completion without private registry markers."""
+
+    # A durable claim has a finite attempt budget. A busy foreground turn is
+    # not a delivery attempt, so leave the record unclaimed and let the shared
+    # restore sweep retry after the session can accept a wakeup.
+    if _session_has_active_turn(session_id):
+        _retry_unclaimed_async_delegation_event(
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
+        )
+        return
+
+    # Atomic per-origin wakeup admission (#6959): the busy check above is a
+    # pre-check, not a reservation — several idle completions for one origin
+    # can all pass it together. Only one may own the in-flight wakeup slot; a
+    # sibling that loses this reservation must NOT claim, because a claim
+    # released by a transient 409 would count against the finite delivery
+    # budget. The admitted wakeup releases the slot when its turn resolves.
+    if not _try_reserve_async_delegation_wakeup_admission(session_id):
+        _retry_unclaimed_async_delegation_event(
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
+        )
+        return
+
+    # Ownership-transfer guard (#6959 gate): the outer finally releases the
+    # per-origin reservation on EVERY exit below — claim exception, claim-None,
+    # formatting failure, dispatch failure, or any exception raised by the
+    # retry helpers themselves — UNLESS the wakeup thread successfully started,
+    # in which case the thread's own finally now owns the release. No raisable
+    # call can therefore strand the reservation (a stranded slot would defer
+    # every later completion for this origin forever, without delivery).
+    transfer_owned = False
+    try:
+        try:
+            claim = claim_async_delegation_delivery(evt, "webui-background")
+        except Exception:
+            _requeue_async_delegation_event(process_registry, evt)
+            return
+        if claim is None:
+            completion_queue = getattr(process_registry, "completion_queue", None)
+            schedule_async_delegation_claim_retry(evt, completion_queue)
+            return
+
+        try:
+            wakeup_prompt_raw = format_wakeup_prompt(evt)
+            wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
+            if not wakeup_prompt:
+                raise RuntimeError("async delegation completion could not be formatted")
+        except Exception:
+            # A formatting failure is a permanent, non-retryable defect (a malformed
+            # event will never format correctly), so it must stay on the bounded
+            # one-shot path — never keep_legacy_retrying, or it would loop forever.
+            release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(process_registry, evt)
+            logger.warning(
+                "async delegation completion could not be formatted for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return
+
+        try:
+            _start_async_delegation_wakeup_turn(
+                session_id,
+                wakeup_prompt,
+                delegation_id=delegation_id,
+                evt=evt,
+                claim=claim,
+                process_registry=process_registry,
+            )
+        except Exception:
+            # A post-format dispatch failure against a resolved target is transient
+            # (the target may accept on a later pass), so keep the legacy completion
+            # retrying rather than dropping it after one bounded attempt.
+            release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
+            logger.warning(
+                "server-side async delegation dispatch failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        # The wakeup thread is running: its own finally owns the release from
+        # here on (set only after Thread.start() returns, so a mid-start
+        # failure still releases here).
+        transfer_owned = True
+    finally:
+        if not transfer_owned:
+            _release_async_delegation_wakeup_admission(session_id)
+
+
+def _resolve_completion_target(
+    *,
+    session_key_resolved_sid: str,
+    origin_ui_session_id: str,
+) -> str:
+    """Return the WebUI session that owns a detached completion event.
+
+    Modern Hermes Agent events carry ``origin_ui_session_id`` as an exact,
+    immutable return address captured from the commissioning browser turn.
+    It is authoritative over the mutable/legacy session-key index. Older
+    Agent events omit it and retain the existing session-key fallback.
+    """
+    resolved = str(session_key_resolved_sid or "")
+    owner = str(origin_ui_session_id or "")
+    if not owner:
+        return resolved
+    if resolved and resolved != owner:
+        logger.error(
+            "cross-session completion route BLOCKED: session_key resolved to %r "
+            "but exact origin_ui_session_id is %r; routing to the exact owner",
+            resolved,
+            owner,
+        )
+    return owner
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -887,55 +1365,59 @@ def _process_one(evt: dict) -> None:
     except Exception:
         _process_registry = None
 
-    process_id = str(evt.get("session_id") or "")
+    process_id = completion_delivery_id(evt)
     session_key = str(evt.get("session_key") or "")
+    origin_ui_session_id = str(evt.get("origin_ui_session_id") or "")
     # Root-cause fix (t_0f447014): the notify_on_complete completion event
-    # enqueued by ProcessRegistry._move_to_finished() carries NO "session_key"
-    # field — only the watch_match enqueue includes one. Without it the old
-    # `evt.get("session_key") or process_id` fell back to the process id
-    # ("proc_xxxx"), which is never a PROCESS_SESSION_INDEX key (only
-    # webui_session_id -> webui_session_id is registered at chat-start), so
-    # every wakeup was silently dropped here and the frontend never POSTed an
-    # ack. Recover the spawn-time session_key from the process registry's
-    # ProcessSession: the terminal tool captured it synchronously at spawn
-    # (while the turn's env was active), so it survives the turn-end env
-    # restore and is the WebUI session_id for WebUI-spawned processes.
-    if not session_key and process_id:
+    # enqueued by ProcessRegistry._move_to_finished() historically carried NO
+    # "session_key" field — only the watch_match enqueue included one. Without
+    # it the old `evt.get("session_key") or process_id` fell back to the
+    # process id ("proc_xxxx"), which is never a PROCESS_SESSION_INDEX key.
+    # Recover spawn-time routing metadata from the process registry.
+    if process_id and (not session_key or not origin_ui_session_id):
         try:
             if _process_registry is not None:
                 _ps = _process_registry.get(process_id)
-                if _ps is not None and getattr(_ps, "session_key", ""):
-                    session_key = str(_ps.session_key)
+                if _ps is not None:
+                    if not session_key and getattr(_ps, "session_key", ""):
+                        session_key = str(_ps.session_key)
+                    if not origin_ui_session_id:
+                        origin_ui_session_id = (
+                            str(getattr(_ps, "origin_ui_session_id", "") or "")
+                            or str(getattr(_ps, "spawn_session_id", "") or "")
+                        )
         except Exception:
             logger.debug(
-                "session_key recovery from process registry failed for %r",
+                "session ownership recovery from process registry failed for %r",
                 process_id,
                 exc_info=True,
             )
-    if not session_key:
+    if not session_key and not origin_ui_session_id:
         logger.debug(
-            "process_complete drop: no recoverable session_key for process_id=%r",
+            "process_complete drop: no recoverable session_key or exact UI owner "
+            "for process_id=%r",
             process_id,
         )
+        if evt.get("type") == "async_delegation":
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
-    with _cfg.PROCESS_SESSION_INDEX_LOCK:
-        session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key)
-    if not session_id:
+    session_id = ""
+    if session_key:
+        with _cfg.PROCESS_SESSION_INDEX_LOCK:
+            session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key) or ""
+    if not session_id and not origin_ui_session_id:
         # No mapping — could be a cron/gateway process that uses the same
-        # registry but a non-WebUI session_key. Ignore.
+        # registry but a non-WebUI session_key. Durable delegation events stay
+        # pending and are retried because their WebUI ownership mapping can be
+        # registered shortly after process restore.
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
+        if evt.get("type") == "async_delegation":
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
     # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
-    # session_id above came from PROCESS_SESSION_INDEX.get(session_key), and
-    # session_key was captured by the terminal tool from the (historically
-    # racy) process-global env at spawn. Option 1 binds the per-turn identity
-    # to a contextvar so that capture is no longer racy — but as an INDEPENDENT
-    # safety net, cross-check the resolved target against the env-immune
-    # spawn owner (when the core ProcessSession exposes one). On a positive
-    # mismatch this re-routes the wakeup (and the live-view emit + dedupe
-    # markers below) to the TRUE owner instead of waking the wrong session.
-    # Pure pass-through when no env-immune owner is available (today's core,
-    # cron/CLI procs, pre-Option-1 spawns) — never suppresses a valid wakeup.
+    # First retain the process-registry spawn-owner cross-check for legacy
+    # terminal events. Then apply origin_ui_session_id as the final authority;
+    # that exact owner is shared by process and async-delegation completions.
     try:
         _ps_xs = _process_registry.get(process_id) if (_process_registry is not None and process_id) else None
     except Exception:
@@ -945,6 +1427,35 @@ def _process_one(evt: dict) -> None:
         session_key_resolved_sid=session_id,
         proc_session=_ps_xs,
     )
+    # origin_ui_session_id is the exact, immutable return address; it is the
+    # FINAL routing authority over the (mutable) session-key/Option-3 result.
+    session_id = _resolve_completion_target(
+        session_key_resolved_sid=session_id,
+        origin_ui_session_id=origin_ui_session_id,
+    )
+    if not session_id:
+        logger.debug("process_complete drop: completion target resolved empty")
+        # An async delegation event that resolves empty here must NOT silently
+        # return: no durable claim was taken, so the core row stays pending and
+        # the restart-restore sweep would re-deliver it forever. Route it into
+        # the bounded retry instead (arms a durable retry / one best-effort
+        # legacy requeue), so it stays retryable without a spurious ACK.
+        if evt.get("type") == "async_delegation":
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
+        return
+    # ── THE SEAM: async delegations take the durable-claim delivery path,
+    # routed to the origin-resolved session. The claim/complete/release
+    # lifecycle (keyed on the immutable delegation_id) is the sole dedupe +
+    # restart-safety authority for async events, so they early-return before
+    # the terminal-process idempotency/emit/Option-Z machinery below. ──
+    if evt.get("type") == "async_delegation":
+        _process_async_delegation_event(
+            evt,
+            session_id=session_id,
+            delegation_id=process_id,
+            process_registry=_process_registry,
+        )
+        return
     # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
     # The real merged #2279 next-turn drain
     # (api/streaming._drain_webui_process_notifications) dedupes ONLY via
@@ -1056,7 +1567,7 @@ def _process_one(evt: dict) -> None:
         )
 
 
-def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str) -> None:
+def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str) -> bool:
     """Persist a deferred process-completion wakeup for later redelivery.
 
     Called from ``_process_one`` when a completion arrives while a turn is
@@ -1068,26 +1579,51 @@ def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str)
 
     Idempotent per process_id: if the same process_id is already queued for
     this session (kill_process racing the reader thread), it is not appended
-    twice. Best-effort — never raises into the drain loop.
+    twice. Returns whether the prompt is safely queued; never raises into the
+    drain loop.
     """
     if not session_id or not wakeup_prompt:
-        return
+        return False
     from api import config as _cfg
 
     try:
         with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
             entries = _cfg.DEFERRED_PROCESS_WAKEUPS.setdefault(session_id, [])
-            if process_id and any(
-                e.get("process_id") == process_id for e in entries
+            # Idempotent per (process_id, wakeup_prompt).
+            #
+            # A non-empty ``process_id`` is the authoritative, immutable
+            # identity of its background completion — assigned once by the
+            # registry and already deduped upstream by
+            # ``BG_TASK_COMPLETE_EVENTS_SEEN`` / the ``_completion_consumed``
+            # marker — so two deferred entries for the SAME non-empty id can
+            # never represent two DIFFERENT wakeups: collapsing on the id is
+            # exact, not over-broad.
+            #
+            # An EMPTY process_id is NOT "no identity": it is what a
+            # multi-line (heredoc) command's display text parses to, and there
+            # are genuine callers that must still dedup (the launch-abort
+            # re-arm, whose best-effort id recovery yields ""). Such entries
+            # key on the prompt text instead: two DIFFERENT id-less wakeups
+            # necessarily differ in ``wakeup_prompt``, so both survive, while
+            # an exact duplicate recorded twice by a race collapses.
+            if any(
+                e.get("process_id") == process_id
+                and (
+                    bool(process_id)
+                    or str(e.get("wakeup_prompt") or "") == wakeup_prompt
+                )
+                for e in entries
             ):
-                return
+                return True
             entries.append(
                 {"process_id": process_id, "wakeup_prompt": wakeup_prompt}
             )
+        return True
     except Exception:
         logger.debug(
             "record_deferred_wakeup failed for session %s", session_id, exc_info=True
         )
+        return False
 
 
 def claim_deferred_wakeups(session_id: str) -> list[dict]:
@@ -1115,7 +1651,47 @@ def claim_deferred_wakeups(session_id: str) -> list[dict]:
         return []
 
 
-def drain_deferred_wakeups_for_session(session_id: str) -> int:
+def discard_deferred_wakeups_for_session(session_id: str) -> None:
+    """Drop any queued process-wakeup state for *session_id* (terminal path).
+
+    Used when a wakeup resolves a session that was DELETED (``start_session_turn``
+    returns 404). Treating the missing session as TERMINAL rather than
+    retryable means any prompt recorded for it — whether already in
+    ``DEFERRED_PROCESS_WAKEUPS`` before the in-flight wakeup resolved, or left
+    over from a prior failed re-queue — is removed, so a deleted session never
+    retains wakeup state until process restart. The bare
+    ``PENDING_BG_TASK_COMPLETIONS`` telemetry marker is dropped too, so no
+    drain / next-turn path can re-fire a wakeup for the removed session.
+
+    Terminal-side effect only (pop / discard) — never re-queues; idempotent.
+    """
+    if not session_id:
+        return
+    from api import config as _cfg
+
+    try:
+        with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            _cfg.DEFERRED_PROCESS_WAKEUPS.pop(session_id, None)
+    except Exception:
+        logger.debug(
+            "discard_deferred_wakeups_for_session failed for %s",
+            session_id,
+            exc_info=True,
+        )
+        return
+    try:
+        _cfg.PENDING_BG_TASK_COMPLETIONS.discard(session_id)
+    except Exception:
+        logger.debug(
+            "PENDING_BG_TASK_COMPLETIONS discard failed for %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def drain_deferred_wakeups_for_session(
+    session_id: str, *, retry_attempt: int = 0
+) -> int:
     """Turn-teardown idle-hook: redeliver deferred wakeups once idle.
 
     Called from ``api/streaming`` right AFTER ``unregister_active_run`` so
@@ -1123,6 +1699,14 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
     makes the active-at-completion case symmetric with the idle-at-completion
     case: idle now → fire now (Option Z idle branch); busy now → fire here
     when the turn ends and the session goes idle.
+
+    ``retry_attempt`` is the per-delivery attempt marker threaded in by the
+    bounded retry timer (``api.routes._run_deferred_wakeup_retry``). A value
+    >= 1 means this drain IS the retry, so a launch failure during it must be
+    treated as final by the abort cleanup: the prompt stays queued, no new
+    retry is scheduled. Without it the retry reschedules itself every
+    ``_DEFERRED_WAKEUP_RETRY_DELAY_SECS`` forever under a persistent launch
+    failure (#7680 CORE).
 
     Multi-stream / cancel-reconnect guard: if ANY other ACTIVE_RUNS row still
     exists for this session (a second stream from cancel/reconnect), the
@@ -1188,14 +1772,16 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 session_id,
                 str((first or {}).get("wakeup_prompt") or "").strip(),
                 process_id=str((first or {}).get("process_id") or ""),
+                retry_attempt=retry_attempt,
             )
             started = 1
         if started:
             logger.info(
                 "turn-teardown idle-hook redelivered %d deferred wakeup(s) "
-                "for session %s",
+                "for session %s (retry_attempt=%d)",
                 started,
                 session_id,
+                retry_attempt,
             )
         return started
     except Exception:
@@ -1215,27 +1801,52 @@ def _session_has_active_turn(session_id: str) -> bool:
     ``_emit_to_session_streams``) to map a stream back to its owning session.
     ACTIVE_RUNS is registered at agent-worker start and removed in the worker's
     outer ``finally``, so it survives cancel/reconnect races better than
-    STREAMS. There is a brief window where ``_start_chat_stream_for_session``
-    has populated STREAMS but the worker thread has not yet called
-    ``register_active_run``; in that window this returns False and the
-    subsequent ``start_session_turn`` is rejected with a 409 by
-    ``_start_chat_stream_for_session``'s own active-stream guard — i.e. the
-    same lock /api/chat/start uses is the authoritative race backstop.
+    STREAMS. We ALSO count a same-session live STREAMS entry (via the
+    synchronously-populated STREAM_SESSION_OWNERS registry): the worker
+    publishes its stream BEFORE it registers in ACTIVE_RUNS, and that
+    pre-registration window must not look idle to a sibling completion
+    (#6959 gate — see the STREAMS check below). ``_start_chat_stream_for_session``'s
+    own active-stream guard remains the authoritative 409 backstop for any
+    residual race.
     """
+    # ACTIVE_RUNS rows (including a bounded cancelling-run unwind window,
+    # per _active_run_ids_for_session).
+    if _active_run_ids_for_session(session_id, attachable_only=False):
+        return True
+
+    # Pre-ACTIVE_RUNS publication window (#6959 gate): the agent worker
+    # publishes its stream — register_stream_owner() first, then the live
+    # STREAMS channel — BEFORE it registers in ACTIVE_RUNS. In that window a
+    # same-session live STREAMS entry means a turn is already (or about to be)
+    # active, so it must count here: otherwise a sibling async-delegation
+    # completion would pass the busy pre-check, reserve the per-origin
+    # admission, claim, and then 409 against the already-published stream —
+    # burning the finite delivery-attempt budget on every retry round. The
+    # worker's teardown finally pops STREAMS (and unregisters the stream owner)
+    # before the turn-teardown idle-hook drain runs, so the just-ended turn
+    # does not keep the session busy.
     from api import config as _cfg
 
     try:
-        with _cfg.ACTIVE_RUNS_LOCK:
-            for _stream_id, meta in (_cfg.ACTIVE_RUNS or {}).items():
-                if isinstance(meta, dict) and meta.get("session_id") == session_id:
-                    return True
+        with _cfg.STREAMS_LOCK:
+            live_stream_ids = list((_cfg.STREAMS or {}).keys())
+        with _cfg.STREAM_SESSION_OWNERS_LOCK:
+            stream_owners = dict(_cfg.STREAM_SESSION_OWNERS or {})
     except Exception:
-        logger.debug("ACTIVE_RUNS active-turn check failed", exc_info=True)
+        logger.debug("STREAMS active-turn check failed", exc_info=True)
+        return False
+    for _stream_id in live_stream_ids:
+        if str(stream_owners.get(_stream_id) or "") == str(session_id or ""):
+            return True
     return False
 
 
 def _start_server_side_wakeup_turn(
-    session_id: str, wakeup_prompt: str, *, process_id: str = ""
+    session_id: str,
+    wakeup_prompt: str,
+    *,
+    process_id: str = "",
+    retry_attempt: int = 0,
 ) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
 
@@ -1243,6 +1854,18 @@ def _start_server_side_wakeup_turn(
     ``start_session_turn`` itself spawns the agent worker thread, but does
     synchronous session-load / workspace / model resolution first, which must
     not stall the single drain thread shared by every WebUI session.
+
+    ``retry_attempt`` is the per-delivery attempt marker from the bounded
+    retry timer. It is forwarded to ``start_session_turn`` and from there into
+    the launch-abort cleanup, so a launch failure on this already-retried
+    attempt keeps the prompt queued WITHOUT scheduling another retry
+    (#7680 CORE).
+
+    This is the ONLY caller that opts into the deferred-wakeup re-arm
+    (``rearm_deferred_wakeup=True``): an async-delegation completion starts its
+    turn with the same ``source="process_wakeup"`` but owns a durable
+    claim/retry, so re-arming for it too would deliver one completion twice
+    (#7680 CORE, maintainer 2026-10-01).
 
     Concurrency + idempotency are enforced by the layers below, not here:
       - ``start_session_turn`` → ``_start_chat_stream_for_session`` serializes
@@ -1271,14 +1894,36 @@ def _start_server_side_wakeup_turn(
             from api.routes import start_session_turn
 
             resp = start_session_turn(
-                session_id, wakeup_prompt, source="process_wakeup"
+                session_id,
+                wakeup_prompt,
+                source="process_wakeup",
+                process_id=process_id,
+                retry_attempt=retry_attempt,
+                rearm_deferred_wakeup=True,
             )
             status = int((resp or {}).get("_status", 200) or 200)
-            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+            if status == 404 and (resp or {}).get("error") == "Session not found":
+                # Terminal, NOT retryable: the session was deleted while this
+                # wakeup was in flight. Re-queuing the prompt here would
+                # recreate DEFERRED_PROCESS_WAKEUPS[sid] with no expiry for a
+                # session that no longer exists — an orphaned prompt that
+                # survives until process restart. Drop any queued wakeup state
+                # for the removed session (including a pre-existing entry from
+                # before the deletion) and do NOT re-queue.
+                discard_deferred_wakeups_for_session(session_id)
+                logger.info(
+                    "server-side wakeup dropped for deleted session %s "
+                    "(404 session-not-found): queued wakeup state cleared",
+                    session_id,
+                )
+            elif status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
                     session_id,
                 )
+                # Deliberate suppression: re-queuing here would recreate the
+                # same provider-unavailable 409 on every subsequent teardown,
+                # so the prompt is intentionally dropped.
             elif status == 409:
                 # Raced an active turn (e.g. a human /api/chat/start, or a
                 # sibling deferred-wakeup thread). Re-defer this prompt so it
@@ -1295,8 +1940,19 @@ def _start_server_side_wakeup_turn(
                     session_id,
                 )
             elif status >= 400:
+                # The turn never started, and whoever called us
+                # (``drain_deferred_wakeups_for_session``) already popped this
+                # prompt from DEFERRED_PROCESS_WAKEUPS — so dropping it here
+                # loses the wakeup permanently. Keep it queued so a later turn
+                # teardown (or the next-turn drain) still delivers it. This is
+                # the "launch-abort retry's own launch failed" case: the prompt
+                # must survive, and it must NOT loop — the retry timer is
+                # one-shot and nothing here reschedules it.
+                if wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.warning(
-                    "server-side wakeup failed for session %s: status=%s err=%r",
+                    "server-side wakeup failed for session %s: status=%s err=%r; "
+                    "prompt kept queued for later delivery",
                     session_id,
                     status,
                     (resp or {}).get("error"),
@@ -1308,8 +1964,19 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
+            # A launch that RAISED (worker-thread construction/``start()``
+            # failure, session-load throw, model-resolution blow-up, …) is the
+            # same loss case as a 5xx: the entry was already claimed, so
+            # without a re-defer the prompt is gone with no retry. Re-defer it
+            # — idempotent per process_id, atomic claim, no reschedule. (The
+            # launch-abort re-arm inside ``start_session_turn`` handles the
+            # narrower worker-start failure; this covers everything that
+            # escapes before/around it.)
+            if wakeup_prompt:
+                record_deferred_wakeup(session_id, process_id, wakeup_prompt)
             logger.warning(
-                "server-side wakeup turn raised for session %s",
+                "server-side wakeup turn raised for session %s; prompt kept "
+                "queued for later delivery",
                 session_id,
                 exc_info=True,
             )
@@ -1329,6 +1996,7 @@ def _drain_loop() -> None:
         logger.warning("bg_task_complete drain unavailable: %s", exc)
         return
     logger.info("bg_task_complete drain thread started")
+    restore_durable_process_completions(process_registry)
     while not _DRAIN_STOP.is_set():
         # Read the queue defensively: a rebuilt/partially-initialized registry
         # may not expose ``completion_queue`` (mirrors streaming.py's
@@ -1359,6 +2027,73 @@ def _drain_loop() -> None:
             _process_one(evt)
         except Exception:
             logger.warning("bg_task_complete event handling failed", exc_info=True)
+
+
+def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> int:
+    """Recover core background processes and restore WebUI routing metadata.
+
+    The core gateway performs this during gateway startup, but this WebUI host
+    previously started only the queue drain. That left checkpointed processes
+    invisible after a WebUI restart.
+    """
+    global _PROCESS_CHECKPOINT_RECOVERED, _PROCESS_RECOVERY_DONE
+    if process_registry is None:
+        try:
+            from tools.process_registry import process_registry
+        except ImportError:
+            # Hermes Agent is optional in isolated WebUI/test environments.
+            # The drain loop already treats a missing registry as unavailable;
+            # startup recovery must preserve that fail-soft contract.
+            logger.debug("process recovery unavailable: Hermes Agent is not installed")
+            return 0
+    if get_session_fn is None:
+        from api.models import get_session as get_session_fn
+
+    with _PROCESS_RECOVERY_LOCK:
+        if _PROCESS_RECOVERY_DONE:
+            return 0
+
+        recovered = 0
+        if not _PROCESS_CHECKPOINT_RECOVERED:
+            recovered = process_registry.recover_from_checkpoint()
+            _PROCESS_CHECKPOINT_RECOVERED = True
+
+        for row in process_registry.list_sessions():
+            process_id = str(row.get("session_id") or "")
+            if not process_id:
+                continue
+            try:
+                proc_session = process_registry.get(process_id)
+                session_key = str(getattr(proc_session, "session_key", "") or "")
+                if not session_key:
+                    continue
+                # The session resolver (``api.models._resolve_session_once``)
+                # raises ``KeyError(sid)`` for a missing session — that is its
+                # documented contract for the "owner gone" outcome, not a
+                # fault. Treat it identically to a ``None`` return: skip the
+                # process without logging, and let a neighbouring live
+                # process still rebind. The narrow ``except KeyError`` lives
+                # INSIDE the outer try so an unrelated ``KeyError`` from
+                # ``process_registry.get()`` (or any routing-index work) still
+                # surfaces in the existing warning path.
+                try:
+                    resolved = get_session_fn(session_key, metadata_only=True)
+                except KeyError:
+                    continue
+                if resolved is None:
+                    continue
+            except Exception:
+                logger.warning(
+                    "Could not resolve recovered WebUI process %r",
+                    process_id,
+                    exc_info=True,
+                )
+                continue
+            register_process_session(session_key, session_key)
+        _PROCESS_RECOVERY_DONE = True
+        if recovered:
+            logger.info("Recovered %d background process(es) for WebUI", recovered)
+        return recovered
 
 
 def register_process_session(session_key: str, session_id: str) -> None:
@@ -1407,6 +2142,12 @@ def start_drain_thread() -> bool:
     with _THREAD_LIFECYCLE_LOCK:
         if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
             return False
+        try:
+            recover_processes_for_webui()
+        except Exception:
+            # Recovery is best-effort. A corrupt checkpoint or transient I/O
+            # error must not disable notifications for newly spawned tasks.
+            logger.warning("background process recovery failed", exc_info=True)
         _DRAIN_STOP.clear()
         _DRAIN_THREAD = threading.Thread(
             target=_drain_loop,

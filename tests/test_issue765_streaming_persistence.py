@@ -314,10 +314,10 @@ class TestIssue765FollowupHardening:
         t2.join(timeout=5)
 
         assert not errors, f"Concurrent same-session saves should not fail: {errors}"
-        assert len(replace_sources) == 2, f"Expected 2 replace calls, got {replace_sources}"
+        assert len(replace_sources) >= 2, f"Expected replace calls, got {replace_sources}"
         assert len(set(replace_sources)) == 2, (
-            "Concurrent same-session saves must use distinct temp files; "
-            f"got {replace_sources}"
+            "Concurrent same-session saves must use distinct temp files even if Windows-safe "
+            f"replace retries one of them; got {replace_sources}"
         )
         data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["session_id"] == "same_sid"
@@ -337,14 +337,14 @@ class TestIssue765FollowupHardening:
             "with _agent_lock:\n"
             "                if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
         )
-        save_idx = src.find("_deduplicate_context_messages(_next_context_messages)")
+        save_idx = src.find("_result_messages = _settle_result_messages(")
 
         assert stop_idx != -1, "Success path must stop the checkpoint thread"
         assert join_idx != -1, "Success path must join the checkpoint thread"
         assert lock_idx != -1, "Success path must serialize mutation with _agent_lock"
-        assert save_idx != -1, "Success path restore/mutation block not found"
+        assert save_idx != -1, "Success path settlement block not found"
         assert stop_idx < join_idx < lock_idx <= save_idx, (
-            "Checkpoint stop/join must happen before the success-path session mutation block"
+            "Checkpoint stop/join must happen before the success-path settlement block"
         )
 
     def test_silent_failure_path_does_not_reacquire_agent_lock(self):

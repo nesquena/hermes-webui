@@ -1,4 +1,5 @@
 """Regression tests for preserving live streams across session switches."""
+import json
 import re
 import shutil
 import subprocess
@@ -1057,6 +1058,673 @@ def test_load_session_discards_cursor_only_inflight_before_reattach():
     # if(INFLIGHT[sid]){ block (which now precedes the guard).
     inflight_branch_pos = compact_load.rfind("if(INFLIGHT[sid]){")
     assert 0 <= guard_pos < inflight_branch_pos
+
+
+def test_user_only_inflight_must_not_seed_nonzero_replay_floor():
+    """#7640: a plain user row must not authorize a nonzero replay floor.
+
+    After a mid-stream SSE drop in transparent mode the client re-attaches with
+    `replay=1&after_seq=<cursor>`. When the cached INFLIGHT entry kept the
+    optimistic user row plus `lastRunJournalSeq` but lost the live assistant
+    projection, that cursor told the server to skip every journal event that
+    rebuilds the message body: only the tail (often just `stream_end`) came back
+    and the settled footer painted over a blank message until a manual reload.
+    """
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_inflightCanSeedJournalReplay"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayFloorForInflight"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayEventIdForInflight"),
+            """
+const userOnly={
+  messages:[{role:'user', content:'a very long ttft prompt'}],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+assert.strictEqual(_inflightCanSeedJournalReplay(userOnly), false);
+assert.strictEqual(_runJournalReplayFloorForInflight(userOnly), 0);
+assert.strictEqual(_runJournalReplayEventIdForInflight(userOnly), '');
+// The floor helper reports, it does not mutate the recovery object.
+assert.strictEqual(userOnly.lastRunJournalSeq, 206);
+
+// A user row with a populated but assistant-less transcript is still user-only.
+assert.strictEqual(
+  _runJournalReplayFloorForInflight({
+    messages:[{role:'user', content:'hi'}, {role:'assistant', content:''}],
+    lastRunJournalSeq:206,
+  }),
+  0
+);
+assert.strictEqual(
+  _runJournalReplayFloorForInflight({
+    messages:[{role:'user', content:'hi'}, {role:'assistant', content:'   '}],
+    lastRunJournalSeq:206,
+  }),
+  0
+);
+
+// Positive inverse: any recoverable live output keeps the cursor.
+const recovering=[
+  {lastAssistantText:'partial answer'},
+  {lastReasoningText:'thinking...'},
+  {liveTurnHtml:'<div>projected turn</div>'},
+  {toolCalls:[{name:'read_file'}]},
+  {activityBurstAnchors:[{seq:12}]},
+  {anchorActivityScene:{activity_rows:[{kind:'tool'}]}},
+  {messages:[{role:'user', content:'p'}, {role:'assistant', content:'answer', _live:true}]},
+];
+for (const extra of recovering) {
+  const state={messages:[{role:'user', content:'p'}], ...extra};
+  state.lastRunJournalSeq=206;
+  state.lastRunJournalEventId='stream-e75e:206';
+  assert.strictEqual(
+    _runJournalReplayFloorForInflight(state),
+    206,
+    'recoverable live output must keep the cursor: '+JSON.stringify(extra)
+  );
+  assert.strictEqual(_runJournalReplayEventIdForInflight(state), 'stream-e75e:206');
+}
+
+// #7651: an ESTABLISHED conversation copies the whole transcript, so the last
+// assistant row is the previous turn's reply. Historical assistant content must
+// never authorize the stale cursor that belongs to the still-running turn.
+const established={
+  messages:[
+    {role:'user', content:'first question'},
+    {role:'assistant', content:'the previous turn answer'},
+    {role:'user', content:'current question'},
+  ],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+assert.strictEqual(
+  _inflightCanSeedJournalReplay(established),
+  false,
+  'a historical assistant row must not seed the replay floor'
+);
+assert.strictEqual(_runJournalReplayFloorForInflight(established), 0);
+assert.strictEqual(_runJournalReplayEventIdForInflight(established), '');
+
+// Even after the latest user boundary, evidence must be LIVE output: a
+// settled/non-live assistant row at the current position still yields zero.
+assert.strictEqual(
+  _runJournalReplayFloorForInflight({
+    messages:[
+      {role:'user', content:'current question'},
+      {role:'assistant', content:'settled reply without _live'},
+    ],
+    lastRunJournalSeq:206,
+  }),
+  0
+);
+
+// Degenerate inputs must stay on the zero floor.
+assert.strictEqual(_runJournalReplayFloorForInflight(null), 0);
+assert.strictEqual(_runJournalReplayFloorForInflight({}), 0);
+assert.strictEqual(_runJournalReplayFloorForInflight({lastRunJournalSeq:206, messages:[]}), 0);
+assert.strictEqual(
+  _runJournalReplayFloorForInflight({lastAssistantText:'partial', lastRunJournalSeq:-4}),
+  0
+);
+assert.strictEqual(_runJournalReplayEventIdForInflight({}), '');
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_reattach_discards_replay_cursor_without_live_assistant_state():
+    """#7640: validate the recovery object immediately before reattach.
+
+    Trusting the object's existence (rather than its contents) is what let a
+    cursor-only cache reach the wire as a replay floor. Reattach now drops the
+    cursor so the journal replays from zero, which is the path a manual reload
+    already proves out, while a cache that still holds live assistant output
+    keeps its cursor and avoids re-rendering the whole journal.
+    """
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_inflightCanSeedJournalReplay"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayFloorForInflight"),
+            _function_decl(SESSIONS_JS, "_normalizeInflightReplayCursorForReattach"),
+            """
+const cursorOnly={
+  streamId:'stream-e75e',
+  reattach:true,
+  messages:[{role:'user', content:'a very long ttft prompt'}],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+assert.strictEqual(
+  _normalizeInflightReplayCursorForReattach(cursorOnly),
+  cursorOnly,
+  'must return the same object so the caller keeps mutating the live cache'
+);
+assert.strictEqual(cursorOnly.lastRunJournalSeq, 0);
+assert.strictEqual(cursorOnly.lastRunJournalEventId, '');
+assert.strictEqual(_runJournalReplayFloorForInflight(cursorOnly), 0);
+assert.strictEqual(
+  cursorOnly.messages.length,
+  1,
+  'the optimistic user row must survive so pending dedupe still works'
+);
+
+const recovering={
+  streamId:'stream-e75e',
+  reattach:true,
+  messages:[{role:'user', content:'p'}],
+  lastAssistantText:'partial answer',
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+_normalizeInflightReplayCursorForReattach(recovering);
+assert.strictEqual(recovering.lastRunJournalSeq, 206);
+assert.strictEqual(recovering.lastRunJournalEventId, 'stream-e75e:206');
+
+// #7651: a historical assistant row must not protect the cursor either, or an
+// established conversation settles with a blank body over a painted footer.
+const established={
+  streamId:'stream-e75e',
+  reattach:true,
+  messages:[
+    {role:'user', content:'first question'},
+    {role:'assistant', content:'the previous turn answer'},
+    {role:'user', content:'current question'},
+  ],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+_normalizeInflightReplayCursorForReattach(established);
+assert.strictEqual(established.lastRunJournalSeq, 0);
+assert.strictEqual(established.lastRunJournalEventId, '');
+assert.strictEqual(_runJournalReplayFloorForInflight(established), 0);
+assert.strictEqual(
+  established.messages.length,
+  3,
+  'the transcript must survive; only the cursor halves are dropped'
+);
+
+const noCursor={streamId:'stream-e75e', messages:[{role:'user', content:'p'}]};
+_normalizeInflightReplayCursorForReattach(noCursor);
+assert.strictEqual(noCursor.lastRunJournalSeq, undefined);
+assert.strictEqual(_runJournalReplayFloorForInflight(noCursor), 0);
+
+assert.strictEqual(_normalizeInflightReplayCursorForReattach(null), null);
+assert.strictEqual(_normalizeInflightReplayCursorForReattach(undefined), undefined);
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_reattach_replay_params_from_a_cursor_only_cache_replay_from_zero():
+    """#7640: end-to-end wire contract for a cursor-only reattach.
+
+    Derives the replay params from the real floor helpers (node) and feeds them
+    to the real server cursor parser. Tying both halves together matters because
+    `api.routes._parse_run_journal_after_seq()` reads `after_event_id` BEFORE
+    `after_seq`: a fix that zeroed only the seq would still resume at the stale
+    event id and skip every journal event that rebuilds the message body.
+    """
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_inflightCanSeedJournalReplay"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayFloorForInflight"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayEventIdForInflight"),
+            """
+const runId='stream-7640';
+const userOnly={
+  messages:[{role:'user', content:'a very long ttft prompt'}],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:runId+':205',
+};
+console.log(JSON.stringify({
+  after_seq:String(_runJournalReplayFloorForInflight(userOnly)),
+  after_event_id:String(_runJournalReplayEventIdForInflight(userOnly)||''),
+}));
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    params = json.loads(result.stdout.strip().splitlines()[-1])
+
+    # What the fixed client puts on the wire for a cache with no live projection.
+    assert params == {"after_seq": "0", "after_event_id": ""}
+
+    from api.routes import _parse_run_journal_after_seq
+
+    run_id = "stream-7640"
+    assert (
+        _parse_run_journal_after_seq(
+            {"after_seq": [params["after_seq"]], "after_event_id": [params["after_event_id"]]},
+            run_id,
+        )
+        == 0
+    )
+
+    # Precedence proof: dropping the seq alone would still resume at the stale id.
+    assert (
+        _parse_run_journal_after_seq(
+            {"after_seq": ["0"], "after_event_id": [f"{run_id}:205"]}, run_id
+        )
+        == 205
+    )
+    # ...and the pre-fix pair, for the record.
+    assert (
+        _parse_run_journal_after_seq(
+            {"after_seq": ["206"], "after_event_id": [f"{run_id}:205"]}, run_id
+        )
+        == 205
+    )
+
+
+def test_attach_and_reattach_use_the_validated_replay_floor():
+    """#7640 wiring guard: the validated floor is what reaches the wire.
+
+    The behavioral coverage for the floor helpers lives in
+    `test_user_only_inflight_must_not_seed_nonzero_replay_floor` and
+    `test_reattach_discards_replay_cursor_without_live_assistant_state`; this
+    test pins that `attachLiveStream()` and both `loadSession()` reattach paths
+    actually go through them instead of reading the raw cursor field.
+    """
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    init_pos = body.index("const _replayCursorInflight=")
+    init_block = body[init_pos : body.index(";", body.index("let _lastRunJournalEventId=", init_pos))]
+    assert "INFLIGHT[activeSid]" in init_block, "must still read the live cache"
+    assert "_runJournalReplayFloorForInflight(_replayCursorInflight)" in init_block
+    assert "_runJournalReplayEventIdForInflight(_replayCursorInflight)" in init_block
+    assert "INFLIGHT[activeSid].lastRunJournalSeq" not in init_block, (
+        "attachLiveStream must not read the raw cursor field anymore"
+    )
+    assert "INFLIGHT[activeSid].lastRunJournalEventId" not in init_block
+
+    load_body = re.sub(r"\s+", "", _function_body(SESSIONS_JS, "loadSession"))
+    assert load_body.count("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])") == 2, (
+        "both reattach paths must re-validate the recovery object"
+    )
+    first = load_body.index("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])")
+    first_attach = load_body.index("attachLiveStream(sid,activeStreamId", first)
+    assert first < first_attach, "validation must run before the stream is attached"
+    last = load_body.rindex("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])")
+    last_attach = load_body.rindex("attachLiveStream(sid,activeStreamId", 0, last)
+    assert last_attach < last
+
+
+def test_live_recovery_prefers_newer_durable_run_journal_snapshot():
+    """Recovery chooses by stream identity and durable journal progress."""
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_inflightHasVisibleLiveState"),
+            _function_decl(SESSIONS_JS, "_selectLiveRecoveryInflight"),
+            """
+const local = {
+  streamId:'stream-1',
+  lastRunJournalSeq:3,
+  lastAssistantText:'stale browser progress',
+};
+const server = {
+  streamId:'stream-1',
+  lastRunJournalSeq:5,
+  lastAssistantText:'newer durable progress',
+};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(local, server, 'stream-1'),
+  server
+);
+const newerLocal = {...local, lastRunJournalSeq:6};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(newerLocal, server, 'stream-1'),
+  newerLocal
+);
+const equalLocal = {...local, lastRunJournalSeq:5};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(equalLocal, server, 'stream-1'),
+  server
+);
+const localWithTodos = {
+  ...local,
+  todos:[{id:'todo-1', content:'live task', status:'in_progress'}],
+  todoStateMeta:{ts:123},
+};
+const selectedWithTodos = _selectLiveRecoveryInflight(localWithTodos, server, 'stream-1');
+assert.strictEqual(selectedWithTodos.lastAssistantText, server.lastAssistantText);
+assert.deepStrictEqual(selectedWithTodos.todos, localWithTodos.todos);
+assert.deepStrictEqual(selectedWithTodos.todoStateMeta, localWithTodos.todoStateMeta);
+const localWithTodosWithoutMeta = {
+  ...local,
+  todos:[{id:'todo-2', content:'unscoped task', status:'pending'}],
+  todoStateMeta:null,
+};
+const selectedWithoutTodoMeta = _selectLiveRecoveryInflight(localWithTodosWithoutMeta, server, 'stream-1');
+assert.strictEqual(selectedWithoutTodoMeta, server);
+assert.strictEqual(selectedWithoutTodoMeta.todos, undefined);
+assert.strictEqual(selectedWithoutTodoMeta.todoStateMeta, undefined);
+const oldStreamLocal = {...local, streamId:'stream-old', lastRunJournalSeq:99};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(oldStreamLocal, server, 'stream-1'),
+  server
+);
+const oldServer = {...server, streamId:'stream-old-server', lastRunJournalSeq:7};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(oldStreamLocal, oldServer, 'stream-1'),
+  null
+);
+const activeLocalWithOldServer = {...local, streamId:'stream-1', lastRunJournalSeq:99};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(activeLocalWithOldServer, oldServer, 'stream-1'),
+  activeLocalWithOldServer
+);
+const unidentifiedLocal = {...local};
+delete unidentifiedLocal.streamId;
+assert.strictEqual(
+  _selectLiveRecoveryInflight(unidentifiedLocal, server, 'stream-1'),
+  server
+);
+assert.strictEqual(_selectLiveRecoveryInflight(local, null, 'stream-1'), local);
+assert.strictEqual(_selectLiveRecoveryInflight(null, server, 'stream-1'), server);
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_run_journal_recovery_persists_stream_scoped_event_cursor():
+    """Hard reload must retain both halves of the run-aware replay cursor."""
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+            _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
+            """
+const inflight = _serverLiveSnapshotInflight({
+  stream_id:'stream-1',
+  last_seq:7,
+  last_event_id:'run-a:7',
+  last_assistant_text:'durable progress',
+}, []);
+assert.strictEqual(inflight.streamId, 'stream-1');
+assert.strictEqual(inflight.lastRunJournalSeq, 7);
+assert.strictEqual(inflight.lastRunJournalEventId, 'run-a:7');
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+    load_body = _function_body(SESSIONS_JS, "loadSession")
+    attach_body = _function_body(MESSAGES_JS, "attachLiveStream")
+    close_body = _function_body(MESSAGES_JS, "closeLiveStream")
+    compact_body = _function_body(UI_JS, "_compactInflightState")
+    assert "streamId:String(stored.streamId||'')" in load_body
+    assert "stored.streamId||activeStreamId" not in load_body
+    assert "lastRunJournalEventId:String(stored.lastRunJournalEventId||'')" in load_body
+    assert "lastRunJournalEventId:state.lastRunJournalEventId||''" in compact_body
+    assert "inflight.lastRunJournalEventId||''" in attach_body
+    # #7640: the cursor's event id is gated by the same validation as the seq —
+    # reading the raw field here let a cursor outlive its assistant projection.
+    assert "_runJournalReplayEventIdForInflight(_replayCursorInflight)" in attach_body
+    assert "INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId" not in attach_body
+    assert "inflight.lastRunJournalEventId=raw" in attach_body
+    assert "INFLIGHT[activeSid].streamId=streamId" in attach_body
+    assert "INFLIGHT[activeSid].lastRunJournalEventId=''" in attach_body
+    assert "lastRunJournalEventId:INFLIGHT[sessionId].lastRunJournalEventId||''" in close_body
+
+
+def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
+    """Durable-wins recovery must not downgrade browser-visible tool details."""
+    assert NODE, "node not on PATH"
+    from api import routes
+
+    stream_id = "stream-long-tool-args"
+    long_command = "python -c " + repr("print('x')\n" * 24)
+    complete_only_command = "bash -lc " + repr("echo complete-only && " * 16)
+    completion_enriched_command = "python -c " + repr("print('completion')\n" * 16)
+    events = [
+        {
+            "event": "tool",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "created_at": 1.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-started",
+                "args": {"command": long_command},
+            },
+        },
+        {
+            "event": "tool_complete",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "created_at": 2.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-started",
+                "preview": "started complete",
+            },
+        },
+        {
+            "event": "tool_complete",
+            "seq": 3,
+            "event_id": f"{stream_id}:3",
+            "created_at": 3.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-complete-only",
+                "args": {"command": complete_only_command},
+                "preview": "complete-only complete",
+            },
+        },
+        {
+            "event": "tool",
+            "seq": 4,
+            "event_id": f"{stream_id}:4",
+            "created_at": 4.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-completion-enriched",
+                "args": {"command": "partial"},
+            },
+        },
+        {
+            "event": "tool_complete",
+            "seq": 5,
+            "event_id": f"{stream_id}:5",
+            "created_at": 5.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-completion-enriched",
+                "args": {"command": completion_enriched_command},
+                "preview": "completion-enriched complete",
+            },
+        },
+    ]
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-1",
+            "run_id": sid,
+            "last_seq": 5,
+            "last_event_id": f"{sid}:5",
+        }
+        if sid == stream_id
+        else None,
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": events}
+        if session_id == "session-1" and run_id == stream_id
+        else {"events": []},
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    assert snapshot is not None
+    assert snapshot["tool_calls"][0]["args"]["command"] == long_command
+    assert snapshot["tool_calls"][1]["args"]["command"] == complete_only_command
+    assert snapshot["tool_calls"][2]["args"]["command"] == completion_enriched_command
+    tool_rows = [
+        row
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+        if row.get("role") == "tool"
+    ]
+    assert tool_rows[0]["tool"]["args"]["command"] == long_command
+    assert tool_rows[1]["tool"]["args"]["command"] == complete_only_command
+    assert tool_rows[2]["tool"]["args"]["command"] == completion_enriched_command
+    assert tool_rows[0]["payload"]["args"]["command"] == long_command
+    assert tool_rows[1]["payload"]["args"]["command"] == complete_only_command
+    assert tool_rows[2]["payload"]["args"]["command"] == completion_enriched_command
+
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+            _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
+            _function_decl(SESSIONS_JS, "_inflightHasVisibleLiveState"),
+            _function_decl(SESSIONS_JS, "_selectLiveRecoveryInflight"),
+            f"const snapshot={json.dumps(snapshot)};",
+            f"const longCommand={json.dumps(long_command)};",
+            f"const completionEnrichedCommand={json.dumps(completion_enriched_command)};",
+            f"const streamId={json.dumps(stream_id)};",
+            """
+const serverInflight = _serverLiveSnapshotInflight(snapshot, []);
+assert.strictEqual(serverInflight.streamId, streamId);
+assert.strictEqual(serverInflight.lastRunJournalSeq, 5);
+assert.strictEqual(serverInflight.toolCalls[0].args.command, longCommand);
+assert.strictEqual(serverInflight.toolCalls[2].args.command, completionEnrichedCommand);
+const localInflight = {
+  streamId,
+  lastRunJournalSeq: serverInflight.lastRunJournalSeq,
+  lastAssistantText: 'local equal-seq progress',
+  toolCalls: [{
+    name: 'terminal',
+    tid: 'call-started',
+    args: {command: 'local has a different full command'},
+  }],
+};
+const selected = _selectLiveRecoveryInflight(localInflight, serverInflight, streamId);
+assert.strictEqual(selected, serverInflight);
+assert.strictEqual(selected.lastRunJournalSeq, localInflight.lastRunJournalSeq);
+assert.strictEqual(selected.toolCalls[0].args.command, longCommand);
+assert.strictEqual(selected.toolCalls[2].args.command, completionEnrichedCommand);
+assert.ok(selected.toolCalls[0].args.command.length > 120);
+assert.ok(!selected.toolCalls[0].args.command.endsWith('...'));
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_projected_runtime_snapshot_restores_visible_scene_without_duplicate_tool_fallback():
+    """The HTTP projection may omit duplicate messages/tool_calls only when the
+    Anchor scene still makes the recovered inflight state visibly meaningful."""
+    assert NODE, "node not on PATH"
+    from api import routes
+
+    repeated = "tool output" * 100
+    snapshot = {
+        "stream_id": "stream-projected",
+        "last_seq": 9,
+        "last_event_id": "stream-projected:9",
+        "messages": [{"role": "assistant", "content": "progress", "_live": True, "_ts": 1234.5}],
+        "last_assistant_text": "progress",
+        "last_reasoning_text": "",
+        "tool_calls": [{"name": "terminal", "tid": "call-1", "snippet": repeated}],
+        "anchor_activity_scene": {
+            "version": "activity_scene_v1",
+            "identity": {"session_id": "session-1", "stream_id": "stream-projected", "run_id": "run-1"},
+            "activity_rows": [{
+                "row_id": "tool:call-1:0",
+                "local_id": "call-1",
+                "kind": "tool_completed",
+                "role": "tool",
+                "source_event_type": "tool_complete",
+                "status": "completed",
+                "tool_call_id": "call-1",
+                "tool": {"id": "call-1", "name": "terminal", "snippet": repeated, "done": True},
+            }],
+        },
+    }
+    projected = routes._runtime_journal_snapshot_for_session_payload(snapshot)
+
+    script = "\n".join([
+        "const assert=require('assert');",
+        _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+        _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
+        _function_decl(SESSIONS_JS, "_inflightHasVisibleLiveState"),
+        f"const snapshot={json.dumps(projected)};",
+        "const recovered=_serverLiveSnapshotInflight(snapshot,[]);",
+        "assert.strictEqual(recovered.streamId,'stream-projected');",
+        "assert.strictEqual(recovered.toolCalls.length,1);",
+        "assert.strictEqual(recovered.toolCalls[0].snippet.length>0,true);",
+        "assert.strictEqual(recovered.messages.length,1);",
+        "assert.strictEqual(recovered.messages[0].content,'progress');",
+        "assert.strictEqual(recovered.messages[0]._ts,1234.5);",
+        "assert.strictEqual(recovered.anchorActivityScene.activity_rows.length,1);",
+        "assert.strictEqual(recovered.anchorActivityScene.activity_rows[0].tool.snippet.length>0,true);",
+        "assert.strictEqual(_inflightHasVisibleLiveState(recovered),true);",
+    ])
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_runtime_journal_scene_fallback_ignores_foreign_stream_snapshots():
+    """A stale Anchor scene must not render under the current stream owner."""
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneStreamId"),
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneMatchesStream"),
+            _function_decl(SESSIONS_JS, "_runtimeJournalAnchorActivitySceneForSession"),
+            """
+const activeScene = {
+  version:'activity_scene_v1',
+  identity:{stream_id:'stream-1'},
+  activity_rows:[{role:'tool'}],
+};
+const oldScene = {
+  version:'activity_scene_v1',
+  identity:{stream_id:'stream-old'},
+  activity_rows:[{role:'tool'}],
+};
+globalThis.INFLIGHT = {sid:{anchorActivityScene:oldScene}};
+globalThis.S = {session:{runtime_journal_snapshot:{anchor_activity_scene:activeScene}}};
+assert.strictEqual(
+  _runtimeJournalAnchorActivitySceneForSession('sid', 'stream-1'),
+  activeScene
+);
+globalThis.S = {session:{runtime_journal_snapshot:{anchor_activity_scene:oldScene}}};
+assert.strictEqual(
+  _runtimeJournalAnchorActivitySceneForSession('sid', 'stream-1'),
+  null
+);
+globalThis.INFLIGHT = {sid:{anchorActivityScene:activeScene}};
+assert.strictEqual(
+  _runtimeJournalAnchorActivitySceneForSession('sid', 'stream-1'),
+  activeScene
+);
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_reconnect_prefers_trimmed_live_message_over_stale_full_assistant_cache():

@@ -10,30 +10,69 @@ import os
 import re
 import threading
 import time
+from copy import deepcopy
+from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+
+try:  # Native Windows uses its byte-range lock instead.
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - native Windows
+    _fcntl = None
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    _msvcrt = None
+
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
-# Next-seq to assign per run-journal file path, kept in memory so repeat appends
-# to the same run do not re-parse the whole file on every call. The per-path
-# ``_lock_for(path)`` serializes same-path reserve→append so seqs stay monotonic
-# and file order matches; ``_SEQ_CACHE_LOCK`` (below) additionally guards every
-# *structural* access to the dict (reserve/note/evict) so ``delete_run_journal``
-# can iterate + drop keys while a concurrent append on ANOTHER path inserts one,
-# without a ``dictionary changed size during iteration`` crash. See
-# ``_reserve_next_seq`` and ``delete_run_journal`` (which evicts stale entries).
+# Next sequence per path; a complete append publishes it under the per-path
+# lock. Cold writers validate and repair an uncommitted EOF tail before reuse;
+# hot writers avoid rereading the growing file. The shared dict mutex also
+# protects structural access against cross-path deletion/eviction.
 _SEQ_CACHE: dict[str, int] = {}
+_SEQ_CACHE_SIGNATURES: dict[str, tuple[int, int, int, int, int]] = {}
 _SEQ_CACHE_LOCK = threading.Lock()
-_TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
+# Summary callers only need terminal state and the latest cursor. Re-parsing a
+# completed journal's full payload (which can include multi-megabyte tool or
+# session results) on every status/reconnect probe is needless. This process
+# cache is keyed by a complete stat identity, so it is never used after an
+# atomic replacement, append, truncate, or same-path file recreation.
+_SUMMARY_CACHE_MAX_ENTRIES = 128
+_SUMMARY_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
+_SUMMARY_CACHE_LOCK = threading.Lock()
+# Events that mark a run terminal in the journal / summary sense.
+TERMINAL_SSE_EVENTS = frozenset({"done", "cancel", "apperror", "error", "stream_end"})
+# Events that should close an SSE relay drain loop. `done` is intentionally
+# excluded: background title generation and `stream_end` are emitted after
+# `done`, and breaking early would drop them. `apperror` is included because
+# it terminates with no trailing `stream_end`.
+SSE_RELAY_CLOSE_EVENTS = frozenset({"stream_end", "cancel", "apperror", "error"})
+# Back-compat alias used by older call sites / tests.
+_TERMINAL_SSE_EVENTS = TERMINAL_SSE_EVENTS
+# Events that are live-UI-only telemetry with no recovery value in the run
+# journal. They are skipped at WRITE time (never durably journaled, so they
+# cannot bloat the journal on marathon runs) and filtered at REPLAY time (so
+# legacy journals that already contain a backlog never stream it to a
+# reconnecting browser tab). Readers deliberately do NOT filter: cursor math
+# (``cursor_event_missing`` bound) and the offline-gap coverage check count
+# journal seqs and must keep seeing every row.
+REPLAY_SKIPPED_SSE_EVENTS = frozenset({"metering"})
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
 _SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
+_SNAPSHOT_ARGS_MAX_ITEMS = 64
+_SNAPSHOT_ARGS_MAX_DEPTH = 8
+_SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
+_SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
+_SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
 
 
 def _default_session_dir() -> Path:
@@ -64,6 +103,104 @@ def _lock_for(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _WRITER_LOCKS[key] = lock
         return lock
+
+
+@contextmanager
+def _journal_process_lock(fd: int, path: Path, *, shared: bool = False):
+    """Settle cooperating processes before seed/read/write/rollback.
+
+    POSIX locks the held journal inode. Native Windows uses a companion byte
+    lock; keep that file in place while this journal exists so waiters share it.
+    Unsupported lock backends fail closed before journal mutation.
+    """
+    if _fcntl is not None:
+        _fcntl.flock(fd, _fcntl.LOCK_SH if shared else _fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            _fcntl.flock(fd, _fcntl.LOCK_UN)
+        return
+    if _msvcrt is not None:
+        lock_fd = os.open(str(path) + '.lock', os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(lock_fd, 'r+b', buffering=0) as lock_file:
+            if os.fstat(lock_fd).st_size == 0:
+                lock_file.write(b'\0')
+            lock_file.seek(0)
+            _msvcrt.locking(lock_fd, _msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                _msvcrt.locking(lock_fd, _msvcrt.LK_UNLCK, 1)
+        return
+    raise OSError('cross-process run journal locking is unavailable')
+
+
+def _held_journal_signature(fd: int) -> tuple[int, int, int, int, int]:
+    stat = os.fstat(fd)
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Return the complete filesystem identity used for summary-cache validity.
+
+    Includes ``st_ctime_ns`` so a same-inode, same-size rewrite that restores the
+    original ``mtime_ns`` (e.g. an atomic replace) still invalidates the cache —
+    ctime advances on any metadata/content change and cannot be forged back.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def _get_cached_summary(path: Path) -> dict | None:
+    signature = _summary_cache_signature(path)
+    if signature is None:
+        return None
+    key = str(path)
+    with _SUMMARY_CACHE_LOCK:
+        cached = _SUMMARY_CACHE.get(key)
+        if cached is None:
+            return None
+        cached_signature, summary = cached
+        if cached_signature != signature:
+            _SUMMARY_CACHE.pop(key, None)
+            return None
+        _SUMMARY_CACHE.move_to_end(key)
+        return deepcopy(summary)
+
+
+def _cache_summary(
+    path: Path,
+    summary: dict,
+    *,
+    expected_signature: tuple[int, int, int, int, int] | None = None,
+) -> None:
+    signature = _summary_cache_signature(path)
+    # The pre-read signature is an enforced TOCTOU precondition. In particular,
+    # a journal created after a missing-file read has ``None -> signature`` and
+    # must not cache the empty/unknown result under the new file's identity.
+    if signature is None or signature != expected_signature:
+        return
+    key = str(path)
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE[key] = (signature, deepcopy(summary))
+        _SUMMARY_CACHE.move_to_end(key)
+        while len(_SUMMARY_CACHE) > _SUMMARY_CACHE_MAX_ENTRIES:
+            _SUMMARY_CACHE.popitem(last=False)
+
+
+def _discard_cached_summary(path: Path) -> None:
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.pop(str(path), None)
 
 
 def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
@@ -103,53 +240,63 @@ def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None
     return run_id or None, seq
 
 
-def _next_seq(path: Path) -> int:
-    events, _malformed = _read_jsonl(path)
-    seqs = [int(event.get("seq") or 0) for event in events if isinstance(event.get("seq"), int)]
-    return (max(seqs) + 1) if seqs else 1
+def _snapshot_args_take_budget(budget: dict[str, int], amount: int) -> int:
+    remaining = max(0, int(budget.get("remaining") or 0))
+    take = min(remaining, max(0, amount))
+    budget["remaining"] = remaining - take
+    return take
 
 
-def _reserve_next_seq(path: Path) -> int:
-    """Reserve and return the next seq for ``path``, advancing the in-memory cache.
-
-    Callers MUST hold ``_lock_for(path)``. The first append per path in this
-    process seeds the cache from ``_next_seq(path)`` (one file read); every later
-    append is a pure in-memory increment, avoiding the O(n) re-parse that
-    re-reading the whole journal on every append caused (O(n^2) over a run).
-    Because ``RunJournalWriter`` and the free ``append_run_event`` share this one
-    cache under the same per-path lock, their seqs stay monotonic and gapless
-    even when both write the same path. ``_SEQ_CACHE_LOCK`` additionally makes the
-    dict get+set atomic against a concurrent cross-path eviction.
-    """
-    key = str(path)
-    with _SEQ_CACHE_LOCK:
-        nxt = _SEQ_CACHE.get(key)
-        if nxt is not None:
-            _SEQ_CACHE[key] = nxt + 1
-            return nxt
-    # Cache miss: seed from disk WITHOUT holding the module-global lock, so a
-    # slow first-access file read for one path can't block every other path's
-    # cache ops. The caller holds the per-path lock, so only one thread per path
-    # can reach this branch — no double-seed, and no same-path writer can race
-    # the value in between.
-    seeded = _next_seq(path)
-    with _SEQ_CACHE_LOCK:
-        _SEQ_CACHE[key] = seeded + 1
-        return seeded
+def _bound_snapshot_args_string(value: str, budget: dict[str, int]) -> str:
+    max_chars = min(len(value), _SNAPSHOT_ARGS_MAX_STRING_CHARS)
+    take = _snapshot_args_take_budget(budget, max_chars)
+    out = value[:take]
+    if take < len(value):
+        suffix_take = _snapshot_args_take_budget(budget, len(_SNAPSHOT_ARGS_TRUNCATED_SUFFIX))
+        out += _SNAPSHOT_ARGS_TRUNCATED_SUFFIX[:suffix_take]
+    return out
 
 
-def _note_assigned_seq(path: Path, seq: int) -> None:
-    """Keep the cache at least one past an explicitly-supplied ``seq``.
+def _bound_run_journal_snapshot_value(value: Any, budget: dict[str, int], depth: int) -> Any:
+    if budget.get("remaining", 0) <= 0:
+        return None
+    if isinstance(value, str):
+        return _bound_snapshot_args_string(value, budget)
+    if isinstance(value, dict):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return {}
+        out: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _SNAPSHOT_ARGS_MAX_ITEMS or budget.get("remaining", 0) <= 0:
+                break
+            bounded_key = _bound_snapshot_args_string(str(key), budget)
+            if not bounded_key:
+                continue
+            out[bounded_key] = _bound_run_journal_snapshot_value(item, budget, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return []
+        return [
+            _bound_run_journal_snapshot_value(item, budget, depth + 1)
+            for item in value[:_SNAPSHOT_ARGS_MAX_ITEMS]
+            if budget.get("remaining", 0) > 0
+        ]
+    if isinstance(value, (bool, int, float)) or value is None:
+        try:
+            _snapshot_args_take_budget(budget, len(json.dumps(value)))
+        except (TypeError, ValueError):
+            return None
+        return value
+    return _bound_snapshot_args_string(str(value), budget)
 
-    Callers MUST hold ``_lock_for(path)``. When an append carries a caller-chosen
-    ``seq`` rather than drawing from the cache, advance the cache so a later
-    cache-based append on the same path cannot re-issue an already-used seq.
-    """
-    key = str(path)
-    nxt = int(seq) + 1
-    with _SEQ_CACHE_LOCK:
-        if _SEQ_CACHE.get(key, 0) < nxt:
-            _SEQ_CACHE[key] = nxt
+
+def bound_run_journal_snapshot_args(args: Any) -> Any:
+    """Return recovery tool args with realistic values intact and pathological payloads bounded."""
+    if args is None:
+        return {}
+    budget = {"remaining": _SNAPSHOT_ARGS_MAX_TOTAL_CHARS}
+    return _bound_run_journal_snapshot_value(args, budget, 0)
 
 
 def _terminal_state_for_event(event_name: str, payload) -> str | None:
@@ -259,34 +406,81 @@ def append_run_event(
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
-        if seq is not None:
-            assigned_seq = int(seq)
-            _note_assigned_seq(path, assigned_seq)
-        else:
-            assigned_seq = _reserve_next_seq(path)
-        terminal_state = _terminal_state_for_event(event_name, payload)
-        event = {
-            "version": 1,
-            "event_id": f"{run_id}:{assigned_seq}",
-            "seq": assigned_seq,
-            "run_id": str(run_id),
-            "session_id": str(session_id),
-            "event": event_name,
-            "type": event_name,
-            "created_at": float(created_at if created_at is not None else time.time()),
-            "terminal": bool(terminal_state),
-            "terminal_state": terminal_state,
-            "payload": payload,
-        }
+        key = str(path)
+        with _SEQ_CACHE_LOCK:
+            cached_next = _SEQ_CACHE.get(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         created_file = not path.exists()
-        line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-            if _should_fsync_event(terminal_state):
-                os.fsync(fh.fileno())
+        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_RDWR, 0o600)
+        try:
+            with _journal_process_lock(fd, path):
+                # Inspect the same inode that will receive the write. Only a cold
+                # cache seeds/repairs from disk; ordinary appends stay O(1).
+                signature = _held_journal_signature(fd)
+                size = signature[2]
+                with _SEQ_CACHE_LOCK:
+                    if _SEQ_CACHE_SIGNATURES.get(key) != signature:
+                        cached_next = None
+                if cached_next is None:
+                    with os.fdopen(os.dup(fd), "rb") as fh:
+                        fh.seek(0)
+                        next_seq, repair_size, add_newline = _prepare_journal_append(
+                            fh, str(session_id), str(run_id), size,
+                        )
+                else:
+                    next_seq, repair_size, add_newline = cached_next, size, False
+                assigned_seq = int(seq) if seq is not None else next_seq
+                terminal_state = _terminal_state_for_event(event_name, payload)
+                event = {
+                    "version": 2,
+                    "event_id": f"{run_id}:{assigned_seq}",
+                    "seq": assigned_seq,
+                    "run_id": str(run_id),
+                    "session_id": str(session_id),
+                    "event": event_name,
+                    "type": event_name,
+                    "created_at": float(created_at if created_at is not None else time.time()),
+                    "terminal": bool(terminal_state),
+                    "terminal_state": terminal_state,
+                    "payload": payload,
+                }
+                # Encode before mutating the file or publishing a sequence. JSON's
+                # ASCII escapes preserve lone provider surrogates without losing a
+                # row or replacing content; normal Unicode stays readable on disk.
+                line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+                try:
+                    encoded = line.encode("utf-8")
+                except UnicodeEncodeError:
+                    encoded = (json.dumps(event, ensure_ascii=True, separators=(",", ":")) + "\n").encode("utf-8")
+                if add_newline:
+                    encoded = b"\n" + encoded
+                try:
+                    if repair_size != size:
+                        os.ftruncate(fd, repair_size)
+                    remaining = memoryview(encoded)
+                    while remaining:
+                        written = os.write(fd, remaining)
+                        if written <= 0:
+                            raise OSError("run journal write made no progress")
+                        remaining = remaining[written:]
+                    if _should_fsync_event(terminal_state):
+                        os.fsync(fd)
+                except BaseException:
+                    # No buffered close can flush a partial row after this rollback.
+                    # Even if rollback itself fails, evict the cache so a later
+                    # append must inspect/repair the actual file before proceeding.
+                    with _SEQ_CACHE_LOCK:
+                        _SEQ_CACHE.pop(key, None)
+                        _SEQ_CACHE_SIGNATURES.pop(key, None)
+                    _discard_cached_summary(path)
+                    os.ftruncate(fd, repair_size)
+                    raise
+                with _SEQ_CACHE_LOCK:
+                    _SEQ_CACHE[key] = max(next_seq, assigned_seq + 1)
+                    _SEQ_CACHE_SIGNATURES[key] = _held_journal_signature(fd)
+                _discard_cached_summary(path)
+        finally:
+            os.close(fd)
         if created_file:
             _fsync_parent_dir(path)
         return event
@@ -299,23 +493,140 @@ class RunJournalWriter:
         self.session_id = _validate_id(session_id, "session_id")
         self.run_id = _validate_id(run_id, "run_id")
         self.session_dir = Path(session_dir) if session_dir is not None else None
-        self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
-        self._lock = _lock_for(self._path)
 
-    def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+    def append_sse_event(self, event_name: str, payload=None) -> dict | None:
+        # Live-UI-only telemetry (metering) has no recovery value in the journal:
+        # nothing reads those rows back for recovery, and journaling them at ~10 Hz
+        # on marathon runs balloons the durable file (12+ MB of a single 18 MB run
+        # was metering). Skip the write entirely and return None so callers'
+        # journal-id plumbing (``(journaled or {}).get("event_id")``) is untouched.
+        # Not reserving a seq keeps the remaining journaled seqs contiguous, which
+        # the offline-gap coverage and replay-cursor contiguity checks rely on.
+        if str(event_name or "").strip() in REPLAY_SKIPPED_SSE_EVENTS:
+            return None
+        # Allocate the sequence inside the same per-path transaction that writes
+        # the row. Reserving here, then releasing the lock before append, lets a
+        # concurrent writer put a higher sequence on disk first.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
         )
+
+
+def journal_replay_visible(event) -> bool:
+    """Return True when a journal row should be streamed to a reconnecting tab.
+
+    Live-UI-only telemetry rows (see ``REPLAY_SKIPPED_SSE_EVENTS``) carry no
+    recovery value — replaying a metering backlog only re-paints a stale TPS
+    number while multiplying the reconnect burst size. Writers no longer journal
+    them, but legacy journals may already contain them, so the replay emit sites
+    filter through this predicate. Non-dict rows are passed through (visible) so
+    an unexpected shape can never silently swallow user-visible output.
+    """
+    if not isinstance(event, dict):
+        return True
+    name = str(event.get("event") or event.get("type") or "")
+    return name not in REPLAY_SKIPPED_SSE_EVENTS
+
+
+def _scan_validated_journal(
+    lines, session_id: str, run_id: str, *, writer_seed: bool = False,
+) -> tuple[list[dict], list[dict], int]:
+    """Validate rows; return the last complete prefix byte offset for tail repair."""
+    events: list[dict] = []
+    line_no = 0
+    prefix_bytes = 0
+    last_seq = 0
+    gapless_started = False
+    try:
+        for current_line, raw in enumerate(lines, start=1):
+            line_no = current_line
+            if not raw.strip():
+                prefix_bytes += len(raw)
+                continue
+            try:
+                event = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                torn_utf8 = (
+                    isinstance(exc, UnicodeDecodeError)
+                    and exc.reason == "unexpected end of data"
+                    and exc.end == len(raw)
+                )
+                if not raw.endswith(b"\n") and (isinstance(exc, json.JSONDecodeError) or torn_utf8):
+                    return events, [{"line": line_no, "reason": "recovery_torn_tail"}], prefix_bytes
+                raise ValueError("recovery_malformed_row") from exc
+            seq = event.get("seq") if isinstance(event, dict) else None
+            # Version1 (or absent version) was written by the legacy producer,
+            # which consumed sequences on failed writes. Preserve increasing
+            # legacy cursor IDs; version2 declares gapless publication. Once
+            # upgraded, a run cannot downgrade its validation contract.
+            version = event.get('version', 1) if isinstance(event, dict) else None
+            if type(version) is not int or version not in (1, 2) or (gapless_started and version != 2):
+                raise ValueError('recovery_protocol_version')
+            gapless_started = gapless_started or version == 2
+            sequence_valid = (type(seq) is int and seq > last_seq and (
+                writer_seed or version == 1 or seq == last_seq + 1
+            ))
+            if not isinstance(event, dict) or (
+                not sequence_valid
+                or event.get("event_id") != f"{run_id}:{seq}"
+                or event.get("run_id") != run_id
+                or event.get("session_id") != session_id
+            ):
+                raise ValueError("recovery_identity_or_sequence")
+            name = event.get("event")
+            if not isinstance(name, str) or not name or event.get("type", name) != name:
+                raise ValueError("recovery_event_type")
+            terminal_state = _terminal_state_for_event(name, event.get("payload"))
+            if (event.get("terminal") is not bool(terminal_state)
+                    or event.get("terminal_state") != terminal_state):
+                raise ValueError("recovery_terminal_identity")
+            events.append(event)
+            last_seq = seq
+            prefix_bytes += len(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        return [], [{"line": line_no, "reason": str(exc)}], 0
+    return events, [], prefix_bytes
+
+
+def _prepare_journal_append(lines, session_id: str, run_id: str, size: int) -> tuple[int, int, bool]:
+    """Plan first-process tail repair and reseeding before any bytes are changed."""
+    events, malformed, prefix_bytes = _scan_validated_journal(
+        lines, session_id, run_id, writer_seed=True,
+    )
+    if malformed and malformed[0]["reason"] != "recovery_torn_tail":
+        raise ValueError(malformed[0]["reason"])
+    next_seq = events[-1]["seq"] + 1 if events else 1
+    if malformed:
+        return next_seq, prefix_bytes, False
+    if size:
+        lines.seek(-1, os.SEEK_END)
+        return next_seq, size, lines.read(1) != b"\n"
+    return next_seq, size, False
+
+
+def _read_validated_recovery_events(
+    path: Path, session_id: str, run_id: str,
+) -> tuple[list[dict], list[dict]]:
+    """Validate a complete durable run, tolerating an uncommitted torn EOF tail."""
+    try:
+        # Client replay caps are not durable-recovery limits. Read incrementally
+        # without splitting lines or dropping a valid run's terminal snapshot.
+        # Recovery must not observe a complete terminal row between write and
+        # a failed fsync/rollback in this process. Writer seeding calls the
+        # scanner directly while holding this same lock, avoiding reentrancy.
+        # Open first so an absent journal cannot retain a reader-only registry
+        # lock that deletion (no directory to remove) cannot evict. Do not read
+        # any bytes until the existing-file append transaction has settled.
+        with path.open("rb") as lines, _lock_for(path):
+            with _journal_process_lock(lines.fileno(), path, shared=True):
+                events, malformed, _prefix_bytes = _scan_validated_journal(lines, session_id, run_id)
+                return events, malformed
+    except FileNotFoundError:
+        return [], []
 
 
 def read_run_events(
@@ -325,9 +636,13 @@ def read_run_events(
     after_seq: int | None = None,
     max_seq: int | None = None,
     session_dir: Path | None = None,
+    validated_recovery: bool = False,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    events, malformed = _read_jsonl(path)
+    if validated_recovery:
+        events, malformed = _read_validated_recovery_events(path, str(session_id), str(run_id))
+    else:
+        events, malformed = _read_jsonl(path)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
     if max_seq is not None:
@@ -340,14 +655,63 @@ def read_run_events(
     }
 
 
+def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
+    """Return the terminal event that owns the run's settled outcome.
+
+    ``stream_end`` is transport closure, so a preceding semantic terminal event
+    (done, cancel, or error) remains authoritative. Among semantic terminal
+    events, the latest journal row wins.
+    """
+    terminal_events = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("terminal")
+    ]
+    return next(
+        (
+            event
+            for event in reversed(terminal_events)
+            if event.get("event") != "stream_end"
+        ),
+        terminal_events[-1] if terminal_events else None,
+    )
+
+
+def runtime_model_from_events(session_id: str, stream_id: str, events: Iterable[dict]) -> dict | None:
+    """Project only observed serving identity for this journal owner.
+
+    A fallback warning or malformed later observation invalidates old evidence;
+    the configured selection and free-text status never supply serving identity.
+    """
+    observed = None
+    for event in events:
+        if not isinstance(event, dict) or event.get("session_id") != session_id or event.get("run_id") != stream_id:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            if event.get("event") == "runtime_model":
+                observed = None
+            continue
+        if event.get("event") == "warning" and payload.get("type") == "fallback":
+            observed = None
+        elif event.get("event") == "runtime_model":
+            observed = None
+            if (payload.get("session_id") != session_id or payload.get("stream_id") != stream_id
+                or not isinstance(payload.get("model"), str) or not payload["model"].strip()
+                or not isinstance(payload.get("fallback_active"), bool)
+                or payload.get("phase") not in ("observed_output", "route_observed")):
+                continue
+            observed = {key: payload[key] for key in (
+                "session_id", "stream_id", "model", "fallback_active", "phase")}
+            if isinstance(payload.get("provider"), str) and payload["provider"].strip():
+                observed["provider"] = payload["provider"]
+    return observed
+
+
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
-    terminal_events = [event for event in ordered if event.get("terminal")]
-    terminal = next(
-        (event for event in reversed(terminal_events) if event.get("event") != "stream_end"),
-        terminal_events[-1] if terminal_events else None,
-    )
+    terminal = select_authoritative_terminal_event(ordered)
     status = terminal.get("terminal_state") if terminal else ("running" if ordered else "unknown")
     return {
         "session_id": str(session_id),
@@ -359,12 +723,20 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
         "terminal": bool(terminal),
         "terminal_state": status,
         "last_event": (last or {}).get("event"),
+        "runtime_model": runtime_model_from_events(session_id, run_id, ordered),
     }
 
 
 def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None = None) -> dict:
-    journal = read_run_events(session_id, run_id, session_dir=session_dir)
-    return _summary_from_events(session_id, run_id, journal.get("events") or [])
+    path = _run_path(session_id, run_id, session_dir=session_dir)
+    cached = _get_cached_summary(path)
+    if cached is not None:
+        return cached
+    pre_read_signature = _summary_cache_signature(path)
+    events, _malformed = _read_jsonl(path)
+    summary = _summary_from_events(session_id, run_id, events)
+    _cache_summary(path, summary, expected_signature=pre_read_signature)
+    return summary
 
 
 def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = None) -> tuple[int, float, int]:
@@ -407,10 +779,35 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
     journal_root = root / RUN_JOURNAL_DIR_NAME
     for path in journal_root.glob(f"*/{rid}.jsonl"):
         session_id = path.parent.name
-        events, _malformed = _read_jsonl(path)
-        summary = _summary_from_events(session_id, rid, events)
+        summary = _get_cached_summary(path)
+        if summary is None:
+            pre_read_signature = _summary_cache_signature(path)
+            events, _malformed = _read_jsonl(path)
+            summary = _summary_from_events(session_id, rid, events)
+            _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary
+    return None
+
+
+def find_run_file(run_id: str, *, session_dir: Path | None = None) -> tuple[str, Path] | None:
+    """Locate a run journal file by run id WITHOUT parsing its body.
+
+    Hot callers that immediately read the full journal (the live-snapshot
+    rebuild) must not pay :func:`find_run_summary`'s full-file parse first:
+    on a long live run the file holds tens of thousands of rows and parsing
+    it twice per rebuild dominated the snapshot cost. Returns
+    ``(session_id, path)`` for the first match, or ``None`` when the run id
+    is invalid or no journal exists.
+    """
+    try:
+        rid = _validate_id(run_id, "run_id")
+    except ValueError:
+        return None
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    journal_root = root / RUN_JOURNAL_DIR_NAME
+    for path in journal_root.glob(f"*/{rid}.jsonl"):
+        return path.parent.name, path
     return None
 
 
@@ -572,12 +969,16 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         # for this session lives directly under ``session_journal_dir``, so its
         # cache key's parent dir matches. Without this, a run re-created at the
         # same path would resume the stale cached seq instead of restarting at 1.
-        # Hold ``_SEQ_CACHE_LOCK`` — the SAME mutex ``_reserve_next_seq``/
-        # ``_note_assigned_seq`` take — so a concurrent append on another path
+        # Hold ``_SEQ_CACHE_LOCK`` — the SAME mutex append publication takes —
+        # so a concurrent append on another path
         # cannot mutate the dict mid-iteration (``dictionary changed size``).
         with _SEQ_CACHE_LOCK:
-            for key in [k for k in _SEQ_CACHE if str(Path(k).parent) == dir_key]:
-                del _SEQ_CACHE[key]
+            for cache in (_SEQ_CACHE, _SEQ_CACHE_SIGNATURES):
+                for cache_key in [entry for entry in cache if str(Path(entry).parent) == dir_key]:
+                    del cache[cache_key]
+        with _SUMMARY_CACHE_LOCK:
+            for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
+                del _SUMMARY_CACHE[cache_key]
     return removed
 
 

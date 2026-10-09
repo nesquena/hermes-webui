@@ -27,6 +27,7 @@ async function api(path,opts={}){
       delete fetchOpts.retryTimeouts;
       delete fetchOpts.retryStatuses;
       delete fetchOpts.retryDelayMs;
+      delete fetchOpts.statusOnly;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -76,6 +77,19 @@ async function api(path,opts={}){
           err.statusText=res.statusText;
           err.body=text;
           throw err;
+        }
+        if(opts.statusOnly===true){
+          // #6710 (gate re-review, item 2): the caller only needs the status line
+          // — the preview reachability probe. Drop the body instead of buffering
+          // it: the inline HTML route answers with the whole document and
+          // `Accept-Ranges: none`, so a plain probe streamed the entire file once
+          // for the probe and again for the iframe (measured: probe 1.80–1.99 s
+          // vs 0.06–0.33 s on a 3.3 MB page at 2 MB/s).
+          try{
+            if(controller) controller.abort();
+            else if(res.body&&typeof res.body.cancel==='function') res.body.cancel();
+          }catch(_){}
+          return {status:res.status};
         }
         const ct=res.headers.get('content-type')||'';
         return ct.includes('application/json')?await res.json():await res.text();
@@ -586,12 +600,39 @@ function renderSessionArtifacts(){
     if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
     return p;
   };
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(displayPath(item.path))}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  const splitArtifactDisplayPath = (path) => {
+    const slash = path.lastIndexOf('/');
+    if(slash < 0) return {name: path, head: '', tail: ''};
+    const directory = path.slice(0, slash + 1);
+    const parentSlash = directory.lastIndexOf('/', directory.length - 2);
+    return {
+      name: path.slice(slash + 1),
+      head: directory.slice(0, parentSlash + 1),
+      tail: directory.slice(parentSlash + 1),
+    };
+  };
+  root.innerHTML = items.map(item => {
+    const path = displayPath(item.path);
+    const parts = splitArtifactDisplayPath(path);
+    const directory = (parts.head || parts.tail)
+      ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
+      : '';
+    const source = item.source ? esc(item.source) : esc(t('workspace_artifact_source_session') || 'session');
+    const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
+    return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
+  }).join('');
+}
+
+function projectSessionArtifactsForOwner(sessionId){
+  if(!sessionId||!S.session||S.session.session_id!==sessionId) return false;
+  if(typeof _isSessionCurrentPane!=='function'||!_isSessionCurrentPane(sessionId)) return false;
+  renderSessionArtifacts();
+  return true;
 }
 
 async function _workspacePathExists(path){
   if(!S.session||!path) return false;
-  const parts=String(path).split('/').filter(Boolean);
+  const parts=String(path).replace(/\\/g,'/').split('/').filter(Boolean);
   const name=parts.pop();
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
@@ -599,28 +640,273 @@ async function _workspacePathExists(path){
   return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
 }
 
+/**
+ * #6710: how long a browser-loaded preview may take to report readiness before
+ * the open is treated as failed. Shared by every preview branch so a stalled
+ * response can never leave `openFile()` (and therefore `openArtifactPath()`)
+ * pending forever — the user selected the file explicitly, so a hang is worse
+ * than a reported failure.
+ */
+const _PREVIEW_LOAD_TIMEOUT_MS = 8000;
+
+/**
+ * #6710: verify a `raw` preview route actually serves the file before reporting
+ * a successful reveal.
+ *
+ * Image / media / PDF / HTML previews hand the URL to a browser element and let
+ * the browser fetch it. That fetch is asynchronous and NOT covered by the
+ * `/api/list` existence check: the entry can exist while the raw request still
+ * fails (expired escape grant → 403, file removed between the two calls → 404,
+ * oversized/binary → attachment). Reporting success on the assignment alone made
+ * `openArtifactPath()` clear the user's dismissal and promote the panel before
+ * the outcome was known, leaving them on a broken preview in a panel that had
+ * just forced itself open.
+ *
+ * Probe with a 1-byte ranged GET: the file route honours Range and answers 206,
+ * so this costs a single byte of body instead of the whole file (a large image
+ * or PDF must not be downloaded twice). `api()` rejects with `.status` attached,
+ * and never throws on the 401 redirect path.
+ */
+async function _workspaceRawReachable(url){
+  try{
+    await api(url, {headers:{Range:'bytes=0-0'}, retries:0, timeoutMs:8000, timeoutToast:false, statusOnly:true});
+    return true;
+  }catch(err){
+    // #6710 (gate re-review): a probe TIMEOUT is not evidence that the file is
+    // unreachable. The probe is a 1-byte ranged GET, but the HTML route ignores
+    // `Range` and streams the whole document, so a large or slow file can
+    // outlast the probe while the iframe would have loaded it fine (master
+    // loaded it; this bound turned that into a hard failure). Only a confirmed
+    // HTTP answer — expired grant → 403, removed file → 404 — proves the
+    // preview cannot load, so only that reports failure.
+    if(err&&(err.timeout===true||err.name==='TimeoutError')) return true;
+    setStatus(t('file_open_failed'));
+    return false;
+  }
+}
+
+/**
+ * #6710: wait for an element that loads its own source (`<img>`) to report
+ * whether it succeeded, then return that outcome.
+ *
+ * `assign()` starts the request; the outcome arrives later as a `load` or
+ * `error` event. Resolving on either means a broken source is reported as a
+ * failure instead of an immediate success. Guarded for the Node harnesses and
+ * older test doubles that have no event plumbing: without `addEventListener`
+ * there is nothing to wait on, so the previous fire-and-forget behaviour is
+ * preserved rather than hanging forever.
+ */
+function _awaitElementLoad(el, assign, failKey){
+  if(!el||typeof el.addEventListener!=='function'){
+    assign();
+    return Promise.resolve(true);
+  }
+  return new Promise(resolve=>{
+    let settled=false;
+    const detach=()=>{
+      el.removeEventListener('load', onLoad);
+      el.removeEventListener('error', onError);
+    };
+    const finish=(ok)=>{
+      if(settled) return;
+      settled=true;
+      detach();
+      clearTimeout(timer);
+      if(!ok) setStatus(t(failKey));
+      resolve(ok);
+    };
+    const onLoad=()=>finish(true);
+    const onError=()=>finish(false);
+    // Late outcome after the anti-hang bound released the open: the panel is
+    // already up, so only a genuine error still needs surfacing — this restores
+    // the status reporting the fire-and-forget code had. A late success needs
+    // nothing: the content is visible by then.
+    //
+    // Both late handlers retire together. `{once:true}` only removes the handler
+    // that actually fired, and this element is shared (#previewImg), so an
+    // attempt that ends in `error` left its paired `load` handler attached for
+    // good — repeated timed-out failures stacked stale closures on the element
+    // and let old handlers consume events from later previews. Each terminal
+    // event now removes both.
+    const detachLate=()=>{
+      el.removeEventListener('load', onLateLoad);
+      el.removeEventListener('error', onLateError);
+    };
+    const onLateLoad=()=>detachLate();
+    const onLateError=()=>{detachLate();setStatus(t(failKey));};
+    el.addEventListener('load', onLoad);
+    el.addEventListener('error', onError);
+    // Anti-hang guard (Greptile): a response that stalls — proxy holding the
+    // socket open, server wedged — fires neither load nor error, so without
+    // this the promise never settles and openArtifactPath() stays pending
+    // forever. But this bound CANNOT tell "slow" from "dead", so it must not
+    // report failure: doing that hid legitimately slow images behind a closed
+    // panel even though the assigned src kept loading and would have appeared.
+    // It releases the wait and lets the panel open; the source keeps loading.
+    const timer=setTimeout(()=>{
+      if(settled) return;
+      settled=true;
+      clearTimeout(timer);
+      detach();
+      el.addEventListener('load', onLateLoad, {once:true});
+      el.addEventListener('error', onLateError, {once:true});
+      resolve(true);
+    }, _PREVIEW_LOAD_TIMEOUT_MS);
+    assign();
+    // A cached image can settle during assignment; `complete` covers that, and
+    // naturalWidth distinguishes a real bitmap from a decode failure.
+    if(el.complete){
+      if(el.naturalWidth>0) finish(true);
+      else finish(false);
+    }
+  });
+}
+
+/**
+ * #6710: mount a media player and hand back the `<video>`/`<audio>` element so
+ * the caller can await its outcome. Returns null when the markup cannot be
+ * inspected (harness doubles), which the caller treats as "cannot verify".
+ */
+function _mountMediaPlayer(wrap, html, mode){
+  wrap.innerHTML=html;
+  const el=wrap.querySelector?wrap.querySelector(mode):null;
+  if(!el||typeof el.addEventListener!=='function') return null;
+  return el;
+}
+
+/**
+ * #6710: resolve once a media element is playable, or fail on a hard error.
+ * `loadedmetadata` is the first point the source is known to be readable;
+ * waiting for the whole file would stall large videos. Never rejects.
+ *
+ * The bound follows the same contract as `_awaitElementLoad()`: it releases a
+ * stalled wait so `openArtifactPath()` cannot hang, but because it cannot tell
+ * "slow" from "dead" it must not report failure — a large file on a slow link
+ * would otherwise be hidden behind a closed panel while it was still loading.
+ * Only a real `error` event fails closed; a late error after the bound fired is
+ * still surfaced through the status line.
+ */
+function _awaitMediaReady(el, isOwned){
+  // #6710 (Greptile P2): a cleared or replaced preview keeps its <video>/<audio>
+  // element (clearPreview()/showPreview() only hide it), so a late error must not
+  // surface a "file open failed" status for a preview the user already left.
+  const stillOwned=()=>typeof isOwned!=='function'||isOwned();
+  return new Promise(resolve=>{
+    let settled=false;
+    const detach=()=>{
+      el.removeEventListener('loadedmetadata', onReady);
+      el.removeEventListener('error', onError);
+    };
+    const finish=(ok)=>{
+      if(settled) return;
+      settled=true;
+      detach();
+      clearTimeout(timer);
+      if(!ok&&stillOwned()) setStatus(t('file_open_failed'));
+      resolve(ok);
+    };
+    const onReady=()=>finish(true);
+    const onError=()=>finish(false);
+    const onLateReady=()=>el.removeEventListener('error', onLateError);
+    const onLateError=()=>{ if(stillOwned()) setStatus(t('file_open_failed')); };
+    const timer=setTimeout(()=>{
+      if(settled) return;
+      settled=true;
+      clearTimeout(timer);
+      detach();
+      el.addEventListener('loadedmetadata', onLateReady, {once:true});
+      el.addEventListener('error', onLateError, {once:true});
+      resolve(true);
+    }, _PREVIEW_LOAD_TIMEOUT_MS);
+    el.addEventListener('loadedmetadata', onReady);
+    el.addEventListener('error', onError);
+    if(el.readyState>=1) finish(true);
+  });
+}
+
+// #6710 (release gate, Codex c38): every artifact click gets its own generation, so
+// only the most recent click may act when its existence check resolves. Sharing
+// _previewOpenGen was not enough: with two pending clicks, the older one's
+// openFile() bumped it and silently retired the newer click.
+let _artifactClickGen = 0;
 async function openArtifactPath(path){
-  if(!path) return;
+  if(!path) return false;
+  // typeof guard: harnesses that extract this function alone keep working.
+  const clickGen=typeof _artifactClickGen==='number'?++_artifactClickGen:null;
   switchWorkspacePanelTab('files');
-  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
+  // Capture the dismissal generation before any await. If the user dismisses the
+  // panel while the existence check or the read is in flight, that newer intent
+  // must win: promoting the panel afterwards would erase it and force the panel
+  // open over whatever the user just closed.
+  const dismissGen=typeof _workspacePanelDismissGen!=='undefined'?_workspacePanelDismissGen:null;
+  const _dismissalUnchanged=()=>dismissGen===null
+    ||typeof _workspacePanelDismissGen==='undefined'
+    ||_workspacePanelDismissGen===dismissGen;
+  // Normalize backslash separators to '/' first — Windows absolute paths
+  // (e.g. "D:\workspace\dir\file") otherwise break prefix-strip and the
+  // /api/list existence check (which splits on '/').
+  let rel = String(path).replace(/\\/g,'/').replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.
-  const ws = S.session && S.session.workspace;
+  const ws = (S.session && S.session.workspace || '').replace(/\\/g,'/');
   if(ws){
     const normWs = ws.replace(/\/+$/,'') + '/';
     if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
     else if(rel === ws.replace(/\/+$/,'')) rel = '.';
   }
   if(!rel) rel = '.';
+  // #6710 (Greptile P1 on the release PR): the existence check is a network
+  // await too. A session switch, a newer file open or a cleared preview while it
+  // is in flight must retire this artifact click; otherwise openFile(rel) would
+  // take fresh ownership and open the old path in the new context.
+  const artGen=typeof _previewOpenGen==='number'?_previewOpenGen:null;
+  const artSid=S.session&&S.session.session_id;
+  const artWsGen=typeof _wsTreeGen==='number'?_wsTreeGen:null;
+  const _artifactClickOwned=()=>(clickGen===null||clickGen===_artifactClickGen)
+    &&(artGen===null||artWsGen===null
+      ||(typeof _previewOpenOwned==='function'&&_previewOpenOwned(artGen,artSid,artWsGen)));
   try{
-    if(!(await _workspacePathExists(rel))){
+    const exists=await _workspacePathExists(rel);
+    if(!_artifactClickOwned()||!_dismissalUnchanged()) return false;
+    if(!exists){
       setStatus(t('file_open_failed'));
-      return;
+      return false;
     }
   }catch(_){
+    if(!_artifactClickOwned()) return false;
     setStatus(t('file_open_failed'));
-    return;
+    return false;
   }
-  openFile(rel);
+  // User-initiated file open from chat (workspace:// link or artifact click):
+  // clear any prior dismissal so the panel auto-opens to show this file.
+  // This must happen only AFTER the async existence check resolves and only on
+  // the success path: clearing it up-front let a keyboard/rotation/URL-bar
+  // sync reopen the stale preview while the request was still pending, and a
+  // failed open (missing file / request error) then stripped the dismissal
+  // guard for good. Both are fixed by writing the flag only here.
+  //
+  // The read can ALSO fail after the existence check succeeded (403 grant
+  // expired, oversized, binary→download, network error). openFile() reports
+  // that, and a failed read must not clear the dismissal either: the panel
+  // would be force-opened onto stale or empty preview content, which is exactly
+  // the intrusion this flag exists to prevent.
+  //
+  // Only a literal `true` counts as a preview. A download-only artifact (e.g.
+  // .zip) or an unreadable file reports false, and must fail closed rather than
+  // being read as a reveal.
+  const opened = await openFile(rel);
+  if(opened !== true){
+    // Nothing was previewed (read failed or the file was downloaded instead).
+    // Leave the dismissal flag untouched and do not promote the panel.
+    return false;
+  }
+  if(!_dismissalUnchanged()){
+    // The user dismissed the panel while this open was in flight. Honour it.
+    return false;
+  }
+  if(typeof _setWorkspacePanelDismissed==='function') _setWorkspacePanelDismissed(false);
+  else if(typeof _workspacePanelUserDismissed!=='undefined') _workspacePanelUserDismissed=false;
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  return true;
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
@@ -709,6 +995,7 @@ async function loadDir(path, opts={}){
                              // rejected here instead of painting the wrong profile's files.
   try{
     if(!path||path==='.'||refreshExpanded){
+      if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
@@ -718,6 +1005,14 @@ async function loadDir(path, opts={}){
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
     );
     if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    if(data.workspace_recovered&&data.workspace){
+      S.session.workspace=String(data.workspace);
+      S._dirCache={};
+      _restoreExpandedDirs();
+      if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
+      if(typeof syncTerminalButton==='function')syncTerminalButton();
+      showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
+    }
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
@@ -918,6 +1213,20 @@ let _previewSaveRoute = '/api/file/save';  // current save adapter for the open 
 let _previewOfficeFormat = '';  // current claimed Office format, if any
 let _previewPreviewKind = '';  // preview family returned by the backend
 
+// #6710 (gate re-review): every async preview branch awaits its source before
+// touching the DOM, so a SLOWER open can complete after a newer one and paint
+// the old file under the new filename (Chromium repro supplied by the gate:
+// delay `ok.html` by 400 ms, then open `new.html` → the iframe showed ok.html).
+// Each open therefore takes a generation, and any completion whose owner has
+// moved on — newer open, different session, or a profile switch that bumped the
+// workspace-tree generation — is rejected before it can commit anything.
+let _previewOpenGen = 0;
+function _previewOpenOwned(gen, sid, wsGen){
+  return gen === _previewOpenGen
+    && sid === (S.session && S.session.session_id)
+    && wsGen === _wsTreeGen;
+}
+
 function showPreview(mode){
   // mode: 'code' | 'csv' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
   $('previewCode').style.display     = mode==='code'  ? '' : 'none';
@@ -1058,7 +1367,7 @@ function _prismLanguageForPath(path){
 }
 
 async function openFile(path, opts={}){
-  if(!S.session)return;
+  if(!S.session)return false;   // nothing can be previewed without a session
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
@@ -1067,7 +1376,7 @@ async function openFile(path, opts={}){
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
     downloadFile(path);
-    return;
+    return false;   // nothing was previewed — the caller must not treat this as a reveal
   }
 
   _previewServerEditable = null;
@@ -1080,30 +1389,62 @@ async function openFile(path, opts={}){
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;
+  // #6710: this open's ownership token (see _previewOpenOwned). Captured before
+  // the first await of any branch so a slower completion can be recognised as
+  // stale and rejected instead of committing over a newer preview.
+  const _openGen = ++_previewOpenGen;
+  const _openSid = S.session && S.session.session_id;
+  const _openWsGen = _wsTreeGen;
   renderFileBreadcrumb(path);
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
     showPreview('image');
     const url=_workspaceRouteForPath(path, 'raw') + cacheBust;
-    $('previewImg').alt=path;
-    $('previewImg').src=url;
-    $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
+    const img=$('previewImg');
+    img.alt=path;
+    // #6710: assigning src only STARTS the request. Report the real outcome so
+    // a broken image fails closed instead of promoting the panel onto a blank
+    // preview (see _awaitElementLoad).
+    if(!(await _awaitElementLoad(img, ()=>{img.src=url;}, 'image_load_failed'))) return false;
+    // #6710 (gate re-review, item 1): the readiness wait above is an await, so
+    // the preview may have been superseded — a newer open, a session switch, or
+    // a workspace-generation bump while the image was loading. Reporting success
+    // here is what reaches openArtifactPath() and clears the user's dismissal
+    // (Chromium repro: delay the readiness 400 ms, switch sessions, loadDir('.')).
+    if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     showPreview(mode);
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
     const wrap=$('previewMediaWrap');
     if(wrap){
-      wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
+      const html=(typeof _mediaPlayerHtml==='function')
         ? _mediaPlayerHtml(mode,url,path.split('/').pop()||path)
         : `<${mode} src="${url.replace(/"/g,'%22')}" controls preload="metadata"></${mode}>`;
+      // #6710: mount the player first so its outcome can be observed, then
+      // report it — a dead grant or missing file must not read as a reveal.
+      const mediaEl=_mountMediaPlayer(wrap, html, mode);
       if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
+      if(mediaEl && !(await _awaitMediaReady(mediaEl, ()=>_previewOpenOwned(_openGen,_openSid,_openWsGen)))) return false;
+      // #6710 (gate re-review, item 1): same ownership rule as the image branch
+      // (video shares this branch) — a readiness wait that resolved after the
+      // preview was superseded must not be reported as a reveal.
+      if(mediaEl && !_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
     const frame=$('previewPdfFrame');
     if(frame){
+      // #6710: an iframe that cannot fetch its document still fires `load`
+      // (the browser substitutes its own error page), so the event cannot
+      // report failure. Probe the route instead and commit the frame only once
+      // it is known to serve.
+      if(!(await _workspaceRawReachable(url))) return false;
+      // #6710: the probe awaited, so a newer open — or a session/workspace
+      // change — may own the preview now. Committing the frame here would paint
+      // this file under whatever the user opened since (gate repro).
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       frame.src=''; // clear first to avoid stale content
       frame.src=url;
       frame.title=`PDF preview: ${path.split('/').pop()||path}`;
@@ -1119,6 +1460,10 @@ async function openFile(path, opts={}){
       const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
         ? {content:_previewRawContent}
         : await api(_workspaceRouteForPath(path, 'read'));
+      // #6710: same ownership rule as the HTML/PDF/media branches -- a read that
+      // resolves after a newer open, a session switch or a closed panel must not
+      // commit or report success (release gate repro: delayed .md + loadDir('.')).
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
@@ -1126,10 +1471,10 @@ async function openFile(path, opts={}){
         $('previewCode').textContent=data.content;
         setLargeMarkdownForceRenderVisible(true);
         setStatus(largeMarkdownPlainTextStatus(data.content));
-        return;
+        return true;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){setStatus(t('file_open_failed'));}
+    }catch(e){setStatus(t('file_open_failed')); return false;}
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1143,29 +1488,39 @@ async function openFile(path, opts={}){
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
     const iframe=$('previewHtmlIframe');
     if(iframe){
+      // #6710: same iframe limitation as the PDF branch — a failed document
+      // still fires `load`, so probe the route before committing the frame.
+      if(!(await _workspaceRawReachable(url))) return false;
+      // #6710: same ownership rule as the PDF branch — a completion that lost
+      // the preview to a newer open must not commit (gate repro: ok.html
+      // delayed 400 ms then new.html opened showed ok.html).
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       iframe.src=''; // clear first to avoid stale content
       iframe.src=url;
     }
   } else if(ext==='.csv'){
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       if(data.binary){
         downloadFile(path);
-        return;
+        return false;   // downloaded, nothing previewed
       }
-      if(renderCsvPreviewContent(path, data.content)) return;
+      if(renderCsvPreviewContent(path, data.content)) return true;
       renderCodePreviewContent(path, data.content);
     }catch(e){
       downloadFile(path);
+      return false;   // downloaded, nothing previewed
     }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       if(data.binary){
         // Server flagged this as binary content
         downloadFile(path);
-        return;
+        return false;   // downloaded, nothing previewed
       }
       if(data.preview_kind==='office'){
         _previewRawContent = data.content || '';
@@ -1181,12 +1536,14 @@ async function openFile(path, opts={}){
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);
         showToast(t('external_link_grant_expired') || t('file_open_failed'), 5000, 'error');
-        return;
+        return false;
       }
       // If it's a 400/too-large error, offer download instead
       downloadFile(path);
+      return false;   // downloaded, nothing previewed
     }
   }
+  return true;
 }
 
 function downloadFile(path){
@@ -1386,16 +1743,22 @@ async function _collectFilesFromEntry(entry, relPrefix) {
 async function _collectOsDropUploads(dataTransfer) {
   const out = [];
   const items = dataTransfer.items ? [...dataTransfer.items] : [];
-  if (items.length && typeof items[0].webkitGetAsEntry === 'function') {
+  const files = dataTransfer.files ? [...dataTransfer.files] : [];
+  if (items.length) {
+    const entries = [];
     for (const item of items) {
       if (item.kind !== 'file') continue;
-      const entry = item.webkitGetAsEntry();
+      const getAsEntry = item.getAsEntry || item.webkitGetAsEntry;
+      const entry = typeof getAsEntry === 'function' ? getAsEntry.call(item) : null;
       if (!entry) continue;
+      entries.push(entry);
+    }
+    for (const entry of entries) {
       out.push(...await _collectFilesFromEntry(entry, ''));
     }
     if (out.length) return out;
   }
-  for (const file of dataTransfer.files) {
+  for (const file of files) {
     out.push({ file, relDir: '' });
   }
   return out;

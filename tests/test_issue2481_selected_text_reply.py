@@ -35,16 +35,22 @@ def test_selected_text_reply_button_is_selection_scoped_and_frontend_only():
     assert "root.contains(el)" in js
     assert "document.addEventListener('selectionchange', _updateSelectedTextReplyButton)" in js
 
-    assert "id='selectedTextReplyBtn'" in js
+    assert "group.id='selectedTextActionGroup'" in js
+    assert "btn.id='selectedTextReplyBtn'" in js
+    assert "refine.id='selectedTextRefineBtn'" in js
+    assert "selected-text-action-group" in js
     assert "selected-text-reply-btn" in js
+    assert "selected-text-refine-btn" in js
     assert "data-i18n', 'selected_text_reply'" in js
     assert "data-i18n-title', 'selected_text_reply_title'" in js
-    assert "data-i18n-aria-label', 'selected_text_reply_title'" in js
+    assert "data-i18n-aria-label', 'selected_text_reply'" in js
+    assert "data-i18n', 'selected_text_refine'" in js
+    assert "data-i18n-title', 'selected_text_refine_title'" in js
+    assert "data-i18n-aria-label', 'selected_text_refine'" in js
 
     # MVP contract: selected text reply is entirely static/frontend; do not add
     # backend endpoints or change send payload routing.
     assert "/api/selected" not in js
-    assert "selected_text" not in js.replace("selected_text_reply", "")
 
 
 def test_selected_text_reply_collects_named_context_blocks_without_dumping_into_composer():
@@ -59,7 +65,8 @@ def test_selected_text_reply_collects_named_context_blocks_without_dumping_into_
     assert "function _renderSelectionChips()" in js
     assert "function _flushSelectionBlocksToComposer()" in js
     assert "_pendingSelections.push({id, name, text})" in js
-    assert "_addNamedContextBlock(_selectedTextReplyText)" in js
+    assert "const text=_consumeSelectedTextReplySelection();" in js
+    assert "_addNamedContextBlock(text)" in js
     assert "**${s.name}:**\\n${_formatSelectedTextReplyQuote(s.text)}" in js
     assert "composer.dispatchEvent(new Event('input',{bubbles:true}))" in js
     assert "if(typeof autoResize==='function') autoResize()" in js
@@ -91,8 +98,11 @@ def test_selected_text_reply_styles_and_i18n_exist_for_all_locales():
     css = read("static/style.css")
     i18n = read("static/i18n.js")
 
-    assert ".selected-text-reply-btn" in css
-    assert ".selected-text-reply-btn.visible" in css
+    assert ".selected-text-action-group" in css
+    assert ".selected-text-action-group.visible" in css
+    assert ".selected-text-action-group button" in css
+    assert ".selected-text-reply-btn::before" in css
+    assert ".selected-text-refine-btn::before" in css
     assert ".selection-context-card" in css
     assert ".selection-context-accent" in css
     assert ".selection-context-quote" in css
@@ -117,9 +127,11 @@ def test_selected_text_reply_styles_and_i18n_exist_for_all_locales():
     assert "<!-- hermes-selected-context -->" in ui
     assert "only blocks carrying the internal marker get custom treatment" in ui
     assert "position:fixed" in css
+    assert "visibility:hidden" in css
+    assert "visibility:visible" in css
     assert "pointer-events:none" in css
     assert "pointer-events:auto" in css
-    assert "border:2px solid var(--accent)" in css
+    assert "border:1px solid var(--border2)" in css
     assert "background:var(--bg)" in css
     assert "color:var(--text)" in css
     assert "outline:2px solid var(--focus-ring)" in css
@@ -131,6 +143,9 @@ def test_selected_text_reply_styles_and_i18n_exist_for_all_locales():
         "selected_text_reply",
         "selected_text_reply_title",
         "selected_text_reply_appended",
+        "selected_text_refine",
+        "selected_text_refine_title",
+        "selected_text_refine_instruction",
         "context_block_rename_hint",
         "context_block_rename_aria",
         "context_block_remove",
@@ -147,11 +162,25 @@ def test_selected_text_reply_button_has_user_select_none():
     # The base rule must carry user-select:none so browser selection never
     # renders on or through the button, regardless of hover background opacity.
     assert "user-select:none" in css
-    # Confirm it lives inside the .selected-text-reply-btn rule, not elsewhere.
+    # Confirm it lives on the floating action shell, not in an unrelated rule.
     rule_match = re.search(
-        r'\.selected-text-reply-btn\{[^}]*user-select:none[^}]*\}', css
+        r'\.selected-text-action-group\{[^}]*user-select:none[^}]*\}', css
     )
-    assert rule_match, ".selected-text-reply-btn base rule must include user-select:none"
+    assert rule_match, ".selected-text-action-group base rule must include user-select:none"
+
+
+def test_selected_text_reply_button_is_hidden_from_keyboard_navigation_until_visible():
+    css = read("static/style.css")
+    hidden_match = re.search(
+        r'\.selected-text-action-group\{[^}]*visibility:hidden[^}]*transition:visibility 0s linear \.12s,opacity \.12s ease,transform \.12s ease[^}]*\}',
+        css,
+    )
+    visible_match = re.search(
+        r'\.selected-text-action-group\.visible\{[^}]*visibility:visible[^}]*transition-delay:0s[^}]*\}',
+        css,
+    )
+    assert hidden_match, "hidden action group must stay out of the tab order until the fade completes"
+    assert visible_match, "visible action group must restore visibility immediately when selection returns"
 
 
 def test_sent_selected_context_blocks_are_rendered_without_enabling_user_markdown():

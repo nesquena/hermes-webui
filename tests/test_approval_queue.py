@@ -7,6 +7,8 @@ approval_id so /api/approval/respond can target a specific entry.
 import json
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -106,6 +108,39 @@ def test_polling_passes_count_to_show():
     """The poll loop must pass pending_count to the owner-aware approval renderer."""
     assert "showApprovalForSession(sid, data.pending, data.pending_count" in MESSAGES_JS, \
         "Poll loop must pass data.pending_count through showApprovalForSession"
+
+
+def test_chat_stream_approval_listener_renders_received_count():
+    """A chat-stream approval event with count two renders the head and count."""
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node is required for the approval listener harness")
+    start = MESSAGES_JS.index("source.addEventListener('approval',e=>{")
+    end_marker = "\n    });"
+    end = MESSAGES_JS.index(end_marker, start) + len(end_marker)
+    listener = MESSAGES_JS[start:end]
+    script = f"""
+    const rendered = [];
+    let activeSid = 'sid-browser';
+    const source = {{ listeners: {{}}, addEventListener(name, cb) {{ this.listeners[name] = cb; }} }};
+    function _applyToAnchor() {{}}
+    function showApprovalForSession(sid, data, count) {{ rendered.push({{sid, data, count}}); }}
+    function playAttentionSound() {{}}
+    function _attentionSoundKey() {{ return 'approval'; }}
+    function sendBrowserNotification() {{}}
+    {listener}
+    source.listeners.approval({{ data: JSON.stringify({{command: 'head', approval_id: 'a', pending_count: 2}}) }});
+    process.stdout.write(JSON.stringify(rendered));
+    """
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    rendered = json.loads(result.stdout)
+    assert rendered == [{
+        "sid": "sid-browser",
+        "data": {"command": "head", "approval_id": "a", "pending_count": 2},
+        "count": 2,
+    }]
 
 
 # ---------------------------------------------------------------------------

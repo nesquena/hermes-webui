@@ -80,11 +80,12 @@ def test_failsafe_preserves_collapsed_worklog_when_visible_answer_exists():
     Worklog the user expects collapsed.
     """
     body = _function_body(UI_JS, "renderMessages")
+    visible_helper = _function_body(UI_JS, "_assistantTurnHasVisibleRenderedSegment")
     # The visible-content check skips worklog-source (folded) + anchor-only placeholder
     # segments, and treats any other non-empty segment as "visible".
     failsafe = body[body.find("Fail-safe invariant (#3875)") :]
-    assert "assistant-segment-worklog-source" in failsafe
-    assert "assistant-segment-anchor" in failsafe
+    assert "assistant-segment-worklog-source" in visible_helper
+    assert "assistant-segment-anchor" in visible_helper
     # The live turn drives its own state and must be excluded from the sweep.
     assert "liveAssistantTurn" in failsafe
 
@@ -142,5 +143,4 @@ def test_assistant_reasoning_payload_reads_reasoning_fields():
     payload_fn = _function_body(UI_JS, "_assistantReasoningPayloadText")
     # Reads the direct reasoning fields off the message object.
     assert "m.reasoning_content||m.reasoning||m.thinking||m._reasoning" in payload_fn
-
 

@@ -24,8 +24,14 @@ def test_settled_scene_keys_live_token_prefix_dedupe_to_final_answer_identity():
     settle_body = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
     final_overlap_body = _function_body(MESSAGES_JS, "_anchorSceneRowLooksLikeFinalAnswer")
 
-    assert "lastNonTerminalWorkRowIndex" in settle_body
-    assert "rowIsLiveTokenFinalPrefix(row,textKey,rowIndex>lastNonTerminalWorkRowIndex)" in settle_body
+    # The final-segment boundary must come from the LIVE projection's own
+    # chronology (projectedRows), not the combined orderedRows: the settled
+    # per-message tool rows appended there re-list tools that ran earlier in
+    # the turn and would push the boundary past the final segment's live-prose
+    # accumulator (the #5758 multi-segment gap).
+    assert "lastProjectedToolIndex=projectedRows.reduce" in settle_body
+    assert "finalSegmentLiveProseRows" in settle_body
+    assert "rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)" in settle_body
     assert "rowHasNonLiveDuplicate" not in settle_body
     assert "_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)" in settle_body
     assert "(shorter/longer)>=0.9" in final_overlap_body

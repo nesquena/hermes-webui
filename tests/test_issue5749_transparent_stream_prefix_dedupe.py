@@ -672,3 +672,140 @@ process.stdout.write(JSON.stringify(rendered));
         {"label": "virtualized", "visible": True, "rowId": "session-prose:stream-1:4", "attachmentCount": 0},
         {"label": "attachments", "visible": True, "rowId": "session-prose:stream-1:5", "attachmentCount": 1},
     ]
+
+
+@pytest.mark.reproduction
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_issue5749_multi_segment_settled_tool_rows_do_not_shield_final_accumulator(tmp_path):
+    """#5758 gap: in a multi-segment turn the settled per-message tool rows are
+    appended AFTER the projected live rows, so a combined-list "after the last
+    tool row" boundary never marked the final segment's live-prose accumulator
+    as final — its stale prefix snapshot survived settlement and rendered as a
+    duplicate of the answer's beginning above the settled segment. The boundary
+    must come from the live projection's own chronology: the accumulator (after
+    the last PROJECTED tool row) is dropped, while pre-tool narration and every
+    tool row survive."""
+    final_answer = (
+        "## Verdict\n\nThe report is mostly right but oversimplifies: curated skill "
+        "bundles help strongly across all tested harness combinations, while "
+        "one-shot self-generated bundles without quality control regress the "
+        "baseline on every configuration we measured. The correct takeaway is to "
+        "keep a curated, versioned library instead of disabling skills entirely."
+    )
+    accumulator_prefix = final_answer[:70]
+    narration_text = "Checking the local skill inventory before judging the claim."
+    script = f"""
+const src = {json.dumps(MESSAGES_JS)};
+function extractFunc(name) {{
+  const start = src.indexOf('function ' + name);
+  if (start === -1) throw new Error(name + ' not found');
+  const params = src.indexOf('(', start);
+  let depth = 0, close = -1;
+  for (let i = params; i < src.length; i++) {{
+    if (src[i] === '(') depth++;
+    else if (src[i] === ')') {{
+      depth--;
+      if (depth === 0) {{ close = i; break; }}
+    }}
+  }}
+  const brace = src.indexOf('{{', close);
+  depth = 0;
+  for (let i = brace; i < src.length; i++) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') {{
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1);
+    }}
+  }}
+  throw new Error(name + ' body did not close');
+}}
+global.window = {{
+  chatActivityMode() {{ return 'transparent_stream'; }},
+  _chatActivityDisplayMode: 'transparent_stream',
+  _transparentStream: true,
+}};
+global.S = {{ session: {{}} }};
+eval(extractFunc('_anchorSceneCleanText'));
+eval(extractFunc('_anchorSceneTextKey'));
+eval(extractFunc('_anchorSceneExistingRowKey'));
+eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
+eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
+eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
+eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
+eval(extractFunc('_completeSettledAnchorSceneForTurn'));
+function _anchorSceneActiveMode() {{ return 'transparent_stream'; }}
+function _anchorSceneFinalAnswerText(message) {{ return message && (message.final_answer || message.content || ''); }}
+// The settled per-message rows re-list the turn's tool as a completed copy;
+// it lands AFTER the projected live rows in the combined ordering.
+function _anchorSceneRowsByMessageIndex() {{
+  return new Map([[2, [{{
+    role: 'tool',
+    kind: 'tool_result',
+    source_event_type: 'tool_complete',
+    local_id: 'settled-tool-row-1',
+    tool_call_id: 'call-1',
+    text: '',
+    status: 'completed',
+  }}]]]);
+}}
+function _anchorSceneMessageRef(message) {{ return String(message && message.id || ''); }}
+function _anchorSceneTurnDurationForSettlement() {{ return 0; }}
+function _anchorSceneRowDisplayHintForMode(row, sceneMode) {{
+  const hints = row && typeof row === 'object' && row.display_hints && typeof row.display_hints === 'object' ? row.display_hints : null;
+  if (sceneMode === 'transparent_stream') return (hints && hints.transparent_stream) || 'chronological_activity';
+  if (sceneMode === 'compact_worklog') return (hints && hints.compact_worklog) || row && row.display_hint || 'activity_row';
+  return row && row.display_hint || 'activity_row';
+}}
+const messages = [
+  {{ role: 'user', content: 'Prompt', id: 'user-1' }},
+  {{ role: 'assistant', content: {json.dumps(narration_text)}, id: 'assistant-1' }},
+  {{ role: 'assistant', content: {json.dumps(final_answer)}, id: 'assistant-2' }},
+];
+const scene = _completeSettledAnchorSceneForTurn(messages, 2, {{
+  mode: 'transparent_stream',
+  final_answer: {json.dumps(final_answer)},
+  lifecycle: {{ terminal_state: 'done' }},
+  identity: {{ source_message_refs: ['legacy'] }},
+  activity_rows: [
+    {{
+      role: 'prose',
+      kind: 'process_prose',
+      source_event_type: 'token',
+      local_id: 'live-prose:stream-multi:1',
+      text: {json.dumps(narration_text)},
+      status: 'running',
+    }},
+    {{
+      role: 'tool',
+      kind: 'tool_started',
+      source_event_type: 'tool',
+      local_id: 'live-tool-row-1',
+      tool_call_id: 'call-1',
+      text: '',
+      status: 'running',
+    }},
+    {{
+      role: 'prose',
+      kind: 'process_prose',
+      source_event_type: 'token',
+      local_id: 'live-prose:stream-multi:2',
+      text: {json.dumps(accumulator_prefix)},
+      status: 'running',
+    }},
+  ],
+}});
+process.stdout.write(JSON.stringify(scene.activity_rows.map(row => ({{
+  role: row.role,
+  local_id: row.local_id,
+  text: row.text || '',
+}}))));
+"""
+    data = _run_node(MESSAGES_JS, script, tmp_path)
+    local_ids = [row["local_id"] for row in data]
+    # The stale accumulator snapshot (strict prefix of the final answer, well
+    # under the 0.9 near-match ratio) is dropped; narration and tools survive.
+    assert "live-prose:stream-multi:2" not in local_ids
+    assert "live-prose:stream-multi:1" in local_ids
+    assert data[0]["text"] == narration_text
+    assert any(row["role"] == "tool" for row in data)

@@ -114,7 +114,7 @@ def test_project_context_content_is_redacted_in_memory_response(tmp_path, monkey
 
     monkeypatch.setattr(api.profiles, "get_active_hermes_home", lambda: home)
     monkeypatch.setattr(routes, "_memory_project_context_workspace", lambda _parsed: workspace)
-    monkeypatch.setattr(routes, "_external_notes_sources_enabled", lambda: False)
+    monkeypatch.setattr(routes, "_external_notes_sources_enabled", lambda _cfg: False)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
 
     payload = routes._handle_memory_read(object(), SimpleNamespace(query=""))

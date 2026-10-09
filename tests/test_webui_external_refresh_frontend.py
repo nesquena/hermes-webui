@@ -427,7 +427,14 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);" in SESSIONS_JS
     assert "return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);" in SESSIONS_JS
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
-    assert "const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';" in SESSIONS_JS
+    # The width hint is applied only when it stays within the server msg_limit
+    # ceiling; an over-ceiling hint would be clamped by the backend and could
+    # silently shrink an already-loaded transcript, so it falls back to the bare
+    # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
+    # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
+    # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
+    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
+    assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function loadSession(sid)")
