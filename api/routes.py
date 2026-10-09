@@ -19244,6 +19244,14 @@ def handle_post(handler, parsed) -> bool:
             if isinstance(body.get("workspaces"), list):
                 _preflight.extend(body["workspaces"])
             for _field in ("workspace", "default_workspace"):
+                if _field == "workspace" and "workspaces" in body:
+                    # The legacy alias is IGNORED by the update branch whenever
+                    # a replacement list is sent (see `if "workspace" in body and
+                    # "workspaces" not in body`), so validating it here would
+                    # reject an otherwise valid request whenever the client's
+                    # old alias points at a directory that has since been
+                    # removed (Greptile P2 2026-10-09T22:17:42Z).
+                    continue
                 if _field in body:
                     _preflight.append(body.get(_field))
             for _cand in _preflight:

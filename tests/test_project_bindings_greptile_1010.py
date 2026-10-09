@@ -209,6 +209,29 @@ def test_a_rejected_reasoning_effort_registers_no_workspaces(bind_env, monkeypat
     assert "workspaces" not in proj
 
 
+def test_a_stale_legacy_workspace_alias_is_ignored_with_a_list(bind_env, monkeypatch):
+    """Greptile P2 (2026-10-09T22:17:42Z): the legacy `workspace` alias must be
+    skipped by the pre-flight when `workspaces` is sent, exactly as the update
+    branch ignores it — otherwise a valid replacement list is rejected because
+    the client's old alias points at a directory that has since been removed."""
+    good = str(bind_env.outside)
+    stale = str(bind_env.outside.parent / "removed-workspace")
+    handled, responses, proj = _drive_bind(
+        monkeypatch,
+        _project(),
+        {
+            "project_id": "proj_g1010",
+            "workspaces": [good],
+            "workspace": stale,
+        },
+    )
+
+    assert handled is True
+    assert responses and responses[-1].get("status", 200) == 200, responses
+    assert proj["workspaces"] == [good]
+    assert proj["workspace"] == good, "the legacy alias mirrors the new list"
+
+
 # ---------------------------------------------------------------------------
 # Frontend: a mini-DOM just big enough for the shipped combobox
 # ---------------------------------------------------------------------------
