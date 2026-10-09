@@ -2652,14 +2652,26 @@ def get_picker_excludes(provider_id: str | None = None) -> set[str]:
 
 
 def _picker_excludes_payload() -> dict:
-    """Return the raw ``picker_excludes`` settings map for API payloads.
+    """Return the ``picker_excludes`` map for API payloads, keyed canonically.
 
-    Unlike ``get_picker_excludes()`` (which resolves a single provider's
-    set, unioning alias-equivalent keys), this returns the *stored*
-    dict — the same shape the user saved — so the browser can apply the
-    exact same policy locally when it would otherwise re-inject an option
-    the server-side filter removed. Returns ``{}`` on any read failure so
-    the field is always a JSON object for the client.
+    Unlike ``get_picker_excludes()`` (which resolves a single provider's set,
+    unioning alias-equivalent keys), this returns the *stored* model-id lists
+    so the browser can apply the exact same policy locally when it would
+    otherwise re-inject an option the server-side filter removed.
+
+    #7777 P1 ("Alias exclusions reach browser unmatched"): the keys are
+    NORMALISED to their canonical provider slug before publishing. The raw
+    stored key can be an alias (``glm`` → ``zai``, ``z.ai`` → ``zai``); the
+    browser's ``_pickerExcludesForProvider`` only knows how to match
+    punctuation and case variants of the provider it was handed, not the
+    agent's semantic alias table. Sending the raw key therefore made the
+    exclusion invisible exactly where the browser needed it — the saved
+    default or previous selection the server had already filtered out would
+    be re-injected. Lists stored under several keys that resolve to the same
+    canonical provider are unioned, mirroring ``get_picker_excludes``.
+
+    Returns ``{}`` on any read failure so the field is always a JSON object
+    for the client.
     """
     try:
         raw = load_settings().get("picker_excludes")
@@ -2667,17 +2679,42 @@ def _picker_excludes_payload() -> dict:
         return {}
     if not isinstance(raw, dict):
         return {}
+
+    def _clean_ids(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        seen: set[str] = set()
+        out: list[str] = []
+        for entry in value:
+            if not isinstance(entry, str):
+                continue
+            stripped = entry.strip()
+            if stripped and stripped not in seen:
+                seen.add(stripped)
+                out.append(stripped)
+        return out
+
     out: dict[str, list[str]] = {}
     for pid, ids in raw.items():
-        if not isinstance(pid, str) or not pid.strip() or not isinstance(ids, list):
+        if not isinstance(pid, str) or not pid.strip():
             continue
-        cleaned = [
-            entry.strip()
-            for entry in ids
-            if isinstance(entry, str) and entry.strip()
-        ]
-        if cleaned:
-            out[pid.strip()] = cleaned
+        cleaned = _clean_ids(ids)
+        if not cleaned:
+            continue
+        key = pid.strip()
+        try:
+            canonical = _resolve_provider_alias(key) or key
+        except Exception:
+            canonical = key
+        key = str(canonical).strip() or key
+        # Union rather than overwrite: a settings.json can carry both ``glm``
+        # and ``zai`` with a different slice of hides each.
+        merged = out.setdefault(key, [])
+        known = set(merged)
+        for entry in cleaned:
+            if entry not in known:
+                known.add(entry)
+                merged.append(entry)
     return out
 
 
@@ -7157,6 +7194,16 @@ _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
+# Monotonic invalidation generation. ``invalidate_models_cache()`` bumps this
+# under the cache lock; a builder captures the value when it starts and re-checks
+# it immediately before publishing. #7777 P1 ("Stale builds repopulate caches"):
+# a rebuild that began before a settings save (e.g. a picker_excludes change)
+# used to publish its result unconditionally, so the catalog built with the OLD
+# exclusions replaced the cache the invalidation had just cleared — and the
+# excluded models stayed selectable until the next invalidation or TTL expiry.
+# Clearing the cache is not enough; an in-flight builder needs a generation to
+# check against, otherwise it is a write that lands after the clear.
+_models_cache_generation = 0
 
 # ── Catalog publication ordering ─────────────────────────────────────────────
 # Every cold rebuild takes the next sequence number, and the published catalog

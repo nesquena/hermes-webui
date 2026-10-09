@@ -9643,9 +9643,10 @@ async function _autosavePreferencesSettings(payload){
       ||capturedModelValue===savedModelOnOpen
       ||prefixStrippedValue===savedModelOnOpen;
     const modelDirty=!!(
-      modelSel&&(
-        !modelUnchanged||
-        ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null))
+      modelSel&&!modelSel._suppressDefaultModelSave&&(
+        ((modelState.model||'')!==(_settingsHermesDefaultModelOnOpen||'')||
+        ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null)))
+        &&!modelUnchanged
       )
     );
     if(!pwDirty&&!modelDirty){
@@ -10058,12 +10059,26 @@ async function loadSettingsPanel(){
         const _firstEligible=Array.from(modelSel.options||[]).find(o=>
           !(typeof _modelIsPickerExcluded==='function'&&_modelIsPickerExcluded(String(o.value||''),(models&&models.active_provider)||window._activeProvider||null)));
         if(_firstEligible) modelSel.value=_firstEligible.value;
+        // #7777 P1 ("Unrelated save changes default model"): the selection
+        // above is a POLICY consequence, not a user edit — the saved default
+        // is hidden, so the picker must show something else. `saveSettings()`
+        // derives `modelChanged` by comparing the live select value against
+        // the value captured on open, so without this marker the next save of
+        // ANY preference (theme, send key, notifications) would POST the
+        // substituted row to /api/default-model and silently replace the
+        // user's configured default. Mark the field as untouched; the marker
+        // is cleared as soon as the user actually changes the selection.
+        modelSel._suppressDefaultModelSave=true;
       }else{
         modelSel.value=_settingsHermesDefaultModelOnOpen;
       }
       if(typeof closeSettingsModelDropdown==='function') closeSettingsModelDropdown();
       if(typeof mountSettingsModelPicker==='function') mountSettingsModelPicker();
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
+      modelSel.addEventListener('change',()=>{
+        // Any real user edit re-arms the default-model write.
+        modelSel._suppressDefaultModelSave=false;
+      },{once:false});
       if(!modelSel._settingsChipSyncBound){
         modelSel._settingsChipSyncBound=true;
         modelSel.addEventListener('change',()=>{if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();},{once:false});
@@ -13583,7 +13598,14 @@ async function saveSettings(andClose){
   const modelState=(typeof _captureModelDropdownSelection==='function'&&$('settingsModel'))
     ? (_captureModelDropdownSelection($('settingsModel'))||{model:String(model||''),model_provider:null})
     : {model:String(model||''),model_provider:null};
-  const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null));
+  const _modelSelForDefault=$('settingsModel');
+  const _suppressDefaultModelSave=!!(_modelSelForDefault&&_modelSelForDefault._suppressDefaultModelSave);
+  // #7777 P1: when the saved default is excluded by the picker policy the
+  // Settings open handler substitutes the first eligible row purely so the
+  // select is not blank, and flags the field. That substitution is not a user
+  // edit, so it must not count as a model change — otherwise saving an
+  // unrelated preference would silently overwrite the configured default.
+  const modelChanged=!_suppressDefaultModelSave&&((model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null)));
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
   const showQuotaChip=!!($('settingsShowQuotaChip')||{}).checked;
