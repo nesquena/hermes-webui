@@ -4504,6 +4504,46 @@ def test_new_profile_switch_copy_uses_english_locale_fallback():
     ) == 1
 
 
+def test_removing_last_context_card_rechecks_paused_queue():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    remove_context = _function(
+        MESSAGES_JS, "_removeNamedContextBlock", "\n\nfunction _clearPendingSelections"
+    )
+    script = textwrap.dedent(
+        f"""
+        let _pendingSelections=[{{id:'ctx-1'}}];
+        let _selectionIdCounter=1;
+        let renders=0,resumes=0;
+        function _renderSelectionChips(){{renders++;}}
+        function _resumeQueuedSessionMessageIfComposerEmpty(){{resumes++;}}
+        {remove_context}
+        _removeNamedContextBlock('ctx-1');
+        process.stdout.write(JSON.stringify({{
+          remaining:_pendingSelections.length,counter:_selectionIdCounter,renders,resumes
+        }}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "remaining": 0, "counter": 0, "renders": 1, "resumes": 1,
+    }
+
+
+def test_send_finally_releases_guard_before_resuming_owned_queue():
+    send = _function(MESSAGES_JS, "send", "\n\nasync function startRegeneration")
+    capture = send.index("const _completedSendSid=_sendInProgressSid;")
+    release = send.index("_sendInProgress=false;", capture)
+    clear_owner = send.index("_sendInProgressSid=null;", release)
+    owner_guard = send.index("S.session.session_id===_completedSendSid", clear_owner)
+    resume = send.index("_resumeQueuedSessionMessageIfComposerEmpty();", owner_guard)
+
+    assert "_sendInProgressSid=S.session&&S.session.session_id||null;" in send
+    assert capture < release < clear_owner < owner_guard < resume
+
+
 def test_profile_switch_settlement_timeout_aborts_with_visible_error():
     switch = _function(PANELS_JS, "switchToProfile", "\n\nfunction openProfileCreate")
     settle = switch.index("window._stopAndSettleComposerDictation()")

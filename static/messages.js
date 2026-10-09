@@ -957,6 +957,9 @@ function _removeNamedContextBlock(id){
   _pendingSelections=_pendingSelections.filter(s=>s.id!==id);
   if(!_pendingSelections.length)_selectionIdCounter=0;
   _renderSelectionChips();
+  if(typeof _resumeQueuedSessionMessageIfComposerEmpty==='function'){
+    _resumeQueuedSessionMessageIfComposerEmpty();
+  }
 }
 
 function _clearPendingSelections(){
@@ -1470,6 +1473,7 @@ async function send(){
     return;
   }
   _sendInProgress = true;
+  _sendInProgressSid=S.session&&S.session.session_id||null;
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
@@ -2055,7 +2059,16 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{
+    const _completedSendSid=_sendInProgressSid;
+    _sendInProgress=false;
+    _sendInProgressSid=null;
+    if(_completedSendSid
+      &&S.session&&S.session.session_id===_completedSendSid
+      &&typeof _resumeQueuedSessionMessageIfComposerEmpty==='function'){
+      _resumeQueuedSessionMessageIfComposerEmpty();
+    }
+  }
 }
 
 async function startRegeneration(sessionId, regenerationRevision){
