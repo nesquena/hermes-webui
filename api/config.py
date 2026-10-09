@@ -1583,7 +1583,13 @@ def _model_block_mirrors_fallback_entry(
             continue
         if _custom_provider_slug_key(name) != key:
             continue
-        if _normalize_base_url_for_match(entry.get("base_url")) == model_url:
+        entry_url = _normalize_base_url_for_match(entry.get("base_url"))
+        if entry_url == model_url:
+            return True
+        if not entry_url and not (entry.get("api_key") or str(entry.get("key_env") or "").strip()):
+            # No endpoint and no credential of its own: the entry inherits the
+            # model connection (see ``_select_custom_provider_record``), so the
+            # block IS that entry's connection rather than a second authority.
             return True
     return False
 
@@ -4195,7 +4201,11 @@ def _select_custom_provider_record(
     model_cfg_for_conn = cfg_data.get("model")
     if (
         isinstance(model_cfg_for_conn, dict)
-        and str(model_cfg_for_conn.get("provider") or "").strip().lower() == "custom"
+        # Bare ``custom`` OR a block that names THIS slug: the default-model
+        # picker rewrites ``model.provider`` to ``custom:<slug>`` on selection
+        # and leaves the block's own ``api_key``/``key_env`` in place, so the
+        # same connection keeps serving the entry after the click.
+        and str(model_cfg_for_conn.get("provider") or "").strip().lower() in {"custom", pid}
         and _raw_provider_record_enabled(model_cfg_for_conn)
         and _custom_record_owns_connection(model_cfg_for_conn, pid)
     ):
@@ -6837,6 +6847,27 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
+def _model_block_serves_selected_custom_provider(provider: object, config_data: object) -> bool:
+    """True when ``provider``'s connection resolves to the ``model:`` block itself.
+
+    A fallback ``custom_providers[]`` entry that declares no endpoint (and no
+    credential) inherits the model connection (``_select_custom_provider_record``
+    returns the block with source ``model``). ``set_hermes_default_model`` must
+    then keep ``model.base_url`` on the provider change instead of dropping it.
+    """
+    pid = str(provider or "").strip().lower()
+    if not pid.startswith("custom:") or not isinstance(config_data, dict):
+        return False
+    slug = _custom_provider_slug_key(pid)
+    if not slug:
+        return False
+    try:
+        _record, source, _is_exact, _status = _select_custom_provider_record(pid, slug, config_data)
+    except Exception:
+        return False
+    return source == "model"
+
+
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
@@ -6878,6 +6909,12 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if persisted_provider.lower() == "local":
             persisted_provider = "custom"
 
+        # Snapshot BEFORE the block is rewritten below: whether the selected
+        # provider's connection is this block must be judged against the
+        # previous provider, not against a block that already names the new one.
+        previous_config_data = dict(config_data)
+        previous_config_data["model"] = dict(model_cfg)
+
         model_cfg["default"] = persisted_model
         if persisted_provider:
             model_cfg["provider"] = persisted_provider
@@ -6887,12 +6924,16 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
-            else:
+            elif not _model_block_serves_selected_custom_provider(persisted_provider, previous_config_data):
                 # Provider changed and we have no resolved URL for the new one.
                 # Drop the previous provider's base_url so New Chat doesn't route
                 # to the old endpoint — this MUST also cover custom:* providers
                 # (a different custom provider has a different URL); leaving the
-                # stale base_url sent requests to the wrong host (#4728).
+                # stale base_url sent requests to the wrong host (#4728). The one
+                # exception is a provider whose connection IS this block (a
+                # fallback entry with no endpoint of its own inherits
+                # ``model.base_url``): popping it would leave that route with no
+                # endpoint at all.
                 model_cfg.pop("base_url", None)
 
         _apply_advanced_model_options(model_cfg, advanced)

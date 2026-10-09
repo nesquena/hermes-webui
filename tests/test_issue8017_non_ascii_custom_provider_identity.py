@@ -1047,3 +1047,89 @@ def test_a_fallback_entry_with_no_endpoint_keeps_the_model_connection(monkeypatc
     )
     assert bundle["base_url"] == u, "the merged route is not left endpoint-unresolved"
     assert bundle.get(config.CUSTOM_ROUTE_ERROR_FIELD) is None
+import api.config as config
+
+
+def _write_cfg(tmp_path, body: str) -> "config.Path":
+    p = tmp_path / "config.yaml"
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def _load(cfg_path):
+    loaded = config._load_yaml_config_file(cfg_path)
+    config.cfg.clear()
+    config.cfg.update(loaded)
+    return loaded
+
+
+def test_set_default_model_keeps_the_model_key_after_picker_click(monkeypatch, tmp_path):
+    """The picker's own write must not strip the model connection (r6 MUST-FIX a)."""
+    monkeypatch.setenv("MODEL_KEY", "sk-modelenv")
+    U = "http://127.0.0.1:8317/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: chat-model\n"
+        f"  base_url: {U}\n"
+        "  key_env: MODEL_KEY\n"
+        "custom_providers:\n"
+        "  - name: 晨光鑫遇专用\n"
+        f"    base_url: {U}\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    assert config.resolve_custom_provider_connection("custom:晨光鑫遇专用") == ("sk-modelenv", U)
+
+    result = config.set_hermes_default_model("chat-model", provider="custom:晨光鑫遇专用")
+    assert result["ok"] is True
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光鑫遇专用")
+    assert (api_key, base_url) == ("sk-modelenv", U), (
+        "after the picker click the route still resolves the model block's key, not the keyless placeholder"
+    )
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert config._custom_provider_entry_identity(
+        on_disk["custom_providers"][0],
+        on_disk.get("custom_providers"),
+        on_disk.get("providers"),
+        on_disk.get("model"),
+    ) == "custom:晨光鑫遇专用", "the entry stays catalogued after the click"
+
+
+def test_set_default_model_keeps_the_base_url_for_an_endpointless_entry(monkeypatch, tmp_path):
+    """The picker's write must not drop model.base_url for an endpoint-less entry (r6 MUST-FIX b)."""
+    U = "http://127.0.0.1:8317/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: chat-model\n"
+        f"  base_url: {U}\n"
+        "  api_key: sk-model\n"
+        "custom_providers:\n"
+        "  - name: 晨光鑫遇专用\n"
+        "    model: chat-model\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    result = config.set_hermes_default_model("chat-model", provider="custom:晨光鑫遇专用")
+    assert result["ok"] is True
+
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert on_disk["model"].get("base_url") == U, (
+        "the endpoint-less entry inherits model.base_url, so the pop must be skipped"
+    )
+    assert config._custom_provider_entry_identity(
+        on_disk["custom_providers"][0],
+        on_disk.get("custom_providers"),
+        on_disk.get("providers"),
+        on_disk.get("model"),
+    ) == "custom:晨光鑫遇专用", "the entry stays catalogued"
