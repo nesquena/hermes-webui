@@ -7300,7 +7300,14 @@ function _fitComposerFooter(){
     // width:auto + a min-width that survives the burger stage's width:34px, so
     // the measured footprint is the pill's own, never the circle's.
     _btnStyle.width='auto';
-    _btnStyle.minWidth='0';
+    // #7686 [SILENT]: the idle measurement must keep the button's real
+    // minimum. `width:auto; min-width:0` measures the bare 16px SVG, so the
+    // stage was sized for an icon smaller than the button that is actually
+    // painted — at 1102px with the workspace open that clipped 16px of the
+    // Reasoning control at idle (master and the rejected head clip 0px).
+    // Reserve 34px desktop / 44px phone during the measurement; `finally`
+    // still restores the previous value afterwards.
+    _btnStyle.minWidth=(window.innerWidth<=640?'44px':'34px');
   }
   // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
   // boundary crossing (this fit path measures real overflow at any width,
