@@ -44,6 +44,7 @@ fs.mkdirSync(output, {recursive:true});
         assert.equal(hintUncovered, !baseline, 'Mobile hint must not be covered by composer');
       } else {
         assert.equal(gap, -24, 'Desktop flyout geometry must stay unchanged');
+        assert.equal(hintUncovered, true, 'Desktop hint must not be covered by composer');
       }
       assert.ok(panel.y >= 0, 'Panel must fit the viewport');
       await page.locator('#clarifyInput').click();
