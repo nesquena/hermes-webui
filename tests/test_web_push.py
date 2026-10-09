@@ -53,6 +53,18 @@ def _fake_dns(monkeypatch, mapping):
 
     monkeypatch.setattr(web_push.socket, "getaddrinfo", fake)
 
+class _StubSession:
+    """Stand-in for the pinned ``requests.Session`` (``requests`` is not installed in CI)."""
+    trust_env = False
+
+    def close(self):
+        pass
+
+
+def _stub_pinned_session(monkeypatch):
+    monkeypatch.setattr(web_push, "_pinned_requests_session", lambda endpoint: _StubSession())
+
+
 def _enable(monkeypatch, tmp_path):
     (tmp_path / "webui_vapid.json").write_text(
         json.dumps({"public_key": "PUBKEY", "private_key": PRIVATE_MARK, "subject": "mailto:a@b.co"})
@@ -196,6 +208,7 @@ def test_delivery_rechecks_endpoint_and_skips_rebound_dns(push_env, monkeypatch)
 
 
 def test_pinned_session_refuses_redirects_proxies_and_http(push_env):
+    pytest.importorskip("requests")  # real session needs requests (pulled in by pywebpush)
     session = web_push._pinned_requests_session(APPLE)
     assert session.trust_env is False
     with pytest.raises(ValueError):
@@ -209,6 +222,7 @@ def test_pinned_session_refuses_redirects_proxies_and_http(push_env):
 
 def test_send_passes_pinned_session_and_vapid_and_prunes_410(push_env, monkeypatch):
     _enable(monkeypatch, push_env)
+    _stub_pinned_session(monkeypatch)
     web_push.add_subscription(_sub(APPLE), owner=OWNER_A)
     web_push.add_subscription(_sub(FCM), owner=OWNER_A)
     seen = []
