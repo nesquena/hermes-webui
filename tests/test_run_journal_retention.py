@@ -2340,3 +2340,250 @@ def test_real_writer_active_run_is_never_archived(tmp_path):
     assert counters["archived_files"] == 0
     assert counters["retained_open"] == 1
     assert path.exists()
+
+# ── re-gate 22:30Z: composed regressions ─────────────────────────────────────
+
+
+def test_crash_tail_survives_archive_append_and_cold_recovery(tmp_path):
+    """Crash-tail -> archive -> append -> cold recovery must keep every row.
+
+    Reproduces the re-gate finding: a tolerated uncommitted EOF tail was
+    archived while still un-terminated; the post-archive append then joined the
+    new suffix onto those bytes, giving them a false newline and promoting them
+    into a malformed COMPLETE row. Cold validated recovery returned ZERO events
+    (``recovery_malformed_row``) where pinned master recovers [1,2,3]. The union
+    now drops the archive's uncommitted torn tail before joining: appends
+    continue at the durable maximum and the whole run validates.
+    """
+    sid, rid = "s1", "r1"
+    rj.append_run_event(sid, rid, "token", {"text": "hello"}, session_dir=tmp_path)
+    rj.append_run_event(sid, rid, "done", {"terminal_state": "completed"}, session_dir=tmp_path)
+    path = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+
+    # Crash mid-append: unterminated bytes at EOF (rollback never ran).
+    with open(path, "ab") as fh:
+        fh.write(b'{"version":2,"event_id":"' + rid.encode() + b':3","seq":3,')
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    torn = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in torn["events"]] == [1, 2]
+    assert torn["malformed"] == [{"line": 3, "reason": "recovery_torn_tail"}]
+
+    # Age + sweep with the ordinary live TTL: the run is archived WITH the tail.
+    old = time.time() - 30 * 86400.0
+    os.utime(path, (old, old))
+    counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+
+    # The post-archive append must continue the durable maximum.
+    row = rj.append_run_event(sid, rid, "stream_end", {}, session_dir=tmp_path)
+    assert row["seq"] == 3
+
+    # Cold recovery (fresh process view) validates the union whole.
+    _simulate_restart()
+    recovered = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in recovered["events"]] == [1, 2, 3], recovered
+    assert recovered["malformed"] == []
+    replay = rj.read_session_run_events(sid, after_event_id=f"{rid}:1", session_dir=tmp_path)
+    assert replay["status"] == "ok", replay["status"]
+    assert [int(e["seq"]) for e in replay["events"]] == [2, 3]
+
+
+def test_merge_drops_torn_archive_tail_and_ignores_invalid_sequence_claims(tmp_path):
+    """Sequence authority: complete-invalid and wrong-owner rows never steer.
+
+    Reproduces the re-gate finding: the archive/live merge accepted ANY row
+    with a parseable ``seq`` as sequence authority — a wrong-owner row
+    (``event_id``/``run_id`` naming another run) or a wrong-protocol row could
+    out-rank committed rows and SUPPRESS the live suffix from the union. The
+    archive's uncommitted torn tail was also re-joined as if committed,
+    promoting an uncommitted crash row into a malformed complete row. Only rows
+    that pass the scanner's own ownership/protocol contract carry authority
+    now, and the uncommitted tail is dropped before the join.
+    """
+    sid, rid = "s1", "r1"
+    live_dir = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid
+    live_dir.mkdir(parents=True)
+    live = live_dir / f"{rid}.jsonl"
+    archive = _archive_path(tmp_path, sid, rid)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+
+    def _row(seq, *, run="r1", session="s1", version=2, event_id=None):
+        return json.dumps({
+            "version": version,
+            "event_id": event_id if event_id is not None else f"{run}:{seq}",
+            "seq": seq, "run_id": run, "session_id": session,
+            "event": "token", "type": "token", "created_at": time.time(),
+            "terminal": False, "terminal_state": None, "payload": {"text": "x"},
+        }, separators=(",", ":"))
+
+    def _seqs(text):
+        out = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line)["seq"])
+            except Exception:  # noqa: BLE001 - surface a malformed row in the list
+                out.append("MALFORMED")
+        return out
+
+    def _compose(archive_text, live_text):
+        with gzip.open(archive, "wb") as gz:
+            gz.write(archive_text.encode("utf-8"))
+        live.write_text(live_text, encoding="utf-8")
+        return rj._read_run_file_text(live)
+
+    # Archive: committed rows 1-2, then a TORN tail (no newline) claiming seq 99.
+    # The live suffix must survive and the torn bytes must NOT become a
+    # malformed complete row.
+    merged = _compose(_row(1) + "\n" + _row(2) + "\n" + '{"version":2,"seq":99,', _row(3) + "\n")
+    assert _seqs(merged) == [1, 2, 3], merged
+
+    # A wrong-owner row may not claim the maximum: the live suffix survives.
+    merged = _compose(_row(1) + "\n" + _row(7, run="other", event_id="other:7") + "\n", _row(3) + "\n")
+    assert _seqs(merged) == [1, 7, 3], merged
+
+    # A wrong-protocol (downgrade) row with a huge seq must not suppress either.
+    merged = _compose(_row(1) + "\n" + _row(50, version=3) + "\n", _row(3) + "\n")
+    assert _seqs(merged) == [1, 50, 3], merged
+
+    # Real writer chain end to end: the committed suffix + archived prefix
+    # validate as one run after a restart.
+    archive.unlink()
+    live.unlink()
+    rj.append_run_event(sid, rid, "token", {"text": "one"}, session_dir=tmp_path)
+    rj.append_run_event(sid, rid, "done", {"terminal_state": "completed"}, session_dir=tmp_path)
+    old = time.time() - 30 * 86400.0
+    os.utime(live, (old, old))
+    assert _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)["archived_files"] == 1
+    row = rj.append_run_event(sid, rid, "token", {"text": "two"}, session_dir=tmp_path)
+    assert row["seq"] == 3
+    _simulate_restart()
+    recovered = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in recovered["events"]] == [1, 2, 3], recovered
+    assert recovered["malformed"] == []
+
+
+def _prune_race_child(root_str: str, ready_str: str, go_str: str, result_str: str) -> None:
+    """Child process: wait for go, then append one row (a REAL writer)."""
+    import time as child_time
+    from pathlib import Path as ChildPath
+
+    from api import run_journal as child_rj  # inherited through fork
+
+    ChildPath(ready_str).write_text("ready", encoding="utf-8")
+    deadline = child_time.time() + 30.0
+    while child_time.time() < deadline and not ChildPath(go_str).exists():
+        child_time.sleep(0.01)
+    try:
+        event = child_rj.append_run_event(
+            "s1", "r1", "token", {"text": "child"}, session_dir=ChildPath(root_str),
+        )
+        ChildPath(result_str).write_text(f"ok {event['seq']}", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - report any failure to the parent
+        ChildPath(result_str).write_text(f"err {type(exc).__name__}: {exc}", encoding="utf-8")
+
+
+@requires_fork
+def test_prune_never_splits_committed_suffix_from_archived_prefix(tmp_path, monkeypatch):
+    """The finite-TTL prune must not orphan a suffix a writer commits meanwhile.
+
+    Reproduces the re-gate finding: the prune's live-absence check and the
+    unlink held only the pid-scoped writer lock, so a child PROCESS could seed
+    from the aged archive (committing seq 3) between them; the parent then
+    deleted the prefix. Reads returned [3] and validated recovery returned
+    nothing (``recovery_identity_or_sequence``) — a committed row split from its
+    stored history. The child is now scheduled at the prune boundary itself,
+    deterministically: with the fix the prune holds the cross-process archive
+    authority across [re-check -> delete], so the child either seeds before the
+    re-check (its live file exists -> prefix kept -> both recoverable) or after
+    the delete (fresh journal, no split). Both outcomes are asserted consistent.
+    """
+    sid, rid = "s1", "r1"
+
+    # Aged archived prefix through the real writers.
+    rj.append_run_event(sid, rid, "token", {"text": "one"}, session_dir=tmp_path)
+    rj.append_run_event(sid, rid, "done", {"terminal_state": "completed"}, session_dir=tmp_path)
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+    old = time.time() - 30 * 86400.0
+    os.utime(live, (old, old))
+    counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+    archive = _archive_path(tmp_path, sid, rid)
+    assert archive.exists() and not live.exists()
+    aold = time.time() - 400 * 86400.0
+    os.utime(archive, (aold, aold))
+    monkeypatch.setenv(rj._RETENTION_ARCHIVE_TTL_ENV, "30")
+
+    ctx = multiprocessing.get_context("fork")
+    ready = tmp_path / "child-ready"
+    go = tmp_path / "child-go"
+    result_file = tmp_path / "child-result"
+    child = ctx.Process(
+        target=_prune_race_child,
+        args=(str(tmp_path), str(ready), str(go), str(result_file)),
+    )
+    child.start()
+    try:
+        deadline = time.time() + 15.0
+        while not ready.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "child never started"
+
+        # Instrument the PRUNE BOUNDARY exactly as the finding describes: fire
+        # the child after the live-absence re-check, just before the real
+        # unlink. A bounded wait lets a buggy tree's child commit (it is not
+        # coordinated) while a fixed tree's child blocks on the authority the
+        # prune already holds — either way the sweep then proceeds unmodified.
+        real_prune_entry = rj._prune_archive_entry
+        state = {"fired": False}
+
+        def fire_child_then_prune(*args, **kwargs):
+            if not state["fired"]:
+                state["fired"] = True
+                go.write_text("go", encoding="utf-8")
+                # Bounded: a buggy tree's child completes here; a fixed tree's
+                # child is blocked on the authority this sweep already holds, so
+                # this simply expires and the sweep proceeds unmodified.
+                wait_deadline = time.time() + 3.0
+                while not result_file.exists() and time.time() < wait_deadline:
+                    time.sleep(0.02)
+            return real_prune_entry(*args, **kwargs)
+
+        monkeypatch.setattr(rj, "_prune_archive_entry", fire_child_then_prune)
+        counters2 = rj.sweep_run_journal(
+            session_dir=tmp_path, ttl_days=0, max_runs_per_session=0, max_bytes_per_session=0
+        )
+        monkeypatch.undo()
+    finally:
+        go.write_text("go", encoding="utf-8")
+        child.join(timeout=60)
+        if child.is_alive():  # pragma: no cover - defensive
+            child.terminate()
+            child.join(timeout=10)
+
+    assert state["fired"], "test did not fire the child at the prune boundary"
+    assert child.exitcode == 0, f"child writer failed: {child.exitcode}"
+    result = result_file.read_text(encoding="utf-8").strip()
+    assert result.startswith("ok "), f"child append failed: {result}"
+    child_seq = int(result.split()[1])
+
+    ordinary = rj.read_run_events(sid, rid, session_dir=tmp_path)
+    validated = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    ordinary_seqs = [int(e["seq"]) for e in ordinary["events"]]
+    validated_seqs = [int(e["seq"]) for e in validated["events"]]
+
+    if archive.exists():
+        # Prefix kept: the child must have committed the verified continuation.
+        assert child_seq == 3, f"archive kept but child restarted at {child_seq}"
+        assert ordinary_seqs == [1, 2, 3], ordinary_seqs
+        assert validated_seqs == [1, 2, 3], validated
+    else:
+        # Prefix pruned (the documented TTL behavior): the child must have
+        # restarted a fresh journal — never a seq-3 suffix beside no prefix.
+        assert child_seq == 1, f"prefix pruned but the child committed seq {child_seq}"
+        assert ordinary_seqs == [1], ordinary_seqs
+        assert validated_seqs == [1], validated
+    assert validated["malformed"] == [], validated["malformed"]

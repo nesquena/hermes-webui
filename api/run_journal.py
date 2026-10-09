@@ -568,24 +568,90 @@ def _read_run_file_text(path: Path) -> str | None:
     archive_text = _read_gz_text(archived)
     if not archive_text:
         return live_text
-    return _merge_archive_and_live_text(archive_text, live_text)
+    return _merge_archive_and_live_text(archive_text, live_text, path=path)
 
 
-def _merge_archive_and_live_text(archive_text: str, live_text: str) -> str:
+def _row_sequence_authority(raw: str, session_id: str, run_id: str) -> int | None:
+    """Return the sequence ``raw`` may assert for THIS run, else ``None``.
+
+    Sequence authority must come only from rows the scanner would accept as
+    this run's own rows. A complete-but-invalid row (not JSON, not an object,
+    missing / non-integer / non-positive ``seq``), a wrong-owner row
+    (``event_id`` / ``run_id`` / ``session_id`` naming another run), or a
+    wrong-protocol row (a ``version`` outside 1/2, including a downgrade) must
+    not steer appends or suppress live rows during an archive/live merge.
+    """
+    try:
+        event = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(event, dict):
+        return None
+    version = event.get("version", 1)
+    if type(version) is not int or version not in (1, 2):
+        return None
+    seq = event.get("seq")
+    if type(seq) is not int or seq <= 0:
+        return None
+    if event.get("run_id") != run_id or event.get("session_id") != session_id:
+        return None
+    if event.get("event_id") != f"{run_id}:{seq}":
+        return None
+    return seq
+
+
+def _archive_committed_text(archive_text: str) -> str:
+    """Drop an archive copy's UNCOMMITTED torn EOF tail, keeping committed rows.
+
+    An archive is a byte copy of a live journal, and a live journal can end with
+    an unterminated torn row (a crash mid-append) that the scanner TOLERATES as
+    ``recovery_torn_tail``. A merge that appends live suffix rows after those
+    bytes gives them a terminating newline for free, promoting them into a
+    malformed COMPLETE row that fails the whole run's validation. Those bytes
+    were never a committed row, so the union drops them — exactly the rows the
+    writer never acknowledged. A final line that DOES parse is a complete row
+    and is kept whole (the scanner validates it, not this helper).
+    """
+    if not archive_text or archive_text.endswith("\n"):
+        return archive_text
+    cut = archive_text.rfind("\n")
+    try:
+        json.loads(archive_text[cut + 1:])
+    except (json.JSONDecodeError, ValueError):
+        return archive_text[: cut + 1]
+    return archive_text
+
+
+def _merge_archive_and_live_text(
+    archive_text: str, live_text: str, *, path: Path | None = None,
+) -> str:
     """Union archived rows with the live rows that continue past them.
 
-    Rows are matched by ``seq`` (leniently: an unparseable row is kept, the
-    journal tolerates malformed rows and the readers surface them).
+    Rows are matched by ``seq``. The archived maximum is taken only from rows
+    that carry sequence authority for this run (``_row_sequence_authority``);
+    tolerated torn archive tail bytes are dropped rather than promoted into a
+    malformed complete row when the suffix is joined
+    (``_archive_committed_text``). An unparseable live row is still kept — the
+    journal tolerates malformed rows and the readers surface them.
     """
+    session_id = run_id = None
+    if path is not None:
+        session_id, run_id = path.parent.name, path.stem
+    committed = _archive_committed_text(archive_text)
     max_archived_seq = 0
-    for raw in archive_text.splitlines():
+    for raw in committed.splitlines():
         stripped = raw.strip()
         if not stripped:
             continue
-        try:
-            seq = int(json.loads(stripped).get("seq") or 0)
-        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
-            continue
+        if session_id is None:
+            try:
+                seq = int(json.loads(stripped).get("seq") or 0)
+            except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                continue
+        else:
+            seq = _row_sequence_authority(stripped, session_id, run_id)
+            if seq is None:
+                continue
         if seq > max_archived_seq:
             max_archived_seq = seq
     kept: list[str] = []
@@ -601,8 +667,8 @@ def _merge_archive_and_live_text(archive_text: str, live_text: str) -> str:
             kept.append(raw)
     if not kept:
         return archive_text
-    joiner = "" if archive_text.endswith("\n") else "\n"
-    return archive_text + joiner + "\n".join(kept) + "\n"
+    joiner = "" if (not committed or committed.endswith("\n")) else "\n"
+    return committed + joiner + "\n".join(kept) + "\n"
 
 
 def _read_gz_text(archive_path: Path) -> str | None:
@@ -1081,10 +1147,20 @@ def _archived_next_seq(path: Path | None) -> int:
 
     Returns 1 only when there is provably NO archive to continue from. When an
     archive exists but its last sequence cannot be established — corrupt,
-    unreadable, or unpinnable — this refuses with ``archive_sequence_unavailable``
-    instead of restarting at 1: readers union archive + live by seq and drop
-    live rows at or below the archived maximum, so a restarted sequence would
-    be written to disk but never read, masking the stored history.
+    unreadable, unpinnable, or carrying no row that may claim a sequence for
+    THIS run — this refuses with ``archive_sequence_unavailable`` instead of
+    restarting at 1: readers union archive + live by seq and drop live rows at
+    or below the archived maximum, so a restarted sequence would be written to
+    disk but never read, masking the stored history.
+
+    The whole read runs under ``_archive_run_authority`` — the same cross-process
+    authority the finite-TTL prune holds across [live-absence re-check ->
+    delete]. A suffix can therefore never commit from a prefix that is then
+    deleted (or vice versa): the writer either seeds before the prune's step
+    (its live file exists, so the re-check keeps the archive) or after the
+    delete (nothing left to split from). Only rows that pass
+    ``_row_sequence_authority`` set the seed; complete invalid rows and
+    wrong-owner/protocol rows are skipped, never consulted for the maximum.
     """
     archived = _archive_path_for(path) if path is not None else None
     if archived is None:
@@ -1099,38 +1175,45 @@ def _archived_next_seq(path: Path | None) -> int:
     except OSError as exc:
         # Existence itself cannot be established: refuse (see docstring).
         raise ValueError("archive_sequence_unavailable") from exc
-    text = _read_gz_text(archived)
-    if text is None:
-        try:
-            # Same three-state check for the read-failed case: `_read_gz_text`
-            # returns None when the entry vanished mid-flight (then there is
-            # genuinely no archive) or when it is corrupt/unpinnable (then the
-            # stored history is real and the last seq is unknown).
-            os.lstat(archived)
-        except FileNotFoundError:
-            return 1
-        except OSError as exc:
-            raise ValueError("archive_sequence_unavailable") from exc
-        raise ValueError("archive_sequence_unavailable")
-    last = 0
-    for raw in (text or "").splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        try:
-            seq = int(json.loads(stripped).get("seq") or 0)
-        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
-            continue
-        if seq > last:
-            last = seq
-    if last <= 0:
-        # A READABLE archive yielded no valid positive sequence: every row is
-        # malformed JSON, a non-object, or missing ``seq`` (or there are no
-        # rows at all). The stored bytes are real but their last seq cannot be
-        # established, so refuse rather than restart at 1 and mask them — the
-        # same fail-closed rule as the unreadable case above.
-        raise ValueError("archive_sequence_unavailable")
-    return last + 1
+    with _archive_run_authority(path) as holding:
+        if _prune_authority_possible() and not holding:
+            # An archive entry exists and this platform can prune: seeding
+            # without the shared authority could read a prefix the prune is
+            # about to delete. Refuse rather than risk a split (see docstring).
+            raise ValueError("archive_sequence_unavailable")
+        text = _read_gz_text(archived)
+        if text is None:
+            try:
+                # Same three-state check for the read-failed case: `_read_gz_text`
+                # returns None when the entry vanished mid-flight (then there is
+                # genuinely no archive) or when it is corrupt/unpinnable (then the
+                # stored history is real and the last seq is unknown).
+                os.lstat(archived)
+            except FileNotFoundError:
+                return 1
+            except OSError as exc:
+                raise ValueError("archive_sequence_unavailable") from exc
+            raise ValueError("archive_sequence_unavailable")
+        session_id, run_id = path.parent.name, path.stem
+        last = 0
+        for raw in (text or "").splitlines():
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            seq = _row_sequence_authority(stripped, session_id, run_id)
+            if seq is None:
+                continue
+            if seq > last:
+                last = seq
+        if last <= 0:
+            # A READABLE archive yielded no authoritative positive sequence:
+            # every row is malformed JSON, a non-object, missing ``seq``, or
+            # names another run / protocol (or there are no rows at all). The
+            # stored bytes are real but their last seq cannot be established,
+            # so refuse rather than restart at 1 and mask them — the same
+            # fail-closed rule as the unreadable case above.
+            raise ValueError("archive_sequence_unavailable")
+        return last + 1
 
 
 def _prepare_journal_append(
@@ -1174,7 +1257,7 @@ def _read_validated_recovery_events(
                     # the live file alone is a suffix whose seqs do not start
                     # at 1 and would fail contiguity.
                     live_text = lines.read().decode("utf-8", errors="surrogateescape")
-                    merged = _merge_archive_and_live_text(archive_text, live_text)
+                    merged = _merge_archive_and_live_text(archive_text, live_text, path=path)
                     lines = io.BytesIO(merged.encode("utf-8", errors="surrogateescape"))
                 events, malformed, _prefix_bytes = _scan_validated_journal(lines, session_id, run_id)
                 return events, malformed
@@ -2048,6 +2131,106 @@ def _open_dir_no_follow(path: Path) -> int | None:
         return os.open(str(path), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     except OSError:
         return None
+
+
+def _prune_authority_possible() -> bool:
+    """True when the archive prune can run on this platform (mirrors the sweep gates)."""
+    return bool(_DIR_FD_OK) and _fcntl is not None
+
+
+def _open_archive_session_dir_pinned(live_path: Path) -> int | None:
+    """Pinned handle for a run's ARCHIVE session directory, or None.
+
+    Resolves ``_run_journal_archive/<sid>`` exactly the way an archive READ does
+    (root and session opened with ``O_NOFOLLOW``, session relative to the pinned
+    root), so the directory locked here is the directory whose entry the caller
+    is about to read. None when any component is missing or untrustworthy.
+    """
+    archive_entry = _archive_path_for(live_path)
+    if archive_entry is None or not _DIR_FD_OK:
+        return None
+    root = archive_entry.parent.parent
+    root_fd = session_fd = None
+    try:
+        root_fd = os.open(str(root), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+        session_fd = os.open(
+            archive_entry.parent.name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=root_fd
+        )
+        fd = session_fd
+        session_fd = None  # ownership handed to the caller
+        return fd
+    except OSError:
+        return None
+    finally:
+        for fd in (session_fd, root_fd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
+@contextmanager
+def _flock_dir_exclusive(dir_fd: int, *, blocking: bool = True):
+    """Hold a cross-process lock on ``dir_fd``; yields False when it cannot be taken."""
+    if _fcntl is None:
+        yield False
+        return
+    flags = _fcntl.LOCK_EX if blocking else _fcntl.LOCK_EX | _fcntl.LOCK_NB
+    try:
+        _fcntl.flock(dir_fd, flags)
+    except OSError:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        try:
+            _fcntl.flock(dir_fd, _fcntl.LOCK_UN)
+        except OSError:
+            pass
+
+
+@contextmanager
+def _archive_run_authority(live_path: Path):
+    """Cross-process authority for a run whose live file may not exist (#7613).
+
+    Archival leaves the run's live file ABSENT, so the live inode cannot
+    coordinate a writer that must re-seed from the archive with the prune that
+    may delete that same archive. Both sides instead share a lock on the run's
+    ARCHIVE session directory — an object that exists for as long as the archive
+    they contend over:
+
+      * a writer that has to seed from the archive holds it across the seed
+        read, so any prune checking afterwards sees a live counterpart (the
+        writer's file was created before the seed) and keeps the prefix;
+      * the prune holds it across [live-absence re-check -> delete], so no
+        writer can seed inside that window: the writer either seeded before
+        (prefix kept) or re-seeds after the delete and starts a fresh journal.
+        A committed suffix split from its archived prefix cannot exist.
+
+    Yields True when the lock is held. False means the lock could not be
+    established; a caller that would have to seed from an archive on a
+    prune-capable platform must refuse (see `_archived_next_seq`).
+    """
+    if not _prune_authority_possible():
+        yield False
+        return
+    fd = _open_archive_session_dir_pinned(live_path)
+    if fd is None:
+        # No archive session directory (nothing to delete, nothing to seed
+        # from — same directory) or it cannot be pinned: no lock, caller
+        # decides (refuse when an archive was actually present).
+        yield False
+        return
+    try:
+        with _flock_dir_exclusive(fd) as holding:
+            yield holding
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _remove_dir_tree(dir_fd: int, *, attempts: int = 3) -> bool:
@@ -3318,6 +3501,16 @@ def _prune_run_journal_archive(session_root: Path, caps: dict, now: float, count
     ttl_days = float(caps.get("archive_ttl_days") or 0.0)
     if ttl_days <= 0:
         return
+    if not _prune_authority_possible():
+        # No cross-process archive authority (no dir_fd support, or no flock):
+        # the delete could race a writer that must re-seed from this same
+        # archive — its live file may not exist yet, so the live inode cannot
+        # coordinate it. Fail closed: never prune where the authority is
+        # missing (mirrors the sweep's own backend gates).
+        logger.info(
+            "Run-journal archive prune disabled: cross-process archive authority is unavailable"
+        )
+        return
     live_root = session_root / RUN_JOURNAL_DIR_NAME
     # Pin the LIVE root once for the whole prune. When it exists but cannot be
     # pinned, skip pruning entirely (fail closed): the live-counterpart check
@@ -3382,18 +3575,38 @@ def _prune_run_journal_archive(session_root: Path, caps: dict, now: float, count
                     # may proceed to the destructive step: an unreadable or
                     # symlinked live state is UNKNOWN and keeps the archive
                     # (fail closed).
+                    #
+                    # The [re-check -> delete] step also runs under the CROSS-
+                    # PROCESS archive authority (a flock on this session
+                    # directory handle — the same object a re-seeding writer
+                    # locks via `_archive_run_authority`). The live file is
+                    # ABSENT here by definition, so the writer's live-inode
+                    # flock cannot coordinate it: without this lock a writer
+                    # could seed from the archive (committing a suffix) inside
+                    # the window between the check and the unlink, and the
+                    # delete would split prefix from suffix permanently.
+                    #
+                    # Lock ORDER mirrors the writer (`_lock_for` first, then
+                    # the archive authority) so the two can never deadlock, and
+                    # the authority take is non-blocking: a busy authority
+                    # (another process seeding/pruning) just keeps the archive
+                    # this pass.
                     live_path = live_root / name / f"{run_stem}.jsonl"
                     with _lock_for(live_path):
-                        if (
-                            _live_run_state_locked(live_root, name, run_stem, holder)
-                            != "absent"
-                        ):
-                            continue
-                        # Identity is re-asserted inside the unlink (see
-                        # `_prune_archive_entry`): a name republished since the
-                        # age check must survive.
-                        if _prune_archive_entry(entry, st, session_fd):
-                            counters["pruned_archives"] += 1
+                        with _flock_dir_exclusive(session_fd, blocking=False) as holding:
+                            if not holding:
+                                # Cannot take the authority: leave the archive.
+                                continue
+                            if (
+                                _live_run_state_locked(live_root, name, run_stem, holder)
+                                != "absent"
+                            ):
+                                continue
+                            # Identity is re-asserted inside the unlink (see
+                            # `_prune_archive_entry`): a name republished since
+                            # the age check must survive.
+                            if _prune_archive_entry(entry, st, session_fd):
+                                counters["pruned_archives"] += 1
             finally:
                 fd = int(holder.get("fd", -1))
                 if fd >= 0 and fd != live_root_fd:
