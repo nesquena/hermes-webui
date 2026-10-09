@@ -9828,10 +9828,13 @@ function setBusy(v){
     // the queued turn remains a chip and drains after the recovered draft has
     // been sent, instead of overwriting and then clearing that draft.
     const _composerHasUnsentContent=_isViewedSid&&(
-      String(($('msg')&&$('msg').value)||'').trim()
-      ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length)
+      typeof _composerHasContent==='function'
+        ? _composerHasContent()
+        : (String(($('msg')&&$('msg').value)||'').trim()
+          ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length))
     );
-    const next=sid&&_isViewedSid&&!_composerHasUnsentContent&&_queueDrainPendingSid!==sid
+    const _sendAlreadyInProgress=typeof _sendInProgress!=='undefined'&&_sendInProgress;
+    const next=sid&&_isViewedSid&&!_composerHasUnsentContent&&!_sendAlreadyInProgress&&_queueDrainPendingSid!==sid
       ?shiftQueuedSessionMessage(sid):null;
     if(next){
       _queueDrainPendingSid=sid;
@@ -9856,11 +9859,21 @@ function setBusy(v){
           _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
           updateQueueBadge(sid);return;
         }
+        // A file upload can keep send() in flight after the visible busy state
+        // clears. Requeue at the front instead of letting send() append this
+        // item behind newer queued turns through its concurrent-send guard.
+        if(typeof _sendInProgress!=='undefined'&&_sendInProgress){
+          _getSessionQueue(sid,true).unshift(next);
+          _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+          updateQueueBadge(sid);return;
+        }
         // Clearing a recovered draft only opens a drain window; text or files
         // entered during the settle delay are newer user intent and must not be
         // replaced by the queued turn.
-        if(String(($('msg')&&$('msg').value)||'').trim()
-          ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length)){
+        if(typeof _composerHasContent==='function'
+          ? _composerHasContent()
+          : (String(($('msg')&&$('msg').value)||'').trim()
+            ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length))){
           _getSessionQueue(sid,true).unshift(next);
           _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
           updateQueueBadge(sid);return;
@@ -9887,12 +9900,15 @@ function setBusy(v){
 
 let _queueDrainPendingSid=null;
 function _resumeQueuedSessionMessageIfComposerEmpty(){
-  if(S.busy||(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight))return;
+  if(S.busy
+    ||(typeof _sendInProgress!=='undefined'&&_sendInProgress)
+    ||(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight))return;
   const sid=S.session&&S.session.session_id;
   if(!sid||_queueDrainPendingSid===sid)return;
-  const msg=$('msg');
-  if(String((msg&&msg.value)||'').trim()
-    ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length))return;
+  if(typeof _composerHasContent==='function'
+    ? _composerHasContent()
+    : (String(($('msg')&&$('msg').value)||'').trim()
+      ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length)))return;
   const queue=_getSessionQueue(sid,false);
   if(!queue||!queue.length)return;
   _queueDrainSid=sid;

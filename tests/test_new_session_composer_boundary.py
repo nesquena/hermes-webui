@@ -16,6 +16,7 @@ BOOT_JS = ROOT.joinpath("static", "boot.js").read_text(encoding="utf-8")
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
 PANELS_JS = ROOT.joinpath("static", "panels.js").read_text(encoding="utf-8")
 WORKSPACE_JS = ROOT.joinpath("static", "workspace.js").read_text(encoding="utf-8")
+I18N_JS = ROOT.joinpath("static", "i18n.js").read_text(encoding="utf-8")
 
 
 def _function(source: str, name: str, next_marker: str) -> str:
@@ -4075,9 +4076,9 @@ def test_failed_new_session_requeues_drained_item_at_front_without_restamping():
     end = UI_JS.index("\n\n// ── Queue chip display", start)
     settle = UI_JS[start:end]
 
-    assert settle.count("_getSessionQueue(sid,true).unshift(next)") == 3
+    assert settle.count("_getSessionQueue(sid,true).unshift(next)") == 4
     assert "queueSessionMessage(sid,next)" not in settle
-    assert settle.count("_persistSessionQueueStorage(sid,_getSessionQueue(sid,false))") == 3
+    assert settle.count("_persistSessionQueueStorage(sid,_getSessionQueue(sid,false))") == 4
 
 
 def test_late_server_transcription_updates_source_owner_not_visible_destination():
@@ -4412,6 +4413,95 @@ def test_queue_drain_requeues_if_user_types_during_settle_window():
     assert json.loads(proc.stdout) == {
         "sends": 0, "text": "newer draft", "queue": ["queued turn"],
     }
+
+
+def test_queue_resume_stays_paused_for_unsent_context_cards():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = UI_JS.index("function setBusy(v){")
+    end = UI_JS.index("\n\n// ── Queue chip display", start)
+    queue_settlement = UI_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:''}};
+        const S={{busy:false,session:{{session_id:'source'}},pendingFiles:[]}};
+        const window={{_hasPendingSelections:()=>true}};
+        let _queueDrainSid='source',_sendInProgress=false;
+        const queued=[{{text:'queued turn'}}];
+        let shifts=0,sends=0,timers=[];
+        function $(id){{return id==='msg'?msg:null;}}
+        function _composerHasContent(){{
+          return !!(msg.value.trim()||S.pendingFiles.length||window._hasPendingSelections());
+        }}
+        function updateSendBtn(){{}}
+        function setStatus(){{}}
+        function setComposerStatus(){{}}
+        function updateQueueBadge(){{}}
+        function _getSessionQueue(){{return queued;}}
+        function _persistSessionQueueStorage(){{}}
+        function shiftQueuedSessionMessage(){{shifts++;return queued.shift()||null;}}
+        function setTimeout(fn){{timers.push(fn);}}
+        function send(){{sends++;}}
+        {queue_settlement}
+        _resumeQueuedSessionMessageIfComposerEmpty();
+        process.stdout.write(JSON.stringify({{shifts,sends,timers:timers.length,queue:queued.length}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "shifts": 0, "sends": 0, "timers": 0, "queue": 1,
+    }
+
+
+def test_queue_drain_requeues_if_file_upload_starts_during_settle_window():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = UI_JS.index("function setBusy(v){")
+    end = UI_JS.index("\n\n// ── Queue chip display", start)
+    queue_settlement = UI_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:''}};
+        const S={{busy:false,session:{{session_id:'source'}},pendingFiles:[]}};
+        let _queueDrainSid='source',_sendInProgress=false;
+        const queued=[{{text:'queued turn'}},{{text:'second turn'}}];
+        let sends=0,timers=[];
+        function $(id){{return id==='msg'?msg:null;}}
+        function _composerHasContent(){{return false;}}
+        function updateSendBtn(){{}}
+        function setStatus(){{}}
+        function setComposerStatus(){{}}
+        function updateQueueBadge(){{}}
+        function _getSessionQueue(){{return queued;}}
+        function _persistSessionQueueStorage(){{}}
+        function shiftQueuedSessionMessage(){{return queued.shift()||null;}}
+        function setTimeout(fn){{timers.push(fn);}}
+        function send(){{sends++;}}
+        {queue_settlement}
+        setBusy(false);
+        _sendInProgress=true;
+        timers.shift()();
+        process.stdout.write(JSON.stringify({{sends,queue:queued.map(x=>x.text)}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "sends": 0, "queue": ["queued turn", "second turn"],
+    }
+
+
+def test_new_profile_switch_copy_uses_english_locale_fallback():
+    assert I18N_JS.count(
+        "profile_switch_dictation_pending: 'Dictation is still finishing — "
+        "try the profile switch again in a moment.'"
+    ) == 1
+    assert I18N_JS.count(
+        "composer_disabled_profile_switch: 'Switching profile…'"
+    ) == 1
 
 
 def test_profile_switch_settlement_timeout_aborts_with_visible_error():
