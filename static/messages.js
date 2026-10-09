@@ -6220,11 +6220,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
+    // Stream-local titles survive the delayed done/fade rebind after compression.
+    const _pendingTitleUpdates=new Map();
+    const _pendingTitleExpectedCurrent=new Map();
     source.addEventListener('title',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
-      if((d.session_id||activeSid)!==activeSid) return;
-      applySessionTitleUpdate(activeSid, d.title);
+      // Accept either the title TARGET session or the stream OWNER session:
+      // after an A→B compression rotation a reattached listener runs with
+      // activeSid=B, and the server keys this event on the title target (B)
+      // while a mid-stream listener that captured the pre-rotation activeSid=A
+      // must still receive it. Matching either id rejects only genuinely
+      // foreign streams (#7318 re-gate).
+      if((d.session_id||activeSid)!==activeSid && d.stream_owner_session_id!==activeSid) return;
+      const targetSid=d.target_session_id||d.session_id||activeSid;
+      _pendingTitleUpdates.set(targetSid, d.title);
+      _pendingTitleExpectedCurrent.set(targetSid, d.expectedCurrent);
+      // Pass the server-declared previous title as expectedCurrent: after a
+      // compression rotation or SSE reattach, the open session's title is the
+      // malformed persisted value and nothing is remembered provisionally, so
+      // a bare listener-style call would be refused and the recovered title
+      // would only appear after a full reload (#7318 re-gate).
+      applySessionTitleUpdate(targetSid, d.title, {expectedCurrent:d.expectedCurrent});
     });
 
     source.addEventListener('title_status',e=>{
@@ -6420,6 +6437,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          if(_pendingTitleUpdates.has(completedSid)){
+            applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
+            _pendingTitleUpdates.delete(completedSid);
+            _pendingTitleExpectedCurrent.delete(completedSid);
+          }
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
@@ -9650,9 +9672,24 @@ function playAttentionSound(key){
 }
 
 function _notificationOptions(body,options={}){
-  const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
-  const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
-  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+  // #7652 review: a falsy sid used to fall through to the CURRENT session, so
+  // a notification for a sessionless surface (e.g. a cron completion with no
+  // session_id) opened whatever chat the user happened to be in and reused its
+  // notification tag. An explicit {sessionless:true} marker routes away from
+  // the current session, with its own tag, instead.
+  const sessionless=!!(options&&options.sessionless);
+  const sid=sessionless?null:((options&&options.sid)||(S&&S.session&&S.session.session_id));
+  // A sessionless surface still needs a DESTINATION to land on: the root URL
+  // alone restores whatever chat was last open (boot's saved-session restore),
+  // so the alert about a cron run opened the chat instead of the panel the run
+  // belongs to (#7652 review round 4). An explicit panel intent is carried in
+  // the URL; boot honors it ahead of the saved-chat restore.
+  const panel=(options&&options.panel)?String(options.panel).slice(0,64):'';
+  const rootWithPanelIntent=panel
+    ? `${location.origin}${_appRootPath()}${_appRootPath().includes('?')?'&':'?'}panel=${encodeURIComponent(panel)}`
+    : `${location.origin}${_appRootPath()}`;
+  const url=sessionless?rootWithPanelIntent:(sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href);
+  return {body:body||'',tag:sessionless?'hermes-webui-sessionless':(sid?`hermes-${sid}`:'hermes-webui'),renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();

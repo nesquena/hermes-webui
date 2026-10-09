@@ -1,36 +1,59 @@
-"""Regression tests for session id rotation URL sync."""
+"""Execute session-rotation tab-state synchronization for both restore paths."""
+import json
 from pathlib import Path
-import re
+import subprocess
+
+import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
-def test_stream_completion_syncs_rotated_session_id_to_tab_state():
-    """When compact/restore returns a new session id, the tab anchor follows it."""
-    # #3018 inserted a carry-forward of ephemeral per-turn fields into both the
-    # completion (_finishDone) and settled-restore assignments; match the new shapes.
-    completion_marker = re.compile(
-        r"S\.session=d\.session;\s*"
-        r"S\.messages=_carryForwardEphemeralTurnFields\(S\.messages\|\|\[\], d\.session\.messages\|\|\[\]\);"
-    )
-    settled_marker = "S.session=session;\n        const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);"
+@pytest.mark.parametrize("path", ["completion", "settled"])
+@pytest.mark.parametrize("storage_blocked", [False, True])
+@pytest.mark.parametrize("url_helper_available", [False, True])
+def test_stream_completion_syncs_rotated_session_id_to_tab_state(
+    path, storage_blocked, url_helper_available,
+):
+    """A -> B updates browser anchors even if storage is unavailable.
 
-    completion_match = completion_marker.search(MESSAGES_JS)
-    completion_pos = completion_match.start() if completion_match else -1
-    settled_pos = MESSAGES_JS.find(settled_marker)
-    assert completion_pos != -1
-    assert settled_pos != -1
-
-    # Proximity window scoping "the completion/settled handler block near the
-    # session assignment". The settled restore block now includes the terminal
-    # stale-prefix guard before the tab-state sync, so keep the assertion local
-    # to the handler while widening the slice enough to cover the new helper
-    # state and the unchanged localStorage/update-url writes.
-    completion_block = MESSAGES_JS[completion_pos : completion_pos + 1000]
-    settled_block = MESSAGES_JS[settled_pos : settled_pos + 1800]
-
-    for block in (completion_block, settled_block):
-        assert "localStorage.setItem('hermes-webui-session',S.session.session_id);" in block
-        assert "_setActiveSessionUrl(S.session.session_id)" in block
-        assert "typeof _setActiveSessionUrl==='function'" in block
+    Execute the actual rebind-through-tab-sync statements, bounded by the next
+    processing stage rather than a character window that unrelated code grows
+    past. Transcript helpers are stubs; session assignment and tab writes are not.
+    """
+    if path == "completion":
+        start = MESSAGES_JS.index("S.session=d.session;")
+        end = MESSAGES_JS.index("const _markerOnlyAssistantError=", start)
+    else:
+        start = MESSAGES_JS.index("S.session=session;")
+        # Paging/revision bookkeeping now precedes the tab sync. Include the
+        # storage and URL writes, stopping before transcript staging begins.
+        end = MESSAGES_JS.index("const _stagedMessages=", start)
+    block = MESSAGES_JS[start:end]
+    script = """
+const assert=require('node:assert/strict');
+const S={session:{session_id:'A'},messages:[]};
+const session={session_id:'B',messages:[{role:'assistant',content:'Done'}]};
+const d={session};
+const completedSid='B';
+const _pendingTitleUpdates=new Map();
+const _carryForwardEphemeralTurnFields=(_, next)=>next;
+const _filterRecoveryControlMessages=messages=>messages;
+const _attachProjectedAnchorSceneToLastAssistant=()=>{};
+const preserveVisibleOnShorterTerminalSnapshot=false;
+const stored=new Map([['hermes-webui-session','A']]);
+const urls=[];
+const localStorage={setItem(key,value){
+  if(STORAGE_BLOCKED) throw new Error('storage unavailable');
+  stored.set(key,value);
+}};
+const _setActiveSessionUrl=URL_HELPER_AVAILABLE?(sid=>urls.push(sid)):undefined;
+""" + block + """
+assert.equal(S.session.session_id,'B');
+assert.equal(stored.get('hermes-webui-session'),STORAGE_BLOCKED?'A':'B');
+assert.deepEqual(urls,URL_HELPER_AVAILABLE?['B']:[]);
+"""
+    script = script.replace("STORAGE_BLOCKED", json.dumps(storage_blocked))
+    script = script.replace("URL_HELPER_AVAILABLE", json.dumps(url_helper_available))
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

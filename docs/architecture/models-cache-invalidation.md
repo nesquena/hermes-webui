@@ -40,6 +40,12 @@ The over-budget stale fallback (`_load_stale_models_cache_from_disk`) tolerates 
 
 ## Codex catalog and routing
 
+The configured default is checked against the active provider's own group
+(including its overflow entries), not against matching bare IDs in other
+providers' groups. An OpenAI API entry therefore cannot suppress insertion of a
+configured Codex default. The normal provider-qualified deduplication still
+keeps the resulting picker options distinct.
+
 The static `openai-codex` model list is a degraded fallback, not an account
 entitlement list. Account-aware live discovery and visible entries in the local
 Codex catalog can add models absent from that fallback. Generic Agent-core
@@ -99,6 +105,33 @@ The switch keeps the disk snapshot because it is keyed per profile and
 new catalog input must become an axis first. `delete_profile_api()` and
 `create_profile_api()` unlink `models_cache.<name>.json`, so a recreated profile
 never inherits the old catalog.
+
+Credential eviction is part of the same epoch-reset critical section as memory
+invalidation, before rebuild admission reopens. Full invalidation clears all
+profile pools; provider invalidation removes the original and canonical provider
+keys for the active profile. Both retain disk-commit → catalog lock order.
+
+Custom endpoint scheduling is work-conserving: a fair-share slice bounds the
+serial wait, while its HTTP attempt can continue against the same caller deadline
+(with publication headroom and the endpoint cap). Later endpoints still get
+in-band attempts; unused time after them is lent back to pending probes. Completed
+outcomes are consumed by the catalog worker and merged through its rebuild-local
+memo before returning, so provider order does not hide a healthy slow endpoint.
+HTTP threads receive already-resolved requests, own only private outcome boxes,
+and never touch profile state, catalog/durable caches or publication locks.
+
+A custom-endpoint timeout below the full endpoint cap is a truncated attempt,
+not evidence of unreachability. A partial catalog with groups can be returned but
+is not published to either cache; an empty partial uses the existing stale-disk
+or static fallback instead. The existing worker checks generation revocation
+under the catalog condition after the foreground handoff, then retries truncated
+targets at the full cap and publishes only through the generation/source/ownership
+fences. Unrelated live provider lookups (including empty results and exceptions)
+are memoized only for that rebuild, not shared with a successor or another profile.
+An abandoned partial is removed from the publication box before revocation is
+checked. Empty partials that finish in time do not log a budget-overrun warning.
+Malformed LM Studio responses whose `data` is not a list are ignored, preserving
+the degraded catalog behavior for both models and onboarding callers.
 
 ## Change protocol
 

@@ -112,6 +112,14 @@ function syncAppTitlebar() {
       inp.type = 'text';
       inp.className = 'app-titlebar-rename-input';
       inp.value = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
+      // #7542: this is a chat-title editor, not a credentials field.
+      // Chrome and password-manager extensions (1Password, LastPass,
+      // Bitwarden, Dashlane) mis-classify it as a login form because
+      // it accepts arbitrary user input and is rendered next to the
+      // chat UI. Disable autofill / form-fill explicitly so the
+      // browser does not surface the "save password" dialog after
+      // the user renames a conversation.
+      _markNonCredentialInput(inp);
 
       // Prevent click/dblclick on the input from bubbling — we don't want
       // panel switches, session switches, or any other handler firing.
@@ -432,6 +440,8 @@ async function switchPanel(name, opts = {}) {
     if (sidebar) {
       sidebar.classList.remove('mobile-session-page');
       sidebar.classList.add('mobile-panel-drawer', 'mobile-open');
+      // #7924: an open drawer must never stay inert (see mobileSwitchPanel).
+      if (typeof _setPanelInert === 'function') _setPanelInert(sidebar, true);
     }
   }
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
@@ -7083,6 +7093,8 @@ function _openProfileSwitchSessionBrowser(){
     try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
     sidebar.classList.remove('mobile-session-page');
     sidebar.classList.add('mobile-panel-drawer','mobile-open');
+    // #7924: an open drawer must never stay inert (see mobileSwitchPanel).
+    if(typeof _setPanelInert==='function')_setPanelInert(sidebar,true);
   }catch(_){}
 }
 
@@ -9288,12 +9300,53 @@ async function _autosavePreferencesSettings(payload){
     const pwField=$('settingsPassword');
     const pwDirty=!!(pwField&&pwField.value);
     const modelSel=$('settingsModel');
+    // The raw select value and _settingsHermesDefaultModelOnOpen speak the same
+    // language — both are the qualified dropdown value (@<provider>:<model> for
+    // catalog options), as written on open (models.default_model) and on save
+    // (body.default_model). Comparing the provider-stripped modelState.model
+    // against it marked the picker dirty on every autosave after a qualified
+    // default was saved (#7865 re-gate), so only the provider is taken from
+    // modelState — a same-value/different-provider re-pick still counts.
+    //
+    // The model half of that comparison must also accept the normalized form:
+    // when the catalog producer (_deduplicate_model_ids) hits a collision it
+    // qualifies the custom provider's option (@custom:foo:claude-sonnet-5)
+    // while the saved default is stored as the bare model + provider
+    // (claude-sonnet-5 / custom:foo). An unchanged default then only matches
+    // on the captured model, so the raw-value side alone reports a phantom
+    // edit and the unsaved-changes bar never clears (#7865 re-gate 2). The
+    // provider still decides on its own, so a same-model/different-provider
+    // re-pick keeps reading dirty.
     const modelState=(typeof _captureModelDropdownSelection==='function'&&modelSel)
       ? (_captureModelDropdownSelection(modelSel)||{model:String((modelSel&&modelSel.value)||''),model_provider:null})
       : {model:String((modelSel&&modelSel.value)||''),model_provider:null};
+    const rawModelValue=String((modelSel&&modelSel.value)||'');
+    const capturedModelValue=String((modelState&&modelState.model)||'');
+    const savedModelOnOpen=String(_settingsHermesDefaultModelOnOpen||'');
+    // #7865 SHOULD-FIX (re-gate): a THIRD form. After "Save Settings" the server
+    // stores the bare model while the default-model global still holds the raw
+    // qualified value the picker rendered. Re-opening Settings therefore shows
+    // the qualified option, and _modelStateForSelect now SKIPS the strip for a
+    // configured default — so captured and raw are both
+    // "@custom:foo:claude-sonnet-5" while saved-on-open is the bare
+    // "claude-sonnet-5". Neither of the two comparisons above matches, and the
+    // unsaved-changes bar reappears on the next autosaved edit even though
+    // nothing was changed.
+    //
+    // Accept the raw value with the captured provider's own "@<provider>:"
+    // prefix removed. It is still anchored on the captured provider, so a
+    // same-model/different-provider re-pick keeps reading dirty.
+    const _capturedProvider=String((modelState&&modelState.model_provider)||'').trim();
+    const _ownPrefix=_capturedProvider?`@${_capturedProvider}:`:'';
+    const prefixStrippedValue=(_ownPrefix&&rawModelValue.toLowerCase().startsWith(_ownPrefix.toLowerCase()))
+      ?rawModelValue.slice(_ownPrefix.length)
+      :rawModelValue;
+    const modelUnchanged=rawModelValue===savedModelOnOpen
+      ||capturedModelValue===savedModelOnOpen
+      ||prefixStrippedValue===savedModelOnOpen;
     const modelDirty=!!(
       modelSel&&(
-        (modelState.model||'')!==(_settingsHermesDefaultModelOnOpen||'')||
+        !modelUnchanged||
         ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null))
       )
     );
@@ -9977,13 +10030,35 @@ async function loadSettingsPanel(){
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
           {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
+          {value:'fr-FR-RemyMultilingualNeural',label:'Rémy (French, Male, Multilingual)'},
+          {value:'fr-FR-VivienneMultilingualNeural',label:'Vivienne (French, Female, Multilingual)'},
+          {value:'fr-FR-DeniseNeural',label:'Denise (French, Female)'},
+          {value:'fr-FR-EloiseNeural',label:'Eloise (French, Female, Child)'},
+          {value:'fr-FR-HenriNeural',label:'Henri (French, Male)'},
+          {value:'fr-CA-AntoineNeural',label:'Antoine (French Canadian, Male)'},
+          {value:'fr-CA-JeanNeural',label:'Jean (French Canadian, Male)'},
+          {value:'fr-CA-SylvieNeural',label:'Sylvie (French Canadian, Female)'},
+          {value:'fr-CA-ThierryNeural',label:'Thierry (French Canadian, Male)'},
         ];
         ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
-        edgeVoices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.value;opt.textContent=v.label;
-          if(v.value===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
+        // Group by language (macOS / Windows / Edge Read Aloud convention) now that
+        // the list spans five locales; order inside each group is unchanged.
+        const edgeVoiceGroups=[
+          ['zh-CN','Chinese'],['en-US','English'],['id-ID','Indonesian'],
+          ['fr-FR','French'],['fr-CA','French (Canada)'],
+        ];
+        edgeVoiceGroups.forEach(([prefix,groupLabel])=>{
+          const voices=edgeVoices.filter(v=>v.value.startsWith(prefix+'-'));
+          if(!voices.length) return;
+          const og=document.createElement('optgroup');
+          og.label=groupLabel;
+          voices.forEach(v=>{
+            const opt=document.createElement('option');
+            opt.value=v.value;opt.textContent=v.label;
+            if(v.value===current) opt.selected=true;
+            og.appendChild(opt);
+          });
+          ttsVoiceSel.appendChild(og);
         });
       } else {
         if(!('speechSynthesis' in window)){
@@ -12552,6 +12627,7 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
+    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
@@ -12587,14 +12663,14 @@ async function checkUpdatesNow(channelOverride){
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       }
     }
   } catch(e){
@@ -13217,7 +13293,14 @@ async function saveSettings(andClose){
         try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
-        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        // The provider comes from the same dropdown selection as `model` above
+        // (both captured from $('settingsModel')), so there is no cross-check to
+        // perform against the raw select value: the raw value can be a qualified
+        // @<provider>:<model> id while modelState.model carries the
+        // provider-stripped model, and comparing them directly would write null
+        // for every qualified option — clearing window._activeProvider on save
+        // (#7865 re-gate).
+        body.default_model_provider=modelState.model_provider||null;
         }catch(_modelErr){
           // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
           // one provider) is user-fixable, not a partial success. Surface the
@@ -13253,7 +13336,14 @@ async function saveSettings(andClose){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
-        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        // The provider comes from the same dropdown selection as `model` above
+        // (both captured from $('settingsModel')), so there is no cross-check to
+        // perform against the raw select value: the raw value can be a qualified
+        // @<provider>:<model> id while modelState.model carries the
+        // provider-stripped model, and comparing them directly would write null
+        // for every qualified option — clearing window._activeProvider on save
+        // (#7865 re-gate).
+        body.default_model_provider=modelState.model_provider||null;
         }catch(_modelErr){
           // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
           // one provider) is user-fixable, not a partial success. Surface the
@@ -13350,11 +13440,20 @@ let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
 let _cronPollGeneration=0;
+// #7652 review follow-up: completions that fired while the tab was hidden
+// but reached no surface (the user has notifications disabled or denied) are
+// queued here so a reload of the page (or a visibility change) can flush them
+// as a toast. Without this the completion is consumed with no surface at all.
+const _cronPendingToasts=[];
+let _cronPollInFlight=false;  // one tick at a time (overlapping ticks double-notify)
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
 
 function _resetCronUnreadForProfileSwitch(){
   _cronPollGeneration++;
   _cronNewJobIds.clear();
+  // Queued completions belong to the profile being left; never flush their
+  // toasts into the incoming profile's timeline (#5960 gate).
+  _cronPendingToasts.length=0;
   _cronPollSince=Date.now()/1000;
   // Clear persisted cron sidebar markers from the profile we left. Non-cron
   // completion unread stays intact (#5960 gate: sticky all-profile leak).
@@ -13373,32 +13472,128 @@ window.addEventListener('hermes:cron_created', () => {
 
 function startCronPolling(){
   if(_cronPollTimer) return;
-  _cronPollTimer=setInterval(async()=>{
-    if(document.hidden) return;  // don't poll when tab is in background
-    try{
-      const pollGeneration=_cronPollGeneration;
-      const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
-      if(pollGeneration!==_cronPollGeneration) return;
-      if(data.completions&&data.completions.length>0){
-        for(const c of data.completions){
-          if(c.toast_notifications !== false){
-            showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
-          }
-          _cronPollSince=Math.max(_cronPollSince,c.completed_at);
-          if(c.job_id && c.badge_notifications !== false) _cronNewJobIds.add(String(c.job_id));
-          if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
-            const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
-            _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
-              source:'cron',
-              profile:activeProfile,
-            });
+  _cronPollTimer=setInterval(_runCronPollTick,30000);
+}
+
+// One recent-completions tick. Split out of the interval callback so the
+// in-flight guard can span the whole await (see _cronPollInFlight): two
+// overlapping ticks would each read the same _cronPollSince and each notify
+// the same completion (#7652 review).
+async function _runCronPollTick(){
+  if(_cronPollInFlight) return;
+  _cronPollInFlight=true;
+  try{
+    const pollGeneration=_cronPollGeneration;
+    const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+    if(pollGeneration!==_cronPollGeneration) return;
+    if(data.completions&&data.completions.length>0){
+      for(const c of data.completions){
+        if(c.toast_notifications !== false){
+          // #7257: even when the tab is backgrounded we still want the
+          // user to know a cron job just completed. With the old
+          // ``if(document.hidden) return`` gate, the entire recent-fetch
+          // skipped silently and no surface (toast or notification) ever
+          // fired. Now: visible tabs keep the existing showToast,
+          // hidden tabs get a browser notification routed through
+          // sendBrowserNotification (which itself honors the user's
+          // notification permission and enabled setting). _cronPollSince,
+          // _cronNewJobIds, and the session-unread marker all advance
+          // regardless of which surface fires.
+          const statusText = c.status==='error' ? t('status_failed') : t('status_completed');
+          if(document.hidden){
+            // A hidden completion only counts as delivered when the
+            // notification actually reached the user's channel. The helper
+            // awaits the real display result, so a display failure is NOT
+            // mistaken for delivery and the completion is queued instead
+            // (#7652 review: SILENT gap).
+            const notified=await _cronSendHiddenCompletionNotification(c.name,statusText,c.session_id);
+            // The await yields: the profile may have switched (the queue
+            // state belongs to the old profile) or the tab may have become
+            // visible (the user is already looking at a live surface). Skip
+            // a stale tick's fallback entirely.
+            if(pollGeneration!==_cronPollGeneration) return;
+            if(!notified){
+              if(typeof document!=='undefined'&&document.hidden){
+                // Notification channel closed or the display failed: queue
+                // the completion so the user still gets it as a toast when
+                // the tab comes back. Otherwise _cronPollSince advances past
+                // it and the completion is consumed with no surface at all.
+                _cronPendingToasts.push({name:c.name,statusText});
+              }else{
+                // The tab became visible while the delivery was pending:
+                // surface it immediately rather than waiting for another
+                // visibility change.
+                showToast(t('cron_completion_status', c.name, statusText), 4000);
+              }
+            }
+          } else {
+            showToast(t('cron_completion_status', c.name, statusText), 4000);
           }
         }
-        // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
-        updateCronBadge();
+        _cronPollSince=Math.max(_cronPollSince,c.completed_at);
+        if(c.job_id && c.badge_notifications !== false) _cronNewJobIds.add(String(c.job_id));
+        if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
+          const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+          _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
+            source:'cron',
+            profile:activeProfile,
+          });
+        }
       }
-    }catch(e){}
-  },30000);
+      // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
+      updateCronBadge();
+    }
+  }catch(e){}
+  finally{ _cronPollInFlight=false; }
+}
+
+// True when a notification for a completion would actually reach the user
+// right now. sendBrowserNotification silently no-ops otherwise, so a hidden
+// tab must not treat its completion as delivered (#7652 review).
+function _cronCanNotify(){
+  return !!(window._notificationsEnabled && typeof Notification!=='undefined'
+    && Notification.permission==='granted');
+}
+
+// Notify for a completion that arrived while the tab was hidden. Resolves true
+// only when sendBrowserNotification reports that the notification actually
+// reached the user's notification channel, so the caller can decide whether to
+// queue a fallback toast. This must be AWAITED: `_cronCanNotify()` is only a
+// permission pre-check, and the real primitive still resolves false when the
+// service-worker path finds no active registration while the direct
+// Notification constructor throws — the normal case on some mobile browsers
+// and installed-PWA contexts that only allow SW notifications. Returning true
+// without awaiting made such a completion vanish (#7652 review).
+async function _cronSendHiddenCompletionNotification(name,statusText,sessionId){
+  if(!_cronCanNotify()) return false;
+  if(typeof sendBrowserNotification!=='function') return false;
+  // #7652 review: pass an explicit sessionless marker when the completion has
+  // no session_id. Without it _notificationOptions falls back to the user's
+  // CURRENT session, so clicking the notification opens the wrong chat (and
+  // reuses that session's notification tag). The `panel` intent is the click
+  // target: a sessionless completion belongs to no chat, so the click must
+  // land on the Tasks panel the run lives in — not the root, which would
+  // restore the last chat the user had open (#7652 review round 4).
+  try{
+    const delivered=await sendBrowserNotification(name,statusText,{sid:sessionId||null,sessionless:!sessionId,panel:!sessionId?'tasks':''});
+    // Fail closed on anything that is not an explicit success: the primitive
+    // returns undefined when it short-circuits before delivery.
+    return delivered===true;
+  }catch(_err){
+    return false;
+  }
+}
+
+// Flush completions that arrived while hidden but reached no surface, as
+// toasts. Runs from the visibilitychange handler below; a no-op while the
+// document is still hidden.
+function _flushCronPendingToasts(){
+  if(!_cronPendingToasts.length) return;
+  if(typeof document!=='undefined'&&document.hidden) return;
+  while(_cronPendingToasts.length){
+    const queued=_cronPendingToasts.shift();
+    showToast(t('cron_completion_status', queued.name, queued.statusText), 4000);
+  }
 }
 
 function updateCronBadge(){
@@ -13434,6 +13629,14 @@ switchPanel=async function(name,opts){ return _origSwitchPanel(name,opts); };
 
 // Start polling on page load
 startCronPolling();
+
+// #7652 review: a completion that fired while the tab was hidden and could not
+// notify (notifications disabled/denied) is queued in _cronPendingToasts.
+// Flushing on becoming visible is what turns it into a toast — without this
+// listener the queued completion would sit there forever.
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden) _flushCronPendingToasts();
+});
 
 // ── Background agent error tracking ──────────────────────────────────────────
 

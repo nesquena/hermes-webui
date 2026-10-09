@@ -25,7 +25,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from api.config import STATE_DIR
-from api.helpers import redact_session_data, split_media_token_ref
+from api.helpers import _json_response_body, redact_session_data, split_media_token_ref
 # _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
 # force=True + local fallback regex). Unlike redact_session_data it does NOT
 # consult the user-toggleable api_redact_enabled setting — a public share is a
@@ -53,16 +53,16 @@ def _share_path(token: str) -> Path:
 
 
 def _write_json_atomic(path: Path, payload: dict) -> None:
+    body = _json_response_body(payload, pretty=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         dir=str(path.parent),
         prefix=f"{path.stem}.",
         suffix=".tmp",
-        text=True,
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(body)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_name, path)
