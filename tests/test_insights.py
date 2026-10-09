@@ -482,7 +482,15 @@ def test_insights_refresh_restored_by_latest_request_runtime():
         """
     ) % {"load_fn": load_fn}
 
-    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=60, check=False)
+    # `--input-type=module` is explicit: `node -e` input is parsed as CommonJS
+    # on some Node 20 releases, where this harness's top-level `await` was a
+    # SyntaxError — and the test only checks that node EXISTS, so those
+    # installs failed the suite instead of skipping it (Greptile P1
+    # 2026-10-09T21:46:38Z).
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", harness],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
     assert proc.returncode == 0, f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     assert out["successPass"] is True
@@ -880,6 +888,7 @@ def test_insights_absolute_range_dst_transition_daily_buckets(monkeypatch, tmp_p
     if not hasattr(time, "tzset"):
         pytest.skip("time.tzset() required for DST test (not available on Windows)")
 
+    _saved_tz = os.environ.get("TZ")
     os.environ["TZ"] = "America/New_York"
     time.tzset()
     try:
@@ -902,7 +911,10 @@ def test_insights_absolute_range_dst_transition_daily_buckets(monkeypatch, tmp_p
         assert data["period_days"] == 5
         assert data["period_days"] == len(data["daily_tokens"])
     finally:
-        os.environ.pop("TZ", None)
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
         if hasattr(time, "tzset"):
             time.tzset()
 
@@ -920,6 +932,7 @@ def test_insights_absolute_range_dst_end_boundary_next_local_midnight(monkeypatc
     if not hasattr(time, "tzset"):
         pytest.skip("time.tzset() required for DST test (not available on Windows)")
 
+    _saved_tz = os.environ.get("TZ")
     os.environ["TZ"] = "America/New_York"
     time.tzset()
     try:
@@ -959,7 +972,10 @@ def test_insights_absolute_range_dst_end_boundary_next_local_midnight(monkeypatc
         dates = [d["date"] for d in data["daily_tokens"]]
         assert dates == ["2026-03-06", "2026-03-07", "2026-03-08"]
     finally:
-        os.environ.pop("TZ", None)
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
         if hasattr(time, "tzset"):
             time.tzset()
 def test_insights_absolute_range_excludes_session_exactly_at_next_midnight(monkeypatch, tmp_path):
@@ -1046,6 +1062,7 @@ def test_insights_trailing_window_dst_cutoff_at_local_midnight(monkeypatch, tmp_
     if not hasattr(time, "tzset"):
         pytest.skip("time.tzset() required for DST test (not available on Windows)")
 
+    _saved_tz = os.environ.get("TZ")
     os.environ["TZ"] = "America/New_York"
     time.tzset()
     try:
@@ -1073,7 +1090,10 @@ def test_insights_trailing_window_dst_cutoff_at_local_midnight(monkeypatch, tmp_
         assert dates == ["2026-11-01", "2026-11-02"]
         assert data["daily_tokens"][0]["sessions"] == 1
     finally:
-        os.environ.pop("TZ", None)
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
         if hasattr(time, "tzset"):
             time.tzset()
 
@@ -2166,6 +2186,7 @@ def test_insights_absolute_range_end_only_dst_calendar_arithmetic(monkeypatch, t
     if not hasattr(time, "tzset"):
         pytest.skip("time.tzset() required for DST test (not available on Windows)")
 
+    _saved_tz = os.environ.get("TZ")
     os.environ["TZ"] = "America/New_York"
     time.tzset()
     try:
@@ -2188,5 +2209,48 @@ def test_insights_absolute_range_end_only_dst_calendar_arithmetic(monkeypatch, t
         assert data["total_sessions"] == 1
         assert data["total_input_tokens"] == 10
     finally:
-        os.environ.pop("TZ", None)
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
         time.tzset()
+
+
+# ---------------------------------------------------------------------------
+# Greptile re-review of the post-master-merge head (2026-10-09T21:46:38Z)
+# ---------------------------------------------------------------------------
+
+
+def test_dst_tests_save_and_restore_the_ambient_tz():
+    """P2: the DST tests overwrote TZ and then DELETED it, so a developer who
+    started the suite with TZ set had it clobbered for the rest of the process
+    and later results depended on test order. Each test must snapshot the
+    previous value and restore it from its finally block."""
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    writes = src.count('os.environ["TZ"] = "America/New_York"')
+    saves = src.count('_saved_tz = os.environ.get("TZ")')
+    restores = src.count('os.environ["TZ"] = _saved_tz')
+    assert writes >= 4, f"expected the DST tests to set TZ, found {writes}"
+    assert saves == writes, (
+        f"every TZ write must snapshot the ambient value ({saves} saves for "
+        f"{writes} writes)"
+    )
+    assert restores == writes, (
+        f"every TZ write must restore the ambient value ({restores} restores "
+        f"for {writes} writes)"
+    )
+    assert 'os.environ.pop("TZ", None)' in src, "an unset TZ must still be unset"
+
+
+def test_the_awaiting_node_harness_declares_module_input():
+    """P1: `node -e` input is CommonJS on some Node 20 releases, where a harness
+    with top-level `await` is a SyntaxError; the test only checks that node
+    exists, so those installs FAILED instead of skipping. The refresh-restore
+    harness therefore has to select module input explicitly."""
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    marker = "successPass: true, errorPass: true"
+    assert marker in src, "the refresh-restore harness is the one under test"
+    call = src.index("subprocess.run(", src.index(marker))
+    assert '"--input-type=module"' in src[call:call + 300], (
+        "the harness that awaits at module scope must run with --input-type=module"
+    )
