@@ -31,7 +31,9 @@ from api.config import (
     gateway_supports_approval,
     peek_stream,
     register_active_run,
+    release_stream_owned_registries,
     unregister_active_run,
+    unregister_active_run_if_owned,
     unregister_stream_owner,
     update_active_run,
 )
@@ -123,6 +125,35 @@ def _clear_gateway_run_starting(stream_id: str) -> None:
             state["owner_done"] = True
         _retire_gateway_run_starting_if_done(stream_id)
         _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def release_gateway_stream_state(stream_id: str, *, finish_pending: bool = True) -> None:
+    """No-op-safe release of the Gateway-owned rows for ``stream_id``.
+
+    THE release path for ``_STREAM_RUN_LIFECYCLE`` / ``_STREAM_RUN_IDS`` /
+    ``_STREAM_ENDPOINTS``: the canonical Gateway worker teardown and the
+    chat/start orphan recovery both call this, so a dead stream cannot leak a
+    lifecycle row, a run-id mapping or an endpoint that no worker will ever free
+    (#7302 re-gate).
+
+    Uses the existing lifecycle/waiter protocol instead of popping rows raw: a
+    request parked in ``wait_for_gateway_run_id`` is never stranded -- it wakes on
+    the terminal phase, and retires the row itself on the way out
+    (``_retire_gateway_run_starting_if_done``), which is why the row can be left
+    in place while ``waiters`` is non-zero.
+
+    ``finish_pending`` publishes the terminal phase for a run that never reached
+    ``ready``. It is a pure no-op for a stream that never touched the Gateway
+    (no lifecycle row, no run id, no endpoint).
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return
+    if finish_pending and gateway_run_id_pending(stream_id):
+        _finish_gateway_run_starting(stream_id)
+    _clear_gateway_run_starting(stream_id)
+    with _STREAM_RUN_STARTING_CONDITION:
+        _STREAM_ENDPOINTS.pop(stream_id, None)
 
 
 def gateway_run_id_pending(stream_id: str) -> bool:
@@ -1634,27 +1665,79 @@ def _resume_gateway_run_for_session(session) -> bool:
         return False
     sid = session.session_id
     endpoint = _gateway_endpoint_for_profile(session.profile)
+    # Review #7302 (nesquena, 01-Oct-2026) finding 2 -- "CORE": publish the
+    # reattached run's ownership (ACTIVE_RUNS row + retained cancel signal) on the
+    # SAME STREAMS_LOCK -> ACTIVE_RUNS_LOCK edge that creates the STREAMS entry,
+    # BEFORE the worker is scheduled. A run restored after a restart carries the
+    # PREVIOUS process's session.pending_started_at, so the fresh-pending guard in
+    # chat/start cannot cover this window: with the stream registered but no
+    # ACTIVE_RUNS row, the orphan check classifies the reattach as an orphan,
+    # clears the stream plus the Gateway state and admits a SECOND start while the
+    # remote run keeps going. The edge and the lock order are the ones the worker
+    # (below), Stop and Steer use.
     with STREAMS_LOCK:
         if stream_id in STREAMS:
             return False
         STREAMS[stream_id] = create_stream_channel()
+        CANCEL_FLAGS[stream_id] = CANCEL_FLAGS.get(stream_id, threading.Event())
+        # Ownership token: Stop can detach this stream (and a successor could even
+        # register the same id) before the worker admits it, so the early-return
+        # teardown must retire exactly THIS claim and never someone else's row.
+        claim_token = uuid.uuid4().hex
+        register_active_run(
+            stream_id,
+            session_id=sid,
+            started_at=time.time(),
+            phase="gateway-reattached",
+            claim_token=claim_token,
+            workspace=str(session.workspace or ""),
+            model=session.model,
+            provider=session.model_provider,
+            backend="gateway",
+        )
     register_stream_owner(stream_id, sid)
     register_session_writeback_owner(sid, stream_id)
     _mark_gateway_run_starting(stream_id)
-    threading.Thread(
-        target=_run_gateway_chat_streaming,
-        args=(sid, session.pending_user_message or "", session.model, session.workspace,
-              stream_id, list(session.pending_attachments or [])),
-        kwargs={
-            "model_provider": session.model_provider,
-            "goal_related": bool(run.get("goal_related")),
-            "regeneration": bool(run.get("regeneration")),
-            "reattach_run": run,
-            "reattach_endpoint": endpoint,
-        },
-        name=f"gateway-reattach-{stream_id[:12]}",
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=_run_gateway_chat_streaming,
+            args=(sid, session.pending_user_message or "", session.model, session.workspace,
+                  stream_id, list(session.pending_attachments or [])),
+            kwargs={
+                "model_provider": session.model_provider,
+                "goal_related": bool(run.get("goal_related")),
+                "regeneration": bool(run.get("regeneration")),
+                "reattach_run": run,
+                "reattach_endpoint": endpoint,
+                "reattach_claim_token": claim_token,
+            },
+            name=f"gateway-reattach-{stream_id[:12]}",
+            daemon=True,
+        ).start()
+    except Exception:
+        # A reattach whose worker could not be scheduled must not leave the
+        # ownership claim behind (the caller is told to retry/fall back instead of
+        # reporting a live reattach). Mirror the worker's own early-return
+        # teardown, plus the ACTIVE_RUNS row published above.
+        logger.warning(
+            "gateway reattach: could not start the worker for stream %s", stream_id,
+            exc_info=True,
+        )
+        _finish_gateway_run_starting(stream_id, result="failed")
+        _clear_gateway_run_starting(stream_id)
+        try:
+            unregister_active_run_if_owned(stream_id, claim_token=claim_token)
+        except Exception:
+            logger.debug("gateway reattach: could not drop the active run for %s", stream_id, exc_info=True)
+        try:
+            release_stream_owned_registries(stream_id, session_id=sid)
+        except Exception:
+            logger.debug("gateway reattach: could not release the stream-owned registries for %s", stream_id, exc_info=True)
+        try:
+            release_gateway_stream_state(stream_id)
+        except Exception:
+            logger.debug("gateway reattach: could not release the Gateway state for %s", stream_id, exc_info=True)
+        return False
     return True
 
 def _settle_gateway_terminal_error(
@@ -1857,6 +1940,7 @@ def _run_gateway_chat_streaming(
     regeneration=False,
     reattach_run=None,
     reattach_endpoint=None,
+    reattach_claim_token=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1866,39 +1950,83 @@ def _run_gateway_chat_streaming(
     the configured Gateway API server into those local events and persists the
     final user/assistant turn back into the WebUI session.
     """
+    cancel_event = threading.Event()
     q = peek_stream(stream_id)
+    if q is not None:
+        # A snapshot lookup is not admission. A concurrent chat/start can classify
+        # this stream as an orphan (registered, no live worker, no pending turn in
+        # the registration window) and clear it between peek_stream() and the
+        # registration below; publishing ourselves active afterwards would run a
+        # turn with no transport/owner state, allowing overlapping turns and
+        # duplicate provider/tool effects. Claim the stream, its retained cancel
+        # signal and the ACTIVE_RUNS registration on ONE STREAMS_LOCK ->
+        # ACTIVE_RUNS_LOCK edge -- the order Stop/Steer use, and the same edge the
+        # in-process worker uses (api/streaming.py) -- revalidating stream
+        # membership and cancellation in-lock and failing closed when ownership is
+        # already gone.
+        with STREAMS_LOCK:
+            cancel_event = CANCEL_FLAGS.get(stream_id, cancel_event)
+            if stream_id not in STREAMS or cancel_event.is_set():
+                q = None
+            else:
+                CANCEL_FLAGS[stream_id] = cancel_event
+                STREAM_PARTIAL_TEXT[stream_id] = ""
+                STREAM_REASONING_TEXT[stream_id] = ""
+                STREAM_LIVE_TOOL_CALLS[stream_id] = []
+                register_active_run(
+                    stream_id,
+                    session_id=session_id,
+                    started_at=time.time(),
+                    phase="gateway-starting",
+                    workspace=str(workspace),
+                    model=model,
+                    provider=model_provider,
+                    backend="gateway",
+                )
+                # Worker admission ends the launch phase (#7302 finding 5): retire
+                # the claim published at registration. Ownership lives in
+                # ACTIVE_RUNS from here on.
+                from api.config import retire_pre_admission_claim_if_owned
+
+                retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
     if q is None:
         _finish_gateway_run_starting(stream_id, result="fallback")
         _clear_gateway_run_starting(stream_id)
-        # Cancelled before the worker started; release the owner entry the route
-        # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
-        unregister_stream_owner(stream_id)
-        # Also release the writeback-owner entry the route layer registered, so
-        # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
-        # path (the teardown finally below never runs when we early-return here).
-        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        # Cancelled or orphan-cleared before the worker was admitted: no teardown
+        # finally runs on this early-return path, so release the COMPLETE set of
+        # stream-owned registries the route layer registered (stream rows,
+        # owners, writeback, goal classification) and then the Gateway-owned
+        # lifecycle rows. release_gateway_stream_state() is no-op-safe and must
+        # run OUTSIDE STREAMS_LOCK -- it owns the lifecycle/waiter protocol and
+        # also drops the endpoint mapping the old owner-only release leaked.
+        # Stop can detach this stream between the pre-admission claim and this
+        # admission (review 2026-10-01, third finding): cancel_stream() marks the
+        # row cancelling and pops STREAMS/CANCEL_FLAGS while this worker is still
+        # unwinding, and this early return never reaches the worker's `finally`.
+        # Retire exactly the claim we published, by identity -- a row a successor
+        # registered for the same stream id must survive. Without this the ghost
+        # row reports false liveness/busy in _run_lifecycle_health() and delays
+        # background wakeups (LAST_RUN_FINISHED_AT never advances).
+        if reattach_claim_token:
+            try:
+                if unregister_active_run_if_owned(stream_id, claim_token=reattach_claim_token):
+                    logger.info(
+                        "gateway reattach: retired the pre-admission claim for stream %s "
+                        "after cancellation", stream_id,
+                    )
+            except Exception:
+                logger.debug(
+                    "gateway reattach: could not retire the pre-admission claim for %s",
+                    stream_id, exc_info=True,
+                )
+        release_stream_owned_registries(stream_id, session_id=session_id)
+        release_gateway_stream_state(stream_id)
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="gateway-starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        backend="gateway",
-    )
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
-    cancel_event = threading.Event()
-    with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ""
-        STREAM_REASONING_TEXT[stream_id] = ""
-        STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
     runs_api_pending_marked = True
@@ -2496,11 +2624,11 @@ def _run_gateway_chat_streaming(
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
             STREAMS.pop(stream_id, None)
-        if runs_api_pending_marked and gateway_run_id_pending(stream_id):
-            _finish_gateway_run_starting(stream_id)
-        _clear_gateway_run_starting(stream_id)
-        with _STREAM_RUN_STARTING_CONDITION:
-            _STREAM_ENDPOINTS.pop(stream_id, None)
+        # Shared, no-op-safe release (#7302 re-gate): the chat/start orphan
+        # recovery retires a dead stream's Gateway rows through this same path,
+        # so both teardowns stay one implementation. ``runs_api_pending_marked``
+        # keeps this call site's original finish-pending semantics.
+        release_gateway_stream_state(stream_id, finish_pending=runs_api_pending_marked)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
         # Release the writeback-owner entry the route layer registered for this
