@@ -19200,14 +19200,25 @@ def handle_post(handler, parsed) -> bool:
                 """Validate + canonicalize a list of workspace paths. Each entry
                 must pass the same trusted-path check as /api/session/new; paths
                 are ALSO auto-registered in the saved workspace list so an
-                admin-style path outside home can be bound in one step."""
-                out = []
+                admin-style path outside home can be bound in one step.
+
+                Every entry is validated BEFORE any of them is registered, so a
+                list whose later entry is rejected cannot leave the earlier
+                paths saved (the field blocks below run after the whole-request
+                pre-flight, which is what actually guarantees no partial write).
+                """
+                validated = []
                 for entry in raw_list or []:
                     if entry is None or str(entry).strip() == "":
                         continue
                     ws_str = str(entry).strip()
                     try:
-                        registered = validate_workspace_to_add(ws_str)
+                        validated.append(validate_workspace_to_add(ws_str))
+                    except (TypeError, ValueError) as e:
+                        raise ValueError(str(e)) from e
+                out = []
+                for registered in validated:
+                    try:
                         wss = load_workspaces()
                         if not any(w["path"] == str(registered) for w in wss):
                             wss.append({"path": str(registered), "name": registered.name})
@@ -19219,6 +19230,41 @@ def handle_post(handler, parsed) -> bool:
                 seen = set()
                 return [p for p in out if not (p in seen or seen.add(p))]
 
+            # ── Pre-flight validation (Greptile P2 2026-10-09T21:47:48Z) ──
+            # Registering a workspace path is a side effect on the SAVED
+            # workspace list, so nothing may be registered until the WHOLE
+            # request is known to be acceptable. Validate every path-shaped
+            # field and the reasoning_effort value here, in one pass, before the
+            # field blocks below mutate or register anything: a rejected entry
+            # (or a rejected effort) then can no longer leave the earlier paths
+            # registered for a binding that was never saved. The field blocks
+            # themselves cannot fail after this pass, since they re-run the same
+            # validator over the same strings.
+            _preflight = []
+            if isinstance(body.get("workspaces"), list):
+                _preflight.extend(body["workspaces"])
+            for _field in ("workspace", "default_workspace"):
+                if _field in body:
+                    _preflight.append(body.get(_field))
+            for _cand in _preflight:
+                if _cand is None or str(_cand).strip() == "":
+                    continue
+                try:
+                    validate_workspace_to_add(str(_cand).strip())
+                except (TypeError, ValueError) as e:
+                    return bad(handler, str(e))
+            if "reasoning_effort" in body:
+                _effort_pre = body.get("reasoning_effort")
+                if _effort_pre is not None and str(_effort_pre).strip() != "":
+                    from api.config import VALID_REASONING_EFFORTS as _VALID_EFFORTS
+
+                    if str(_effort_pre).strip().lower() not in _VALID_EFFORTS:
+                        return bad(
+                            handler,
+                            "reasoning_effort must be one of "
+                            f"{', '.join(_VALID_EFFORTS)}",
+                        )
+
             # ── Workspaces (multi-value) ──
             if "workspaces" in body:
                 raw = body.get("workspaces")
@@ -19226,6 +19272,13 @@ def handle_post(handler, parsed) -> bool:
                     proj.pop("workspaces", None)
                     proj.pop("default_workspace", None)
                     proj.pop("workspace", None)  # keep legacy alias in sync
+                elif not isinstance(raw, list):
+                    # A scalar iterated as characters (a string) or raised an
+                    # uncaught TypeError mid-loop (a number/bool), so the client
+                    # got a 500 instead of a bad-request. Reject the shape up
+                    # front, exactly like /api/projects/auto-assign-preview
+                    # (Greptile P2 2026-10-09T21:47:48Z).
+                    return bad(handler, "workspaces must be a list of paths")
                 else:
                     try:
                         resolved = _resolve_ws_list(raw)
@@ -19273,30 +19326,37 @@ def handle_post(handler, parsed) -> bool:
                 if dw is None or str(dw).strip() == "":
                     proj.pop("default_workspace", None)
                 else:
+                    # Same helper as `workspaces`: it strips a pasted quote pair
+                    # and auto-registers a fresh path before resolving, so a
+                    # default outside home (or one pasted from Finder with
+                    # surrounding quotes) is no longer rejected before that
+                    # registration can run (Greptile P1 2026-10-09T21:47:48Z).
                     try:
-                        dw_resolved = str(
-                            resolve_trusted_workspace(str(dw).strip())
-                        )
+                        dw_list = _resolve_ws_list([dw])
                     except (TypeError, ValueError) as e:
                         return bad(handler, str(e))
-                    # Must be one of the bound workspaces — auto-add if needed so
-                    # the invariant "default ∈ workspaces" always holds. Use the
-                    # canonical accessor (not `proj.get("workspaces") or []`) so a
-                    # LEGACY project carrying only `workspace: A` keeps A in the
-                    # bound set: starting from an empty list would store just B and
-                    # then overwrite the compatibility alias, dropping A from both
-                    # quick-create and auto-assignment.
-                    ws_list = _project_workspaces(proj)
-                    if dw_resolved not in ws_list:
-                        try:
-                            ws_list = _resolve_ws_list([*ws_list, dw_resolved])
-                        except ValueError as e:
-                            return bad(handler, str(e))
-                        proj["workspaces"] = ws_list
-                    proj["default_workspace"] = dw_resolved
-                    # Keep the legacy alias in sync.
-                    if ws_list:
-                        proj["workspace"] = ws_list[0]
+                    dw_resolved = dw_list[0] if dw_list else None
+                    if not dw_resolved:
+                        proj.pop("default_workspace", None)
+                    else:
+                        # Must be one of the bound workspaces — auto-add if needed so
+                        # the invariant "default ∈ workspaces" always holds. Use the
+                        # canonical accessor (not `proj.get("workspaces") or []`) so a
+                        # LEGACY project carrying only `workspace: A` keeps A in the
+                        # bound set: starting from an empty list would store just B and
+                        # then overwrite the compatibility alias, dropping A from both
+                        # quick-create and auto-assignment.
+                        ws_list = _project_workspaces(proj)
+                        if dw_resolved not in ws_list:
+                            try:
+                                ws_list = _resolve_ws_list([*ws_list, dw_resolved])
+                            except ValueError as e:
+                                return bad(handler, str(e))
+                            proj["workspaces"] = ws_list
+                        proj["default_workspace"] = dw_resolved
+                        # Keep the legacy alias in sync.
+                        if ws_list:
+                            proj["workspace"] = ws_list[0]
 
             # ── auto_assign flag ──
             if "auto_assign" in body:

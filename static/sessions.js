@@ -10776,29 +10776,52 @@ function _makeBindingsCombo(o){
     if(menu.classList.contains('open')){_close();}else{_open();}
   };
   trigger.onkeydown=(e)=>{
-    if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
+    // Two states, two jobs. The old handler tested ArrowDown in the FIRST
+    // branch, so the later "menu is open" ArrowDown branch was unreachable and
+    // down-arrow did nothing once the list was open; Enter/Space were
+    // preventDefault()ed without ever choosing the highlighted row, so the
+    // usual open -> arrow -> Enter flow could not pick a model or workspace
+    // (Greptile P2 2026-10-09T21:47:48Z). Opening the menu and moving/choosing
+    // inside it are now separate branches.
+    if(!menu.classList.contains('open')){
+      if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
+        e.preventDefault();
+        _open();
+      }
+      return;
+    }
+    if(e.key==='Escape'){e.preventDefault();_close();return;}
+    if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+      // Move through the rendered options: the current value carries 'active',
+      // so the first press lands on the next/previous real row.
       e.preventDefault();
-      if(!menu.classList.contains('open')) _open();
-    }else if(e.key==='Escape'){
-      _close();
-    }else if(e.key==='ArrowUp'&&menu.classList.contains('open')){
-      // Move selection up through the rendered options.
+      const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+      if(!rows.length) return;
+      const idx=rows.findIndex(r=>r.classList.contains('active'));
+      const next=e.key==='ArrowDown'
+        ?(idx<0?0:(idx+1)%rows.length)
+        :(idx<=0?rows.length-1:idx-1);
+      if(rows[next]){rows[next].click();}
+      return;
+    }
+    if(e.key==='Enter'||e.key===' '){
+      // Confirm the highlighted row (falling back to the first one) instead of
+      // swallowing the key.
       e.preventDefault();
       const rows=Array.from(menu.querySelectorAll('.ws-opt'));
       const idx=rows.findIndex(r=>r.classList.contains('active'));
-      const next=idx<=0?rows.length-1:idx-1;
-      if(rows[next]){rows[next].click();}
-    }else if(e.key==='ArrowDown'&&menu.classList.contains('open')){
-      e.preventDefault();
-      const rows=Array.from(menu.querySelectorAll('.ws-opt'));
-      const idx=rows.findIndex(r=>r.classList.contains('active'));
-      const next=idx<0?0:(idx+1)%rows.length;
-      if(rows[next]){rows[next].click();}
+      const pick=idx>=0?rows[idx]:rows[0];
+      if(pick){pick.click();}else{_close();}
     }
   };
-  document.addEventListener('click',(e)=>{
+  // Named so the dialog can drop it again: an anonymous document listener that
+  // outlives the overlay kept the closed dialog's controls (and their captured
+  // state) alive and re-ran them on every later click (Greptile P2
+  // 2026-10-09T21:47:48Z).
+  const _onDocClick=(e)=>{
     if(!wrap.contains(e.target)) _close();
-  });
+  };
+  document.addEventListener('click',_onDocClick);
   _renderTrigger();
   return {
     el:wrap,
@@ -10806,6 +10829,7 @@ function _makeBindingsCombo(o){
     setValue:(v)=>{state.value=v||'';_renderTrigger();},
     setOptions:(opts)=>{state.options=Array.isArray(opts)?opts:[];_renderTrigger();},
     setOnChange:(fn)=>{state.onChange=typeof fn==='function'?fn:null;},
+    destroy:()=>{document.removeEventListener('click',_onDocClick);},
   };
 }
 
@@ -11398,6 +11422,11 @@ function _showProjectBindingsDialog(proj){
     if(_closed) return;
     _closed=true;
     document.removeEventListener('keydown',_onKey,true);
+    // Each combobox installs a document click listener; drop both with the
+    // dialog, or every reopen leaves another live listener plus the old
+    // controls it closed over (Greptile P2 2026-10-09T21:47:48Z).
+    try{ if(typeof addCombo.destroy==='function') addCombo.destroy(); }catch(_){}
+    try{ if(typeof modelCombo.destroy==='function') modelCombo.destroy(); }catch(_){}
     overlay.remove();
     try{ if(_lastFocus&&typeof _lastFocus.focus==='function') _lastFocus.focus(); }catch(_){}
   }
