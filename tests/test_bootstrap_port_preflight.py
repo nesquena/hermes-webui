@@ -304,10 +304,8 @@ def _serve(body: bytes) -> Iterator[int]:
         def log_message(self, *args: object) -> None:
             return None
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    with http.server.HTTPServer(("127.0.0.1", port), _Handler) as httpd:
+    with http.server.HTTPServer(("127.0.0.1", 0), _Handler) as httpd:
+        port = httpd.server_address[1]
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
         try:
