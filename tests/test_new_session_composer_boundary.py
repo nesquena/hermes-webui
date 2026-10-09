@@ -4075,9 +4075,9 @@ def test_failed_new_session_requeues_drained_item_at_front_without_restamping():
     end = UI_JS.index("\n\n// ── Queue chip display", start)
     settle = UI_JS[start:end]
 
-    assert settle.count("_getSessionQueue(sid,true).unshift(next)") == 2
+    assert settle.count("_getSessionQueue(sid,true).unshift(next)") == 3
     assert "queueSessionMessage(sid,next)" not in settle
-    assert settle.count("_persistSessionQueueStorage(sid,_getSessionQueue(sid,false))") == 2
+    assert settle.count("_persistSessionQueueStorage(sid,_getSessionQueue(sid,false))") == 3
 
 
 def test_late_server_transcription_updates_source_owner_not_visible_destination():
@@ -4312,6 +4312,105 @@ def test_queue_drain_does_not_replace_a_restored_unsent_composer():
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "shifts": 0, "text": "restored source draft", "drainSid": None,
+    }
+
+
+def test_queue_drain_resumes_once_after_restored_composer_is_cleared():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = UI_JS.index("function setBusy(v){")
+    end = UI_JS.index("\n\n// ── Queue chip display", start)
+    queue_settlement = UI_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'restored source draft'}};
+        const S={{busy:true,session:{{session_id:'source'}},pendingFiles:[]}};
+        let _queueDrainSid='source';
+        const queued=[{{text:'queued turn'}}];
+        let shifts=0,sends=0,timers=[];
+        function $(id){{return id==='msg'?msg:null;}}
+        function updateSendBtn(){{}}
+        function setStatus(){{}}
+        function setComposerStatus(){{}}
+        function updateQueueBadge(){{}}
+        function _getSessionQueue(){{return queued;}}
+        function _persistSessionQueueStorage(){{}}
+        function shiftQueuedSessionMessage(){{shifts++;return queued.shift()||null;}}
+        function setTimeout(fn){{timers.push(fn);}}
+        function _composerSetText(text){{msg.value=text;}}
+        function _composerReplaceFiles(files){{S.pendingFiles=files;}}
+        function autoResize(){{}}
+        function renderTray(){{}}
+        function send(){{sends++;S.busy=true;}}
+        {queue_settlement}
+        setBusy(false);
+        msg.value='';
+        _resumeQueuedSessionMessageIfComposerEmpty();
+        _resumeQueuedSessionMessageIfComposerEmpty();
+        const scheduled=timers.length;
+        timers.shift()();
+        process.stdout.write(JSON.stringify({{shifts,sends,scheduled,text:msg.value}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "shifts": 1, "sends": 1, "scheduled": 1, "text": "queued turn",
+    }
+
+
+def test_queue_resume_is_wired_to_text_and_attachment_clearing():
+    input_listener = BOOT_JS[BOOT_JS.index("$('msg').addEventListener('input',()=>{"):]
+    input_listener = input_listener[:input_listener.index("\n});")]
+    assert "_resumeQueuedSessionMessageIfComposerEmpty()" in input_listener
+
+    tray = _function(UI_JS, "renderTray", "\nfunction _uploadTooLargeMessage")
+    remove = tray[tray.index("chip.querySelector('button').onclick"):]
+    assert remove.index("_composerRemoveFile(") < remove.index(
+        "_resumeQueuedSessionMessageIfComposerEmpty()"
+    )
+
+
+def test_queue_drain_requeues_if_user_types_during_settle_window():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = UI_JS.index("function setBusy(v){")
+    end = UI_JS.index("\n\n// ── Queue chip display", start)
+    queue_settlement = UI_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:''}};
+        const S={{busy:false,session:{{session_id:'source'}},pendingFiles:[]}};
+        let _queueDrainSid='source';
+        const queued=[{{text:'queued turn'}}];
+        let sends=0,timers=[];
+        function $(id){{return id==='msg'?msg:null;}}
+        function updateSendBtn(){{}}
+        function setStatus(){{}}
+        function setComposerStatus(){{}}
+        function updateQueueBadge(){{}}
+        function _getSessionQueue(){{return queued;}}
+        function _persistSessionQueueStorage(){{}}
+        function shiftQueuedSessionMessage(){{return queued.shift()||null;}}
+        function setTimeout(fn){{timers.push(fn);}}
+        function _composerSetText(text){{msg.value=text;}}
+        function _composerReplaceFiles(files){{S.pendingFiles=files;}}
+        function autoResize(){{}}
+        function renderTray(){{}}
+        function send(){{sends++;}}
+        {queue_settlement}
+        setBusy(false);
+        msg.value='newer draft';
+        timers.shift()();
+        process.stdout.write(JSON.stringify({{sends,text:msg.value,queue:queued.map(x=>x.text)}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "sends": 0, "text": "newer draft", "queue": ["queued turn"],
     }
 
 

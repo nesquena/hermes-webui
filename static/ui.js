@@ -9831,11 +9831,13 @@ function setBusy(v){
       String(($('msg')&&$('msg').value)||'').trim()
       ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length)
     );
-    const next=sid&&_isViewedSid&&!_composerHasUnsentContent
+    const next=sid&&_isViewedSid&&!_composerHasUnsentContent&&_queueDrainPendingSid!==sid
       ?shiftQueuedSessionMessage(sid):null;
     if(next){
+      _queueDrainPendingSid=sid;
       updateQueueBadge(sid);
       setTimeout(()=>{
+        _queueDrainPendingSid=null;
         // Guard: if the user switched away from the drain session during
         // the 120ms settle window, the queued message must NOT go to the
         // wrong chat.  Put it back into the original session's queue and
@@ -9850,6 +9852,15 @@ function setBusy(v){
         // Keep a queued turn bound to sid if a session-owner handoff started
         // during the settle window; send() must not capture it from the destination.
         if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+          _getSessionQueue(sid,true).unshift(next);
+          _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+          updateQueueBadge(sid);return;
+        }
+        // Clearing a recovered draft only opens a drain window; text or files
+        // entered during the settle delay are newer user intent and must not be
+        // replaced by the queued turn.
+        if(String(($('msg')&&$('msg').value)||'').trim()
+          ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length)){
           _getSessionQueue(sid,true).unshift(next);
           _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
           updateQueueBadge(sid);return;
@@ -9872,6 +9883,20 @@ function setBusy(v){
       },120);
     }
   }
+}
+
+let _queueDrainPendingSid=null;
+function _resumeQueuedSessionMessageIfComposerEmpty(){
+  if(S.busy||(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight))return;
+  const sid=S.session&&S.session.session_id;
+  if(!sid||_queueDrainPendingSid===sid)return;
+  const msg=$('msg');
+  if(String((msg&&msg.value)||'').trim()
+    ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length))return;
+  const queue=_getSessionQueue(sid,false);
+  if(!queue||!queue.length)return;
+  _queueDrainSid=sid;
+  setBusy(false);
 }
 
 // ── Queue chip display (Codex Desktop pattern) ─────────────────────────────
@@ -24010,6 +24035,7 @@ function renderTray(){ // non-media files use paperclip chip
       // Revoke blob URL to avoid memory leak before removing
       if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
       _composerRemoveFile(f,S.session&&S.session.session_id);renderTray();
+      _resumeQueuedSessionMessageIfComposerEmpty();
     };
     tray.appendChild(chip);
   });
