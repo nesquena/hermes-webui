@@ -2221,8 +2221,10 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
 
     monkeypatch.setenv("GIT_DIR", "/tmp/evil-git-dir")
     monkeypatch.setenv("GIT_WORK_TREE", "/tmp/evil-work-tree")
+    monkeypatch.setenv("GIT_CONFIG", "/tmp/evil-repo-config")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/tmp/evil-config")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/tmp/evil-system-config")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "ssh -i /tmp/evil-key")
@@ -2231,14 +2233,18 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     monkeypatch.setenv("SSH_ASKPASS", "/tmp/evil-ssh-askpass")
     monkeypatch.setenv("GIT_SSH", "/tmp/evil-ssh")
     monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /tmp/evil-key")
+    monkeypatch.setenv("GIT_PROXY_COMMAND", "/tmp/evil-proxy")
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/trusted-agent.sock")
 
     env = _clean_git_env({"GIT_INDEX_FILE": "/tmp/hermes-index"})
 
     assert "GIT_DIR" not in env
     assert "GIT_WORK_TREE" not in env
+    assert "GIT_CONFIG" not in env
     assert "GIT_CONFIG_GLOBAL" not in env
     assert "GIT_CONFIG_SYSTEM" not in env
+    assert "GIT_CONFIG_NOSYSTEM" not in env
     assert "GIT_CONFIG_COUNT" not in env
     assert "GIT_CONFIG_KEY_0" not in env
     assert "GIT_CONFIG_VALUE_0" not in env
@@ -2247,7 +2253,9 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     assert "SSH_ASKPASS" not in env
     assert "GIT_SSH" not in env
     assert "GIT_SSH_COMMAND" not in env
+    assert "GIT_PROXY_COMMAND" not in env
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["SSH_AUTH_SOCK"] == "/tmp/trusted-agent.sock"
     assert env["GIT_INDEX_FILE"] == "/tmp/hermes-index"
 
 

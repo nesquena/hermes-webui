@@ -1068,6 +1068,7 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
         messages=prior_messages,
         context_messages=prior_messages,
     )
+    _session.pending_user_source = "webui"
     revisions = []
 
     class AuthThenRecoverAgent:
@@ -1080,8 +1081,14 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
             self._last_error = None
             self.stream_delta_callback = _kwargs.get("stream_delta_callback")
 
-        def run_conversation(self, **kwargs):
+        def run_conversation(self, persist_user_timestamp=None, **kwargs):
             type(self).runs += 1
+            assert persist_user_timestamp == 10.0
+            persisted = Session.load(sid)
+            assert persisted._webui_pending_user_timestamp_identity == (
+                stream_id,
+                persist_user_timestamp,
+            )
             revisions.append(kwargs["conversation_history_revision"])
             history = list(kwargs.get("conversation_history") or [])
             if type(self).runs == 1:

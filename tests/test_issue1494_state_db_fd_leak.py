@@ -163,9 +163,9 @@ def test_read_importable_agent_session_rows_closes_connection(tmp_path, tracking
         read_importable_agent_session_rows(db)
 
     _assert_all_closed(tracking_sqlite, "read_importable_agent_session_rows")
-    # #5455: missing-index self-heal uses one separate short-lived RW connection
-    # in addition to the five read-only listing connections.
-    assert len(tracking_sqlite.instances) == 6
+    # #5455: the listing is strictly read-only, including when indexes are
+    # missing — five calls, five read-only connections, no self-heal writer.
+    assert len(tracking_sqlite.instances) == 5
 
 
 def test_read_session_lineage_metadata_closes_connection(tmp_path, tracking_sqlite):

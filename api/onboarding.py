@@ -71,7 +71,9 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "default_model": "anthropic/claude-sonnet-4.6",
         "requires_base_url": False,
         "models": [
-            {"id": _to_openrouter_namespace(model["id"]), "label": model["label"]}
+            {"id": "z-ai/glm-4.5-air", "label": "GLM-4.5 Air"}
+            if model["id"] == "zai/glm-4.5-flash"
+            else {"id": _to_openrouter_namespace(model["id"]), "label": model["label"]}
             for model in _FALLBACK_MODELS
         ],
         "category": "easy_start",
@@ -261,7 +263,7 @@ def _load_env_file(env_path: Path) -> dict[str, str]:
 
 def _load_yaml_config(config_path: Path) -> dict:
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return {}
 
@@ -276,7 +278,7 @@ def _load_yaml_config(config_path: Path) -> dict:
 
 def _save_yaml_config(config_path: Path, config: dict) -> None:
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 

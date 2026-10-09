@@ -25,7 +25,14 @@ def _listener_body() -> str:
 
 
 def test_settings_expose_shift_enter_send_key_option():
-    assert '<option value="shift+enter">Shift+Enter (Enter for newline)</option>' in INDEX_HTML
+    # #7582: the option labels are now wired through `data-i18n`
+    # (settings_send_key_enter / ctrl_enter / shift_enter) so
+    # non-en locales render through `t()`; the literal text is
+    # still the English fallback when no translation exists.
+    assert (
+        '<option value="shift+enter" data-i18n="settings_send_key_shift_enter">'
+        'Shift+Enter (Enter for newline)</option>'
+    ) in INDEX_HTML
     assert '"send_key": {"enter", "ctrl+enter", "shift+enter"}' in CONFIG_PY
 
 

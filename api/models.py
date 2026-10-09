@@ -10,13 +10,14 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, overload
+from typing import Literal, cast, overload
 
 try:  # pragma: no cover - platform-specific imports.
     import fcntl as _fcntl
@@ -42,13 +43,75 @@ from api.agent_sessions import (
     is_cli_session_row,
     normalize_agent_session_source,
     open_state_db_readonly,
+    read_assigned_project_row_counts,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
 from api.process_event_utils import stamp_message_source
 
 logger = logging.getLogger(__name__)
-CLI_VISIBLE_SESSION_LIMIT = 20
+# Size of the interactive sidebar recency window. Also bounds how many
+# delegated subagent children can be rendered at once, since a child only
+# nests when it wins a slot in this window. Resolved in api.config before
+# profile init; override with HERMES_WEBUI_VISIBLE_SESSION_LIMIT (clamped 1–200).
+CLI_VISIBLE_SESSION_LIMIT = _cfg.CLI_VISIBLE_SESSION_LIMIT
+# Project chips must remain able to reveal older assigned CLI/TUI sessions even
+# after newer unassigned rows fill the normal sidebar window (#6659).
+#
+# The bound is PER PROJECT and counts LOGICAL conversations (after lineage and
+# sidecar dedup), not raw state.db rows. Per project, because a single global
+# budget re-creates the bug this fixes — one busy project would evict another
+# project's whole history. Logical conversations, because compression segments
+# are not separately addressable and must not spend a project's budget.
+PROJECT_ASSIGNED_CLI_LIMIT = 200
+# Hard ceiling on the assigned-recovery QUERY so the per-project budget cannot
+# multiply into an unbounded scan on a profile with dozens of projects. Past
+# this, every project's share of the recovery pass shrinks to
+# PROJECT_ASSIGNED_CLI_SCAN_CEILING // len(projects) instead of any one project
+# eating the whole window; project-filtered server pagination is still the real
+# fix for profiles that large.
+PROJECT_ASSIGNED_CLI_SCAN_CEILING = 2000
+# The project-scoped follow-up below is deliberately NOT capped by project
+# count: any fixed cap would recreate the starvation it repairs — every starved
+# project past the cap stays unreachable on every rebuild (greptile P1 on
+# #6659). Its work is bounded by construction instead: it fires only when the
+# global assigned query is logically saturated OR its final raw candidate window
+# was exhausted while projection stayed short; each scoped query is limited to
+# one project's remaining budget; and the sum of those budgets across every
+# starved project is at most effective_limit * len(projects), which the scan
+# ceiling above already caps. Worst case per build: 1 global query + 1 GROUP BY
+# probe + one small project-scoped query per starved project, plus the pass's
+# single widening budget (query_limit, see `widening_budget`) shared by the
+# compression-heavy retries — a retry is NOT granted the global allowance per
+# project, which would make a build scale with the number of starved projects
+# (greptile P1 on #6659).
+#
+# --- Bounds for the UNASSIGNED refill pass (see _load_cli_sessions_uncached).
+# The SQL 'unassigned' filter reads state.db.project_id, but a WebUI-side move
+# records the assignment on the session's sidecar ONLY, so that filter hands back
+# conversations this projection classifies as ASSIGNED. How many is not knowable
+# before the query runs, so the refill re-classifies its own result and widens
+# again while the window is still short. These two constants are what keep that
+# loop finite. Both bound ONE profile context: get_cli_sessions(
+# all_profiles=1) runs the whole loader once per context, so an N-profile sidebar
+# pays N times the numbers below.
+#
+# At most this many unassigned queries per profile context (the first included).
+# The widening below is geometric and proportional, not one row at a time, so 4
+# covers both moves spread through the history and moves clustered just under the
+# window edge; the last of the four abandons estimating and reads the ceiling in
+# one go, which is the widest read the loop is ever allowed to pay. It is also
+# what paces the geometric growth: each widening adds at least width // queries
+# still left, so the steps get bolder as the forced ceiling read gets closer.
+UNASSIGNED_CLI_REFILL_MAX_QUERIES = 4
+# ...and no single refill query reads deeper than this many logical
+# conversations. It bounds both the I/O and the payload: a build cannot be made
+# to scan the whole of a large state.db by moving conversations into projects.
+# The unassigned window is filled whenever at least CLI_VISIBLE_SESSION_LIMIT of
+# the newest UNASSIGNED_CLI_REFILL_SCAN_CEILING state.db-unassigned conversations
+# are still unassigned once sidecars are read; past that (>180 of the newest 200
+# moved from the WebUI) the sidebar is honestly short rather than unbounded.
+UNASSIGNED_CLI_REFILL_SCAN_CEILING = 200
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -59,6 +122,11 @@ WEBHOOK_PROJECT_CHIP_LIMIT = 200
 # higher project-chip cap so project-assigned kanban rows stay addressable when
 # the toggle is on, without letting them dominate the default sidebar window.
 KANBAN_PROJECT_CHIP_LIMIT = 200
+# Sources with their own bounded project-chip pass. They are kept out of the
+# interactive CLI window and out of its recovery passes, and they keep the
+# system-chip answer wherever they are projected, so the same background row can
+# never report two different project chips.
+BACKGROUND_CLI_SOURCES = ("cron", "webhook", "kanban")
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -81,6 +149,11 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
+# Complete projections retained under an identity that excludes the volatile
+# state.db fingerprint. This store is independently bounded because the stable
+# identity still contains external Claude/session-index stat revisions.
+_CLI_SESSIONS_LAST_KNOWN_GOOD: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
+_CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES = 8
 _CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -850,7 +923,7 @@ def _active_stream_ids():
 
 
 def _recovered_model_context_projection(message: dict) -> dict | None:
-    if not isinstance(message, dict):
+    if not isinstance(message, dict) or message.get('_recovered_display_only') is True:
         return None
     projected = dict(message)
     projected.pop('reasoning', None)
@@ -913,13 +986,18 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     _append_recovered_context_projection(session, context_messages, projected)
 
 
-def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
+def _recovered_pending_timestamp(value=None) -> int | float:
+    """Retain the pending intent's exact finite time, with the legacy fallback."""
+    if type(value) in (int, float) and value > 0 and (type(value) is int or math.isfinite(value)):
+        return value
+    return int(time.time())
+
+
+def _append_recovered_pending_turn(session, *, timestamp: int | float | None = None) -> dict | None:
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
-    recovered_ts = int(time.time())
-    if isinstance(timestamp, (int, float)) and timestamp > 0:
-        recovered_ts = int(timestamp)
+    recovered_ts = _recovered_pending_timestamp(timestamp)
     recovered: dict = {
         'role': 'user',
         'content': session.pending_user_message,
@@ -927,7 +1005,7 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         '_recovered': True,
     }
     pending_source = getattr(session, 'pending_user_source', None)
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(recovered, pending_source, active_turn_token=_pending_active_turn_token(session))
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
@@ -1103,6 +1181,14 @@ _METADATA_PREFIX_MAX_BYTES = 1024 * 1024
 #: even when the stop key sits at 2 KB.
 _METADATA_PREFIX_FIRST_STAGE_BYTES = 64 * 1024
 
+# Marks a sidecar as written by the CURRENT writer contract, where the
+# persisted `message_count` equals len(messages) by construction (both keys
+# land in the same atomic write). save()'s bounded-prefix shrink check trusts
+# a persisted count ONLY when this marker sits next to it in the file; see
+# _prefix_message_count(). Bump the value whenever the writer contract changes
+# meaning, so counts from an older contract fall back to the full parse.
+_MESSAGE_COUNT_MARKER = 1
+
 
 def _read_metadata_json_prefix(path, max_prefix_bytes=_METADATA_PREFIX_MAX_BYTES):
     """Read only the metadata portion before the large arrays.
@@ -1245,6 +1331,85 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+def _deduplicate_exact_stable_messages(messages):
+    """Drop only exact replay copies that carry stable event identity.
+
+    Repeated role/content without both an id and timestamp can be a legitimate
+    later turn, so those rows are deliberately preserved.  The complete
+    dictionary is canonicalized before hashing: same-event rows with enriched
+    metadata or changed content remain distinct.
+    """
+    if not isinstance(messages, list):
+        return [], 0
+    # Persist from a deep snapshot, not only a detached outer list. A retained
+    # message can contain nested dict/list values; if those remain aliased to the
+    # owner-visible transcript, a mutation after this scan can change the bytes
+    # serialized for a deletion decision that was made against older content.
+    messages_snapshot = copy.deepcopy(messages)
+    if len(messages_snapshot) < 2:
+        return messages_snapshot, 0
+
+    seen_by_identity = {}
+    guarded = []
+    removed = 0
+
+    def _stable_identity_component(value):
+        """Return a typed exact built-in scalar, or None when untrusted."""
+        # Numeric/string subclasses (for example an IntEnum) can compare and
+        # serialize exactly like their base scalar, so accepting them would let
+        # a distinct runtime value authorize deletion.
+        if type(value) is str:
+            return ("str", value) if value.strip() else None
+        if type(value) is int:
+            return ("int", value)
+        if type(value) is float:
+            return ("float", value) if math.isfinite(value) else None
+        return None
+
+    def _is_missing_or_blank(value):
+        return value is None or (type(value) is str and not value.strip())
+
+    for message in messages_snapshot:
+        if not isinstance(message, dict):
+            guarded.append(message)
+            continue
+        message_id = message.get("id")
+        message_id_component = _stable_identity_component(message_id)
+        timestamp_value = message.get("timestamp")
+        timestamp_component = _stable_identity_component(timestamp_value)
+        if timestamp_component is None and _is_missing_or_blank(timestamp_value):
+            timestamp_component = _stable_identity_component(message.get("_ts"))
+        if message_id_component is None or timestamp_component is None:
+            guarded.append(message)
+            continue
+        identity = (
+            "event",
+            message_id_component,
+            "timestamp",
+            timestamp_component,
+        )
+        try:
+            canonical = json.dumps(
+                message,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            guarded.append(message)
+            continue
+        fingerprint = hashlib.sha256(canonical).digest()
+        identity_variants = seen_by_identity.setdefault(identity, {})
+        prior_variants = identity_variants.setdefault(fingerprint, [])
+        if any(prior == message for prior in prior_variants):
+            removed += 1
+            continue
+        prior_variants.append(message)
+        guarded.append(message)
+    return guarded, removed
+
+
 _SIDEBAR_HEAVY_METADATA_FIELDS = (
     'compression_anchor_summary',
     'compression_anchor_details',
@@ -1262,6 +1427,36 @@ def _strip_sidebar_heavy_metadata(row: dict) -> dict:
     for key in _SIDEBAR_HEAVY_METADATA_FIELDS:
         row.pop(key, None)
     return row
+
+
+def _validated_webui_pending_user_timestamp_identity(session, value):
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return None
+    stream_id = getattr(session, 'active_stream_id', None)
+    source = str(getattr(session, 'pending_user_source', '') or '').strip().lower()
+    if (
+        not isinstance(stream_id, str)
+        or not stream_id
+        or value[0] != stream_id
+        or not isinstance(getattr(session, 'pending_user_message', None), str)
+        or not getattr(session, 'pending_user_message', None)
+        or source not in {'webui', 'fork'}
+    ):
+        return None
+    pending_timestamp, pending_valid = _message_exact_timestamp_details(
+        {'timestamp': getattr(session, 'pending_started_at', None)}
+    )
+    identity_timestamp, identity_valid = _message_exact_timestamp_details(
+        {'timestamp': value[1]}
+    )
+    if (
+        not pending_valid
+        or not identity_valid
+        or pending_timestamp is None
+        or pending_timestamp != identity_timestamp
+    ):
+        return None
+    return (stream_id, pending_timestamp)
 
 
 class Session:
@@ -1301,6 +1496,8 @@ class Session:
                  truncation_boundary=None,
                  clear_generation=None,
                  intentional_shrink_generation=None,
+                 transcript_generation: int=0,
+                 transcript_generation_baseline: int=0,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1315,6 +1512,7 @@ class Session:
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
+                 gateway_run=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1347,7 +1545,9 @@ class Session:
         # so a stale first-party leftover (#433) is never wrongly preserved.
         # Restored from persisted metadata on load (arrives via **kwargs).
         self.model_explicit_pick_signature = kwargs.get('model_explicit_pick_signature') or None
-        self.messages = messages or []
+        # Preserve malformed persisted containers so save() can fail closed
+        # instead of silently normalizing a dict/string to an empty transcript.
+        self.messages = messages if messages is not None else []
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
@@ -1366,6 +1566,11 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self._webui_pending_user_timestamp_identity = (
+            _validated_webui_pending_user_timestamp_identity(
+                self, kwargs.get('_webui_pending_user_timestamp_identity')
+            )
+        )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1399,6 +1604,10 @@ class Session:
         self.truncation_boundary = truncation_boundary
         self.clear_generation = clear_generation
         self.intentional_shrink_generation = intentional_shrink_generation
+        self.transcript_generation = max(0, _parse_nonnegative_int(transcript_generation) or 0)
+        self.transcript_generation_baseline = max(
+            0, _parse_nonnegative_int(transcript_generation_baseline) or 0
+        )
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1420,6 +1629,7 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        self.gateway_run = gateway_run if isinstance(gateway_run, dict) else None
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1461,8 +1671,18 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        if not isinstance(self.messages, list):
+            raise ValueError(
+                f"Refusing to save session {self.session_id!r}: messages must be a list, "
+                f"got {type(self.messages).__name__}."
+            )
         if touch_updated_at:
             self.updated_at = time.time()
+        self._webui_pending_user_timestamp_identity = (
+            _validated_webui_pending_user_timestamp_identity(
+                self, getattr(self, '_webui_pending_user_timestamp_identity', None)
+            )
+        )
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1473,6 +1693,7 @@ class Session:
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            '_webui_pending_user_timestamp_identity',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -1485,6 +1706,8 @@ class Session:
             'truncation_boundary',
             'clear_generation',
             'intentional_shrink_generation',
+            'transcript_generation',
+            'transcript_generation_baseline',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -1492,7 +1715,15 @@ class Session:
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
+            'gateway_run',
         ]
+        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
+        if exact_replay_rows_removed:
+            logger.warning(
+                "Removed %d exact stable replay messages from persisted snapshot for session %s",
+                exact_replay_rows_removed,
+                self.session_id,
+            )
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
@@ -1500,7 +1731,17 @@ class Session:
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
+        meta['message_count'] = len(guarded_messages or [])
+        # _mc_v marks this file as written by the current writer contract,
+        # where `message_count` equals len(the persisted guarded messages) by
+        # construction and both keys land in the same atomic write. save()'s
+        # shrink guard takes the bounded-prefix shortcut ONLY for marked files;
+        # an unmarked count (a legacy pre-#5854 sidecar, a sidecar materialized
+        # by an older recovery writer, any foreign writer) gets the full parse,
+        # so a stale count from outside this contract can never read a real
+        # shrink as a growth and skip the #1558 backup. One save re-marks the
+        # file, so the fast path still covers steady state.
+        meta['_mc_v'] = _MESSAGE_COUNT_MARKER
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
@@ -1508,16 +1749,23 @@ class Session:
         # defense-in-depth; the cached-side freshness check reads real records,
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
-        meta['messages'] = self.messages
+        meta['messages'] = guarded_messages
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
-        _placed = {'message_count', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
+        _placed = {'message_count', '_mc_v', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        try:
+            payload.encode('utf-8')
+        except UnicodeEncodeError:
+            # Journal recovery may preserve a lone provider surrogate. Escape
+            # it losslessly before touching the atomic sidecar temp file, just
+            # as the journal writer does, so repeated cold loads can commit.
+            payload = json.dumps({**meta, **extra}, ensure_ascii=True, indent=2)
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1533,13 +1781,56 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
-                try:
-                    existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                # The on-disk count, without reading the body.
+                #
+                # The decision below is a function of ONE integer -- how many
+                # messages the file on disk holds -- and save() already writes
+                # that integer into the metadata prefix, before `messages`, as
+                # `message_count` (see METADATA_FIELDS above; load_metadata_only
+                # and the sidebar freshness check read it the same way). So read
+                # THAT through a bounded 64 KiB prefix instead of the whole file.
+                # Measured before this: a 203,439,398-byte sidecar cost 20,377 ms
+                # (17,453 in read_text, 2,924 in json.loads) to yield one integer,
+                # on EVERY save -- including the grow-saves that never back
+                # anything up. The prefix read is O(64 KiB), and because the count
+                # is part of the bytes on disk it travels with any rewrite of them.
+                #
+                # An in-memory "I wrote this, stat says nothing changed" cache is
+                # NOT sufficient here, and was removed after review: (inode, size,
+                # mtime_ns) is not a content identity. A same-length in-place
+                # rewrite inside one mtime tick keeps all three fields -- ext4
+                # stamps mtime from a coarse clock, so two writes in the same tick
+                # share one mtime_ns -- and a stale cached count then reads a real
+                # shrink as a growth and skips the #1558 backup. The prefix count
+                # cannot be fooled that way.
+                #
+                # Every unknown falls through to the full read + parse below: a
+                # legacy (pre-#5854) sidecar whose count is not in the prefix, a
+                # count written without the current writer's _mc_v marker (an
+                # older writer's count can be stale relative to the messages
+                # array next to it), a corrupt or truncated prefix, a file with
+                # no top-level `messages` key at all, or metadata alone that
+                # overflows the budget.
+                # Fail-open is the contract -- never "assume no shrink".
+                existing_text = None
+                existing = None
+                existing_guarded_messages = None
+                existing_exact_replay_rows_removed = 0
+                existing_msg_count = _prefix_message_count(self.path)
+                if existing_msg_count is None:
+                    existing_text = self.path.read_text(encoding='utf-8')
+                    try:
+                        existing = json.loads(existing_text)
+                        existing_messages = existing.get('messages') or []
+                        existing_msg_count = len(existing_messages)
+                        if isinstance(existing_messages, list):
+                            (
+                                existing_guarded_messages,
+                                existing_exact_replay_rows_removed,
+                            ) = _deduplicate_exact_stable_messages(existing_messages)
+                    except (json.JSONDecodeError, ValueError, AttributeError):
+                        existing_msg_count = -1  # corrupt → always back up
+                incoming_msg_count = len(guarded_messages or [])
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1556,6 +1847,21 @@ class Session:
                     return
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
+                    if existing_text is None:
+                        # The .bak body is the one thing that needs the full text,
+                        # and a shrink is the one time it is needed.
+                        existing_text = self.path.read_text(encoding='utf-8')
+                    if existing is None:
+                        try:
+                            existing = json.loads(existing_text)
+                            existing_messages = existing.get('messages') or []
+                            if isinstance(existing_messages, list):
+                                (
+                                    existing_guarded_messages,
+                                    existing_exact_replay_rows_removed,
+                                ) = _deduplicate_exact_stable_messages(existing_messages)
+                        except (json.JSONDecodeError, ValueError, AttributeError):
+                            existing = None
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
                     # mirroring the main save() pattern below. Prevents a
                     # torn .bak from a crash mid-write or a concurrent
@@ -1565,11 +1871,33 @@ class Session:
                     # this fix the backup either lands cleanly or doesn't
                     # land at all.
                     try:
+                        backup_text = existing_text
+                        if (
+                            existing_exact_replay_rows_removed
+                            and isinstance(existing, dict)
+                            and isinstance(existing_guarded_messages, list)
+                        ):
+                            cleaned_existing = dict(existing)
+                            cleaned_existing['messages'] = existing_guarded_messages
+                            cleaned_existing['message_count'] = len(existing_guarded_messages)
+                            backup_text = json.dumps(cleaned_existing, ensure_ascii=False, indent=2)
+                            try:
+                                backup_text.encode('utf-8')
+                            except UnicodeEncodeError:
+                                # Keep recovered surrogates lossless when
+                                # replay cleanup rewrites the shrink backup,
+                                # before creating its atomic temp file.
+                                backup_text = json.dumps(cleaned_existing, ensure_ascii=True, indent=2)
+                            logger.warning(
+                                "Removed %d exact stable replay messages from backup for session %s",
+                                existing_exact_replay_rows_removed,
+                                self.session_id,
+                            )
                         bak_tmp = bak_path.with_suffix(
                             f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
                         )
                         with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(existing_text)
+                            bf.write(backup_text)
                             bf.flush()
                             os.fsync(bf.fileno())
                         _safe_replace(bak_tmp, bak_path)
@@ -1588,15 +1916,35 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            _safe_replace(tmp, self.path)
+            if skip_index:
+                # Callers that explicitly skip the sidebar projection retain
+                # the existing same-session concurrency contract: their unique
+                # temp files may replace the sidecar independently.
+                _safe_replace(tmp, self.path)
+            else:
+                # Publish the sidecar and its sidebar projection as one ordered
+                # operation. _write_session_index() uses this same RLock, so the
+                # nested acquisition is safe. Without the outer ownership, an
+                # older save can pause after replacing the sidecar, a newer save
+                # can publish both files, and then the older save can regress
+                # only the index with its frozen projection.
+                with _INDEX_WRITE_LOCK:
+                    _safe_replace(tmp, self.path)
+                    # Build the sidebar entry from the same guarded transcript
+                    # snapshot as the JSON payload. A shallow copy avoids
+                    # rebinding/mutating the live Session while keeping message
+                    # count, user count, and last-message time aligned with
+                    # what this save actually persisted.
+                    persisted_index_session = copy.copy(self)
+                    persisted_index_session.messages = guarded_messages
+                    persisted_index_session._metadata_message_count = len(guarded_messages)
+                    _write_session_index(updates=[persisted_index_session])
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:
                 pass
             raise
-        if not skip_index:
-            _write_session_index(updates=[self])
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -1835,6 +2183,8 @@ class Session:
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'last_message_at': last_message_at,
+            'transcript_generation': self.transcript_generation,
+            'transcript_generation_baseline': self.transcript_generation_baseline,
             'pinned': self.pinned,
             'archived': self.archived,
             'project_id': self.project_id,
@@ -2438,6 +2788,191 @@ def _latest_user_matches_pending_text(messages, pending_text):
     return False
 
 
+def _pending_active_turn_token(session):
+    """Return the exact WebUI active-turn token for the pending turn.
+
+    The token is ``"<stream_id>:<pending_started_at>"`` — the same value the
+    eager user-message checkpoint and the agent-result merge stamp onto the
+    materialized user row (``stamp_message_source``). It is unforgeable
+    per-turn identity: two distinct streams that submit the same prompt
+    inside the same second produce different tokens.
+    """
+    from api.process_event_utils import build_active_turn_token
+
+    return build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        getattr(session, 'pending_started_at', None),
+    )
+
+
+def _transcript_user_row_is_pending_turn(message, session, pending_token) -> bool:
+    """Return True only when a transcript user row provably IS the pending turn.
+
+    Identity is bound to the active-turn token, never to integer-second
+    timestamp equality: two different streams that send the same prompt
+    within one second truncate to the same ``int(timestamp)``, so the
+    checkpoint matcher alone would accept the *other* stream's row as the
+    pending turn. A token mismatch therefore always loses, and a row that
+    carries no token at all cannot be proven to be this turn — which means
+    the caller must recover, not suppress.
+    """
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    row_token = message.get('_active_turn_token')
+    if pending_token:
+        if not row_token:
+            # Ambiguous legacy identity: the pending turn has a resolvable
+            # token but this row predates token stamping. We cannot prove it
+            # is the same turn, so recovery must run.
+            return False
+        return row_token == pending_token
+    if row_token:
+        # The row belongs to a different, token-bearing turn. Never let a
+        # same-second timestamp collision override that mismatch.
+        return False
+    # Neither side carries a token (legacy/dead-stream pending state): fall
+    # back to the strict content + timestamp + source + attachments
+    # checkpoint, which is the only identity signal available.
+    return _message_matches_pending_checkpoint(
+        message,
+        getattr(session, 'pending_user_message', None),
+        getattr(session, 'pending_started_at', None),
+        getattr(session, 'pending_user_source', None),
+        getattr(session, 'pending_attachments', None),
+    )
+
+
+def _pending_turn_has_final_assistant_answer(messages, start_idx: int) -> bool:
+    """Return True when the matched user turn ends in a genuine final answer.
+
+    Reuses the established final-answer semantics
+    (``_assistant_message_has_final_visible_text``) instead of "an assistant
+    row exists". An assistant row only settles the turn when it carries real
+    visible answer text: empty rows, tool-call-only rows, interim
+    ``_partial`` progress rows, rows recovered from the run journal and
+    compaction reference cards are all rejected, so a turn that was
+    interrupted mid-tool-execution is never mistaken for a completed one.
+
+    The scan stops at the next real user row — a final answer that belongs
+    to a *later* turn must not settle this pending turn.
+    """
+    from api.streaming import (
+        _assistant_message_has_final_visible_text,
+        _is_synthetic_control_message,
+    )
+
+    for later in messages[start_idx + 1:]:
+        if not isinstance(later, dict):
+            continue
+        if _is_synthetic_control_message(later):
+            continue
+        role = later.get('role')
+        if role == 'user':
+            if is_context_compression_marker(later):
+                # Synthetic compaction cards are not a user-turn boundary.
+                continue
+            return False
+        if role != 'assistant':
+            # Tool rows never prove a final answer.
+            continue
+        if (
+            later.get('_partial')
+            or later.get('_error')
+            or later.get('_recovered')
+            or later.get('_recovered_from_run_journal')
+        ):
+            continue
+        if is_context_compression_marker(later):
+            continue
+        if _assistant_message_has_final_visible_text(later):
+            return True
+    return False
+
+
+def _transcript_already_advanced_past_pending(session) -> bool:
+    """#6366: a stale pending user message whose own user row already appears
+    in the durable transcript, followed by a genuine final assistant answer
+    inside that same user-turn boundary, means the transcript has already
+    advanced past this pending turn. Returning True here lets the recovery
+    path skip the recovered user / ``_partial`` clone / journal replay /
+    generic no-response error that would otherwise append after the valid
+    final answer. The tail-only check at line ~3485 (``session.messages[-1]``)
+    misses this case: when the pending turn's user row is older than
+    the transcript tail, the tail is a *newer* assistant row that
+    can never match the pending **user** checkpoint, and the recovery
+    path falls through into the append branch.
+
+    Identity is bound to the pending stream's exact active-turn token
+    (``_transcript_user_row_is_pending_turn``), so a repeated prompt from a
+    different stream — even one submitted in the same integer second —
+    can never be matched against this pending turn and silently dropped.
+
+    Completion requires a genuine final visible assistant answer
+    (``_pending_turn_has_final_assistant_answer``): empty, tool-call-only,
+    interim ``_partial``, journal-recovered and compaction tails all keep
+    recovery active, because that is precisely the interrupted-turn shape
+    the recovery path exists for.
+
+    The transcript heuristic alone is not durable: an unflagged interim
+    prose row ("Let me check the logs first.") followed by tool rows that
+    were never followed by a final answer in the transcript passes the
+    predicate as a "completed" turn, but the stream may have died mid-
+    tool and the run journal was never marked done. 9/23 re-gate: also
+    require durable same-stream terminal evidence. The run journal
+    cannot supply that evidence on this path — the caller in
+    ``_apply_core_sync_or_error_marker`` already returns early whenever
+    the run journal reports ``completed`` for the stream, so the branch
+    that reaches this predicate can never observe that state (which is
+    why the previous run-journal gate was unreachable dead code). The
+    evidence therefore has to come from the turn journal, which records
+    the exact-stream ``completed`` event for the pending turn
+    (``_turn_journal_records_completion``). Without it, fall through to
+    the normal journal-recovery path so the partial output is replayed
+    and the interruption is marked.
+
+    The suppression is therefore deliberately conservative: whenever the
+    turn's identity, its completion, or its durable terminal evidence
+    cannot be positively proven, this helper returns False and the
+    prompt is recovered instead of discarded. A false negative leaves a
+    visible cosmetic duplicate; a false positive silently destroys a
+    prompt or a response.
+
+    Idempotent: this is a pure read that does not mutate the session.
+    Running recovery twice therefore produces the same outcome.
+    """
+    pending_text = getattr(session, 'pending_user_message', None)
+    if not pending_text:
+        return False
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list):
+        return False
+    pending_token = _pending_active_turn_token(session)
+    for idx, message in enumerate(messages):
+        if not _transcript_user_row_is_pending_turn(message, session, pending_token):
+            continue
+        # Found the pending turn's own user row at ``idx``. A genuine
+        # final answer inside that turn's boundary is necessary but not
+        # sufficient: durable same-stream terminal evidence must also
+        # exist, otherwise unflagged interim prose
+        # ("Let me check the logs first.") followed by tool rows can be
+        # mistaken for a finished turn.
+        if not _pending_turn_has_final_assistant_answer(messages, idx):
+            continue
+        stream_id = getattr(session, 'active_stream_id', None)
+        # The turn journal — not the run journal — carries the
+        # completion evidence that is still observable here: the caller
+        # (``_apply_core_sync_or_error_marker``) already consumed the
+        # run-journal ``completed`` state on its own early return, so a
+        # run-journal gate at this depth can never fire.
+        if not _turn_journal_records_completion(session, stream_id):
+            # No durable same-stream terminal evidence — the turn may
+            # have died mid-tool. Fall through to the journal-recovery
+            # path instead of suppressing it.
+            return False
+        return True
+    return False
+
+
 def _partial_message_signature(message: dict) -> tuple:
     """Return a stable identity for partial assistant markers recovered on load."""
     if not isinstance(message, dict):
@@ -2493,6 +3028,7 @@ def _find_existing_assistant_for_journal_content(
     session,
     content: str,
     *,
+    min_index: int | None = None,
     max_index: int | None = None,
     excluded_indexes: set[int] | None = None,
 ) -> int | None:
@@ -2500,9 +3036,10 @@ def _find_existing_assistant_for_journal_content(
     if not candidate:
         return None
     messages = session.messages or []
-    stop = len(messages) if max_index is None else min(len(messages), max_index)
+    start = 0 if min_index is None else max(0, min(len(messages), min_index))
+    stop = len(messages) if max_index is None else max(start, min(len(messages), max_index))
     substring_match = None
-    for idx in range(stop):
+    for idx in range(start, stop):
         if excluded_indexes and idx in excluded_indexes:
             continue
         message = messages[idx]
@@ -2526,6 +3063,9 @@ def _journal_tool_already_present(
     preview: str,
     *,
     stream_id: str | None = None,
+    tool_id: str | None = None,
+    min_assistant_idx: int | None = None,
+    max_assistant_idx: int | None = None,
 ) -> bool:
     """Return True when an equivalent tool card already exists.
 
@@ -2547,6 +3087,7 @@ def _journal_tool_already_present(
     candidate_name = str(name or '')
     candidate_preview = _normalize_journal_recovery_text(preview)
     candidate_stream = str(stream_id) if stream_id else None
+    candidate_tool_id = str(tool_id or '').strip() or None
     for tool_call in session.tool_calls or []:
         if not isinstance(tool_call, dict):
             continue
@@ -2557,13 +3098,30 @@ def _journal_tool_already_present(
         )
         if existing_preview != candidate_preview:
             continue
+        if candidate_tool_id is not None:
+            existing_tool_id = str(
+                tool_call.get('tid') or tool_call.get('tool_call_id') or ''
+            ).strip()
+            if existing_tool_id and existing_tool_id != candidate_tool_id:
+                continue
         if candidate_stream is not None:
             existing_stream = tool_call.get('_recovered_stream_id')
             # A tool card explicitly tagged with a recovered_stream_id that
             # differs from ours belongs to another retry's turn — don't let
-            # it pre-empt this retry.  Untagged tool cards (live or carried
-            # over from the core transcript) still match.
-            if existing_stream and str(existing_stream) != candidate_stream:
+            # it pre-empt this retry. An exact tagged retry remains globally
+            # eligible for idempotence even if later transcript edits moved
+            # its owner outside the original positional window.
+            if existing_stream:
+                if str(existing_stream) != candidate_stream:
+                    continue
+                return True
+        if min_assistant_idx is not None or max_assistant_idx is not None:
+            owner_idx = tool_call.get('assistant_msg_idx')
+            if type(owner_idx) is not int:
+                continue
+            if min_assistant_idx is not None and owner_idx < min_assistant_idx:
+                continue
+            if max_assistant_idx is not None and owner_idx >= max_assistant_idx:
                 continue
         return True
     return False
@@ -2574,7 +3132,7 @@ def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
         return False
     try:
         from api.run_journal import read_run_events
-        journal = read_run_events(session.session_id, stream_id)
+        journal = read_run_events(session.session_id, stream_id, validated_recovery=True)
     except Exception:
         return False
     for event in journal.get('events') or []:
@@ -2625,7 +3183,7 @@ def _run_journal_terminal_state(session, stream_id: str | None) -> str | None:
             read_run_events,
             select_authoritative_terminal_event,
         )
-        journal = read_run_events(session.session_id, stream_id)
+        journal = read_run_events(session.session_id, stream_id, validated_recovery=True)
         terminal = select_authoritative_terminal_event(journal.get('events') or [])
     except Exception:
         return None
@@ -2637,6 +3195,54 @@ def _run_journal_terminal_state(session, stream_id: str | None) -> str | None:
     ):
         return None
     return str(terminal.get('terminal_state') or '') or None
+
+
+def _turn_journal_records_completion(session, stream_id: str | None) -> bool:
+    """Return True when the crash-safe turn journal proves the turn for
+    ``stream_id`` reached its terminal ``completed`` state.
+
+    The turn journal is written per stream/turn id by the exact-stream
+    workers and by :mod:`api.routes` on submission, so a ``completed``
+    event for the *pending stream id* is completion evidence that
+    survives a run-journal write failure: the run journal only reaches
+    ``done`` / ``stream_end`` on its own write path, and a process that
+    dies between the turn journal write and the run-journal terminal
+    append leaves the run journal without terminal state while the turn
+    journal still records that the turn actually finished.
+
+    Bound strictly to ``stream_id`` — a ``completed`` turn belonging to
+    another stream of the same session never settles this one — and to
+    the latest turn recorded for that stream, so a turn that was
+    cancelled or crashed (``interrupted``) keeps recovery active even
+    when an earlier turn of the same stream completed normally.
+    """
+    if not stream_id:
+        return False
+    try:
+        from api.turn_journal import (
+            derive_turn_journal_states,
+            read_turn_journal,
+        )
+        journal = read_turn_journal(session.session_id)
+        states, _ = derive_turn_journal_states(journal.get('events') or [])
+    except Exception:
+        return False
+    latest: tuple[float, str, dict] | None = None
+    for turn_id, event in states.items():
+        if str(event.get('stream_id') or '') != str(stream_id):
+            continue
+        try:
+            created_at = float(event.get('created_at') or 0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        # ``>=`` on both elements keeps the winner deterministic when two
+        # turns of the same stream share a ``created_at``.
+        candidate = (created_at, turn_id, event)
+        if latest is None or candidate[:2] >= latest[:2]:
+            latest = candidate
+    if latest is None:
+        return False
+    return latest[2].get('event') == 'completed'
 
 
 def _recoverable_unsaved_gateway_terminal_error(
@@ -2651,7 +3257,7 @@ def _recoverable_unsaved_gateway_terminal_error(
             read_run_events,
             select_authoritative_terminal_event,
         )
-        journal = read_run_events(session.session_id, stream_id)
+        journal = read_run_events(session.session_id, stream_id, validated_recovery=True)
     except Exception:
         logger.debug(
             "Session %s: failed to read terminal error journal for stream %s",
@@ -2802,12 +3408,19 @@ def _recover_journaled_output_and_terminal_error(
     *,
     dedupe_existing: bool = False,
     terminal_recovery: dict | None = None,
+    append_context: bool = True,
+    dedupe_min_index: int | None = None,
+    dedupe_max_index: int | None = None,
 ) -> tuple[bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error."""
     recovered_output = _append_journaled_partial_output(
         session,
         stream_id,
         dedupe_existing=dedupe_existing,
+        dedupe_min_index=dedupe_min_index,
+        dedupe_max_index=dedupe_max_index,
+        append_context=append_context,
+        display_only=not append_context,
     )
     terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
         session,
@@ -2855,6 +3468,10 @@ def _append_journaled_partial_output(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    dedupe_min_index: int | None = None,
+    dedupe_max_index: int | None = None,
+    append_context: bool = True,
+    display_only: bool = False,
 ) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -2869,7 +3486,7 @@ def _append_journaled_partial_output(
 
     try:
         from api.run_journal import read_run_events
-        journal = read_run_events(session.session_id, stream_id)
+        journal = read_run_events(session.session_id, stream_id, validated_recovery=True)
     except Exception:
         logger.debug(
             "Session %s: failed to read run journal for stream %s",
@@ -2933,6 +3550,8 @@ def _append_journaled_partial_output(
         return True
 
     def append_context_projection(message: dict) -> None:
+        if not append_context:
+            return
         context_projection = dict(message)
         context_projection.pop('reasoning', None)
         _append_recovered_turn_to_context(session, context_projection)
@@ -2962,7 +3581,12 @@ def _append_journaled_partial_output(
                 candidate_idx = _find_existing_assistant_for_journal_content(
                     session,
                     content,
-                    max_index=initial_message_count,
+                    min_index=dedupe_min_index,
+                    max_index=(
+                        initial_message_count
+                        if dedupe_max_index is None
+                        else min(initial_message_count, dedupe_max_index)
+                    ),
                     excluded_indexes=search_excluded,
                 )
                 if candidate_idx is None:
@@ -2982,7 +3606,17 @@ def _append_journaled_partial_output(
                         appended_any = True
                 return existing_idx
         if dedupe_existing and reasoning and not content:
-            for existing_idx in range(initial_message_count):
+            reasoning_start = (
+                0
+                if dedupe_min_index is None
+                else max(0, min(initial_message_count, dedupe_min_index))
+            )
+            reasoning_stop = (
+                initial_message_count
+                if dedupe_max_index is None
+                else max(reasoning_start, min(initial_message_count, dedupe_max_index))
+            )
+            for existing_idx in range(reasoning_start, reasoning_stop):
                 if existing_idx in claimed_existing_assistant_indexes:
                     continue
                 existing_message = session.messages[existing_idx]
@@ -3008,6 +3642,8 @@ def _append_journaled_partial_output(
             '_recovered_stream_id': stream_id,
         }
         attach_display_reasoning(recovered_assistant, reasoning)
+        if display_only:
+            recovered_assistant['_recovered_display_only'] = True
         session.messages.append(recovered_assistant)
         append_context_projection(recovered_assistant)
         current_assistant_idx = len(session.messages) - 1
@@ -3048,13 +3684,16 @@ def _append_journaled_partial_output(
             ):
                 current_assistant_idx = _existing_idx
                 return _existing_idx
-        session.messages.append({
+        recovered_anchor = {
             'role': 'assistant',
             'content': '',
             'timestamp': int(created_at or time.time()),
             '_recovered_from_run_journal': True,
             '_recovered_stream_id': stream_id,
-        })
+        }
+        if display_only:
+            recovered_anchor['_recovered_display_only'] = True
+        session.messages.append(recovered_anchor)
         current_assistant_idx = len(session.messages) - 1
         appended_any = True
         return current_assistant_idx
@@ -3101,8 +3740,17 @@ def _append_journaled_partial_output(
                 anchor_idx = ensure_assistant_anchor(created_at)
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
+            tool_id = str(
+                payload.get('tid') or payload.get('tool_call_id') or ''
+            ).strip()
             if dedupe_existing and _journal_tool_already_present(
-                session, name, preview, stream_id=stream_id,
+                session,
+                name,
+                preview,
+                stream_id=stream_id,
+                tool_id=tool_id or None,
+                min_assistant_idx=dedupe_min_index,
+                max_assistant_idx=dedupe_max_index,
             ):
                 current_assistant_idx = anchor_idx
                 continue
@@ -3110,7 +3758,11 @@ def _append_journaled_partial_output(
                 'name': name,
                 'preview': preview,
                 'snippet': preview,
-                'tid': f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}",
+                'tid': (
+                    tool_id
+                    or f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}"
+                ),
+                '_journal_synthetic_tid': not bool(tool_id),
                 'assistant_msg_idx': anchor_idx,
                 'args': _truncate_journal_tool_args(payload.get('args') or {}),
                 'done': False,
@@ -3122,24 +3774,44 @@ def _append_journaled_partial_output(
             continue
         if event_name == 'tool_complete':
             name = str(payload.get('name') or '')
-            for tool_call in reversed(recovered_tool_calls):
-                if tool_call.get('done'):
-                    continue
-                if not name or tool_call.get('name') == name:
-                    tool_call['done'] = True
-                    if payload.get('preview'):
-                        tool_call['preview'] = str(payload.get('preview') or '')
-                        tool_call['snippet'] = str(payload.get('preview') or '')
-                    if payload.get('duration') is not None:
-                        tool_call['duration'] = payload.get('duration')
-                    tool_call['is_error'] = bool(payload.get('is_error', False))
-                    break
+            completion_tool_id = str(
+                payload.get('tid') or payload.get('tool_call_id') or ''
+            ).strip()
+            unfinished = [call for call in reversed(recovered_tool_calls) if not call.get('done')]
+            matched_tool = None
+            if completion_tool_id:
+                matched_tool = next((
+                    call for call in unfinished
+                    if str(call.get('tid') or '') == completion_tool_id
+                ), None)
+                if matched_tool is None:
+                    matched_tool = next((
+                        call for call in unfinished
+                        if call.get('_journal_synthetic_tid')
+                        and name and call.get('name') == name
+                    ), None)
+            else:
+                matched_tool = next((
+                    call for call in unfinished
+                    if not name or call.get('name') == name
+                ), None)
+            if matched_tool is not None:
+                tool_call = matched_tool
+                tool_call['done'] = True
+                if payload.get('preview'):
+                    tool_call['preview'] = str(payload.get('preview') or '')
+                    tool_call['snippet'] = str(payload.get('preview') or '')
+                if payload.get('duration') is not None:
+                    tool_call['duration'] = payload.get('duration')
+                tool_call['is_error'] = bool(payload.get('is_error', False))
             continue
         if event_name in {'done', 'stream_end', 'cancel', 'apperror', 'error'}:
             flush_assistant()
 
     flush_assistant()
     if recovered_tool_calls:
+        for tool_call in recovered_tool_calls:
+            tool_call.pop('_journal_synthetic_tid', None)
         session.tool_calls = list(session.tool_calls or []) + recovered_tool_calls
         appended_any = True
     return appended_any
@@ -3177,6 +3849,12 @@ def _append_journaled_partial_output(
 #     so users do not see "reload to retry" prompts forever.
 _JOURNAL_RETRY_MAX_ATTEMPTS = 12
 _JOURNAL_RETRY_GIVEUP_SECONDS = 24 * 3600
+# Persisted cancel-recovery hooks record the process instance that created
+# them. ACTIVE_RUNS can be reaped while a wedged worker still exists, so
+# registry absence alone is not proof that a same-process journal can no
+# longer receive writes. A fresh process gets a fresh token; that is positive
+# evidence the old writer cannot still be running in this interpreter.
+_JOURNAL_RECOVERY_PROCESS_TOKEN = uuid.uuid4().hex
 _JOURNAL_RETRY_LOCKS: dict[str, threading.Lock] = {}
 _JOURNAL_RETRY_LOCKS_GUARD = threading.Lock()
 
@@ -3213,18 +3891,396 @@ def _build_recovery_marker_with_retry_hook(
     return marker
 
 
-def _session_has_pending_journal_retry(session) -> bool:
-    """Cheap short-circuit: scan from the tail until the most recent normal
-    assistant turn. Any `_pending_journal_recovery` flag found before then
-    means a retry is queued.
-    """
+def _is_cancel_journal_retry_marker(message: dict) -> bool:
+    """Return True for a durable journal-only Stop recovery marker."""
+    return (
+        isinstance(message, dict)
+        and message.get('_pending_journal_recovery') is True
+        and message.get('_journal_retry_kind') == 'cancelled'
+    )
+
+
+def _cancel_journal_retry_owner_index(session, marker_idx: int, marker: dict) -> int | None:
+    """Resolve the exact token-bearing user row owned by a cancel hook."""
     messages = getattr(session, 'messages', None) or []
+    owner_token = str(marker.get('_journal_retry_owner_token') or '').strip()
+    if not owner_token:
+        return None
+    matches = [
+        index
+        for index, row in enumerate(messages[:marker_idx])
+        if (
+            isinstance(row, dict)
+            and row.get('role') == 'user'
+            and str(row.get('_active_turn_token') or '').strip() == owner_token
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+
+def _journal_user_identity_details(row):
+    """Keep stable user identities in separate namespaces; reject bad aliases."""
+    stable, stable_valid = _stable_message_identity_details(row)
+    state_row, state_valid = _state_db_row_identity_details(row)
+    identities = {'message': stable, 'state_row': state_row}
+    valid = stable_valid and state_valid
+    for key in ('_active_turn_token', 'message_uid'):
+        value = row.get(key)
+        if value is None or value == '':
+            identities[key] = None
+        elif isinstance(value, str) and value.strip():
+            identities[key] = value.strip()
+        else:
+            identities[key] = None
+            valid = False
+    return identities, valid
+
+
+def _journal_user_display_text(row):
+    """Compare display text without rewriting native image/provider payloads."""
+    from api.streaming import _strip_title_attachment_suffix, _strip_workspace_prefix
+
+    content = row.get('content')
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                return None
+            kind = part.get('type')
+            if kind in ('text', 'input_text', 'output_text'):
+                if not isinstance(part.get('text'), str):
+                    return None
+                parts.append(part['text'])
+            elif kind not in ('image_url', 'input_image', 'image'):
+                return None
+        text = '\n'.join(parts)
+    else:
+        return None
+    return _strip_workspace_prefix(
+        _strip_title_attachment_suffix(text), include_legacy=True,
+    )
+
+
+def _journal_user_metadata_key(row):
+    timestamp = row.get('timestamp')
+    # Preserve exact numeric timestamps: float coercion loses large-int identity,
+    # and booleans/nonfinite values must never establish ownership.
+    if timestamp is not None and (type(timestamp) not in (int, float)
+                                 or (isinstance(timestamp, float) and not math.isfinite(timestamp))):
+        return None
+    source = row.get('_source')
+    # Only absent/blank string metadata has the legacy WebUI default. Falsy
+    # non-strings are malformed authority, not permission to infer an owner.
+    if source is None or source == '':
+        source = 'webui'
+    if not isinstance(source, str):
+        return None
+    return timestamp, source.strip().casefold()
+
+
+def _journal_user_fallback_key(row):
+    metadata = _journal_user_metadata_key(row)
+    text = _journal_user_display_text(row)
+    if metadata is None or metadata[0] is None or text is None:
+        return None
+    return (*metadata, text)
+
+
+def _journal_user_timestamps_match(left, right) -> bool:
+    """Match exact times or a legacy integer against its finite fractional time."""
+    if type(left) not in (int, float) or type(right) not in (int, float):
+        return False
+    if any(type(value) is float and not math.isfinite(value) for value in (left, right)):
+        return False
+    if left == right:
+        return True
+    if type(left) is int:
+        return left == int(right)
+    if type(right) is int:
+        return int(left) == right
+    return False
+
+
+def _journal_user_fallback_keys_match(left, right) -> bool:
+    return (left is not None and right is not None and left[1:] == right[1:]
+            and _journal_user_timestamps_match(left[0], right[0]))
+
+
+def _interrupted_journal_context_owner(session, marker_idx: int, owner_idx: int | None):
+    """Prove an interrupted owner and its successor across rich projections."""
+    messages = session.messages or []
+    context = getattr(session, 'context_messages', None)
+    if owner_idx is None or not isinstance(context, list):
+        return None
+    display_users = [row for row in messages if isinstance(row, dict) and row.get('role') == 'user']
+    context_users = [row for row in context if isinstance(row, dict) and row.get('role') == 'user']
+    display_rows = [row for row in messages if isinstance(row, dict)]
+    context_rows = [row for row in context if isinstance(row, dict)]
+
+    def identity_projections(namespace):
+        # Turn tokens identify user turns; stable message/DB/UID identities are
+        # message-wide, so an assistant/tool alias also defeats uniqueness.
+        return (display_users, context_users) if namespace == '_active_turn_token' else (display_rows, context_rows)
+
+    def unique_context_user(expected):
+        identities, valid = _journal_user_identity_details(expected)
+        if not valid:
+            return None
+        for namespace, value in identities.items():
+            if value is not None and any(
+                sum(_journal_user_identity_details(row)[0][namespace] == value for row in users) > 1
+                for users in identity_projections(namespace)
+            ):
+                return None
+        expected_metadata = _journal_user_metadata_key(expected)
+        if expected_metadata is None:
+            return None
+        expected_key = _journal_user_fallback_key(expected)
+        matches = []
+        for row in context_users:
+            row_ids, row_valid = _journal_user_identity_details(row)
+            if not row_valid or not _message_private_identity_compatible(row, expected):
+                continue
+            if any(value is not None and row_ids[key] is not None and value != row_ids[key]
+                   for key, value in identities.items()):
+                continue
+            # Legacy eager repair can lack the display token in context. Only
+            # a unique fallback pair may bridge that missing token; a context-
+            # only token or any conflicting shared token still fails closed.
+            missing_context_token = bool(identities['_active_turn_token'] and row_ids['_active_turn_token'] is None)
+            if row_ids['_active_turn_token'] != identities['_active_turn_token'] and not missing_context_token:
+                continue
+            if any(row.get(key) not in (None, '', []) and expected.get(key) not in (None, '', [])
+                   and row[key] != expected[key] for key in ('api_content', 'attachments')):
+                continue
+            row_metadata = _journal_user_metadata_key(row)
+            if row_metadata is None or row_metadata[1] != expected_metadata[1]:
+                continue
+            if row_metadata[0] is not None and expected_metadata[0] is not None and not _journal_user_timestamps_match(row_metadata[0], expected_metadata[0]):
+                continue
+            row_key = _journal_user_fallback_key(row)
+            shared = [key for key, value in identities.items() if value is not None and value == row_ids[key]]
+            if shared and not missing_context_token:
+                if any(sum(_journal_user_identity_details(candidate)[0][key] == identities[key]
+                           for candidate in users) != 1
+                       for key in shared for users in identity_projections(key)):
+                    continue
+            elif not _journal_user_fallback_keys_match(row_key, expected_key) or any(
+                sum(_journal_user_fallback_keys_match(_journal_user_fallback_key(candidate), endpoint)
+                    for candidate in users) != 1
+                for endpoint in (row_key, expected_key) for users in (display_users, context_users)
+            ):
+                continue
+            matches.append(row)
+        return matches[0] if len(matches) == 1 else None
+
+    context_owner = unique_context_user(messages[owner_idx])
+    if context_owner is None:
+        return None
+    owner_position = next(i for i, row in enumerate(context) if row is context_owner)
+    successor = next((row for row in context[owner_position + 1:]
+                      if isinstance(row, dict) and row.get('role') == 'user'), None)
+    display_successors = [row for row in messages[marker_idx + 1:]
+                          if isinstance(row, dict) and row.get('role') == 'user']
+    if successor is not None:
+        token = str(successor.get('_active_turn_token') or '').strip()
+        matches = [row for row in display_successors
+                   if token and str(row.get('_active_turn_token') or '').strip() == token]
+        if len(matches) != 1 or unique_context_user(matches[0]) is not successor:
+            return None
+    elif owner_position != len(context) - 1 or not any(
+        str(row.get('_active_turn_token') or '').strip() for row in display_successors
+    ):
+        # Without a context successor, only a tail owner has a proven insertion
+        # boundary. Compression summaries or unowned suffixes stay untouched.
+        return None
+    return context_owner
+
+
+def _rehome_interrupted_journal_context(session, context_owner, stream_id: str, *, display_owner=None) -> None:
+    """Insert exact-stream output before the proven successor, preserving pairs."""
+    context = session.context_messages
+    owner_positions = [i for i, row in enumerate(context) if row is context_owner]
+    if len(owner_positions) != 1:
+        return
+    recovered = []
+    for row in session.messages:
+        if (not isinstance(row, dict) or row.get('_recovered_from_run_journal') is not True
+                or str(row.get('_recovered_stream_id') or '') != stream_id):
+            continue
+        candidate = dict(row)
+        candidate.pop('_recovered_display_only', None)
+        projected = _recovered_model_context_projection(candidate)
+        if projected is not None:
+            recovered.append(projected)
+        row.pop('_recovered_display_only', None)
+    if not recovered:
+        return
+    if any(row.get('role') == 'assistant' for row in recovered):
+        # Answered recovered questions are no longer provisional. Match the
+        # cancellation promotion rule so a first question survives sanitizing.
+        context_owner.pop('_recovered', None)
+        if display_owner is not None:
+            display_owner.pop('_recovered', None)
+    # Keep any existing native assistant/tool block together; never synthesize
+    # provider calls from the journal's truncated display-only tool metadata.
+    insert_at = next((i for i in range(owner_positions[0] + 1, len(context))
+                      if isinstance(context[i], dict) and context[i].get('role') == 'user'), len(context))
+    session.context_messages = context[:insert_at] + recovered + context[insert_at:]
+
+
+def _rehome_cancel_journal_rows(session, marker_idx: int, stream_id: str) -> None:
+    """Move only this cancelled stream's recovered rows before its marker."""
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list) or not (0 <= marker_idx < len(messages)):
+        return
+    marker = messages[marker_idx]
+    before = list(messages)
+    recovered = [
+        row
+        for index, row in enumerate(before)
+        if index > marker_idx
+        and isinstance(row, dict)
+        and row.get('_recovered_from_run_journal') is True
+        and str(row.get('_recovered_stream_id') or '') == str(stream_id)
+    ]
+    if not recovered:
+        return
+    recovered_ids = {id(row) for row in recovered}
+    remaining = [row for row in before if id(row) not in recovered_ids]
+    try:
+        marker_position = next(index for index, row in enumerate(remaining) if row is marker)
+    except StopIteration:
+        return
+    session.messages = (
+        remaining[:marker_position]
+        + recovered
+        + [marker]
+        + remaining[marker_position + 1:]
+    )
+
+    _reindex_tool_owners_after_message_reorder(session, before)
+
+
+def _reindex_tool_owners_after_message_reorder(session, before, *, after_messages=None) -> None:
+    """Preserve exact row ownership, including a projection before deepcopy."""
+    after = session.messages if after_messages is None else after_messages
+    new_index_by_row = {id(row): index for index, row in enumerate(after)}
+    for tool_call in getattr(session, 'tool_calls', None) or []:
+        if not isinstance(tool_call, dict):
+            continue
+        old_index = tool_call.get('assistant_msg_idx')
+        if type(old_index) is not int or not (0 <= old_index < len(before)):
+            continue
+        owner = before[old_index]
+        new_index = new_index_by_row.get(id(owner))
+        if new_index is not None:
+            tool_call['assistant_msg_idx'] = new_index
+
+
+def _rehome_cancel_journal_context(
+    session,
+    *,
+    owner_token: str,
+    stream_id: str,
+) -> None:
+    """Project exact recovered rows after the token-owned context user only."""
+    context = getattr(session, 'context_messages', None)
+    messages = getattr(session, 'messages', None)
+    if not isinstance(context, list) or not isinstance(messages, list):
+        return
+
+    remaining = [
+        row
+        for row in context
+        if not (
+            isinstance(row, dict)
+            and row.get('_recovered_from_run_journal') is True
+            and str(row.get('_recovered_stream_id') or '') == str(stream_id)
+        )
+    ]
+    owner_token = str(owner_token or '').strip()
+    if not owner_token:
+        session.context_messages = remaining
+        return
+    owner_positions = [
+        index
+        for index, row in enumerate(remaining)
+        if (
+            isinstance(row, dict)
+            and row.get('role') == 'user'
+            and str(row.get('_active_turn_token') or '').strip() == owner_token
+        )
+    ]
+    if len(owner_positions) != 1:
+        # Compression may legitimately remove the exact provider-context owner.
+        # Visible transcript recovery remains valid, but old assistant output
+        # must never be guessed onto a successor user turn.
+        session.context_messages = remaining
+        return
+    owner_position = owner_positions[0]
+
+    # Display rows start without model authority. Only this unique owner can
+    # authorize a candidate projection; do not use text dedupe across turns.
+    recovered = []
+    projected_rows = []
+    for row in messages:
+        if not (
+            isinstance(row, dict)
+            and row.get('_recovered_from_run_journal') is True
+            and str(row.get('_recovered_stream_id') or '') == str(stream_id)
+        ):
+            continue
+        candidate = dict(row)
+        candidate.pop('_recovered_display_only', None)
+        projected = _recovered_model_context_projection(candidate)
+        if projected is not None:
+            recovered.append(projected)
+            projected_rows.append(row)
+    if not recovered:
+        session.context_messages = remaining
+        return
+
+    if any(row.get('role') == 'assistant' for row in recovered):
+        # Only model-visible assistant output promotes the provisional owner.
+        # Display-only reasoning and terminal errors do not answer the prompt.
+        remaining[owner_position].pop('_recovered', None)
+        for row in messages:
+            if (
+                isinstance(row, dict)
+                and row.get('role') == 'user'
+                and str(row.get('_active_turn_token') or '').strip() == owner_token
+            ):
+                row.pop('_recovered', None)
+
+    insert_at = len(remaining)
+    for index in range(owner_position + 1, len(remaining)):
+        if isinstance(remaining[index], dict) and remaining[index].get('role') == 'user':
+            insert_at = index
+            break
+    session.context_messages = remaining[:insert_at] + recovered + remaining[insert_at:]
+    for row in projected_rows:
+        row.pop('_recovered_display_only', None)
+
+
+def _session_has_pending_journal_retry(session) -> bool:
+    """Return True when a durable interrupted/cancelled journal hook is pending."""
+    messages = getattr(session, 'messages', None) or []
+    # A cancelled-stream hook remains authoritative even if a successor turn is
+    # already persisted after it. The exact stream id on the marker prevents a
+    # successor from becoming the recovery source.
+    if any(_is_cancel_journal_retry_marker(msg) for msg in messages):
+        return True
     for msg in reversed(messages):
         if not isinstance(msg, dict):
             continue
         if msg.get('_pending_journal_recovery'):
             return True
-        if msg.get('role') == 'assistant' and not msg.get('_error'):
+        if msg.get('role') == 'assistant' and not msg.get('_error') \
+                and msg.get('_recovered_from_cancel_journal') is not True:
             # A normal assistant turn after any pending marker — nothing to
             # retry above this point.
             return False
@@ -3236,6 +4292,9 @@ def _strip_journal_retry_meta(marker: dict) -> None:
     marker.pop('_journal_retry_stream_id', None)
     marker.pop('_journal_retry_attempts', None)
     marker.pop('_journal_retry_first_seen_ts', None)
+    marker.pop('_journal_retry_kind', None)
+    marker.pop('_journal_retry_owner_token', None)
+    marker.pop('_journal_retry_process_token', None)
 
 
 def _reorder_journal_tail_above_marker(session, marker_idx: int) -> None:
@@ -3303,27 +4362,118 @@ def _retry_journal_recovery_in_place(
     session,
     *,
     preserve_arriving_budget: bool = False,
+    _skip_cancel_hooks: bool = False,
 ) -> bool:
-    """Re-attempt run-journal recovery for the most recent pending marker.
+    """Retry eligible cancellation hooks, then the latest interrupted marker.
 
-    Returns True if journal output or a specific terminal error resolved the marker.
-    Never raises — caller is best-effort.
+    Interrupted-response hooks keep their existing bounded retry behavior.
+    Journal-only cancellation hooks are exact-stream capabilities: they remain
+    discoverable across successor turns, wait until the old runtime owner is
+    gone, and splice recovered rows back before their cancellation marker.
     """
+    def snapshot_cancel_projection():
+        return (
+            copy.deepcopy(getattr(session, 'messages', None) or []),
+            copy.deepcopy(getattr(session, 'context_messages', None) or []),
+            copy.deepcopy(getattr(session, 'tool_calls', None) or []),
+            getattr(session, 'updated_at', None),
+        )
+
+    def restore_cancel_projection(snapshot) -> None:
+        (
+            session.messages,
+            session.context_messages,
+            session.tool_calls,
+            session.updated_at,
+        ) = snapshot
+
+    def save_cancel_projection(snapshot, reason: str) -> bool:
+        try:
+            session.save(touch_updated_at=False)
+            return True
+        except Exception:
+            restore_cancel_projection(snapshot)
+            logger.debug(
+                "save() failed while %s for cancelled session %s",
+                reason,
+                getattr(session, 'session_id', '?'),
+                exc_info=True,
+            )
+            return False
+
+    # A failed cancellation save replaces rows with a deep-copied snapshot;
+    # abort that pass instead of continuing with stale marker identities.
+    visited_cancel_markers: set[int] = set()
     try:
-        messages = session.messages or []
-        for idx in range(len(messages) - 1, -1, -1):
-            msg = messages[idx]
-            if not isinstance(msg, dict):
-                continue
-            if msg.get('role') == 'assistant' and not msg.get('_error') \
-                    and not msg.get('_pending_journal_recovery'):
-                # Walked past the pending marker without finding it.
-                return False
-            if not (
-                msg.get('type') == 'interrupted'
-                and msg.get('_pending_journal_recovery')
-            ):
-                continue
+        while True:
+            messages = session.messages or []
+            cancel_candidates = [] if _skip_cancel_hooks else [
+                (index, message)
+                for index, message in enumerate(messages)
+                if _is_cancel_journal_retry_marker(message)
+                and id(message) not in visited_cancel_markers
+            ]
+            idx = None
+            msg = None
+            cancel_hook = False
+            if cancel_candidates:
+                # Multiple cancelled turns may remain pending in one transcript.
+                # A newer hook that is still owned by a live worker (or by a
+                # same-process nonterminal journal) must not starve an older hook
+                # whose exact stream is already safe to recover.
+                active_stream_ids = _active_stream_ids()
+                for candidate_idx, candidate in reversed(cancel_candidates):
+                    candidate_stream_id = str(
+                        candidate.get('_journal_retry_stream_id') or ''
+                    ).strip()
+                    candidate_process_token = str(
+                        candidate.get('_journal_retry_process_token') or ''
+                    ).strip()
+                    candidate_owner_token = str(
+                        candidate.get('_journal_retry_owner_token') or ''
+                    ).strip()
+                    if (
+                        not candidate_stream_id
+                        or not candidate_process_token
+                        or not candidate_owner_token
+                    ):
+                        continue
+                    if candidate_stream_id in active_stream_ids:
+                        continue
+                    if candidate_process_token == _JOURNAL_RECOVERY_PROCESS_TOKEN:
+                        try:
+                            if not _run_journal_terminal_state(session, candidate_stream_id):
+                                continue
+                        except Exception:
+                            continue
+                    idx, msg = candidate_idx, candidate
+                    cancel_hook = True
+                    break
+
+            if msg is None:
+                # Cancellation recovery is opportunistic. A newer cancel hook that
+                # is not selectable must not mask the older interrupted-response
+                # recovery contract.
+                cancel_hook = False
+                for candidate_idx in range(len(messages) - 1, -1, -1):
+                    candidate = messages[candidate_idx]
+                    if not isinstance(candidate, dict):
+                        continue
+                    if candidate.get('role') == 'assistant' and not candidate.get('_error') \
+                            and not candidate.get('_pending_journal_recovery') \
+                            and candidate.get('_recovered_from_cancel_journal') is not True:
+                        # Walked past the pending marker without finding it.
+                        return False
+                    if (
+                        candidate.get('type') == 'interrupted'
+                        and candidate.get('_pending_journal_recovery')
+                    ):
+                        idx, msg = candidate_idx, candidate
+                        break
+                if msg is None:
+                    return False
+
+            assert isinstance(idx, int) and isinstance(msg, dict)
             stream_id = msg.get('_journal_retry_stream_id')
             first_seen = msg.get('_journal_retry_first_seen_ts') or 0
             attempts = int(msg.get('_journal_retry_attempts') or 0)
@@ -3335,61 +4485,167 @@ def _retry_journal_recovery_in_place(
                     and now - float(first_seen) > _JOURNAL_RETRY_GIVEUP_SECONDS
                 )
             )
-            if not stream_id:
-                # No stream id to retry against; demote immediately.
-                msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
-                _strip_journal_retry_meta(msg)
-                try:
-                    session.save(touch_updated_at=False)
-                except Exception:
-                    logger.debug(
-                        "save() failed while demoting marker for session %s",
-                        getattr(session, 'session_id', '?'),
-                        exc_info=True,
-                    )
-                return False
-            if give_up:
-                msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
-                _strip_journal_retry_meta(msg)
-                try:
-                    session.save(touch_updated_at=False)
-                except Exception:
-                    logger.debug(
-                        "save() failed while demoting marker for session %s",
-                        getattr(session, 'session_id', '?'),
-                        exc_info=True,
-                    )
-                return False
-            recovered_output, terminal_error_recovered = (
-                _recover_journaled_output_and_terminal_error(
+
+            if cancel_hook:
+                visited_cancel_markers.add(id(msg))
+                if not stream_id:
+                    # A cancellation hook without its exact run identity cannot
+                    # safely select a journal. Keep it intact rather than guessing.
+                    continue
+                if str(stream_id) in _active_stream_ids():
+                    # Stop detaches the browser stream before the worker finishes.
+                    # The durable hook belongs to restart/read-side recovery only
+                    # after that old runtime owner has disappeared.
+                    continue
+                marker_process_token = str(
+                    msg.get('_journal_retry_process_token') or ''
+                ).strip()
+                owner_token = str(msg.get('_journal_retry_owner_token') or '').strip()
+                if not marker_process_token or not owner_token:
+                    # Unknown process ownership is not permission to consume an
+                    # exact cancellation hook.
+                    continue
+                if marker_process_token == _JOURNAL_RECOVERY_PROCESS_TOKEN:
+                    # ACTIVE_RUNS has a bounded stale reaper, so its absence inside
+                    # the same process does not prove a wedged worker is gone. Only
+                    # an explicit terminal journal row closes that same-process
+                    # ambiguity. A real restart changes the process token and can
+                    # recover a nonterminal durable tail because the old writer
+                    # cannot survive into the new interpreter.
+                    try:
+                        if not _run_journal_terminal_state(session, str(stream_id)):
+                            continue
+                    except Exception:
+                        continue
+                cancel_snapshot = snapshot_cancel_projection()
+                if give_up:
+                    _strip_journal_retry_meta(msg)
+                    if not save_cancel_projection(cancel_snapshot, "retiring expired cancel journal hook"):
+                        return False
+                    continue
+                owner_index = _cancel_journal_retry_owner_index(session, idx, msg)
+                if owner_index is None:
+                    continue
+                recovered_output = _append_journaled_partial_output(
                     session,
                     stream_id,
                     dedupe_existing=True,
+                    dedupe_min_index=owner_index + 1,
+                    dedupe_max_index=idx,
+                    append_context=False,
+                    display_only=True,
                 )
-            )
-            if recovered_output or terminal_error_recovered:
-                if not terminal_error_recovered:
-                    msg['content'] = _INTERRUPTED_RECOVERED_WORDING
+                terminal_error_recovered = False
+            else:
+                if not stream_id:
+                    # No stream id to retry against; demote immediately.
+                    msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
                     _strip_journal_retry_meta(msg)
-                # The journaled rows were appended at the end of messages;
-                # move them above the marker before either retaining its
-                # interrupted wording or replacing it with a specific terminal
-                # error from that same stream.
-                _reorder_journal_tail_above_marker(session, idx)
-                if terminal_error_recovered:
-                    session.messages = [
-                        message
-                        for message in session.messages
-                        if message is not msg
-                    ]
-                try:
-                    session.save(touch_updated_at=False)
-                except Exception:
-                    logger.debug(
-                        "save() failed while applying lazy journal recovery for session %s",
-                        getattr(session, 'session_id', '?'),
-                        exc_info=True,
+                    try:
+                        session.save(touch_updated_at=False)
+                    except Exception:
+                        logger.debug(
+                            "save() failed while demoting marker for session %s",
+                            getattr(session, 'session_id', '?'),
+                            exc_info=True,
+                        )
+                    return False
+                if give_up:
+                    msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+                    _strip_journal_retry_meta(msg)
+                    try:
+                        session.save(touch_updated_at=False)
+                    except Exception:
+                        logger.debug(
+                            "save() failed while demoting marker for session %s",
+                            getattr(session, 'session_id', '?'),
+                            exc_info=True,
+                        )
+                    return False
+                # Display successors alone do not establish context placement.
+                has_successor = any(
+                    isinstance(row, dict) and row.get('role') == 'user'
+                    for row in messages[idx + 1:]
+                )
+                owner_index = next((
+                    index for index in range(idx - 1, -1, -1)
+                    if isinstance(messages[index], dict)
+                    and messages[index].get('role') == 'user'
+                ), None)
+                context_owner = (
+                    _interrupted_journal_context_owner(session, idx, owner_index)
+                    if has_successor else None
+                )
+                interrupted_snapshot = snapshot_cancel_projection() if context_owner is not None else None
+                recovered_output, terminal_error_recovered = (
+                    _recover_journaled_output_and_terminal_error(
+                        session,
+                        stream_id,
+                        dedupe_existing=True,
+                        append_context=not has_successor,
+                        dedupe_min_index=owner_index + 1 if owner_index is not None else idx,
+                        dedupe_max_index=idx,
                     )
+                )
+
+            if recovered_output or terminal_error_recovered:
+                if cancel_hook:
+                    # Only this successful cancellation action can authorize
+                    # scans past its exact-stream recovered assistant rows.
+                    for row in session.messages:
+                        if (
+                            isinstance(row, dict)
+                            and row.get('role') == 'assistant'
+                            and not row.get('_error')
+                            and row.get('_recovered_from_run_journal') is True
+                            and str(row.get('_recovered_stream_id') or '') == str(stream_id)
+                        ):
+                            row['_recovered_from_cancel_journal'] = True
+                    _rehome_cancel_journal_rows(session, idx, str(stream_id))
+                    _rehome_cancel_journal_context(
+                        session,
+                        owner_token=owner_token,
+                        stream_id=str(stream_id),
+                    )
+                    # Keep the user-visible cancellation wording. Only the durable
+                    # recovery capability is retired by this commit.
+                    _strip_journal_retry_meta(msg)
+                    if not save_cancel_projection(
+                        cancel_snapshot,
+                        "applying cancelled journal recovery",
+                    ):
+                        return False
+                else:
+                    if not terminal_error_recovered:
+                        msg['content'] = _INTERRUPTED_RECOVERED_WORDING
+                        _strip_journal_retry_meta(msg)
+                    # The journaled rows were appended at the end of messages;
+                    # move them above the marker before either retaining its
+                    # interrupted wording or replacing it with a specific terminal
+                    # error from that same stream.
+                    _rehome_cancel_journal_rows(session, idx, str(stream_id))
+                    if context_owner is not None:
+                        _rehome_interrupted_journal_context(session, context_owner, str(stream_id), display_owner=messages[owner_index])
+                    if terminal_error_recovered:
+                        before_removal = session.messages
+                        session.messages = [
+                            message
+                            for message in session.messages
+                            if message is not msg
+                        ]
+                        _reindex_tool_owners_after_message_reorder(session, before_removal)
+                    try:
+                        session.save(touch_updated_at=False)
+                    except Exception:
+                        if interrupted_snapshot is not None:
+                            logger.debug("save() failed while applying proven interrupted context recovery", exc_info=True)
+                            restore_cancel_projection(interrupted_snapshot)
+                            return False
+                        logger.debug(
+                            "save() failed while applying lazy journal recovery for session %s",
+                            getattr(session, 'session_id', '?'),
+                            exc_info=True,
+                        )
                 logger.info(
                     "Session %s: lazy journal-recovery applied stream %s "
                     "after %d attempts",
@@ -3398,6 +4654,7 @@ def _retry_journal_recovery_in_place(
                     attempts,
                 )
                 return True
+
             if (
                 preserve_arriving_budget
                 and _journal_is_still_arriving(session, stream_id)
@@ -3408,8 +4665,21 @@ def _retry_journal_recovery_in_place(
                     getattr(session, 'session_id', '?'),
                     stream_id,
                 )
+                if cancel_hook:
+                    continue
                 return False
+
             next_attempts = attempts + 1
+            if cancel_hook:
+                cancel_snapshot = snapshot_cancel_projection()
+                if next_attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS:
+                    _strip_journal_retry_meta(msg)
+                else:
+                    msg['_journal_retry_attempts'] = next_attempts
+                if not save_cancel_projection(cancel_snapshot, "updating cancel journal retry counter"):
+                    return False
+                continue
+
             if next_attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS:
                 msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
                 _strip_journal_retry_meta(msg)
@@ -3424,7 +4694,6 @@ def _retry_journal_recovery_in_place(
                     exc_info=True,
                 )
             return False
-        return False
     except Exception:
         logger.exception(
             "_retry_journal_recovery_in_place failed for session %s",
@@ -3479,9 +4748,7 @@ def _apply_core_sync_or_error_marker(
     # prompt submitted just before a server restart, so materialize it before
     # clearing runtime stream state.
     if len(session.messages) != 0:
-        _recovered_ts = int(time.time())
-        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-            _recovered_ts = int(session.pending_started_at)
+        _recovered_ts = _recovered_pending_timestamp(session.pending_started_at)
         _already_checkpointed = _message_matches_pending_checkpoint(
             session.messages[-1],
             session.pending_user_message,
@@ -3515,6 +4782,29 @@ def _apply_core_sync_or_error_marker(
             )
             return True
         if not _tail_user_already_checkpointed:
+            # #6366 re-gate: when the durable transcript has already
+            # advanced past this pending turn into a newer settled
+            # user/assistant boundary, the recovery path must NOT
+            # append a recovered user row + ``_partial`` clone +
+            # journal replay + generic no-response error after the
+            # valid final answer. The tail-only check above misses
+            # that case (the tail is a newer assistant row that can
+            # never match the pending user checkpoint). Clear only
+            # the stale pending fields and return; the transcript is
+            # already correct and durable.
+            if _transcript_already_advanced_past_pending(session):
+                session.active_stream_id = None
+                session.pending_user_message = None
+                session.pending_attachments = []
+                session.pending_started_at = None
+                session.pending_user_source = None
+                session.save(touch_updated_at=touch_updated_at)
+                logger.info(
+                    "Session %s: cleared stale pending state for stream %s — transcript already advanced past this turn",
+                    sid,
+                    _stream_id,
+                )
+                return True
             _append_recovered_pending_turn(session, timestamp=_recovered_ts)
         else:
             recovered = {
@@ -3524,8 +4814,7 @@ def _apply_core_sync_or_error_marker(
                 '_recovered': True,
             }
             pending_source = getattr(session, 'pending_user_source', None)
-            if pending_source and pending_source != 'webui':
-                recovered['_source'] = pending_source
+            stamp_message_source(recovered, pending_source, active_turn_token=_pending_active_turn_token(session))
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
@@ -3569,9 +4858,7 @@ def _apply_core_sync_or_error_marker(
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
             _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-            _recovered_ts = int(time.time())
-            if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-                _recovered_ts = int(session.pending_started_at)
+            _recovered_ts = _recovered_pending_timestamp(session.pending_started_at)
             _already_checkpointed = _message_matches_pending_checkpoint(
                 session.messages[-1] if session.messages else None,
                 session.pending_user_message,
@@ -3639,9 +4926,7 @@ def _apply_core_sync_or_error_marker(
     if session.pending_user_message:
         # Use the original send time if available so the recovered turn
         # appears in the correct chronological position.
-        _recovered_ts = int(time.time())
-        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-            _recovered_ts = int(session.pending_started_at)
+        _recovered_ts = _recovered_pending_timestamp(session.pending_started_at)
         _append_recovered_pending_turn(session, timestamp=_recovered_ts)
     recovered_output, terminal_error_recovered = (
         _recover_journaled_output_and_terminal_error(
@@ -3988,21 +5273,83 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         )
         if not state_messages:
             return False
+
+        # The Agent row is intentionally hidden from display while the saved
+        # handoff proof is active. Materialize the exact WebUI-owned prompt
+        # before reconciling that row away, so clearing pending state cannot
+        # erase the only durable copy of the submitted text/attachments.
+        pending_identity = _validated_webui_pending_user_timestamp_identity(
+            locked,
+            getattr(locked, '_webui_pending_user_timestamp_identity', None),
+        )
+        # When a legacy sidecar has no explicit context_messages, the shared
+        # context reconciler falls back to messages. Capture that model-facing
+        # merge before adding the display-only WebUI owner row below.
+        merged_context = (
+            reconciled_state_db_messages_for_session(
+                locked,
+                prefer_context=True,
+                state_messages=state_messages,
+            )
+            if pending_identity is not None
+            else None
+        )
+        if pending_identity is not None:
+            pending_timestamp = pending_identity[1]
+            pending_text = locked.pending_user_message
+            pending_source = getattr(locked, 'pending_user_source', None) or 'webui'
+            pending_attachments = list(getattr(locked, 'pending_attachments', None) or [])
+            pending_row = {
+                'role': 'user',
+                'content': pending_text,
+                'timestamp': pending_timestamp,
+            }
+            stamp_message_source(pending_row, pending_source)
+            if str(pending_source or '').strip().lower() == 'fork':
+                pending_row['_fork_child_turn'] = locked.session_id
+            if pending_attachments:
+                pending_row['attachments'] = pending_attachments
+
+            existing_pending = next((
+                message for message in locked_messages
+                if isinstance(message, dict)
+                and (
+                    _message_exact_timestamp_details(message)
+                    == (pending_timestamp, True)
+                    and (message.get('_source') or 'webui') == pending_source
+                    and _message_matches_pending_text(message, pending_text)
+                )
+            ), None)
+            if existing_pending is not None:
+                # A prior eager checkpoint already owns this exact proved turn;
+                # refresh it from the still-authoritative pending fields.
+                existing_pending.update(pending_row)
+                if pending_attachments:
+                    existing_pending['attachments'] = pending_attachments
+                else:
+                    existing_pending.pop('attachments', None)
+            else:
+                # The proof makes this submitted row authoritative even if a
+                # clock adjustment places it before the surviving sidecar tail.
+                if not _insert_state_message_chronologically(locked_messages, pending_row):
+                    locked_messages.insert(0, pending_row)
+            locked.messages = locked_messages
+
+        display_baseline_count = len(locked_messages)
         merged_messages = reconciled_state_db_messages_for_session(
             locked,
             state_messages=state_messages,
         )
-        # The reconciler is append-only: a genuine state.db advance (output the
-        # lost stream never wrote back) shows up as MORE rows than the sidecar.
-        # A merged length not greater than the sidecar means nothing new to
-        # recover — leave the sidecar untouched rather than rewriting in place.
-        if len(merged_messages) <= locked_count:
+        # The baseline includes any proven WebUI-owned pending display row. Only
+        # a later state.db row is an advance worth committing and clearing pending.
+        if len(merged_messages) <= display_baseline_count:
             return False
-        merged_context = reconciled_state_db_messages_for_session(
-            locked,
-            prefer_context=True,
-            state_messages=state_messages,
-        )
+        if merged_context is None:
+            merged_context = reconciled_state_db_messages_for_session(
+                locked,
+                prefer_context=True,
+                state_messages=state_messages,
+            )
 
         # Mutate + persist the freshly-loaded, locked object. Because we hold the
         # lock and reloaded under it, this save cannot clobber a concurrent
@@ -4233,6 +5580,57 @@ def _sidecar_stat_signature(path):
         return None
     return (str(path), int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
             int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
+
+
+_MESSAGE_COUNT_MARKER = 1
+
+
+def _prefix_message_count(path):
+    """The sidecar's own persisted ``message_count``, from a bounded prefix.
+
+    The #1558 shrink check in save() needs exactly one integer -- how many
+    messages the file on disk holds -- and the writer puts that integer in the
+    metadata prefix, before ``messages``, precisely so readers can have it
+    without parsing the body (see METADATA_FIELDS). Reading the prefix costs
+    O(64 KiB) against O(file size) for ``read_text`` + ``json.loads`` (measured
+    2026-09-15: 20,377 ms for one integer on a 203,439,398-byte sidecar).
+
+    Content-derived on purpose. A stat identity cannot stand in for it: an
+    in-place rewrite of the same length inside one mtime tick keeps inode, size
+    *and* mtime_ns, so a cached count would read a real shrink as a growth and
+    skip the backup. The count is part of the bytes, so any rewrite of them
+    rewrites it too.
+
+    Gated on the writer marker (``_mc_v``, review 2026-09-22): a count is only
+    trusted when the SAME write that produced the messages array also vouched
+    for the count. Anything unmarked -- a legacy pre-#5854 sidecar, a sidecar
+    materialized by an older recovery writer whose denormalized count could be
+    stale against its rows, any foreign writer -- returns None and the caller
+    falls back to the full read + parse. After one save by the current writer
+    the file carries the marker and the fast path resumes.
+
+    Returns None -- meaning "the caller must fall back to the full read +
+    parse" -- for every shape that does not carry a usable MARKED count: an
+    unmarked or wrong-marker file, a legacy sidecar whose count is not in the
+    prefix, a file with no top-level ``messages`` key at all, a corrupt or
+    truncated prefix, an unreadable path, or metadata alone that overflows the
+    budget.
+    """
+    try:
+        raw = _read_metadata_json_prefix(path)
+    except (OSError, ValueError):
+        return None
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get('_mc_v') != _MESSAGE_COUNT_MARKER:
+        return None
+    return _parse_nonnegative_int(parsed.get('message_count'))
 
 
 def _legacy_sidecar_facts_get(sid):
@@ -4784,7 +6182,41 @@ class _FullSessionResolveRequired(RuntimeError):
     """Internal signal that a full sidecar load must enter the bounded path."""
 
 
-_FULL_SESSION_RESOLVE_MAX_CONCURRENT = 2
+def _read_max_session_resolve_concurrent() -> int:
+    """#7421: env override for the heavy session-resolve cap. The
+    hardcoded literal 2 is too low for high-concurrency
+    deployments where several parallel active sessions all need
+    a full-transcript resolve; operators can set
+    ``HERMES_WEBUI_MAX_SESSION_RESOLVE`` to a positive int to
+    raise the cap without code changes. A bad or missing value
+    falls back to the previous default of 2, so an operator who
+    sets ``HERMES_WEBUI_MAX_SESSION_RESOLVE=0`` or a non-numeric
+    value does not regress to a blocked or unbounded state.
+
+    The cap is a *safety bound* (per-resolve cost tracked in
+    #7310), not a user preference — a typo like ``=999999``
+    must fall back to the safe default, never to the permissive
+    extreme. Every other bad input in this function falls back
+    to ``2``; out-of-range values do too. The previously
+    accepted upper bound (64) is reachable only via an explicit
+    in-range operator value; a profile's ``.env`` cannot reach
+    it at all (see ``_PROTECTED_ENV_KEYS``).
+    """
+    raw = (os.getenv("HERMES_WEBUI_MAX_SESSION_RESOLVE") or "").strip()
+    if not raw:
+        return 2
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 2
+    if n < 1:
+        return 2
+    if n > 64:
+        return 2  # #7656 round-3: typo-safe fallback, not clamp-up-to-64
+    return n
+
+
+_FULL_SESSION_RESOLVE_MAX_CONCURRENT = _read_max_session_resolve_concurrent()
 _FULL_SESSION_RESOLVE_SLOTS = threading.BoundedSemaphore(
     _FULL_SESSION_RESOLVE_MAX_CONCURRENT
 )
@@ -6836,6 +8268,48 @@ def _profile_has_user_projects(profile: str | None = None) -> bool:
     return False
 
 
+# Sentinel for profile_scoped_project_ids(): "no profile given, use the active
+# one". A bare None cannot mean that, because None is a legitimate profile value
+# (_profiles_match reads it as the root profile).
+_ACTIVE_PROFILE = object()
+
+
+def profile_scoped_project_ids(profile=_ACTIVE_PROFILE) -> frozenset[str]:
+    """Project IDs that currently exist for ``profile`` (default: the active one).
+
+    A state.db ``project_id`` is an opaque string the agent wrote; the project
+    it names can since have been deleted, or can belong to a different profile.
+    Callers resolve against this set and treat a miss as "unassigned" so a stale
+    assignment can never HIDE a session: an unresolved id would otherwise drop
+    the row out of "Unassigned" and turn it into a ``default_hidden`` row with no
+    project chip left to reveal it (#6659 review finding 3).
+
+    ``profile`` must be the SESSION's profile, not the process-wide active one,
+    wherever the two can differ. The all-profiles sidebar view scans one state.db
+    per profile in a single request, so resolving every context against the active
+    profile made another profile's LIVE assignment look unresolvable and dropped
+    the row from the payload entirely — while its chip stayed selectable in that
+    same view (#6659 review finding 3).
+
+    Profile/alias matching is delegated to ``api.profiles._profiles_match``,
+    the canonical helper every other profile-scoped read already uses, so this
+    set cannot disagree with the rest of the app about which profile owns a
+    project (renamed root, legacy ``'default'`` tag, and a missing ``profile``
+    key are all its business, not ours). Read-only.
+    """
+    from api.profiles import get_active_profile_name, _profiles_match
+
+    active = get_active_profile_name() if profile is _ACTIVE_PROFILE else profile
+    resolved: set[str] = set()
+    for p in load_projects():
+        project_id = str(p.get('project_id') or '').strip()
+        if not project_id:
+            continue
+        if _profiles_match(p.get('profile'), active):
+            resolved.add(project_id)
+    return frozenset(resolved)
+
+
 def is_cron_session(session_id: str, source_tag: str | None = None) -> bool:
     """Return True if a session originates from a cron job."""
     if source_tag == 'cron':
@@ -7214,6 +8688,7 @@ def clear_cli_sessions_cache() -> None:
         global _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
         _CLI_SESSIONS_CACHE_INVALIDATION_VERSION += 1
         _CLI_SESSIONS_CACHE.clear()
+        _CLI_SESSIONS_LAST_KNOWN_GOOD.clear()
     # The sidecar-metadata projection cache is stat-keyed (self-invalidating on
     # any file change), but clear it alongside the CLI cache so an explicit
     # reset — a mutating sidebar action or test isolation — starts fully cold.
@@ -7249,6 +8724,25 @@ def _cli_sessions_cache_done(cache_key: tuple, event: threading.Event | None) ->
         event.set()
 
 
+def _cli_sessions_stable_cache_identity(cache_key: tuple) -> tuple:
+    """Remove volatile state.db revisions from a CLI cache identity."""
+    if cache_key and cache_key[0] == 'all_profiles':
+        # Index 4 is the explicit profile-home/profile-name ownership key. It
+        # stays stable across idle and streaming-frozen primary cache modes.
+        return (*cache_key[:3], cache_key[4], *cache_key[5:])
+    # Single-profile keys place the volatile DB fingerprint at index 4.
+    return (*cache_key[:4], *cache_key[5:]) if len(cache_key) > 4 else cache_key
+
+
+def _copy_last_known_good_cli_sessions(stable_key: tuple, invalidation_stamp: int):
+    with _CLI_SESSIONS_CACHE_LOCK:
+        entry = _CLI_SESSIONS_LAST_KNOWN_GOOD.get(stable_key)
+        if entry is None or entry[0] != invalidation_stamp:
+            return None
+        _CLI_SESSIONS_LAST_KNOWN_GOOD.move_to_end(stable_key)
+        return _copy_cli_sessions(entry[1])
+
+
 def _cache_cli_sessions_if_current(
     cache_key: tuple,
     ttl: float,
@@ -7258,11 +8752,20 @@ def _cache_cli_sessions_if_current(
     with _CLI_SESSIONS_CACHE_LOCK:
         if _CLI_SESSIONS_CACHE_INVALIDATION_VERSION != invalidation_stamp:
             return False
+        copied_sessions = _copy_cli_sessions(sessions)
         _CLI_SESSIONS_CACHE[cache_key] = (
             time.monotonic() + ttl,
             invalidation_stamp,
-            _copy_cli_sessions(sessions),
+            copied_sessions,
         )
+        stable_key = _cli_sessions_stable_cache_identity(cache_key)
+        _CLI_SESSIONS_LAST_KNOWN_GOOD[stable_key] = (
+            invalidation_stamp,
+            _copy_cli_sessions(copied_sessions),
+        )
+        _CLI_SESSIONS_LAST_KNOWN_GOOD.move_to_end(stable_key)
+        while len(_CLI_SESSIONS_LAST_KNOWN_GOOD) > _CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES:
+            _CLI_SESSIONS_LAST_KNOWN_GOOD.popitem(last=False)
         _CLI_SESSIONS_CACHE.move_to_end(cache_key)
         while len(_CLI_SESSIONS_CACHE) > _CLI_SESSIONS_CACHE_MAX_ENTRIES:
             _CLI_SESSIONS_CACHE.popitem(last=False)
@@ -7289,6 +8792,13 @@ def _copy_fresh_cli_sessions_cache_entry(cache_key: tuple):
         return _copy_cli_sessions(cached_sessions)
 
 
+@dataclass(frozen=True)
+class _CliSessionsLoadResult:
+    sessions: list
+    complete: bool = True
+    fresh_when_incomplete: bool = False
+
+
 def _load_and_cache_cli_sessions(
     *,
     cache_key: tuple,
@@ -7300,8 +8810,15 @@ def _load_and_cache_cli_sessions(
     all_profiles: bool,
     db_path,
 ) -> list:
+    stable_cache_key = _cli_sessions_stable_cache_identity(cache_key)
     try:
-        sessions = load_sessions()
+        loaded = load_sessions()
+        if isinstance(loaded, _CliSessionsLoadResult):
+            sessions = loaded.sessions
+            complete = loaded.complete
+        else:
+            sessions = loaded
+            complete = True
     except Exception as _cli_err:
         logger.warning(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
@@ -7309,7 +8826,28 @@ def _load_and_cache_cli_sessions(
         )
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
+        stable_sessions = _copy_last_known_good_cli_sessions(
+            stable_cache_key, invalidation_stamp
+        )
+        if stable_sessions is not None:
+            return stable_sessions
         return []
+    if not complete:
+        if isinstance(loaded, _CliSessionsLoadResult) and loaded.fresh_when_incomplete:
+            # Optional source passes are additive. If one cannot be read, the
+            # primary rows already loaded are newer and more useful than a stale
+            # complete snapshot. Serve them for this request only; never publish
+            # an incomplete projection to either cache.
+            return _copy_cli_sessions(sessions)
+        if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
+            return stale_sessions
+        stable_sessions = _copy_last_known_good_cli_sessions(
+            stable_cache_key, invalidation_stamp
+        )
+        if stable_sessions is not None:
+            return stable_sessions
+        # Expose a first partial attempt, but never publish it as authoritative.
+        return _copy_cli_sessions(sessions)
     _cache_cli_sessions_if_current(
         cache_key,
         ttl,
@@ -7415,11 +8953,15 @@ def _path_stat_cache_key(path):
 
 
 def _callable_accepts_include_claude_code(callable_obj) -> bool:
+    return _callable_accepts_keyword(callable_obj, 'include_claude_code')
+
+
+def _callable_accepts_keyword(callable_obj, keyword: str) -> bool:
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):
         return True
-    if 'include_claude_code' in signature.parameters:
+    if keyword in signature.parameters:
         return True
     return any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
@@ -7605,7 +9147,6 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
             _profiles_root,
             get_active_profile_name,
             get_hermes_home_for_profile,
-            list_profiles_api,
         )
     except Exception:
         return [], ()
@@ -7632,15 +9173,12 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
         _add_context(get_active_profile_name())
     except Exception:
         pass
+    # The root profile, then one home per directory under the named-profile
+    # root. Deliberately not list_profiles_api(): that builds the picker's rows,
+    # skill counts included, and this scan needs only the homes (#7940).
+    _add_context('default')
     try:
-        for row in list_profiles_api():
-            if not isinstance(row, dict):
-                continue
-            _add_context(row.get('name'))
-    except Exception:
-        logger.debug("All-profiles CLI context enumeration failed", exc_info=True)
-    try:
-        for entry in _profiles_root().iterdir():
+        for entry in sorted(_profiles_root().iterdir()):
             if not entry.is_dir():
                 continue
             _add_context(entry.name)
@@ -7657,7 +9195,14 @@ def clear_sidecar_metadata_cache() -> None:
 
 
 def _state_projection_sidecar_metadata(sid: str) -> dict:
-    """Return UI-owned metadata (title + archived) for a state.db-projected row.
+    """Return UI-owned metadata (title + archived + project_id) for a state row.
+
+    ``project_id`` is UI-owned in exactly the same way as the other two:
+    ``/api/session/move`` writes it onto the sidecar and NOTHING writes
+    ``state.db.sessions.project_id``. Reading it here is what lets the sidebar
+    projection agree with the assignment ``all_sessions()`` re-surfaces, instead
+    of counting a moved conversation against the unassigned window (#6659 review
+    finding 2).
 
     Memoized by the sidecar file's (path, mtime_ns, size, ctime_ns) stat
     signature so the sidebar projection — which calls this once per row in both
@@ -7668,11 +9213,11 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     Returns a COPY so callers can't mutate the cached dict.
 
     NOTE: this stat-gates on ``SESSION_DIR / f'{sid}.json'`` because that file is
-    ``Session.load_metadata_only``'s sole source for title+archived. If that ever
-    stops being true (metadata moves to another store), this gate would short-
-    circuit before the real source — update both together.
+    ``Session.load_metadata_only``'s sole source for title+archived+project_id. If
+    that ever stops being true (metadata moves to another store), this gate would
+    short-circuit before the real source — update both together.
     """
-    default = {"title": None, "archived": False}
+    default = {"title": None, "archived": None, "project_id": None}
     if not is_safe_session_id(sid):
         return dict(default)
     p = SESSION_DIR / f'{sid}.json'
@@ -7700,6 +9245,8 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
         if title:
             metadata["title"] = title
         metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+        project_id = str(getattr(webui_meta, 'project_id', None) or '').strip()
+        metadata["project_id"] = project_id or None
 
     with _SIDECAR_METADATA_CACHE_LOCK:
         # Re-check under lock in case a concurrent build populated it; either
@@ -7712,6 +9259,16 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     return dict(metadata)
 
 
+def _state_db_supports_project_ids(db_path: Path) -> bool:
+    """Return whether the agent session schema can persist project assignments."""
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
+    except Exception:
+        return False
+    return any(str(row[1]) == "project_id" for row in rows)
+
+
 @profile_home_resolve_cache_scope()
 def _load_cli_sessions_uncached(
     hermes_home: Path,
@@ -7720,12 +9277,25 @@ def _load_cli_sessions_uncached(
     source_filter=None,
     *,
     visible_session_limit: int | None = None,
+    project_assigned_limit: int | None | bool = PROJECT_ASSIGNED_CLI_LIMIT,
     cron_project_limit: int | None | bool = CRON_PROJECT_CHIP_LIMIT,
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
-) -> list:
+    _with_completeness: bool = False,
+) -> list | _CliSessionsLoadResult:
     cli_sessions = []
+    projection_complete = True
+
+    def _result():
+        if _with_completeness:
+            return _CliSessionsLoadResult(
+                cli_sessions,
+                complete=projection_complete,
+                fresh_when_incomplete=not projection_complete,
+            )
+        return cli_sessions
+
     if source_filter in (None, CLAUDE_CODE_SOURCE) and include_claude_code:
         try:
             cli_sessions.extend(get_claude_code_sessions())
@@ -7733,11 +9303,11 @@ def _load_cli_sessions_uncached(
             logger.debug("Claude Code session scan failed", exc_info=True)
 
     if source_filter == CLAUDE_CODE_SOURCE:
-        return cli_sessions
+        return _result()
 
 
     if not db_path.exists():
-        return cli_sessions
+        return _result()
 
     # Memoize the cron project ID for this scan so we don't pay a lock-acquire +
     # disk-read of projects.json per cron session in the loop below.
@@ -7807,12 +9377,97 @@ def _load_cli_sessions_uncached(
             _webhook_pid_cache[0] = ensure_webhook_project(profile=_cli_profile)
         return _webhook_pid_cache[0]
 
+    # The live project catalog for THIS SCAN'S profile, read lazily and at most
+    # once per scan (same [resolved, value] cell pattern as _cron_pid above, for
+    # the same #4842 reason: a per-row load_projects() is a cold-sidebar I/O
+    # blowup).
+    #
+    # Scoped to ``_cli_profile`` — the profile whose state.db this scan is
+    # reading — not to the process-wide active profile. The all-profiles view
+    # calls this loader once per profile context in a single request, so the
+    # active-profile catalog would misread another profile's LIVE assignment as
+    # unresolvable and drop the row from the payload (#6659 review finding 3).
+    _known_project_ids_cache: list = [False, frozenset()]
+    def _known_project_ids() -> frozenset[str]:
+        if not _known_project_ids_cache[0]:
+            _known_project_ids_cache[0] = True
+            try:
+                _known_project_ids_cache[1] = profile_scoped_project_ids(_cli_profile)
+            except Exception:
+                logger.debug("Project catalog read failed for CLI projection", exc_info=True)
+        return _known_project_ids_cache[1]
+
+    def _resolved_project_id(raw) -> str | None:
+        """A state.db assignment, or None when its project no longer resolves.
+
+        Coercing an unresolved (deleted or cross-profile) id to None BEFORE
+        either cap runs is what keeps the row in the default "Unassigned" window
+        instead of exiling it to a ``default_hidden`` row whose project chip does
+        not exist any more — the mirror of the bug this PR fixes (#6659).
+        """
+        project_id = str(raw or '').strip()
+        if not project_id:
+            return None
+        return project_id if project_id in _known_project_ids() else None
+
     def _state_row_project_id(sid: str, source: str | None) -> str | None:
+        """Dedicated system-source chip for a background row, else None.
+
+        cron and webhook own an auto-provisioned project; kanban deliberately
+        does not, so it falls through to None (upstream behaviour) and is
+        reachable through the normal sidebar list instead of a chip.
+        """
         if is_cron_session(sid, source):
             return _cron_pid()
         if is_webhook_session(sid, source):
             return _webhook_pid()
         return None
+
+    # Sidecar-carried assignments, memoized per sid for this scan.
+    # _state_projection_sidecar_metadata is already stat-cached, but
+    # _interactive_row_project_id is called several times per row (budget
+    # seeding, the unassigned count, the projection), and one os.stat per call
+    # per row is the kind of cold-sidebar I/O #4842 removed.
+    _sidecar_pid_cache: dict[str, str | None] = {}
+    def _sidecar_row_project_id(sid: str) -> str | None:
+        if sid not in _sidecar_pid_cache:
+            _sidecar_pid_cache[sid] = _state_projection_sidecar_metadata(sid).get('project_id')
+        return _sidecar_pid_cache[sid]
+
+    def _interactive_row_project_id(row: dict) -> str | None:
+        """Project chip for an interactive (CLI/TUI/ACP) state.db row.
+
+        Single resolved value for both the cap decisions below and the projected
+        payload, so the code that budgets a row and the code that renders it can
+        never disagree about which project it belongs to.
+
+        The WebUI sidecar is consulted when state.db carries no assignment,
+        because ``/api/session/move`` writes ``project_id`` onto the sidecar ONLY
+        — nothing writes ``state.db.sessions.project_id``. Without this the
+        "``CLI_VISIBLE_SESSION_LIMIT`` unassigned conversations" guarantee counted
+        a WebUI-side assignment as unassigned while the route (which sees the
+        sidecar's value through ``all_sessions()``) classified the same
+        conversation as ASSIGNED, so three moved sessions silently shortened
+        everyone's sidebar to 17 rows (#6659 review finding 2). state.db wins when
+        it has an assignment of its own: it is the agent's own record.
+
+        Background sources keep the system-chip answer even when a
+        ``source_filter`` routes them through this loop, so one kanban row cannot
+        report a resolved ``project_id`` here and ``None`` from its own bounded
+        second pass further down.
+        """
+        sid = row['id']
+        source = row.get('source')
+        if (
+            str(source or '').strip().lower() in BACKGROUND_CLI_SOURCES
+            or is_cron_session(sid, source)
+            or is_webhook_session(sid, source)
+        ):
+            return _state_row_project_id(sid, source)
+        resolved = _resolved_project_id(row.get('project_id'))
+        if resolved is None:
+            resolved = _resolved_project_id(_sidecar_row_project_id(sid))
+        return resolved
 
     profile_value = _cli_profile or 'default'
     # A deleted WebUI session is tombstoned (see _record_webui_deleted_session_tombstone)
@@ -7825,7 +9480,7 @@ def _load_cli_sessions_uncached(
         _deleted_webui_tombstone = _load_webui_deleted_session_tombstone()
     except Exception:
         _deleted_webui_tombstone = frozenset()
-    for row in read_importable_agent_session_rows(
+    state_rows = read_importable_agent_session_rows(
         db_path,
         limit=visible_session_limit if visible_session_limit is not None else (
             CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron'
@@ -7837,9 +9492,550 @@ def _load_cli_sessions_uncached(
         # Background sources have independent bounded passes below. Keeping them
         # out of this 20-row interactive window prevents a busy worker source
         # (especially kanban) from evicting every CLI/TUI/ACP conversation.
+        # Spelled as a literal on purpose: tests/test_issue2841_show_cron_sessions_toggle.py
+        # reads this line as source text. Must stay equal to BACKGROUND_CLI_SOURCES
+        # (pinned by test_background_source_exclusion_literal_matches_the_constant).
         exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
-    ):
+    )
+    if source_filter is None:
+        # The interactive window above is a MIXED budget of assigned and
+        # unassigned conversations, and it truncates by recency. Two bounded
+        # recovery passes repair the two ways that loses a conversation:
+        #   1. an assigned conversation older than the window is unreachable even
+        #      though its project chip still claims it;
+        #   2. every assigned row inside the window spends a slot the sidebar
+        #      owes to an unassigned conversation (#6659 review findings 1-2).
+        # Both passes are keyed on the LOGICAL conversation (lineage), never the
+        # raw row, so compression segments cannot consume either budget.
+        interactive_excluded = BACKGROUND_CLI_SOURCES
+        first_pass_count = len(state_rows)
+        represented_rows: dict[str, dict] = {}
+
+        def _lineage_ids(row: dict) -> list[str]:
+            return [
+                str(value)
+                for key in ("id", "_lineage_root_id", "_lineage_tip_id")
+                if (value := row.get(key))
+            ]
+
+        def _merge_state_row(row: dict) -> bool:
+            """Add ``row`` unless its lineage is already represented.
+
+            Returns True only when a NEW logical conversation was added, which is
+            what lets recovery pass 1 spend its per-project budget on
+            conversations rather than rows. An already represented lineage is
+            upgraded in place: the recovery pass sees the same conversation
+            carrying its resolved project assignment, and the projection loop
+            must read that richer row. Pass 2 needs no budget of its own (its
+            query limit is the bound) and ignores the result.
+
+            "Upgrade" is one-way. Overwriting a row that already carries a
+            RESOLVED project_id with a projection that has none would delete the
+            chip this whole function exists to restore — and swap the row's
+            identity from the lineage tip back to its root. Pass 2 projects the
+            same conversations as pass 1 without the assignment context, so it
+            must never be able to win that race.
+            """
+            lineage_ids = _lineage_ids(row)
+            existing = next(
+                (represented_rows[value] for value in lineage_ids if value in represented_rows),
+                None,
+            )
+            if existing is not None:
+                if (
+                    _resolved_project_id(row.get('project_id')) is not None
+                    or _resolved_project_id(existing.get('project_id')) is None
+                ):
+                    # Either the incoming row adds an assignment, or the row on
+                    # file has none to lose: overwriting cannot drop a chip.
+                    existing.clear()
+                    existing.update(row)
+                for value in lineage_ids:
+                    represented_rows[value] = existing
+                return False
+            state_rows.append(row)
+            for value in lineage_ids:
+                represented_rows[value] = row
+            return True
+
+        for row in state_rows:
+            for value in _lineage_ids(row):
+                represented_rows.setdefault(value, row)
+
+        # --- Recovery pass 1: project-assigned conversations the recent window
+        # truncated. Bounded PER PROJECT (see PROJECT_ASSIGNED_CLI_LIMIT) so a
+        # chip can reveal its project's history without any one project growing
+        # the payload without limit. Skipped entirely when the profile has no
+        # projects at all — nothing could resolve, so the query would be waste.
+        #
+        # Two tiers, because a per-project BUDGET on top of one global recency
+        # window is not a per-project bound: a project that owns the whole window
+        # leaves every other project unrepresented. So the global query runs
+        # first (the only cost most profiles pay), and only if it came back
+        # saturated does a project-scoped follow-up top up the projects it
+        # starved. Worst case per build: 1 global query + 1 GROUP BY probe +
+        # one project-scoped query per starved project, each bounded to that
+        # project's remaining budget (whose sum the scan ceiling bounds).
+        known_project_ids = _known_project_ids() if project_assigned_limit is not False else frozenset()
+        if (
+            project_assigned_limit is not False
+            and known_project_ids
+            and _state_db_supports_project_ids(db_path)
+        ):
+            project_count = max(len(known_project_ids), 1)
+            per_project_limit = (
+                None if project_assigned_limit is None
+                else max(0, int(project_assigned_limit))
+            )
+            # Every project gets an EQUAL share of the global scan ceiling. The
+            # share only bites past PROJECT_ASSIGNED_CLI_SCAN_CEILING /
+            # PROJECT_ASSIGNED_CLI_LIMIT projects, and it is what keeps the
+            # recovered payload bounded (<= the ceiling) while making a project's
+            # allowance independent of how loud its neighbours are.
+            effective_limit = (
+                None if per_project_limit is None
+                else min(
+                    per_project_limit,
+                    max(1, PROJECT_ASSIGNED_CLI_SCAN_CEILING // project_count),
+                )
+            )
+            query_limit = (
+                None if effective_limit is None
+                else min(
+                    effective_limit * project_count,
+                    PROJECT_ASSIGNED_CLI_SCAN_CEILING,
+                )
+            )
+            try:
+                # An assigned conversation ALREADY inside the recent window
+                # occupies one of its project's slots, so this pass tops each
+                # project UP TO the bound instead of stacking a second bound on
+                # top of the window.
+                kept_per_project: dict[str, int] = {}
+                for row in state_rows:
+                    seeded_project_id = _interactive_row_project_id(row)
+                    if seeded_project_id is not None:
+                        kept_per_project[seeded_project_id] = (
+                            kept_per_project.get(seeded_project_id, 0) + 1
+                        )
+
+                def _spend_assigned_rows(rows: list[dict]) -> None:
+                    """Merge ``rows`` into the window under the per-project budget."""
+                    for row in rows:
+                        project_id = _resolved_project_id(row.get('project_id'))
+                        if project_id is None:
+                            # A deleted/cross-profile id is not an assignment.
+                            # Leave the row to the normal window so it stays
+                            # reachable under "Unassigned" (#6659 finding 3).
+                            continue
+                        if (
+                            effective_limit is not None
+                            and kept_per_project.get(project_id, 0) >= effective_limit
+                        ):
+                            continue
+                        if _merge_state_row(row):
+                            # Spend the budget on LOGICAL conversations only: a
+                            # row that merely upgrades an already-represented
+                            # lineage (a compression segment, or a window row
+                            # learning its assignment) costs its project nothing.
+                            kept_per_project[project_id] = (
+                                kept_per_project.get(project_id, 0) + 1
+                            )
+
+                # One global newest-first query covers every profile whose whole
+                # assigned history fits in the window — the overwhelmingly common
+                # case, and the only query most builds pay.
+                global_rows, global_window_exhausted = cast(
+                    tuple[list[dict], bool],
+                    read_importable_agent_session_rows(
+                        db_path,
+                        limit=query_limit,
+                        log=logger,
+                        exclude_sources=interactive_excluded,
+                        project_assignment='assigned',
+                        return_window_exhaustion=True,
+                    ),
+                )
+                _spend_assigned_rows(global_rows)
+
+                # A full logical result truncates by recency, as does a result
+                # that stays short only because the final raw candidate window
+                # was consumed by compression/visibility projection.  In either
+                # case older rows can still exist, so only then pay the GROUP BY
+                # probe that identifies projects needing a scoped top-up. A short
+                # result from an unfilled raw window has seen every candidate and
+                # keeps the one-global-query fast path.
+                if (
+                    effective_limit
+                    and query_limit
+                    and (
+                        len(global_rows) >= query_limit
+                        or global_window_exhausted
+                    )
+                ):
+                    # One GROUP BY over sessions.project_id (no join, no lineage
+                    # recursion) says which projects still own rows this pass has
+                    # not delivered, so the follow-up queries below are paid only
+                    # for projects that can actually be starved — not one per
+                    # registered project.
+                    owed_rows = read_assigned_project_row_counts(
+                        db_path,
+                        log=logger,
+                        exclude_sources=interactive_excluded,
+                    )
+                    starved = sorted(
+                        (kept_per_project.get(project_id, 0), project_id)
+                        for project_id, row_count in owed_rows.items()
+                        if project_id in known_project_ids
+                        and kept_per_project.get(project_id, 0) < effective_limit
+                        and row_count > kept_per_project.get(project_id, 0)
+                    )
+                    # Neediest first (fewest conversations delivered, then id for
+                    # a deterministic order). EVERY starved project is served: a
+                    # fixed per-build project cap would leave every project past
+                    # it unreachable on each rebuild — the very starvation this
+                    # pass exists to repair (greptile P1 on #6659). The per-build
+                    # cost stays bounded because each query is limited to one
+                    # project's remaining budget (sum <= the scan ceiling) and
+                    # only fires when the global window was saturated.
+                    #
+                    # The WIDENING below is rationed per PASS instead (greptile
+                    # P1 on #6659): `remaining` bounds each project's FIRST
+                    # query, but a retry that jumps to `query_limit` is not
+                    # bounded by the project's own share at all, so granting it
+                    # to every starved project made a build scan
+                    # len(starved) * query_limit — an order of magnitude past
+                    # the ceiling on a profile with ten compression-heavy
+                    # projects. One aggregate pool caps the scoped reading of
+                    # a pass at a constant multiple of `query_limit` however
+                    # many projects are starved.
+                    # Only the widening is rationed; the first query of every
+                    # starved project is never skipped, which is what keeps the
+                    # completeness guarantee above intact.
+                    #
+                    # (greptile P1, 2026-09-22 re-review) The pool is debited
+                    # only for what a retry reads BEYOND the project's own
+                    # first-query width — `widened - scoped_limit`, not the
+                    # whole `widened` grant. Debiting the whole grant spent the
+                    # entire pool on the first starved project whose window
+                    # merely touched its own 8x oversample: it read
+                    # `grant - share` extra rows but was billed the full grant,
+                    # so every later starved project lost its retry and its
+                    # older conversations stayed absent from its sidebar on
+                    # every rebuild. With incremental debits a later project
+                    # retries whenever real reads have left it pool; if an
+                    # earlier project genuinely read the pool down to zero,
+                    # that was real scan work — the aggregate bound, not a
+                    # reservation, is what caps the pass. The bound is
+                    # `3 * query_limit`: every starved project's first query
+                    # sums to at most `query_limit`, a retrying project re-reads
+                    # at most its own first width again, and the funded
+                    # increments sum to at most the pool — still constant in
+                    # the number of starved projects, which is what retires the
+                    # original `len(starved) * query_limit` blow-up.
+                    widening_budget = query_limit
+                    for starved_index, (_kept, project_id) in enumerate(starved):
+                        remaining = effective_limit - kept_per_project.get(project_id, 0)
+                        if remaining <= 0:
+                            continue
+                        # A scoped query carries a raw candidate window of its
+                        # own, and compression segments plus the post-projection
+                        # visibility filters are spent from that window BEFORE
+                        # the logical slice. A lineage-heavy project can
+                        # therefore come back short with its window fully
+                        # consumed and older assigned conversations of its own
+                        # still waiting behind it. Without the exhaustion signal
+                        # the loop would advance to the next project and leave
+                        # this one under-delivered on every rebuild — the same
+                        # failure the global query already guards against
+                        # (greptile P1 on #6659). Re-query once, widened to the
+                        # project's own width plus whatever the pass's widening
+                        # pool still has, which is what bounds the retry at the
+                        # PASS level instead of per project (greptile P1 on
+                        # #6659).
+                        scoped_limit = remaining
+                        while True:
+                            scoped_rows, scoped_window_exhausted = cast(
+                                tuple[list[dict], bool],
+                                read_importable_agent_session_rows(
+                                    db_path,
+                                    limit=scoped_limit,
+                                    log=logger,
+                                    exclude_sources=interactive_excluded,
+                                    project_assignment='assigned',
+                                    project_ids=(project_id,),
+                                    return_window_exhaustion=True,
+                                ),
+                            )
+                            _spend_assigned_rows(scoped_rows)
+                            if (
+                                not scoped_window_exhausted
+                                # A binding window on a project that is now
+                                # full needs no second query, and neither does
+                                # one that cannot be widened any further.
+                                or kept_per_project.get(project_id, 0)
+                                >= effective_limit
+                                or scoped_limit >= query_limit
+                            ):
+                                break
+                            # (greptile P1, 2026-09-22 re-review) Each
+                            # retry is funded by a FAIR SHARE of what the
+                            # pool still holds — one slice per starved
+                            # project not yet tried, so later projects
+                            # always keep pool for their own first retry.
+                            # The retry goes to `scoped_limit + share`:
+                            # debiting the whole grant spent the entire
+                            # pool on the first starved project whose
+                            # window merely touched its own 8x oversample
+                            # and left every later one unfunded, but
+                            # granting `min(query_limit, pool)` whole also
+                            # let the first project READ the pool down to
+                            # zero — every project whose raw window is
+                            # consumed re-reads its own width once before
+                            # delivering, so an honest retry must buy
+                            # roughly one more width. The share converges
+                            # there in a few bounded steps; anything still
+                            # short after the pool is spent stays for the
+                            # next build — the alternative is the
+                            # per-project grant that made the pass scan
+                            # `len(starved) * query_limit` (the original
+                            # greptile P1 on #6659).
+                            pool_share = (
+                                widening_budget
+                                // max(len(starved) - starved_index, 1)
+                            )
+                            if pool_share <= 0:
+                                # The pool is spent: no further starved
+                                # project's retry can be funded. Whatever a
+                                # project could not reach this pass stays
+                                # for the next build — the alternative is
+                                # buying reads nobody budgeted for.
+                                break
+                            widened = min(
+                                query_limit, scoped_limit + pool_share
+                            )
+                            widening_budget -= widened - scoped_limit
+                            scoped_limit = widened
+            except (OSError, sqlite3.Error) as exc:
+                projection_complete = False
+                logger.warning(
+                    "Optional project-assigned recovery pass unavailable at %s: %s",
+                    db_path,
+                    exc,
+                )
+            except Exception:
+                logger.debug("Project-assigned CLI recovery pass failed", exc_info=True)
+
+        # --- Recovery pass 2: top the interactive window back up to
+        # CLI_VISIBLE_SESSION_LIMIT *unassigned* conversations. Only runs when
+        # the window came up short AND something other than an empty database
+        # can explain it: either it was saturated, or assigned conversations
+        # inside it displaced unassigned candidates. A profile with no
+        # assignments and a small state.db still pays nothing.
+        unassigned_target = (
+            visible_session_limit if visible_session_limit is not None
+            else CLI_VISIBLE_SESSION_LIMIT
+        )
+
+        def _count_unassigned() -> int:
+            """Conversations in the window this projection calls unassigned.
+
+            Recomputed after every refill query instead of trusted from before
+            it: the classification depends on the sidecar, so only the rows in
+            hand can answer it. Cheap to repeat — both inputs
+            (``_sidecar_row_project_id``, ``_known_project_ids``) are memoized
+            for the scan, so no pass re-reads a file (#4842).
+            """
+            return sum(
+                1 for row in state_rows if _interactive_row_project_id(row) is None
+            )
+
+        unassigned_seen = _count_unassigned()
+        # A sidecar-carried assignment is invisible to the SQL 'unassigned'
+        # filter (state.db still says NULL), so the refill query would spend
+        # that many of its own slots re-fetching conversations this pass already
+        # classified as assigned and already represents. Widen the FIRST query by
+        # that count so it can actually reach the older unassigned conversations
+        # the moved rows displaced (#6659 review finding 2). It is only the first
+        # estimate — the moved conversations this window cannot see yet are what
+        # the re-examination loop below is for.
+        sidecar_only_assigned = sum(
+            1 for row in state_rows
+            if _interactive_row_project_id(row) is not None
+            and _resolved_project_id(row.get('project_id')) is None
+        )
+        if (
+            unassigned_target
+            and unassigned_seen < unassigned_target
+            and (
+                first_pass_count >= unassigned_target
+                # A short MIXED first pass can still be under-delivering: the
+                # narrower unassigned-only query reaches conversations the mixed
+                # candidate window spent on assigned rows and segments.
+                or unassigned_seen < first_pass_count
+            )
+        ):
+            try:
+                # ONE pre-computed allowance is the wrong shape. It is derived
+                # from the rows fetched BEFORE the refill, but the refill reaches
+                # OLDER conversations, and those can carry sidecar-only
+                # assignments of their own — each of which spends an unassigned
+                # slot again, the exact failure the widening exists to remove.
+                # (Three moves at the bottom edge of a 30-conversation database
+                # delivered 19 rows and never fetched the 20th conversation;
+                # eleven straddling the boundary delivered 15.)
+                #
+                # So the refill re-classifies ITS OWN result and widens again
+                # while the window is short. Bounds, per PROFILE CONTEXT (not per
+                # sidebar build: all_profiles=1 runs this loader once per context,
+                # so an N-profile view pays N times everything below):
+                #   * at most UNASSIGNED_CLI_REFILL_MAX_QUERIES queries;
+                #   * none of them reading deeper than the scan ceiling;
+                #   * and it stops early the moment the window is full or the
+                #     filter has demonstrably nothing deeper to give.
+                # Guarantee: the window is filled whenever at least
+                # ``unassigned_target`` of the newest ceiling
+                # state.db-unassigned conversations are still unassigned once
+                # their sidecars are read — the last query reads exactly that
+                # band. Past that the sidebar is honestly short (a shortfall the
+                # database itself imposes) instead of unbounded work.
+                #
+                # What that costs, stated at its WORST rather than its best. The
+                # window this loop must deliver is 20 rows; the best case is a
+                # single query carrying 24 of them, and quoting that as the
+                # trade-off understates it by an order of magnitude:
+                #   * PAYLOAD. Every refill row is merged into the projection and
+                #     travels on, so the surplus is trimmed by the sidebar cap
+                #     only AFTER it has been read, sidecar-stat()ed and (on
+                #     /api/sessions/gateway/stream, which snapshots the uncapped
+                #     list) serialised. A shape that keeps the window short
+                #     through all three estimates reaches the forced ceiling
+                #     query, and the model then carries the whole band — up to
+                #     scan_ceiling (200) conversations, nearly all of them
+                #     unassigned, to hand the sidebar 20. The widening below is
+                #     what keeps ordinary shapes off that path; it does not, and
+                #     cannot, remove it, because the ceiling read is exactly what
+                #     the guarantee above is made of.
+                #   * I/O. "No query deeper than 200 conversations" is a LOGICAL
+                #     depth. read_importable_agent_session_rows oversamples raw
+                #     rows by CANDIDATE_WINDOW_MULTIPLIERS = (8, 32) to survive
+                #     compression segments, so a ceiling-width query touches
+                #     200 * 8 = 1600 raw rows, and 200 * 32 = 6400 when the first
+                #     window is consumed and re-widened. Per profile context.
+                # Cheaper than any of it: project-filtered server pagination, or
+                # recording WebUI-side moves in state.db so the SQL filter stops
+                # lying to this pass.
+                query_limit = unassigned_target + sidecar_only_assigned
+                # A caller-supplied window wider than the ceiling still gets its
+                # first query at full width — the ceiling bounds the WIDENING,
+                # it does not shrink the requested window.
+                scan_ceiling = max(UNASSIGNED_CLI_REFILL_SCAN_CEILING, query_limit)
+                queries_left = UNASSIGNED_CLI_REFILL_MAX_QUERIES
+                while queries_left > 0:
+                    queries_left -= 1
+                    if queries_left == 0:
+                        # Out of estimates: pay one query at the ceiling rather
+                        # than hand back a short window after guessing three
+                        # times. This is the only query allowed to over-read, and
+                        # the ceiling is what bounds it.
+                        query_limit = scan_ceiling
+                    refill_rows, refill_window_exhausted = cast(
+                        tuple[list[dict], bool],
+                        read_importable_agent_session_rows(
+                            db_path,
+                            limit=query_limit,
+                            log=logger,
+                            exclude_sources=interactive_excluded,
+                            project_assignment='unassigned',
+                            return_window_exhaustion=True,
+                        ),
+                    )
+                    for row in refill_rows:
+                        _merge_state_row(row)
+                    unassigned_seen = _count_unassigned()
+                    shortfall = unassigned_target - unassigned_seen
+                    if (
+                        shortfall <= 0
+                        or query_limit >= scan_ceiling
+                        # A short result from an UNFILLED raw candidate window has
+                        # already seen every conversation this filter can reach,
+                        # so a wider query would re-read the same rows for
+                        # nothing. A short result whose raw window WAS consumed
+                        # (by compression segments) is the opposite: widening the
+                        # limit re-widens that window, so it is worth another go.
+                        or (
+                            len(refill_rows) < query_limit
+                            and not refill_window_exhausted
+                        )
+                    ):
+                        break
+                    # Widen GEOMETRICALLY, not by one row at a time. Up to three
+                    # candidate widths; the widest of the ones that apply wins:
+                    #   * query_limit + shortfall — the exact width needed if
+                    #     every conversation deeper than the current one is
+                    #     unassigned. It is the FLOOR: always strictly wider, so
+                    #     the loop cannot stall, and it is exact (no over-read)
+                    #     when the moved conversations are clustered.
+                    #   * query_limit + query_limit // queries_left — GEOMETRIC
+                    #     growth, paced by the budget that is left. The floor alone
+                    #     advances by only the shortfall, so a handful of moves
+                    #     clustered just below the window edge crawls (21, 23, 25)
+                    #     until every estimate is spent and the forced ceiling read
+                    #     does the job anyway: 200 rows fetched to deliver 20. The
+                    #     step grows as the budget shrinks (width/3, then width/2)
+                    #     because a too-narrow LAST estimate costs the whole ceiling
+                    #     read, while a too-wide one costs only its own surplus.
+                    #     Those eight clustered moves now finish at (21, 28).
+                    #   * ceil(target * query_limit / unassigned_seen) — the width
+                    #     implied by the moved SHARE observed so far, for moves
+                    #     spread through the history. Without it, a database where
+                    #     every other conversation was moved would close the gap
+                    #     by halves and need ~log2(target) queries.
+                    # That last term applies ONLY when this window found at least
+                    # one still-unassigned conversation. With zero, the share is
+                    # undefined, and guarding the divisor with max(seen, 1)
+                    # evaluated it as target * query_limit (20 * 40 = 800, clamped
+                    # to the ceiling): every profile that had moved >= 21 of its
+                    # newest conversations jumped straight to a full 200-row read
+                    # where the 60-row floor would have filled the window. Zero
+                    # unassigned rows is not evidence about density, so the
+                    # geometric step — not a degenerate ratio — is what carries it.
+                    # The price of escalating smoothly is that a profile whose
+                    # newest ceiling band is ENTIRELY moved now spends its whole
+                    # budget (40, 60, 90, 200) climbing to the ceiling it was
+                    # always going to need, instead of two queries. That is the
+                    # deliberate side of the trade: an extra narrow query costs SQL
+                    # only, while an early-and-wrong wide query costs payload — and
+                    # payload is read, sidecar-stat()ed and serialised. And a
+                    # cluster deeper than the last estimate can reach — measured at
+                    # 23+ moves sitting just under the window edge, where the three
+                    # estimates are 21, 28, 42 — still ends on the ceiling read, as
+                    # it did before: that is the guarantee doing its job, not the
+                    # estimate failing.
+                    next_query_limit = max(
+                        query_limit + shortfall,
+                        query_limit + query_limit // max(queries_left, 1),
+                    )
+                    if unassigned_seen > 0:
+                        next_query_limit = max(
+                            next_query_limit,
+                            -(  # ceil(target * width / unassigned)
+                                -unassigned_target * query_limit // unassigned_seen
+                            ),
+                        )
+                    query_limit = min(scan_ceiling, next_query_limit)
+            except (OSError, sqlite3.Error) as exc:
+                projection_complete = False
+                logger.warning(
+                    "Optional unassigned refill pass unavailable at %s: %s",
+                    db_path,
+                    exc,
+                )
+            except Exception:
+                logger.debug("Unassigned CLI refill pass failed", exc_info=True)
+
+    for row in state_rows:
         sid = row['id']
         raw_ts = row['last_activity'] or row['started_at']
         # Prefer the CLI session's own profile from the DB; fall back to
@@ -7869,7 +10065,10 @@ def _load_cli_sessions_uncached(
         _sidecar_meta = _state_projection_sidecar_metadata(sid)
         if _sidecar_meta.get('title'):
             _title = _sidecar_meta['title']
-        _archived = bool(_sidecar_meta.get('archived'))
+        if _sidecar_meta.get('archived') is not None:
+            _archived = bool(_sidecar_meta['archived'])
+        else:
+            _archived = bool(row.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
         cli_sessions.append({
             'session_id': sid,
@@ -7881,7 +10080,7 @@ def _load_cli_sessions_uncached(
             'updated_at': raw_ts,
             'pinned': False,
             'archived': _archived,
-            'project_id': _state_row_project_id(sid, _source),
+            'project_id': _interactive_row_project_id(row),
             'profile': profile,
             'source_tag': _source,
             'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
@@ -7908,7 +10107,22 @@ def _load_cli_sessions_uncached(
         })
 
     if source_filter is not None:
-        return cli_sessions
+        return _result()
+
+    def _optional_source_rows(label: str, **kwargs):
+        """Read one additive source pass without discarding primary rows."""
+        nonlocal projection_complete
+        try:
+            return read_importable_agent_session_rows(db_path, **kwargs)
+        except (OSError, sqlite3.Error) as exc:
+            projection_complete = False
+            logger.warning(
+                "Optional %s state.db projection unavailable at %s: %s",
+                label,
+                db_path,
+                exc,
+            )
+            return ()
 
     # --- Second pass: fetch cron sessions that may have been squeezed out
     # of the default window by more-recent non-cron sessions.
@@ -7920,8 +10134,8 @@ def _load_cli_sessions_uncached(
     if cron_project_limit is not False:
         existing_sids = {s['session_id'] for s in cli_sessions}
         try:
-            for row in read_importable_agent_session_rows(
-                db_path,
+            for row in _optional_source_rows(
+                "cron",
                 limit=cron_project_limit,
                 log=logger,
                 exclude_sources=None,
@@ -7941,7 +10155,10 @@ def _load_cli_sessions_uncached(
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
+                if _sidecar_meta.get('archived') is not None:
+                    _archived = bool(_sidecar_meta['archived'])
+                else:
+                    _archived = bool(row.get('archived'))
                 _display_title = _title or 'Cron Session'
                 cli_sessions.append({
                     'session_id': sid,
@@ -7988,8 +10205,8 @@ def _load_cli_sessions_uncached(
     if webhook_project_limit is not False:
         existing_sids = {s['session_id'] for s in cli_sessions}
         try:
-            for row in read_importable_agent_session_rows(
-                db_path,
+            for row in _optional_source_rows(
+                "webhook",
                 limit=webhook_project_limit,
                 log=logger,
                 exclude_sources=None,
@@ -8007,7 +10224,10 @@ def _load_cli_sessions_uncached(
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
+                if _sidecar_meta.get('archived') is not None:
+                    _archived = bool(_sidecar_meta['archived'])
+                else:
+                    _archived = bool(row.get('archived'))
                 _display_title = _title or 'Webhook Session'
                 cli_sessions.append({
                     'session_id': sid,
@@ -8053,8 +10273,8 @@ def _load_cli_sessions_uncached(
     if kanban_project_limit is not False:
         existing_sids = {s['session_id'] for s in cli_sessions}
         try:
-            for row in read_importable_agent_session_rows(
-                db_path,
+            for row in _optional_source_rows(
+                "kanban",
                 limit=kanban_project_limit,
                 log=logger,
                 exclude_sources=None,
@@ -8072,7 +10292,10 @@ def _load_cli_sessions_uncached(
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
+                if _sidecar_meta.get('archived') is not None:
+                    _archived = bool(_sidecar_meta['archived'])
+                else:
+                    _archived = bool(row.get('archived'))
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _title or 'Kanban Session',
@@ -8112,7 +10335,7 @@ def _load_cli_sessions_uncached(
         except Exception:
             logger.debug("Kanban sidebar second pass failed", exc_info=True)
 
-    return cli_sessions
+    return _result()
 
 
 def get_cli_sessions(
@@ -8128,8 +10351,13 @@ def get_cli_sessions(
     bridge is purely additive and never crashes the WebUI.
     """
     source_filter = _normalize_cli_session_source_filter(source_filter)
+    contexts = []
     if all_profiles:
         contexts, context_cache_key = _all_profiles_cli_contexts()
+        stable_context_cache_key = tuple(
+            (_path_cache_key(ctx_home), str(ctx_profile or 'default'))
+            for ctx_home, _ctx_db_path, ctx_profile in contexts
+        )
         db_path = "all profiles"
         # #4842: freeze the volatile per-profile state.db component while
         # streaming so a streamed message row in one profile doesn't bust the
@@ -8142,6 +10370,7 @@ def get_cli_sessions(
             source_filter or '',
             bool(include_claude_code),
             context_cache_key,
+            stable_context_cache_key,
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(SESSION_INDEX_FILE),
@@ -8162,34 +10391,96 @@ def get_cli_sessions(
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
-    def _load_sessions():
+    def _load_sessions() -> list | _CliSessionsLoadResult:
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
             _load_cli_sessions_uncached
         )
+        loader_supports_completeness = _callable_accepts_keyword(
+            _load_cli_sessions_uncached, '_with_completeness'
+        )
         if all_profiles:
             merged: list[dict] = []
-            for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
+            unavailable_error = None
+            successful_profiles = 0
+            optional_incomplete = False
+            for ctx_home, ctx_db_path, ctx_profile in contexts:
                 load_kwargs = {
+                    # NOTE: visible_session_limit=None is NOT "unbounded" for the
+                    # interactive pass — it resolves to CLI_VISIBLE_SESSION_LIMIT
+                    # above, so this view truncates assigned conversations by
+                    # recency exactly like the single-profile one and needs the
+                    # same recovery passes. project_assigned_limit therefore keeps
+                    # its default per-project bound here. Only the three limits
+                    # below are handed straight to the reader as ``limit=``, where
+                    # None really does mean unbounded.
                     'source_filter': source_filter,
                     'visible_session_limit': None,
+                    'project_assigned_limit': PROJECT_ASSIGNED_CLI_LIMIT,
                     'cron_project_limit': None,
                     'webhook_project_limit': None,
                     'kanban_project_limit': None,
                 }
                 if loader_supports_include_claude_code:
-                    load_kwargs['include_claude_code'] = include_claude_code and idx == 0
-                merged.extend(
-                    _load_cli_sessions_uncached(
+                    # Claude Code is global rather than profile-owned. Scan it
+                    # once below so profile 0 availability cannot suppress it.
+                    load_kwargs['include_claude_code'] = False
+                if loader_supports_completeness:
+                    load_kwargs['_with_completeness'] = True
+                try:
+                    profile_loaded = _load_cli_sessions_uncached(
                         ctx_home,
                         ctx_db_path,
                         ctx_profile,
                         **load_kwargs,
                     )
-                )
-            return merged
-        load_kwargs = {'source_filter': source_filter}
+                    if isinstance(profile_loaded, _CliSessionsLoadResult):
+                        profile_rows = profile_loaded.sessions
+                        optional_incomplete = optional_incomplete or (
+                            not profile_loaded.complete
+                            and profile_loaded.fresh_when_incomplete
+                        )
+                    else:
+                        profile_rows = profile_loaded
+                    merged.extend(profile_rows)
+                    successful_profiles += 1
+                except (OSError, sqlite3.Error) as _profile_err:
+                    unavailable_error = _profile_err
+                    logger.warning(
+                        "get_cli_sessions() skipped unavailable profile %s at %s: %s",
+                        ctx_profile or 'default',
+                        ctx_db_path,
+                        _profile_err,
+                    )
+            external_complete = True
+            if include_claude_code and source_filter in (None, CLAUDE_CODE_SOURCE):
+                try:
+                    merged.extend(get_claude_code_sessions())
+                except Exception as _claude_err:
+                    external_complete = False
+                    logger.warning(
+                        "get_cli_sessions() Claude Code scan failed: %s",
+                        _claude_err,
+                    )
+            return _CliSessionsLoadResult(
+                merged,
+                complete=(
+                    unavailable_error is None
+                    and successful_profiles == len(contexts)
+                    and external_complete
+                    and not optional_incomplete
+                ),
+                fresh_when_incomplete=(
+                    optional_incomplete
+                    and unavailable_error is None
+                    and successful_profiles == len(contexts)
+                    and external_complete
+                ),
+            )
+        load_kwargs: dict = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
+        if loader_supports_completeness:
+            load_kwargs['_with_completeness'] = True
         return _load_cli_sessions_uncached(
             hermes_home,
             db_path,
@@ -8244,7 +10535,8 @@ def get_cli_sessions(
         )
 
     try:
-        return _load_sessions()
+        loaded = _load_sessions()
+        return loaded.sessions if isinstance(loaded, _CliSessionsLoadResult) else loaded
     except Exception as _cli_err:
         logger.warning(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
@@ -8420,14 +10712,14 @@ def _decode_state_db_content(value):
     return decoded
 
 
-def _project_state_db_message(row, available, id_col, optional):
+def _project_state_db_message(row, available, id_col, optional, *, include_row_identity=False):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
     Shared by ``get_state_db_session_messages`` and the regeneration
     single-snapshot helper so the bounded tail can never drift from the
     canonical reader: JSON-decode content/tool_calls/reasoning payloads, omit
-    empty fields, keep durable row id private (``_state_db_row_id`` only for
-    real Agent api_content replays), and apply ``tool_name → name``.
+    empty fields, keep durable row id private for provider replays and native
+    image projections, and apply ``tool_name → name``.
     """
     msg = {
         'role': row['role'],
@@ -8443,11 +10735,22 @@ def _project_state_db_message(row, available, id_col, optional):
         if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
             value = _json_loads_if_string(value)
         msg[col] = value
+    native_image_projection = (
+        msg.get('role') == 'user'
+        and isinstance(msg.get('content'), str)
+        and '[screenshot]' in msg['content']
+    )
     if (
         id_col
         and row['id'] is not None
-        and isinstance(msg.get('api_content'), str)
-        and msg['api_content']
+        and (
+            include_row_identity
+            or native_image_projection
+            or (
+                isinstance(msg.get('api_content'), str)
+                and msg['api_content']
+            )
+        )
     ):
         msg['_state_db_row_id'] = row['id']
     if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
@@ -8464,6 +10767,7 @@ def get_state_db_session_messages(
     since_timestamp=None,
     include_inactive: bool = False,
     limit=None,
+    include_row_identity: bool = False,
     with_revision: Literal[False] = False,
 ) -> list: ...
 
@@ -8477,6 +10781,7 @@ def get_state_db_session_messages(
     since_timestamp=None,
     include_inactive: bool = False,
     limit=None,
+    include_row_identity: bool = False,
     with_revision: Literal[True],
 ) -> StateDBSessionMessagesSnapshot: ...
 
@@ -8489,6 +10794,7 @@ def get_state_db_session_messages(
     since_timestamp=None,
     include_inactive: bool = False,
     limit=None,
+    include_row_identity: bool = False,
     with_revision: bool = False,
 ):
     """Read messages for a Hermes session from state.db.
@@ -8525,6 +10831,11 @@ def get_state_db_session_messages(
     Its revision is derived from the exact rows fetched by the same SQLite
     query and is available only for an unbounded, active, current-segment read.
     Existing callers keep the historical list return by default.
+
+    ``include_row_identity=True`` retains private durable row IDs for every
+    projected row. Cancelled-journal consumers use this to carry proven SQLite
+    successor identity through sidecar persistence; ordinary projections retain
+    their historical shape. Public/provider projections strip the private IDs.
     """
     try:
         import sqlite3
@@ -8581,9 +10892,26 @@ def get_state_db_session_messages(
                 cur.execute("PRAGMA table_info(sessions)")
                 session_cols = {str(row['name']) for row in cur.fetchall()}
                 if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                    # session_source/model_config carry the fork/delegate boundary
+                    # identity consumed by _is_continuation_session (#6931/#7021).
+                    # Select them when present so the branch-marker guard applies
+                    # to the stitch path too; older schemas degrade to NULL.
+                    identity_cols = []
+                    if 'session_source' in session_cols:
+                        identity_cols.append('session_source')
+                    else:
+                        identity_cols.append('NULL AS session_source')
+                    if 'model_config' in session_cols:
+                        identity_cols.append('model_config')
+                    else:
+                        identity_cols.append('NULL AS model_config')
+                    lineage_select = (
+                        "id, source, started_at, parent_session_id, ended_at, end_reason"
+                        + ", " + ", ".join(identity_cols)
+                    )
                     cur.execute(
-                        """
-                        SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                        f"""
+                        SELECT {lineage_select}
                         FROM sessions
                         WHERE id = ?
                         """,
@@ -8601,8 +10929,8 @@ def get_state_db_session_messages(
                             if not parent_id or parent_id in seen:
                                 break
                             cur.execute(
-                                """
-                                SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                                f"""
+                                SELECT {lineage_select}
                                 FROM sessions
                                 WHERE id = ?
                                 """,
@@ -8696,7 +11024,10 @@ def get_state_db_session_messages(
             msgs = []
             for row in rows:
                 msgs.append(
-                    _project_state_db_message(row, available, bool(id_col), optional)
+                    _project_state_db_message(
+                        row, available, bool(id_col), optional,
+                        include_row_identity=include_row_identity,
+                    )
                 )
     except Exception:
         return _state_db_session_messages_result([], None, with_revision=with_revision)
@@ -9099,6 +11430,8 @@ def _session_message_key_with_sidecar(base_key: tuple, msg: dict) -> tuple:
 
 
 _SESSION_MESSAGE_IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
+_WEBUI_TRUSTED_AGENT_INPUT_FIELD = "_webui_trusted_agent_input_text"
+_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD = "_webui_unmatched_native_image_mirror"
 
 
 def _agent_durable_multimodal_content(msg: dict) -> str | None:
@@ -9177,6 +11510,202 @@ def _session_message_multimodal_mirror_key(
         str(msg.get("tool_name") or msg.get("name") or ""),
         tool_calls_key,
     )
+
+
+def _native_image_leading_text(message):
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return None
+    parts = []
+    for part in content:
+        if not isinstance(part, dict):
+            return None
+        part_type = str(part.get("type") or "").lower()
+        if part_type in _SESSION_MESSAGE_IMAGE_PART_TYPES:
+            return "\n".join(parts)
+        if part_type not in {"", "text", "input_text", "output_text"}:
+            return None
+        text = part.get("text", part.get("input_text", part.get("output_text", "")))
+        if not isinstance(text, str):
+            return None
+        parts.append(text)
+    return None
+
+
+def _suppress_native_image_display_mirrors(
+    session,
+    state_messages,
+    *,
+    suppress_api_content=True,
+    suppress_pending_turn=True,
+):
+    """Drop proven pending Agent rows and native-image mirrors from display."""
+    if not state_messages:
+        return state_messages
+
+    if suppress_pending_turn:
+        identity = _validated_webui_pending_user_timestamp_identity(
+            session,
+            getattr(session, "_webui_pending_user_timestamp_identity", None),
+        )
+        if identity is not None:
+            # A matching timestamp is an Agent handoff identity only because
+            # the live worker recorded that this exact value was passed via
+            # persist_user_timestamp. If rows collide on it, hide the whole
+            # ambiguous bucket from display; model context retains every row.
+            pending_timestamp = identity[1]
+            state_messages = [
+                message for message in state_messages
+                if not (
+                    isinstance(message, dict)
+                    and str(message.get("role") or "").lower() == "user"
+                    and _message_exact_timestamp(message) == pending_timestamp
+                )
+            ]
+
+    display_messages = getattr(session, "messages", None) or []
+    context_messages = getattr(session, "context_messages", None) or []
+    if not display_messages or not context_messages or not state_messages:
+        return state_messages
+
+    display_by_token = collections.defaultdict(list)
+    context_by_token = collections.defaultdict(list)
+    for message in display_messages:
+        if isinstance(message, dict) and message.get("_active_turn_token"):
+            display_by_token[message["_active_turn_token"]].append(message)
+    for message in context_messages:
+        if isinstance(message, dict) and message.get("_active_turn_token"):
+            context_by_token[message["_active_turn_token"]].append(message)
+
+    display_row_id_counts = collections.Counter()
+    context_row_id_counts = collections.Counter()
+    for messages, counts in (
+        (display_messages, display_row_id_counts),
+        (context_messages, context_row_id_counts),
+    ):
+        for message in messages:
+            row_id, valid = _state_db_row_identity_details(message)
+            if valid and row_id is not None:
+                counts[row_id] += 1
+
+    from api.streaming import _submitted_user_text_matches
+
+    mirrors = collections.defaultdict(list)
+    for token, contexts in context_by_token.items():
+        displays = display_by_token.get(token, [])
+        for context in contexts:
+            trusted_input = context.get(_WEBUI_TRUSTED_AGENT_INPUT_FIELD)
+            leading_text = _native_image_leading_text(context)
+            if (
+                not isinstance(trusted_input, str)
+                or leading_text is None
+                or not _submitted_user_text_matches(leading_text, trusted_input)
+            ):
+                continue
+            key = _session_message_multimodal_mirror_key(
+                context,
+                require_image_parts=True,
+            )
+            if key is None:
+                continue
+            display = displays[0] if len(contexts) == len(displays) == 1 else None
+            display_link_valid = False
+            if display is not None and display.get("role") == "user":
+                context_ts, context_ts_valid = _message_exact_timestamp_details(context)
+                display_ts, display_ts_valid = _message_exact_timestamp_details(display)
+                display_link_valid = (
+                    context_ts_valid
+                    and display_ts_valid
+                    and context_ts is not None
+                    and display_ts == context_ts
+                    and _message_private_identity_compatible(display, context)
+                )
+            # Keep trusted rich candidates even when display linkage is
+            # ambiguous, so a matching scalar row is preserved unless its
+            # durable row id proves it is the exact Agent projection.
+            mirrors[key].append((context, display, display_link_valid))
+    if not mirrors:
+        return state_messages
+
+    row_id_counts = collections.Counter()
+    stable_id_counts = collections.Counter()
+    state_mirror_keys = []
+    for message in state_messages:
+        if not isinstance(message, dict):
+            state_mirror_keys.append(None)
+            continue
+        row_id, row_id_valid = _state_db_row_identity_details(message)
+        stable_id, stable_id_valid = _stable_message_identity_details(message)
+        if row_id_valid and row_id is not None:
+            row_id_counts[row_id] += 1
+        if stable_id_valid and stable_id is not None:
+            stable_id_counts[stable_id] += 1
+        state_mirror_keys.append(
+            _session_message_multimodal_mirror_key(
+                message,
+                require_scalar_mirror=True,
+            )
+        )
+
+    suppress = set()
+    marked = {}
+    for index, key in enumerate(state_mirror_keys):
+        if key is None or key not in mirrors:
+            continue
+        message = state_messages[index]
+        row_id, row_id_valid = _state_db_row_identity_details(message)
+        stable_id, stable_id_valid = _stable_message_identity_details(message)
+        contexts = mirrors[key]
+        matched = None
+        preserve_distinct_row = False
+        if len(contexts) == 1:
+            context, display, display_link_valid = contexts[0]
+            context_row_id, context_row_id_valid = _state_db_row_identity_details(context)
+            display_row_id, display_row_id_valid = _state_db_row_identity_details(display)
+            linked_context_row = (
+                display is not None
+                and display_link_valid
+                and context_row_id_valid
+                and display_row_id_valid
+                and context_row_id is not None
+                and context_row_id == display_row_id
+                and context_row_id_counts[context_row_id] == 1
+                and display_row_id_counts[display_row_id] == 1
+            )
+            if (
+                linked_context_row
+                and (not row_id_valid or row_id is None or row_id != context_row_id)
+                and (row_id is None or row_id_counts[row_id] == 1)
+                and stable_id_valid
+                and (stable_id is None or stable_id_counts[stable_id] == 1)
+            ):
+                preserve_distinct_row = True
+            if (
+                linked_context_row
+                and row_id_valid
+                and row_id is not None
+                and context_row_id == row_id
+                and row_id_counts[row_id] == 1
+                and stable_id_valid
+                and (stable_id is None or stable_id_counts[stable_id] == 1)
+                and _message_private_identity_compatible(context, message)
+            ):
+                matched = context
+        if (
+            matched is not None
+            and (suppress_api_content or not _session_message_api_content_key(message))
+        ):
+            suppress.add(index)
+        elif preserve_distinct_row:
+            marked[index] = {
+                **message,
+                _WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD: True,
+            }
+    return [
+        marked.get(index, message)
+        for index, message in enumerate(state_messages)
+        if index not in suppress
+    ]
 
 
 # Per-call memo of structured-content identities. Reconciliation derives merge,
@@ -9421,6 +11950,8 @@ def _message_exact_timestamp_details(message: dict | None) -> tuple[float | None
     """Return ``(timestamp, valid)`` while distinguishing absent metadata."""
     if not isinstance(message, dict):
         return None, True
+    if any(isinstance(message.get(key), bool) for key in ("timestamp", "_ts")):
+        return None, False
     for key in ("timestamp", "_ts"):
         if key not in message or message.get(key) in (None, ""):
             continue
@@ -9482,7 +12013,7 @@ def _visible_content_compatible(target: dict | None, source: dict | None) -> boo
 
 
 def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
-    """Copy a non-empty internal sidecar without replacing an existing one."""
+    """Copy a valid sidecar unless the target already has a valid one."""
     if not isinstance(target, dict) or not isinstance(source, dict):
         return False
     target_role = _message_sidecar_role(target)
@@ -9501,7 +12032,8 @@ def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
             )
         ):
             return False
-    if target.get("api_content") not in (None, ""):
+    target_api_content = target.get("api_content")
+    if isinstance(target_api_content, str) and target_api_content:
         return True
     api_content = source.get("api_content")
     if isinstance(api_content, str) and api_content:
@@ -10117,7 +12649,7 @@ def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool
     return _matching_visible_duplicate(visible_key, visible_keys) is not None
 
 
-def _sidecar_has_terminal_partial_error(sidecar_messages: list) -> bool:
+def _sidecar_has_terminal_partial_error(sidecar_messages: list, *, live_only: bool = False) -> bool:
     """Return True when WebUI already owns an interrupted live partial turn.
 
     After a cancelled/error terminal event, the WebUI sidecar contains the
@@ -10146,10 +12678,484 @@ def _sidecar_has_terminal_partial_error(sidecar_messages: list) -> bool:
         if str(messages[idx].get("role") or "").lower() == "user":
             segment_start = idx + 1
             break
+    if live_only and segment_start == 0:
+        return False  # A partial/error-only context does not own the user turn.
     for msg in messages[segment_start:latest_error_idx]:
-        if str(msg.get("role") or "").lower() == "assistant" and msg.get("_partial"):
+        if str(msg.get("role") or "").lower() == "assistant" and (
+            msg.get("_partial") or (not live_only and msg.get("_recovered_from_cancel_journal") is True)
+        ):
             return True
     return False
+
+
+def _selected_history_owns_live_partial(selected: list, owner_messages: list) -> bool:
+    """Require the selected user and saved partial, not its optional carrier."""
+    if not _sidecar_has_terminal_partial_error(owner_messages, live_only=True):
+        return False
+    owner_rows = [row for row in owner_messages if isinstance(row, dict)]
+    error_index = max(i for i, row in enumerate(owner_rows)
+                      if str(row.get('role') or '').lower() == 'assistant' and row.get('_error'))
+    user_index = max(i for i, row in enumerate(owner_rows[:error_index])
+                     if str(row.get('role') or '').lower() == 'user')
+    user = owner_rows[user_index]
+    partials = [row for row in owner_rows[user_index+1:error_index]
+                if str(row.get('role') or '').lower() == 'assistant' and row.get('_partial')]
+    selected = [row for row in selected if isinstance(row, dict)]
+
+    def same_saved_row(local, saved, *, ordered_copy=False):
+        if (not _message_private_identity_compatible(local, saved)
+                or _session_message_visible_key(local) != _session_message_visible_key(saved)):
+            return False
+        token, saved_token = local.get('_active_turn_token'), saved.get('_active_turn_token')
+        if token and saved_token and token != saved_token:
+            return False
+        if saved.get('_partial') and not local.get('_partial'):
+            return False  # An ordinary settled answer is not a live partial.
+        if local is saved:
+            return True
+        clock, valid = _message_exact_timestamp_details(local)
+        saved_clock, saved_valid = _message_exact_timestamp_details(saved)
+        row_id, _ = _state_db_row_identity_details(local)
+        saved_id, _ = _state_db_row_identity_details(saved)
+        stable, _ = _stable_message_identity_details(local)
+        saved_stable, _ = _stable_message_identity_details(saved)
+        if ((row_id is not None and int(row_id) > 0 and row_id == saved_id)
+                or (stable is not None and stable == saved_stable)
+                or (token and token == saved_token)):
+            return True
+        if not (valid and saved_valid and clock is not None and clock == saved_clock):
+            return False
+        if _message_sidecar_role(saved) == 'user' and not ordered_copy:
+            # Clock-only authority cannot choose between an earlier identical
+            # user and the current Stop owner. A trusted ID/token above can.
+            candidates = [row for row in owner_rows
+                          if _session_message_visible_key(row) == _session_message_visible_key(saved)
+                          and _message_exact_timestamp_details(row) == (saved_clock, True)
+                          and _message_private_identity_compatible(local, row)]
+            if len(candidates) != 1:
+                return False
+        return True
+
+    # Ordinal correspondence in the complete saved history proves which of
+    # several legacy equal-clock users owns this partial. A shorter, older view
+    # still requires the existing unique clock or explicit identity below.
+    selected_history = [row for row in selected if not row.get('_error')]
+    saved_history = [row for row in owner_rows if not row.get('_error')]
+    if len(selected_history) == len(saved_history) and all(
+        same_saved_row(local, saved, ordered_copy=True)
+        for local, saved in zip(selected_history, saved_history, strict=True)
+    ):
+        return True
+
+    for index, row in enumerate(selected):
+        if str(row.get('role') or '').lower() != 'user' or not same_saved_row(row, user):
+            continue
+        end = next((i for i in range(index+1, len(selected))
+                    if str(selected[i].get('role') or '').lower() == 'user'), len(selected))
+        cursor = index+1
+        for partial in partials:
+            matched = next((i for i in range(cursor, end) if same_saved_row(selected[i], partial)), None)
+            if matched is None:
+                break
+            cursor = matched+1
+        else:
+            return True
+    return False
+
+
+def _cancelled_journal_turn_owner(
+    sidecar_messages: list, *, include_live_partial: bool = False,
+) -> tuple[dict, dict] | None:
+    """Find the latest cancelled journal segment, including historical ones."""
+    messages = [row for row in sidecar_messages if isinstance(row, dict)]
+    for error_idx in range(len(messages) - 1, -1, -1):
+        carrier = messages[error_idx]
+        if carrier.get('role') != 'assistant' or not carrier.get('_error'):
+            continue
+        owner_idx = next((i for i in range(error_idx - 1, -1, -1)
+                          if messages[i].get('role') == 'user'), None)
+        if owner_idx is None:
+            continue
+        segment = messages[owner_idx + 1:error_idx]
+        has_partial = any(row.get('_partial') for row in segment)
+        if has_partial and (not include_live_partial
+                            or carrier.get('type') not in (None, '', 'cancelled')):
+            continue  # A typed crash/provider interruption is not a user Stop.
+        if (has_partial or any(row.get('_recovered_from_cancel_journal') is True for row in segment)):
+            return messages[owner_idx], carrier
+    return None
+
+
+def _state_db_cancelled_journal_turn_bounds(
+    sidecar_messages: list, state_messages: list, *, turn_owner=None,
+    allow_legacy_integer_clock=False,
+) -> tuple[int | None, int | None]:
+    """Prove the cancelled owner and its next user in SQLite's row order.
+
+    Recovery timestamps are not execution timestamps. An exact, unique owner
+    in SQLite's ordered transcript proves its next user is a successor even
+    when that successor predates the recovered sidecar's terminal carrier.
+    """
+    if turn_owner is None:
+        turn_owner = _cancelled_journal_turn_owner(sidecar_messages)
+    if turn_owner is None:
+        return None, None
+    owner, carrier = turn_owner
+
+    def timestamp(row):
+        if any(isinstance(row.get(key), bool) for key in ('timestamp', '_ts')):
+            return None
+        return _message_exact_timestamp(row)
+
+    owner_time = timestamp(owner)
+
+    def owner_clock_matches(row):
+        if timestamp(row) == owner_time:
+            return owner_time is not None
+        return (allow_legacy_integer_clock and type(owner.get('timestamp')) is int
+                and _journal_user_timestamps_match(owner['timestamp'], row.get('timestamp')))
+
+    owner_stable, stable_valid = _stable_message_identity_details(owner)
+    owner_row, row_valid = _state_db_row_identity_details(owner)
+    if not stable_valid or not row_valid:
+        return None, None
+    known_claims = []
+    for i, row in enumerate(state_messages):
+        if not isinstance(row, dict) or row.get('role') != 'user':
+            continue
+        stable, stable_valid = _stable_message_identity_details(row)
+        row_id, row_valid = _state_db_row_identity_details(row)
+        if not stable_valid or not row_valid:
+            return None, None
+        if ((owner_stable is not None and stable == owner_stable)
+                or (owner_row is not None and row_id == owner_row)):
+            known_claims.append(i)
+    matches = [i for i, row in enumerate(state_messages)
+               if isinstance(row, dict) and row.get('role') == 'user'
+               and owner_clock_matches(row)
+               and _session_message_content_key(row, normalize_workspace_prefix=True)
+               == _session_message_content_key(owner, normalize_workspace_prefix=False)
+               and _message_private_identity_compatible(owner, row)]
+    # A row claiming the cancelled owner's known ID is never a later-only
+    # successor merely because its content or timestamp changed.
+    if known_claims and (len(known_claims) != 1 or known_claims[0] not in matches):
+        return None, None
+    if matches:
+        if len(matches) != 1:
+            return None, None
+        matched = state_messages[matches[0]]
+        if not _message_private_identity_compatible(owner, matched):
+            return None, None
+        owner_token, matched_token = owner.get('_active_turn_token'), matched.get('_active_turn_token')
+        if owner_token and matched_token and owner_token != matched_token:
+            return None, None
+        # A unique SQLite tuple can still be an earlier visible occurrence.
+        # Plaintext SQLite rows have no durable row identity in this projection;
+        # do not mistake an old repeated prompt for the absent/restamped owner.
+        bound_identity = bool(known_claims or (owner_token and owner_token == matched_token))
+        if not bound_identity:
+            owner_index = next(i for i, row in enumerate(sidecar_messages) if row is owner)
+            if any(isinstance(row, dict) and row.get('role') == 'user'
+                   and owner_clock_matches(row)
+                   and _session_message_content_key(row, normalize_workspace_prefix=False)
+                   == _session_message_content_key(owner, normalize_workspace_prefix=False)
+                   and _message_private_identity_compatible(row, matched)
+                   for row in sidecar_messages[:owner_index]):
+                return None, None
+        start = next((i for i in range(matches[0] + 1, len(state_messages))
+                      if isinstance(state_messages[i], dict) and state_messages[i].get('role') == 'user'), None)
+    else:
+        # A later-only store can still prove a successor with a timestamp newer
+        # than the terminal carrier. Unknown/older timestamps grant no authority.
+        terminal_time = timestamp(carrier)
+        start = next((i for i, row in enumerate(state_messages)
+                      if isinstance(row, dict) and row.get('role') == 'user'
+                      and terminal_time is not None and timestamp(row) is not None
+                      and timestamp(row) > terminal_time), None)
+    return (matches[0] if matches else None), start
+
+
+def _state_db_after_cancelled_journal_turn(sidecar_messages: list, state_messages: list) -> list:
+    """Return only the proved successor, excluding the cancelled execution."""
+    _, start = _state_db_cancelled_journal_turn_bounds(sidecar_messages, state_messages)
+    return list(state_messages[start:]) if start is not None else []
+
+
+def _restore_cancelled_journal_prefix(selected, prefix, owner_messages, *, verified_start=False):
+    """Fill ordered gaps after a unique retained anchor, before the Stop owner.
+
+    Matched row order bounds gaps; user clocks order whole unmatched turns.
+    Assistant/tool rows stay with their owner regardless of recovery clocks.
+    Never infer permission to restore a discarded leading prefix from text alone.
+    A verified compression anchor separately authorizes its already sliced tail.
+    """
+    owner, _ = _cancelled_journal_turn_owner(owner_messages)
+
+    def row_owners(rows):
+        owners = []
+        current = None
+        for row in rows:
+            if row.get('role') == 'user':
+                current = row
+            owners.append(current)
+        return owners
+
+    local_owners_all, source_owners = row_owners(selected), row_owners(prefix)
+    local_owner_by_row = {id(row): turn for row, turn in zip(selected, local_owners_all, strict=True)}
+    source_owner_by_row = {id(row): turn for row, turn in zip(prefix, source_owners, strict=True)}
+    local_occurrences = collections.Counter(
+        (id(turn), _session_message_visible_key(row))
+        for row, turn in zip(selected, local_owners_all, strict=True)
+    )
+    source_occurrences = collections.Counter(
+        (id(turn), _session_message_visible_key(row, normalize_workspace_prefix=True))
+        for row, turn in zip(prefix, source_owners, strict=True)
+    )
+
+    def matches(local, saved):
+        if not _message_private_identity_compatible(local, saved):
+            return False
+        left_token, right_token = local.get('_active_turn_token'), saved.get('_active_turn_token')
+        if left_token and right_token and left_token != right_token:
+            return False
+        left_time, left_valid = _message_exact_timestamp_details(local)
+        right_time, right_valid = _message_exact_timestamp_details(saved)
+        key = _session_message_visible_key(local, normalize_workspace_prefix=False)
+        if (not left_valid or not right_valid or right_time is None
+                or key != _session_message_visible_key(saved, normalize_workspace_prefix=True)):
+            return False
+        for identity in (_state_db_row_identity_details, _stable_message_identity_details):
+            local_id, local_valid = identity(local)
+            saved_id, saved_valid = identity(saved)
+            if (local_valid and saved_valid and local_id is not None and local_id == saved_id
+                    and (identity is not _state_db_row_identity_details or int(local_id) > 0)):
+                return True
+        if left_time is not None and left_time == right_time:
+            return True
+        if local.get('role') == 'user':
+            return False
+        local_owner, saved_owner = local_owner_by_row.get(id(local)), source_owner_by_row.get(id(saved))
+        # Native Agent flush and WebUI settlement stamp replies independently.
+        # A mutually unique visible row inside the same proved user execution
+        # is a mirror, not a second completed turn or an unanchored gap.
+        return (local_owner is not None and saved_owner is not None
+                and matches(local_owner, saved_owner)
+                and local_occurrences[(id(local_owner), key)] == 1
+                and source_occurrences[(id(saved_owner), key)] == 1)
+
+    owner_indices = [i for i, row in enumerate(selected) if row is owner or matches(owner, row)]
+    if len(owner_indices) > 1:
+        return selected
+    stop_index = owner_indices[0] if owner_indices else len(selected)
+    local_prefix = selected[:stop_index]
+    # Duplicate private IDs cannot establish ownership or order of a gap.
+    for rows in (prefix, local_prefix):
+        for identity in (_state_db_row_identity_details, _stable_message_identity_details):
+            ids = [identity(row) for row in rows]
+            if any(not valid for _, valid in ids):
+                return selected
+            known = [value for value, _ in ids if value is not None]
+            if len(set(known)) != len(known):
+                return selected
+    for identity in (_state_db_row_identity_details, _stable_message_identity_details):
+        local_by_id = {identity(row)[0]: row for row in local_prefix if identity(row)[0] is not None}
+        for row in prefix:
+            row_id = identity(row)[0]
+            if row_id in local_by_id and not matches(local_by_id[row_id], row):
+                return selected
+    # Equal-clock native calls with differing tool payloads cannot be an
+    # anchor, or a new gap beside the saved call's authoritative result block.
+    local_call_clocks = collections.defaultdict(set)
+    for row in local_prefix:
+        if row.get('tool_calls'):
+            local_call_clocks[_message_exact_timestamp_details(row)].add(_session_message_visible_key(row))
+    for row in prefix:
+        key = _message_exact_timestamp_details(row)
+        if row.get('tool_calls') and key in local_call_clocks:
+            if _session_message_visible_key(row, normalize_workspace_prefix=True) not in local_call_clocks[key]:
+                return selected
+    def anchor_key(row, *, source=False):
+        clock, valid = _message_exact_timestamp_details(row)
+        if not valid or clock is None:
+            return None
+        return clock, _session_message_visible_key(row, normalize_workspace_prefix=source)
+
+    source_keys = collections.defaultdict(list)
+    for index, row in enumerate(prefix):
+        source_keys[_session_message_visible_key(row, normalize_workspace_prefix=True)].append(index)
+    anchors = []
+    for local_idx, row in enumerate(local_prefix):
+        candidates = source_keys.get(_session_message_visible_key(row), [])
+        compatible = [index for index in candidates if matches(row, prefix[index])]
+        # A clock/content mirror with contradictory private/provider identity
+        # is quarantined, never inserted as a second authoritative occurrence.
+        if (anchor_key(row) is not None
+                and any(anchor_key(row) == anchor_key(prefix[index], source=True)
+                        and not matches(row, prefix[index]) for index in candidates)):
+            return selected
+        if len(compatible) > 1:
+            return selected
+        if compatible:
+            anchors.append((local_idx, compatible[0]))
+    anchors.sort()
+    if any(right[1] <= left[1] for left, right in zip(anchors, anchors[1:], strict=False)):
+        return selected
+    local_owners = local_owners_all[:stop_index]
+    for local_idx, saved_idx in anchors:
+        local_owner, saved_owner = local_owners[local_idx], source_owners[saved_idx]
+        # Matching assistant/tool bytes can occur in different executions.
+        # Such a row cannot align gaps belonging to contradictory user owners.
+        if (local_owner is not None and saved_owner is not None
+                and not matches(local_owner, saved_owner)):
+            return selected
+    if not anchors and not verified_start:
+        return selected
+
+    def merge_gap(local, saved):
+        if not local or not saved:
+            return list(local or saved)
+
+        def turn_blocks(rows):
+            leading, turns = [], []
+            previous_clock = None
+            for row in rows:
+                if row.get('role') == 'user':
+                    clock, valid = _message_exact_timestamp_details(row)
+                    if (not valid or clock is None
+                            or (previous_clock is not None and clock <= previous_clock)):
+                        return None
+                    turns.append((clock, [row]))
+                    previous_clock = clock
+                elif turns:
+                    turns[-1][1].append(row)
+                else:
+                    leading.append(row)
+            return leading, turns
+
+        local_blocks, saved_blocks = turn_blocks(local), turn_blocks(saved)
+        if local_blocks is None or saved_blocks is None:
+            return None
+        local_leading, local_turns = local_blocks
+        saved_leading, saved_turns = saved_blocks
+        # Both leading fragments belong to the preceding anchor's execution.
+        # Without another shared row their relative order cannot be proved.
+        if local_leading and saved_leading:
+            return None
+        merged = local_leading + saved_leading
+        local_index = saved_index = 0
+        while local_index < len(local_turns) and saved_index < len(saved_turns):
+            local_clock, local_rows = local_turns[local_index]
+            saved_clock, saved_rows = saved_turns[saved_index]
+            if local_clock == saved_clock:
+                return None
+            if local_clock < saved_clock:
+                merged.extend(local_rows)
+                local_index += 1
+            else:
+                merged.extend(saved_rows)
+                saved_index += 1
+        for _, rows in local_turns[local_index:] + saved_turns[saved_index:]:
+            merged.extend(rows)
+        return merged
+
+    result = []
+    local_cursor = 0
+    source_cursor = 0 if verified_start else anchors[0][1]
+    for local_idx, saved_idx in anchors:
+        gap = []
+        if saved_idx >= source_cursor:
+            gap = prefix[source_cursor:saved_idx]
+            if gap and local_idx and local_prefix[local_idx].get('role') == 'tool':
+                # A saved tool result cannot be separated from its assistant's
+                # native tool-call block by a newly recovered user/answer.
+                block_start = local_idx - 1
+                while block_start >= 0 and local_prefix[block_start].get('role') == 'tool':
+                    block_start -= 1
+                if block_start >= 0 and local_prefix[block_start].get('tool_calls'):
+                    return selected
+        merged_gap = merge_gap(local_prefix[local_cursor:local_idx], gap)
+        if merged_gap is None:
+            return selected
+        result.extend(merged_gap)
+        result.append(local_prefix[local_idx])
+        local_cursor, source_cursor = local_idx + 1, saved_idx + 1
+    merged_gap = merge_gap(local_prefix[local_cursor:], prefix[source_cursor:])
+    if merged_gap is None:
+        return selected
+    result.extend(merged_gap)
+    result.extend(selected[stop_index:])
+    return result
+
+
+def _state_db_after_saved_cancel_successors(
+    owner_messages: list, state_messages: list, local_messages: list, *, turn_owner=None,
+) -> list:
+    """Remove only an ordered mirror of successors already saved after Stop.
+
+    The cancelled owner/carrier are excluded from this alignment. Require a
+    two-row prefix for legacy content-only evidence; retain occurrence counts
+    and reject conflicting private identities so a genuinely new identical
+    turn is not collapsed. Timestamps may change when SQLite restamps mirrors.
+    """
+    if turn_owner is None:
+        turn_owner = _cancelled_journal_turn_owner(owner_messages)
+    if turn_owner is None:
+        return state_messages
+    carrier = turn_owner[1]
+    carrier_index = next(i for i, row in enumerate(owner_messages) if row is carrier)
+    saved = [row for row in owner_messages[carrier_index + 1:] if isinstance(row, dict)]
+    if not saved or saved[0].get('role') != 'user':
+        return state_messages
+    # The display can be newer than authoritative model context. Remove only
+    # the saved prefix also represented in this call's selected local view;
+    # visible ownership alone does not prove context has consumed those rows.
+    represented = 0
+    for offset in range(len(local_messages)):
+        length = 0
+        while length < len(saved) and offset + length < len(local_messages):
+            local, visible = local_messages[offset + length], saved[length]
+            if (not isinstance(local, dict)
+                    or not _message_private_identity_compatible(local, visible)
+                    or _message_exact_timestamp_details(local)
+                    != _message_exact_timestamp_details(visible)
+                    or _session_message_content_key(local, normalize_workspace_prefix=False)
+                    != _session_message_content_key(visible, normalize_workspace_prefix=False)):
+                break
+            length += 1
+        represented = max(represented, length)
+    if represented < 2:
+        return state_messages
+    saved = saved[:represented]
+    _reconcile_api_content_sidecars(saved, state_messages)
+    matched = 0
+    for local, incoming in zip(saved, state_messages, strict=False):
+        # Content alone cannot distinguish a restamped legacy mirror from a
+        # genuinely new identical turn. Only a shared valid identity or exact
+        # non-null clock grants authority to consume this occurrence.
+        local_stable, local_stable_valid = _stable_message_identity_details(local)
+        incoming_stable, incoming_stable_valid = _stable_message_identity_details(incoming)
+        local_row, local_row_valid = _state_db_row_identity_details(local)
+        incoming_row, incoming_row_valid = _state_db_row_identity_details(incoming)
+        shared_identity = (
+            (local_stable_valid and incoming_stable_valid and local_stable is not None
+             and local_stable == incoming_stable)
+            or (local_row_valid and incoming_row_valid and local_row is not None
+                and int(local_row) > 0 and local_row == incoming_row)
+        )
+        local_time, local_time_valid = _message_exact_timestamp_details(local)
+        incoming_time, incoming_time_valid = _message_exact_timestamp_details(incoming)
+        exact_clock = (local_time_valid and incoming_time_valid and local_time is not None
+                       and local_time == incoming_time)
+        if (not isinstance(incoming, dict)
+                or not (shared_identity or exact_clock)
+                or not _message_private_identity_compatible(local, incoming)
+                or _session_message_content_key(local, normalize_workspace_prefix=False)
+                != _session_message_content_key(incoming, normalize_workspace_prefix=True)):
+            break
+        matched += 1
+    if matched < 2:
+        return state_messages
+    return state_messages[matched:]
 
 
 def state_db_delta_after_context(sidecar_context: list, state_messages: list) -> list:
@@ -10382,16 +13388,22 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
             # preceding assistant's tool_calls, not just the first — a multi-tool
             # turn has several adjacent tool results, and inserting between any of
             # them splits the block (assistant, tool, <insert>, tool).
-            if (
-                idx < len(messages)
-                and messages[idx].get("role") == "tool"
-                and idx > 0
-                and messages[idx - 1].get("role") == "assistant"
-                and messages[idx - 1].get("tool_calls")
-            ):
-                while idx < len(messages) and messages[idx].get("role") == "tool":
-                    idx += 1
-                    advanced = True
+            if idx < len(messages) and messages[idx].get("role") == "tool":
+                # Walk back over any contiguous tool rows already emitted for
+                # this block, so the owning assistant is found even when idx
+                # lands on the SECOND result of a multi-tool turn (where
+                # messages[idx - 1] is another tool row, not the assistant).
+                owner = idx - 1
+                while owner >= 0 and messages[owner].get("role") == "tool":
+                    owner -= 1
+                if (
+                    owner >= 0
+                    and messages[owner].get("role") == "assistant"
+                    and messages[owner].get("tool_calls")
+                ):
+                    while idx < len(messages) and messages[idx].get("role") == "tool":
+                        idx += 1
+                        advanced = True
             # (b) Skip past an equal-timestamp run whose left neighbour shares
             # this message's role — inserting there would re-order an
             # already-matched same-role turn (user, <inserted user>, assistant).
@@ -10420,6 +13432,10 @@ def merge_session_messages_append_only(
     *,
     truncation_watermark=None,
     truncation_boundary=None,
+    incoming_provenance: Literal["unverified", "state_db"] = "unverified",
+    cancelled_journal_owner_messages: list | None = None,
+    cancelled_journal_source_messages: list | None = None,
+    cancelled_journal_prefix_start_verified: bool = False,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -10433,9 +13449,96 @@ def merge_session_messages_append_only(
             state_messages,
             truncation_watermark=truncation_watermark,
             truncation_boundary=truncation_boundary,
+            incoming_provenance=incoming_provenance,
+            cancelled_journal_owner_messages=cancelled_journal_owner_messages,
+            cancelled_journal_source_messages=cancelled_journal_source_messages,
+            cancelled_journal_prefix_start_verified=cancelled_journal_prefix_start_verified,
         )
     finally:
         _STRUCTURED_IDENTITY_MEMO.reset(token)
+
+
+def _project_native_image_payload_conflicts_for_display(
+    sidecar_messages,
+    state_messages,
+    merged_messages,
+):
+    """Project a proven same-row native-image conflict onto its sidecar bubble."""
+    sidecar_messages = list(sidecar_messages or [])
+    state_messages = list(state_messages or [])
+    if not sidecar_messages or not state_messages:
+        return merged_messages
+
+    sidecar_row_id_counts = collections.Counter(
+        row_id
+        for message in sidecar_messages
+        if (row_id := _state_db_row_identity(message)) is not None
+    )
+    state_row_id_counts = collections.Counter(
+        row_id
+        for message in state_messages
+        if (row_id := _state_db_row_identity(message)) is not None
+    )
+    display_conflicts = {}
+    for incoming in state_messages:
+        if (
+            not isinstance(incoming, dict)
+            or incoming.get(_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD) is not True
+        ):
+            continue
+        row_id, row_id_valid = _state_db_row_identity_details(incoming)
+        timestamp, timestamp_valid = _message_exact_timestamp_details(incoming)
+        content = incoming.get("content")
+        if (
+            not row_id_valid
+            or row_id is None
+            or sidecar_row_id_counts[row_id] != 1
+            or state_row_id_counts[row_id] != 1
+            or not timestamp_valid
+            or timestamp is None
+            or str(incoming.get("role") or "").lower() != "user"
+            or not isinstance(content, str)
+        ):
+            continue
+        incoming_api_content = _session_message_api_content_key(incoming)
+        if incoming_api_content is None:
+            continue
+        sidecar_owner = next((
+            message for message in sidecar_messages
+            if isinstance(message, dict)
+            and _state_db_row_identity_details(message) == (row_id, True)
+            and _message_identity_compatible(message, incoming)
+            and message.get("content") == content
+            and _message_exact_timestamp_details(message) == (timestamp, True)
+            and _session_message_api_content_key(message)
+            not in (None, incoming_api_content)
+        ), None)
+        if sidecar_owner is not None:
+            display_conflicts[(row_id, timestamp, content)] = (incoming, sidecar_owner)
+
+    if not display_conflicts:
+        return merged_messages
+    visible_messages = []
+    for message in merged_messages:
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            row_id, row_id_valid = _state_db_row_identity_details(message)
+            timestamp, timestamp_valid = _message_exact_timestamp_details(message)
+            conflict = (
+                display_conflicts.get((row_id, timestamp, message["content"]))
+                if row_id_valid and row_id is not None and timestamp_valid
+                else None
+            )
+            if conflict is not None and _message_identity_compatible(message, conflict[0]):
+                incoming, sidecar_owner = conflict
+                is_sidecar_owner = (
+                    _message_identity_compatible(message, sidecar_owner)
+                    and _session_message_api_content_key(message)
+                    == _session_message_api_content_key(sidecar_owner)
+                )
+                if not is_sidecar_owner:
+                    continue
+        visible_messages.append(message)
+    return visible_messages
 
 
 def _merge_session_messages_append_only_impl(
@@ -10444,6 +13547,10 @@ def _merge_session_messages_append_only_impl(
     *,
     truncation_watermark=None,
     truncation_boundary=None,
+    incoming_provenance=None,
+    cancelled_journal_owner_messages=None,
+    cancelled_journal_source_messages=None,
+    cancelled_journal_prefix_start_verified=False,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -10455,6 +13562,73 @@ def _merge_session_messages_append_only_impl(
     """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
+    owner_messages = sidecar_messages if cancelled_journal_owner_messages is None else cancelled_journal_owner_messages
+    post_cancel_state = False
+    owns_live_partial = _selected_history_owns_live_partial(sidecar_messages, owner_messages)
+    cancelled_turn = _cancelled_journal_turn_owner(owner_messages, include_live_partial=owns_live_partial)
+    latest_error = next((row for row in reversed(owner_messages)
+                         if isinstance(row, dict) and row.get('role') == 'assistant'
+                         and row.get('_error')), None)
+    owns_live_stop = (owns_live_partial and cancelled_turn is not None
+                      and cancelled_turn[1] is latest_error)
+    if ((owns_live_partial and not owns_live_stop)
+            or (incoming_provenance != 'state_db'
+                and (owns_live_partial or _sidecar_has_terminal_partial_error(owner_messages)))):
+        # The selected history owns the veto. Deferred model context can still
+        # precede the displayed Stop; SQLite must fill that older snapshot.
+        state_messages = []
+    elif incoming_provenance == 'state_db' and cancelled_turn:
+        source_messages = state_messages if cancelled_journal_source_messages is None else cancelled_journal_source_messages
+        owner_index, successor_index = _state_db_cancelled_journal_turn_bounds(
+            owner_messages, source_messages, turn_owner=cancelled_turn,
+        )
+        if owner_index is not None and truncation_watermark is None and not owns_live_partial:
+            allowed_rows = {id(row) for row in state_messages}
+            prefix = [row for row in source_messages[:owner_index] if id(row) in allowed_rows]
+            # Earlier saved Stops own their raw execution blocks as well. A
+            # later cancellation must not turn those blocks into prefix gaps.
+            for carrier_index, carrier in enumerate(owner_messages):
+                if not carrier.get('_error'):
+                    continue
+                earlier = owner_messages[:carrier_index + 1]
+                earlier_turn = _cancelled_journal_turn_owner(earlier, include_live_partial=True)
+                if (not earlier_turn or earlier_turn[1] is not carrier
+                        or earlier_turn[0] is cancelled_turn[0]):
+                    continue
+                earlier_owner, earlier_successor = _state_db_cancelled_journal_turn_bounds(
+                    earlier, source_messages, turn_owner=earlier_turn,
+                    allow_legacy_integer_clock=True,
+                )
+                if earlier_owner is None:
+                    prefix = []
+                    break
+                end = earlier_successor if earlier_successor is not None else len(source_messages)
+                excluded = {id(row) for row in source_messages[earlier_owner + 1:end]}
+                prefix = [row for row in prefix if id(row) not in excluded]
+                source_owner = source_messages[earlier_owner]
+                if _message_exact_timestamp(source_owner) != _message_exact_timestamp(earlier_turn[0]):
+                    # The uniquely proved legacy integer/fractional owner is
+                    # one turn. Project its canonical saved owner, without
+                    # rewriting either durable source or its execution clock.
+                    prefix = [earlier_turn[0] if row is source_owner else row for row in prefix]
+            _reconcile_api_content_sidecars(sidecar_messages, prefix)
+            sidecar_messages = _restore_cancelled_journal_prefix(
+                sidecar_messages, prefix, owner_messages,
+                verified_start=cancelled_journal_prefix_start_verified,
+            )
+        proved_suffix = list(source_messages[successor_index:]) if successor_index is not None else []
+        proved_suffix = _state_db_after_saved_cancel_successors(
+            owner_messages, proved_suffix, sidecar_messages, turn_owner=cancelled_turn,
+        )
+        if cancelled_journal_source_messages is None:
+            state_messages = proved_suffix
+        else:
+            # Context/compression slicing retains these invocation-local row
+            # objects. Intersect with the proved suffix of the full read, so an
+            # anchor cannot erase owner proof or re-admit a pre-anchor row.
+            suffix_row_ids = {id(row) for row in proved_suffix}
+            state_messages = [row for row in state_messages if id(row) in suffix_row_ids]
+        post_cancel_state = bool(state_messages)
     _reconcile_api_content_sidecars(sidecar_messages, state_messages)
     # The reconciler's quarantine sets are invocation-local. Mirror the
     # identity-bucket guards here because this append-only merge has its own
@@ -10709,8 +13883,6 @@ def _merge_session_messages_append_only_impl(
                 sidecar_multimodal_mirrors[multimodal_mirror_key] = msg
         merged_messages.append(msg)
         _remember_merged_message(msg, source="sidecar")
-    if _sidecar_has_terminal_partial_error(sidecar_messages):
-        return merged_messages
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
     state_multimodal_mirror_keys = {}
     ambiguous_state_multimodal_mirrors = set()
@@ -10759,14 +13931,286 @@ def _merge_session_messages_append_only_impl(
         and boundary_ts is not None
         and boundary_ts < watermark_timestamp
     )
-    for msg in state_messages:
+    # Self-heal for a STALE (wall-clock) watermark left by the pre-fix
+    # advance helper. A legitimate watermark always equals a real message
+    # timestamp (session_ops._truncation_watermark_for uses the last kept
+    # row's timestamp), so a watermark NEWER than every sidecar row cannot be a
+    # real truncate cutoff -- it is an invented boundary. Because
+    # sidecar_advanced_past_watermark then stays False forever, the filter
+    # below hides exactly the state.db rows that would advance the sidecar past
+    # the watermark: a self-locked transcript that silently drops every later
+    # turn. Detect that and drop the watermark, restoring normal merge order
+    # (fail OPEN toward data, matching the intent of session_recovery's
+    # watermark guards). The replaced-tail suppression still works via the
+    # legitimate boundary/watermark values, which are always <= max_sidecar.
+    #
+    # Provenance guard (#7946 review): manual compression is a LEGITIMATE cutoff
+    # writer that CAN exceed every timestamped sidecar row -- it stamps the
+    # missing timestamps on a compressed COPY with the current time and leaves
+    # session.messages unchanged, so whenever the sidecar's newest row has no
+    # timestamp the real cutoff sits above every timestamped sidecar row.
+    # Every such writer persists truncation_boundary at the SAME value as the
+    # watermark (routes compression, session_ops truncate/retry/undo), while
+    # the pre-fix wall-clock advance never touched the boundary. A watermark
+    # that matches the persisted boundary is therefore a real cutoff and must
+    # keep suppressing the pre-compression rows (#4836); only an unmatched
+    # watermark above the sidecar is the invented wall-clock value.
+    watermark_matches_persisted_boundary = (
+        watermark_timestamp is not None
+        and boundary_ts is not None
+        and boundary_ts == watermark_timestamp
+    )
+    # Ambiguous shape (#7946 gate c17, Codex): a recorded cutoff that EQUALS
+    # the newest timestamped sidecar row (a truncate/edit/undo whose post-edit
+    # turn never reached the sidecar with a timestamp). Nothing persisted marks
+    # where the deleted suffix ends, so state.db rows after the cutoff may be
+    # the rows the user deleted; healing would resurrect them. Stay
+    # conservative there (master behaviour); the writer clamp above prevents
+    # new occurrences.
+    cutoff_is_newest_sidecar_row = (
+        boundary_ts is not None
+        and max_sidecar_timestamp is not None
+        and boundary_ts == max_sidecar_timestamp
+    )
+    watermark_is_stale_wall_clock = (
+        watermark_timestamp is not None
+        and watermark_timestamp != 0
+        and max_sidecar_timestamp is not None
+        and watermark_timestamp > max_sidecar_timestamp
+        and not watermark_matches_persisted_boundary
+        and not cutoff_is_newest_sidecar_row
+    )
+    healed_to_recorded_cutoff = False
+    if watermark_is_stale_wall_clock:
+        # Heal to the newest REAL cutoff instead of dropping the watermark
+        # (#7946 gate, Codex + senior review): clearing it would replay rows a
+        # recorded cutoff deliberately hid -- e.g. a session manually compressed
+        # at C and only later hit by the wall-clock advance (W > C > every
+        # timestamped sidecar row) would get its discarded pre-compression
+        # state.db rows back (#4836). The newest real cutoff is the later of the
+        # recorded boundary and the newest timestamped sidecar row: unseen
+        # state.db rows at or below it stay suppressed exactly as on master
+        # (compression-discarded rows, a truncate's deleted suffix that predates
+        # the newest sidecar row), and the advance guard below is released so
+        # every state.db turn AFTER it -- the turns the self-lock was hiding --
+        # merges back (#7945).
+        heal_candidates = [max_sidecar_timestamp]
+        if boundary_ts is not None and boundary_ts > 0 and boundary_ts < watermark_timestamp:
+            heal_candidates.append(boundary_ts)
+        watermark_timestamp = max(heal_candidates)
+        healed_to_recorded_cutoff = True
+
+    def _state_row_is_truncated(
+        msg, key, content_key, timestamp, checkpoint_consumed,
+        *, retained_native_image_row: bool | None = None,
+    ):
+        # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
+        # past the watermark. Because Session.save() no longer auto-clears the
+        # watermark, an unconditional `timestamp > watermark` skip would become
+        # permanent and silently drop legitimate future state.db-only recovery
+        # rows once the session moves forward past the edit boundary. Once the
+        # sidecar's own max timestamp is beyond the watermark, allow state rows
+        # newer than the sidecar tail to merge.
+        #
+        # The sidecar's max timestamp can also EQUAL the watermark when the new
+        # post-edit USER turn has been checkpointed into the sidecar (its
+        # timestamp == the advanced watermark) but its ASSISTANT reply exists
+        # only in state.db (recovery before the sidecar tail advances). In that
+        # state truncation_boundary < watermark proves the session is genuinely
+        # advanced, so the post-watermark state-only reply is legitimate
+        # post-edit content and must merge through (not be dropped as a replaced
+        # tail). The conservative skip still applies for boundary is None and
+        # boundary == watermark (not-advanced / legacy).
+        #
+        # CRITICAL: the boundary-advanced signal may only bypass the skip AFTER
+        # state replay has consumed the sidecar's visible checkpoint
+        # (state_replay_idx >= len(sidecar_visible_sequence)). A deleted suffix
+        # row with ts > watermark that appears in state.db BEFORE the edited
+        # checkpoint must still be skipped — otherwise the advanced signal would
+        # resurrect it. The sidecar-max-timestamp signal needs no such gate (a
+        # sidecar tail beyond the watermark is itself proof the checkpoint has
+        # advanced).
+        sidecar_advanced_past_watermark = (
+            watermark_timestamp is not None
+            and (
+                healed_to_recorded_cutoff
+                or (max_sidecar_timestamp is not None
+                    and max_sidecar_timestamp > watermark_timestamp)
+                or (watermark_advanced_by_boundary and checkpoint_consumed)
+            )
+        )
+        message_key_seen = key in seen_message_keys
+        content_key_seen = content_key in seen_content_keys
+        if retained_native_image_row is not None:
+            # A marked image mirror needs durable row proof; an equal scalar
+            # projection from another row cannot exempt it from the watermark.
+            message_key_seen = content_key_seen = retained_native_image_row
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp > watermark_timestamp
+            and not message_key_seen
+            and (
+                not sidecar_advanced_past_watermark
+                or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
+            )
+        ):
+            return True
+        # When a truncation watermark is active, state.db may contain original
+        # messages that were replaced by Edit (old content with old timestamp).
+        # The timestamp-based filter above catches messages AFTER the watermark,
+        # but messages BEFORE it (like the original pre-edit content) slip through.
+        # If a state.db message's content is not present in the sidecar and its
+        # timestamp is before the watermark, it's a replaced/stale row — skip it.
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp < watermark_timestamp
+            and not message_key_seen
+            and not content_key_seen
+        ):
+            return True
+        # Same-second edit: if timestamp equals the watermark and the message
+        # content is not in the sidecar, it's a replaced message edited at the
+        # same second — skip it. The edited version (same timestamp, different
+        # content) is in the sidecar and survives this check.
+        #
+        # Only apply the same-second guard to user messages. An assistant reply
+        # (or tool message) at the same second as the watermark is a legitimate
+        # post-edit recovery row — the sidecar holds only the edited user
+        # checkpoint, so the assistant reply's content won't be in it and would
+        # be silently dropped without this role guard.
+        return (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp == watermark_timestamp
+            and not message_key_seen
+            and not content_key_seen
+            and str(msg.get("role", "")).lower() == "user"
+        )
+
+    for source_message in state_messages:
+        preserve_native_image_row = (
+            isinstance(source_message, dict)
+            and source_message.get(_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD) is True
+        )
+        msg = (
+            {
+                key: value
+                for key, value in source_message.items()
+                if key != _WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD
+            }
+            if preserve_native_image_row
+            else source_message
+        )
         timestamp = _message_timestamp_as_float(msg)
         key = _cached_message_key(msg, "merge")
         dedup_key = _cached_message_key(msg, "dedup")
         visible_key = _cached_message_key(msg, "visible_state")
         content_key = _cached_message_key(msg, "content_state")
+        if preserve_native_image_row:
+            row_id, row_id_valid = _state_db_row_identity_details(msg)
+            existing = (
+                merged_by_row_id.get(row_id)
+                if row_id_valid and row_id is not None
+                else None
+            )
+            row_id_fast_path_allowed = (
+                existing is not None
+                and row_id not in ambiguous_row_ids
+                and _row_id_fast_path_allowed(existing, msg)
+            )
+            existing_timestamp, existing_timestamp_valid = (
+                _message_exact_timestamp_details(existing)
+            )
+            incoming_timestamp, incoming_timestamp_valid = (
+                _message_exact_timestamp_details(msg)
+            )
+            retained_native_image_row = (
+                row_id_fast_path_allowed
+                and sidecar_row_id_counts.get(row_id, 0) == 1
+                and state_row_id_counts.get(row_id, 0) == 1
+                and existing_timestamp_valid
+                and incoming_timestamp_valid
+                and existing_timestamp is not None
+                and existing_timestamp == incoming_timestamp
+                and str(msg.get("role") or "").lower() == "user"
+            )
+            if _state_row_is_truncated(
+                msg,
+                key,
+                content_key,
+                timestamp,
+                state_replay_idx >= len(sidecar_visible_sequence),
+                retained_native_image_row=retained_native_image_row,
+            ):
+                continue
+            if row_id_fast_path_allowed:
+                # This state row replays the sidecar row it resolved to, so it
+                # consumes that position in the replay sequence exactly like the
+                # ordinary and multimodal-mirror paths do. Without this the
+                # checkpoint never reads as consumed and a later state-only
+                # reply after an edited checkpoint is truncated.
+                if (
+                    state_replay_idx < len(sidecar_visible_messages)
+                    and sidecar_visible_messages[state_replay_idx] is existing
+                ):
+                    state_replay_idx += 1
+                existing_api_content = _session_message_api_content_key(existing)
+                incoming_api_content = _session_message_api_content_key(msg)
+                if (
+                    existing_api_content is not None
+                    and incoming_api_content is not None
+                    and existing_api_content != incoming_api_content
+                ):
+                    # Row identity does not establish which provider payload is
+                    # newer. A unique exact row match proves this row survived
+                    # truncation, so preserve both versions for model context.
+                    pass
+                else:
+                    if existing_api_content is None and incoming_api_content is not None:
+                        _copy_api_content_sidecar(existing, msg)
+                    _merge_session_display_metadata(existing, msg)
+                    continue
+            if dedup_key in seen_dedup_keys:
+                duplicate = merged_by_dedup_key.get(dedup_key)
+                duplicate_row_id, duplicate_row_id_valid = (
+                    _state_db_row_identity_details(duplicate)
+                )
+                two_distinct_durable_rows = (
+                    row_id_valid
+                    and row_id is not None
+                    and duplicate_row_id_valid
+                    and duplicate_row_id is not None
+                    and duplicate_row_id != row_id
+                )
+                if not two_distinct_durable_rows:
+                    _merge_session_display_metadata(duplicate, msg)
+                    continue
+                duplicate = merged_by_row_id.get(row_id)
+                duplicate_row_id, duplicate_row_id_valid = (
+                    _state_db_row_identity_details(duplicate)
+                )
+                same_durable_row = (
+                    row_id not in ambiguous_row_ids
+                    and duplicate_row_id_valid
+                    and duplicate_row_id == row_id
+                    and _cached_message_key(duplicate, "dedup") == dedup_key
+                    and _row_id_fast_path_allowed(duplicate, msg)
+                )
+                if same_durable_row:
+                    _merge_session_display_metadata(duplicate, msg)
+                    continue
+            if not _insert_state_message_chronologically(merged_messages, msg):
+                merged_messages.append(msg)
+            seen_message_keys.add(key)
+            seen_dedup_keys.add(dedup_key)
+            seen_content_keys.add(content_key)
+            seen_visible_keys.add(visible_key)
+            _remember_merged_message(msg, source="state")
+            continue
         multimodal_mirror_key = (
-            state_multimodal_mirror_keys.get(id(msg))
+            state_multimodal_mirror_keys.get(id(source_message))
             if sidecar_multimodal_mirrors
             else None
         )
@@ -10795,7 +14239,7 @@ def _merge_session_messages_append_only_impl(
             continue
         replays_sidecar_prefix = False
         replay_target = None
-        if state_replay_idx < len(sidecar_visible_sequence):
+        if not post_cancel_state and state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
             if visible_key == expected_visible_key or _has_visible_duplicate(
                 visible_key, {expected_visible_key}
@@ -10844,83 +14288,9 @@ def _merge_session_messages_append_only_impl(
                     _copy_api_content_sidecar(existing, msg)
                 _merge_session_display_metadata(existing, msg)
                 continue
-        # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
-        # past the watermark. Because Session.save() no longer auto-clears the
-        # watermark, an unconditional `timestamp > watermark` skip would become
-        # permanent and silently drop legitimate future state.db-only recovery
-        # rows once the session moves forward past the edit boundary. Once the
-        # sidecar's own max timestamp is beyond the watermark (the session has
-        # advanced), allow state rows newer than the sidecar tail to merge.
-        #
-        # The sidecar's max timestamp can also EQUAL the watermark when the new
-        # post-edit USER turn has been checkpointed into the sidecar (its
-        # timestamp == the advanced watermark) but its ASSISTANT reply exists
-        # only in state.db (recovery before the sidecar tail advances). In that
-        # state truncation_boundary < watermark proves the session is genuinely
-        # advanced, so the post-watermark state-only reply is legitimate
-        # post-edit content and must merge through (not be dropped as a replaced
-        # tail). The conservative skip still applies for boundary is None and
-        # boundary == watermark (not-advanced / legacy).
-        #
-        # CRITICAL: the boundary-advanced signal may only bypass the skip AFTER
-        # state replay has consumed the sidecar's visible checkpoint
-        # (state_replay_idx >= len(sidecar_visible_sequence)). A deleted suffix
-        # row with ts > watermark that appears in state.db BEFORE the edited
-        # checkpoint must still be skipped — otherwise the advanced signal would
-        # resurrect it. The sidecar-max-timestamp signal needs no such gate (a
-        # sidecar tail beyond the watermark is itself proof the checkpoint has
-        # advanced).
         checkpoint_consumed = state_replay_idx >= len(sidecar_visible_sequence)
-        sidecar_advanced_past_watermark = (
-            watermark_timestamp is not None
-            and (
-                (max_sidecar_timestamp is not None
-                 and max_sidecar_timestamp > watermark_timestamp)
-                or (watermark_advanced_by_boundary and checkpoint_consumed)
-            )
-        )
-        if (
-            watermark_timestamp is not None
-            and timestamp is not None
-            and timestamp > watermark_timestamp
-            and key not in seen_message_keys
-            and (
-                not sidecar_advanced_past_watermark
-                or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
-            )
-        ):
-            continue
-        # When a truncation watermark is active, state.db may contain original
-        # messages that were replaced by Edit (old content with old timestamp).
-        # The timestamp-based filter above catches messages AFTER the watermark,
-        # but messages BEFORE it (like the original pre-edit content) slip through.
-        # If a state.db message's content is not present in the sidecar and its
-        # timestamp is before the watermark, it's a replaced/stale row — skip it.
-        if (
-            watermark_timestamp is not None
-            and timestamp is not None
-            and timestamp < watermark_timestamp
-            and key not in seen_message_keys
-            and content_key not in seen_content_keys
-        ):
-            continue
-        # Same-second edit: if timestamp equals the watermark and the message
-        # content is not in the sidecar, it's a replaced message edited at the
-        # same second — skip it.  The edited version (same timestamp, different
-        # content) is in the sidecar and survives this check.
-        #
-        # Only apply the same-second guard to user messages.  An assistant reply
-        # (or tool message) at the same second as the watermark is a legitimate
-        # post-edit recovery row — the sidecar holds only the edited user
-        # checkpoint, so the assistant reply's content won't be in it and would
-        # be silently dropped without this role guard.
-        if (
-            watermark_timestamp is not None
-            and timestamp is not None
-            and timestamp == watermark_timestamp
-            and key not in seen_message_keys
-            and content_key not in seen_content_keys
-            and str(msg.get("role", "")).lower() == "user"
+        if _state_row_is_truncated(
+            msg, key, content_key, timestamp, checkpoint_consumed,
         ):
             continue
         # Check for true duplicates using full-precision timestamp (#3346).
@@ -10931,7 +14301,7 @@ def _merge_session_messages_append_only_impl(
         if dedup_key in seen_dedup_keys:
             _merge_session_display_metadata(merged_by_dedup_key.get(dedup_key), msg)
             continue
-        if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
+        if not post_cancel_state and max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
             # For message_id keys the merge key is authoritative — skip if
             # already seen.  For legacy keys the dedup check above already
             # handled true duplicates; same-second distinct messages must
@@ -10956,7 +14326,7 @@ def _merge_session_messages_append_only_impl(
             sidecar_visible_keys,
             sidecar_visible_lookup,
         )
-        if matched_visible_key is not None:
+        if matched_visible_key is not None and not post_cancel_state:
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
             if skipped_count < sidecar_count:
@@ -10975,6 +14345,7 @@ def _merge_session_messages_append_only_impl(
         # only when their visible content is not already present.
         if (
             key[0] != "message_id"
+            and not post_cancel_state
             and max_sidecar_timestamp is not None
             and timestamp is not None
             and timestamp <= max_sidecar_timestamp
@@ -11038,7 +14409,22 @@ def _merge_session_messages_append_only_impl(
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(content_key)
         seen_visible_keys.add(visible_key)
-        merged_messages.append(msg)
+        # This terminal path is shared by state.db reconciliation and by ordered
+        # sidecar stitching (notably compression continuations). Only the caller
+        # that read state.db may authorize timestamp-based recovery placement;
+        # stable child-sidecar sequence remains authoritative even when an
+        # archived parent was restamped later.
+        if (
+            incoming_provenance == "state_db"
+            and not post_cancel_state
+            and max_sidecar_timestamp is not None
+            and timestamp is not None
+            and timestamp < max_sidecar_timestamp
+        ):
+            if not _insert_state_message_chronologically(merged_messages, msg):
+                merged_messages.append(msg)
+        else:
+            merged_messages.append(msg)
         _remember_merged_message(msg, source="state")
     return merged_messages
 
@@ -11089,7 +14475,12 @@ def reconciled_state_db_messages_for_session(
     if state_messages is None:
         session_id = getattr(session, 'session_id', None)
         session_profile = getattr(session, 'profile', None)
-        if with_revision:
+        if _cancelled_journal_turn_owner(getattr(session, 'messages', None) or [], include_live_partial=True):
+            state_result = get_state_db_session_messages(
+                session_id, profile=session_profile,
+                with_revision=with_revision, include_row_identity=True,
+            )
+        elif with_revision:
             state_result = get_state_db_session_messages(
                 session_id,
                 profile=session_profile,
@@ -11109,6 +14500,14 @@ def reconciled_state_db_messages_for_session(
             state_messages = state_result.messages
         else:
             state_messages = state_result
+    state_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_messages,
+        suppress_api_content=not using_context_messages,
+        suppress_pending_turn=not prefer_context,
+    )
+    cancelled_journal_source_messages = state_messages
+    cancelled_journal_prefix_start_verified = False
     if prefer_context and local_messages:
         if using_context_messages:
             sidecar_messages = getattr(session, 'messages', None) or []
@@ -11152,13 +14551,26 @@ def reconciled_state_db_messages_for_session(
                             with_revision=with_revision,
                         )
                     state_messages = list(state_messages or [])[anchor_index + 1 :]
-        state_messages = state_db_delta_after_context(local_messages, state_messages)
+                    cancelled_journal_prefix_start_verified = True
+        if not (_sidecar_has_terminal_partial_error(getattr(session, 'messages', None) or [])
+                or _cancelled_journal_turn_owner(getattr(session, 'messages', None) or [], include_live_partial=True)):
+            state_messages = state_db_delta_after_context(local_messages, state_messages)
     reconciled_messages = merge_session_messages_append_only(
         local_messages,
         state_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+        incoming_provenance="state_db",
+        cancelled_journal_owner_messages=(getattr(session, 'messages', None) or []) if prefer_context else None,
+        cancelled_journal_source_messages=cancelled_journal_source_messages if prefer_context else None,
+        cancelled_journal_prefix_start_verified=cancelled_journal_prefix_start_verified,
     )
+    if not prefer_context:
+        reconciled_messages = _project_native_image_payload_conflicts_for_display(
+            local_messages,
+            state_messages,
+            reconciled_messages,
+        )
     return _state_db_session_messages_result(
         reconciled_messages,
         state_revision,

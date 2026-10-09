@@ -183,6 +183,7 @@ def test_optimistic_merge_preserves_server_running_state_when_local_cache_is_sta
     optimistic_body = _function_body(SESSIONS_SRC, "function _isOptimisticFirstTurnSessionRow(")
     keep_body = _function_body(SESSIONS_SRC, "function _shouldKeepLocalOnlyOptimisticSessionRow(")
     drop_body = _function_body(SESSIONS_SRC, "function _dropStaleOptimisticSessionRow(")
+    owner_body = _function_body(SESSIONS_SRC, "function _hasOwnedOpenLiveStream(")
     merge_body = _function_body(SESSIONS_SRC, "function _mergeOptimisticFirstTurnSessions(")
 
     script = f"""
@@ -206,6 +207,7 @@ function _isServerIdleSessionRow(s) {{{helper_body}}}
 function _isSessionLocallyStreaming(s) {{{local_body}}}
 function _isOptimisticFirstTurnSessionRow(s) {{{optimistic_body}}}
 function _shouldKeepLocalOnlyOptimisticSessionRow(local) {{{keep_body}}}
+function _hasOwnedOpenLiveStream(sid) {{{owner_body}}}
 function _dropStaleOptimisticSessionRow(sid) {{{drop_body}}}
 function _mergeOptimisticFirstTurnSessions(fetchedSessions) {{{merge_body}}}
 const merged = _mergeOptimisticFirstTurnSessions([{{

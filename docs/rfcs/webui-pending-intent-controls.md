@@ -215,6 +215,14 @@ settle.
 Steer must not exist only as a toast or transient DOM state. It must survive
 refresh, session switch, replay, and settled render.
 
+**The transport wrapper is not the Steer row.** A Steer is emitted as a standalone
+typed user row (`role: user`, `display_kind: "steer"`). The surrounding
+`[OUT-OF-BAND USER MESSAGE …] … [/OUT-OF-BAND USER MESSAGE]` block is transport-level
+control data: settlement unwraps the single validated frame in place, extracting
+and preserving the user's authored steer instruction while dropping the wrapper.
+Legacy tool rows and rows where markers are multiple, nested, incomplete, or
+contain ambiguous delimiters are preserved byte-for-byte.
+
 ### Relationship to system control events
 
 Steer is similar to system-delivered control events such as tool-iteration-limit

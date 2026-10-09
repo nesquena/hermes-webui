@@ -144,7 +144,7 @@ def test_server_bypasses_auth_for_csp_report(monkeypatch):
         called["path"] = parsed.path
         return True
 
-    monkeypatch.setattr("server.check_auth", fail_auth)
+    monkeypatch.setattr("server.check_auth_or_close", fail_auth)
     monkeypatch.setattr("server.clear_request_profile", lambda: None)
     monkeypatch.setattr("server.get_profile_cookie", lambda _handler: None)
 

@@ -93,6 +93,9 @@ eval(extractFunc('_collapseSessionLineageForSidebar'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 eval(extractFunc('_sessionAttentionState'));
 eval(extractFunc('_sidebarRowHasVisibleMessages'));
+eval(extractFunc('_isDelegatedSubagentRow'));
+eval(extractFunc('_sidebarProjectResolver'));
+eval(extractFunc('_sidebarRowsById'));
 eval(extractFunc('_partitionSidebarSessionRows'));
 eval(extractFunc('_scopedSidebarReferenceRows'));
 eval(extractFunc('_renderSidebarRowsFromRawSessions'));
@@ -216,9 +219,9 @@ console.log(JSON.stringify({
 }));
 """
     out = json.loads(_run_node(source))
-    # Child survives the visibility/project scope into sessionsRaw (parent does not)...
-    assert out["sessionsRaw"] == ["subagent_child"]
-    # ...but is NOT rendered as a top-level orphan.
+    # The child inherits its parent's project, so the "no project" filter drops both...
+    assert out["sessionsRaw"] == []
+    # ...and it is NOT rendered as a top-level orphan.
     assert out["topLevel"] == []
     assert out["orphans"] == []
 
