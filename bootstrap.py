@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -561,9 +563,97 @@ def _detect_supervisor() -> str | None:
     return None
 
 
+def _bind_host_for_check(host: str) -> str:
+    """Normalize a configured host into a concrete address for bind checks.
+
+    Wildcard binds ("", "0.0.0.0", "::", "[::]") are probed on loopback,
+    matching server.py's _abort_if_already_serving behavior. Everything else
+    is used verbatim so a specific interface address is checked as-is.
+    """
+    if host in ("", "0.0.0.0", "::", "[::]"):
+        return "127.0.0.1"
+    return host
+
+
+def _port_is_available(host: str, port: int) -> bool:
+    """Return True iff a TCP socket can bind host:port right now.
+
+    Point-in-time check only: a successful bind here does not guarantee the
+    server's later bind will succeed (another process may grab the port in
+    between). Actual bind failures remain authoritative.
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _find_free_port(host: str, start_port: int, attempts: int = 20) -> int | None:
+    """Return the first available port at or above start_port, or None."""
+    for candidate in range(start_port + 1, start_port + 1 + attempts):
+        if candidate > 65535:
+            break
+        if _port_is_available(host, candidate):
+            return candidate
+    return None
+
+
+def _check_port_available(host: str, port: int) -> None:
+    """Preflight bind check. Raise RuntimeError with an actionable message.
+
+    Distinguishes a port conflict (address in use) from an invalid bind
+    address or other socket error, and suggests a free alternative without
+    silently switching ports or modifying persistent configuration.
+    """
+    check_host = _bind_host_for_check(host)
+    family = socket.AF_INET6 if ":" in check_host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((check_host, port))
+        return
+    except OSError as exc:
+        if exc.errno in (errno.EADDRINUSE, 48, 10048):
+            alternative = _find_free_port(check_host, port)
+            lines = [
+                f"Port {port} on {host} is already in use by another service.",
+            ]
+            if alternative is not None:
+                lines.append(
+                    f"Try an available port instead: ./start.sh {alternative}"
+                )
+                lines.append(
+                    f"Or set HERMES_WEBUI_PORT={alternative} in {REPO_ROOT / '.env'}."
+                )
+            else:
+                lines.append(
+                    "No free alternative port was found nearby; choose one manually."
+                )
+            lines.append(
+                "The existing service was left untouched; no configuration was changed."
+            )
+            raise RuntimeError(" ".join(lines)) from exc
+        raise RuntimeError(
+            f"Cannot bind {host}:{port} — {exc}. "
+            "Check that the host address is valid and available on this machine."
+        ) from exc
+    finally:
+        sock.close()
+
+
 def main() -> int:
     args = parse_args()
     ensure_supported_platform()
+
+    # Preflight: fail fast on an occupied port before installing the agent,
+    # setting up dependencies, creating state, or launching the server.
+    _check_port_available(args.host, args.port)
 
     agent_dir = discover_agent_dir()
     if not agent_dir and not hermes_command_exists():
