@@ -174,7 +174,12 @@ _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 WEBUI_LOCAL_CHAT_BACKEND = "legacy"
 
 
-def _gateway_model_field(model: str | None) -> str:
+def _gateway_model_field(
+    model: str | None,
+    *,
+    session_provider: str | None = None,
+    profile: str | None = None,
+) -> str:
     """Return the bare model name to put in a gateway request body.
 
     The picker and ``_resolve_compatible_session_model_state`` intentionally
@@ -186,14 +191,49 @@ def _gateway_model_field(model: str | None) -> str:
     Parsing is delegated to ``config._parse_provider_qualified_model_id()`` so
     a multi-segment custom provider ID (``@custom:backup:model-a``) yields the
     real model (``model-a``) instead of a positional-split fragment.
+
+    ``profile`` is the SESSION's profile: configured custom-provider
+    identities are resolved from that profile's ``config.yaml``, never from
+    the ambient config, so a ``custom:<name>`` defined only in the profile
+    still keeps its slug instead of being peeled into the generic lane
+    (#7905 CR CORE 3). ``session_provider`` is the session's stored
+    ``model_provider`` — the positive evidence that a ``@custom:<seg>:<tag>``
+    string belongs to the GENERIC lane (#7904); without it master's parse
+    stands.
     """
     if not model:
         return ""
     value = str(model).strip()
-    parsed = _parse_provider_qualified_model_id(value)
+    generic_custom = str(session_provider or "").strip().lower() == "custom"
+    config_obj = None
+    if str(profile or "").strip():
+        config_obj = _gateway_profile_config(profile)
+    parsed = _parse_provider_qualified_model_id(
+        value, generic_custom=generic_custom, config_obj=config_obj
+    )
     if parsed:
         return str(parsed[0] or "").strip()
     return value
+
+
+def _gateway_profile_config(profile) -> dict | None:
+    """Config dict of the SESSION's profile, never the process-active one.
+
+    Mirrors ``_gateway_endpoint_for_profile``: the home is resolved from the
+    profile name and read straight off disk, so a provider configured only in
+    that profile is visible here. Returns ``None`` (ambient config) only when
+    the profile itself cannot be resolved.
+    """
+    try:
+        from api import profiles as _profiles
+        from api.config import get_config_for_profile_home
+
+        home = _profiles.get_hermes_home_for_profile(str(profile or "").strip())
+        cfg = get_config_for_profile_home(home)
+        return cfg if isinstance(cfg, dict) else None
+    except Exception:
+        logger.debug("gateway model field profile config lookup failed", exc_info=True)
+        return None
 
 
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
@@ -1019,7 +1059,11 @@ def _run_gateway_runs_api_streaming(
         if isinstance(run_input, list):
             run_input = [{"role": "user", "content": run_input}]
         run_body = {
-            "model": _gateway_model_field(model) or "default",
+            "model": _gateway_model_field(
+                model,
+                session_provider=active_provider,
+                profile=getattr(session, "profile", None),
+            ) or "default",
             "input": run_input,
             **body_extras,
             "session_id": session_id,
@@ -2096,7 +2140,11 @@ def _run_gateway_chat_streaming(
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
                     message_content = str(msg_text or "")
             body = {
-                "model": _gateway_model_field(model) or "default",
+                "model": _gateway_model_field(
+                    model,
+                    session_provider=model_provider,
+                    profile=getattr(s, "profile", None),
+                ) or "default",
                 "stream": True,
                 "messages": [*prefill_messages, {"role": "user", "content": message_content}],
             }

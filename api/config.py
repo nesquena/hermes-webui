@@ -2715,81 +2715,102 @@ class _ConfiguredCustomLaneModel(str):
     __slots__ = ()
 
 
-def _custom_slug_looks_like_endpoint(seg: str) -> bool:
-    """True when single custom slug segment looks like an IP address, localhost, or domain."""
-    seg = str(seg or "").strip()
-    if not seg:
-        return False
-    if seg.lower() == "localhost":
-        return True
-    try:
-        import ipaddress
+def _configured_custom_provider_identity(
+    slug_rest: str,
+    config_obj: dict | None = None,
+) -> bool:
+    """True when ``custom:<slug_rest>`` names a provider that config declares.
 
-        ipaddress.ip_address(seg)
-        return True
-    except ValueError:
-        pass
-    if "." in seg:
-        tld = seg.rsplit(".", 1)[1]
-        if tld.isalpha() and len(tld) >= 2:
+    ``@custom:<segment>:<tag>`` is ambiguous as a string, so "is ``<segment>``
+    a configured custom provider?" must answer from EVERY identity shape the
+    installed Agent accepts — not just the ``custom_providers:`` list:
+
+      * ``custom_providers: [{name: omni}]``   -> ``custom:omni``
+      * ``providers: {custom:omni: {...}}``     -> the mapping key itself
+      * ``providers: {omni: {...}}``            -> the bare mapping key
+      * endpoint-derived slugs already covered by ``custom:<host>:<port>``
+
+    ``config_obj`` is the config the caller is resolving against (the session
+    profile on the gateway path); ``None`` reads the ambient ``cfg``. Both
+    shapes are checked together so a profile that declares ``custom:omni``
+    only under ``providers:`` is still recognised (#7905 CR CORE 1/CORE 3).
+
+    ``slug_rest`` is everything after ``custom:`` except the final model
+    segment, so it can itself be multi-segment (``mybox:my-model`` for
+    ``@custom:mybox:my-model:latest``). Every colon-delimited prefix is
+    tested, because a named provider may claim any leading span of it.
+    """
+    rest = str(slug_rest or "").strip().lower()
+    if not rest:
+        return False
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    if not isinstance(source, dict):
+        return False
+    providers_cfg = source.get("providers")
+    keys: set[str] = set()
+    if isinstance(providers_cfg, dict):
+        keys = {
+            str(key).strip().lower()
+            for key in providers_cfg.keys()
+            if isinstance(key, str)
+        }
+    parts = rest.split(":")
+    for index in range(1, len(parts) + 1):
+        prefix = ":".join(parts[:index])
+        if f"custom:{prefix}" in keys or prefix in keys:
+            return True
+        if _named_custom_provider_slug_for_provider(f"custom:{prefix}", source):
             return True
     return False
 
 
-def _looks_like_model_tag(candidate: str) -> bool:
-    """True when candidate looks like a model tag (e.g. :latest, :free, :7b, :0731, :q4_k_m)."""
-    candidate = str(candidate or "").strip()
-    if not candidate:
-        return False
-    lower = candidate.lower()
-    if lower in {
-        "latest", "free", "preview", "thinking", "beta", "default",
-        "instruct", "chat", "base", "fp16", "fp32", "bf16", "int8", "int4",
-        "mini", "nano", "small", "medium", "large", "turbo", "light",
-    }:
-        return True
-    import re
-
-    # Parameter size / architecture suffix: e.g. 7b, 8b, 70b, 1.5b, 8x7b, 7b-instruct
-    if re.match(r"^(\d+(\.\d+)?[bmk]|(\d+x\d+[bmk]))(-.*)?$", lower):
-        return True
-    # Quantization tag: e.g. q4_0, q4_k_m, q8_0
-    if re.match(r"^q\d+.*$", lower):
-        return True
-    # Version / date stamp: e.g. v1, v2, 0731, 20240806, 1.0
-    if re.match(r"^(v?\d+(\.\d+)+|\d{4,8})$", lower):
-        return True
-    return False
-
-
-def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
+def _parse_provider_qualified_model_id(
+    model_id: str,
+    *,
+    generic_custom: bool = False,
+    config_obj: dict | None = None,
+) -> tuple[str, str] | None:
     """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
 
     The provider segment can contain colons for named custom providers, while
     the model segment can also contain colons for tags such as ``:free``.
     Keep this parser shared with ``resolve_model_provider`` so any caller that
     compares route-hinted model lanes uses the same grammar.
+
+    ``@custom:<segment>:<tag>`` is ambiguous as a bare string: it is either
+    generic ``custom`` + model ``<segment>:<tag>`` (#7904) or named
+    ``custom:<segment>`` + model ``<tag>`` (#6722/#7182). The tag is therefore
+    peeled ONLY when the caller brings POSITIVE evidence that the selection
+    belongs to the generic lane — ``generic_custom=True`` (the session's
+    stored ``model_provider == "custom"``, or the picker writing the generic
+    route) — and even then never when ``<segment>`` is itself a configured
+    identity (``providers: {custom:<name>: …}`` OR ``custom_providers:``),
+    resolved against ``config_obj`` (the session profile on the gateway path)
+    instead of the ambient config. Everything else keeps master's parse, so a
+    removed provider keeps failing on ``custom:<name>`` instead of being
+    silently rerouted to the generic endpoint (#7905 CR).
     """
     candidate = str(model_id or "").strip()
     if not candidate.startswith("@") or ":" not in candidate:
         return None
     inner = candidate[1:]
     provider_hint, bare_model = inner.rsplit(":", 1)
-    if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
+    if provider_hint.startswith("custom:"):
         _slug_rest = provider_hint[len("custom:"):]
-        if not _custom_slug_rest_looks_like_host_port(_slug_rest):
-            provider_hint, extra = provider_hint.rsplit(":", 1)
-            bare_model = f"{extra}:{bare_model}"
-    elif provider_hint.startswith("custom:") and ":" not in provider_hint[len("custom:"):]:
-        _seg = provider_hint[len("custom:"):]
-        _named = bool(_named_custom_provider_slug_for_provider(provider_hint))
-        _endpoint_like = _custom_slug_looks_like_endpoint(_seg)
-        if not _named and not _endpoint_like and _looks_like_model_tag(bare_model):
+        if generic_custom and not _configured_custom_provider_identity(
+            _slug_rest, config_obj
+        ):
+            # Generic lane: every colon after ``custom:`` belongs to the model.
+            bare_model = f"{_slug_rest}:{bare_model}"
+            provider_hint = "custom"
+        elif (
+            provider_hint.count(":") >= 2
+            and not _custom_slug_rest_looks_like_host_port(_slug_rest)
+        ):
             provider_hint, extra = provider_hint.rsplit(":", 1)
             bare_model = f"{extra}:{bare_model}"
     elif (provider_hint not in _PROVIDER_MODELS
-            and provider_hint not in _PROVIDER_DISPLAY
-            and not provider_hint.startswith("custom:")):
+            and provider_hint not in _PROVIDER_DISPLAY):
         provider_hint, bare_model = inner.split(":", 1)
     return bare_model, provider_hint
 
@@ -2910,7 +2931,12 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     return matches[0] if matches else None
 
 
-def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
+def resolve_model_provider(
+    model_id: str,
+    *,
+    explicitly_picked: bool = False,
+    session_provider: str | None = None,
+) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -2940,6 +2966,16 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     leftover, e.g. #433's ``openai/gpt-5.4`` on a bare-only relay) still gets the
     legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
     (endpoint-advertised ids) always takes precedence over this flag.
+
+    ``session_provider``: the session's STORED ``model_provider``. It is the
+    only positive evidence available that a ``@custom:<segment>:<tag>`` string
+    belongs to the GENERIC ``custom`` lane (#7904): when it is exactly
+    ``"custom"`` the tag is peeled off ``<segment>``, otherwise the string
+    keeps master's parse — so a saved ``@custom:<name>:<tag>`` for a named (or
+    since-removed) provider still routes to ``custom:<name>`` and fails
+    visibly instead of being silently rerouted (#7905 CR). Callers that hold
+    the session/request provider pass it; without it the string alone stays
+    ambiguous and master's grammar wins.
     """
     config_provider = None
     config_base_url = None
@@ -2986,6 +3022,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
 
     # Read before the strip below, which returns a plain str.
     configured_custom_lane = isinstance(model_id, _ConfiguredCustomLaneModel)
+    # Positive evidence for the GENERIC ``custom`` lane (#7904): the session's
+    # own stored provider. Anything else leaves the grammar at master's parse.
+    generic_custom_lane = str(session_provider or "").strip().lower() == "custom"
     model_id = (model_id or "").strip()
     if not model_id:
         return _finalize(model_id, config_provider, config_base_url)
@@ -3178,7 +3217,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     #
     # Exception: ``custom:<ip-or-host>:<port>`` is a single logical slug derived
     # from OpenAI ``base_url`` authority and contains no eaten model segments.
-    parsed_provider_hint = _parse_provider_qualified_model_id(model_id)
+    # #7904/#7905: the tag is peeled out of ``custom:<segment>`` ONLY with the
+    # session's positive evidence for the generic lane, and never when the
+    # segment is itself a configured identity (``providers: {custom:<name>}``
+    # or ``custom_providers:``) — otherwise master's parse stands.
+    parsed_provider_hint = _parse_provider_qualified_model_id(
+        model_id, generic_custom=generic_custom_lane
+    )
     if parsed_provider_hint is not None:
         bare_model, provider_hint = parsed_provider_hint
         # Session/send/handoff shapes encode the provider as @custom:<slug>:model
@@ -5040,7 +5085,8 @@ def canonical_model_provider_lane(model_id: str, model_provider: str | None = No
     if not model:
         return "", provider
     resolved_model, resolved_provider, _ = resolve_model_provider(
-        model_with_provider_context(model, provider)
+        model_with_provider_context(model, provider),
+        session_provider=provider,
     )
     resolved_provider = str(resolved_provider or "").strip() or None
     return str(resolved_model or "").strip(), resolved_provider

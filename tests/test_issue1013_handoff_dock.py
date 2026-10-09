@@ -249,7 +249,7 @@ def test_no_api_key_handoff_summary_persists_fallback_summary(monkeypatch):
             {"role": "assistant", "content": "I'll help you", "timestamp": 2.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None, **_kwargs: ("gpt-test", "openrouter", None))
 
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
     fake_runtime_module.resolve_runtime_provider = lambda requested=None: {"api_key": "", "provider": "openrouter", "base_url": None}
@@ -359,7 +359,7 @@ def test_exception_handoff_summary_persists_fallback_summary(monkeypatch):
             {"role": "assistant", "content": "Sure, I can help", "timestamp": 2.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None, **_kwargs: ("gpt-test", "openrouter", None))
 
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
     fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
@@ -530,7 +530,7 @@ def test_handoff_summary_retries_once_when_length_limit_reached(monkeypatch):
             {"role": "assistant", "content": "Step 1 is done, step 2 is pending.", "timestamp": 4.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None, **_kwargs: ("gpt-test", "openrouter", None))
 
     completion_calls = []
 
@@ -663,7 +663,7 @@ def test_handoff_summary_codex_output_cap_matches_provider_compatibility(
     monkeypatch.setattr(
         cfg,
         "resolve_model_provider",
-        lambda resolved_model=None: ("gpt-test", provider, base_url),
+        lambda resolved_model=None, **_kwargs: ("gpt-test", provider, base_url),
     )
     monkeypatch.setattr(
         routes,
@@ -764,7 +764,7 @@ def test_handoff_summary_falls_back_when_retry_still_incomplete(monkeypatch):
             {"role": "assistant", "content": "Yes, one more check is needed.", "timestamp": 4.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None, **_kwargs: ("gpt-test", "openrouter", None))
 
     class _Client:
         class completions:
