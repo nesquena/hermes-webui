@@ -381,8 +381,26 @@ def _tls_probe_enabled() -> bool:
     )
 
 
-def _health_ok(url: str, verify: bool = True) -> bool:
-    """Single /health request. Returns True iff the server answered with ok.
+_STATUS_OK_MARKER = b'"status": "ok"'
+
+# Fields only the WebUI's own /health answer carries (api/routes.py
+# ``_handle_health``). Used to tell OUR server apart from an unrelated
+# service that merely answers 200 with a generic ``{"status": "ok"}`` on
+# the same port.
+_HERMES_HEALTH_MARKERS = (b'"server_started_at"', b'"sessions"')
+
+
+def _health_ok(
+    url: str,
+    verify: bool = True,
+    markers: tuple[bytes, ...] = (_STATUS_OK_MARKER,),
+) -> bool:
+    """Single /health request. True iff the body carries every marker.
+
+    The default marker is the ``"status": "ok"`` field every WebUI answer
+    has. Callers that must not mistake a foreign listener for the WebUI pass
+    ``markers=_HERMES_HEALTH_MARKERS``: a generic ok without the Hermes
+    fields is then rejected.
 
     ``verify=False`` disables TLS certificate verification (self-signed certs).
     """
@@ -398,13 +416,21 @@ def _health_ok(url: str, verify: bool = True) -> bool:
         context.verify_mode = ssl.CERT_NONE
     try:
         with urllib.request.urlopen(url, timeout=2, context=context) as response:  # nosec B310
-            return b'"status": "ok"' in response.read()
+            body = response.read()
     except Exception:
         return False
+    return all(marker in body for marker in markers)
 
 
-def wait_for_health(url: str, timeout: float = 25.0) -> str:
+def wait_for_health(
+    url: str, timeout: float = 25.0, markers: tuple[bytes, ...] = ()
+) -> str:
     """Poll /health until the server answers ok or the timeout elapses.
+
+    ``markers`` overrides which fields the body must carry (the default is
+    the ``"status": "ok"`` field alone). Bootstrap's own probe of an
+    occupied port passes ``_HERMES_HEALTH_MARKERS`` so a foreign
+    ok-answering service is never mistaken for the WebUI.
 
     Returns the scheme that actually answered ("https" or "http") on success,
     or "" on timeout. The scheme string is truthy on success, so existing
@@ -426,6 +452,11 @@ def wait_for_health(url: str, timeout: float = 25.0) -> str:
     # Validate URL scheme to prevent file:// and other dangerous schemes
     if not url.startswith(("http://", "https://")):
         raise ValueError(f"Invalid health check URL: {url}")
+    required = markers or (_STATUS_OK_MARKER,)
+
+    def probe(url_: str, verify: bool = True) -> bool:
+        return _health_ok(url_, verify=verify, markers=required)
+
     deadline = time.time() + timeout
     https = _tls_probe_enabled()
     insecure_optin = _truthy(os.getenv("HERMES_WEBUI_TLS_INSECURE_PROBE"))
@@ -438,16 +469,16 @@ def wait_for_health(url: str, timeout: float = 25.0) -> str:
     warned = False
     while time.time() < deadline:
         if not https:
-            if _health_ok(http_url, verify=True):
+            if probe(http_url, verify=True):
                 return "http"
         else:
             if insecure_optin:
-                if _health_ok(https_url, verify=False):
+                if probe(https_url, verify=False):
                     return "https"
             else:
-                if _health_ok(https_url, verify=True):
+                if probe(https_url, verify=True):
                     return "https"
-                if _health_ok(https_url, verify=False):
+                if probe(https_url, verify=False):
                     if not warned:
                         warned = True
                         warn(
@@ -457,7 +488,7 @@ def wait_for_health(url: str, timeout: float = 25.0) -> str:
                         )
                     return "https"
             # server.py may have fallen back to plain HTTP (cert/key unloadable).
-            if _health_ok(http_url, verify=True):
+            if probe(http_url, verify=True):
                 return "http"
         time.sleep(0.4)
     return ""
@@ -610,12 +641,23 @@ def _find_free_port(host: str, start_port: int, attempts: int = 20) -> int | Non
     return None
 
 
+class PortInUseError(RuntimeError):
+    """The configured port is already bound by another listener.
+
+    A distinct type because only THIS failure may be our own WebUI already
+    running: an invalid or unreachable bind address (EADDRNOTAVAIL and
+    friends) must stay a hard error instead of being probed for a server.
+    """
+
+
 def _check_port_available(host: str, port: int) -> None:
-    """Preflight bind check. Raise RuntimeError with an actionable message.
+    """Preflight bind check. Raise with an actionable message.
 
     Distinguishes a port conflict (address in use) from an invalid bind
     address or other socket error, and suggests a free alternative without
-    silently switching ports or modifying persistent configuration.
+    silently switching ports or modifying persistent configuration. A
+    conflict raises ``PortInUseError``; every other bind failure raises a
+    plain ``RuntimeError`` so its cause stays visible.
     """
     check_host = _bind_host_for_check(host)
     family = socket.AF_INET6 if ":" in check_host else socket.AF_INET
@@ -646,7 +688,7 @@ def _check_port_available(host: str, port: int) -> None:
             lines.append(
                 "The existing service was left untouched; no configuration was changed."
             )
-            raise RuntimeError(" ".join(lines)) from exc
+            raise PortInUseError(" ".join(lines)) from exc
         raise RuntimeError(
             f"Cannot bind {host}:{port} — {exc}. "
             "Check that the host address is valid and available on this machine."
@@ -664,9 +706,18 @@ def _already_serving_scheme(host: str, port: int) -> str:
     bootstrap when neither curl nor wget is installed. Advising a second
     instance on the same state dir in that case is wrong. Wildcard binds are
     probed on localhost, where a server bound to 0.0.0.0 answers.
+
+    Only the WebUI's own payload counts (``_HERMES_HEALTH_MARKERS``): any
+    other service that happens to answer a generic ``{"status": "ok"}`` on
+    that port is a foreign listener, so bootstrap keeps reporting the
+    conflict.
     """
     probe_host = "localhost" if host in ("", "0.0.0.0", "::", "[::]") else host
-    return wait_for_health(f"http://{probe_host}:{port}/health", timeout=1.0)
+    return wait_for_health(
+        f"http://{probe_host}:{port}/health",
+        timeout=1.0,
+        markers=_HERMES_HEALTH_MARKERS,
+    )
 
 
 def main() -> int:
@@ -677,12 +728,15 @@ def main() -> int:
     # setting up dependencies, creating state, or launching the server.
     try:
         _check_port_available(args.host, args.port)
-    except RuntimeError:
+    except PortInUseError:
         # 10.10 (review #8112, fix 1): an occupied port is not automatically a
         # foreign service. If a healthy WebUI already answers there, take the
         # already-running path - report it ready and leave it untouched. A
         # foreground/supervisor launch would be a second server on the same
-        # port, so it keeps the duplicate-start error.
+        # port, so it keeps the duplicate-start error. Only a port conflict is
+        # recovered here (review #8112, fix 2): a bind-address error stays a
+        # hard error, otherwise a remote --host would be reported as running
+        # while nothing local ever started.
         _scheme = _already_serving_scheme(args.host, args.port)
         if not _scheme or args.foreground or _detect_supervisor():
             raise

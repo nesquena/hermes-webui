@@ -91,6 +91,12 @@ A port held by a healthy WebUI is not a conflict: re-running bootstrap (or
 instance ready and exits 0. Only a foreground/supervisor launch, which
 would be a second server on the same port, reports the duplicate start.
 
+Only the WebUI's own `/health` payload counts as that running instance: any
+other service, including one answering a generic `{"status": "ok"}`, is
+reported as the conflict above. A bind address that cannot be used at all
+(`--host` naming another machine, for example) stays a hard error, so a
+bootstrap that started nothing never claims to be running.
+
 ## What the wizard checks
 
 The first screen reports the runtime state WebUI can see:

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
+import http.server
 import socket
 import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -181,7 +185,9 @@ def test_real_wildcard_check_catches_interface_only_listener() -> None:
 
 
 def _raise_in_use(*_args: object, **_kwargs: object) -> None:
-    raise RuntimeError("Port 8787 on 127.0.0.1 is already in use by another service.")
+    raise bootstrap.PortInUseError(
+        "Port 8787 on 127.0.0.1 is already in use by another service."
+    )
 
 
 def _stub_main_up_to_preflight(monkeypatch: pytest.MonkeyPatch, argv: list) -> None:
@@ -206,7 +212,8 @@ def test_already_serving_scheme_probes_localhost_for_wildcard(
 ) -> None:
     seen: list = []
 
-    def fake_wait(url: str, timeout: float = 0.0) -> str:
+    def fake_wait(url: str, timeout: float = 0.0, **kwargs: object) -> str:
+        assert kwargs.get("markers") == bootstrap._HERMES_HEALTH_MARKERS
         seen.append((url, timeout))
         return "http"
 
@@ -218,7 +225,9 @@ def test_already_serving_scheme_probes_localhost_for_wildcard(
 def test_already_serving_scheme_empty_when_nothing_answers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(bootstrap, "wait_for_health", lambda url, timeout=0.0: "")
+    monkeypatch.setattr(
+        bootstrap, "wait_for_health", lambda url, timeout=0.0, **kwargs: ""
+    )
     assert bootstrap._already_serving_scheme("127.0.0.1", 8787) == ""
 
 
@@ -265,4 +274,77 @@ def test_occupied_port_in_foreground_keeps_duplicate_start_error(
     monkeypatch.setattr(bootstrap, "_already_serving_scheme", lambda host, port: "http")
 
     with pytest.raises(RuntimeError, match="already in use"):
+        bootstrap.main()
+
+
+def test_port_conflict_raises_the_dedicated_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a conflict is recoverable; main() catches just this type."""
+    monkeypatch.setattr(bootstrap.socket, "socket", _BusySocket)
+    monkeypatch.setattr(bootstrap, "_port_is_available", lambda host, candidate: False)
+    with pytest.raises(bootstrap.PortInUseError):
+        bootstrap._check_port_available("127.0.0.1", 9099)
+
+
+@contextlib.contextmanager
+def _serve(body: bytes) -> Iterator[int]:
+    """A /health listener that answers 200 with exactly ``body``.
+
+    Yields the port; the server runs on a background thread.
+    """
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    with http.server.HTTPServer(("127.0.0.1", port), _Handler) as httpd:
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield port
+        finally:
+            httpd.shutdown()
+            thread.join(timeout=5)
+
+
+def test_foreign_status_ok_listener_is_not_the_webui() -> None:
+    """A generic status-ok body is a foreign listener, not our WebUI (#8112)."""
+    with _serve(b'{"status": "ok"}') as port:
+        assert bootstrap._already_serving_scheme("127.0.0.1", port) == ""
+
+
+def test_webui_health_payload_still_takes_the_running_path() -> None:
+    """The WebUI payload from api/routes.py::_handle_health is recognised."""
+    body = (
+        b'{"status": "ok", "sessions": 0, "server_started_at": 1.0, '
+        b'"uptime_seconds": 1.0}'
+    )
+    with _serve(body) as port:
+        assert bootstrap._already_serving_scheme("127.0.0.1", port) == "http"
+
+
+def test_invalid_bind_address_is_not_recovered_as_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EADDRNOTAVAIL stays an error even when a probe would answer.
+
+    With a remote --host the bind fails locally while a health probe can still
+    reach the machine named there; reporting that as "already running" would
+    hide a bootstrap that started nothing at all.
+    """
+    _stub_main_up_to_preflight(monkeypatch, ["--no-browser"])
+    monkeypatch.setattr(bootstrap.socket, "socket", _RefusingSocket)
+    monkeypatch.setattr(bootstrap, "_already_serving_scheme", lambda host, port: "http")
+
+    with pytest.raises(RuntimeError, match="Cannot bind"):
         bootstrap.main()
