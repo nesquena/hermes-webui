@@ -26,7 +26,10 @@ def test_grouped_active_anchor_and_offscreen_preview_heights(tmp_path):
 
 @pytest.mark.parametrize(('script', 'case', 'count'), [
     ('browser_session_virtual_geometry.py', 'projects', 4),
-    ('browser_archived_child_label.py', None, 15588),
+    # The full locale/skin/font matrix can exceed the global 60s limit on
+    # shared CI runners; retain a bounded timeout without dropping scenes.
+    pytest.param('browser_archived_child_label.py', None, 15588,
+                 marks=pytest.mark.timeout(180)),
     ('browser_session_virtual_settle.py', None, 22),
 ])
 def test_project_controls_and_reference_only_labels(tmp_path, script, case, count):
@@ -34,7 +37,8 @@ def test_project_controls_and_reference_only_labels(tmp_path, script, case, coun
     command = [sys.executable, str(ROOT / 'tests' / script), '--output', str(tmp_path / 'report')]
     if case:
         command += ['--case', case]
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=90)
+    driver_timeout = 150 if script == 'browser_archived_child_label.py' else 90
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=driver_timeout)
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads((tmp_path / 'report/report.json').read_text())
     assert len(report['results']) == count
