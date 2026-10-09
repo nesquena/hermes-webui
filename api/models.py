@@ -149,6 +149,14 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
+# When the rows behind each cache key were READ (monotonic), not when they were
+# published. The choose-and-publish fallback in _load_and_cache_cli_sessions
+# orders concurrent rebuilds by this (#4966) instead of by expiry/publication
+# time. Stored BESIDE the entry, never inside it: the entry keeps the
+# (expires_at, stamp, sessions) positional contract that the read path in
+# get_cli_sessions() and the cache tests unpack. Always mutated under
+# _CLI_SESSIONS_CACHE_LOCK, alongside its cache entry.
+_CLI_SESSIONS_CACHE_READ_STARTED: dict = {}
 # Complete projections retained under an identity that excludes the volatile
 # state.db fingerprint. This store is independently bounded because the stable
 # identity still contains external Claude/session-index stat revisions.
@@ -8690,6 +8698,7 @@ def clear_cli_sessions_cache() -> None:
         global _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
         _CLI_SESSIONS_CACHE_INVALIDATION_VERSION += 1
         _CLI_SESSIONS_CACHE.clear()
+        _CLI_SESSIONS_CACHE_READ_STARTED.clear()
         _CLI_SESSIONS_LAST_KNOWN_GOOD.clear()
     # The sidecar-metadata projection cache is stat-keyed (self-invalidating on
     # any file change), but clear it alongside the CLI cache so an explicit
@@ -8761,7 +8770,9 @@ def _cache_cli_sessions_if_current(
             now + ttl,
             invalidation_stamp,
             copied_sessions,
-            read_started_at if read_started_at is not None else now,
+        )
+        _CLI_SESSIONS_CACHE_READ_STARTED[cache_key] = (
+            read_started_at if read_started_at is not None else now
         )
         stable_key = _cli_sessions_stable_cache_identity(cache_key)
         _CLI_SESSIONS_LAST_KNOWN_GOOD[stable_key] = (
@@ -8773,7 +8784,8 @@ def _cache_cli_sessions_if_current(
             _CLI_SESSIONS_LAST_KNOWN_GOOD.popitem(last=False)
         _CLI_SESSIONS_CACHE.move_to_end(cache_key)
         while len(_CLI_SESSIONS_CACHE) > _CLI_SESSIONS_CACHE_MAX_ENTRIES:
-            _CLI_SESSIONS_CACHE.popitem(last=False)
+            evicted_key, _ = _CLI_SESSIONS_CACHE.popitem(last=False)
+            _CLI_SESSIONS_CACHE_READ_STARTED.pop(evicted_key, None)
     return True
 
 
@@ -8782,13 +8794,14 @@ def _copy_fresh_cli_sessions_cache_entry(cache_key: tuple):
         cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
         if cached_entry is None:
             return None
-        if len(cached_entry) >= 3:
-            cached_expires_at, cached_stamp, cached_sessions = cached_entry[:3]
+        if len(cached_entry) == 3:
+            cached_expires_at, cached_stamp, cached_sessions = cached_entry
         else:
             cached_expires_at, cached_sessions = cached_entry
             cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
         if cached_stamp != _CLI_SESSIONS_CACHE_INVALIDATION_VERSION:
             _CLI_SESSIONS_CACHE.pop(cache_key, None)
+            _CLI_SESSIONS_CACHE_READ_STARTED.pop(cache_key, None)
             return None
         if cached_expires_at <= time.monotonic():
             return None
@@ -8866,15 +8879,14 @@ def _load_and_cache_cli_sessions(
             return _copy_cli_sessions(sessions)
         cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
         if cached_entry is not None:
-            if len(cached_entry) >= 4:
-                cached_expires_at, cached_stamp, cached_sessions, cached_read_started_at = cached_entry[:4]
-            elif len(cached_entry) == 3:
+            if len(cached_entry) == 3:
                 cached_expires_at, cached_stamp, cached_sessions = cached_entry
-                cached_read_started_at = 0.0
             else:
                 cached_expires_at, cached_sessions = cached_entry
                 cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
-                cached_read_started_at = 0.0
+            # Entries written before this key had a recorded read start behave
+            # like a read that started at the epoch: never preferred.
+            cached_read_started_at = _CLI_SESSIONS_CACHE_READ_STARTED.get(cache_key, 0.0)
             # A same-stamp, unexpired entry whose read started after our load started
             # represents strictly newer data. Prefer it over our older read.
             if (
@@ -8889,8 +8901,8 @@ def _load_and_cache_cli_sessions(
             now + ttl,
             invalidation_stamp,
             copied_sessions,
-            loaded_at,
         )
+        _CLI_SESSIONS_CACHE_READ_STARTED[cache_key] = loaded_at
         stable_key = _cli_sessions_stable_cache_identity(cache_key)
         _CLI_SESSIONS_LAST_KNOWN_GOOD[stable_key] = (
             invalidation_stamp,
@@ -8901,7 +8913,8 @@ def _load_and_cache_cli_sessions(
             _CLI_SESSIONS_LAST_KNOWN_GOOD.popitem(last=False)
         _CLI_SESSIONS_CACHE.move_to_end(cache_key)
         while len(_CLI_SESSIONS_CACHE) > _CLI_SESSIONS_CACHE_MAX_ENTRIES:
-            _CLI_SESSIONS_CACHE.popitem(last=False)
+            evicted_key, _ = _CLI_SESSIONS_CACHE.popitem(last=False)
+            _CLI_SESSIONS_CACHE_READ_STARTED.pop(evicted_key, None)
     return _copy_cli_sessions(sessions)
 
 
@@ -10562,6 +10575,7 @@ def get_cli_sessions(
                     cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
                 if cached_stamp != _CLI_SESSIONS_CACHE_INVALIDATION_VERSION:
                     _CLI_SESSIONS_CACHE.pop(cache_key, None)
+                    _CLI_SESSIONS_CACHE_READ_STARTED.pop(cache_key, None)
                 elif cached_expires_at > now:
                     # LRU: a fresh hit is the most-recently-used entry.
                     _CLI_SESSIONS_CACHE.move_to_end(cache_key)

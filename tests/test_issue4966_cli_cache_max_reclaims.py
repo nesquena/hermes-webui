@@ -180,3 +180,49 @@ def test_cli_sessions_cache_fallback_discards_expired_rows_published_during_load
 
     models.clear_cli_sessions_cache()
 
+
+def test_cache_hit_after_rebuild_returns_cached_rows(monkeypatch, tmp_path):
+    """The rows published by a rebuild must stay readable by the cache-hit path.
+
+    ``get_cli_sessions()`` unpacks the entry positionally as
+    ``(expires_at, stamp, sessions)``; a rebuild that publishes an extra field
+    makes the SECOND lookup for the same key raise ``ValueError`` instead of
+    returning the cached rows (greptile P1 on #7846 — 12 tests red in all 15
+    CI shards of run 37884506145).
+    """
+    import api.profiles as profiles
+
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    models.clear_cli_sessions_cache()
+
+    calls = {"count": 0}
+
+    def fake_claude_code_sessions():
+        calls["count"] += 1
+        return [
+            {
+                "session_id": "cache_hit_row",
+                "title": "Cached row",
+                "updated_at": 1,
+                "message_count": 1,
+                "source_tag": "claude_code",
+                "is_cli_session": True,
+            }
+        ]
+
+    monkeypatch.setattr(models, "get_claude_code_sessions", fake_claude_code_sessions)
+
+    try:
+        first = models.get_cli_sessions()
+        second = models.get_cli_sessions()
+    finally:
+        models.clear_cli_sessions_cache()
+
+    assert first == second
+    assert calls["count"] == 1
+    assert second[0]["title"] == "Cached row"
+
