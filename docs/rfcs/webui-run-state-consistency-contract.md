@@ -610,7 +610,10 @@ Window selection and scroll callbacks, including pending animation frames,
 use content-coordinate offsets that include measured project/profile/archive
 controls and date headers. Group spacers use row-only prefix sums, so controls
 and headers are never counted twice. Both consume the same current
-layout. Repainting preserves the visible conversation and its offset;
+layout. With unchanged row order and date-group placement, repainting preserves
+the visible conversation and its offset through row-height or expansion changes.
+Background activity reordering preserves the user's numeric scroll position instead
+of following a moved conversation into its new group, including non-virtual lists;
 reload and leaving search can bring an off-window active conversation into view
 using the rendered row's position, including preceding controls and date headers.
 Overscan membership is not viewport visibility: activation/filter transitions

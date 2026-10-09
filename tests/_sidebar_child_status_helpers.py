@@ -17,6 +17,15 @@ def component_script(source=None):
         "_isSessionEffectivelyStreaming", "_hasPendingUserMessageSignal",
         "_sessionStateTooltip", "_sessionChildBadgeTooltip", "_hasUnreadForSession",
     ]
+    # Extract the navigation seams together: listeners consume modified gestures
+    # through the real profile guard and URL builder, not a no-op adapter.
+    for name in ["_wireSessionNewTabListeners", "_consumeSessionNewTabClick",
+                 "_openSessionUrlInNewTab", "_newTabOpenSupported",
+                 "_newTabOwningProfileAllowed", "_markSessionUrlExact",
+                 "_sessionUrlForSid", "_sidebarSessionProfileName",
+                 "_profileMatchesActiveProfile"]:
+        if "function " + name + "(" in source:
+            names.append(name)
     # New helper is optional so the same harness exercises the exact prior head.
     if "function _sessionRowHasLineageSummary(" in source:
         names.append("_sessionRowHasLineageSummary")
@@ -34,6 +43,7 @@ def component_script(source=None):
 let activeSidForSidebar = 'other';
 const S={session:null,busy:false};
 const _showArchived=false, _sessionSelectMode=false, _showAllProfiles=false;
+const _allSessionsScope={allProfiles:false,profile:'default'};
 const _expandedChildSessionKeys=new Set(), _sessionSwipeReturnOffsets=new Map();
 const _allProjects=[], _lineageReportInflight=new Map(), _lineageReportCache=new Map();
 const _expandedLineageKeys=new Set();

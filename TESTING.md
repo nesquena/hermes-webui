@@ -15,6 +15,21 @@
 
 ---
 
+## Background sidebar refresh and new-tab fixture compatibility
+
+Run `./scripts/test.sh tests/test_session_background_sort_browser.py` with
+Playwright and Chromium installed. The 18-case browser gate executes production
+activity sorting, date grouping, measured windowing and rows at 300px/180px sidebar
+widths, with 40/120 conversations. It checks a partly clipped first row moving
+into Today while selection is outside the viewport, unchanged-height refresh,
+stable-order density/expansion corrections, bounded virtual DOM, and modifier /
+middle-button navigation with child exact-target URLs and click consumption.
+`python tests/browser_session_background_sort.py --output <dir> --before-ref <sha>`
+replays the same pipeline against an exact source revision and retains reports
+and paired screenshots. It supplies synthetic snapshots, not a live Agent/SSE run.
+The shared extracted row fixture composes real new-tab helpers; only outbound
+navigation is recorded in the navigation checks.
+
 ## Cancelled-journal recovery combinations
 
 Run `./scripts/test.sh tests/test_cancel_recovery_properties.py tests/test_cancel_restart_journal_recovery.py`.

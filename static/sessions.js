@@ -8447,7 +8447,7 @@ function _sessionVirtualLayout(list, rows, query, activeSid){
       active?activeSid:'']);
     const id=s.session_id,old=previous.get(id);
     if(old&&old.shape===shape) layout.measured.set(id,old);
-    return {id,shape,summary,active};
+    return {id,shape,summary,active,group:row.group.label};
   });
   _sessionVirtualOffsets(layout);
   list._sessionVirtualLayout=layout;
@@ -9210,6 +9210,16 @@ function renderSessionListFromCache(){
     virtualGroups.push({g,body,isGroupCollapsed});
   }
   const previousVirtualLayout=list._sessionVirtualLayout;
+  // Geometric anchors correct height changes, not background reordering. A
+  // moved conversation must not drag the viewport to its new activity bucket.
+  // Compare before _sessionVirtualLayout replaces the retained row projection.
+  const stableRowOrder=previousVirtualLayout&&previousVirtualLayout.rows.length===flatSessionRows.length&&
+    previousVirtualLayout.rows.every((row,i)=>{
+      if(row.id!==flatSessionRows[i].session.session_id) return false;
+      const wasGroupStart=i===0||row.group!==previousVirtualLayout.rows[i-1].group;
+      const isGroupStart=i===0||flatSessionRows[i].group!==flatSessionRows[i-1].group;
+      return wasGroupStart===isGroupStart;
+    });
   const virtualLayout=_sessionVirtualLayout(list,flatSessionRows,searchQueryRaw,activeSidForSidebar);
   // Empty group bodies expose cumulative controls/header geometry independently
   // of row estimates. Spacers remain row-only; windows use content coordinates.
@@ -9222,7 +9232,7 @@ function renderSessionListFromCache(){
   }
   virtualLayout.chromeOffsets.push(virtualLayout.chromeOffsets.at(-1)||0);
   _sessionVirtualOffsets(virtualLayout);
-  const resizedAnchorIndex=previousVirtualLayout!==virtualLayout&&viewportAnchorBeforeRender
+  const resizedAnchorIndex=stableRowOrder&&previousVirtualLayout!==virtualLayout&&viewportAnchorBeforeRender
     ?flatSessionRows.findIndex(row=>row.session.session_id===viewportAnchorBeforeRender.id):-1;
   const renderedVirtualRows=[],virtualSpacers=[];
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
@@ -9301,7 +9311,7 @@ function renderSessionListFromCache(){
     // scrollTop drops to 0 — producing a "scroll keeps jumping back" feel
     // when the list scrolls naturally. Fixed for #1669 follow-up.
     list.scrollTop=listScrollTopBeforeRender;
-    if(viewportAnchorBeforeRender){
+    if(stableRowOrder&&viewportAnchorBeforeRender){
       const anchor=renderedVirtualRows.find(r=>r.el.dataset.sid===viewportAnchorBeforeRender.id);
       if(anchor) list.scrollTop+=anchor.el.getBoundingClientRect().top-list.getBoundingClientRect().top-viewportAnchorBeforeRender.y;
     }
