@@ -273,6 +273,55 @@
     );
   }
 
+  async function navigationAfterAFailedLoadKeepsADeliberateScale() {
+    // Maintainer re-gate 2026-10-09T00:47:03Z (static/ui.js:2861): a deliberate
+    // zoom must survive a failed load. _imgOnError used to rewrite fitScale
+    // (first to a constant 1, then to state.scale), so a zoom that landed on
+    // exactly the baseline was reclassified as "at fit" and the next image
+    // threw it away. The 1350x800 start fits at ~0.8 and "=" multiplies by
+    // 1.25, which is exactly the reported 0.8 -> 1.0 -> 0.675 loss.
+    var box = await openBox(1350, 800, {
+      images: [
+        { src: svgDataUrl(1350, 800), alt: "wide" },
+        { src: "data:image/png;base64,AAAA", alt: "broken" },
+        { src: svgDataUrl(1600, 900), alt: "medium" },
+      ],
+      index: 0,
+    });
+    approx(box.z.scale, box.z.fitScale, 1e-9, "fixture: the wide image opens at its fit");
+    assert_(box.z.fitScale < 1, "fixture: the wide image needs a downscale, fit=" + box.z.fitScale);
+    var fitBefore = box.z.fitScale;
+    key("=");
+    var deliberate = box.z.scale;
+    assert_(deliberate > fitBefore, "fixture: '=' must zoom past the fit, got " + deliberate);
+    key("ArrowRight");
+    for (var i = 0; i < 180 && box.z.boxW; i++) await frame();
+    assert_(box.z.boxW === 0, "the broken image must drop the geometry");
+    approx(
+      box.z.fitScale, fitBefore, 1e-9,
+      "a failed load must RETAIN the previous fit baseline instead of rewriting it: " +
+        box.z.fitScale + " vs " + fitBefore
+    );
+    approx(
+      box.z.scale, deliberate, 1e-9,
+      "a failed load must not touch the deliberate scale: " + box.z.scale + " vs " + deliberate
+    );
+    key("ArrowRight");
+    for (var j = 0; j < 180 && !box.z.boxW; j++) await frame();
+    for (var a = 0; a < 4; a++) await frame();
+    assert_(box.z.boxW === 1600, "the recovered load must adopt the medium image's geometry");
+    approx(
+      box.z.scale, deliberate, 1e-9,
+      "a deliberate zoom must not be reinterpreted as 'at fit' by the next image: " +
+        box.z.scale + " vs " + deliberate
+    );
+    assert_(
+      Math.abs(box.z.scale - box.z.fitScale) > 1e-9,
+      "the recovered image must keep the deliberate zoom, not open at its own fit: " +
+        box.z.scale + " vs fit " + box.z.fitScale
+    );
+  }
+
   async function runDesktop(bucket) {
     // 1. Pointer-path pan clamping / centring.
     await run("pointer_extreme_negative_clamp", bucket, async function () {
@@ -647,6 +696,7 @@
 
     await run("navigation_carries_fit_not_raw_scale", bucket, navigationCarriesFit);
     await run("navigation_after_a_failed_load_carries_fit", bucket, navigationAfterAFailedLoadCarriesFit);
+    await run("navigation_after_a_failed_load_keeps_a_deliberate_scale", bucket, navigationAfterAFailedLoadKeepsADeliberateScale);
 
     // 5. Review follow-ups (greptile 2026-10-05): a second pointer must not
     // take the pan over, the document-wide shortcuts must not hijack typing
@@ -916,6 +966,7 @@
   async function runMobile(bucket) {
     await run("navigation_carries_fit_not_raw_scale", bucket, navigationCarriesFit);
     await run("navigation_after_a_failed_load_carries_fit", bucket, navigationAfterAFailedLoadCarriesFit);
+    await run("navigation_after_a_failed_load_keeps_a_deliberate_scale", bucket, navigationAfterAFailedLoadKeepsADeliberateScale);
 
     await run("geometry_circle_size", bucket, async function () {
       var box = await openBox(IMG_W, IMG_H);

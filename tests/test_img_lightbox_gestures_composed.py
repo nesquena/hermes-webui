@@ -215,6 +215,17 @@ class TestComposedReviewFollowups:
     def test_navigation_after_a_failed_load_opens_the_next_image_at_fit_mobile(self, composed):
         _check(composed.mobile, "navigation_after_a_failed_load_carries_fit")
 
+    def test_a_deliberate_scale_survives_a_failed_load(self, composed):
+        """Maintainer re-gate 2026-10-09T00:47:03Z, static/ui.js:2861 — opening a
+        1350x800 image (fit 0.8), pressing '=' (x1.25 -> exactly 1) and then
+        navigating through a broken image to a 1600x900 successor must keep the
+        deliberate 1; HEAD reset it to the successor's 0.675 because the error
+        path had rewritten fitScale to state.scale."""
+        _check(composed.desktop, "navigation_after_a_failed_load_keeps_a_deliberate_scale")
+
+    def test_a_deliberate_scale_survives_a_failed_load_mobile(self, composed):
+        _check(composed.mobile, "navigation_after_a_failed_load_keeps_a_deliberate_scale")
+
 
 # Trusted-input regressions for the 2026-10-06 maintainer gate certificate.
 # These use Playwright's own input pipeline (real mouse/keyboard events), which

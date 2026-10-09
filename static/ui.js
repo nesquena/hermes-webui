@@ -2844,21 +2844,22 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     // navigation re-arms pendingNav and the next successful load re-centres at
     // the preserved scale (greptile follow-up, 2026-10-05).
     //
-    // Keep the at-fit RELATION, not a numeric baseline. _onImgLoad decides
-    // whether the next image opens at ITS own fit with
-    // `Math.abs(state.scale - state.fitScale) < 1e-9`; resetting fitScale to 1
-    // while preserving state.scale made an image that WAS at fit (fitScale != 1)
-    // look user-zoomed, so the next working image opened cropped or undersized
-    // instead of at its own fit (greptile P1, 2026-10-08T23:43:03Z). With no
+    // fitScale is deliberately left ALONE here. It holds the PREVIOUS image's
+    // fit baseline, and the next load compares |scale - fitScale| < 1e-9 to
+    // decide whether the new image opens at ITS own fit. Overwriting it in the
+    // error path misreads the user's zoom either way: a constant 1 made an
+    // image that WAS at fit (fitScale != 1) look user-zoomed and open cropped
+    // or undersized (greptile P1, 2026-10-08T23:43:03Z), while writing
+    // state.scale classified a deliberate zoom that happens to sit at exactly 1
+    // as "at fit", so the next image threw that zoom away and opened at its own
+    // fit (maintainer re-gate 2026-10-09T00:47:03Z, static/ui.js:2861). With no
     // geometry (boxW=0) no scale math runs anyway: _fit() and _imgSetScale()
     // bail out on the missing box.
-    const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;
     state.pendingNav = false;
     state.dragging = false;
     state.dragPointerId = null;
     state.boxW = 0;
     state.boxH = 0;
-    state.fitScale = wasAtFit ? state.scale : 1;
     state.x = 0;
     state.y = 0;
     // Drop the "already initialized" tracking: a failed image has no usable
@@ -3150,8 +3151,15 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   // recovers the image after it has been zoomed/panned out of view.
   const fitBtn = document.createElement('button');
   fitBtn.className = 'img-lightbox-fit';
-  fitBtn.setAttribute('aria-label', t('img_lightbox_fit_title'));
-  fitBtn.setAttribute('title', t('img_lightbox_fit_title'));
+  // static/share.html loads ui.js WITHOUT i18n.js, so `t` may be undefined on
+  // the public share page: calling it threw ReferenceError before the lightbox
+  // mounted and broke every shared image preview (maintainer re-gate
+  // 2026-10-09T00:47:03Z, static/ui.js:3153). Fall back to the English string
+  // (the locale i18n.js ships for img_lightbox_fit_title) and reuse the result
+  // for both attributes.
+  const fitTitle = (typeof t === 'function') ? t('img_lightbox_fit_title') : 'Reset zoom to fit (F)';
+  fitBtn.setAttribute('aria-label', fitTitle);
+  fitBtn.setAttribute('title', fitTitle);
   // Icon-only 36px circle matching the close button: the shared `fit` glyph
   // from the Mermaid icon set removes the text pill that overlapped the image
   // band and lost legibility over light images, and is language-neutral. The

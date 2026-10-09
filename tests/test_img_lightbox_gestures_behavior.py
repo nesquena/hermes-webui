@@ -139,6 +139,39 @@ class TestKeyboardAndButton:
         assert "t('img_lightbox_fit_title')" in src
         assert "_mermaidViewerIcon('fit')" in src
 
+    def test_fit_button_tolerates_a_page_without_i18n(self):
+        """Maintainer re-gate 2026-10-09T00:47:03Z, static/ui.js:3153 (BRICK).
+
+        ``static/share.html`` loads ``ui.js`` WITHOUT ``i18n.js``, so a bare
+        ``t('img_lightbox_fit_title')`` threw ``ReferenceError: t is not
+        defined`` while building the lightbox, and every public-share image
+        preview failed to open. The lookup must be guarded and the result reused
+        for BOTH the aria-label and the title.
+        """
+        src = UI.read_text(encoding="utf-8")
+        marker = (
+            "const fitTitle = (typeof t === 'function') "
+            "? t('img_lightbox_fit_title') : 'Reset zoom to fit (F)';"
+        )
+        assert marker in src, (
+            "the fit control's label must fall back to the English string when "
+            "i18n.js is absent (the public share page)"
+        )
+        assert src.count("t('img_lightbox_fit_title')") == 1, (
+            "the only lookup may be the guarded one"
+        )
+        assert "fitBtn.setAttribute('aria-label', fitTitle);" in src
+        assert "fitBtn.setAttribute('title', fitTitle);" in src
+
+    def test_fit_button_fallback_matches_the_english_locale(self):
+        i18n = I18N.read_text(encoding="utf-8")
+        src = UI.read_text(encoding="utf-8")
+        fallback = re.search(r":\s*'(Reset zoom to fit \(F\))'", src)
+        assert fallback, "the fallback string is missing from ui.js"
+        assert f"img_lightbox_fit_title: '{fallback.group(1)}'" in i18n, (
+            "the ui.js fallback must be exactly the English i18n entry"
+        )
+
     def test_non_english_label_exists(self):
         i18n = I18N.read_text(encoding="utf-8")
         assert "img_lightbox_fit_title" in i18n
@@ -264,24 +297,36 @@ class TestReviewFollowups20261005:
             "_imgOnError must not reset the user's zoom level (greptile follow-up)"
         )
 
-    def test_failed_load_keeps_the_at_fit_relation(self):
-        """greptile P1 (2026-10-08T23:43:03Z): _imgOnError must not clobber
-        fitScale to a constant 1 while preserving scale — the next load uses
-        |scale - fitScale| < 1e-9 to decide whether the new image opens at its
-        own fit, so a constant 1 made an image that WAS at fit look zoomed."""
+    def test_failed_load_retains_the_fit_baseline(self):
+        """greptile P1 (2026-10-08T23:43:03Z) then maintainer re-gate
+        (2026-10-09T00:47:03Z, static/ui.js:2861): the error path must leave
+        ``state.fitScale`` completely ALONE.
+
+        _onImgLoad decides whether the next image opens at ITS own fit with
+        ``|scale - fitScale| < 1e-9``. Rewriting fitScale in the error path
+        misreads the user's zoom either way: a constant 1 made an image that WAS
+        at fit look user-zoomed (greptile), and writing ``state.scale``
+        classified a deliberate zoom that lands on exactly 1 -- the fit of a
+        1350x800 image is 0.8, and the '=' shortcut multiplies by 1.25 -- as
+        "at fit", so the next image threw that zoom away and opened at 0.675.
+        The behavioural proof (real Chromium, '=' then a broken image then a
+        1600x900 successor) lives in the composed suite.
+        """
         src = UI.read_text(encoding="utf-8")
         start = src.index("function _imgOnError() {")
         end = src.index("function _imgPointOnCanvas(", start)
         body = src[start:end]
-        marker = "const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;"
-        assert marker in body, (
-            "_imgOnError must capture the at-fit relation before rewriting fitScale"
+        assert "state.fitScale" not in body, (
+            "_imgOnError must not touch fitScale: retaining the pre-error "
+            "baseline is what keeps a deliberate zoom (even exactly 1) "
+            "distinguishable from 'at fit'"
         )
-        assert body.index(marker) < body.index(
-            "state.fitScale = wasAtFit ? state.scale : 1;"
-        ), "the at-fit relation must be captured before fitScale is rewritten"
-        assert "state.fitScale = 1;" not in body, (
-            "_imgOnError must not reset fitScale to a constant"
+        assert "wasAtFit" not in body, (
+            "the now-unused wasAtFit capture must be gone"
+        )
+        # state.scale is still deliberately preserved across a failed load.
+        assert "state.scale = " not in body, (
+            "_imgOnError must not reset the user's zoom level"
         )
 
 
