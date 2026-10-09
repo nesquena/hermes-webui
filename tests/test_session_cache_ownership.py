@@ -345,3 +345,76 @@ def test_terminal_eviction_noop_when_no_agent_used_this_turn(monkeypatch):
 
     assert "session-1" in config.SESSION_AGENT_CACHE
     assert closed_entries == []
+
+
+def test_rate_limit_error_with_persisted_prior_400_preserves_cached_agent(monkeypatch):
+    """Review item: a transient rate_limit error must NOT evict a healthy agent, even if
+    the session transcript in error_payload contains a previous turn mentioning 'HTTP 400'."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    payload_with_history = {
+        "type": "rate_limit",
+        "message": "Rate limit reached. Please wait a moment.",
+        "session": {
+            "session_id": "session-1",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "**Error:** ❌ Non-retryable error (HTTP 400): Bad Request",
+                    "_error": True,
+                },
+                {
+                    "role": "user",
+                    "content": "Why did HTTP 400 happen?",
+                },
+            ],
+        },
+    }
+
+    _invalidate_cached_agent_on_terminal_error(
+        "session-1",
+        "rate_limit",
+        agent=agent,
+        error_payload=payload_with_history,
+    )
+
+    assert "session-1" in config.SESSION_AGENT_CACHE
+    assert closed_entries == []
+
+
+def test_unregister_and_discard_session_guard_successor_turn():
+    """Review item: teardown of an evicted agent must not unregister or discard a
+    successor agent that has already registered in the session lifecycle."""
+    import api.session_lifecycle as lifecycle
+
+    evicted_agent = SimpleNamespace(session_id="session-1")
+    successor_agent = SimpleNamespace(session_id="session-1")
+
+    # Successor agent registers
+    lifecycle.register_agent("session-1", successor_agent)
+
+    # Evicted agent's unregister/discard must not touch the successor's registration
+    assert lifecycle.unregister_agent("session-1", agent=evicted_agent) is False
+    assert lifecycle._sessions["session-1"]["agent"] is successor_agent
+
+    assert lifecycle.discard_session("session-1", agent=evicted_agent) is False
+    assert "session-1" in lifecycle._sessions
+    assert lifecycle._sessions["session-1"]["agent"] is successor_agent
+
+    # Successor unregisters cleanly
+    assert lifecycle.unregister_agent("session-1", agent=successor_agent) is True
+    assert lifecycle._sessions["session-1"]["agent"] is None
+    assert lifecycle.discard_session("session-1", agent=successor_agent) is True
+    assert "session-1" not in lifecycle._sessions
+
