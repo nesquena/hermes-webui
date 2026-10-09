@@ -12304,6 +12304,13 @@ def create_stream_channel() -> StreamChannel:
 
 STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
+# Launch-phase ownership claims, keyed by stream_id and guarded by STREAMS_LOCK
+# (no extra lock edge). A claim is published in the SAME critical section that
+# creates the STREAMS entry and retired by identity once the worker is admitted
+# or the stream is torn down. While it exists the stream is still launching, so
+# chat/start must keep it whatever the pending age -- a slow session save between
+# registration and worker admission is not evidence of an orphan.
+PRE_ADMISSION_CLAIMS: dict = {}
 
 
 def peek_stream(stream_id):
@@ -12331,6 +12338,227 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+
+# ── THE list of per-stream registries (#7302 re-gate) ───────────────────────
+# Every registry a stream owns. Both the local worker teardown (api/streaming.py)
+# and the chat/start orphan recovery (api/routes.py) iterate THIS list instead of
+# hand-maintained pop lists, so a new per-stream registry cannot be added to one
+# teardown path and silently forgotten in the other.
+def stream_owned_registries() -> tuple:
+    """The per-stream registries, resolved on EVERY call.
+
+    Deliberately a function, not a module-level constant: a frozen tuple holds
+    the dict objects that existed at import time, so rebinding a registry
+    (``config.STREAMS = {...}``) would leave every teardown popping the stale
+    dict and leaking the live one. Module-level attribute lookup keeps the list
+    in step with whichever object is current.
+    """
+    return (
+        STREAMS,
+        AGENT_INSTANCES,
+        CANCEL_FLAGS,
+        STREAM_GOAL_RELATED,
+        STREAM_PARTIAL_TEXT,
+        STREAM_REASONING_TEXT,
+        STREAM_LIVE_TOOL_CALLS,
+        STREAM_LAST_EVENT_ID,
+    )
+
+
+def _release_stream_owned_rows(stream_id: str, session_id: str | None) -> None:
+    """Drop this stream's rows from every registry. Caller holds the locks."""
+    for _registry in stream_owned_registries():
+        _registry.pop(stream_id, None)
+    # The launch-phase claim dies with the stream it was published for. This is
+    # the single teardown entry point every release path goes through, so the
+    # claim can never outlive its stream and block a later chat/start.
+    PRE_ADMISSION_CLAIMS.pop(stream_id, None)
+    # Owner registries. The writeback entry is compare-and-clear: a successor
+    # admitted after cancel must keep its registry claim (#6623 re-gate).
+    unregister_stream_owner(stream_id)
+    if session_id:
+        try:
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear session writeback owner for stream %s", stream_id,
+                exc_info=True,
+            )
+
+
+def release_stream_owned_registries(
+    stream_id: str, *, session_id: str | None = None, streams_lock_held: bool = False
+) -> None:
+    """Release EVERY registry a stream can own -- the single teardown entry point.
+
+    ``streams_lock_held=True`` is for callers already inside ``STREAMS_LOCK``
+    (``threading.Lock`` is not reentrant). Lock order stays
+    ``STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK``, the order the rest of the
+    lifecycle uses; ``_release_stream_owned_rows`` never takes a lock itself, so
+    the nesting is the caller's.
+
+    The Gateway-owned rows (``_STREAM_RUN_LIFECYCLE`` / ``_STREAM_RUN_IDS`` /
+    ``_STREAM_ENDPOINTS``) are NOT touched here: they live in api/gateway_chat.py
+    and are released through ``release_gateway_stream_state()``, which uses the
+    lifecycle/waiter protocol and must run OUTSIDE ``STREAMS_LOCK``.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return
+    if streams_lock_held:
+        _release_stream_owned_rows(stream_id, session_id)
+        return
+    with STREAMS_LOCK:
+        _release_stream_owned_rows(stream_id, session_id)
+
+
+def publish_pre_admission_claim(stream_id: str, *, streams_lock_held: bool = False) -> str:
+    """Publish the launch-phase ownership claim for a stream being registered.
+
+    MUST run inside the same ``STREAMS_LOCK`` critical section that creates the
+    ``STREAMS`` entry (pass ``streams_lock_held=True``; ``threading.Lock`` is not
+    reentrant): the orphan check in ``_active_stream_blocks_chat_start`` reads this
+    registry under that lock, and a stream registered without its claim is
+    indistinguishable from a crashed turn once the pending window expires.
+
+    Returns the claim token; retire with ``retire_pre_admission_claim_if_owned``.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return ""
+    claim_token = uuid.uuid4().hex
+    if streams_lock_held:
+        PRE_ADMISSION_CLAIMS[stream_id] = claim_token
+        return claim_token
+    with STREAMS_LOCK:
+        PRE_ADMISSION_CLAIMS[stream_id] = claim_token
+    return claim_token
+
+
+def retire_pre_admission_claim_if_owned(
+    stream_id: str, *, claim_token: str | None = None, streams_lock_held: bool = False
+) -> bool:
+    """Retire a launch-phase claim by IDENTITY. Idempotent; returns whether it retired.
+
+    ``claim_token=None`` is the stream's own teardown speaking for the whole
+    stream (Stop, launch failure, worker admission): the claim goes with it. With
+    a token, only that exact claim is retired, so a successor that registered the
+    same stream id keeps its own claim.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+
+    def _retire() -> bool:
+        current = PRE_ADMISSION_CLAIMS.get(stream_id)
+        if current is None:
+            return False
+        if claim_token is not None and current != claim_token:
+            return False
+        PRE_ADMISSION_CLAIMS.pop(stream_id, None)
+        return True
+
+    if streams_lock_held:
+        return _retire()
+    with STREAMS_LOCK:
+        return _retire()
+
+
+def _is_orphaned_stream_locked(
+    stream_id: str, pending_turn_in_window: bool
+) -> bool:
+    """Orphan decision body. The caller holds ``STREAMS_LOCK``.
+
+    Split out so the decision and the release can share ONE lock acquisition
+    (``release_orphaned_stream_if_still_orphaned``); ``is_orphaned_stream`` is the
+    locking wrapper for readers that only need the answer.
+    """
+    if stream_id not in STREAMS:
+        return False
+    if stream_id in PRE_ADMISSION_CLAIMS:
+        return False
+    if pending_turn_in_window:
+        return False
+    try:
+        with ACTIVE_RUNS_LOCK:
+            if stream_id in (ACTIVE_RUNS or {}):
+                return False
+    except Exception:
+        # Fail closed: an unreadable liveness registry must never be taken as
+        # proof of an orphan.
+        return False
+    return True
+
+
+def is_orphaned_stream(
+    stream_id: str,
+    *,
+    pending_turn_in_window: bool = False,
+    streams_lock_held: bool = False,
+) -> bool:
+    """Single definition of an orphaned stream, shared by every reader.
+
+    A stream is an orphan only when ALL of these hold:
+
+      * it is still registered in ``STREAMS``;
+      * no worker owns it (``ACTIVE_RUNS`` has no row);
+      * it is not still launching (``PRE_ADMISSION_CLAIMS`` has no claim);
+      * its pending turn is outside the registration window
+        (``pending_turn_in_window`` -- the caller's call, since only callers with
+        the session at hand can evaluate it).
+
+    ``STREAMS`` membership alone is not liveness: the entry is removed by the
+    worker's own finalization, so a hard-killed or wedged worker leaves it behind.
+    ``ACTIVE_RUNS`` is the authoritative worker-liveness registry, the
+    launch-phase claim covers the window between registration and worker
+    admission, and the pending window covers the shortest gap for callers that
+    hold a session.
+
+    The claim check is mandatory. Without it a stream that is still launching is
+    classified as orphaned and reaped, which makes its first worker exit without
+    running the turn (finding 5). Callers that already hold ``STREAMS_LOCK`` must
+    pass ``streams_lock_held=True``: ``threading.Lock`` is not reentrant.
+
+    Reading this answer and acting on it later is NOT safe on its own -- see
+    ``release_orphaned_stream_if_still_orphaned`` for the decide-and-release
+    contract.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    if streams_lock_held:
+        return _is_orphaned_stream_locked(stream_id, pending_turn_in_window)
+    with STREAMS_LOCK:
+        return _is_orphaned_stream_locked(stream_id, pending_turn_in_window)
+
+
+def release_orphaned_stream_if_still_orphaned(
+    stream_id: str, *, pending_turn_in_window: bool = False
+) -> bool:
+    """Decide AND release on ONE ``STREAMS_LOCK`` edge. Returns whether it released.
+
+    Callers that decide and release under two separate acquisitions hand the worker
+    a race: it can publish its ``ACTIVE_RUNS`` row (or its launch claim) in the gap,
+    and the release then drops a stream that is live -- taking its ownership state
+    with it while the worker keeps running. Re-validating inside the same critical
+    section that drops the rows makes a stale decision impossible.
+
+    ``_release_stream_owned_rows`` takes no locks ("caller holds the locks"), and
+    ``stream_owner_session_id`` only takes ``STREAM_SESSION_OWNERS_LOCK``, which
+    respects the documented ``STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK`` order.
+
+    Gateway-owned rows are deliberately NOT touched here: they live in
+    api/gateway_chat.py and must be released OUTSIDE ``STREAMS_LOCK``, so the caller
+    runs ``release_gateway_stream_state()`` when this returns True.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    with STREAMS_LOCK:
+        if not _is_orphaned_stream_locked(stream_id, pending_turn_in_window):
+            return False
+        _release_stream_owned_rows(stream_id, stream_owner_session_id(stream_id))
+        return True
 
 
 def register_stream_owner(stream_id: str, session_id: str) -> None:
@@ -12558,6 +12786,13 @@ DEFERRED_PROCESS_WAKEUPS_LOCK = threading.Lock()
 # subscribers-empty grace path (60s) handles ordinary tab-close traffic.
 SESSION_CHANNEL_IDLE_TTL_SECS: int = 14400  # 4 hours
 SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
+# Positive dead-subscriber signal. How long a subscriber's queue
+# must reject broadcasts CONTINUOUSLY before the reaper may treat it as dead
+# (a ghost/half-open tab that never drains). A healthy tab drains on every
+# event, so it can never accumulate a run this long; 300s is well above the
+# SSE heartbeat interval and any plausible transient backpressure. Age alone
+# never collects a subscribed channel — only this signal or an explicit close.
+SESSION_CHANNEL_SUBSCRIBER_STALL_SECS: int = 300  # 5 minutes
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
 # than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
@@ -12650,6 +12885,37 @@ def unregister_active_run(stream_id: str) -> None:
         ACTIVE_RUNS.pop(stream_id, None)
         LAST_RUN_FINISHED_AT = time.time()
     unregister_stream_owner(stream_id)
+
+
+def unregister_active_run_if_owned(stream_id: str, *, claim_token: str | None = None) -> bool:
+    """Retire an active-run row only while it is still the caller's own claim.
+
+    ``Stop`` (``cancel_stream``) deliberately leaves the row behind in
+    ``phase="cancelling"`` so recovery/health polling sees the detached run while
+    the worker unwinds; the worker's normal ``finally`` retires it and stamps
+    ``LAST_RUN_FINISHED_AT``. A worker cancelled BEFORE it admits the stream takes
+    the early-return path, which never reaches that ``finally`` -- so the claim
+    published before the worker was scheduled has to be retired here, BY IDENTITY,
+    so a row that a successor legitimately registered for the same stream id is
+    never deleted. Returns True when this call retired the row.
+
+    ``unregister_stream_owner`` is deliberately NOT called: the owner registry is a
+    stream-owned registry (already released by ``release_stream_owned_registries``)
+    and a successor may own it.
+    """
+    if not stream_id:
+        return False
+    global LAST_RUN_FINISHED_AT
+    with ACTIVE_RUNS_LOCK:
+        entry = ACTIVE_RUNS.get(stream_id)
+        if entry is None:
+            return False
+        if claim_token is not None:
+            if not isinstance(entry, dict) or str(entry.get("claim_token") or "") != str(claim_token):
+                return False
+        ACTIVE_RUNS.pop(stream_id, None)
+        LAST_RUN_FINISHED_AT = time.time()
+    return True
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
