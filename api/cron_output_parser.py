@@ -1,4 +1,4 @@
-"""Hermes cron-output artifact parser.
+r"""Hermes cron-output artifact parser.
 
 Issue #7303: completed agent cron runs persist a markdown artifact with
 front-matter followed by a ``## Response`` heading that marks the start
@@ -19,7 +19,7 @@ treated as a response boundary when ALL of the following are true:
 
 1. The line begins with ``## Response`` or ``# Response`` (exact prefix,
    not e.g. ``## Response time``).
-2. The line is OUTSIDE a fenced code block (``\`\`\`) — a heading-shaped
+2. The line is OUTSIDE a fenced code block (`````) — a heading-shaped
    string inside script output or a quoted snippet must not be
    interpreted as a section boundary.
 3. The line is OUTSIDE an HTML-style ``<pre>`` / ``<code>`` block.
@@ -244,6 +244,42 @@ def parse_cron_output(text: str) -> CronOutputProjection:
             raw=raw,
             has_response_boundary=False,
         )
+
+    # ---- Legacy writer-envelope path ------------------------------------
+    # #7687 re-gate: a document that carries the writer's ``## Prompt``
+    # section header but NO length frames is still a legacy cron artifact,
+    # not free-form text. The Agent wrote ``## Prompt`` plus a response
+    # frame with no prompt stamp until 00bbc5b64fc (2026-09-30), and failed
+    # runs are never prompt-stamped at all (cron/scheduler.py ``_run_doc_
+    # header``). Feeding those through the fence-aware first-heading scan
+    # below loses the answer whenever the prompt contains an unclosed fence
+    # or HTML block: the scanner carries that prompt state across the
+    # writer's own response delimiter and returns the first 600 characters
+    # of context instead (verified over real HTTP: master and 25642a74098f
+    # show "Backup completed for 3 volumes"; the pre-fix head shows prompt
+    # text with has_response_boundary=false).
+    #
+    # For these envelopes the writer's own delimiter is authoritative and
+    # needs no fence tracking: the LAST canonical ``## Response`` line is
+    # the boundary, exactly as the pre-00bbc5b64fc reader resolved it. The
+    # frame validation above still guards every framed document, so a
+    # truncated or mismatched frame never reaches this branch.
+    # NOTE: _PROMPT_HEADING_RE has no MULTILINE flag, so it must be applied
+    # per line (as the scanner below does) rather than searched over the
+    # whole document, where ^ would only match the very first character.
+    if any(_PROMPT_HEADING_RE.match(_line) for _line in lines) and not _has_prompt_frame(raw):
+        _last_response = None
+        for _i, _line in enumerate(lines):
+            if _RESPONSE_HEADING_RE.match(_line):
+                _last_response = _i
+        if _last_response is not None:
+            return CronOutputProjection(
+                response="\n".join(lines[_last_response + 1:]).strip(),
+                context="\n".join(lines[:_last_response]).strip(),
+                raw=raw,
+                has_response_boundary=True,
+                response_line=_last_response + 1,  # 1-indexed for the UI
+            )
 
     # ---- Legacy unframed path (conservative, fail-closed) ---------------
     in_fence = False
