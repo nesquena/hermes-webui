@@ -9,6 +9,12 @@ Supported operations:
 - Task dependency links (create, delete)
 - SSE live event stream for real-time updates
 - Comments and worker dispatch integration
+
+Status transitions are routed through the Agent's own verbs (``complete_task``,
+``block_task``, ``archive_task``, ``schedule_task``, ``unblock_task``). The
+full column/status flow — including how tasks enter and leave ``scheduled``
+and the parent re-gating on the way back to ``ready`` — is documented in
+``docs/kanban.md``.
 """
 
 from __future__ import annotations
