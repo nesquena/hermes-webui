@@ -10691,7 +10691,7 @@ function _makeBindingsCombo(o){
   wrap.appendChild(trigger);
   wrap.appendChild(menu);
 
-  const state={value:(o&&o.value)||'', options:Array.isArray(o&&o.options)?o.options:[], onChange:(o&&typeof o.onChange==='function')?o.onChange:null};
+  const state={value:(o&&o.value)||'', options:Array.isArray(o&&o.options)?o.options:[], onChange:(o&&typeof o.onChange==='function')?o.onChange:null, filterOptions:(o&&typeof o.filterOptions==='function')?o.filterOptions:null};
 
   function _currentOption(){
     return state.options.find(opt=>opt.value===state.value)||null;
@@ -10708,9 +10708,16 @@ function _makeBindingsCombo(o){
     trigger.setAttribute('aria-expanded','false');
   }
   function _open(){
-    // Rebuild options so freshly-fetched lists (workspace names) appear.
+    // Rebuild options so freshly-fetched lists (workspace names) appear, and
+    // let the caller drop entries that are only invalid NOW: the workspace add
+    // list hides already-bound workspaces, and that bound list changes after
+    // the fetch resolves (a row removed, a path typed in), so filtering once
+    // at fetch time would leave stale rows selectable.
     menu.innerHTML='';
-    const items=state.options;
+    let items=state.options;
+    if(typeof state.filterOptions==='function'){
+      try{ const filtered=state.filterOptions(state.options); if(Array.isArray(filtered)) items=filtered; }catch(_){}
+    }
     if(!items.length){
       const empty=document.createElement('div');
       empty.className='project-bindings-combo-empty';
@@ -10993,8 +11000,11 @@ function _showProjectBindingsDialog(proj){
       const rm=document.createElement('button');
       rm.type='button';
       rm.className='ws-row-remove';
-      rm.textContent='×';
+      // Lucide X (ISC, https://lucide.dev/icons/x): the 12px "×" text glyph
+      // only reached ~2.2:1 on a 1x dark desktop. The SVG strokes currentColor.
+      rm.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
       rm.title=t('pb_unbind_ws_title');
+      rm.setAttribute('aria-label',t('pb_unbind_ws_title'));
       rm.onclick=(e)=>{
         e.stopPropagation();
         wsList.splice(idx,1);
@@ -11013,6 +11023,11 @@ function _showProjectBindingsDialog(proj){
     placeholder:t('pb_add_workspace_placeholder'),
     value:'',
     options:[],
+    // Drop workspaces this project already binds, evaluated on every open: the
+    // bound list changes after the initial fetch (a row removed, a path typed
+    // in), so the comment-only promise below was never enough. The custom
+    // "type a path…" entry always survives.
+    filterOptions:(opts)=>opts.filter(o=>o&&(o.value==='__custom_path__'||!wsList.some(x=>x.value===o.value))),
   });
   addCombo._customOption={value:'__custom_path__',name:t('pb_type_path'),sub:t('pb_enter_ws_path')};
   const addRow=document.createElement('div');
@@ -11052,7 +11067,9 @@ function _showProjectBindingsDialog(proj){
   });
   addBtn.onclick=()=>{ _applyAdd(addCombo.getValue()); };
   addRow.appendChild(addBtn);
-  // Fill the add list with saved workspaces NOT already bound + custom entry.
+  // Fill the add list with the saved workspaces + the custom entry. The
+  // already-bound ones are dropped at OPEN time by addCombo's filterOptions,
+  // because the bound list can change after this fetch resolves.
   (async()=>{
     try{
       const wsRes=await api('/api/workspaces');

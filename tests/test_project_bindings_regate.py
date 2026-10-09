@@ -244,7 +244,7 @@ def test_project_bindings_i18n_keys_present_in_all_locales():
         assert not missing, f"locale {loc!r} is missing pb_* keys: {missing}"
 
     # Non-English sanity: the long auto-assign sentence must be translated.
-    en_hint = "'All existing and future sessions in the bound workspaces are filed under this project.'"
+    en_hint = "'All existing and future chats in the bound workspaces are filed under this project.'"
     for loc in I18N_LOCALES:
         if loc == "en":
             continue
