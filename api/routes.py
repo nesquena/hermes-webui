@@ -9883,11 +9883,9 @@ def _lookup_cli_session_owner_readonly(
     sid = str(session_id)
     try:
         from api.models import (
-            _active_state_db_path,
             _all_profiles_cli_contexts,
         )
         from api.profiles import (
-            _profiles_root,
             get_active_profile_name,
             get_hermes_home_for_profile,
         )
