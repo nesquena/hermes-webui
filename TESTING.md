@@ -1,5 +1,32 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Mobile clarification panel overlap
+
+At widths below 640px, an expanded clarification panel must sit above the
+composer so the response hint and controls remain visible. Desktop positioning
+and the collapsed header retain their existing geometry. Check an open-ended
+question, a question with choices, and a long question that requires scrolling;
+repeat with the phone keyboard open and closed.
+
+Automated geometry probe using the real clarification markup and stylesheet
+with a synthetic composer (browser tooling stays outside the runtime checkout):
+
+```bash
+npm install --prefix /tmp/hermes-layout-deps playwright@1.64.0
+/tmp/hermes-layout-deps/node_modules/.bin/playwright install chromium
+NODE_PATH=/tmp/hermes-layout-deps/node_modules \
+  node scripts/check_clarify_mobile_overlap.cjs /tmp/clarify-mobile-overlap
+```
+
+Set `CHROME_PATH` to use an existing Chrome/Chromium binary. Run the probe on
+the unpatched base with `--baseline` to capture the original overlap; without
+that flag it fails on the base and passes with the fix. It checks desktop/narrow
+geometry, phone and reduced viewport sizes, actual hit testing of the response
+hint, typed input, scrolling long questions, and collapsed state. A reduced
+viewport approximates keyboard space; it does not prove OS keyboard/PWA behavior.
+Before/after evidence is in
+[docs/pr-media/clarify-mobile-overlap](docs/pr-media/clarify-mobile-overlap/README.md).
+
 > This document is for manual browser testing by you or by a Claude browser agent.
 > It covers user-facing features of the UI across current releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.
