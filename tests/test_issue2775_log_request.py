@@ -137,3 +137,48 @@ def test_log_request_fails_closed_on_malformed_forwarded_chain_from_trusted_prox
     # Malformed chain fails closed to '-' so fail2ban / downstream security won't ban innocent IPs
     assert record["client_ip"] == "-"
 
+
+def test_log_request_ignores_x_real_ip_from_trusted_proxy(log_output):
+    """X-Real-IP is ignored as an authoritative log identity; raw peer is logged."""
+    class Headers:
+        def get(self, key, default=None):
+            if key == "X-Real-IP":
+                return "203.0.113.195"
+            return default
+
+    handler = Handler.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/health"
+    handler.client_address = ("127.0.0.1", 54321)
+    handler.headers = Headers()
+
+    Handler.log_request(handler, "200")
+
+    line = log_output.getvalue().strip()
+    record = json.loads(line.removeprefix("[webui] "))
+    assert record["remote"] == "127.0.0.1"
+    # Must log raw peer, ignoring unvalidated X-Real-IP:
+    assert record["client_ip"] == "127.0.0.1"
+
+
+def test_log_request_bounds_oversized_forwarded_for(log_output):
+    """Oversized forwarded headers are bounded."""
+    class Headers:
+        def get(self, key, default=None):
+            if key == "X-Forwarded-For":
+                return "A" * 500
+            return default
+
+    handler = Handler.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/health"
+    handler.client_address = ("192.0.2.10", 54321)
+    handler.headers = Headers()
+
+    Handler.log_request(handler, "200")
+
+    line = log_output.getvalue().strip()
+    record = json.loads(line.removeprefix("[webui] "))
+    assert len(record["forwarded_for"]) <= 128
+
+
