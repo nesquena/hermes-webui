@@ -209,6 +209,37 @@ For UI changes, verify the relevant states:
 Controls should remain usable at touch sizes, and mobile navigation should not
 steal chat height unnecessarily.
 
+### Keyboard and assistive-tech behavior on closed mobile panels
+
+On the compact off-canvas bands, the closed sidebar and workspace drawer stay
+laid out so their slide-out can animate, which would otherwise leave their whole
+subtree in the tab order. Three layers keep a closed mobile panel out of the
+keyboard sequence, and changes to this area must keep all three:
+
+1. The panel takes the `inert` attribute the moment it closes
+   (`_setPanelInert()` in `static/boot.js`, set by `closeMobileSidebar()` and
+   `_setWorkspacePanelMode()`), so the 250 ms closing window is inert too — not
+   just the settled state.
+2. `visibility:hidden`, delayed past the slide-out
+   (`visibility 0s linear .25s` in `static/style.css`), removes the settled
+   subtree from the tab order without cutting the transform transition.
+3. `pointer-events:none` keeps the parked panel from swallowing clicks aimed at
+   the chat underneath it.
+
+Focus handling when a mobile panel closes out from under a focused control
+(`_releaseFocusFromClosedPanel()`) follows the same split as the desktop drawer:
+
+- an explicit dismiss (the "Close menu" X, the overlay, the drawer's Close,
+  tapping outside the drawer) returns focus to the control that opened the panel
+  — the hamburger, or the band-appropriate workspace toggle;
+- content-selection closes (picking a session or a panel item) leave focus on
+  the composer, which those paths already move it to.
+
+Browser probes that drive real key events are the only coverage that sees this:
+a computed-style or `tabIndex` assertion cannot observe the browser refusing or
+stranding a `focus()` call, and a static source assertion cannot observe a path
+the probes never take. Keep both halves when adding a case.
+
 ## Themes and skins
 
 Theme and skin work should use the existing variable system. `THEMES.md` points

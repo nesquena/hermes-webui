@@ -212,6 +212,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Code block copy button with "Copied!" feedback
 - Syntax highlighting via Prism.js (Python, JS, bash, JSON, SQL, and more)
 - Safe HTML rendering in AI responses (bold, italic, code converted to markdown)
+- Bare HTTP(S) URLs are auto-linked without absorbing adjacent CJK prose; Unicode IDN host separators and raw-CJK IRI paths remain linkable
 - rAF-throttled token streaming for smoother rendering during long responses
 - Context usage indicator in composer footer -- token count, cost, and fill bar (model-aware)
 
@@ -239,6 +240,12 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Edit, create, delete, and rename files; create folders
 - Binary file download (auto-detected from server)
 - File preview auto-closes on directory navigation (with unsaved-edit guard)
+- Dismissing the workspace panel is respected: resizing the viewport or showing the
+  on-screen keyboard no longer force-reopens the panel after you close it (#6710)
+- Previews report their real load outcome -- a broken source is reported as a
+  failure instead of a silent success -- and a response that never settles is
+  released by a bounded wait so the panel still opens; the source keeps loading
+  and a late failure is surfaced in the status line (#6710)
 - Git detection -- branch name and dirty file count badge in workspace header
 - Right panel is drag-resizable
 - Syntax highlighted code preview (Prism.js)
@@ -768,6 +775,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`DESIGN.md`](DESIGN.md) — design tokens and the calm-console direction
 - [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) — UI/UX principles sourced from the design docs and visual inventories
 - [`docs/sse-streams.md`](docs/sse-streams.md) — cross-client SSE endpoint reference: session streaming, gateway SSE probe scope, heartbeats, and proxy behavior
+- [`docs/architecture/transcript-auto-follow-scroll.md`](docs/architecture/transcript-auto-follow-scroll.md) — transcript auto-follow contract: pinned/unpinned state model, input-tail re-pinning, reader-resume rules, and the transcript's overscroll suppression rationale
 - [`docs/CONTRACTS.md`](docs/CONTRACTS.md) — project contract/RFC/design index for contributors and agents
 - [`docs/rfcs/README.md`](docs/rfcs/README.md) — RFC index for larger architecture and durability proposals
 

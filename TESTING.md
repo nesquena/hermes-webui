@@ -15,6 +15,32 @@
 
 ---
 
+## Cancelled-journal recovery combinations
+
+Run `./scripts/test.sh tests/test_cancel_recovery_properties.py tests/test_cancel_restart_journal_recovery.py`.
+Use isolated `HERMES_HOME`, `HERMES_BASE_HOME`, `HERMES_CONFIG_PATH`, and
+`HERMES_WEBUI_STATE_DIR` directories. Seed `782920261003` selects 128 of 768
+lifecycle combinations and covers all 156 pairwise axis combinations. The tests
+exercise the real eager/deferred checkpoint, Stop, journal, restart, cold/cached
+load, and next-send history builders. They preserve native image and tool payloads,
+reject ambiguous or malformed ownership, and check rollback and repeated-load
+idempotence, with capacity cases up to 17 hooks and 64 tool cards. This coverage
+does not certify external provider execution or filesystem crash durability.
+
+Run `./scripts/test.sh tests/test_cancelled_history_real_producers.py` for independent Agent-flush versus WebUI-settlement clocks, later Gateway turns after a live Stop, legacy integer/fractional Stop owners, and tool-card owners on cold/cached paginated HTTP reads. A terminal Stop excludes only its proved raw execution block, including when it retained live partial output; proved later Gateway exchanges remain in display and next-send history. Ambiguous clock/content occurrences still prevent prefix restoration. Sidecar-only Stop tool-card regressions repeat full, tail, and earlier-page reads through the production handler and real HTTP for missing SQLite, empty SQLite, and native-image mirror rows fully filtered from display. Owners use exact saved message objects, including distinct assistants with identical prose; invisible and missing owners remain excluded, and saved card metadata stays unchanged. Snapshot-parent/non-cumulative child Stop coverage runs in a separate HTTP server process to exercise lineage cache store/hit paths and repeated full, tail, earlier and owner-absent pages, with missing, empty and nonempty SQLite. Cache row copies retain independently stored exact-owner provenance; reconciliation composes that map before pagination without mutating saved indices. The worker stubs write real SQLite rows and exercise production worker/HTTP paths; they do not certify a real provider call.
+
+## Context replay matching
+
+Run `./scripts/test.sh -q tests/test_context_replay_scaling.py tests/test_large_replay_settlement.py tests/test_issue1217_transcript_compaction.py tests/test_stale_user_context_contamination.py tests/test_context_message_stable_ids.py tests/test_issue6751_api_content_agent_replay.py`.
+The context suite compares serialized output against the former greedy algorithm
+over seeded adversarial sequences, checks summary identity boundaries and all
+three reconciliation branches, and counts normalization/key comparisons for
+disjoint, periodic and near-miss sequences. Operation budgets, not wall-clock
+thresholds, are the regression gate. Benchmark no-overlap histories separately
+from correctness checks; include the shared helper and its reconciliation caller,
+and report row count, interpreter and base revision with timings. Use synthetic
+rows or isolated copies, never production session state.
+
 ## Session-scoped media authorization
 
 Run `./scripts/test.sh tests/test_media_inline.py tests/test_media_session_preview_auth.py`.
@@ -342,6 +368,23 @@ read earlier content, including a small scroll gesture immediately after a live
 render. Subsequent streamed content must not pull the reader back to the bottom.
 Use the jump-to-latest control to resume following the live tail; after that,
 new streamed content should remain visible at the bottom.
+
+The authoritative behavior contract — including the input-tail re-pinning rules
+(scrolling back down to the tail you were aiming at re-pins immediately, even
+while the stream keeps growing) and the transcript's overscroll suppression —
+lives in
+[`docs/architecture/transcript-auto-follow-scroll.md`](docs/architecture/transcript-auto-follow-scroll.md).
+Verify it per that document's manual checklist across wide desktop, ordinary
+laptop width, and narrow/mobile viewport widths (touch: swipe up releases
+follow, swipe back down to the tail re-pins, and no bottom-edge vibration is
+visible while pinned during streaming), matching the responsive-state
+expectations in [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md).
+
+Automated regression coverage for this section:
+`tests/test_fast_stream_shrink_clamp_unpin.py`,
+`tests/test_issue5637_stale_anchor_guard.py` (the `test_live_render_queue_*`
+ownership tests), `tests/test_2111_ios_pwa_bottom_scroll_stutter.py`, and
+`tests/test_mobile_layout.py` (the `.messages` overscroll suppression).
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
