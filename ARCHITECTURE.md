@@ -726,8 +726,8 @@ commits directly, which is correct because it holds no catalog lock by then.
 ### 4.12 Project Bindings (`/api/projects/bind`)
 
 A session project can carry **bindings**: a set of workspaces (one of them the
-default), a model, and — API-only since the dialog row is hidden — a reasoning
-effort. The chip's quick-create (`+`) button, and the top-level New Chat button
+default), a model, and — API-only since the dialog row is hidden and no session
+applies it yet — a stored reasoning effort. The chip's quick-create (`+`) button, and the top-level New Chat button
 while that project filter is active, open a new session already configured for
 the project's context; with **auto-assign** on, unfiled sessions in the bound
 workspaces are filed under the project after a counted confirmation. Right-click
@@ -758,7 +758,9 @@ field is optional and only the supplied ones are touched:
 - `model` / `model_provider` / `reasoning_effort` — single-value bindings per
   project; `null` clears that axis (the project is then unbound on it). The
   dialog renders the model row only: it never submits `reasoning_effort`, so
-  saving a binding PRESERVES an existing effort value instead of clearing it.
+  saving a binding PRESERVES an existing effort value instead of clearing it —
+  and, since the UX re-gate of 2026-10-08, no session applies that stored value
+  either (see below).
 
 `POST /api/projects/auto-assign-preview` is the read-only companion the dialog
 calls before submitting `auto_assign: true`. Its body takes
@@ -775,19 +777,24 @@ read-only/subagent rows the sweep skips but never under-counts. The caller's
 `profile` since the c16 fix, because a caller-selected profile made the shared
 session index filterable by the caller (see the route's own comment).
 
-`reasoning_effort` is applied through the **profile-wide** preference, not a
-session-local override: for a bound workspace/model/effort session the sidebar
-POSTs `/api/reasoning`, which persists one shared `agent.reasoning_effort`
+`reasoning_effort` is **stored but dormant**. `/api/projects/bind` still accepts
+it (and `null` still clears it), and the dialog still renders no row for it
+(re-gate 2026-10-07) — but since the UX re-gate of 2026-10-08 nothing forwards
+it into a new session, so creating a project-bound session no longer changes
+anything effort-related. The only mechanism it could use is the **profile-wide**
+preference: `POST /api/reasoning` persists one shared `agent.reasoning_effort`
 value in the active profile's `config.yaml` — the same key the CLI `/reasoning`
 and the composer's effort chip use. The bound `model` / `model_provider` only
 *interpret* that single value (they select which ladder applies); they do not
 get separately stored effort preferences, so two projects bound to different
-models still share one effort setting. Creating a project-bound session
-therefore also moves the effective effort of other sessions and projects in
-that profile; only the workspace and model axes are stored on the session
-itself. Because that makes a per-project effort row read as per-project, the bind
-dialog no longer renders one (re-gate 2026-10-07): the field stays in
-`/api/projects/bind` and comes back with per-session effort (#7881).
+models still share one effort setting. Applying a project's stored effort
+therefore moved the effective effort of every other session and project in that
+profile, while the dialog offered no way to see or clear the value — it read as
+a silent profile-wide change behind a chip that says *Default* — so
+`_projectBindingsForNewSession` stopped forwarding it (UX re-gate
+2026-10-08T23:39:33Z, item A). The apply branch in `newSession` stays in place,
+dormant, for per-session effort (#7881), which will re-supply the option; the
+stored binding itself is still what that future mechanism will read.
 
 The endpoint only binds a project its own profile owns (`_profiles_match`,
 otherwise 404), mirroring the `/api/session/new` profile boundary. The stored
@@ -799,8 +806,9 @@ Where the bindings take effect:
 
 - **Quick-create and New Chat with an active project filter** —
   `_projectBindingsForNewSession` forwards the default workspace (falling back
-  to the first bound workspace, then the legacy `workspace`) plus `model`,
-  `model_provider` and `reasoning_effort` as `newSession` options. Only bound
+  to the first bound workspace, then the legacy `workspace`) plus `model` and
+  `model_provider` as `newSession` options — deliberately NOT `reasoning_effort`
+  (see above). Only bound
   axes are forwarded, and only when the caller did not pass an explicit value,
   so the chip's own `+` click (which passes its own `project_id`) is never
   double-applied.

@@ -192,6 +192,25 @@ def test_the_workspace_path_placeholder_derives_from_the_shown_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# D — the docs must describe the dormant effort binding (greptile P2)
+# ---------------------------------------------------------------------------
+
+
+def test_docs_describe_the_dormant_effort_binding():
+    """greptile P2 (ARCHITECTURE.md:803, 2026-10-09T00:51:28Z): the docs still
+    told readers that ``_projectBindingsForNewSession`` forwards
+    ``reasoning_effort`` and that a bound session changes the profile-wide
+    preference. Both passages now describe the dormant binding."""
+    arch = (REPO_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "`model_provider` and `reasoning_effort` as `newSession` options" not in arch
+    assert "deliberately NOT `reasoning_effort`" in arch
+    assert "**stored but dormant**" in arch
+    assert "is applied through the **profile-wide** reasoning-effort preference" not in readme
+    assert "is dormant" in readme
+
+
+# ---------------------------------------------------------------------------
 # C — 32px touch targets on narrow viewports
 # ---------------------------------------------------------------------------
 
