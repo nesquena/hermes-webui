@@ -186,7 +186,11 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
                 host, port, address
             ):
                 continue
-            sock = socket.socket(family, socktype, proto)
+            try:
+                sock = socket.socket(family, socktype, proto)
+            except OSError as exc:
+                last_error = exc
+                continue
             try:
                 timeout = self.timeout
                 if timeout is not None and not isinstance(timeout, (int, float)):
@@ -225,7 +229,6 @@ class _OIDCHTTPSHandler(urllib.request.HTTPSHandler):
             _oidc_https_connection_factory(self._oidc_policy),
             req,
             context=self._context,
-            check_hostname=self._check_hostname,
         )
 
 

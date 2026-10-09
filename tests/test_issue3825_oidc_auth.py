@@ -1175,8 +1175,9 @@ def test_token_form_body_never_delivered_to_ambient_proxy(monkeypatch):
     that would receive the client_secret never sees a connection."""
     import api.auth_oidc as auth_oidc
 
-    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
-    monkeypatch.setenv("https_proxy", "http://127.0.0.1:3128")
+    # Globally routable proxy address (TEST-NET-2)
+    monkeypatch.setenv("HTTPS_PROXY", "http://198.51.100.1:3128")
+    monkeypatch.setenv("https_proxy", "http://198.51.100.1:3128")
 
     connected_to = []
 
@@ -1205,12 +1206,15 @@ def test_token_form_body_never_delivered_to_ambient_proxy(monkeypatch):
     def fake_wrap_socket(self, sock, *, server_hostname=None, **kwargs):
         return sock
 
+    def fake_getaddrinfo(host, port, *a, **k):
+        if host == "198.51.100.1":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.51.100.1", int(port or 3128)))]
+        if host == "issuer.example":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", int(port or 443)))]
+        raise socket.gaierror(f"Unknown host: {host}")
+
     monkeypatch.setattr(auth_oidc.socket, "socket", FakeSocket)
-    monkeypatch.setattr(
-        auth_oidc.socket,
-        "getaddrinfo",
-        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
-    )
+    monkeypatch.setattr(auth_oidc.socket, "getaddrinfo", fake_getaddrinfo)
     monkeypatch.setattr(ssl.SSLContext, "wrap_socket", fake_wrap_socket)
 
     policy = auth_oidc._OIDCNetworkPolicy(
@@ -1228,8 +1232,55 @@ def test_token_form_body_never_delivered_to_ambient_proxy(monkeypatch):
     )
 
     # The connection went straight to the endpoint — never to the ambient
-    # proxy (127.0.0.1:3128).  The proxy never had a chance to read the body.
+    # proxy (198.51.100.1:3128). The proxy never had a chance to read the body.
     assert connected_to == [("93.184.216.34", 443)]
+
+
+def test_socket_creation_oserror_falls_back_to_next_approved_address(monkeypatch):
+    """If socket creation raises OSError (e.g. EAFNOSUPPORT) for the first approved
+    address, the connection loop continues to the next approved address."""
+    import errno
+    import api.auth_oidc as auth_oidc
+
+    calls = []
+
+    class FakeSocket:
+        def __init__(self, family, socktype, proto):
+            pass
+
+        def settimeout(self, timeout):
+            pass
+
+        def connect(self, sockaddr):
+            calls.append(sockaddr)
+
+        def close(self):
+            pass
+
+    def fake_socket_factory(family, socktype, proto):
+        if family == socket.AF_INET6:
+            raise OSError(errno.EAFNOSUPPORT, "Address family not supported by protocol")
+        return FakeSocket(family, socktype, proto)
+
+    monkeypatch.setattr(auth_oidc.socket, "socket", fake_socket_factory)
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700:4700::1111", 443, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        ssl.SSLContext, "wrap_socket", lambda self, sock, *, server_hostname=None, **kwargs: sock
+    )
+
+    policy = auth_oidc._OIDCNetworkPolicy(
+        issuer="https://issuer.example", allow_private_endpoints=False
+    )
+    conn = auth_oidc._PinnedHTTPSConnection("issuer.example", 443, policy=policy)
+    conn.connect()
+    assert calls == [("93.184.216.34", 443)]
 
 
 def test_fetch_json_rejects_dns_resolved_shared_space(monkeypatch):
