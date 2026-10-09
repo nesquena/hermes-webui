@@ -2224,22 +2224,42 @@ def test_insights_absolute_range_end_only_dst_calendar_arithmetic(monkeypatch, t
 def test_dst_tests_save_and_restore_the_ambient_tz():
     """P2: the DST tests overwrote TZ and then DELETED it, so a developer who
     started the suite with TZ set had it clobbered for the rest of the process
-    and later results depended on test order. Each test must snapshot the
-    previous value and restore it from its finally block."""
+    and later results depended on test order.
+
+    Greptile P2 (2026-10-09T22:21:55Z): the first version of this check searched
+    the whole file for the cleanup call — including the call it was asserting
+    on, since that literal lives in this very test — so deleting every real
+    cleanup would still have passed. It now inspects the four DST test bodies
+    only, and the searched strings are assembled at runtime so this test's own
+    text cannot satisfy them.
+    """
+    import ast
+
     src = pathlib.Path(__file__).read_text(encoding="utf-8")
-    writes = src.count('os.environ["TZ"] = "America/New_York"')
-    saves = src.count('_saved_tz = os.environ.get("TZ")')
-    restores = src.count('os.environ["TZ"] = _saved_tz')
-    assert writes >= 4, f"expected the DST tests to set TZ, found {writes}"
-    assert saves == writes, (
-        f"every TZ write must snapshot the ambient value ({saves} saves for "
-        f"{writes} writes)"
+    write = 'os.environ[' + '"TZ"' + '] = "America/New_York"'
+    save = "_saved_tz = os.environ." + 'get("TZ")'
+    restore = 'os.environ[' + '"TZ"' + '] = _saved_tz'
+    pop = "os.environ." + 'pop("TZ", None)'
+    guarded = (
+        "        if _saved_tz is None:\n"
+        "            " + pop + "\n"
+        "        else:\n"
+        "            " + restore + "\n"
     )
-    assert restores == writes, (
-        f"every TZ write must restore the ambient value ({restores} restores "
-        f"for {writes} writes)"
-    )
-    assert 'os.environ.pop("TZ", None)' in src, "an unset TZ must still be unset"
+
+    bodies = {
+        node.name: ast.get_source_segment(src, node) or ""
+        for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.FunctionDef)
+    }
+    dst = {name: body for name, body in bodies.items() if write in body}
+    assert len(dst) == 4, f"expected the four DST tests, found {sorted(dst)}"
+    for name, body in dst.items():
+        assert save in body, f"{name} must snapshot the ambient TZ"
+        assert guarded in body, (
+            f"{name} must unset TZ only when it was unset before, and otherwise "
+            f"restore the value it found"
+        )
 
 
 def test_the_awaiting_node_harness_declares_module_input():
