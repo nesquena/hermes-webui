@@ -564,14 +564,20 @@ def _detect_supervisor() -> str | None:
 
 
 def _bind_host_for_check(host: str) -> str:
-    """Normalize a configured host into a concrete address for bind checks.
+    """Normalize a configured host into the address used for the bind check.
 
-    Wildcard binds ("", "0.0.0.0", "::", "[::]") are probed on loopback,
-    matching server.py's _abort_if_already_serving behavior. Everything else
-    is used verbatim so a specific interface address is checked as-is.
+    Wildcard binds ("", "0.0.0.0", "::", "[::]") are probed on the wildcard
+    address itself, so another service holding the port on a single interface
+    address is still reported as a conflict. Substituting loopback is right for
+    reaching an already-running server (server.py's
+    _abort_if_already_serving) but not for deciding whether the server can
+    bind. Everything else is used verbatim, so a specific interface address is
+    checked as-is.
     """
-    if host in ("", "0.0.0.0", "::", "[::]"):
-        return "127.0.0.1"
+    if host in ("", "0.0.0.0"):
+        return "0.0.0.0"
+    if host in ("::", "[::]"):
+        return "::"
     return host
 
 
@@ -613,6 +619,8 @@ def _check_port_available(host: str, port: int) -> None:
     """
     check_host = _bind_host_for_check(host)
     family = socket.AF_INET6 if ":" in check_host else socket.AF_INET
+    # check_host is the address the server itself would bind, so an occupied
+    # port on any interface is caught here instead of after installation.
     sock = socket.socket(family, socket.SOCK_STREAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
