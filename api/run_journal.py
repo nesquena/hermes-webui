@@ -571,33 +571,27 @@ def _read_run_file_text(path: Path) -> str | None:
     return _merge_archive_and_live_text(archive_text, live_text, path=path)
 
 
-def _row_sequence_authority(raw: str, session_id: str, run_id: str) -> int | None:
-    """Return the sequence ``raw`` may assert for THIS run, else ``None``.
+def _scan_archive_prefix(text: str, session_id: str, run_id: str) -> tuple[list[dict], str | None]:
+    """Apply the scanner's own contract to durable archive bytes (fail closed).
 
-    Sequence authority must come only from rows the scanner would accept as
-    this run's own rows. A complete-but-invalid row (not JSON, not an object,
-    missing / non-integer / non-positive ``seq``), a wrong-owner row
-    (``event_id`` / ``run_id`` / ``session_id`` naming another run), or a
-    wrong-protocol row (a ``version`` outside 1/2, including a downgrade) must
-    not steer appends or suppress live rows during an archive/live merge.
+    The prefix that may supply append or dedup authority is exactly what
+    ``_scan_validated_journal`` accepts: identity, protocol ordering (including
+    the stateful version2→version1 downgrade rule), event/type agreement, and
+    terminal metadata. ``recovery_torn_tail`` is the one tolerated stop — an
+    uncommitted crash tail after a valid prefix. Any other failure returns its
+    reason: rows past the failure point never carry authority, and callers
+    that would CREATE rows must refuse rather than acknowledge appends into a
+    union no reader can recover.
     """
-    try:
-        event = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(event, dict):
-        return None
-    version = event.get("version", 1)
-    if type(version) is not int or version not in (1, 2):
-        return None
-    seq = event.get("seq")
-    if type(seq) is not int or seq <= 0:
-        return None
-    if event.get("run_id") != run_id or event.get("session_id") != session_id:
-        return None
-    if event.get("event_id") != f"{run_id}:{seq}":
-        return None
-    return seq
+    events, malformed, _prefix_bytes = _scan_validated_journal(
+        io.BytesIO((text or "").encode("utf-8")),
+        session_id,
+        run_id,
+        keep_prefix_on_error=True,
+    )
+    if malformed and malformed[0]["reason"] != "recovery_torn_tail":
+        return events, malformed[0]["reason"]
+    return events, None
 
 
 def _archive_committed_text(archive_text: str) -> str:
@@ -627,33 +621,39 @@ def _merge_archive_and_live_text(
 ) -> str:
     """Union archived rows with the live rows that continue past them.
 
-    Rows are matched by ``seq``. The archived maximum is taken only from rows
-    that carry sequence authority for this run (``_row_sequence_authority``);
-    tolerated torn archive tail bytes are dropped rather than promoted into a
-    malformed complete row when the suffix is joined
-    (``_archive_committed_text``). An unparseable live row is still kept — the
-    journal tolerates malformed rows and the readers surface them.
+    Rows are matched by ``seq``. The archived maximum comes from the canonical
+    scan of the committed archive bytes (``_scan_archive_prefix``): only rows
+    the scanner would accept set it, so damaged metadata can neither suppress a
+    genuine live suffix nor supply append/dedup authority. Tolerated torn
+    archive tail bytes are dropped rather than promoted into a malformed
+    complete row when the suffix is joined (``_archive_committed_text``), and
+    the live EOF boundary is preserved the same way — the union must not
+    terminate an uncommitted torn live fragment either. An unparseable live row
+    is still kept: the journal tolerates malformed rows and the readers
+    surface them.
     """
     session_id = run_id = None
     if path is not None:
         session_id, run_id = path.parent.name, path.stem
     committed = _archive_committed_text(archive_text)
     max_archived_seq = 0
-    for raw in committed.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        if session_id is None:
+    if session_id is None:
+        # No identity context to validate against: legacy weak skim (no
+        # in-tree caller reaches this shape; kept for standalone safety).
+        for raw in committed.splitlines():
+            stripped = raw.strip()
+            if not stripped:
+                continue
             try:
                 seq = int(json.loads(stripped).get("seq") or 0)
             except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
                 continue
-        else:
-            seq = _row_sequence_authority(stripped, session_id, run_id)
-            if seq is None:
-                continue
-        if seq > max_archived_seq:
-            max_archived_seq = seq
+            if seq > max_archived_seq:
+                max_archived_seq = seq
+    else:
+        events, _fatal = _scan_archive_prefix(committed, session_id, run_id)
+        if events:
+            max_archived_seq = int(events[-1]["seq"])
     kept: list[str] = []
     for raw in live_text.splitlines():
         if not raw.strip():
@@ -667,8 +667,18 @@ def _merge_archive_and_live_text(
             kept.append(raw)
     if not kept:
         return archive_text
+    body = "\n".join(kept)
     joiner = "" if (not committed or committed.endswith("\n")) else "\n"
-    return committed + joiner + "\n".join(kept) + "\n"
+    # Preserve the LIVE file's EOF boundary: when the union ends with the live
+    # file's own final (unterminated) line, do not invent a terminator for it —
+    # that is what promoted an uncommitted torn live fragment into a malformed
+    # complete row and failed the whole run's cold recovery.
+    tail_newline = "\n"
+    if not live_text.endswith("\n"):
+        last_raw = next((raw for raw in reversed(live_text.splitlines()) if raw.strip()), None)
+        if last_raw is not None and kept[-1] == last_raw:
+            tail_newline = ""
+    return committed + joiner + body + tail_newline
 
 
 def _read_gz_text(archive_path: Path) -> str | None:
@@ -1084,8 +1094,15 @@ def journal_replay_visible(event) -> bool:
 
 def _scan_validated_journal(
     lines, session_id: str, run_id: str, *, writer_seed: bool = False,
+    keep_prefix_on_error: bool = False,
 ) -> tuple[list[dict], list[dict], int]:
-    """Validate rows; return the last complete prefix byte offset for tail repair."""
+    """Validate rows; return the last complete prefix byte offset for tail repair.
+
+    ``keep_prefix_on_error`` swaps the all-or-nothing failure shape for callers
+    that must know how far a stream validated before it failed (archive
+    sequence authority): the canonically-valid prefix is returned alongside
+    the fatal reason instead of being discarded.
+    """
     events: list[dict] = []
     line_no = 0
     prefix_bytes = 0
@@ -1138,6 +1155,8 @@ def _scan_validated_journal(
             last_seq = seq
             prefix_bytes += len(raw)
     except (UnicodeDecodeError, ValueError) as exc:
+        if keep_prefix_on_error:
+            return events, [{"line": line_no, "reason": str(exc)}], prefix_bytes
         return [], [{"line": line_no, "reason": str(exc)}], 0
     return events, [], prefix_bytes
 
@@ -1158,9 +1177,10 @@ def _archived_next_seq(path: Path | None) -> int:
     delete]. A suffix can therefore never commit from a prefix that is then
     deleted (or vice versa): the writer either seeds before the prune's step
     (its live file exists, so the re-check keeps the archive) or after the
-    delete (nothing left to split from). Only rows that pass
-    ``_row_sequence_authority`` set the seed; complete invalid rows and
-    wrong-owner/protocol rows are skipped, never consulted for the maximum.
+    delete (nothing left to split from). Only the canonically-valid prefix
+    (``_scan_archive_prefix`` — the scanner's own contract) seeds; any failure
+    past it refuses, and a tolerated uncommitted torn tail does not
+    invalidate the prefix before it.
     """
     archived = _archive_path_for(path) if path is not None else None
     if archived is None:
@@ -1195,25 +1215,23 @@ def _archived_next_seq(path: Path | None) -> int:
                 raise ValueError("archive_sequence_unavailable") from exc
             raise ValueError("archive_sequence_unavailable")
         session_id, run_id = path.parent.name, path.stem
-        last = 0
-        for raw in (text or "").splitlines():
-            stripped = raw.strip()
-            if not stripped:
-                continue
-            seq = _row_sequence_authority(stripped, session_id, run_id)
-            if seq is None:
-                continue
-            if seq > last:
-                last = seq
-        if last <= 0:
-            # A READABLE archive yielded no authoritative positive sequence:
-            # every row is malformed JSON, a non-object, missing ``seq``, or
-            # names another run / protocol (or there are no rows at all). The
+        events, fatal = _scan_archive_prefix(text or "", session_id, run_id)
+        if fatal is not None:
+            # The stored bytes fail the scanner's own contract past the valid
+            # prefix (identity, ordering/gapless rules — including the
+            # version2→version1 downgrade refusal — event/type agreement, or
+            # terminal metadata). No reader can recover a union built on top
+            # of them, so an acknowledged append would be unrecoverable:
+            # refuse rather than write into a run nothing can read back.
+            raise ValueError("archive_sequence_unavailable")
+        if not events:
+            # A READABLE archive yielded no canonically valid row: empty,
+            # every row malformed, or rows naming another run / protocol. The
             # stored bytes are real but their last seq cannot be established,
             # so refuse rather than restart at 1 and mask them — the same
             # fail-closed rule as the unreadable case above.
             raise ValueError("archive_sequence_unavailable")
-        return last + 1
+        return int(events[-1]["seq"]) + 1
 
 
 def _prepare_journal_append(

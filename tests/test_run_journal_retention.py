@@ -2089,17 +2089,23 @@ def test_readable_but_invalid_archive_does_not_restart_sequences(tmp_path):
     assert archive.exists()
 
 
-def test_partially_valid_archive_still_seeds_from_max_valid_seq(tmp_path):
-    """Recoverable archives keep seeding: garbage rows are skipped, valid rows count."""
+def test_archive_with_uncommitted_torn_tail_still_seeds_from_valid_prefix(tmp_path):
+    """A tolerated uncommitted torn tail does not invalidate the valid prefix.
+
+    Seeding reads THROUGH the scanner's canonical contract: an unterminated
+    crash fragment at archive EOF is the one tolerated stop, so the prefix
+    that validated still supplies the seed. (A complete malformed row does
+    not — see the refusal tests below.)
+    """
     _write_run(tmp_path, "s1", "r1", mtime_age_days=30)
     counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
     assert counters["archived_files"] == 1
     archive = _archive_path(tmp_path, "s1", "r1")
     raw = gzip.decompress(archive.read_bytes())
     with gzip.open(archive, "wb") as gz:
-        gz.write(raw + b"garbage tail\n")
+        gz.write(raw + b'{"version":2,"event_id":"r1:4","seq":4,')
     row = rj.append_run_event("s1", "r1", "token", {"text": "after"}, session_dir=tmp_path)
-    assert row["seq"] == 4  # max valid archived seq is 3; garbage rows are skipped
+    assert row["seq"] == 4  # prefix max is 3; the torn fragment is not a row
     read = rj.read_run_events("s1", "r1", session_dir=tmp_path)
     assert [int(e["seq"]) for e in read["events"]] == [1, 2, 3, 4]
 
@@ -2553,7 +2559,7 @@ def test_prune_never_splits_committed_suffix_from_archived_prefix(tmp_path, monk
             return real_prune_entry(*args, **kwargs)
 
         monkeypatch.setattr(rj, "_prune_archive_entry", fire_child_then_prune)
-        counters2 = rj.sweep_run_journal(
+        rj.sweep_run_journal(
             session_dir=tmp_path, ttl_days=0, max_runs_per_session=0, max_bytes_per_session=0
         )
         monkeypatch.undo()
@@ -2587,3 +2593,152 @@ def test_prune_never_splits_committed_suffix_from_archived_prefix(tmp_path, monk
         assert ordinary_seqs == [1], ordinary_seqs
         assert validated_seqs == [1], validated
     assert validated["malformed"] == [], validated["malformed"]
+
+
+# ── re-gate 06:38Z Oct 9: live EOF boundary + canonical archive authority ────
+
+
+def test_torn_live_suffix_survives_cold_recovery_and_repaired_append(tmp_path):
+    """Archive -> live seq3 -> torn live seq4 -> cold recovery -> repaired append.
+
+    Reproduces the reviewer's scenario: the merge gave every retained live line
+    a fresh terminating newline, so an uncommitted crash fragment at live EOF
+    became a malformed COMPLETE row — after a cache-clearing restart, cold
+    validated recovery returned NO events (``recovery_malformed_row`` at the
+    fragment's line) and the whole run was unrecoverable. The live EOF boundary
+    is preserved now: cold recovery retains [1,2,3] with the tolerated
+    ``recovery_torn_tail``, and the next real append repairs the tail and
+    commits seq 4 so the same run reads back complete.
+    """
+    sid, rid = "s1", "r1"
+    rj.append_run_event(sid, rid, "token", {"text": "one"}, session_dir=tmp_path)
+    rj.append_run_event(sid, rid, "done", {"terminal_state": "completed"}, session_dir=tmp_path)
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+    old = time.time() - 30 * 86400.0
+    os.utime(live, (old, old))
+    counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+    assert not live.exists()
+
+    _simulate_restart()
+    assert rj.append_run_event(sid, rid, "token", {"text": "three"}, session_dir=tmp_path)["seq"] == 3
+
+    # Crash mid-append: an unterminated seq4 fragment at live EOF.
+    with open(live, "ab") as fh:
+        fh.write(b'{"version":2,"event_id":"r1:4","seq":4,')
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    _simulate_restart()
+    recovered = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in recovered["events"]] == [1, 2, 3], recovered
+    assert recovered["malformed"] == [{"line": 4, "reason": "recovery_torn_tail"}]
+
+    # The repaired append truncates the uncommitted fragment and commits seq 4.
+    row = rj.append_run_event(sid, rid, "token", {"text": "four"}, session_dir=tmp_path)
+    assert row["seq"] == 4
+    _simulate_restart()
+    repaired = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in repaired["events"]] == [1, 2, 3, 4], repaired
+    assert repaired["malformed"] == []
+
+
+def _archive_row(rid: str, sid: str, seq: int, **over):
+    base = {
+        "version": 2, "event_id": f"{rid}:{seq}", "seq": seq,
+        "run_id": rid, "session_id": sid, "event": "token", "type": "token",
+        "created_at": time.time(), "terminal": False, "terminal_state": None,
+        "payload": {"text": "x"},
+    }
+    base.update(over)
+    return json.dumps(base, separators=(",", ":"))
+
+
+def test_damaged_archive_rows_never_become_sequence_authority(tmp_path):
+    """The scanner's canonical contract gates append authority over archives.
+
+    Reproduces the reviewer's scenarios: with contiguous archived 1,2 plus an
+    invalid seq3 (event/type disagreement) the reader rejects the prefix, but
+    the old per-row skim acknowledged seq4 — an acknowledged row into a union
+    no reader can recover. Complete garbage after valid rows behaved the same.
+    Authority now comes from the scanner's own validation, so both refuse
+    while a reader still surfaces the damaged rows. An uncommitted torn tail
+    does not refuse (see the prefix-seeding test).
+    """
+    sid, rid = "s1", "r1"
+    archive = _archive_path(tmp_path, sid, rid)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+
+    # Contiguous 1,2 + an invalid seq3 (event/type disagreement).
+    with gzip.open(archive, "wb") as gz:
+        gz.write((_archive_row(rid, sid, 1) + "\n" + _archive_row(rid, sid, 2) + "\n"
+                  + _archive_row(rid, sid, 3, type="other") + "\n").encode())
+    with pytest.raises(ValueError, match="archive_sequence_unavailable"):
+        rj.append_run_event(sid, rid, "token", {"text": "four"}, session_dir=tmp_path)
+    assert not live.exists() or live.read_text() == ""
+    read = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert read["events"] == []
+    assert read["malformed"][0]["reason"] == "recovery_event_type"
+
+    # Complete garbage after valid rows refuses the same way.
+    with gzip.open(archive, "wb") as gz:
+        gz.write((_archive_row(rid, sid, 1) + "\n" + _archive_row(rid, sid, 2)
+                  + "\ngarbage tail\n").encode())
+    with pytest.raises(ValueError, match="archive_sequence_unavailable"):
+        rj.append_run_event(sid, rid, "token", {"text": "four"}, session_dir=tmp_path)
+    assert not live.exists() or live.read_text() == ""
+
+
+def test_real_v2_to_v1_downgrade_refuses_seed(tmp_path):
+    """A real version2 -> version1 downgrade refuses append authority.
+
+    The scanner's stateful rule: once a version2 row starts gapless
+    publication, a later version1 row downgrades the run's validation
+    contract and invalidates it. (version3 is an unsupported version, not
+    that downgrade — this pins the real stateful case.) The writer must not
+    acknowledge an append beside rows no reader can recover.
+    """
+    sid, rid = "s1", "r1"
+    archive = _archive_path(tmp_path, sid, rid)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+
+    with gzip.open(archive, "wb") as gz:
+        gz.write((_archive_row(rid, sid, 1, version=2) + "\n"
+                  + _archive_row(rid, sid, 2, version=2) + "\n"
+                  + _archive_row(rid, sid, 3, version=1) + "\n").encode())
+    # The reader rejects from the downgrade row onward.
+    read = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert read["events"] == []
+    assert read["malformed"][0]["reason"] == "recovery_protocol_version"
+    # The writer refuses too: the prefix cannot supply append authority.
+    with pytest.raises(ValueError, match="archive_sequence_unavailable"):
+        rj.append_run_event(sid, rid, "token", {"text": "four"}, session_dir=tmp_path)
+    assert not live.exists() or live.read_text() == ""
+
+
+def test_invalid_high_seq_archive_row_does_not_suppress_live_suffix(tmp_path):
+    """Damaged archive metadata never suppresses a genuine live suffix.
+
+    The old skim let ANY parseable seq — including an invalid row's seq 99 —
+    set the archived maximum, so a genuine live seq3 was dropped from the
+    union. Canonical authority bounds the maximum at the last row the scanner
+    accepts (2); the damaged row's bytes remain in the union (readers surface
+    them) but cannot rank.
+    """
+    sid, rid = "s1", "r1"
+    live_dir = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid
+    live_dir.mkdir(parents=True)
+    live = live_dir / f"{rid}.jsonl"
+    archive = _archive_path(tmp_path, sid, rid)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+
+    with gzip.open(archive, "wb") as gz:
+        gz.write((_archive_row(rid, sid, 1) + "\n" + _archive_row(rid, sid, 2) + "\n"
+                  + _archive_row(rid, sid, 99, type="other") + "\n").encode())
+    live.write_text(_archive_row(rid, sid, 3) + "\n", encoding="utf-8")
+
+    merged = rj._read_run_file_text(live)
+    seqs = [json.loads(line)["seq"] for line in merged.splitlines() if line.strip()]
+    assert seqs == [1, 2, 99, 3], merged
