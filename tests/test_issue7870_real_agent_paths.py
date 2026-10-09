@@ -45,13 +45,28 @@ from types import SimpleNamespace
 
 import pytest
 
+# Reuse the repository's own agent discovery instead of re-deriving it here:
+# tests/conftest.py already mirrors api/config._discover_agent_dir, and a second
+# implementation would drift from the first. tests/ is not a package, so the
+# directory goes on sys.path first (same pattern as the other conftest
+# importers in this tree).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from conftest import _discover_agent_dir  # noqa: E402
+
 # The installed agent tree. The WebUI venv does not carry it, and the modules the
 # code under test imports (``hermes_cli.config`` -> ``hermes_yaml`` ->
 # ``ruamel``) are exactly what is missing there, so these tests run under the
 # interpreter that actually serves the WebUI.
-_AGENT_ROOT = Path("/home/xiaobao/.hermes/hermes-agent")
+# The installed agent tree, discovered the same way tests/conftest.py does it
+# (``HERMES_WEBUI_AGENT_DIR`` → ``~/.hermes/hermes-agent`` → repo-parent → HOME
+# variants, each requiring ``run_agent.py``). CI does not install the agent at
+# any of those locations, so the skip below still holds there — but a
+# contributor with the agent in a non-default location no longer silently loses
+# this module, and the path is not pinned to one machine's layout.
+_AGENT_ROOT = _discover_agent_dir()
 
-_REAL_AGENT = _AGENT_ROOT.is_dir()
+_REAL_AGENT = bool(_AGENT_ROOT)
 pytestmark = pytest.mark.skipif(
     not _REAL_AGENT, reason="the installed hermes-agent tree is not present"
 )
