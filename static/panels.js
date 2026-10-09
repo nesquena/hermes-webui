@@ -9993,7 +9993,7 @@ async function loadSettingsPanel(){
       try{
         models=await api('/api/models');
         // #7507: keep the browser-side exclude policy in sync with the
-        // server so the settings picker's default-model apply below (and
+        // server so the settings picker default-model apply below (and
         // the shared _ensureModelOptionInDropdown path) honours the
         // same excludes the server already filtered out.
         if(models&&typeof models.picker_excludes==='object'&&models.picker_excludes!==null){
@@ -10066,7 +10066,7 @@ async function loadSettingsPanel(){
         // the value captured on open, so without this marker the next save of
         // ANY preference (theme, send key, notifications) would POST the
         // substituted row to /api/default-model and silently replace the
-        // user's configured default. Mark the field as untouched; the marker
+        // user configured default. Mark the field as untouched; the marker
         // is cleared as soon as the user actually changes the selection.
         modelSel._suppressDefaultModelSave=true;
       }else{
