@@ -153,9 +153,18 @@ class TestReceiptSurvivesUnrelatedTraffic:
         ) is not None
 
         # Age everything past the TTL: the sweep bounds memory again.
+        # #7862 round 10 (finding 3): the handoff now anchors a live receipt, so
+        # it must be aged too. Leaving it fresh would pin every receipt as
+        # "attempt in flight" forever, which is the unbounded registry the TTL
+        # exists to prevent — an attempt that crashed without discharging is
+        # exactly what this half of the test describes.
         with store._LOCK:
             for rec in store._ROLLBACK_RECEIPTS.values():
                 rec["_receipt_minted_at"] = (
+                    store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 1
+                )
+            for rec in store._CONTINUATION_HANDOFF_TOKENS.values():
+                rec["_handoff_minted_at"] = (
                     store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 1
                 )
             store._sweep_expired_receipts_unlocked()

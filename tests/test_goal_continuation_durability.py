@@ -650,11 +650,15 @@ class TestRejectedStartRollback:
         assert len(store._ROLLBACK_RECEIPTS) == store._MAX_ROLLBACK_RECEIPTS + 20
 
         # Age them past the TTL; the next record's sweep drops them all.
+        # #7862 round 10 (finding 3): the handoff anchors a live receipt, so age
+        # it as well. A fresh handoff would pin every receipt as in-flight and
+        # nothing would ever be swept.
         with store._LOCK:
+            stale = store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 1
             for key, rec in store._ROLLBACK_RECEIPTS.items():
-                rec["_receipt_minted_at"] = (
-                    store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 1
-                )
+                rec["_receipt_minted_at"] = stale
+            for rec in store._CONTINUATION_HANDOFF_TOKENS.values():
+                rec["_handoff_minted_at"] = stale
             dropped = store._sweep_expired_receipts_unlocked()
         assert dropped == store._MAX_ROLLBACK_RECEIPTS + 20
         assert len(store._ROLLBACK_RECEIPTS) == 0

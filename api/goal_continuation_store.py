@@ -165,6 +165,50 @@ def _receipt_last_claimed_at(record: dict) -> float:
         return 0.0
 
 
+def _receipt_attempt_is_live(sid: str) -> bool:
+    """True when *sid* still has an UNLAUNCHED, non-abandoned attempt.
+
+    #7862 round 10 (finding 3): the handoff is the authoritative record that an
+    attempt consumed an intent and has not yet launched — it is created in the
+    same ``os.replace`` as the removal, and it disappears only when the attempt
+    launches (discharge) or is rejected (rollback). That is exactly the window
+    in which the attempt is still live, so a receipt whose session still holds a
+    handoff must never be swept for age alone.
+
+    Before this, the sweep compared elapsed wall time against the TTL. The route
+    reclaims a receipt exactly once, immediately after the consume, and a start
+    has no deadline — a slow provider handshake or a registration callback still
+    waiting on its worker outlives the TTL while the attempt runs. The sweep
+    then dropped the receipt, the rejection path found nothing to restore, and
+    the retry ran as an ordinary turn: the goal loop silently lost its
+    continuation.
+
+    A handoff is only conclusive while the attempt still reports in. An attempt
+    that crashed never discharges, so its handoff would anchor its receipt
+    forever and the registry would grow without bound — the very thing the TTL
+    exists to prevent. ``reclaim_goal_continuation_receipt`` refreshes the
+    handoff's clock through the receipt path, so a handoff nobody has reclaimed
+    past the TTL is an abandoned attempt, and its receipt is swept normally.
+
+    Callers must hold ``_LOCK``.
+    """
+    now = time.time()
+    for key in _CONTINUATION_HANDOFF_TOKENS:
+        if key[0] != sid:
+            continue
+        stored = _CONTINUATION_HANDOFF_TOKENS[key]
+        try:
+            minted = float(stored.get("_handoff_minted_at") or 0.0)
+        except (TypeError, ValueError):
+            minted = 0.0
+        # A handoff with no readable clock is treated as abandoned rather than
+        # immortal: the conservative reading is the one that keeps the registry
+        # bounded.
+        if minted and now - minted <= _ROLLBACK_RECEIPT_TTL_SECONDS:
+            return True
+    return False
+
+
 def _sweep_expired_receipts_unlocked() -> int:
     """Drop receipts whose attempt is long gone; return how many were dropped.
 
@@ -182,6 +226,12 @@ def _sweep_expired_receipts_unlocked() -> int:
     is now backed by an attempt's own liveness report instead of by a clock
     alone.
 
+    #7862 round 10 (finding 3): that liveness report is only advisory. The
+    conclusive signal is the durable handoff: while a session still holds one,
+    an attempt is provably in flight, so its receipt is kept regardless of age.
+    This replaces "the route reclaims once and hopes the TTL covers it" with
+    "the receipt lives exactly as long as the attempt does".
+
     There is still deliberately no global count cap and no per-session count
     cap: with 65 starts in flight for one session, a per-session cap of 4
     silently evicted the in-flight attempt's receipt (#7862 round 6).
@@ -191,6 +241,11 @@ def _sweep_expired_receipts_unlocked() -> int:
     now = time.time()
     expired = []
     for key, record in _ROLLBACK_RECEIPTS.items():
+        if _receipt_attempt_is_live(key[0]):
+            # An attempt is provably in flight for this session. Age is not
+            # evidence that it ended, so the receipt stays claimable for the
+            # rejection rollback.
+            continue
         # #7862 round 7 (finding 3): age is only conclusive when the attempt
         # has stopped reporting itself live. ``reclaim_goal_continuation_receipt``
         # refreshes this receipt's liveness, so whichever of the mint and the
@@ -237,9 +292,18 @@ def reclaim_goal_continuation_receipt(session_id: str, attempt_id: str = "") -> 
             keys = [k for k in _ROLLBACK_RECEIPTS if k[0] == sid]
         if not keys:
             return False
+        now = time.time()
         for key in keys:
             record = _ROLLBACK_RECEIPTS[key]
-            record["_receipt_reclaimed_at"] = time.time()
+            record["_receipt_reclaimed_at"] = now
+            # #7862 round 10 (finding 3): the handoff anchors the receipt's
+            # survival, so the same liveness report has to refresh it. Without
+            # this, an attempt that legitimately outlives the TTL would have its
+            # receipt protected for one TTL and then lose it — the exact
+            # regression this closes, just moved out by 15 minutes.
+            handoff = _CONTINUATION_HANDOFF_TOKENS.get(key)
+            if handoff is not None:
+                handoff["_handoff_minted_at"] = now
         return True
 
 
@@ -253,6 +317,13 @@ def _record_continuation_handoff_unlocked(sid: str, record: dict, attempt_id: st
     attempt = str(attempt_id or "") or "attempt"
     stored = dict(record)
     stored["_handoff_attempt_id"] = attempt
+    # #7862 round 10 (finding 3): the handoff is also the receipt's liveness
+    # anchor, so it needs its own clock. An attempt that crashed without
+    # discharging leaves the handoff behind forever otherwise, and the receipt
+    # it protects would never be swept — an unbounded registry traded for a
+    # bounded one. ``reclaim_goal_continuation_receipt`` refreshes this field
+    # through the receipt path, so a live attempt keeps both alive.
+    stored["_handoff_minted_at"] = time.time()
     _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = stored
     # #7862 round 9 (CORE, finding "the 64-entry cap evicts the only durable
     # owner"): the cap is a memory bound, but the tokens ARE the durable
@@ -301,6 +372,11 @@ def pop_goal_continuation_handoff(
             return None
         claimed = dict(_CONTINUATION_HANDOFF_TOKENS.pop(key))
         claimed.pop("_handoff_attempt_id", None)
+        # #7862 round 10: the handoff's liveness clock is internal bookkeeping,
+        # exactly like the receipt's. Leaving it in the restored record would
+        # put a wall-clock stamp into the durable intent, where a later load
+        # would read it as intent metadata.
+        claimed.pop("_handoff_minted_at", None)
         claimed.pop("_receipt_minted_at", None)
         claimed.pop("_receipt_reclaimed_at", None)
         claimed["attempt_id"] = key[1]
@@ -441,7 +517,15 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> bool:
                     f"{sid}\u0000{attempt}": {
                         k: v
                         for k, v in rec.items()
+                        # Receipt bookkeeping never belongs in the handoff payload.
                         if not k.startswith("_receipt_")
+                        # ``_handoff_attempt_id`` is redundant with the dict key.
+                        # ``_handoff_minted_at`` IS persisted: it is the clock that
+                        # tells a cold process whether the attempt is still live or
+                        # abandoned (#7862 round 10). Dropping it would make every
+                        # restored handoff look abandoned, and its receipt would be
+                        # swept on the first sweep after a restart — the exact
+                        # regression this round closes.
                         and k != "_handoff_attempt_id"
                     }
                     for (sid, attempt), rec in _CONTINUATION_HANDOFF_TOKENS.items()
@@ -540,6 +624,12 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int], dict[tuple[str, 
                     "created_at": float(rec.get("created_at") or time.time()),
                     "reason": str(rec.get("reason") or "goal_continue"),
                     "continuation_id": str(rec.get("continuation_id") or ""),
+                    # #7862 round 10: the liveness clock must survive the load.
+                    # This builder is a whitelist, so a field not named here is
+                    # dropped even though it is persisted — and a restored
+                    # handoff with no clock reads as abandoned, which sweeps the
+                    # receipt it is supposed to protect.
+                    "_handoff_minted_at": float(rec.get("_handoff_minted_at") or 0.0),
                 }
         out: dict[str, dict] = {}
         for sid, rec in raw_records.items():

@@ -25087,6 +25087,25 @@ def _start_chat_stream_for_session(
             receipt = pop_goal_continuation_rollback_receipt(
                 s.session_id, goal_continuation_attempt_id
             )
+            # #7862 round 10 (finding 3): fall back to the durable handoff when
+            # the receipt is gone. The handoff is written in the same snapshot
+            # as the removal, so it survives everything the receipt survives and
+            # more — including the case where the receipt was swept because the
+            # attempt outlived the TTL without reclaiming. Before this, a
+            # missing receipt meant the rollback restored nothing, the retry ran
+            # as an ordinary turn, and the goal loop silently lost its
+            # continuation.
+            if receipt is None:
+                receipt = pop_goal_continuation_handoff(
+                    s.session_id, goal_continuation_attempt_id
+                )
+                if receipt is not None:
+                    logger.info(
+                        "Session %s: goal-continuation rollback fell back to the "
+                        "durable handoff for attempt %s",
+                        s.session_id,
+                        goal_continuation_attempt_id,
+                    )
             if receipt is not None:
                 restore_pending_goal_continuation(s.session_id, receipt)
             else:
