@@ -853,14 +853,49 @@ async function _loadSavedPrompts(){
   return _savedPromptsCache;
 }
 
+// #7647 (CR minor): dismissing the popup must disarm the pending ✕. Escape
+// used to be a no-op here and click-away only hid the popup, so the first-click
+// confirmation stayed armed behind a hidden element — one Enter away from
+// deleting the prompt the user had just decided to keep.
+function _disarmSavedPromptDeletes(){
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  if(!popup||!popup.querySelectorAll)return;
+  for(const del of popup.querySelectorAll('.saved-prompt-delete')){
+    // The row's own closure clears the 4 s arm timer and restores title/label;
+    // the class fallback covers rows built without one.
+    if(typeof del._disarmDelete==='function'){del._disarmDelete();continue;}
+    del.classList.remove('is-confirming');
+    const row=del.closest?del.closest('.saved-prompt-row'):null;
+    if(row)row.classList.remove('is-confirm-pending');
+  }
+}
+function _closeSavedPromptsPopup(){
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
+  if(!popup||popup.style.display==='none')return false;
+  _disarmSavedPromptDeletes();
+  popup.style.display='none';
+  if(btn)btn.setAttribute('aria-expanded','false');
+  return true;
+}
 async function toggleSavedPromptsPopup(){
   const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
   const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
   if(!popup)return;
   if(popup.style.display!=='none'){
-    popup.style.display='none';
-    if(btn)btn.setAttribute('aria-expanded','false');
+    _closeSavedPromptsPopup();
     return;
+  }
+  // #7647: Escape inside the popup must close it (and with it the armed ✕
+  // confirmation); bound once on the popup element, which survives re-renders.
+  if(!popup._savedPromptsKeydownBound){
+    popup._savedPromptsKeydownBound=true;
+    popup.addEventListener('keydown',(e)=>{
+      if(e.key!=='Escape')return;
+      e.preventDefault();
+      e.stopPropagation();
+      _closeSavedPromptsPopup();
+    });
   }
   popup.innerHTML='<div class="saved-prompts-loading">Loading…</div>';
   popup.style.display='flex';
@@ -908,6 +943,9 @@ async function toggleSavedPromptsPopup(){
         del.title=delTitle;
         del.setAttribute('aria-label',delTitle);
       };
+      // Published so Escape / click-away / toggle can disarm this row through
+      // its own closure (clearing the arm timer) — #7647 minor.
+      del._disarmDelete=disarmDelete;
       del.onclick=async(e)=>{
         e.stopPropagation();
         if(!del.classList.contains('is-confirming')){
@@ -970,8 +1008,9 @@ document.addEventListener('click',(e)=>{
   const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
   if(!popup||popup.style.display==='none')return;
   if(!popup.contains(e.target)&&e.target!==btn&&!(btn&&btn.contains(e.target))){
-    popup.style.display='none';
-    if(btn)btn.setAttribute('aria-expanded','false');
+    // Shared close routine: hide AND disarm, so a click-away cannot leave an
+    // armed ✕ behind a hidden popup (#7647 minor).
+    _closeSavedPromptsPopup();
   }
 },{capture:false});
 function _addNamedContextBlock(text){

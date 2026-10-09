@@ -13716,12 +13716,25 @@ def _saved_prompts_backup_path(p: "Path | None" = None) -> "Path":
     return p.with_name(p.name + _SAVED_PROMPTS_BACKUP_SUFFIX)
 
 
-from api.paths import _atomic_write_text
+from api.paths import _atomic_write_text, _require_writable_target
 
 
-def _write_text_atomic(path: "Path", text: str) -> None:
-    """Atomic write wrapper delegating to api.paths._atomic_write_text (tempfile + fsync + os.replace)."""
-    _atomic_write_text(path, text)
+class _SavedPromptsStoreNotWritable(OSError):
+    """The live store refused a write probe, so nothing — backup included — was touched (#7647).
+
+    A distinct type so the DELETE handler can blame the real blocker: without
+    it a read-only store produced the generic "recovery backup" 500 even
+    though the backup step never ran.
+    """
+
+
+def _write_text_atomic(path: "Path", text: str, *, mode: "int | None" = None) -> None:
+    """Atomic write wrapper delegating to api.paths._atomic_write_text (tempfile + fsync + os.replace).
+
+    ``mode`` seeds / tightens the resulting file's permission bits; it is how
+    the recovery backup is born no wider than the store it copies (#7647).
+    """
+    _atomic_write_text(path, text, mode=mode)
 
 
 def _save_saved_prompts(
@@ -13736,14 +13749,22 @@ def _save_saved_prompts(
 
     * the write is atomic via _write_text_atomic / api.paths._atomic_write_text,
       preserving permissions, ownership, symlink targets, and directory constraints;
-    * the previous generation is copied to `saved_prompts.json.bak` *before* the
-      rewrite, preserving the source's mode/ownership, so a DELETE can be undone.
+    * on a destructive write (``backup_required=True``, the DELETE path, #7647)
+      the previous generation is copied to `saved_prompts.json.bak` *before* the
+      rewrite, at the store's mode — never wider, an already-wider backup is
+      tightened — so a DELETE can be undone.
 
     With ``backup_required=True`` (the DELETE path, #7647) a backup failure is
     raised instead of logged: the caller must abort the destructive operation
-    and leave the live store untouched. If ``backup_content`` is passed, it is
-    used directly rather than re-reading the store from disk. Non-destructive
-    writers (POST) keep best-effort behaviour: they log and continue.
+    and leave the live store untouched. Before rotating anything, the live
+    store itself is write-probed, so a read-only store aborts with the previous
+    `.bak` still intact instead of destroying it ahead of a store write that
+    cannot succeed. If ``backup_content`` is passed, it is used directly rather
+    than re-reading the store from disk.
+
+    Append-only writers (POST) pass no backup flags and rotate nothing: a
+    deleted prompt stays recoverable until the next *destructive* write, not
+    until the next save (#7647 minor).
     """
     p = _saved_prompts_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -13757,27 +13778,30 @@ def _save_saved_prompts(
         except OSError:
             pass
 
-    if backup_content is None and p.is_file():
+    if backup_required:
+        # #7647 (minor): never rotate .bak ahead of a store write that cannot
+        # succeed. A read-only store used to rotate the backup first and only
+        # then fail the store write — the older, useful recovery copy was
+        # destroyed for nothing, and the 500 blamed the backup step.
         try:
-            backup_content = p.read_text(encoding="utf-8")
-        except Exception as exc:
-            if backup_required:
-                raise OSError(f"could not read saved prompts for backup: {exc}") from exc
-            backup_content = None
+            _require_writable_target(p)
+        except PermissionError as exc:
+            raise _SavedPromptsStoreNotWritable(
+                f"saved prompts store is not writable: {p}"
+            ) from exc
 
-    if backup_content:
-        backup = _saved_prompts_backup_path(p)
-        try:
-            # _atomic_write_text (api.paths) already copies uid/gid and mode
-            # from an existing inode onto the temp descriptor before the
-            # rename. For a brand-new .bak that copy falls back to the
-            # process umask, matching Path.write_text semantics — no extra
-            # seed needed, and no empty inode left behind on write failure.
-            _write_text_atomic(backup, backup_content)
-        except OSError as exc:
-            if backup_required:
-                raise
-            logger.warning("saved prompts: could not write backup %s: %s", backup, exc)
+        if backup_content is None and p.is_file():
+            try:
+                backup_content = p.read_text(encoding="utf-8")
+            except Exception as exc:
+                raise OSError(f"could not read saved prompts for backup: {exc}") from exc
+
+        if backup_content:
+            backup = _saved_prompts_backup_path(p)
+            # mode=source_mode: a brand-new .bak is seeded with the store's
+            # bits instead of the process umask's (0664 under umask 002), and
+            # an existing wider .bak is tightened on this swap (#7647).
+            _write_text_atomic(backup, backup_content, mode=source_mode)
 
     _write_text_atomic(p, json.dumps(prompts, ensure_ascii=False, indent=2))
 
@@ -19028,6 +19052,20 @@ def handle_delete(handler, parsed) -> bool:
             # rename) BEFORE the store is rewritten; if it cannot be written
             # the delete aborts here with the live store untouched (#7647).
             _save_saved_prompts(prompts, backup_required=True, backup_content=source_raw)
+        except _SavedPromptsStoreNotWritable as exc:
+            # The store itself refused the write probe, so the rotation never
+            # ran: name the real blocker and say the backup was left alone
+            # (#7647 minor — the old 500 blamed the backup step).
+            logger.error(
+                "saved prompt delete aborted: live store not writable, backup left untouched: %s",
+                exc,
+            )
+            return bad(
+                handler,
+                "saved prompts store is not writable; nothing was deleted "
+                "and the existing backup was left untouched",
+                status=500,
+            )
         except OSError as exc:
             logger.error("saved prompt delete aborted: recovery backup failed: %s", exc)
             return bad(

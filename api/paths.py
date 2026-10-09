@@ -105,7 +105,9 @@ def _require_writable_target(write_path: Path) -> os.stat_result | None:
         os.close(probe_fd)
 
 
-def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+def _atomic_write_text(
+    path: Path, text: str, *, encoding: str = "utf-8", mode: int | None = None
+) -> None:
     """Atomically replace *path* with *text*.
 
     Writes to a temp file in the same directory, flushes + ``os.fsync``, then
@@ -126,6 +128,15 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     ``open(..., "w")`` would.
     (Unlike ``.env``, ``config.yaml`` holds no secrets and is not meant to be
     forced to ``0600``.)
+
+    ``mode`` overrides that derivation with explicit permission bits: a
+    brand-new file is created with exactly those bits (the umask fallback for
+    new files above is corrected afterwards) and an existing file is set to
+    them — which tightens an existing *wider* file rather than inheriting it.
+    The saved-prompts recovery backup uses this (#7647): it holds the deleted
+    prompt's private text and must be born no wider than the store it copies,
+    whatever the process umask says. ``mode=None`` (the default) keeps the
+    inherit-from-the-inode behaviour described above.
 
     Symlinks and hard links keep the same follow-through semantics as
     ``Path.write_text``: writing ``config.yaml`` through a symlink updates the
@@ -152,6 +163,7 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     The caller is responsible for ensuring ``path.parent`` exists.
     """
     path = Path(path)
+    requested_mode = stat.S_IMODE(mode) if mode is not None else None
     symlink_target = path.resolve(strict=False) if path.is_symlink() else None
     write_path = symlink_target or path
     try:
@@ -179,6 +191,14 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 ):
                     raise PermissionError("config target changed before fallback write")
                 _verify_symlink_target()
+                if requested_mode is not None:
+                    # Explicit mode also applies to the in-place compatibility
+                    # path, otherwise a fallback write would leave an existing
+                    # wider file (the .bak tightening case, #7647) untouched.
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(fallback_fd, requested_mode)
+                    else:
+                        os.chmod(write_path, requested_mode)
                 os.ftruncate(fallback_fd, 0)
                 fallback_file = os.fdopen(fallback_fd, "w", encoding=encoding)
                 owns_fallback_fd = False
@@ -203,6 +223,14 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         ):
             _write_in_place()
             return
+
+    if requested_mode is not None:
+        # An explicit mode wins over everything derived above: the temp file
+        # for a brand-new target was just created with the process umask, and
+        # an existing target may be wider than what the caller captured from
+        # its source (#7647: the recovery backup inherits the store's mode and
+        # an already-wider .bak is tightened on the swap).
+        mode = requested_mode
 
     try:
         fd, tmp = _create_atomic_temp_file(write_path, existing=existing_stat is not None)
