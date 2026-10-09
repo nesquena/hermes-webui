@@ -50,6 +50,8 @@ FUNCTIONS = [
     "_isTouchKeyboardViewport",
     "_isTouchCapableViewport",
     "_hasFinePointerCoexisting",
+    "_isIOSWebKit",
+    "_isEditableElement",
     "_syncKeyboardBottomInset",
     "_resetDocumentHorizontalOffset",
     "_forceMobileViewportReflow",
@@ -94,13 +96,13 @@ def _extract_function(src: str, name: str) -> str:
 
 def _keyboard_state_decl(src: str) -> tuple[str, str]:
     """Return (identifier, declaration) for the keyboard-visible state flag."""
-    match = re.search(r"^(let|var) (_keyboard\w*) *= *false;", src, re.M)
-    assert match, (
+    matches = re.findall(r"^(?:let|var) _keyboard\w* *= *[^;]+;", src, re.M)
+    assert matches, (
         "static/boot.js must keep a module-level boolean that tracks whether the "
         "on-screen keyboard is occluding the viewport (the state authority for "
         "body.keyboard-visible)"
     )
-    return match.group(2), match.group(0)
+    return "_keyboardVisible", "\n".join(matches)
 
 
 def _media_blocks(css: str) -> list[tuple[str, str]]:
@@ -161,18 +163,12 @@ def test_layout_clipping_is_scoped_to_touch_and_mobile_surfaces():
             "geometry it guards only exists on touch/mobile surfaces"
         )
 
+    # Wide-tablet rules are scoped by html.pwa-ios, phone rules live in max-width:640px.
+    assert "html.pwa-ios .layout{overflow-x:clip;}" in css
+    assert "html.pwa-ios body.keyboard-visible{overflow-x:hidden;position:relative;}" in css
     blocks = _media_blocks(css)
-    for rule in scoped_rules:
-        queries = [
-            query
-            for query, body in blocks
-            if rule in body and "any-pointer" in query and "coarse" in query
-        ]
-        assert queries, (
-            f"{rule!r} must live inside a touch-scoped media query such as "
-            "@media (max-width: 640px), (any-pointer: coarse) so iPad-with-"
-            "trackpad (fine primary pointer) is still covered"
-        )
+    phone_blocks = [body for query, body in blocks if "max-width: 640px" in query or "max-width:640px" in query]
+    assert any(".layout{overflow-x:clip;}" in body for body in phone_blocks)
 
 
 def test_keyboard_visible_class_is_written_and_cleared_by_the_state_authority():
@@ -273,6 +269,36 @@ let rootClasses = new Set();
 let styleProps = {};
 let resyncCount = 0;
 let reflowAdds = 0;
+let activeEl = { tagName: 'TEXTAREA' };
+let currentPlatform = 'ipad';
+let currentNav = {};
+Object.defineProperty(globalThis, 'navigator', {
+  get: () => currentNav,
+  configurable: true,
+});
+function setPlatform(platform) {
+  currentPlatform = platform || 'ipad';
+  if (currentPlatform === 'ipad') {
+    currentNav = {
+      userAgent: 'Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+      platform: 'MacIntel',
+      maxTouchPoints: 5,
+    };
+  } else if (currentPlatform === 'android') {
+    currentNav = {
+      userAgent: 'Mozilla/5.0 (Linux; Android 15; Pixel Tablet) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+      platform: 'Linux armv8l',
+      maxTouchPoints: 10,
+    };
+  } else {
+    currentNav = {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+      platform: 'Win32',
+      maxTouchPoints: 0,
+    };
+  }
+}
+setPlatform('ipad');
 
 const makeClassList = (set, onAdd) => ({
   add: c => { set.add(c); if (onAdd) onAdd(c); },
@@ -292,6 +318,11 @@ globalThis.document = {
   body: { classList: makeClassList(bodyClasses) },
   querySelector: sel => (sel === '.layout' ? layoutEl : null),
 };
+Object.defineProperty(globalThis.document, 'activeElement', {
+  get: () => activeEl,
+  set: v => { activeEl = v; },
+  configurable: true,
+});
 globalThis.window = globalThis;
 Object.defineProperty(globalThis, 'visualViewport', {
   get: () => VV,
@@ -312,10 +343,16 @@ function reset() {
   reflowAdds = 0;
   document.documentElement.classList = makeClassList(rootClasses, noteReflowAdd);
   document.body.classList = makeClassList(bodyClasses);
-  VV = { height: 900, offsetTop: 0, scale: 1 };
+  VV = { height: 900, width: 1024, offsetTop: 0, scale: 1 };
   globalThis.innerHeight = 900;
+  globalThis.innerWidth = 1024;
   globalThis.scrollY = 512;
-  __STATE__ = false;
+  setPlatform('ipad');
+  activeEl = { tagName: 'TEXTAREA' };
+  _keyboardVisible = false;
+  _keyboardBeganWithEditableFocus = false;
+  _keyboardStartWidth = 0;
+  _keyboardStartOrientation = '';
 }
 function keyboardUp(px) { VV.height = globalThis.innerHeight - px; VV.scale = 1; }
 function keyboardDown() { VV.height = globalThis.innerHeight; VV.scale = 1; }
@@ -338,7 +375,8 @@ _HARNESS_TAIL = r"""
 // paint any tablet/keyboard state.
 setMedia({ fine: true });
 reset();
-VV = { height: 600, offsetTop: 0, scale: 1 };
+setPlatform('desktop');
+VV = { height: 600, width: 1024, offsetTop: 0, scale: 1 };
 tick(); tick(); tick();
 OUT.fine_pointer_desktop = snap();
 
@@ -382,7 +420,8 @@ OUT.pinch_zoom = snap();
 setMedia({ mobile: true, coarse: true, primaryCoarse: true, touchPrimary: true });
 reset();
 globalThis.innerHeight = 844;
-VV = { height: 844, offsetTop: 0, scale: 1 };
+globalThis.innerWidth = 390;
+VV = { height: 844, width: 390, offsetTop: 0, scale: 1 };
 keyboardUp(336);
 tick();
 OUT.phone_keyboard_up = snap();
@@ -392,8 +431,44 @@ OUT.phone_dismissed = snap();
 
 setMedia({ fine: true });
 reset();
+setPlatform('desktop');
 tick();
 OUT.desktop_after_phone = snap();
+
+// S6 — Android tablet: touch-coarse tablet, but not iOS. Ordinary viewport resize must NOT reset horizontal scroll.
+setMedia({ coarse: true, primaryCoarse: true, touchPrimary: true });
+reset();
+setPlatform('android');
+activeEl = { tagName: 'TEXTAREA' };
+keyboardUp(300);
+tick();
+keyboardDown();
+tick();
+OUT.android_tablet = snap();
+
+// S7 — Focusless resize: iPad viewport shrink without editable focus (e.g. body focused). Must NOT trigger horizontal reset.
+setMedia({ coarse: true, primaryCoarse: true, touchPrimary: true });
+reset();
+setPlatform('ipad');
+activeEl = globalThis.document.body;
+keyboardUp(300);
+tick();
+keyboardDown();
+tick();
+OUT.focusless_resize = snap();
+
+// S8 — Rotation across keyboard transition: width/orientation changed while keyboard open. Must NOT reset horizontal scroll.
+setMedia({ coarse: true, primaryCoarse: true, touchPrimary: true });
+reset();
+setPlatform('ipad');
+activeEl = { tagName: 'TEXTAREA' };
+keyboardUp(300);
+tick();
+VV.width = 768;
+tick();
+keyboardDown();
+tick();
+OUT.rotation_changed = snap();
 
 console.log('RESULT ' + JSON.stringify(OUT));
 """
@@ -533,4 +608,28 @@ def test_reflow_class_cleanup_leaves_no_stranded_state(behavior):
     assert behavior["desktop_after_phone"]["inset"] is None
     assert behavior["phone_dismissed"]["scrollCalls"] == [[0, 512]], (
         "the phone keyboard-dismiss path must keep resetting X once"
+    )
+
+
+def test_android_tablet_does_not_reset_horizontal_scroll(behavior):
+    """Non-iOS touch devices must not lose horizontal position on viewport shrink/restore."""
+    android = behavior["android_tablet"]
+    assert android["scrollCalls"] == [], (
+        "an Android tablet must never get the document horizontal reset on viewport resize"
+    )
+
+
+def test_focusless_resize_does_not_reset_horizontal_scroll(behavior):
+    """Viewport changes without an editable control focused must not trigger the horizontal reset."""
+    focusless = behavior["focusless_resize"]
+    assert focusless["scrollCalls"] == [], (
+        "a viewport resize without an editable control focused must not reset horizontal scroll"
+    )
+
+
+def test_rotation_across_keyboard_invalidates_reset(behavior):
+    """Width or orientation changes across the keyboard transition must invalidate reset eligibility."""
+    rotation = behavior["rotation_changed"]
+    assert rotation["scrollCalls"] == [], (
+        "orientation or width changes across keyboard transition must invalidate the reset"
     )

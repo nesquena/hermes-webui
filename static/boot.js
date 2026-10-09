@@ -181,10 +181,33 @@ function _isTouchCapableViewport(){
   try{return matchMedia('(any-pointer:coarse)').matches;}catch(_){return false;}
 }
 
+function _isIOSWebKit(){
+  try{
+    const nav=(typeof navigator!=='undefined')?navigator:null;
+    if(!nav) return false;
+    if(nav.MSStream) return false;
+    const ua=String(nav.userAgent||'');
+    if(/iP(ad|hone|od)/.test(ua)) return true;
+    if(nav.platform==='MacIntel' && Number(nav.maxTouchPoints)>1) return true;
+  }catch(_){}
+  return false;
+}
+
+function _isEditableElement(el){
+  if(!el) return false;
+  const tag=String(el.tagName||'').toLowerCase();
+  if(tag==='input'||tag==='textarea'||tag==='select') return true;
+  if(el.isContentEditable) return true;
+  return false;
+}
+
 // Whether the on-screen keyboard was occluding the visual viewport as of the
 // last _syncKeyboardBottomInset() call — the single keyboard-state authority in
 // this file.
 let _keyboardVisible=false;
+let _keyboardBeganWithEditableFocus=false;
+let _keyboardStartWidth=0;
+let _keyboardStartOrientation='';
 
 // Keyboard-occlusion state machine. Writes the --keyboard-bottom-inset variable
 // consumed by the touch-primary composer padding rule, mirrors the same state on
@@ -205,6 +228,9 @@ function _syncKeyboardBottomInset(){
   const clearKeyboardState=()=>{
     root.style.removeProperty('--keyboard-bottom-inset');
     _keyboardVisible=false;
+    _keyboardBeganWithEditableFocus=false;
+    _keyboardStartWidth=0;
+    _keyboardStartOrientation='';
     if(document.body) document.body.classList.remove('keyboard-visible');
   };
   const vv=window.visualViewport;
@@ -228,6 +254,11 @@ function _syncKeyboardBottomInset(){
   }
   const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
   if(inset>0){
+    if(!wasVisible){
+      _keyboardBeganWithEditableFocus=_isEditableElement(document.activeElement);
+      _keyboardStartWidth=(vv.width||window.innerWidth||0);
+      _keyboardStartOrientation=(window.screen&&window.screen.orientation&&window.screen.orientation.type)||window.orientation||'';
+    }
     // The inset variable is only read inside the `(hover:none) and
     // (pointer:coarse)` padding rule in style.css, so its write stays scoped to
     // that pair; body.keyboard-visible is the guard that also matters on
@@ -237,8 +268,17 @@ function _syncKeyboardBottomInset(){
     if(document.body) document.body.classList.add('keyboard-visible');
     return wasVisible?'':'shown';
   }
+  let isEligible=false;
+  if(wasVisible){
+    const currentWidth=(vv.width||window.innerWidth||0);
+    const widthChanged=Boolean(_keyboardStartWidth>0 && Math.abs(currentWidth-_keyboardStartWidth)>5);
+    const currentOrientation=(window.screen&&window.screen.orientation&&window.screen.orientation.type)||window.orientation||'';
+    const orientationChanged=Boolean(_keyboardStartOrientation && currentOrientation && currentOrientation!==_keyboardStartOrientation);
+    const platformEligible=_isPhoneWidthViewport() || _isIOSWebKit();
+    isEligible=_keyboardBeganWithEditableFocus && !widthChanged && !orientationChanged && platformEligible;
+  }
   clearKeyboardState();
-  return wasVisible?'dismissed':'';
+  return (wasVisible && isEligible)?'dismissed':'';
 }
 
 // Reset only the document's horizontal offset, preserving vertical scroll.
