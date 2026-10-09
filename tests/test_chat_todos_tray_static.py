@@ -868,6 +868,10 @@ def test_chat_todos_pill_follows_the_tray_box_lifecycle(tmp_path):
         ui, "let _chatTodosResizeObserver=null;", "function _syncChatTodosExpanded("
     ) + _extract(
         ui, "function _repinChatTodosTranscript(){", "function renderChatTodos(){"
+    ) + _extract(
+        # The shipped observer also refreshes the overflow cue now
+        # (Greptile P2 2026-10-09T21:45:10Z), so the probe must provide it.
+        ui, "function _updateChatTodosScrollCue(){", "function scheduleTodosRefresh(){"
     )
     script = _TRAY_HEIGHT_PROBE.replace("__HELPER__", helper)
     assert _run_node(tmp_path, "tray_height_probe.js", script).strip() == "ok"
@@ -880,6 +884,91 @@ def test_chat_todos_box_observer_is_wired_into_the_render_path():
     assert "_ensureChatTodosResizeObserver();" in render
     assert "new ResizeObserver(" in ui
     assert "ro.observe(tray);" in ui
+
+
+# ── Greptile re-review of the post-master-merge head (2026-10-09T21:45:10Z) ──
+# P2 "Overflow fade misses size changes": the tray's resize callback republished
+# the height and re-pinned the transcript but never refreshed the bottom fade,
+# so a list that became scrollable through a viewport/composer change kept the
+# cue hidden while scrollTop was still 0.
+
+_TRAY_CUE_PROBE = """
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+const shellClasses = new Set(['chat-todos-visible']);
+const shellStyle = {
+  _v: {},
+  setProperty(k, v) { this._v[k] = v; },
+  removeProperty(k) { delete this._v[k]; },
+  getPropertyValue(k) { return this._v[k] || ''; },
+};
+const shell = {
+  classList: {
+    add(c) { shellClasses.add(c); },
+    remove(c) { shellClasses.delete(c); },
+    contains(c) { return shellClasses.has(c); },
+    toggle(c, on) { if (on) shellClasses.add(c); else shellClasses.delete(c); return !!on; },
+  },
+  style: shellStyle,
+};
+const tray = { getBoundingClientRect() { return { height: 276 }; } };
+function $(id) { return id === 'chatTodosPanel' ? tray : null; }
+const document = { querySelector(sel) { return sel === '.messages-shell' ? shell : null; } };
+const observers = [];
+class ResizeObserver {
+  constructor(cb) { this.cb = cb; this.el = null; observers.push(this); }
+  observe(el) { this.el = el; }
+  disconnect() { this.el = null; }
+}
+let repins = 0;
+function _repinChatTodosTranscript() { repins++; }
+__HELPER__
+
+// Count the shipped calls instead of replacing the implementation.
+const _pubShipped = _publishChatTodosHeight;
+let pubs = 0;
+_publishChatTodosHeight = function () { pubs++; return _pubShipped.apply(null, arguments); };
+const _cueShipped = _updateChatTodosScrollCue;
+let cues = 0;
+_updateChatTodosScrollCue = function () { cues++; return _cueShipped.apply(null, arguments); };
+
+_ensureChatTodosResizeObserver();
+assert(observers.length === 1, 'exactly one lifecycle observer');
+observers[0].cb([]);
+assert(pubs === 1, 'the box change republishes the tray height');
+assert(cues === 1, 'the box change must refresh the overflow cue too');
+
+// A hidden tray measures 0: it republishes nothing and must not touch the cue.
+shellClasses.delete('chat-todos-visible');
+observers[0].cb([]);
+assert(cues === 1, 'a hidden tray must not refresh the cue');
+console.log('ok');
+"""
+
+
+def test_chat_todos_overflow_cue_follows_the_tray_box(tmp_path):
+    """The bottom fade must be refreshed when the tray's box changes.
+
+    Without it, a list that only becomes scrollable through a shorter viewport
+    or a taller composer keeps the fade hidden (scrollTop is still 0), so the
+    clipped list reads as the complete list.
+    """
+    ui = _read_static("static/ui.js")
+    helper = _extract(
+        ui, "let _chatTodosResizeObserver=null;", "function _syncChatTodosExpanded("
+    ) + _extract(
+        ui, "function _updateChatTodosScrollCue(){", "function scheduleTodosRefresh(){"
+    )
+    script = _TRAY_CUE_PROBE.replace("__HELPER__", helper)
+    assert _run_node(tmp_path, "tray_cue_probe.js", script).strip() == "ok"
+
+
+def test_the_resize_callback_refreshes_the_overflow_cue():
+    """Source guard for the probe above: the cue call sits in the callback."""
+    ui = _read_static("static/ui.js")
+    callback = _extract(ui, "const ro=new ResizeObserver(function(){", "ro._tray=tray;")
+    assert "_updateChatTodosScrollCue();" in callback
+    assert "_publishChatTodosHeight();" in callback
+    assert "_repinChatTodosTranscript();" in callback
 
 
 # ── Re-gate 2026-10-08T03:10:50Z (head a63ab699) ──────────────────────────

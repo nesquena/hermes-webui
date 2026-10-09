@@ -11032,6 +11032,12 @@ function _ensureChatTodosResizeObserver(){
       const shell=document.querySelector('.messages-shell');
       if(!(shell&&shell.classList&&shell.classList.contains('chat-todos-visible'))) return;
       _publishChatTodosHeight();
+      // The bottom fade is a function of the tray's box too: a list that fit
+      // when it was rendered starts scrolling after a shorter viewport or a
+      // taller composer, and with scrollTop still 0 the cue stayed hidden, so
+      // the clipped list read as the complete list until something else
+      // refreshed it (Greptile P2 2026-10-09T21:45:10Z).
+      _updateChatTodosScrollCue();
       // The repin's own growth gate decides whether the reader moves: a 0px
       // hidden box records "nothing on screen", so the visible flip still counts
       // as a real growth (reviewer re-gate 2026-10-08T03:10:50Z).
