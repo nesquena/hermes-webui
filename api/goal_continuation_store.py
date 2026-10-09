@@ -254,8 +254,26 @@ def _record_continuation_handoff_unlocked(sid: str, record: dict, attempt_id: st
     stored = dict(record)
     stored["_handoff_attempt_id"] = attempt
     _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = stored
+    # #7862 round 9 (CORE, finding "the 64-entry cap evicts the only durable
+    # owner"): the cap is a memory bound, but the tokens ARE the durable
+    # evidence -- an unconditional FIFO pop could evict the one outstanding
+    # handoff a crash would need to restore. Evict only entries whose session
+    # already has a live record or a retirement tombstone, i.e. tokens that are
+    # provably spent. When every entry is still outstanding the dict is allowed
+    # to exceed the bound: losing an in-flight continuation is worse than a
+    # temporarily oversized registry.
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
     while len(_CONTINUATION_HANDOFF_TOKENS) > _MAX_CONTINUATION_HANDOFFS:
-        _CONTINUATION_HANDOFF_TOKENS.pop(next(iter(_CONTINUATION_HANDOFF_TOKENS)))
+        evictable = [
+            key
+            for key in _CONTINUATION_HANDOFF_TOKENS
+            if key[0] in PENDING_GOAL_CONTINUATION_RECORDS
+            or int(_TOMBSTONES.get(key[0]) or 0) > 0
+        ]
+        if not evictable:
+            break
+        _CONTINUATION_HANDOFF_TOKENS.pop(evictable[0], None)
 
 
 def pop_goal_continuation_handoff(
@@ -289,7 +307,7 @@ def pop_goal_continuation_handoff(
         return claimed
 
 
-def discard_goal_continuation_handoff(session_id: str, attempt_id: str = "") -> None:
+def discard_goal_continuation_handoff(session_id: str, attempt_id: str = "") -> bool:
     """Discharge this start attempt's handoff once its launch SUCCEEDED.
 
     #7862 round 7 (finding 2): the discharge is DURABLE, not just in-memory.
@@ -299,26 +317,80 @@ def discard_goal_continuation_handoff(session_id: str, attempt_id: str = "") -> 
     entry and the registry snapshot commit together, exactly like the receipt
     discard that mirrors it on the same paths.
 
+    #7862 round 9 (CORE, finding "an admitted attempt becomes claimable intent
+    again"): returns whether the snapshot actually committed. A launch that
+    succeeded while the discharge write failed leaves the handoff durable, so a
+    cold restore would restore an intent whose turn already ran. The caller must
+    be able to see that and reconcile at the next startup instead of assuming
+    the discharge landed.
+
     Never raises into the chat path.
     """
     from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 
     sid = str(session_id or "").strip()
     if not sid:
-        return
+        return False
     attempt = str(attempt_id or "").strip()
     with _LOCK:
         had = bool(attempt and (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS)
+        _discharged_record = (
+            dict(_CONTINUATION_HANDOFF_TOKENS[(sid, attempt)]) if had else None
+        )
         if attempt:
             _CONTINUATION_HANDOFF_TOKENS.pop((sid, attempt), None)
         else:
             for key in [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]:
                 del _CONTINUATION_HANDOFF_TOKENS[key]
         if had:
-            _write_registry_unlocked(
+            if _write_registry_unlocked(
                 PENDING_GOAL_CONTINUATION_RECORDS,
                 context=f"handoff-discharge sid={sid}",
+            ):
+                return True
+            # The snapshot write failed, so the durable state still describes an
+            # interrupted start. Put the in-memory token back so this process
+            # agrees with disk -- dropping it here would make the failure
+            # invisible to everything but the log, and the next discharge
+            # attempt (or a startup reconciliation) needs the token to act on.
+            # Report the failure: an admitted attempt whose handoff survives is
+            # claimable intent again, so the caller must be able to see it.
+            if attempt and _discharged_record is not None:
+                _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = _discharged_record
+            logger.warning(
+                "Goal continuation handoff for session %s could not be durably "
+                "discharged; the attempt stays claimable until reconciled",
+                sid,
             )
+            return False
+    return True
+
+
+def _drop_continuation_handoffs_unlocked(sid: str) -> int:
+    """Remove every durable handoff for *sid*; callers hold ``_LOCK``.
+
+    #7862 round 9 (CORE): the handoff is the durable evidence that a start
+    attempt consumed an intent. Three flows must clear it, and all three used
+    to leave it behind:
+
+    * **retirement** (``/goal clear``) — the intent is over, so its handoff is
+      too. Leaving it let a cold restore adopt it and resurrect the cleared
+      goal.
+    * **a rejected-start rollback that restored the record** — the intent is
+      live again as a RECORD; the handoff for the attempt that consumed it is
+      spent. Leaving it let a successful retry followed by a restart restore
+      the continuation a second time.
+    * **an adoption that refused on a tombstone** — the handoff describes an
+      intent the user explicitly cleared.
+
+    Returns the number of in-memory tokens removed. The caller is responsible
+    for the snapshot write, so this and the state it accompanies always land
+    in one ``os.replace``.
+    """
+    keys = [key for key in _CONTINUATION_HANDOFF_TOKENS if key[0] == sid]
+    for key in keys:
+        _CONTINUATION_HANDOFF_TOKENS.pop(key, None)
+    return len(keys)
 
 
 def _record_rollback_receipt_unlocked(sid: str, record: dict, attempt_id: str) -> None:
@@ -603,6 +675,16 @@ def retire_pending_goal_continuation(
         # intent that no longer exists, and keeping them only invites a claim
         # that the generation guard below would then have to refuse.
         _drop_rollback_receipt_unlocked(sid)
+        # #7862 round 9 (CORE, finding "a cleared goal comes back after the
+        # next restart"): retire must also discharge the session's durable
+        # HANDOFFS, in this same snapshot. A handoff is evidence that a start
+        # attempt consumed an intent; ``/goal clear`` ends that intent, so
+        # leaving the handoff behind let a later cold restore adopt it and
+        # resurrect the continuation the user just stopped. Adoption only
+        # compared tombstones against the RECORD's generation, and a
+        # handoff-restored record re-derives that generation at adoption
+        # time -- so the tombstone never matched.
+        _drop_continuation_handoffs_unlocked(sid)
         # Durable tombstone: the clear must outlive this process AND any number
         # of unrelated retirements, so it is written to the same snapshot as
         # the state it cleared. The in-memory stamp below stays as the
@@ -919,6 +1001,14 @@ def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
         restored = dict(record)
         PENDING_GOAL_CONTINUATION.add(sid)
         PENDING_GOAL_CONTINUATION_RECORDS[sid] = restored
+        # #7862 round 9 (CORE, finding "successful retries leave claimable
+        # handoffs"): the intent is live again as a RECORD, so the handoff for
+        # the attempt that consumed it is spent. Keeping it let a successful
+        # retry followed by a restart restore the continuation a SECOND time:
+        # adoption re-armed the record from the stale handoff even though the
+        # retry had already consumed it. Cleared in the same snapshot as the
+        # restore, so the durable state never shows both.
+        _drop_continuation_handoffs_unlocked(sid)
         _write_registry_unlocked(
             PENDING_GOAL_CONTINUATION_RECORDS,
             context=f"rollback-restore sid={sid}",
@@ -986,8 +1076,46 @@ def restore_goal_continuations() -> int:
         adopted = 0
         for (sid, attempt), record in disk_handoffs.items():
             if sid in PENDING_GOAL_CONTINUATION_RECORDS:
+                # The intent is already live as a record (a rollback restored
+                # it, or an earlier adoption did). Its handoff is spent; drop
+                # it rather than leaving a second claimable copy behind
+                # (#7862 round 9).
+                _drop_continuation_handoffs_unlocked(sid)
                 continue
             if (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS:
+                continue
+            # #7862 round 9 (CORE, finding "a cleared goal comes back after
+            # the next restart"): a handoff is only evidence of an interrupted
+            # start while the intent it describes still exists. If the session
+            # was retired (``/goal clear``, session delete, expiry) after this
+            # handoff was written, adopting it resurrects a goal the user
+            # explicitly stopped -- the record's own generation cannot catch
+            # this, because a handoff-restored record derives its generation
+            # at adoption time. Compare against the handoff's ORIGINAL
+            # generation, which the consume stamped when it spent the intent.
+            handoff_generation = int(record.get("generation") or 0)
+            tombstone = int(
+                max(
+                    int(_TOMBSTONES.get(sid) or 0),
+                    int(_RETIRED_GENERATIONS.get(sid) or 0),
+                )
+            )
+            if tombstone and handoff_generation and handoff_generation <= tombstone:
+                logger.info(
+                    "Goal continuation registry: refusing to adopt handoff for "
+                    "session %s (generation %d <= retired generation %d)",
+                    sid,
+                    handoff_generation,
+                    tombstone,
+                )
+                _drop_continuation_handoffs_unlocked(sid)
+                _RETIRED_LOG.append(
+                    {
+                        "session_id": sid,
+                        "reason": "handoff_adoption_refused_retired",
+                        "at": time.time(),
+                    }
+                )
                 continue
             _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = dict(record)
             # The intent itself is gone from disk by construction (the consume
