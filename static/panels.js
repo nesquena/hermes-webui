@@ -6721,7 +6721,30 @@ async function _profileSwitchPanelLoad(){
 // 2026-10-08T20:06:51Z). Callers use this to skip the stale window; the pending
 // reconciliation applies that profile's own snapshot itself.
 let _tabVisReconcilePending = 0;
+// Profile switches currently in flight: bumped the instant a switch takes a new
+// generation and dropped in its finally. A switch is the ONLY other thing that
+// arms nothing here but will still rewrite the mirror later, so the replay
+// below needs to tell "a NEWER switch is still running and will reconcile"
+// apart from "the switch that superseded this reconciliation already failed"
+// (a failed switch runs no reconciliation of its own, so the last release to
+// see a zero counter is then the SUPERSEDED one). greptile P1,
+// static/panels.js:6783, 2026-10-09T00:15:45Z.
+let _profileSwitchInFlight = 0;
 function _tabVisibilitySnapshotStale(){ return _tabVisReconcilePending > 0; }
+
+// Replay the tray's rail release once the localStorage hidden_tabs mirror is
+// authoritative again for the profile now in effect: no /api/settings
+// reconciliation is in flight and no switch is running that would rewrite it
+// afterwards. Skipped for a superseded reconciliation whose newer switch is
+// still in flight (greptile P1, 2026-10-08T23:51:52Z) — but NOT for one whose
+// newer switch already FAILED: that switch ran no reconciliation of its own, so
+// without the replay a tray disabled during the window leaves the Todos rail
+// entry stale until the next settings refresh (greptile P1, 2026-10-09T00:15:45Z).
+function _maybeReplayChatTodosRailSync(){
+  if (_tabVisReconcilePending > 0) return;
+  if (_profileSwitchInFlight > 0) return;
+  if (typeof _syncChatTodosRailVisibility === 'function') _syncChatTodosRailVisibility();
+}
 
 function _refreshProfileSwitchBackground(gen){
   window._modelDropdownReady=null;
@@ -6771,17 +6794,15 @@ function _refreshProfileSwitchBackground(gen){
     // re-ran it afterwards: disabling the tray during a failed reconciliation
     // left the Todos entry hidden although the guard was already clear.
     //
-    // Only the CURRENT reconciliation may replay. A SUPERSEDED one (a newer
-    // switch bumped the generation) never rewrote the mirror — it early-returns
-    // above — so re-deriving from it would reimpose the previous profile's
-    // hidden_tabs on the profile now in effect, and it can be the last release
-    // to see a zero counter while the newer switch is still awaiting its POST
-    // (greptile P1, 2026-10-08T23:51:52Z). A failed-but-current reconciliation
-    // still replays: that is the case the reviewer reproduced over Chromium.
-    if(gen === _profileSwitchGeneration && _tabVisReconcilePending <= 0
-       && typeof _syncChatTodosRailVisibility === 'function'){
-      _syncChatTodosRailVisibility();
-    }
+    // The decision lives in _maybeReplayChatTodosRailSync(): a SUPERSEDED
+    // reconciliation must NOT replay while its newer switch is still in flight
+    // (it can be the last release to see a zero counter there, and re-deriving
+    // from the then-stale mirror would reimpose the previous profile's
+    // hidden_tabs — greptile P1, 2026-10-08T23:51:52Z), but it MUST replay once
+    // that switch has FAILED: a failed switch runs no reconciliation of its own,
+    // so nothing else would ever re-run the sync and a tray disabled during the
+    // window left the Todos rail entry stale (greptile P1, 2026-10-09T00:15:45Z).
+    _maybeReplayChatTodosRailSync();
   });
 }
 
@@ -7150,6 +7171,14 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  // Hold a switch-in-flight marker for the whole run: the stale-snapshot arm
+  // below only lands once this POST resolves, and the gap before it is exactly
+  // where a superseded reconciliation's release must NOT replay the previous
+  // profile's mirror (greptile P1, 2026-10-08T22:06:59Z). Dropped in the finally,
+  // where a FAILED switch then lets that release replay (see
+  // _maybeReplayChatTodosRailSync). typeof-tolerant like the other counter ops
+  // because the frontend test harnesses eval these statements in isolation.
+  if (typeof _profileSwitchInFlight === 'number') _profileSwitchInFlight++;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
@@ -7479,6 +7508,16 @@ async function switchToProfile(name) {
     // unconditional; a stranded arm would pin tab visibility to the stale window
     // for the rest of the session (greptile P1, static/panels.js:6741).
     if (_tabVisGuardHeld) { _tabVisGuardHeld = false; if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending--; }
+    // This switch is no longer in flight. A switch that FAILED (or was
+    // superseded) never runs a /api/settings reconciliation of its own, so the
+    // release that brought the counter to zero can be a SUPERSEDED
+    // reconciliation's, which must still replay the tray rail sync — otherwise a
+    // tray disabled during the window leaves the Todos rail entry stale until
+    // the next settings refresh (greptile P1, static/panels.js:6783,
+    // 2026-10-09T00:15:45Z). A successful switch hands the mirror to its own
+    // reconciliation, so the counter is still > 0 here and that one replays.
+    if (typeof _profileSwitchInFlight === 'number' && _profileSwitchInFlight > 0) _profileSwitchInFlight--;
+    if (typeof _maybeReplayChatTodosRailSync === 'function') _maybeReplayChatTodosRailSync();
   }
 }
 

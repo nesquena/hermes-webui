@@ -1452,14 +1452,25 @@ def test_rail_release_skips_the_stale_mirror_during_a_profile_switch(tmp_path):
 
 
 def _extract_reconcile_guard(panels: str) -> tuple[str, str]:
-    counter = re.search(r"let _tabVisReconcilePending = 0;", panels)
-    assert counter, "the reconciliation guard counter is missing from static/panels.js"
-    guard = _extract(
-        panels,
-        "function _tabVisibilitySnapshotStale(){",
-        "function _refreshProfileSwitchBackground(gen){",
+    """The tray-sync guard's declarations and its two functions.
+
+    ``counter`` carries BOTH counters (the reconciliation depth and the
+    switch-in-flight marker); ``guard`` covers _tabVisibilitySnapshotStale()
+    through _maybeReplayChatTodosRailSync(), so a probe that only inlines these
+    two slices gets the complete replay decision (greptile P1,
+    static/panels.js:6783, 2026-10-09T00:15:45Z).
+    """
+    start = panels.index("let _tabVisReconcilePending = 0;")
+    stale_at = panels.index("function _tabVisibilitySnapshotStale(){")
+    reconcile_at = panels.index("function _refreshProfileSwitchBackground(gen){")
+    counter, guard = panels[start:stale_at], panels[stale_at:reconcile_at]
+    assert "let _profileSwitchInFlight = 0;" in counter, (
+        "the switch-in-flight marker the replay consults is missing from static/panels.js"
     )
-    return counter.group(0), guard
+    assert "function _maybeReplayChatTodosRailSync(){" in guard, (
+        "the tray rail replay helper is missing from static/panels.js"
+    )
+    return counter, guard
 
 
 _RECONCILE_GUARD_PROBE = """
@@ -1525,12 +1536,14 @@ function settled() { return new Promise(function (r) { setImmediate(r); }); }
   assert(resyncs === 2, 'a failed reconciliation must still replay the tray rail sync');
 
   // A SUPERSEDED reconciliation (a newer switch bumped the generation) never
-  // rewrote the mirror, so its release must NOT replay the rail sync — it can
-  // be the last release to see a zero counter while the newer switch is still
-  // awaiting its POST, and re-deriving from the stale mirror would reimpose the
-  // previous profile's hidden_tabs (greptile P1, 2026-10-08T23:51:52Z).
+  // rewrote the mirror, so while that newer switch is STILL IN FLIGHT its
+  // release must NOT replay the rail sync — it can be the last release to see a
+  // zero counter while the newer switch is still awaiting its POST, and
+  // re-deriving from the stale mirror would reimpose the previous profile's
+  // hidden_tabs (greptile P1, 2026-10-08T23:51:52Z).
   var supersededGen = _profileSwitchGeneration;
   _profileSwitchGeneration++;              // the newer switch
+  _profileSwitchInFlight = 1;              // ...which is still running
   applied = [];
   _refreshProfileSwitchBackground(supersededGen);
   assert(_tabVisibilitySnapshotStale() === true,
@@ -1541,7 +1554,28 @@ function settled() { return new Promise(function (r) { setImmediate(r); }); }
     'a superseded reconciliation still releases the guard');
   assert(applied.length === 0,
     'a superseded reconciliation must not apply its stale snapshot');
-  assert(resyncs === 2, 'a superseded reconciliation must not replay the tray rail sync');
+  assert(resyncs === 2,
+    'a superseded reconciliation must not replay while its newer switch is in flight');
+
+  // ...but once that newer switch FAILS, it will never run a reconciliation of
+  // its own: this superseded release IS the last one and the mirror stays
+  // authoritative, so the rail sync MUST replay — otherwise a tray disabled
+  // during the window left the Todos rail entry stale (greptile P1,
+  // static/panels.js:6783, 2026-10-09T00:15:45Z).
+  var failedGen = _profileSwitchGeneration;
+  _profileSwitchGeneration++;
+  _profileSwitchInFlight = 1;              // the newer switch starts...
+  applied = [];
+  _refreshProfileSwitchBackground(failedGen);
+  _profileSwitchInFlight = 0;              // ...and its profile-switch request fails
+  fulfill({hidden_tabs: ['notes'], tab_order: ['chat']});
+  await settled();
+  assert(_tabVisibilitySnapshotStale() === false,
+    'a superseded reconciliation still releases the guard');
+  assert(applied.length === 0,
+    'a superseded reconciliation must not apply its stale snapshot');
+  assert(resyncs === 3,
+    'a FAILED newer switch must not suppress the replay: the mirror is authoritative again');
   console.log('ok');
 })().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
 """
@@ -1567,23 +1601,26 @@ def test_profile_switch_reconciliation_marks_the_tab_mirror_stale(tmp_path):
     assert "}).catch(function(){}).then(function(){" in block, (
         "the release must sit after the swallowed rejection so both settle paths clear it"
     )
-    # arm + release + the zero-check that replays the tray rail sync.
-    assert block.count("_tabVisReconcilePending") == 3, (
-        "exactly one arm, one release, and one zero-check per reconciliation"
+    # one arm + one release per reconciliation; the release then delegates the
+    # replay decision to the guard helper, which is what a probe can exercise
+    # (greptile P1, 2026-10-08T23:51:52Z → 2026-10-09T00:15:45Z).
+    assert block.count("_tabVisReconcilePending") == 2, (
+        "exactly one arm and one release per reconciliation"
     )
-    resync_at = block.find("_syncChatTodosRailVisibility();", release_at)
-    assert resync_at != -1, (
-        "the release must replay the tray's rail sync once the mirror is "
+    replay_at = block.find("_maybeReplayChatTodosRailSync();", release_at)
+    assert replay_at != -1, (
+        "the release must request the tray's rail syncing once the mirror is "
         "authoritative (re-gate 2026-10-08T23:19:27Z, static/panels.js:6766)"
     )
-    zero_check_at = block.rfind("_tabVisReconcilePending <= 0", release_at, resync_at)
-    assert zero_check_at != -1, (
-        "the rail sync must be gated on the counter reaching zero"
+    # The helper owns the decision: replay only when no reconciliation is in
+    # flight AND no switch is still running to rewrite the mirror.
+    assert "if (_tabVisReconcilePending > 0) return;" in guard, (
+        "the replay must be gated on the reconciliation counter reaching zero"
     )
-    assert "gen === _profileSwitchGeneration && _tabVisReconcilePending <= 0" in block, (
-        "only the CURRENT reconciliation's release may replay the tray rail sync "
-        "(a superseded one never rewrote the mirror: greptile P1, 2026-10-08T23:51:52Z)"
+    assert "if (_profileSwitchInFlight > 0) return;" in guard, (
+        "the replay must be suppressed while a newer switch is still in flight"
     )
+    assert "if (typeof _syncChatTodosRailVisibility === 'function') _syncChatTodosRailVisibility();" in guard
     script = (
         _RECONCILE_GUARD_PROBE.replace("__COUNTER__", counter)
         .replace("__GUARD__", guard)
