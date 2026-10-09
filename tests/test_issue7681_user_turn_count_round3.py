@@ -25,7 +25,6 @@ counter. The 2026-10-08 re-gate found four more, three of them must-fix:
 
 from __future__ import annotations
 
-import re
 import sqlite3
 import subprocess
 from pathlib import Path
