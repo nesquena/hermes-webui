@@ -98,10 +98,19 @@ STATE_DIR = (
     .resolve()
 )
 
+
+def _resolve_settings_file(state_dir: Path) -> Path:
+    """Resolve an optional per-instance settings file without splitting session state."""
+    configured = os.getenv("HERMES_WEBUI_SETTINGS_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return state_dir / "settings.json"
+
+
 SESSION_DIR = STATE_DIR / "sessions"
 WORKSPACES_FILE = STATE_DIR / "workspaces.json"
 SESSION_INDEX_FILE = SESSION_DIR / "_index.json"
-SETTINGS_FILE = STATE_DIR / "settings.json"
+SETTINGS_FILE = _resolve_settings_file(STATE_DIR)
 LAST_WORKSPACE_FILE = STATE_DIR / "last_workspace.txt"
 PROJECTS_FILE = STATE_DIR / "projects.json"
 
@@ -112,6 +121,17 @@ logger = logging.getLogger(__name__)
 # path probes configured custom endpoints serially, so each provider needs a
 # short hard cap and graceful degradation.
 CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 5.0
+
+# Attempt-only timeout for a probe that ``_CustomProbeSchedule`` reaches *after*
+# the shared rebuild window is already spent while the foreground caller is still
+# waiting — the narrow hand-off race described on ``next_timeout``. It is NOT a
+# per-probe minimum and NOT a share of the window: by the time it applies the
+# window is already gone, so nothing is being divided out of it, and it can never
+# be handed out on the fair-share path. Not zero, because urllib reads a zero
+# timeout as "non-blocking" and would report a probe that is genuinely still in
+# flight as an instant connection failure. The full per-endpoint cap is reserved
+# for the deliberately out-of-band continuation, never for this state.
+CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS = 0.01
 
 
 def _env_mb_bytes(name: str, default_mb: int) -> int:
@@ -567,6 +587,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     # Remember the old mtime so we can tell whether config actually changed
     # vs. first-ever load (mtime == 0.0, e.g. server start or profile switch).
     _old_cfg_mtime = _cfg_mtime
+    _old_cfg_path = _cfg_path
     _cfg_path = config_path
     _cfg_mtime = 0.0
     try:
@@ -623,10 +644,11 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     _cfg_fingerprint = _fingerprint_config(_cfg_cache)
     # Bust the models cache so the next request sees fresh config values.
     # Only delete the disk cache when config has actually changed -- not on
-    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start or
-    # profile switch) -- preserving the disk cache so the next restart
+    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start) and not
+    # on a path change (per-client profile switch leaves the old profile's
+    # mtime) -- preserving the disk cache so the next restart
     # still hits the fast path without a cold run.
-    if _old_cfg_mtime != 0.0:
+    if _old_cfg_mtime != 0.0 and _old_cfg_path == config_path:
         _delete_models_cache_on_disk()
 
 
@@ -667,7 +689,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     mutates its input) pass _copy=False to skip the redundant copy on the hot path.
     """
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return {}
 
@@ -803,7 +825,7 @@ def _config_for_yaml_save(config_data: dict) -> dict:
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
@@ -1063,6 +1085,10 @@ MIME_MAP = {
     ".pdf": "application/pdf",
     ".zip": "application/zip",
     ".json": "application/json",
+    ".csv": "text/csv",
+    ".diff": "text/x-diff",
+    ".patch": "text/x-diff",
+    ".excalidraw": "application/vnd.excalidraw+json",
     ".html": "text/html",
     ".htm": "text/html",
     ".xls": "application/vnd.ms-excel",
@@ -1778,26 +1804,21 @@ _PROVIDER_MODELS = {
     ],
     "openai": [
         {"id": "gpt-5.5",      "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-api": [
         {"id": "gpt-5.5",      "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-codex": [
-        {"id": "gpt-5.5", "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
-        {"id": "gpt-5.4", "label": "GPT-5.4"},
-        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
-        {"id": "gpt-5.3-codex", "label": "GPT-5.3 Codex"},
-        {"id": "gpt-5.2-codex", "label": "GPT-5.2 Codex"},
-        {"id": "gpt-5.1-codex-max", "label": "GPT-5.1 Codex Max"},
-        {"id": "gpt-5.1-codex-mini", "label": "GPT-5.1 Codex Mini"},
-        {"id": "codex-mini-latest", "label": "Codex Mini (latest)"},
+        {"id": "gpt-6-sol",      "label": "GPT-6 Sol"},
+        {"id": "gpt-6-luna",     "label": "GPT-6 Luna"},
+        {"id": "gpt-5.6-sol",    "label": "GPT-5.6 Sol"},
+        {"id": "gpt-5.6-terra",  "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.6-luna",   "label": "GPT-5.6 Luna"},
+        {"id": "gpt-5.5",        "label": "GPT-5.5"},
     ],
     "google": [
         {"id": "gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
@@ -2017,11 +2038,12 @@ def _seed_provider_models_from_core() -> None:
     """Enrich existing provider model lists with missing IDs from hermes_cli.
 
     The core's _PROVIDER_MODELS is the authoritative curated list of agent-capable
-    models per provider.  The WebUI's static dict above is a display-oriented copy
-    (with {id, label} entries) that can go stale when new models are added to the
-    core without a matching WebUI update.  This function bridges the gap by
-    injecting any missing model IDs from the core into **existing** WebUI provider
-    entries.
+    models for ordinary providers.  The WebUI's static dict above is a
+    display-oriented copy (with {id, label} entries) that can go stale when new
+    models are added to the core without a matching WebUI update.  This function
+    bridges the gap by injecting any missing model IDs from the core into
+    **existing** WebUI provider entries.  OpenAI Codex is excluded because its
+    account-entitlement-aware live/cache path owns catalog freshness.
 
     Constrains seeding to providers already in the WebUI catalog — does NOT add
     brand-new providers.  Adding new vendors is a maintainer curation decision.
@@ -2052,6 +2074,8 @@ def _seed_provider_models_from_core() -> None:
             _webui_key_by_canonical[_canon] = _wk
 
     for provider_id, core_models in _core_pm.items():
+        if provider_id == "openai-codex":
+            continue
         if not isinstance(core_models, list):
             continue
 
@@ -2677,6 +2701,20 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     return False
 
 
+class _ConfiguredCustomLaneModel(str):
+    """A model id bound to the Custom lane of the configured endpoint (#7955).
+
+    model_with_provider_context() returns it for a ``custom`` session under a
+    configured provider that aliases to ``custom`` (``ollama``, legacy
+    ``local``), and resolve_model_provider() routes it to ``model.base_url``.
+    The lane travels as this type, not as text: every caller passes the value
+    straight from one to the other, and no ``@<provider>:<model>`` string a
+    ``providers.<name>`` entry can produce is an instance of it.
+    """
+
+    __slots__ = ()
+
+
 def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
 
@@ -2892,9 +2930,19 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             )
         return model, provider, base_url
 
+    # Read before the strip below, which returns a plain str.
+    configured_custom_lane = isinstance(model_id, _ConfiguredCustomLaneModel)
     model_id = (model_id or "").strip()
     if not model_id:
         return _finalize(model_id, config_provider, config_base_url)
+
+    # The Custom lane of the configured endpoint (#7955). It is bound to
+    # ``model.base_url`` and answered before anything is looked up by name: a
+    # ``providers.<name>`` or ``custom_providers[]`` record that carries the
+    # configured provider's name, or lists the same model id, has its own
+    # endpoint and credential and is not this lane.
+    if configured_custom_lane:
+        return _finalize(model_id, "custom", config_base_url)
 
     # Custom providers declared in config.yaml should win over slash-based
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
@@ -3399,6 +3447,11 @@ CUSTOM_SELECTION_UNOWNED = (CUSTOM_SELECTION_MISSING, CUSTOM_SELECTION_MALFORMED
 CUSTOM_ROUTE_UNOWNED = "unowned_custom_provider"
 CUSTOM_ROUTE_NO_CREDENTIAL = "custom_provider_credential_unresolved"
 CUSTOM_ROUTE_NO_ENDPOINT = "custom_provider_endpoint_unresolved"
+# An opaque model-alias lane that no longer resolves to any configured alias
+# (deleted, renamed, owned by another profile, or targeting a different model).
+# Kept beside the custom-provider reasons because it travels the same terminal
+# verdict path: an unresolvable route must stop before any provider routing.
+MODEL_ALIAS_ROUTE_UNRESOLVED = "model_alias_route_unresolved"
 
 # Key the verdict travels under on a merged bundle. ``None`` == routable.
 CUSTOM_ROUTE_ERROR_FIELD = "route_error"
@@ -4846,10 +4899,32 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if _is_plugin_model_provider(provider):
         return f"@{provider}:{model}"
 
+    # Codex live/cache models are intentionally absent from the static catalog,
+    # so bare same-provider IDs can be claimed by overlapping providers.* entries.
+    if provider == "openai-codex":
+        return f"@{provider}:{model}"
+
     # If the selected provider is already the configured provider, leaving the
     # model bare preserves provider-specific base_url/proxy settings.
     if provider == config_provider:
         return model
+
+    # The picker reports a configured provider that aliases to the generic
+    # ``custom`` lane (``local``, or ``ollama`` through the agent's alias table)
+    # as ``custom``, so the session's ``custom`` IS the configured provider even
+    # though the raw strings differ. Qualifying it as ``custom`` would mint
+    # ``@custom:qwen3.8:27b``, whose tag prefix resolve_model_provider() reads
+    # as a named-provider slug (``custom:qwen3.8``). A bare id is not safe
+    # either: it goes through the custom_providers[] / providers: ownership
+    # scans, so another endpoint listing the same id would take the request.
+    # Nor is the configured provider's own hint (``@ollama:``), which picks up
+    # a same-named providers: / custom_providers[] record, nor any other
+    # ``@<name>:`` text, which a providers.<name> entry of that name produces.
+    # The lane is carried as a type, resolved to ``model.base_url`` before any
+    # lookup. (#7955)
+    if provider == "custom" and config_provider:
+        if str(_resolve_provider_alias(config_provider) or "").strip().lower() == "custom":
+            return _ConfiguredCustomLaneModel(model)
 
     # OpenRouter selections with slash IDs are explicit provider/model paths.
     if provider == "openrouter":
@@ -6239,9 +6314,14 @@ def _model_supports_fast_tier_for_provider(model_id: str | None, provider: str |
 
 
 def _annotate_fast_tier_model_groups(payload: dict | None) -> dict | None:
-    """Add service-tier capability metadata to OpenAI-family model groups."""
+    """Add computed, browser-safe metadata to a model-catalog payload."""
     if not isinstance(payload, dict):
         return payload
+    routes = _public_model_alias_routes()
+    if routes:
+        payload["model_alias_routes"] = routes
+    else:
+        payload.pop("model_alias_routes", None)
     groups = payload.get("groups")
     if not isinstance(groups, list):
         return payload
@@ -6696,6 +6776,137 @@ _available_models_cache_lock = threading.RLock()  # must be RLock: cold path ref
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
 
+# ── Catalog publication ordering ─────────────────────────────────────────────
+# Every cold rebuild takes the next sequence number, and the published catalog
+# remembers the sequence it came from. A build may publish only if it is newer
+# than whatever is already published. That is what stops an over-budget worker
+# finishing late — the out-of-band publisher, which outlives the foreground
+# caller that gave up on it — from resurrecting a superseded catalog over a
+# newer one. Wall-clock stamps cannot express this ordering: an OLDER build can
+# publish *after* a newer build has already started, and a time comparison would
+# read that publication as "newer" and wrongly discard the newer build's result
+# (#7481 review).
+_models_rebuild_seq: int = 0
+
+
+def _allocate_models_rebuild_seq() -> int:
+    """Take the next catalog-rebuild sequence number.
+
+    The caller must hold ``_available_models_cache_lock`` (the cold path does),
+    so the counter is never advanced by two builds at once.
+    """
+    global _models_rebuild_seq
+    _models_rebuild_seq += 1
+    return _models_rebuild_seq
+
+
+def _models_rebuild_superseded(rebuild_seq: int) -> bool:
+    """True when a newer rebuild has been allocated since ``rebuild_seq``.
+
+    The caller must hold ``_cache_build_cv`` (which shares its RLock with
+    ``_available_models_cache_lock``) so this reads ``_models_rebuild_seq``
+    atomically with respect to ``_allocate_models_rebuild_seq``.
+
+    A build is superseded by the newest *allocated* generation, not merely by the
+    newest *published* one. ``invalidate_models_cache()`` clears
+    ``_cache_build_in_progress`` without cancelling an in-flight worker (#7481
+    review), so a newer rebuild can be allocated while an older one is still
+    running. Comparing against the last published sequence would let that older
+    worker publish an invalidated catalog before the newer build publishes, and
+    then release the build flag that already belongs to the newer rebuild — the
+    invalidation has to fence against the latest allocated generation to be a
+    real freshness boundary.
+
+    Invalidation advances the allocated generation itself, so a build that was
+    already running when the cache was invalidated is superseded even when no
+    successor rebuild is ever allocated. Without that, the delayed worker stayed
+    eligible and repopulated the catalog that had just been cleared.
+    """
+    return rebuild_seq < _models_rebuild_seq
+
+
+def _clear_build_in_progress(rebuild_seq: int) -> None:
+    """Release the single-flight slot only if this build still owns it.
+
+    ``_cache_build_in_progress`` is one shared flag, so a build that has been
+    superseded — a newer rebuild was allocated, or an invalidation advanced the
+    generation — must leave it alone: clearing it here would wake waiters to an
+    empty cache and let another cold rebuild start beside the newer one (#7481
+    review). Used by the error paths inside the catalog critical section and by
+    the post-lock durable commit, so it lives at module scope rather than being
+    redefined inside ``get_available_models``.
+    """
+    global _cache_build_in_progress
+    with _cache_build_cv:
+        if _models_rebuild_superseded(rebuild_seq):
+            # A newer rebuild owns the flag now; releasing it here would wake
+            # waiters to an empty cache and let another cold rebuild start
+            # concurrently with the newer one.
+            return
+        _cache_build_in_progress = False
+        _cache_build_cv.notify_all()
+
+
+def _models_build_identity_current(
+    build_fingerprint, build_profile
+) -> bool:
+    """True when a build's source/profile identity is still the current one.
+
+    A catalog is only an answer for the config, auth state and provider catalog
+    it was *read from*. A build that started before a config edit and publishes
+    afterwards would otherwise stamp its stale catalog with the fingerprint of
+    the sources it never saw — a fresh-looking provenance on stale data — and on
+    the disk path that is exactly what makes the stale file look loadable
+    (#7481 review). So the identity captured when the build started is compared
+    again at publication and at the durable commit; a mismatch means the result
+    is dropped and the next caller rebuilds.
+
+    ``build_fingerprint`` / ``build_profile`` are ``None`` for the legacy caller
+    that has no rebuild to fence (nothing is validated then). A ``None``
+    profile — single-profile installs, or a runtime where ``api.profiles`` could
+    not be imported — skips the profile axis; the fingerprint's
+    ``config_yaml`` axis is the profile-specific config path, so a foreign
+    profile's catalog still fails that comparison.
+
+    Fails CLOSED: an identity that cannot be read is not treated as a match.
+    """
+    if build_fingerprint is None:
+        return True
+    try:
+        if _models_cache_source_fingerprint() != build_fingerprint:
+            return False
+    except Exception:
+        return False
+    if build_profile is not None:
+        try:
+            from api.profiles import get_active_profile_name
+
+            if (get_active_profile_name() or "").strip() != build_profile:
+                return False
+        except Exception:
+            return False
+    return True
+
+
+# Serializes the durable (on-disk) catalog commit. The in-memory generation
+# fence alone cannot order two *file* writers: a publisher decides under
+# ``_cache_build_cv`` and then writes the file with that lock released (a disk
+# write must not run inside the catalog lock), so an older publisher can reach
+# the filesystem after a newer one has already committed and revert the durable
+# catalog — valid-looking JSON from a superseded build (#7481 review). The
+# commit is therefore taken under this lock and re-validated against the
+# generation and the sources it was built from, immediately before the rename.
+_models_cache_disk_commit_lock = threading.Lock()
+# Generation of the newest rebuild whose payload actually reached the durable
+# file, guarded by ``_models_cache_disk_commit_lock``. The generation fence alone
+# leaves one check-then-use window on the disk path: a publisher can pass its
+# check, be descheduled, let a newer build commit, and only then take the commit
+# lock — reverting the file it just lost to. Remembering the last committed
+# generation inside the lock closes that window without holding the catalog lock
+# across a file write.
+_models_disk_committed_seq: int = 0
+
+
 # Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
 # the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
 # to answer "did this endpoint actually advertise this exact id?" in O(1) per
@@ -6828,6 +7039,108 @@ try:
     )
 except (TypeError, ValueError):
     _LIVE_REBUILD_BUDGET_SECONDS = 4.0
+
+
+class _CustomProbeSchedule:
+    """Fair-share timing for the serial custom-endpoint probe chain (#7481).
+
+    The cold model-catalog rebuild probes the active endpoint first and each
+    named ``custom_providers`` entry after it, serially, and every probe in the
+    chain shares the one ``_LIVE_REBUILD_BUDGET_SECONDS`` wall-clock budget
+    while individually being capped at ``CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS``.
+    One unreachable endpoint — a LAN LM Studio/Ollama host the webui container
+    cannot route to is the common case, since the probe runs server-side —
+    therefore used to spend the entire budget on its connect timeout, and every
+    reachable provider scheduled behind it never got an in-band ``/v1/models``
+    probe at all: its group rendered from a stale disk cache or stayed empty and
+    the whole rebuild was pushed out-of-band.
+
+    This schedule hands each probe a fair slice of the *remaining* budget rather
+    than letting it consume the whole cap, so an endpoint that times out cannot
+    starve the endpoints after it. Two cases intentionally keep the historical
+    unthrottled cap, and both are stated rather than inferred:
+
+    * the legacy unbounded path (``_LIVE_REBUILD_BUDGET_SECONDS <= 0``), where
+      there is no window to share;
+    * the out-of-band continuation, i.e. the rebuild worker still running after
+      the foreground caller already gave up — reported by the ``out_of_band``
+      predicate — whose probes are no longer holding anyone up and must keep
+      their full attempt so the refresh can complete.
+
+    A slice is ``left / (remaining + 0.1)`` with no lower bound: a fractional
+    slot reserves publication headroom without halving a lone endpoint's window.
+    A slice bounds the serial wait, not the HTTP attempt: attempts may overlap
+    against the same deadline. After later probes, unused time is lent back to
+    still-running attempts before rebuilding from their outcomes in-band. The
+    active/LM Studio duplicate does not reserve a second slot when its URL and
+    configured credential match.
+
+    Even the shared window can truncate a healthy endpoint. A timeout below the
+    full cap is therefore not evidence of unreachability: return a partial,
+    uncached catalog, then retry truncated targets at the full cap on the worker.
+    Successful probes are retained and the final catalog uses the existing
+    generation, identity, ownership and durable-publication fences.
+
+    The window is the CALLER's window, not this chain's: ``deadline`` is an
+    absolute instant captured once before the worker and the foreground wait
+    start (see ``__init__``), so work that happens earlier in the rebuild is paid
+    out of the same window instead of being re-granted to the chain.
+    """
+
+    def __init__(self, endpoint_count: int, *, out_of_band=None, deadline=None) -> None:
+        """``deadline`` is the ABSOLUTE ``time.monotonic()`` instant the shared
+        window ends — the same instant the foreground caller stops waiting on
+        (#7481 review). The caller that owns the rebuild captures it once, before
+        the worker and the foreground wait start, because a deadline minted here
+        would be minted at construction time: any discovery work that ran before
+        the custom-probe phase (provider detection, the live id lookups, the
+        profile rebind) would be spent twice — once against the caller's wait and
+        again against a fresh window handed to this chain — so the chain could
+        still be probing for seconds after the caller had been served a fallback.
+        ``None`` falls back to "one window from now" for standalone callers.
+        """
+        self._remaining = max(1, int(endpoint_count))
+        self._cap = float(CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS)
+        self._attempt_only = float(CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS)
+        self._out_of_band = out_of_band
+        if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
+            # Legacy unbounded path: there is no window to share, so an absolute
+            # deadline is meaningless and the explicit one (if any) is ignored.
+            self._deadline = None
+        elif deadline is not None:
+            self._deadline = float(deadline)
+        else:
+            self._deadline = time.monotonic() + float(_LIVE_REBUILD_BUDGET_SECONDS)
+
+    def next_timeout(self) -> float:
+        """Timeout for the next probe in the chain, then advance the schedule."""
+        remaining = self._remaining
+        self._remaining = max(1, remaining - 1)
+        # Legacy unbounded path: no window exists, so there is nothing to share.
+        if self._deadline is None:
+            return self._cap
+        # Deliberately out-of-band continuation: the foreground caller has already
+        # stopped waiting and served its fallback, so this chain is no longer
+        # holding anyone up and keeps the full attempt for the refresh to be able
+        # to complete. This is an explicit signal rather than an inference from
+        # the deadline, because the deadline being spent does NOT imply the
+        # foreground has given up — a probe can find the window spent while the
+        # caller is still waiting (the hand-off race handled below), and that
+        # state has to stay bounded.
+        if self._out_of_band is not None and self._out_of_band():
+            return self._cap
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            # In-band, window already spent: attempt the probe with the smallest
+            # workable timeout instead of the full cap. Handing out the cap here
+            # is what let a long chain outspend the window once its early slices
+            # were floored up — the later probes paid a full per-endpoint cap each
+            # after the window was gone, so a reachable provider behind them still
+            # landed out-of-band (or not at all), which is the reported defect.
+            return min(self._cap, self._attempt_only)
+        # Fractional headroom, not a whole extra endpoint. No fixed floor:
+        # arbitrary-length chains must not over-allocate the shared window.
+        return min(self._cap, left / (remaining + 0.1))
 
 
 # ── Budget-exceeded warning rate-limit ───────────────────────────────────────
@@ -7053,13 +7366,13 @@ def _minimal_static_models_catalog() -> dict:
         })
     except Exception:
         logger.debug("minimal static models catalog build failed", exc_info=True)
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": None,
             "default_model": "",
             "configured_model_badges": {},
             "groups": [],
             "aliases": {},
-        }
+        })
 
 
 def _static_models_catalog_without_live_probes() -> dict:
@@ -7398,17 +7711,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         groups.sort(key=_group_sort_key)
 
-        model_aliases: dict[str, str] = {}
-        try:
-            raw_aliases = cfg.get("model", {}).get("aliases", {})
-            if isinstance(raw_aliases, dict):
-                model_aliases = {
-                    str(k).strip(): str(v).strip()
-                    for k, v in raw_aliases.items()
-                    if k and v
-                }
-        except Exception:
-            pass
+        model_aliases = _model_aliases_from_config()
 
         if not groups and default_model:
             return copy.deepcopy(_minimal_static_models_catalog())
@@ -7545,7 +7848,6 @@ def _has_explicit_pool_credentials(provider_id: str) -> bool:
     cost more than once per TTL window.
     """
     return bool(_pool_entry_payloads(provider_id))
-_provider_models_invalidated_ts: dict[str, float] = {}  # provider_id -> timestamp of last invalidation
 
 # Disk-backed in-memory cache for get_available_models().
 # Written to disk on every cache population so the cache survives server restarts.
@@ -7597,7 +7899,7 @@ _MODELS_CACHE_SCHEMA_VERSION = 3
 _models_cache_path = STATE_DIR / "models_cache.json"
 
 
-def _get_models_cache_path() -> Path:
+def _get_models_cache_path(profile: str | None = None) -> Path:
     """Return the /api/models disk-cache path for the *active* profile (#3957).
 
     WebUI profile switching is per-client/cookie scoped (issue #798), but the
@@ -7621,12 +7923,13 @@ def _get_models_cache_path() -> Path:
     The named-profile path is derived from ``_models_cache_path`` (the
     module-level default), not from ``STATE_DIR`` directly, so the path stays
     correct if the default is repointed (e.g. tests monkeypatch
-    ``_models_cache_path`` to an isolated tmp file).
+    ``_models_cache_path`` to an isolated tmp file). Pass *profile* to get
+    another profile's path (profile delete/create).
     """
     try:
         from api.profiles import get_active_profile_name, _is_root_profile
 
-        name = (get_active_profile_name() or "").strip()
+        name = (profile or get_active_profile_name() or "").strip()
         if not name or _is_root_profile(name):
             return _models_cache_path
         # Defensive filename sanitization: the cookie-derived profile name is
@@ -7913,6 +8216,96 @@ def _auth_store_semantic_fingerprint(path: Path) -> dict:
     return fp
 
 
+def _active_profile_home() -> Path:
+    try:
+        from api.profiles import get_active_hermes_home as _gah
+
+        return _gah()
+    except ImportError:
+        return _DEFAULT_HERMES_HOME
+
+
+def _models_cache_env_fingerprint(path: Path) -> list:
+    """``[key, HMAC(value)]`` per non-empty ``.env`` entry, parsed like provider detection.
+
+    Values are keyed-hashed with the WebUI signing key so the cache file never holds a secret.
+    """
+    import hmac
+    from api.auth import _signing_key
+    from api.providers import _load_env_file
+
+    key = _signing_key()
+    return [
+        [k, hmac.new(key, v.encode("utf-8"), hashlib.sha256).hexdigest()]
+        for k, v in sorted(_load_env_file(Path(path).expanduser()).items())
+        if v
+    ]
+
+
+def _declares_model_provider_kind(plugin_dir: Path) -> bool:
+    # Same parse as the agent's providers._declares_model_provider_kind: PyYAML, then a line scan.
+    for filename in ("plugin.yaml", "plugin.yml"):
+        manifest = plugin_dir / filename
+        if not manifest.is_file():
+            continue
+        try:
+            text = manifest.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        try:
+            from api import yaml_compat as _yaml
+
+            data = _yaml.safe_load(text)
+            if isinstance(data, dict):
+                return str(data.get("kind", "")).strip() == "model-provider"
+        except Exception:
+            pass
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or ":" not in stripped:
+                continue
+            key, _, value = stripped.partition(":")
+            if key.strip() == "kind":
+                return value.strip().strip("\"'") == "model-provider"
+        return False
+    return False
+
+
+def _models_cache_plugin_fingerprint(home: Path) -> list:
+    """``[dir, file stamps]`` per model-provider plugin, discovered like providers._scan_home_layer."""
+    found = []
+    plugins_root = Path(home).expanduser() / "plugins"
+    for base, flat in ((plugins_root / "model-providers", False), (plugins_root, True)):
+        try:
+            children = sorted(base.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir() or child.name.startswith(("_", ".")):
+                continue
+            if flat and (child.name == "model-providers" or not _declares_model_provider_kind(child)):
+                continue
+            found.append([str(child.relative_to(plugins_root)), _plugin_tree_stamps(child)])
+    return found
+
+
+def _plugin_tree_stamps(plugin_dir: Path) -> list:
+    # The loader execs __init__.py, which may import siblings or read data files; skip bytecode.
+    stamps = []
+    for root, dirs, files in os.walk(plugin_dir):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not d.startswith("."))
+        for name in sorted(files):
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            stamps.append([os.path.relpath(path, plugin_dir), st.st_mtime_ns, st.st_size])
+    return stamps
+
+
 def _models_cache_source_fingerprint() -> dict:
     """Return the current config/auth/catalog fingerprint for /api/models cache.
 
@@ -7924,9 +8317,12 @@ def _models_cache_source_fingerprint() -> dict:
     mtime/size fingerprint because it is only rewritten on deliberate user
     edits (which can change anything) and does not churn on a timer.
     """
+    home = _active_profile_home()
     return {
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
+        "env": _models_cache_env_fingerprint(home / ".env"),
+        "plugins": _models_cache_plugin_fingerprint(home),
         "catalog": _models_cache_catalog_fingerprint(),
     }
 
@@ -8054,24 +8450,363 @@ def _load_models_cache_from_disk() -> dict | None:
 
 
 def _model_aliases_from_config() -> dict[str, str]:
-    """Build the normalized model-alias map from current config.
-
-    Mirrors the alias construction used by the live and static catalog paths so
-    the `/api/models.aliases` contract is consistent across every catalog source
-    (live, static, and the stale-disk fallback, which can't read aliases from a
-    disk cache that never persisted them).
-    """
+    """Build the legacy string-alias map from current config."""
     try:
         raw_aliases = cfg.get("model", {}).get("aliases", {})
         if isinstance(raw_aliases, dict):
             return {
                 str(k).strip(): str(v).strip()
                 for k, v in raw_aliases.items()
-                if k and v
+                if k and v and isinstance(v, str)
             }
     except Exception:
         pass
     return {}
+
+
+_MODEL_ALIAS_ROUTE_PREFIX = "model-alias-"
+
+
+def _model_alias_route_provider(name: object) -> str:
+    """Return a stable opaque provider lane for one profile-local alias name."""
+    normalized = str(name or "").strip().lower()
+    try:
+        from api.profiles import get_active_hermes_home
+
+        profile_home = str(get_active_hermes_home().expanduser().resolve())
+    except Exception:
+        # The config path is the closest stable profile identity available during
+        # early imports and in reduced test environments.
+        profile_home = str(_get_config_path().expanduser().resolve().parent)
+    digest = hashlib.sha256(f"{profile_home}\0{normalized}".encode("utf-8")).hexdigest()
+    return f"{_MODEL_ALIAS_ROUTE_PREFIX}{digest}"
+
+
+def _configured_model_alias_entries(config_data: dict | None = None) -> dict[str, dict[str, str]]:
+    """Normalize canonical and legacy aliases with Hermes precedence."""
+    config_data = config_data if isinstance(config_data, dict) else cfg
+    entries: dict[str, dict[str, str]] = {}
+    canonical = config_data.get("model_aliases")
+    if isinstance(canonical, dict):
+        for raw_name, raw_entry in canonical.items():
+            name = str(raw_name or "").strip().lower()
+            if not name or not isinstance(raw_entry, dict):
+                continue
+            model = str(raw_entry.get("model") or "").strip()
+            if not model:
+                continue
+            entries[name] = {
+                "model": model,
+                "provider": str(raw_entry.get("provider") or "custom").strip() or "custom",
+                "base_url": str(raw_entry.get("base_url") or "").strip(),
+                "api_key": str(raw_entry.get("api_key") or "").strip(),
+                "key_env": str(raw_entry.get("key_env") or "").strip(),
+            }
+
+    model_section = config_data.get("model")
+    legacy = model_section.get("aliases") if isinstance(model_section, dict) else None
+    current_provider = str(model_section.get("provider") or "").strip() if isinstance(model_section, dict) else ""
+    if isinstance(legacy, dict):
+        for raw_name, raw_entry in legacy.items():
+            name = str(raw_name or "").strip().lower()
+            if not name or name in entries:
+                continue
+            if isinstance(raw_entry, dict):
+                model = str(raw_entry.get("model") or "").strip()
+                explicit_provider = str(raw_entry.get("provider") or "").strip()
+                base_url = str(raw_entry.get("base_url") or "").strip()
+                api_key = str(raw_entry.get("api_key") or "").strip()
+                key_env = str(raw_entry.get("key_env") or "").strip()
+                if not explicit_provider and not base_url:
+                    continue
+                provider = explicit_provider or current_provider or "custom"
+            elif isinstance(raw_entry, str) and raw_entry.strip():
+                value = raw_entry.strip()
+                if "/" not in value:
+                    continue
+                provider, model = value.split("/", 1)
+                provider, model, base_url = provider.strip(), model.strip(), ""
+                api_key, key_env = "", ""
+                if not provider:
+                    continue
+            else:
+                continue
+            if model:
+                entries[name] = {
+                    "model": model,
+                    "provider": provider or current_provider or "custom",
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "key_env": key_env,
+                }
+    return entries
+
+
+def _public_model_alias_routes() -> dict[str, dict[str, str]]:
+    """Return alias routes safe to expose through ``/api/models``.
+
+    Endpoint and credential fields remain server-side. The opaque provider lane
+    preserves exact alias/endpoint identity in session state without exposing a
+    credential-bearing URL or key material.
+    """
+    return {
+        name: {
+            "model": entry["model"],
+            "provider": entry["provider"],
+            "route_provider": _model_alias_route_provider(name),
+        }
+        for name, entry in _configured_model_alias_entries().items()
+    }
+
+
+def resolve_model_alias_runtime(
+    route_provider: str | None,
+    expected_model: str | None = None,
+) -> dict[str, object] | None:
+    """Resolve an opaque alias lane to server-side runtime routing material."""
+    route_provider = str(route_provider or "").strip().lower()
+    if not route_provider.startswith(_MODEL_ALIAS_ROUTE_PREFIX):
+        return None
+    aliases = _configured_model_alias_entries()
+    name = next(
+        (alias_name for alias_name in aliases if _model_alias_route_provider(alias_name) == route_provider),
+        None,
+    )
+    if name is None:
+        return None
+
+    configured = aliases[name]
+    resolved = dict(configured)
+    base_url_explicit = bool(configured.get("base_url"))
+    credential_explicit = bool(configured.get("api_key") or configured.get("key_env"))
+    # Hermes resolves a URL-bearing alias's credential for the alias HOST
+    # (requested="custom", which is host-gated), never for its provider label.
+    # That lookup provider is credential authority only; the alias's logical
+    # provider stays its routing/wire identity.
+    credential_lookup_provider = (
+        "custom" if base_url_explicit else str(configured.get("provider") or "custom").strip()
+    )
+    try:
+        from hermes_cli.model_switch import _load_direct_aliases, direct_alias_runtime_request
+
+        direct = _load_direct_aliases().get(name)
+        if direct is not None:
+            requested_provider, api_key = direct_alias_runtime_request(direct)
+            credential_lookup_provider = str(requested_provider or credential_lookup_provider).strip()
+            resolved = {
+                "model": str(direct.model or "").strip(),
+                "provider": str(direct.provider or requested_provider or "custom").strip(),
+                "base_url": str(direct.base_url or configured.get("base_url") or "").strip(),
+                "api_key": str(api_key or configured.get("api_key") or "").strip(),
+                "key_env": "" if api_key else str(configured.get("key_env") or "").strip(),
+            }
+    except Exception:
+        pass
+    resolved["credential_lookup_provider"] = credential_lookup_provider
+
+    resolved["alias"] = name
+    # Keep server-only provenance for composing aliases with named custom
+    # providers. An explicit alias endpoint is its own authority and must not be
+    # replaced by, or paired with credentials from, ``custom:<slug>`` config.
+    resolved["base_url_explicit"] = base_url_explicit
+    resolved["credential_explicit"] = credential_explicit
+    if expected_model and str(expected_model).strip() != resolved["model"]:
+        return None
+    raw_api_key = resolved.get("api_key", "")
+    if raw_api_key.startswith("${") and raw_api_key.endswith("}"):
+        resolved["api_key"] = _thread_local_env_value(raw_api_key[2:-1]).strip()
+    elif not raw_api_key and resolved.get("key_env"):
+        resolved["api_key"] = _thread_local_env_value(resolved["key_env"]).strip()
+    return resolved
+
+
+def is_model_alias_route_provider(route_provider: object) -> bool:
+    """True when ``route_provider`` is an opaque model-alias lane.
+
+    True whether or not the lane currently resolves: the lane is a WebUI-minted
+    identity for one alias name, so it identifies the alias route even when the
+    alias was deleted, belongs to another profile, or now targets a different
+    model. Callers use this to keep such a lane out of generic provider
+    resolution, which would read the opaque digest as a provider id.
+    """
+    return str(route_provider or "").strip().lower().startswith(_MODEL_ALIAS_ROUTE_PREFIX)
+
+
+def unresolved_model_alias_route_error() -> dict:
+    """Return the terminal verdict for an alias lane that resolved to nothing."""
+    return {
+        "reason": MODEL_ALIAS_ROUTE_UNRESOLVED,
+        "provider": None,
+        "message": (
+            "This session's model alias is not configured in the active profile: it "
+            "may have been deleted or renamed, or its target model may have changed."
+        ),
+        "hint": (
+            "Pick the model again (the /model command or the model selector), then "
+            "send again."
+        ),
+    }
+
+
+def raise_for_unresolved_model_alias_route(route_provider: object) -> None:
+    """Fail closed when an opaque alias lane no longer resolves.
+
+    No-op for a lane that is not a ``model-alias-*`` route. Otherwise raise the
+    terminal :class:`CustomProviderRouteError` so the caller stops before
+    generic provider resolution, before any AIAgent is constructed, and before
+    the agent cache is written — the opaque digest is not a provider id, and
+    resolving it as one can land on an ambient/fallback endpoint the user never
+    picked. The verdict carries no endpoint, credential, or alias-name detail.
+    """
+    if not is_model_alias_route_provider(route_provider):
+        return
+    verdict = unresolved_model_alias_route_error()
+    raise CustomProviderRouteError(
+        verdict["message"],
+        reason=verdict["reason"],
+        provider=verdict["provider"],
+        hint=verdict["hint"],
+    )
+
+
+def _same_endpoint_origin(url_a: object, url_b: object) -> bool:
+    """True only for an identical (scheme, host, port) origin; unknown is False."""
+    from urllib.parse import urlsplit
+
+    def _origin(url: object):
+        try:
+            parts = urlsplit(str(url or "").strip())
+            scheme = (parts.scheme or "").lower()
+            host = (parts.hostname or "").lower()
+            port = parts.port or {"https": 443, "http": 80}.get(scheme)
+        except ValueError:
+            return None
+        return (scheme, host, port) if scheme and host else None
+
+    origin_a = _origin(url_a)
+    return origin_a is not None and origin_a == _origin(url_b)
+
+
+def _model_alias_endpoint_api_mode(provider: str, base_url: str | None, model: object) -> str | None:
+    """Wire protocol for a URL-bearing alias, via Hermes' own detection.
+
+    Mirrors Hermes Agent, which clears the mode for a direct-alias endpoint and
+    re-detects it from the alias's logical provider plus its host. ``None``
+    (agent-side detection) when the installed Hermes cannot answer.
+    """
+    try:
+        from hermes_cli.providers import determine_api_mode
+
+        return determine_api_mode(provider, base_url or "", model=str(model or "")) or None
+    except Exception:
+        return None
+
+
+def merge_model_alias_runtime_bundle(
+    alias_route: dict,
+    runtime_provider: dict | None = None,
+    *,
+    connection_resolver=None,
+) -> dict:
+    """Compose one alias route with provider runtime state without mixing authorities.
+
+    An alias-declared ``base_url`` owns the endpoint boundary, matching Hermes
+    Agent's direct-alias contract (``_apply_direct_alias_endpoint``): the alias's
+    declared credential wins; otherwise the only credential that may accompany
+    it is one the caller resolved host-gated against the alias URL itself (see
+    ``direct_alias_runtime_request``), and only when that runtime reports the
+    alias's own origin. An unrelated provider credential never crosses to it.
+    The alias's logical provider remains its identity and selects the wire
+    protocol together with the alias host; the host-gated ``custom`` lookup is
+    credential authority only. When the alias names only a provider, normal
+    provider resolution remains authoritative. A credential-only alias may
+    override that provider's credential, but not its endpoint or wire protocol,
+    and it clears the provider credential pool it displaced.
+    """
+    route = alias_route if isinstance(alias_route, dict) else {}
+    runtime = runtime_provider if isinstance(runtime_provider, dict) else {}
+    provider = str(route.get("provider") or runtime.get("provider") or "").strip() or None
+    explicit_base_url = bool(route.get("base_url_explicit"))
+    explicit_credential = bool(route.get("credential_explicit"))
+    alias_api_key = route.get("api_key") or None
+
+    if explicit_base_url:
+        alias_base_url = route.get("base_url") or None
+        logical_provider = str(route.get("provider") or "").strip()
+        # WebUI canonicalizes named custom providers to "custom" everywhere.
+        bundle_provider = (
+            "custom"
+            if not logical_provider or logical_provider.lower().startswith("custom")
+            else logical_provider
+        )
+        if explicit_credential:
+            api_key = alias_api_key
+        else:
+            runtime_key = str(runtime.get("api_key") or "").strip()
+            if runtime_key == "no-key-required" or not _same_endpoint_origin(
+                runtime.get("base_url"), alias_base_url
+            ):
+                runtime_key = ""
+            api_key = runtime_key or KEYLESS_CUSTOM_API_KEY
+        bundle = {
+            "provider": bundle_provider,
+            "base_url": alias_base_url,
+            "api_key": api_key,
+            "api_mode": _model_alias_endpoint_api_mode(
+                logical_provider or bundle_provider, alias_base_url, route.get("model")
+            ),
+            "acp_command": None,
+            "acp_args": None,
+            "credential_pool": None,
+            CUSTOM_ROUTE_ERROR_FIELD: None,
+        }
+        if explicit_credential and not alias_api_key:
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
+                CUSTOM_ROUTE_NO_CREDENTIAL,
+                provider or f"model alias {route.get('alias') or '<unknown>'}",
+            )
+        return bundle
+
+    resolved_provider = provider
+    resolved_api_key = runtime.get("api_key")
+    resolved_base_url = runtime.get("base_url")
+    if isinstance(provider, str) and provider.lower().startswith("custom:"):
+        bundle = merge_custom_provider_runtime_bundle(
+            resolved_provider,
+            resolved_api_key,
+            resolved_base_url,
+            runtime,
+            lookup_provider=provider,
+            connection_resolver=connection_resolver,
+        )
+    else:
+        bundle = {
+            "provider": resolved_provider,
+            "base_url": resolved_base_url,
+            "api_key": resolved_api_key,
+            "api_mode": runtime.get("api_mode"),
+            "acp_command": runtime.get("acp_command", runtime.get("command")),
+            "acp_args": runtime.get("acp_args", runtime.get("args")),
+            "credential_pool": runtime.get("credential_pool"),
+            CUSTOM_ROUTE_ERROR_FIELD: None,
+        }
+
+    if explicit_credential:
+        bundle["api_key"] = alias_api_key
+        bundle["credential_pool"] = None
+        if alias_api_key and bundle.get("base_url"):
+            # The alias supplied the credential the provider bundle lacked; the
+            # pair is now complete, so a prior missing-credential verdict no
+            # longer applies. Endpoint/unowned verdicts remain terminal.
+            verdict = bundle.get(CUSTOM_ROUTE_ERROR_FIELD)
+            if not verdict or verdict.get("reason") == CUSTOM_ROUTE_NO_CREDENTIAL:
+                bundle[CUSTOM_ROUTE_ERROR_FIELD] = None
+        elif not alias_api_key:
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
+                CUSTOM_ROUTE_NO_CREDENTIAL,
+                provider or f"model alias {route.get('alias') or '<unknown>'}",
+            )
+    return bundle
 
 
 def _load_stale_models_cache_from_disk() -> dict | None:
@@ -8080,10 +8815,10 @@ def _load_stale_models_cache_from_disk() -> dict | None:
     The main cache loader enforces metadata stamps for a full cold-path cache hit.
     This helper intentionally does not apply that stricter policy, so we can still
     recover a useful fallback payload when the strict loader rejected cache because
-    metadata or fingerprint fields are stale. It DOES still enforce the schema
-    version: a cross-schema cache can have an incompatible groups/badge shape, so
-    serving it to the picker could surface a broken catalog — schema mismatch is a
-    hard reject even on the fallback path.
+    the WebUI version stamp is stale. It DOES still enforce the schema version (a
+    cross-schema cache can have an incompatible groups/badge shape) and the source
+    fingerprint: a snapshot built from other config/auth/.env/plugin sources is a
+    wrong catalog, not merely an old one, so it is never served.
     """
     try:
         import json as _j
@@ -8096,6 +8831,8 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
+            return None
+        if cache.get("_source_fingerprint") != _models_cache_source_fingerprint():
             return None
         aliases = cache.get("aliases")
         if not isinstance(aliases, dict):
@@ -8117,7 +8854,9 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         return None
 
 
-def _save_models_cache_to_disk(cache: dict) -> None:
+def _save_models_cache_to_disk(
+    cache: dict, *, rebuild_seq=None, build_fingerprint=None, build_profile=None
+) -> None:
     """Save cache to disk so it survives server restarts.
 
     Stamps the payload with `_webui_version` and `_schema_version` (#1633) so
@@ -8132,13 +8871,31 @@ def _save_models_cache_to_disk(cache: dict) -> None:
     a mismatch (since runtime_version is non-None on every subsequent call),
     so this is safe — at worst we write one cache file that gets rejected
     once on the next boot.
+
+    The commit is fenced (#7481 review). Two overlapping publishers used to
+    pick the SAME ``.<pid>.tmp`` path, so the newer writer's rename could be
+    undone by the older writer's still-open descriptor, leaving stale-but-valid
+    JSON as the durable catalog; and there was no re-check between the in-memory
+    generation decision and the rename. So the temp file is unique per build, and
+    the rename is taken under ``_models_cache_disk_commit_lock`` after
+    re-validating that this build is still the newest allocated generation and is
+    still publishing for the sources it read. A superseded or re-sourced commit
+    discards its temp file and leaves the durable catalog to the build that won.
+    ``_source_fingerprint`` records the fingerprint the build READ, so the file
+    can never claim provenance it did not have.
     """
+    global _models_disk_committed_seq
+    tmp = None
     try:
         if not _is_valid_models_cache(cache):
             return
         payload = {
             "_schema_version": _MODELS_CACHE_SCHEMA_VERSION,
-            "_source_fingerprint": _models_cache_source_fingerprint(),
+            "_source_fingerprint": (
+                build_fingerprint
+                if build_fingerprint is not None
+                else _models_cache_source_fingerprint()
+            ),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -8148,12 +8905,145 @@ def _save_models_cache_to_disk(cache: dict) -> None:
         if runtime_version is not None:
             payload["_webui_version"] = runtime_version
         cache_path = _get_models_cache_path()
-        tmp = str(cache_path) + f".{os.getpid()}.tmp"
+        # Unique per build AND per thread: a shared per-pid name is what let two
+        # concurrent publishers collide on one temp path. Same directory, so the
+        # commit stays a same-filesystem (atomic) rename.
+        tmp = "{}.{}.{}.{}.tmp".format(
+            cache_path,
+            os.getpid(),
+            threading.get_ident(),
+            "unfenced" if rebuild_seq is None else int(rebuild_seq),
+        )
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        os.rename(tmp, str(cache_path))
+        with _models_cache_disk_commit_lock:
+            # Commit-time fence, not merely a pre-write check: the write above is
+            # slow enough for a newer build to publish in the meantime, and the
+            # durable file must never be reverted to an older catalog.
+            #
+            # Lock order is commit lock -> catalog lock; nothing takes them the
+            # other way round (the publishers call this with `_cache_build_cv`
+            # released, because a file write must not run inside the catalog
+            # lock).
+            # Hold the catalog lock through the rename: invalidation takes
+            # commit -> catalog in that same order and deletes under both.
+            # Otherwise it can revoke the build after this check, delete the
+            # file, and return before this stale rename restores it.
+            with _cache_build_cv:
+                superseded = rebuild_seq is not None and _models_rebuild_superseded(
+                    rebuild_seq
+                )
+                if superseded or (
+                    rebuild_seq is not None
+                    and (
+                        int(rebuild_seq) < _models_disk_committed_seq
+                        or not _models_build_identity_current(
+                            build_fingerprint, build_profile
+                        )
+                    )
+                ):
+                    logger.debug(
+                        "discarding models-cache disk commit from superseded rebuild "
+                        "#%s (latest allocated rebuild #%s, latest committed #%s)",
+                        rebuild_seq, _models_rebuild_seq, _models_disk_committed_seq,
+                    )
+                    return
+                os.replace(tmp, str(cache_path))
+                tmp = None
+                if rebuild_seq is not None:
+                    _models_disk_committed_seq = max(
+                        _models_disk_committed_seq, int(rebuild_seq)
+                    )
     except Exception:
         pass  # Non-fatal -- cache will rebuild on next call
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass  # already gone / never created
+
+
+def _commit_models_cache_to_disk_after_lock(
+    cache: dict, rebuild_seq, build_fingerprint, build_profile
+) -> None:
+    """Foreground durable publication, run with the catalog lock NOT held.
+
+    ``get_available_models`` holds ``_available_models_cache_lock`` across the
+    whole cold path, including the foreground wait. It publishes memory there
+    and queues the durable commit for this helper, which runs only after that
+    outer lock scope has fully ended (#7481 review). Calling
+    ``_save_models_cache_to_disk`` while the catalog lock was still held acquired
+    the two locks in the order catalog -> commit, while
+    ``_invalidate_models_catalog_epoch`` (and the writer itself) uses
+    commit -> catalog: a foreground publisher then blocked on a commit mutex an
+    invalidator already held, while that invalidator blocked on the catalog lock
+    the publisher owned. Both acquisitions are unbounded in production, so that
+    is a cycle with no escape — the foreground `/api/models` load and the
+    invalidation would each wait forever.
+
+    Running the commit here keeps the writer's own order (commit -> catalog)
+    intact with no outer catalog ownership held, so the two can never cycle.
+    The single-flight release rides with the commit, so ownership still spans
+    the durable write; ``_clear_build_in_progress`` refuses to release a slot a
+    newer rebuild owns, so a superseded foreground publisher cannot clear the
+    newer build's flag (#7481 review).
+    """
+    try:
+        _save_models_cache_to_disk(
+            cache,
+            rebuild_seq=rebuild_seq,
+            build_fingerprint=build_fingerprint,
+            build_profile=build_profile,
+        )
+    except Exception:
+        logger.debug("models cache disk save failed", exc_info=True)
+    finally:
+        _clear_build_in_progress(rebuild_seq)
+
+
+class _DeferredCatalogPublication:
+    """Hold the models-catalog lock for one cold path, then flush the commits.
+
+    ``get_available_models`` runs its whole cold path under
+    ``_available_models_cache_lock`` and, on the foreground paths, publishes the
+    catalog to memory *and* to disk. Committing to disk while that lock is held
+    acquires the two locks as catalog -> commit, while
+    ``_invalidate_models_catalog_epoch`` and ``_save_models_cache_to_disk``
+    itself take commit -> catalog (#7481 review): a foreground publisher then
+    waits forever on a commit mutex an invalidator already holds, and that
+    invalidator waits forever on the catalog lock the publisher owns. Both
+    acquisitions are unbounded in production, so this is a hard deadlock, not a
+    latency bug.
+
+    This scope owns the catalog lock for the critical section and, on exit,
+    releases it *before* running the queued durable commits. Ordering is the
+    whole point: the exit runs after the ``with`` body (including on the way out
+    of a ``return``), and the release happens first, so the commits below acquire
+    commit -> catalog with no outer catalog ownership — the writer's own order,
+    which cannot cycle with an invalidator.
+
+    The queue is handed to the body (``as deferred``) so the closures inside it
+    can enqueue instead of committing inline.
+    """
+
+    def __init__(self, lock) -> None:
+        self._lock = lock
+        self._commits: list = []
+
+    def __enter__(self) -> list:
+        self._lock.acquire()
+        return self._commits
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # Release exactly the level acquired in __enter__ — the body's own
+        # re-entries (``_cache_build_cv`` shares this RLock) are balanced, so
+        # the lock is fully free from here on. Doing this before the flush is
+        # what removes the cycle; holding it would recreate the deadlock.
+        self._lock.release()
+        while self._commits:
+            _commit_models_cache_to_disk_after_lock(*self._commits.pop(0))
+        return False
 
 
 def _get_fresh_memory_models_cache(now: float) -> dict | None:
@@ -8187,7 +9077,39 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     return None
 
 
-def invalidate_models_cache():
+def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: str | None = None) -> None:
+    """Revoke readers and workers, then remove the durable snapshot atomically.
+
+    Lock order is always disk-commit -> catalog. Keeping both through unlink
+    prevents an already-admitted rename from restoring a deleted cache. Readers
+    that loaded disk outside the lock use the epoch to reject those bytes.
+    """
+    global _available_models_cache, _available_models_cache_ts
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
+    global _cache_build_in_progress
+    with _models_cache_disk_commit_lock:
+        with _cache_build_cv:
+            _allocate_models_rebuild_seq()
+            _available_models_cache = None
+            _available_models_cache_ts = 0.0
+            _available_models_live_rebuild_ts = 0.0
+            _available_models_cache_source_fingerprint = None
+            _sync_models_cache_provenance()
+            # Evict credentials before reopening rebuild admission. Otherwise a
+            # new generation can persist an old pool with the new fingerprint.
+            if provider_id is None:
+                _CREDENTIAL_POOL_CACHE.clear()
+            else:
+                tag = _credential_pool_profile_tag()
+                _CREDENTIAL_POOL_CACHE.pop((tag, provider_id), None)
+                _CREDENTIAL_POOL_CACHE.pop((tag, _resolve_provider_alias(provider_id)), None)
+            _cache_build_in_progress = False
+            _cache_build_cv.notify_all()
+            if delete_disk:
+                _delete_models_cache_on_disk()
+
+
+def invalidate_models_cache(*, delete_disk: bool = True):
     """Force the TTL cache for get_available_models() to be cleared.
 
     Call this after modifying config.cfg in-memory (e.g. in tests) so
@@ -8200,25 +9122,12 @@ def invalidate_models_cache():
     that call invalidate_models_cache() still get back the previous test's
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
+
+    Invalidation revokes running rebuilds even without a successor. A profile
+    switch passes ``delete_disk=False`` to preserve its fingerprint-guarded disk
+    snapshot; the generation/owner epoch still advances.
     """
-    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
-    with _available_models_cache_lock:
-        _available_models_cache = None
-        _available_models_cache_ts = 0.0
-        _available_models_live_rebuild_ts = 0.0
-        _available_models_cache_source_fingerprint = None
-        _sync_models_cache_provenance()
-        _cache_build_in_progress = False
-        _cache_build_cv.notify_all()
-        # Clear the credential pool cache too (all profiles). Without this,
-        # tests (and live provider key edits) see a stale CredentialPool from a
-        # prior auth_store payload — the test_credential_pool_providers suite was
-        # hitting this directly. A full reset is intentionally profile-wide.
-        _CREDENTIAL_POOL_CACHE.clear()
-    # Also delete the disk cache so the next cold build starts fresh.
-    # Disk delete is outside the lock — file I/O shouldn't block other readers.
-    _delete_models_cache_on_disk()
+    _invalidate_models_catalog_epoch(delete_disk=delete_disk)
     try:
         from api.plugin_providers import invalidate_plugin_model_provider_cache
 
@@ -8254,30 +9163,12 @@ def invalidate_provider_models_cache(provider_id: str):
 
     Also invalidates the full cache so that the next get_available_models()
     call rebuilds all groups cleanly (the rebuilt provider is merged with any
-    other cached groups from the 24h TTL window).  After the next
-    get_available_models() call, _provider_models_invalidated_ts[provider_id]
-    is cleared so the provider's fresh models are used.
+    other cached groups from the 24h TTL window).
 
     Args:
         provider_id: canonical provider id (e.g. 'openai', 'anthropic', 'custom:my-key')
     """
-    global _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _CREDENTIAL_POOL_CACHE
-    with _available_models_cache_lock:
-        _available_models_cache = None
-        _available_models_cache_ts = 0.0
-        _available_models_live_rebuild_ts = 0.0
-        _available_models_cache_source_fingerprint = None
-        _sync_models_cache_provenance()
-        _provider_models_invalidated_ts[provider_id] = time.time()
-        # Also evict the credential pool so the next cold path re-loads it.
-        # Must evict both the original key and its canonical form (load_pool
-        # may be called with either, and both paths cache under their own key),
-        # scoped to the active profile's cache key.
-        _cp_tag = _credential_pool_profile_tag()
-        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, provider_id), None)
-        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, _resolve_provider_alias(provider_id)), None)
-    _delete_models_cache_on_disk()
+    _invalidate_models_catalog_epoch(provider_id=provider_id)
 
 
 def _get_label_for_model(model_id: str, existing_groups: list) -> str:
@@ -8466,9 +9357,9 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     """Return visible model slugs from Codex's local models_cache.json.
 
     The agent's provider_model_ids('openai-codex') intentionally filters IDs
-    with ``supported_in_api: false``. Codex CLI still lists some of those models
-    in its picker (notably ``gpt-5.3-codex-spark`` from #1680), so the WebUI
-    merges this visible local catalog to stay in sync with Codex itself.
+    with ``supported_in_api: false``. Codex's visible catalog may still include
+    some of those models, so the WebUI merges this local catalog with live
+    discovery.
     """
     codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
     cache_path = codex_home / "models_cache.json"
@@ -8549,6 +9440,99 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
+    #
+    # #7481: explicit foreground-vs-out-of-band signal for the probe schedule.
+    # The bounded path below runs the rebuild on a daemon worker and lets the
+    # foreground caller stop waiting at the budget; from that moment the worker's
+    # remaining probes are out-of-band and keep the full per-endpoint cap so the
+    # refresh can complete. That is a *different* contract from the in-band chain,
+    # which must stay inside the shared window — and the two cannot be told apart
+    # by the deadline alone (a probe can find the window spent while the caller is
+    # still waiting). The foreground sets this event when it gives up; every
+    # rebuild invocation gets its own, so a still-running worker from an earlier
+    # rebuild cannot read a later caller's state. Defined before the builder
+    # closure so the closure can capture it as a free variable; on the legacy
+    # synchronous path it is simply never set and there is no window to share.
+    _models_rebuild_abandoned = threading.Event()
+
+    # ONE absolute deadline for this whole rebuild (#7481 review). Captured
+    # before the worker and the foreground wait start, then read by BOTH: by
+    # ``_CustomProbeSchedule`` (so the custom-probe chain spends what is LEFT of
+    # the caller's window rather than minting a fresh one after whatever
+    # discovery work already ran) and by the foreground ``build_done.wait``
+    # below. A schedule that minted its own deadline let earlier discovery work
+    # — provider detection, live id lookups, the profile rebind — be paid twice:
+    # once against the caller's wait, again against the chain's fresh window, so
+    # the chain could still be probing seconds after the caller had been served
+    # the over-budget fallback. ``None`` means the legacy unbounded path
+    # (budget <= 0), where there is no window to share. Defined before the
+    # builder closure so the closure can capture it as a free variable; assigned
+    # in the cold path below, before either caller runs.
+    _models_rebuild_deadline: float | None = None
+
+    # Retain successful probes across the full-cap continuation; only truncated
+    # attempts are removed before rebuilding the catalog on the same worker.
+    _custom_endpoint_probe_memo: dict[tuple[str, str], tuple[str, object]] = {}
+    _truncated_probes: set[tuple[str, str]] = set()
+    # A slice limits serial waiting, not the lifetime of the HTTP attempt.
+    # Later probes can run while earlier slow probes use the shared window.
+    # Only the catalog worker consumes outcomes/mutates the probe memo.
+    _pending_probes: dict[tuple[str, str], tuple[threading.Event, dict]] = {}
+
+    def _read_probe_payload(req, probe_key, timeout):
+        import urllib.request
+
+        pending = _pending_probes.get(probe_key)
+        if pending is None:
+            # Keep synchronous/full-cap continuation semantics. A bounded
+            # attempt gets the remaining caller window, not just its fair slice.
+            if _models_rebuild_deadline is None or _models_rebuild_abandoned.is_set():
+                with urllib.request.urlopen(req, timeout=timeout) as response:  # nosec B310
+                    return json.loads(response.read().decode("utf-8"))
+            remaining = max(timeout, _models_rebuild_deadline - time.monotonic() - 0.05)
+            request_timeout = min(CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS, remaining)
+            done, outcome = threading.Event(), {"timeout": request_timeout}
+
+            def read():
+                try:
+                    with urllib.request.urlopen(req, timeout=request_timeout) as response:  # nosec B310
+                        outcome["data"] = json.loads(response.read().decode("utf-8"))
+                except Exception as exc:
+                    outcome["error"] = exc
+                finally:
+                    done.set()
+
+            _pending_probes[probe_key] = (done, outcome)
+            threading.Thread(target=read, name="models-endpoint-probe", daemon=True).start()
+        else:
+            done, outcome = pending
+        if not done.wait(timeout):
+            raise TimeoutError("catalog probe slice exhausted")
+        _pending_probes.pop(probe_key, None)
+        if "error" in outcome:
+            exc = outcome["error"]
+            if outcome.get("timeout", 0.0) >= CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS:
+                # The HTTP attempt itself ran at the full endpoint cap, so its
+                # timeout IS evidence of unreachability even when a later pass
+                # consumes the outcome under a smaller fair-share slice.
+                exc.hermes_full_cap_attempt = True
+            raise exc
+        return outcome["data"]
+    # A full-cap custom retry must not repeat unrelated provider discovery.
+    # Empty/failure fallbacks are retained too, but only for this invocation.
+    _live_provider_memo: dict[str, tuple[bool, object]] = {}
+
+    def _memoized_live_lookup(key, lookup):
+        if key not in _live_provider_memo:
+            try:
+                _live_provider_memo[key] = (True, lookup())
+            except Exception as exc:
+                _live_provider_memo[key] = (False, exc)
+        succeeded, value = _live_provider_memo[key]
+        if not succeeded:
+            raise value
+        return copy.deepcopy(value)
+
     def _build_available_models_uncached() -> dict:
         active_provider = None
         default_model = get_effective_default_model(cfg)
@@ -9070,7 +10054,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         def _custom_endpoint_error(
             provider: str,
-            exc: Exception,
+            exc: Exception | None = None,
             *,
             code: int | None = None,
         ) -> dict:
@@ -9094,16 +10078,47 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 "message": f"Models endpoint unreachable for {provider_label}; verify base_url.",
             }
 
+        # ── In-rebuild probe de-duplication (#7481 follow-up) ────────────────
+        # One rebuild can consult the same endpoint more than once: step 4 probes
+        # the active ``model.base_url``, and the LM Studio provider-group fallback
+        # later reads ``providers.lmstudio.base_url`` (falling back to
+        # ``model.base_url`` when lmstudio is the active provider) — in the config
+        # shape the issue reports those are the SAME unreachable LAN host, so one
+        # dead endpoint cost the rebuild two full connect timeouts and two slots of
+        # the shared window. A named ``custom_providers`` entry can likewise repeat
+        # an endpoint an earlier entry already probed. Memoise by (endpoint URL,
+        # credential) and reuse the outcome, so an endpoint is probed at most once
+        # per initial pass (slice-truncated attempts get one full-cap retry).
+        #
+        # The credential is part of the identity: the same URL with a different key
+        # is a different probe and still runs. The raw payload is cached rather than
+        # the parsed entries, so each consumer still shapes the list for its own
+        # provider, and the memo is consulted only AFTER the per-endpoint
+        # SSRF/validation checks — a consumer that would have been blocked is still
+        # blocked rather than served another caller's result.
+
+        def _custom_endpoint_probe_key(endpoint_url: str, headers: dict) -> tuple[str, str]:
+            """Identity of one custom-endpoint probe: the URL it hits + the credential it sends."""
+            return (endpoint_url, str(headers.get("Authorization") or ""))
+
         def _read_custom_endpoint_models(
             base_url: object,
             provider: str,
             *,
             api_key: object = "",
             trusted_base_urls: tuple[object, ...] = (),
+            timeout_seconds: float | None = None,
         ) -> tuple[list[dict], dict | None]:
             base = str(base_url or "").strip()
             if not base:
                 return [], None
+            # Filled in once the endpoint has passed validation; the failure paths
+            # below memoize their outcome under it so a later consumer in the same
+            # rebuild does not pay the same timeout twice. It stays None when the
+            # validation refuses the URL, so a consumer that would have been blocked
+            # is never served another caller's memoized result.
+            probe_key: tuple[str, str] | None = None
+            probe_timeout = CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
             try:
                 import ipaddress
                 import urllib.error
@@ -9146,21 +10161,116 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     except socket.gaierror:
                         pass
 
+                probe_key = _custom_endpoint_probe_key(endpoint_url, headers)
+                memoized = _custom_endpoint_probe_memo.get(probe_key)
+                if memoized is not None:
+                    # This exact endpoint + credential was already probed earlier in
+                    # this rebuild, so reuse the outcome rather than paying the
+                    # connect timeout a second time (#7481 follow-up). A memoized
+                    # failure is re-reported for THIS provider (its own label).
+                    memo_kind, memo_value = memoized
+                    if memo_kind == "ok":
+                        logger.debug("Reusing in-rebuild /models probe for %s", endpoint_url)
+                        return _extract_model_entries_from_payload(memo_value, provider), None
+                    if memo_kind == "truncated":
+                        return [], None
+                    return [], _custom_endpoint_error(provider, code=memo_value)
+
                 req = urllib.request.Request(endpoint_url, method="GET")
                 req.add_header("User-Agent", "OpenAI/Python 1.0")
                 for k, v in headers.items():
                     req.add_header(k, v)
-                with urllib.request.urlopen(req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as response:  # nosec B310
-                    data = json.loads(response.read().decode("utf-8"))
+                # #7481: the caller may hand us a fair-share slice of the shared
+                # rebuild budget (see _CustomProbeSchedule) instead of the full
+                # per-endpoint cap, so one unreachable endpoint cannot starve the
+                # providers probed after it. Default stays the documented cap.
+                probe_timeout = (
+                    CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                    if timeout_seconds is None
+                    else float(timeout_seconds)
+                )
+                data = _read_probe_payload(req, probe_key, probe_timeout)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("ok", data)
                 return _extract_model_entries_from_payload(data, provider), None
             except urllib.error.HTTPError as exc:
-                error = _custom_endpoint_error(provider, exc, code=getattr(exc, "code", None))
+                response_code = getattr(exc, "code", None)
+                error = _custom_endpoint_error(provider, exc, code=response_code)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("error", response_code)
                 logger.debug("Custom endpoint models fetch failed for provider %s: %s", provider, error)
                 return [], error
             except Exception as exc:
+                reason = getattr(exc, "reason", exc)
+                if (probe_key is not None and probe_timeout < CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                        and not getattr(exc, "hermes_full_cap_attempt", False)
+                        and isinstance(reason, (TimeoutError, socket.timeout))):
+                    _truncated_probes.add(probe_key)
+                    _custom_endpoint_probe_memo[probe_key] = ("truncated", None)
+                    return [], None
                 error = _custom_endpoint_error(provider, exc)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("error", None)
                 logger.debug("Custom endpoint unreachable or misconfigured for provider %s: %s", provider, error)
                 return [], error
+
+        # ── Fair-share schedule for the serial custom-endpoint probe chain ───
+        # #7481: step 4 probes the active endpoint and step 5 probes each named
+        # ``custom_providers`` entry after it, serially, off one shared rebuild
+        # budget. Without a schedule the first endpoint in the chain could spend
+        # that entire budget on its own connect timeout and leave every later —
+        # reachable — provider with no in-band probe at all. See
+        # _CustomProbeSchedule for the allocation rules.
+        def _pending_custom_probe_count() -> int:
+            """How many endpoints this rebuild is about to probe live, in order.
+
+            Counts the active endpoint (step 4) plus the named
+            ``custom_providers`` entries that will need a live ``/v1/models``
+            probe (step 5). Providers carrying a static ``models:`` allowlist
+            never probe live, so they must not dilute the schedule. Entries
+            whose base_url is only resolvable later from the credential pool are
+            counted anyway — over-counting merely makes the earlier slices a
+            little smaller, whereas under-counting would over-spend the budget.
+            """
+            count = 1 if cfg_base_url else 0
+            custom_providers_cfg = cfg.get("custom_providers", [])
+            if isinstance(custom_providers_cfg, list):
+                for entry in custom_providers_cfg:
+                    if not isinstance(entry, dict):
+                        continue
+                    if not (entry.get("name") or "").strip():
+                        continue
+                    configured_models = entry.get("models")
+                    if isinstance(configured_models, (dict, list)) and len(configured_models) > 0:
+                        continue
+                    count += 1
+            # The LM Studio provider-group branch re-probes the same
+            # /v1/models endpoint from ``providers.lmstudio.base_url`` in its own
+            # right — the second consumer of a single dead LAN endpoint in the
+            # common #7481 config — so it has to hold a slot in the schedule too.
+            # When the hermes_cli tier answers first no HTTP probe happens and
+            # the slot simply goes unused, which only makes the earlier slices a
+            # touch smaller.
+            if (
+                "lmstudio" in {str(pid).strip().lower() for pid in detected_providers}
+                and _get_provider_base_url("lmstudio")
+            ):
+                lm_base = _get_provider_base_url("lmstudio")
+                lm_key = str(_get_provider_cfg("lmstudio").get("api_key") or "").strip()
+                active_key = str(model_cfg.get("api_key") or lm_key).strip() if isinstance(model_cfg, dict) else ""
+                # The common active-LM-Studio shape has one distinct target,
+                # not two competing probes. Do not halve its healthy latency.
+                if (not cfg_base_url or active_provider != "lmstudio"
+                        or _models_endpoint_for_base_url(str(cfg_base_url)) != (str(lm_base) + "/models").rstrip("/")
+                        or active_key != lm_key):
+                    count += 1
+            return count
+
+        custom_probe_schedule = _CustomProbeSchedule(
+            _pending_custom_probe_count(),
+            out_of_band=_models_rebuild_abandoned.is_set,
+            deadline=_models_rebuild_deadline,
+        )
 
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
@@ -9236,6 +10346,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider,
                 api_key=api_key,
                 trusted_base_urls=tuple(_trusted_custom_bases),
+                timeout_seconds=custom_probe_schedule.next_timeout(),
             )
             for auto_model in _active_endpoint_models:
                 auto_detected_models.append(auto_model)
@@ -9309,6 +10420,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             _slug,
                             api_key=_cp_api_key,
                             trusted_base_urls=(_cp_base_url,),
+                            timeout_seconds=custom_probe_schedule.next_timeout(),
                         )
                     if _live_error:
                         _named_custom_errors[_slug] = _live_error
@@ -9530,7 +10642,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         from hermes_cli.models import (
                             fetch_openrouter_models as _fetch_or_models,
                         )
-                        live_curated = _fetch_or_models() or []
+                        live_curated = _memoized_live_lookup("openrouter-curated", _fetch_or_models) or []
                         for mid, _desc in live_curated:
                             if mid and mid not in seen_ids:
                                 seen_ids.add(mid)
@@ -9555,8 +10667,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
                         free_tier_models = []
                         selected_free_tier_model = None
-                        with _urlreq.urlopen(_req, timeout=8.0) as _resp:
-                            _payload = json.loads(_resp.read().decode())
+                        def _fetch_free_tier(req=_req):
+                            with _urlreq.urlopen(req, timeout=8.0) as _resp:
+                                return json.loads(_resp.read().decode())
+
+                        _payload = _memoized_live_lookup("openrouter-free", _fetch_free_tier)
                         for _item in _payload.get("data", []) or []:
                             if not isinstance(_item, dict):
                                 continue
@@ -9630,7 +10745,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                         raw_models = [
                             {"id": mid, "label": _format_ollama_label(mid)}
-                            for mid in (_provider_model_ids("ollama-cloud") or [])
+                            for mid in (_memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or [])
                         ]
                     except Exception:
                         logger.warning("Failed to load Ollama Cloud models from hermes_cli")
@@ -9638,18 +10753,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if raw_models:
                         _append_picker_group(provider_name, pid, raw_models)
                 elif pid == "openai-codex":
-                    # Codex account catalogs drift faster than WebUI releases
-                    # (for example gpt-5.3-codex-spark in #1680). Ask the
-                    # agent's Codex resolver first so /api/models inherits the
-                    # live Codex API / local ~/.codex cache / static fallback
-                    # chain instead of freezing the picker to WebUI's curated
-                    # _PROVIDER_MODELS snapshot.
+                    # Codex account catalogs drift independently from WebUI
+                    # releases, so ask the agent's resolver first and merge the
+                    # visible local cache below before falling back to WebUI's
+                    # static _PROVIDER_MODELS snapshot.
                     raw_models = []
                     codex_ids = []
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
 
-                        codex_ids = [mid for mid in (_provider_model_ids("openai-codex") or []) if mid]
+                        codex_ids = [mid for mid in (_memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or []) if mid]
                     except Exception:
                         logger.warning("Failed to load OpenAI Codex models from hermes_cli")
 
@@ -9687,7 +10800,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
 
-                        live_ids = _provider_model_ids("nous") or []
+                        live_ids = _memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or []
                     except Exception:
                         logger.warning("Failed to load Nous Portal models from hermes_cli")
                         live_ids = []
@@ -9747,7 +10860,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     lm_ids: list[str] = []
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
-                        lm_ids = _provider_model_ids("lmstudio") or []
+                        lm_ids = _memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or []
                     except Exception:
                         logger.debug("hermes_cli LM Studio lookup unavailable; using urlopen fallback")
 
@@ -9768,17 +10881,61 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 headers["Authorization"] = f"Bearer {lm_api_key}"
                             endpoint = (lm_base_url + "/models").rstrip("/")
                             try:
-                                import urllib.request as _urlreq
-                                req = _urlreq.Request(endpoint, method="GET", headers=headers)
-                                with _urlreq.urlopen(req, timeout=5) as resp:
-                                    lm_data = json.loads(resp.read().decode())
-                                for m in (lm_data.get("data") or []):
+                                _lm_probe_key = _custom_endpoint_probe_key(endpoint, headers)
+                            except Exception:
+                                _lm_probe_key = None
+                            _lm_memo = (
+                                _custom_endpoint_probe_memo.get(_lm_probe_key)
+                                if _lm_probe_key is not None
+                                else None
+                            )
+                            lm_data = None
+                            if _lm_memo is not None:
+                                # #7481 follow-up: this endpoint was already probed
+                                # earlier in this rebuild — typically by the active
+                                # model.base_url probe, since
+                                # _get_provider_base_url("lmstudio") falls back to
+                                # model.base_url when lmstudio is the active
+                                # provider. Reuse that payload (or its failure)
+                                # instead of stalling on the same host a second
+                                # time, which is what made one dead LAN endpoint
+                                # cost the rebuild two connect timeouts.
+                                if _lm_memo[0] == "ok":
+                                    lm_data = _lm_memo[1]
+                                else:
+                                    logger.debug(
+                                        "LM Studio endpoint %s already failed in this rebuild; not re-probing",
+                                        endpoint,
+                                    )
+                            else:
+                                lm_timeout = CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                                try:
+                                    import urllib.request as _urlreq
+                                    req = _urlreq.Request(endpoint, method="GET", headers=headers)
+                                    # #7481: this probe is part of the same rebuild as
+                                    # the custom-endpoint chain, so it draws from the
+                                    # shared schedule instead of a hardcoded 5s that
+                                    # could push the rebuild past the budget on its own.
+                                    lm_timeout = custom_probe_schedule.next_timeout()
+                                    lm_data = _read_probe_payload(req, _lm_probe_key, lm_timeout)
+                                    if _lm_probe_key is not None:
+                                        _custom_endpoint_probe_memo[_lm_probe_key] = ("ok", lm_data)
+                                except Exception as exc:
+                                    if _lm_probe_key is not None:
+                                        if (lm_timeout < CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                                                and not getattr(exc, "hermes_full_cap_attempt", False)
+                                                and isinstance(getattr(exc, "reason", exc), TimeoutError)):
+                                            _truncated_probes.add(_lm_probe_key)
+                                            _custom_endpoint_probe_memo[_lm_probe_key] = ("truncated", None)
+                                        else:
+                                            _custom_endpoint_probe_memo[_lm_probe_key] = ("error", None)
+                                    logger.debug("LM Studio /models fetch failed at %s", endpoint)
+                            if isinstance(lm_data, dict) and isinstance(lm_data.get("data"), list):
+                                for m in lm_data["data"]:
                                     if isinstance(m, dict):
                                         mid = str(m.get("id") or "").strip()
                                         if mid and {"id": mid, "label": mid} not in raw_models:
                                             raw_models.append({"id": mid, "label": mid})
-                            except Exception:
-                                logger.debug("LM Studio /models fetch failed at %s", endpoint)
 
                     if raw_models:
                         _append_picker_group(provider_name, pid, raw_models)
@@ -9832,7 +10989,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         else:
                             raw_models = _models_from_live_provider_ids(
                                 pid,
-                                _read_live_provider_model_ids(pid),
+                                _memoized_live_lookup(pid, lambda pid=pid: _read_live_provider_model_ids(pid)),
                             )
                             if (
                                 not raw_models
@@ -9942,13 +11099,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     default_model,
                 )
             else:
-                all_ids_norm = {
+                # Model IDs are provider-scoped: an OpenAI API entry cannot
+                # satisfy a configured Codex default with the same bare ID.
+                # Keep the global fallback only when no active group exists.
+                active_groups = [
+                    g for g in groups if g.get("provider_id") == active_provider
+                ] if active_provider else []
+                existing_ids_norm = {
                     _norm_model_id(m["id"])
-                    for g in groups
+                    for g in (active_groups or groups)
                     for bucket_name in ("models", "extra_models")
                     for m in g.get(bucket_name, [])
                 }
-                if _norm_model_id(default_model) not in all_ids_norm:
+                if _norm_model_id(default_model) not in existing_ids_norm:
                     label = _get_label_for_model(default_model, groups)
                     target_display = (
                         _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
@@ -10021,21 +11184,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         groups.sort(key=_group_sort_key)
 
         # 12. Include model aliases so the WebUI frontend can resolve them.
-        model_aliases: dict[str, str] = {}
-        try:
-            raw_aliases = cfg.get("model", {}).get("aliases", {})
-            if isinstance(raw_aliases, dict):
-                model_aliases = {str(k).strip(): str(v).strip() for k, v in raw_aliases.items() if k and v}
-        except Exception:
-            pass
+        model_aliases = _model_aliases_from_config()
 
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": _build_configured_model_badges(),
             "groups": groups,
             "aliases": model_aliases,
-        }
+        })
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
     # Mark that a build may be in progress BEFORE acquiring the lock.
@@ -10053,10 +11210,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     _cfg_changed = _current_mtime != _cfg_mtime
 
     # Disk load BEFORE lock: ~0.1ms, lets concurrent requests skip entirely.
-    # Then acquire lock and check memory cache.  Cold path runs inside the lock
-    # so only one thread rebuilds while others wait.
+    # Capture the epoch before that load: the bytes must not be published to
+    # memory under a fresh fingerprint if invalidation advanced the epoch in
+    # between. Cold rebuilds still serialize on the lock.
     disk_groups = None
     stale_disk_groups = None
+    disk_epoch = _models_rebuild_seq
     if _available_models_cache is None and not force_refresh:
         disk_groups = _load_models_cache_from_disk()
         if disk_groups is None:
@@ -10064,7 +11223,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     elif force_refresh:
         stale_disk_groups = _load_stale_models_cache_from_disk()
 
-    with _available_models_cache_lock:
+    # Durable commits queued while the catalog lock is held, run after it is
+    # released (#7481 review). A foreground publisher owns
+    # ``_available_models_cache_lock`` for this whole critical section, and the
+    # durable writer takes commit-lock -> catalog-lock — so committing inline
+    # here would acquire the two in the reverse order of
+    # ``_invalidate_models_catalog_epoch`` and deadlock against a concurrent
+    # invalidation. Memory publication stays inside the short critical sections
+    # below; the durable commit is queued and executed by the scope's exit
+    # (after the catalog lock is released) via
+    # ``_commit_models_cache_to_disk_after_lock``.
+    with _DeferredCatalogPublication(_available_models_cache_lock) as deferred_disk_commits:
+        if disk_epoch != _models_rebuild_seq:
+            # Invalidation advanced the epoch after the unlocked read, so these
+            # bytes may describe the catalog it just cleared: they must not be
+            # published to memory here, nor served as the fresh answer.
+            # ``stale_disk_groups`` is deliberately NOT fenced — it is the
+            # degraded fallback handed to a caller that already stopped waiting
+            # (and to the strict-metadata miss below), and it is never published
+            # to memory, so discarding it would only turn a stale-but-real answer
+            # into a static catalog without protecting anything.
+            disk_groups = None
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
         if should_wait:
@@ -10155,7 +11334,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
 
-        # Cold path: disk cache hit — use it (fast, no lock contention)
+        # Cold path: disk cache hit — use it only from the captured epoch.
         if disk_groups is not None and not force_refresh:
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
@@ -10188,6 +11367,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
             _cache_build_in_progress = True
+        # This build's position in the publication order. Taken while holding
+        # _available_models_cache_lock (above), so no two builds can share one,
+        # and used to keep a late out-of-band publisher from overwriting a newer
+        # catalog (#7481).
+        rebuild_seq = _allocate_models_rebuild_seq()
+        # The one absolute deadline this rebuild runs against: the custom-probe
+        # schedule and the foreground wait below both measure THIS instant, so
+        # discovery work done before the probe chain is spent out of the caller's
+        # window instead of being re-granted to the chain (#7481 review).
+        if _LIVE_REBUILD_BUDGET_SECONDS > 0:
+            _models_rebuild_deadline = (
+                time.monotonic() + float(_LIVE_REBUILD_BUDGET_SECONDS)
+            )
 
         # Capture the active per-request profile (#3957). The live provider
         # probe inside the rebuild resolves credentials from os.environ /
@@ -10200,6 +11392,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _active_profile_name = ""
         _prof_env_request = None
         _prof_scope_worker = None
+        _profile_resolver = None
         try:
             from api.profiles import (
                 get_active_profile_name as _gapn,
@@ -10207,9 +11400,28 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 profile_scope_for_detached_worker as _prof_scope_worker,
             )
             _active_profile_name = (_gapn() or "").strip()
+            _profile_resolver = _gapn
         except Exception:
             _prof_env_request = None
             _prof_scope_worker = None
+
+        # The sources and the profile this build is reading (#7481 review). The
+        # result is only an answer for THESE inputs, so both are captured here —
+        # on the request thread, where the profile TLS is valid, before the
+        # worker starts — and re-validated at publication and at the durable
+        # commit. Without that, a build that outlives a config edit publishes its
+        # stale catalog stamped with the *current* fingerprint, which is exactly
+        # how stale data acquires fresh-looking provenance. ``None`` profile
+        # means the resolver was unavailable; the fingerprint's config-path axis
+        # still fences a foreign profile.
+        rebuild_source_fingerprint = _models_cache_source_fingerprint()
+        rebuild_profile = (
+            _active_profile_name if _profile_resolver is not None else None
+        )
+
+        # ``_clear_build_in_progress`` is the module-level single-flight release
+        # used by every exit path here and by the post-lock durable commit.
+
 
         # Legacy synchronous (unbounded) rebuild — opt-in via budget<=0.
         if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
@@ -10226,24 +11438,55 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 with _sync_scope:
                     result = _invoke_models_rebuild(_build_available_models_uncached)
             except BaseException:
-                # Always reset the flag so waiting threads don't block for 60s
-                with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                # Always reset the flag so waiting threads don't block for 60s —
+                # unless a newer rebuild has been allocated in the meantime, in
+                # which case the flag now belongs to it (#7481 review). Same
+                # ownership rule as the success path, one implementation.
+                _clear_build_in_progress(rebuild_seq)
                 raise
             with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
-            try:
-                _save_models_cache_to_disk(result)
-            finally:
-                with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                _superseded = _models_rebuild_superseded(rebuild_seq)
+                _identity_current = _models_build_identity_current(
+                    rebuild_source_fingerprint, rebuild_profile
+                )
+                if not _superseded and _identity_current:
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = rebuild_source_fingerprint
+                    _sync_models_cache_provenance()
+            if _superseded:
+                # An invalidated/older generation must not overwrite the disk
+                # cache either, and must leave the build flag to the newer build.
+                logger.debug(
+                    "discarding superseded models-catalog rebuild result "
+                    "(rebuild #%d, latest allocated rebuild #%d)",
+                    rebuild_seq,
+                    _models_rebuild_seq,
+                )
+                return copy.deepcopy(result)
+            if not _identity_current:
+                # The config/auth/catalog this build read changed while it ran, so
+                # it describes sources that no longer exist. Publishing it would
+                # stamp stale data with the current fingerprint; drop it and let
+                # the next caller rebuild (#7481 review).
+                logger.debug(
+                    "discarding models-catalog rebuild result for changed sources "
+                    "(rebuild #%d)",
+                    rebuild_seq,
+                )
+                _clear_build_in_progress(rebuild_seq)
+                return copy.deepcopy(result)
+            # Foreground durable commit, queued rather than performed here: the
+            # caller still holds the catalog lock, and taking the commit mutex in
+            # that state is the lock-order cycle the #7481 review reproduced. The
+            # single-flight release rides with the queued commit (see
+            # _commit_models_cache_to_disk_after_lock), so ownership still spans
+            # it.
+            deferred_disk_commits.append(
+                (result, rebuild_seq, rebuild_source_fingerprint, rebuild_profile)
+            )
             return copy.deepcopy(result)
 
         # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
@@ -10275,33 +11518,94 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         publish_lock = threading.Lock()
         box: dict = {}
 
-        def _publish_models_result(result):
+        def _publish_models_result(
+            result,
+            *,
+            rebuild_seq: int,
+            build_fingerprint,
+            build_profile,
+            defer_durable: bool = False,
+        ):
             global _cache_build_in_progress, _available_models_cache
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
-            with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = (
-                    _models_cache_source_fingerprint()
-                )
-                _sync_models_cache_provenance()
+            deferred = False
             try:
-                _save_models_cache_to_disk(result)
-            except Exception:
-                logger.debug("models cache disk save failed", exc_info=True)
-            finally:
                 with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
-
-        def _clear_build_in_progress():
-            global _cache_build_in_progress
-            with _cache_build_cv:
-                _cache_build_in_progress = False
-                _cache_build_cv.notify_all()
+                    if _models_rebuild_superseded(rebuild_seq):
+                        # #7481 failure isolation: a newer rebuild has been
+                        # allocated since this one started, so this result is
+                        # superseded and must not overwrite the cache or the
+                        # disk. Invalidation revokes the running generation and
+                        # clears _cache_build_in_progress without cancelling this
+                        # worker, which is how a newer build can be allocated while
+                        # this one is still running; the flag now belongs to that
+                        # newer build, so the ``finally`` below deliberately leaves
+                        # it set rather than releasing it for a build that is not
+                        # ours. Ordered by allocated generation, not by wall clock:
+                        # an older build can publish *after* a newer one started,
+                        # and a timestamp comparison would misread that as newer
+                        # and drop the newer result instead.
+                        logger.debug(
+                            "discarding superseded models-catalog rebuild result "
+                            "(rebuild #%d, latest allocated rebuild #%d)",
+                            rebuild_seq,
+                            _models_rebuild_seq,
+                        )
+                        return
+                    if not _models_build_identity_current(
+                        build_fingerprint, build_profile
+                    ):
+                        # The sources this build read are gone (config/auth/catalog
+                        # edit) or the publishing thread is no longer in the
+                        # profile the build belonged to. Publishing would hand the
+                        # catalog the CURRENT fingerprint — fresh-looking
+                        # provenance on data that was never built from it — so it
+                        # is dropped instead. Fail closed (#7481 review).
+                        logger.debug(
+                            "discarding models-catalog rebuild result for changed "
+                            "sources (rebuild #%d)",
+                            rebuild_seq,
+                        )
+                        return
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = build_fingerprint
+                    _sync_models_cache_provenance()
+                if defer_durable:
+                    # Foreground caller: it still owns the outer catalog lock,
+                    # so the durable commit is queued for the post-lock flush
+                    # instead of taking commit -> catalog underneath it (#7481
+                    # review). The single-flight release rides with the queued
+                    # commit, so ownership still spans the durable write.
+                    deferred_disk_commits.append(
+                        (result, rebuild_seq, build_fingerprint, build_profile)
+                    )
+                    deferred = True
+                    return
+                try:
+                    _save_models_cache_to_disk(
+                        result,
+                        rebuild_seq=rebuild_seq,
+                        build_fingerprint=build_fingerprint,
+                        build_profile=build_profile,
+                    )
+                except Exception:
+                    logger.debug("models cache disk save failed", exc_info=True)
+            finally:
+                # Release the single-flight slot only when this build still owns
+                # it. A newer rebuild may have been allocated while the disk write
+                # above ran with the catalog lock released; clearing the flag
+                # unconditionally there ended that rebuild's single-flight
+                # ownership and let a third rebuild in beside it (#7481 review).
+                # This also covers the error paths, including anything raised
+                # after the disk I/O. A deferred (foreground) publication skips
+                # the release here: it is queued, and the flush performs the
+                # commit and then the release, in that order.
+                if not deferred:
+                    _clear_build_in_progress(rebuild_seq)
 
         def _claim_publish() -> bool:
             """Return True iff the caller won the right to publish."""
@@ -10316,7 +11620,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # (#3957): the daemon inherits neither the request-profile TLS nor
             # os.environ, so without this it would probe the default profile's
             # credentials and, over budget, publish the rebuilt catalog to the
-            # DEFAULT profile's disk cache. No-op for the default profile.
+            # DEFAULT profile's disk cache. Default still binds request TLS but
+            # does not mirror a named-profile environment.
             _worker_scope = (
                 _prof_scope_worker(_active_profile_name, "models rebuild (worker)")
                 if _prof_scope_worker is not None
@@ -10325,6 +11630,36 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             with _worker_scope:
                 try:
                     box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+                    if _pending_probes:
+                        # Lend all time left by later fast probes back to the
+                        # still-running attempts before yielding a partial.
+                        for done, _outcome in list(_pending_probes.values()):
+                            left = max(0.0, (_models_rebuild_deadline or 0.0) - time.monotonic())
+                            done.wait(max(0.0, left - 0.05))
+                        completed = [key for key, (done, _) in _pending_probes.items() if done.is_set()]
+                        if completed:
+                            for key in completed:
+                                _custom_endpoint_probe_memo.pop(key, None)
+                                _truncated_probes.discard(key)
+                            box.pop("result", None)
+                            box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+                    if _truncated_probes:
+                        # The foreground may use this partial catalog, but it is
+                        # not authoritative and must never enter either cache.
+                        box["partial"] = box.pop("result")
+                        build_done.set()
+                        _models_rebuild_abandoned.wait()
+                        with _cache_build_cv:
+                            if _models_rebuild_superseded(rebuild_seq):
+                                return
+                        for key in _truncated_probes:
+                            _custom_endpoint_probe_memo.pop(key, None)
+                            # A surviving HTTP attempt owns only its private box.
+                            # It cannot publish or write into this build's memo.
+                            _pending_probes.pop(key, None)
+                        _truncated_probes.clear()
+                        box.pop("result", None)
+                        box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
                 except Exception as exc:  # noqa: BLE001 — propagated to caller
                     box["error"] = exc
                 finally:
@@ -10337,9 +11672,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # the correct profile's cache file.
                     if budget_exceeded.is_set() and _claim_publish():
                         if "result" in box:
-                            _publish_models_result(box["result"])
+                            _publish_models_result(
+                                box["result"],
+                                rebuild_seq=rebuild_seq,
+                                build_fingerprint=rebuild_source_fingerprint,
+                                build_profile=rebuild_profile,
+                            )
                         else:
-                            _clear_build_in_progress()
+                            _clear_build_in_progress(rebuild_seq)
 
         _worker = threading.Thread(
             target=_rebuild_worker,
@@ -10348,25 +11688,62 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         )
         _worker.start()
 
-        if build_done.wait(timeout=_LIVE_REBUILD_BUDGET_SECONDS):
+        # Wait on the SAME absolute deadline the probe schedule draws its slices
+        # from (#7481 review), not on a fresh full window started here: with two
+        # windows, discovery work that ran before the custom-probe phase was paid
+        # by the caller but re-granted to the chain, so the chain could still be
+        # probing after this caller had already been served the over-budget
+        # fallback. Computed after start() so thread-launch time counts too.
+        timeout_remaining = (
+            max(0.0, _models_rebuild_deadline - time.monotonic())
+            if _models_rebuild_deadline is not None
+            else float(_LIVE_REBUILD_BUDGET_SECONDS)
+        )
+        finished_in_time = build_done.wait(timeout=timeout_remaining)
+        if finished_in_time and "partial" not in box:
             # Build finished within budget — foreground publishes
             # synchronously, exactly like the legacy path.
             if "error" in box:
-                _clear_build_in_progress()
+                _clear_build_in_progress(rebuild_seq)
                 raise box["error"]
             if _claim_publish():
-                _publish_models_result(box["result"])
+                _publish_models_result(
+                    box["result"],
+                    rebuild_seq=rebuild_seq,
+                    build_fingerprint=rebuild_source_fingerprint,
+                    build_profile=rebuild_profile,
+                    # Foreground publisher: queue the durable commit for the
+                    # post-catalog-lock flush (#7481 review).
+                    defer_durable=True,
+                )
             return copy.deepcopy(box["result"])
 
         # Budget elapsed. Mark it so the worker knows it owns out-of-band
-        # publication. Handle the tiny race where the build completed between
-        # wait() returning False and here: if so, still publish synchronously
-        # so this caller honours the cache contract.
+        # publication, and so the probe schedule hands its remaining probes the
+        # full per-endpoint cap instead of a share of a window nobody is waiting
+        # on any more (#7481). Handle the tiny race where the build completed
+        # between wait() returning False and here: if so, still publish
+        # synchronously so this caller honours the cache contract.
         budget_exceeded.set()
-        if build_done.is_set() and "error" not in box and "result" in box:
-            if _claim_publish():
-                _publish_models_result(box["result"])
-            return copy.deepcopy(box["result"])
+        _models_rebuild_abandoned.set()
+        if build_done.is_set() and "error" not in box:
+            if "partial" in box:
+                if box["partial"].get("groups"):
+                    return copy.deepcopy(box["partial"])
+                # An all-truncated pass has no picker options. Use the same
+                # stale/static fallback as a still-running first pass below.
+            elif "result" in box and _claim_publish():
+                _publish_models_result(
+                    box["result"],
+                    rebuild_seq=rebuild_seq,
+                    build_fingerprint=rebuild_source_fingerprint,
+                    build_profile=rebuild_profile,
+                    # Budget-boundary foreground winner: same deferred durable
+                    # commit as the within-budget path above (#7481 review).
+                    defer_durable=True,
+                )
+            if "partial" not in box:
+                return copy.deepcopy(box["result"])
 
         # Genuinely slow/hung probe: serve the best fallback now; the worker
         # keeps going and refreshes the cache for the next caller.
@@ -10377,10 +11754,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             "live provider-catalog rebuild exceeded %.1fs budget — serving "
             "fallback, refreshing catalog out-of-band"
         )
-        if _should_warn_budget("live_rebuild_budget_exceeded"):
-            logger.warning(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
-        else:
-            logger.info(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
+        if not finished_in_time:
+            if _should_warn_budget("live_rebuild_budget_exceeded"):
+                logger.warning(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
+            else:
+                logger.info(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
         # ``stale_disk_groups`` is shape-valid but failed the strict metadata
         # checks required for authoritative cold-path use. It was read before
         # acquiring _available_models_cache_lock so this over-budget fallback
@@ -10517,21 +11895,26 @@ def get_available_models_for_session_visit() -> dict:
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
         _mark("memory_cache_miss_loading_disk")
+        disk_epoch = _models_rebuild_seq
         disk_cached = _load_models_cache_from_disk()
         if disk_cached is not None:
             with _available_models_cache_lock:
+                if disk_epoch != _models_rebuild_seq:
+                    disk_cached = None
                 cached = _get_fresh_memory_models_cache(time.monotonic())
                 if cached is not None:
                     _mark("disk_then_memory_cache_hit")
                     _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                     return cached
-                _available_models_cache = copy.deepcopy(disk_cached)
-                _available_models_cache_ts = time.monotonic()
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
-            _mark("disk_cache_returned")
-            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-            return copy.deepcopy(disk_cached)
+                if disk_cached is not None:
+                    _available_models_cache = copy.deepcopy(disk_cached)
+                    _available_models_cache_ts = time.monotonic()
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _sync_models_cache_provenance()
+            if disk_cached is not None:
+                _mark("disk_cache_returned")
+                _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                return copy.deepcopy(disk_cached)
 
     _mark("cache_age_stale_or_missing")
     stale_cached = disk_cached or _load_stale_models_cache_from_disk()

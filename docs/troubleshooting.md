@@ -106,6 +106,46 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ---
 
+### Hermes package-managed runtime bootstrap order
+
+For package-managed Hermes installs, the server activates the discovered Agent's
+`hermes_bootstrap` dependency layer before importing WebUI modules that need
+third-party packages. It must **not** import `run_agent` at that point:
+`api.config` first selects the active profile, then profile-sensitive Agent
+application modules can be imported. Importing skills under the launch/base home
+before selecting a named profile can disable their context-local home resolution
+and force turns and model-catalog scopes into the legacy whole-turn lock.
+
+The dependency layer retains Agent-owned activation and re-exec behavior; WebUI
+does not choose generation directories or install into an obsolete Agent venv.
+Legacy Agents and browser-only fixtures without `hermes_bootstrap.py` skip this
+early activation. A failure inside a present bootstrap is logged as a warning
+and startup continues, as it did when the Agent import was lazy, so the UI,
+diagnostics and updater stay reachable; the Agent's own relaunch or repair exit
+still stops the process. The interpreter compatibility probe may still import
+`run_agent` in its disposable subprocess; that import must not leak into server
+startup. If a restart fails, inspect the current service journal and selected
+interpreter. This ordering repair does not remove the static fallback lock or
+change cross-profile credential handling.
+
+The native Windows launcher also decides *which* Agent root that bootstrap runs
+from, so the two have to agree. `start.ps1` normally keeps the source-first
+order from `api.config._discover_agent_dir`, but it repairs a few displaced
+layouts: a bare source checkout, the repo sibling, an Agent root (source or
+pip-style) at the repo parent, or `%USERPROFILE%\hermes-agent`, when that selection has no in-root
+venv and a later master-order install exists. For the layout-fallback cases the
+install may win even without its own venv (deps already importable); otherwise
+the install needs a `venv\Scripts\python.exe`. A source checkout that has its
+own venv keeps priority, since it is launchable on its own.
+`HERMES_WEBUI_AGENT_DIR` remains authoritative over both.
+
+Current Hermes managed environments ship `ruamel.yaml` and may not include
+PyYAML. WebUI reads and writes YAML through `api/yaml_compat.py`, which uses
+PyYAML when it is importable and falls back to `ruamel.yaml` otherwise, and the
+bootstrap probe accepts either backend.
+
+---
+
 ## "Response interrupted." marker keeps saying "no agent output was recovered"
 
 **Symptom.** After a live response stream stops before a turn completes (manual restart, OOM, crash, browser/SSE disconnect, lost worker bookkeeping, …), the affected chat shows an `**Response interrupted.**` marker. If the run-journal for that turn is already visible on disk, the marker says the partial output was recovered; if not, it preserves the user turn and says no agent output was recovered yet.
@@ -203,6 +243,14 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 **Why.** WebUI imports `run_agent.AIAgent` into its long-lived Python process. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision. Local Agent-backed actions return a retryable `409 agent_runtime_stale` with `restart_scheduled: false` before accepting a new turn. Gateway- and runner-owned chat keep their existing runtime ownership. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare; losing a previously known revision remains fail-closed.
 
+Revision checks allow up to 10 seconds total across the three local Git reads
+(worktree root, tracked module, and HEAD). Each read receives only the time
+remaining before one monotonic deadline, so slow reads that finish within the
+total budget do not falsely look like a changed runtime. An exhausted budget or
+failed read still blocks a previously identified Git runtime; this does not
+bypass the revision guard or schedule an automatic restart. This is a per-check
+budget, not an end-to-end chat-request timeout; chat admission can check twice.
+
 **Diagnostic.** The stale-runtime response includes `agent_update_state`, also preserved in asynchronous compression error status:
 
 | Value | Observation |
@@ -235,7 +283,11 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 **Symptom.** The sidebar's imported/CLI session list takes seconds per refresh on a large Hermes profile, or a log line says a `state.db` read failed. Sessions still appear; nothing is lost.
 
-**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary (the listing returns empty for that profile) instead of silently reopening the file writable.
+**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary instead of silently reopening the file writable.
+
+A primary `state.db` read failure keeps the existing availability behavior: a complete same-generation stale snapshot wins when available, then the independently bounded eight-entry last-known-good cache keyed without the volatile database fingerprint preserves rows across idle and streaming-frozen refreshes. In the all-profiles view, a profile whose primary read fails makes the aggregate non-authoritative, so it is never published to either cache.
+
+The additive cron, webhook, and kanban passes, and the project-assigned recovery and unassigned refill passes, have a different failure boundary. If one of those later reads is temporarily unavailable, WebUI serves the primary rows it already loaded as an explicitly incomplete, fresh projection for that request and does not cache it; the next poll retries the optional pass. Errors while creating project metadata or building an optional row are debug-logged and skipped without misclassifying `projects.json` as an unavailable `state.db`. In all-profiles mode, an optional-pass failure therefore keeps both the affected profile's primary rows and healthy profiles' rows instead of replacing them with a stale aggregate. Claude Code discovery remains one global scan, independent of profile database availability, and runs only for unfiltered or explicit `claude-code` requests.
 
 **Diagnostic.**
 
@@ -268,6 +320,67 @@ python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confir
 **Why.** The server-side redirect after login targets `/sessions` (plural), but that path was missing from the explicit SPA-shell allowlist in `handle_get()`. Without auth the bug is invisible because the SPA handles `/sessions` client-side and the server route is never hit — only the server-side post-login redirect exposes it.
 
 **Fix.** `/sessions` is now included alongside `/` and `/index.html` in the set of paths that serve the SPA shell. No configuration change is needed.
+
+---
+
+## Update check reports a Git authentication or fetch failure
+
+**Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or
+`could not read Username`, or `unable to get password from user` (Git 2.47+).
+Git's own prompts are disabled; credential-helper UI depends on the helper.
+
+**Why.** Update checks are unattended. WebUI removes inherited askpass, SSH-command, proxy, and Git
+config injection settings; disables checkout-controlled askpass and credential helpers; and forces
+SSH batch mode. Generic and URL-scoped credential helpers from trusted user and system Git config
+remain available when declared directly in the primary system/global files.
+Git Credential Manager also receives `GCM_INTERACTIVE=never` and
+`credential.interactive=false`: cached credentials may authenticate a check, but a GCM cache miss
+must fail without opening its GUI or browser login. Git itself honors
+`credential.interactive` starting in 2.47; other credential helpers may ignore
+these controls and still open a browser or GUI. These controls follow
+[GCM's environment contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/environment.md#gcm_interactive)
+and [configuration contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/configuration.md#credentialinteractive). `include` and
+`includeIf` are not followed for credential helpers, `core.sshCommand`, or `ssh.variant`:
+included files may be checkout-controlled even when Git labels their scope global. Move these
+settings into the main user/system config if needed. The explicit scope reads also work on
+Git versions before 2.26. A trusted user/system `core.sshCommand` is retained with the batch option for
+its trusted or detected SSH variant (`-oBatchMode=yes` for OpenSSH, `-batch` for PuTTY/Plink),
+as is an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
+to the active `git://` remote's host; ordinary `git://` remotes without an applicable override remain
+supported. Push checks follow `branch.<name>.pushRemote`, `remote.pushDefault`,
+`branch.<name>.remote`, then `origin`. Checks cover every selected remote `pushurl`,
+or every `url` when no `pushurl` exists; fetch/pull use only the first fetch URL.
+Any applicable checkout-controlled proxy blocks the entire push before it starts.
+A trusted SSH command is preserved/probed when any actual push destination uses SSH.
+Remote-helper forms such as `ext::`, `ssh::`, and `https::` are rejected because the
+transport prefix names a helper command.
+
+**Diagnostic.** Run the project diagnostic for each checkout named by the update status:
+
+```bash
+python3 scripts/diagnose_update_git.py /path/to/checkout
+```
+
+The diagnostic reads the origin, accepts built-in HTTP(S), SSH, and `git://` remote forms,
+applies the update runner's proxy guard in the original checkout, then probes the captured
+URL outside the checkout so repository-controlled remote helpers and URL rewrites cannot run. It
+reports fixed failure categories instead of relaying Git or credential-helper output, and redacts
+checkout paths, origin paths, URL credentials, tokens, and secret query values.
+
+**Fix.** Configure a non-interactive user/system credential helper for a private HTTPS origin, or use
+an SSH origin with a key already loaded in the SSH agent seen by WebUI. Restart WebUI if necessary so
+it inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic and update check. Custom SSH
+commands must declare or auto-detect as OpenSSH, Plink, PuTTY, or TortoisePlink; Git's `simple` variant
+fails closed. Only SSH destinations trigger the five-second, stdin-disabled `-G`
+configuration probe for custom-named commands; local paths and HTTP(S) never invoke
+the SSH wrapper. The probe uses Git's resolved shell rather than requiring `sh` on PATH;
+only a successful probe enables OpenSSH batch mode. Explicit interactive `BatchMode` options
+(including whitespace forms such as `-o 'BatchMode no'`) fail closed rather than relying on
+a later option to override OpenSSH's first-value semantics. Failed/unknown probes fail closed.
+
+**When to file a bug.** File a WebUI bug if the diagnostic succeeds under the same user and
+environment but the update check still fails, or if either path opens a credential prompt. Include
+only sanitized hosts and errors; do not include credential-bearing URLs, tokens, or private paths.
 
 ---
 
@@ -306,6 +419,27 @@ Interpret the two together:
 - **Missing new model, Agent older than v0.20.5** → the static fallback is serving by design; upgrade the Agent to ≥ v0.20.5 so the picker reads the live catalog.
 
 **When to file a bug.** File a WebUI bug if a model fails on send *and* appears in the `curl` output for your key (a routing problem), or if a model is missing with Agent ≥ v0.20.5 and the live catalog reachable (fallback used when it should not be).
+
+---
+
+## MCP panel shows another profile's servers, or "Live status for this profile is unavailable"
+
+**Symptom.** With several profiles, the MCP settings panel of profile A shows a server as *Active* with a tool count while the tool inventory is empty (or lists profile B's tools); `/reload-mcp` on one profile stops the other profile's servers; or the MCP panel and the external Notes drawer show the notice *"Live status for this profile is unavailable right now"* and `/reload-mcp` answers *"MCP runtime scope could not be confirmed"*.
+
+**Why.** Hermes Agent keeps one in-process MCP ledger per WebUI process and keys a connection by profile only when it can tell the request serves a profile other than the process's own. The WebUI binds every MCP status read and `/reload-mcp` to the request profile (`ARCHITECTURE.md` §4.10). While a chat turn is streaming, the WebUI mirrors that turn's profile into `HERMES_HOME`; Agents that predate `hermes_constants.pin_process_hermes_home` cannot distinguish that mirror from the process profile, so the WebUI withholds runtime data and refuses the reload instead of showing or resetting another profile's connection.
+
+**Diagnostic commands.**
+
+```bash
+# runtime_scope: "profile" (bound), "legacy_process" (Agent without profile-scoped MCP),
+# "unavailable" (scope could not be confirmed right now)
+curl -s -b "hermes_profile=<profile>" http://127.0.0.1:8787/api/mcp/servers | python3 -m json.tool | grep -E '"(name|status|tool_count|runtime_scope)"'
+python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_process_hermes_home'))"
+```
+
+**Fix.** `unavailable` while a turn is running is expected: refresh once the turn finishes. If it persists with no turn running, the Agent predates the process-home pin; upgrade Hermes Agent. `legacy_process` means the Agent has no profile-scoped MCP ledger at all; its `/reload-mcp` stays process-wide by design. After changing a profile's `mcp_servers`, run `/reload-mcp` **from that profile**: it only resets that profile's own connections and retries its failed servers.
+
+**When to file a bug.** File a WebUI bug if `runtime_scope` is `"profile"` and a server is still reported *Active* with tools you cannot see in the inventory, or if `/reload-mcp` from one profile changes another profile's `tool_count`.
 
 ---
 

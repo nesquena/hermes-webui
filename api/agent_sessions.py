@@ -113,6 +113,16 @@ CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 # window cannot collapse genuinely concurrently started children.
 CONTINUATION_STARTED_AT_TOLERANCE_SECONDS = 2.0
 
+# Accepted ``project_assignment`` values for read_importable_agent_session_rows.
+PROJECT_ASSIGNMENT_FILTERS = frozenset({'assigned', 'unassigned'})
+
+# Raw-row oversample factors for the bounded candidate window. ``limit`` counts
+# LOGICAL conversations, but compression segments and the post-projection
+# visibility filters are spent from the raw window first, so a single 8x pass can
+# come up short on a lineage-heavy profile. The second factor is only paid when
+# the first window was fully consumed AND still under-delivered.
+CANDIDATE_WINDOW_MULTIPLIERS = (8, 32)
+
 SOURCE_LABELS = {
     'acp': 'ACP',
     'api_server': 'API',
@@ -366,28 +376,59 @@ def is_cli_session_row_visible(row: dict) -> bool:
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
-def _branch_markers(row: dict | None) -> tuple[str | None, str | None]:
-    """Return ``(_branched_from, _delegate_from)`` from a row's ``model_config``.
+# Every model_config marker Hermes Agent binds to ``parent_session_id`` in its
+# non-continuation child predicate (``_NON_CONTINUATION_CHILD_FILTER_SQL``):
+# ``_delegate_from`` (delegate_task), ``_branched_from`` (/branch) and
+# ``_reset_from`` (gateway reset children, stamped at creation or durably by
+# ``reopen_session()`` in ``gateway/session_recovery.py``).
+_MODEL_CONFIG_LINEAGE_KEYS = ('_delegate_from', '_branched_from', '_reset_from')
 
-    Hermes Agent stamps explicit branches and delegate/subagent runs in the
-    ``model_config`` JSON column (``_branched_from`` / ``_delegate_from``);
-    ``session_source='fork'`` alone only covers WebUI-created forks. Missing,
-    empty, or unparsable ``model_config`` degrades to ``(None, None)``.
+
+def _branch_markers(row: dict | None) -> tuple[str, dict[str, str]]:
+    """Return ``(state, markers)`` for a row's ``model_config`` lineage identity.
+
+    Hermes Agent stamps explicit branches, delegate/subagent runs and gateway
+    reset children in the ``model_config`` JSON column (see
+    ``_MODEL_CONFIG_LINEAGE_KEYS``); ``session_source='fork'`` alone only
+    covers WebUI-created forks.
+
+    ``state`` is one of:
+
+    - ``'none'``: no ``model_config``, or an object carrying no lineage marker;
+    - ``'markers'``: every non-null marker is a non-empty string, returned by key;
+    - ``'unknown'``: identity evidence exists but cannot be trusted (payload is
+      not JSON, not a JSON object, too deeply nested to decode, or a marker is
+      not a non-empty string). Callers must fail closed on this state and treat
+      the row as a lineage boundary, never as a continuation.
     """
     if not row:
-        return None, None
+        return 'none', {}
     raw = row.get('model_config')
-    if isinstance(raw, dict):
-        config = raw
-    elif isinstance(raw, str) and raw.strip():
+    if raw is None:
+        return 'none', {}
+    if isinstance(raw, (str, bytes, bytearray)):
+        if not raw.strip():
+            return 'none', {}
         try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError):
-            parsed = None
-        config = parsed if isinstance(parsed, dict) else {}
+            config = json.loads(raw)
+        except (TypeError, ValueError, RecursionError):
+            # RecursionError: a valid but pathologically deep payload exceeds
+            # the decoder's recursion limit; it is untrusted identity evidence
+            # like any other undecodable payload, never an escaping crash.
+            return 'unknown', {}
     else:
-        config = {}
-    return config.get('_branched_from'), config.get('_delegate_from')
+        config = raw
+    if not isinstance(config, dict):
+        return 'unknown', {}
+    markers: dict[str, str] = {}
+    for key in _MODEL_CONFIG_LINEAGE_KEYS:
+        value = config.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            return 'unknown', {}
+        markers[key] = value.strip()
+    return ('markers', markers) if markers else ('none', {})
 
 
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
@@ -405,30 +446,36 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     conversation; otherwise the tip inherits the root's title/source metadata and
     can disappear under messaging/sidebar policies.
 
-    Explicit branches/delegates never continue: a child whose ``model_config``
-    ``_branched_from`` / ``_delegate_from`` points at this parent is a fork of
-    the conversation and must stay visible. Beyond the bounded tolerance window
-    there is no reliable continuation signal — titles are user-controlled and
-    non-unique, so they are never used to widen the window (#7021 re-gate).
+    Explicit branches/delegates/resets never continue: a child whose
+    ``model_config`` ``_branched_from`` / ``_delegate_from`` / ``_reset_from``
+    points at this parent is a separate conversation and must stay visible.
+    Unparsable or non-string marker evidence fails closed as a boundary.
+    Beyond the bounded tolerance window there is no reliable continuation
+    signal — titles are user-controlled and non-unique, so they are never used
+    to widen the window (#7021 re-gate).
     """
     if not parent or not child:
         return False
     if str(child.get('session_source') or '').strip().lower() == 'fork':
         return False
-    # Real Agent branches/delegates are marked in model_config (not
+    # Real Agent branches/delegates/resets are marked in model_config (not
     # session_source, which only WebUI-created forks carry). The marker must
     # reference THIS parent: compression continuations inherit the rotated
     # agent's model_config verbatim, so presence alone (a delegate's
     # continuation still carries the delegate's own ``_delegate_from``) would
-    # misclassify real continuations.
-    child_branched_from, child_delegate_from = _branch_markers(child)
-    parent_id = parent.get('id')
-    if parent_id and (
-        child_branched_from == parent_id or child_delegate_from == parent_id
-    ):
+    # misclassify real continuations. Untrusted identity evidence fails closed.
+    marker_state, child_markers = _branch_markers(child)
+    if marker_state == 'unknown':
+        return False
+    parent_id = str(parent.get('id') or '').strip()
+    if parent_id and parent_id in child_markers.values():
         return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()
+    # Agent lineage excludes tool children even when the parent has the same
+    # source (or no source); a timestamp overlap cannot override that boundary.
+    if child_source == 'tool':
+        return False
     if parent_source and child_source and parent_source != child_source:
         return False
     if parent.get('end_reason') not in {'compression', 'cli_close'}:
@@ -503,7 +550,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
     for children in children_by_parent.values():
         children.sort(key=lambda row: row.get('started_at') or 0, reverse=True)
 
-    def compression_tip(row: dict) -> tuple[dict | None, int]:
+    def compression_tip(row: dict) -> tuple[dict | None, int, str | None]:
         """Return the freshest importable continuation descendant for ``row``.
 
         Compression parents can have multiple continuation-looking children when
@@ -515,6 +562,9 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         latest_importable = row if (row.get('actual_message_count') or 0) > 0 else None
         segment_count = 0
         best_depth = 1
+        latest_project_id: str | None = None
+        project_depth = 0
+        project_score = -1.0
         best_score = (
             _as_score(latest_importable.get('last_activity'), latest_importable.get('started_at'))
             if latest_importable
@@ -532,6 +582,17 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             segment_count += 1
 
             current_score = _as_score(current.get('last_activity'), current.get('started_at'))
+            current_project_id = str(current.get('project_id') or '').strip()
+            if (
+                current_project_id
+                and (
+                    current_score > project_score
+                    or (current_score == project_score and depth >= project_depth)
+                )
+            ):
+                latest_project_id = current_project_id
+                project_depth = depth
+                project_score = current_score
             if (
                 (current.get('actual_message_count') or 0) > 0
                 and (current_score > best_score or (current_score == best_score and depth >= best_depth))
@@ -547,7 +608,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
                     continue
                 stack.append((child, depth + 1))
 
-        return latest_importable, max(segment_count, 1)
+        return latest_importable, max(segment_count, 1), latest_project_id
 
     projected = []
     for row in rows:
@@ -556,13 +617,21 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
 
         segment_count = 1
         tip = row
+        lineage_project_id = str(row.get('project_id') or '').strip() or None
         if row.get('end_reason') in {'compression', 'cli_close'}:
-            tip, segment_count = compression_tip(row)
+            tip, segment_count, lineage_project_id = compression_tip(row)
         if not tip or (tip.get('actual_message_count') or 0) <= 0:
             continue
 
         if tip is row:
-            projected.append(dict(row))
+            # The root can still be the freshest *importable* segment while a
+            # newer EMPTY continuation carries the project assignment. Applying
+            # the resolved lineage id here too keeps that assignment instead of
+            # silently dropping it on the early-return path (#6659).
+            root_only = dict(row)
+            if lineage_project_id:
+                root_only['project_id'] = lineage_project_id
+            projected.append(root_only)
             continue
 
         merged = dict(row)
@@ -576,10 +645,12 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         # expects from "Show agent sessions" sorted by activity.
         for key in (
             'id', 'model', 'message_count', 'actual_message_count', 'actual_user_message_count',
-            'ended_at', 'end_reason', 'last_activity',
+            'ended_at', 'end_reason', 'last_activity', 'archived',
         ):
             if key in tip:
                 merged[key] = tip[key]
+        if lineage_project_id:
+            merged['project_id'] = lineage_project_id
         if str(tip.get('source') or '').strip().lower() == 'tui':
             # TUI continuation rows are user-visible session segments (#6, #17,
             # ...), not opaque compression snapshots. Keep navigation pointed at
@@ -612,7 +683,10 @@ def read_importable_agent_session_rows(
     log=None,
     exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
     include_sources: tuple[str, ...] | None = None,
-) -> list[dict]:
+    project_assignment: str | None = None,
+    project_ids: tuple[str, ...] | None = None,
+    return_window_exhaustion: bool = False,
+) -> list[dict] | tuple[list[dict], bool]:
     """Return agent sessions projected as importable conversations.
 
     Hermes Agent can create rows in ``state.db.sessions`` before a session has
@@ -629,22 +703,67 @@ def read_importable_agent_session_rows(
     filter; callers that want an include-only query should explicitly pass
     ``exclude_sources=None`` so the default exclusions do not also apply.
 
+    ``project_assignment`` narrows to project-assigned (``'assigned'``) or
+    project-free (``'unassigned'``) conversations; ``None`` returns both. The
+    two are exact complements and key on the whole compression lineage, so a
+    caller can budget assigned and unassigned conversations independently
+    without either filter double-counting a lineage (#6659).
+
+    ``project_ids`` narrows the assigned set further, to conversations whose
+    LINEAGE is assigned to one of the given projects. It exists so a caller can
+    give each project its own ``limit`` instead of sharing one global window: a
+    single ``project_assignment='assigned'`` query orders by recency, so one busy
+    project can consume the whole window and leave quieter projects unreachable
+    (greptile P1 on #6659). Only meaningful together with
+    ``project_assignment='assigned'``; any other combination raises ValueError
+    rather than silently returning an unnarrowed (and therefore starvable) set.
+
+    ``limit`` bounds LOGICAL conversations, not raw rows: the slice is applied
+    after lineage projection, and the raw candidate window is re-widened once
+    if compression segments consumed it before the projection could fill the
+    request.
+
     ``limit`` bounds the *recency slice*, not the returned row count. Subagent
     rows only render as children when their parent row is in the same payload,
     so subagent ancestors of selected rows are re-added afterwards and the
     result can exceed ``limit`` by the number of such anchors. Callers must
     therefore iterate the result rather than assume ``len(rows) <= limit``.
 
+    ``return_window_exhaustion=True`` returns ``(rows, exhausted)`` instead of
+    just ``rows``. ``exhausted`` is true only when the final bounded raw-candidate
+    window was full while its logical projection still under-delivered ``limit``.
+    That lets a caller distinguish a genuinely short database from a compressed
+    or filtered projection that needs a narrow recovery query, without paying a
+    count probe for ordinary short windows.
+
     That recovery is deliberately bounded by the oversampled candidate set
-    (``limit * 8`` newest sessions): it re-uses rows the projection already
-    fetched and never issues an extra query, so an ancestor older than the
-    oversample stays unresolved and its children render top-level, exactly as
-    they did before. Widening that window is a ``candidate_limit`` change, not
-    a change to this walk.
+    (the ``CANDIDATE_WINDOW_MULTIPLIERS`` window that actually ran — ``limit *
+    8``, or ``limit * 32`` when the first window was consumed and re-widened):
+    it re-uses rows the projection already fetched and never issues an extra
+    query, so an ancestor older than the oversample stays unresolved and its
+    children render top-level, exactly as they did before. Widening that window
+    is a ``CANDIDATE_WINDOW_MULTIPLIERS`` change, not a change to this walk.
     """
+    def _result(rows: list[dict], exhausted: bool = False):
+        """Preserve the list API unless this caller needs raw-window status."""
+        return (rows, exhausted) if return_window_exhaustion else rows
+
+    wanted_project_ids: tuple[str, ...] = ()
+    if project_ids is not None:
+        if str(project_assignment or '').strip().lower() != 'assigned':
+            raise ValueError(
+                "project_ids requires project_assignment='assigned'"
+            )
+        wanted_project_ids = tuple(
+            cleaned for value in project_ids if (cleaned := str(value or '').strip())
+        )
+        if not wanted_project_ids:
+            # An empty narrowing selects nothing. Returning [] keeps that exact
+            # instead of degrading to "every assigned conversation".
+            return _result([])
     db_path = Path(db_path)
     if not db_path.exists():
-        return []
+        return _result([])
 
     log = log or logger
     conn = open_state_db_readonly(db_path, log=log)
@@ -668,7 +787,7 @@ def read_importable_agent_session_rows(
                     "Upgrade hermes-agent to fix this.",
                     db_path,
                 )
-            return []
+            return _result([])
 
         parent_expr = _optional_col('parent_session_id', session_cols)
         session_source_expr = _optional_col('session_source', session_cols)
@@ -683,6 +802,8 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
+        archived_expr = _optional_col('archived', session_cols)
+        project_id_expr = _optional_col('project_id', session_cols)
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
         # or a ``messages`` table without a ``session_id`` / ``timestamp`` column.
         # The projection SQL below joins ``messages`` and aggregates
@@ -744,6 +865,90 @@ def read_importable_agent_session_rows(
                 placeholders = ", ".join("?" for _ in excluded)
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
+        if project_assignment is not None:
+            wanted = str(project_assignment).strip().lower()
+            if wanted not in PROJECT_ASSIGNMENT_FILTERS:
+                raise ValueError(
+                    "project_assignment must be one of "
+                    f"{sorted(PROJECT_ASSIGNMENT_FILTERS)} or None"
+                )
+            if 'project_id' not in session_cols:
+                # A schema that cannot persist assignments has no assigned rows,
+                # and every row it does have is unassigned. Keep both answers
+                # exact instead of emitting SQL against a missing column.
+                if wanted == 'assigned':
+                    return _result([])
+            elif {'parent_session_id', 'end_reason'} <= session_cols:
+                continuation_checks = [
+                    "parent.end_reason IN ('compression', 'cli_close')",
+                    "(parent.source IS NULL OR child.source IS NULL "
+                    "OR LOWER(TRIM(parent.source)) = LOWER(TRIM(child.source)))",
+                ]
+                if 'ended_at' in session_cols:
+                    continuation_checks.append(
+                        "(parent.ended_at IS NULL OR child.started_at >= parent.ended_at)"
+                    )
+                if 'session_source' in session_cols:
+                    continuation_checks.append(
+                        "LOWER(TRIM(COALESCE(child.session_source, ''))) != 'fork'"
+                    )
+                continuation_where = " AND ".join(continuation_checks)
+                # An assignment anywhere in a compression lineage assigns the
+                # whole logical conversation, so both filters must key on the
+                # lineage, not the individual row: 'unassigned' is the exact
+                # complement of 'assigned' (#6659).
+                membership = "IN" if wanted == 'assigned' else "NOT IN"
+                # ``project_ids`` narrows only the SEED: the lineage walk still
+                # pulls in the whole compression chain around a seeded row, so a
+                # per-project query returns the same logical conversations the
+                # global one would have, minus the other projects'.
+                seed_project_filter = ""
+                if wanted_project_ids:
+                    placeholders = ", ".join("?" for _ in wanted_project_ids)
+                    seed_project_filter = (
+                        f"\n                              AND TRIM(seed.project_id) IN ({placeholders})"
+                    )
+                where_clauses.append(
+                    f"""
+                    s.id {membership} (
+                        WITH RECURSIVE project_lineage(id) AS (
+                            SELECT seed.id
+                            FROM sessions seed
+                            WHERE seed.project_id IS NOT NULL
+                              AND TRIM(seed.project_id) != ''{seed_project_filter}
+                            UNION
+                            SELECT child.id
+                            FROM sessions child
+                            JOIN project_lineage lineage ON child.parent_session_id = lineage.id
+                            JOIN sessions parent ON parent.id = lineage.id
+                            WHERE {continuation_where}
+                            UNION
+                            SELECT parent.id
+                            FROM sessions child
+                            JOIN project_lineage lineage ON child.id = lineage.id
+                            JOIN sessions parent ON parent.id = child.parent_session_id
+                            WHERE {continuation_where}
+                        )
+                        SELECT id FROM project_lineage
+                    )
+                    """
+                )
+                params.extend(wanted_project_ids)
+            elif wanted == 'assigned':
+                if wanted_project_ids:
+                    placeholders = ", ".join("?" for _ in wanted_project_ids)
+                    where_clauses.append(
+                        f"TRIM(COALESCE(s.project_id, '')) IN ({placeholders})"
+                    )
+                    params.extend(wanted_project_ids)
+                else:
+                    where_clauses.append(
+                        "s.project_id IS NOT NULL AND TRIM(s.project_id) != ''"
+                    )
+            else:
+                where_clauses.append(
+                    "(s.project_id IS NULL OR TRIM(s.project_id) = '')"
+                )
 
         # Without ``idx_messages_session`` the correlated ``MAX(mx.timestamp)``
         # candidate ordering rescans ``messages`` once per session (seconds on
@@ -790,17 +995,30 @@ def read_importable_agent_session_rows(
                    {origin_chat_id_expr},
                    {origin_user_id_expr},
                    {platform_expr},
+                   {project_id_expr},
                    {parent_expr},
                    {ended_expr},
                    {end_reason_expr},
+                   {archived_expr},
                    {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
                    {last_activity_expr} AS last_activity
         """
+
+        def _project(raw_rows: list[dict]) -> list[dict]:
+            projected = _project_agent_session_rows(raw_rows)
+            # model_config is selected only so the continuation classifier can
+            # read the real _branched_from/_delegate_from markers; it is internal
+            # agent state and must not leak into the /api/sessions response.
+            for row in projected:
+                row.pop('model_config', None)
+            projected = [_with_normalized_source(row) for row in projected]
+            return [row for row in projected if is_cli_session_row_visible(row)]
+
         if limit is not None:
             result_limit = max(0, int(limit))
             if result_limit == 0:
-                return []
+                return _result([])
             # The sidebar only needs a small visible window. Bound the expensive
             # messages join to a recent-activity candidate set instead of
             # aggregating every historical Hermes state.db session before
@@ -809,7 +1027,6 @@ def read_importable_agent_session_rows(
             # can be resumed days later and should still surface at the top.
             # Oversampling preserves room for hidden compression segments or
             # other rows filtered after projection.
-            candidate_limit = max(result_limit * 8, result_limit)
             if latest_messages_cte:
                 candidate_cte = (
                     "WITH {latest_messages_cte}, candidates AS (\n"
@@ -839,8 +1056,7 @@ def read_importable_agent_session_rows(
                     candidate_order_clause=candidate_order_clause,
                 )
 
-            cur.execute(
-                f"""
+            candidate_sql = f"""
                 {candidate_cte}
                 {select_sql}
                 FROM sessions s
@@ -848,69 +1064,142 @@ def read_importable_agent_session_rows(
                 {join_clause}
                 {group_by_clause}
                 {order_by_clause}
-                """,
-                [*params, candidate_limit],
+                """
+            # Compression segments and the post-projection visibility filters are
+            # spent from the RAW candidate window before the logical slice below,
+            # so a lineage-heavy profile can return far fewer conversations than
+            # asked for (greptile P1 on #6659). Widen the window once when it was
+            # fully consumed and still came up short instead of silently
+            # truncating the caller's request.
+            projected: list[dict] = []
+            window_exhausted = False
+            for multiplier in CANDIDATE_WINDOW_MULTIPLIERS:
+                candidate_limit = max(result_limit * multiplier, result_limit)
+                cur.execute(candidate_sql, [*params, candidate_limit])
+                raw_rows = [dict(row) for row in cur.fetchall()]
+                projected = _project(raw_rows)
+                window_exhausted = (
+                    len(raw_rows) >= candidate_limit
+                    and len(projected) < result_limit
+                )
+                if not window_exhausted:
+                    # Either the request is satisfied or the raw candidate window
+                    # was not binding, so projection has seen every candidate this
+                    # query can reveal.
+                    break
+            selected = projected[:result_limit]
+
+            # The recency slice is per-row, but subagent rows are only renderable as
+            # children: the sidebar nests a child under its parent solely when that
+            # parent row is present in the same payload. A frozen orchestrator stops
+            # writing while its leaves keep streaming, so the leaves win the recency
+            # race and the parent falls outside the window — leaving the leaves to be
+            # promoted to top-level sidebar rows. Re-add subagent parents that the
+            # oversampled candidate set already projected (no extra query); webui
+            # ancestors are left out because that sidebar bucket already has them.
+            #
+            # Bounded by construction: ``by_id`` only holds the candidates of the
+            # window that was actually executed (``limit * 8``, or ``limit * 32``
+            # when the re-widening pass above had to run), so an ancestor older
+            # than that oversample is not recovered and its children stay
+            # top-level — the pre-existing behaviour, narrowed rather than fixed.
+            # Resolving those would need an unbounded per-row ancestor query on
+            # the hot sidebar path; widen ``CANDIDATE_WINDOW_MULTIPLIERS`` instead
+            # if the window proves too tight.
+            # NOTE: this can return more than ``limit`` rows (see docstring).
+            have = {row.get('id') for row in selected}
+            by_id = {row.get('id'): row for row in projected if row.get('id')}
+            pending = list(selected)
+            while pending:
+                row = pending.pop()
+                if str(row.get('raw_source') or row.get('source') or '').strip().lower() != 'subagent':
+                    continue
+                parent_id = row.get('parent_session_id')
+                if not parent_id or parent_id in have:
+                    continue
+                parent = by_id.get(parent_id)
+                if parent is None:
+                    continue
+                if str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
+                    continue
+                selected.append(parent)
+                have.add(parent_id)
+                pending.append(parent)
+            return _result(selected, window_exhausted)
+
+        cur.execute(
+            f"""
+            {select_sql}
+            FROM sessions s
+            {join_clause}
+            WHERE {' AND '.join(where_clauses)}
+            {group_by_clause}
+            {order_by_clause}
+            """,
+            params,
+        )
+        return _result(_project([dict(row) for row in cur.fetchall()]))
+
+
+def read_assigned_project_row_counts(
+    db_path: Path,
+    log=None,
+    exclude_sources: tuple[str, ...] | None = None,
+) -> dict[str, int]:
+    """Return ``{project_id: assigned raw row count}`` from ``state.db``.
+
+    A single GROUP BY over ``sessions.project_id``: no messages join, no lineage
+    recursion, and an answer bounded by the number of distinct project ids. It
+    exists so the assigned-recovery pass can tell WHICH projects still have rows
+    it has not delivered, and pay a per-project follow-up query only for those,
+    instead of one query per registered project (greptile P1 on #6659).
+
+    The counts are RAW rows, so a compression lineage counts once per segment.
+    That makes the signal deliberately conservative — it can overestimate what a
+    project still owes, never underestimate it, so a starved project is always
+    detected while at worst one follow-up query comes back empty.
+    """
+    db_path = Path(db_path)
+    log = log or logger
+    if not db_path.exists():
+        return {}
+    try:
+        with closing(open_state_db_readonly(db_path, log)) as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            if not {'project_id', 'source'} <= session_cols:
+                return {}
+            where_clauses = [
+                "s.source IS NOT NULL",
+                "s.project_id IS NOT NULL",
+                "TRIM(s.project_id) != ''",
+            ]
+            params: list[object] = []
+            excluded = tuple(
+                str(source) for source in (exclude_sources or ()) if source
             )
-        else:
+            if excluded:
+                placeholders = ", ".join("?" for _ in excluded)
+                where_clauses.append(f"s.source NOT IN ({placeholders})")
+                params.extend(excluded)
             cur.execute(
                 f"""
-                {select_sql}
+                SELECT TRIM(s.project_id) AS project_id, COUNT(*) AS row_count
                 FROM sessions s
-                {join_clause}
                 WHERE {' AND '.join(where_clauses)}
-                {group_by_clause}
-                {order_by_clause}
+                GROUP BY TRIM(s.project_id)
                 """,
                 params,
             )
-        projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
-        # model_config is selected only so the continuation classifier can
-        # read the real _branched_from/_delegate_from markers; it is internal
-        # agent state and must not leak into the /api/sessions response.
-        for row in projected:
-            row.pop('model_config', None)
-        projected = [_with_normalized_source(row) for row in projected]
-        projected = [row for row in projected if is_cli_session_row_visible(row)]
-        if limit is None:
-            return projected
-        selected = projected[:max(0, int(limit))]
-
-        # The recency slice is per-row, but subagent rows are only renderable as
-        # children: the sidebar nests a child under its parent solely when that
-        # parent row is present in the same payload. A frozen orchestrator stops
-        # writing while its leaves keep streaming, so the leaves win the recency
-        # race and the parent falls outside the window — leaving the leaves to be
-        # promoted to top-level sidebar rows. Re-add subagent parents that the
-        # oversampled candidate set already projected (no extra query); webui
-        # ancestors are left out because that sidebar bucket already has them.
-        #
-        # Bounded by construction: ``by_id`` only holds the ``limit * 8``
-        # newest candidates, so an ancestor older than that oversample is not
-        # recovered and its children stay top-level — the pre-existing
-        # behaviour, narrowed rather than fixed. Resolving those would need an
-        # unbounded per-row ancestor query on the hot sidebar path; widen
-        # ``candidate_limit`` instead if the window proves too tight.
-        # NOTE: this can return more than ``limit`` rows (see docstring).
-        have = {row.get('id') for row in selected}
-        by_id = {row.get('id'): row for row in projected if row.get('id')}
-        pending = list(selected)
-        while pending:
-            row = pending.pop()
-            if str(row.get('raw_source') or row.get('source') or '').strip().lower() != 'subagent':
-                continue
-            parent_id = row.get('parent_session_id')
-            if not parent_id or parent_id in have:
-                continue
-            parent = by_id.get(parent_id)
-            if parent is None:
-                continue
-            if str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
-                continue
-            selected.append(parent)
-            have.add(parent_id)
-            pending.append(parent)
-        return selected
-
+            return {
+                str(row[0]): int(row[1] or 0)
+                for row in cur.fetchall()
+                if str(row[0] or '').strip()
+            }
+    except Exception:
+        log.debug("assigned project row-count probe failed", exc_info=True)
+        return {}
 
 
 def _lineage_report_row(row: dict, role: str) -> dict:

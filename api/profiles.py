@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-import yaml
+from api import yaml_compat as yaml
 
 from api.paths import _atomic_write_text
 from api.session_events import publish_session_list_changed
@@ -55,6 +55,11 @@ _loaded_profile_env_keys: set[str] = set()
 # reads its own profile from the hermes_profile cookie instead of the
 # process-global _active_profile.
 _tls = threading.local()
+
+# Home of the profile this process serves as its own (set by init_profile_state).
+# Streaming turns mirror their profile into os.environ['HERMES_HOME'], so the live
+# env var is not a stable identity; see _pin_process_profile_home().
+_PROCESS_PROFILE_HOME: Optional[str] = None
 
 _SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
 _SKILL_HOME_MODULE_PATCH_LOCK = threading.RLock()
@@ -398,6 +403,11 @@ def _read_active_profile_file() -> str:
 _root_profile_name_cache: set[str] = {'default'}
 _root_profile_name_cache_lock = threading.Lock()
 _root_profile_name_cache_loaded = False
+
+
+def _root_profile_names_snapshot() -> set[str] | None:
+    with _root_profile_name_cache_lock:
+        return {str(name) for name in _root_profile_name_cache} if _root_profile_name_cache_loaded else None
 
 
 def _invalidate_root_profile_cache() -> None:
@@ -889,7 +899,7 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     env: dict[str, str] = {}
 
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
 
         cfg_path = home / 'config.yaml'
         cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
@@ -1360,6 +1370,8 @@ def profile_env_for_background_worker(
 def profile_env_for_active_request_readonly(
     purpose: str = "provider/model read",
     logger_override: Optional[logging.Logger] = None,
+    *,
+    include_root: bool = False,
 ):
     """Apply the active per-request profile's env to thread-local state only (#3957).
 
@@ -1376,11 +1388,18 @@ def profile_env_for_active_request_readonly(
     process-global ``os.environ``.
 
     No-ops for the default/root profile, which is the common single-profile
-    deployment case.
+    deployment case, unless ``include_root`` is set: callers whose Hermes Agent
+    reads must not follow a streaming turn's mirrored ``HERMES_HOME`` (MCP
+    runtime status/reload) bind the root profile's home explicitly too.
+
+    Yields True when the context-local Hermes-home override is installed for
+    the resolved profile, else False (no-op, older agent, or resolution error).
     """
     profile = (get_active_profile_name() or "").strip()
-    if not profile or _is_root_profile(profile):
-        yield
+    if include_root and not profile:
+        profile = "default"
+    if not profile or (_is_root_profile(profile) and not include_root):
+        yield False
         return
     try:
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
@@ -1396,7 +1415,7 @@ def profile_env_for_active_request_readonly(
             purpose,
             exc_info=True,
         )
-        yield
+        yield False
         return
     try:
         from hermes_constants import (
@@ -1440,7 +1459,7 @@ def profile_env_for_active_request_readonly(
                     purpose,
                     exc_info=True,
                 )
-        yield
+        yield home_override_installed
     finally:
         if _has_scope and _secret_scope_mod is not None:
             try:
@@ -1506,31 +1525,46 @@ def profile_scope_for_detached_worker(
     Pass the profile name CAPTURED on the spawning thread (where the TLS is
     valid) into the worker, then enter this scope at the top of the worker body.
     It sets the request-profile TLS for this (worker) thread and applies the
-    profile env via ``profile_env_for_background_worker``, restoring both on exit.
-    No-op for the default/root profile.
+    profile env via ``profile_env_for_background_worker`` for named profiles,
+    restoring both on exit. An explicit default/root profile still binds the TLS
+    but keeps the existing root process environment. Only an empty profile name
+    is a no-op.
 
     Unlike ``profile_env_for_active_request`` (which reads the *current* thread's
-    TLS and must NOT clear it — the request thread keeps using it after the call),
-    this sets and then CLEARS the TLS, which is correct for a dedicated worker
-    thread that has no other use for it.
+    TLS), this temporarily replaces the worker thread's TLS and restores the exact
+    previous profile afterward. That keeps nested scopes and reused executor
+    threads compositional on both normal and exceptional exits.
     """
     name = (profile_name or "").strip()
-    if not name or _is_root_profile(name):
+    if not name:
         yield
         return
+    previous_profile = getattr(_tls, "profile", None)
     set_request_profile(name)
     try:
-        with profile_env_for_background_worker(
-            name, purpose, logger_override=logger_override
-        ):
+        if _is_root_profile(name):
             yield
+        else:
+            with profile_env_for_background_worker(
+                name, purpose, logger_override=logger_override
+            ):
+                yield
     finally:
-        clear_request_profile()
+        if previous_profile is None:
+            clear_request_profile()
+        else:
+            set_request_profile(previous_profile)
 
 
 def _set_hermes_home(home: Path):
-    """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
+    """Set HERMES_HOME env var and monkey-patch cached module-level paths.
+
+    Every process-wide home change (startup, ``switch_profile(process_wide=True)``)
+    goes through here, so the process-profile pin used for MCP routing decisions
+    is updated in the same step and cannot drift from ``HERMES_HOME``.
+    """
     os.environ['HERMES_HOME'] = str(home)
+    _pin_process_profile_home(home)
 
     patch_skill_home_modules(home)
 
@@ -1610,9 +1644,43 @@ def init_profile_state() -> None:
     else:
         _active_profile = _read_active_profile_file()
         home = get_active_hermes_home()
-    _set_hermes_home(home)
+    _set_hermes_home(home)  # also pins the process-profile home (MCP routing anchor)
     install_cron_scheduler_profile_isolation()
     _reload_dotenv(home)
+
+
+def _pin_process_profile_home(home: Path) -> None:
+    """Record the profile home this process serves as its own, for WebUI and Hermes Agent.
+
+    Called from ``_set_hermes_home()`` so startup and process-wide profile switches
+    keep one owner for the value. Hermes Agent keys MCP connections and registry
+    overlays by profile only when a task serves a *routed* profile: the context-local
+    Hermes-home override differs from the process home. Streaming turns mirror their
+    profile into ``os.environ['HERMES_HOME']`` for legacy readers, which makes every
+    turn's own profile look like the process profile, so same-named MCP servers of
+    different profiles share one bare-name connection. Agents exposing
+    ``hermes_constants.pin_process_hermes_home`` take a stable anchor instead; older
+    agents keep following the env var, and ``get_process_profile_home()`` still gives
+    WebUI the anchor to detect that skew.
+    """
+    global _PROCESS_PROFILE_HOME
+    _PROCESS_PROFILE_HOME = str(home)
+    try:
+        import hermes_constants
+        pin = getattr(hermes_constants, 'pin_process_hermes_home', None)
+        if callable(pin):
+            pin(str(home))
+    except Exception:
+        logger.debug("Hermes Agent process-home pin unavailable", exc_info=True)
+
+
+def get_process_profile_home() -> Path:
+    """Return the profile home this WebUI process serves as its own (stable per process)."""
+    if _PROCESS_PROFILE_HOME:
+        return Path(_PROCESS_PROFILE_HOME)
+    if _INITIAL_HERMES_HOME:
+        return Path(_INITIAL_HERMES_HOME).expanduser()
+    return _DEFAULT_HERMES_HOME
 
 
 def switch_profile(name: str, *, process_wide: bool = True) -> dict:
@@ -1671,8 +1739,10 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         if not home.is_dir():
             raise ValueError(f"Profile '{name}' does not exist.")
 
+    # The skill-stats cache is deliberately left alone here (#7940). A profile's
+    # counts come from its own config.yaml and SKILL.md files, so which profile
+    # is active changes none of them, and the mtime probe catches real changes.
     with _profile_lock:
-        _SKILLS_STATS_CACHE.clear()
         if process_wide:
             global _active_profile
             _active_profile = name
@@ -1700,7 +1770,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     else:
         # Direct disk read — does not touch _cfg_cache
         try:
-            import yaml as _yaml
+            from api import yaml_compat as _yaml
             cfg_path = home / 'config.yaml'
             cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
             if not isinstance(cfg, dict):
@@ -1776,7 +1846,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
-_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float]] = {}
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float, str | None]] = {}
 _SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because .clear() handles programmatic changes
 
 # Per-profile compute locks (#5364). Without these, concurrent cold-startup
@@ -1803,6 +1873,21 @@ def _skills_stats_lock_for(profile_dir: Path) -> threading.Lock:
             lock = threading.Lock()
             _SKILLS_STATS_LOCKS[profile_dir] = lock
         return lock
+
+
+def _active_org_marker(skills_dir: Path) -> str | None:
+    """The org whose mirror counts, read the way the agent's index walk reads it.
+
+    None when there is no marker, or no agent to gate on it.
+    """
+    try:
+        from agent.skill_utils import read_active_org_id
+    except Exception:
+        return None
+    try:
+        return read_active_org_id(skills_dir)
+    except Exception:
+        return None
 
 
 def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
@@ -1866,7 +1951,7 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     config_path = profile_dir / "config.yaml"
     if config_path.exists():
         try:
-            import yaml as _yaml
+            from api import yaml_compat as _yaml
             cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
             if isinstance(cfg, dict):
                 skills_cfg = cfg.get("skills")
@@ -1941,23 +2026,30 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     # Always run the cheap stat-only probe first — this is what catches an
     # out-of-band create/edit/delete within the same request (not after the TTL).
     current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    current_org = _active_org_marker(skills_dir)
 
     # Read via .get() (not membership-check + index) so a concurrent
     # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
     # between the `in` test and the lookup.
     cached = _SKILLS_STATS_CACHE.get(profile_dir)
     if cached is not None:
-        enabled, compat, cached_mtime_ns, expiry = cached
+        enabled, compat, cached_mtime_ns, expiry, cached_org = cached
         # Fast path: files unchanged (by the cheap probe above) AND still within
         # the TTL → serve cached without re-reading any SKILL.md. The mtime probe
         # already ran, so an out-of-band change is caught immediately regardless
         # of the TTL. On TTL expiry we deliberately fall through to a full
         # recompute (the TTL is a safety net for mtime-preserving changes that
         # the probe can't see — e.g. a git checkout that restores the old mtime).
-        if current_mtime_ns == cached_mtime_ns and now < expiry:
+        # The active-org marker is carried IN the same tuple, so a reader never
+        # sees a new org beside stale counts (single atomic publish below).
+        if (
+            current_mtime_ns == cached_mtime_ns
+            and now < expiry
+            and cached_org == current_org
+        ):
             return enabled, compat
 
-    # Cache miss, mtime changed, or TTL expired — serialize per-profile so a
+    # Cache miss, mtime changed, active org changed, or TTL expired — serialize per-profile so a
     # burst of concurrent misses (cold startup) collapses to ONE compute instead
     # of a thundering herd of simultaneous os.walk + SKILL.md parses (#5364).
     lock = _skills_stats_lock_for(profile_dir)
@@ -1967,17 +2059,25 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # still matches and the entry is within its TTL — no second compute.
         cached = _SKILLS_STATS_CACHE.get(profile_dir)
         if cached is not None:
-            enabled, compat, cached_mtime_ns, expiry = cached
-            if current_mtime_ns == cached_mtime_ns and time.time() < expiry:
+            enabled, compat, cached_mtime_ns, expiry, cached_org = cached
+            if (
+                current_mtime_ns == cached_mtime_ns
+                and time.time() < expiry
+                and cached_org == current_org
+            ):
                 return enabled, compat
 
         # Snapshot mtime BEFORE compute so any concurrent SKILL.md write during
         # the compute window causes a mismatch on the next probe instead of
         # silently serving stale data (TOCTOU).
         new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+        new_org = _active_org_marker(skills_dir)
         res = _compute_profile_skills_stats(profile_dir)
+        # Publish counts + mtime + org in ONE tuple assignment: a lock-free
+        # fast-path reader sees either the whole old entry or the whole new one,
+        # never a new org tag beside pre-rewrite counts.
         _SKILLS_STATS_CACHE[profile_dir] = (
-            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL
+            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL, new_org
         )
         return res
 
@@ -2393,7 +2493,7 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
         return
     config_path = profile_dir / 'config.yaml'
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return
     cfg = {}
@@ -2551,7 +2651,7 @@ def _write_model_defaults_to_config(
         return
     config_path = profile_dir / 'config.yaml'
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return
     cfg = {}
@@ -2654,6 +2754,7 @@ def create_profile_api(name: str, clone_from: str = None,
         model_provider=model_provider,
     )
 
+    _drop_profile_models_cache(name)
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).
     _SKILLS_STATS_CACHE.clear()
@@ -2680,6 +2781,16 @@ def create_profile_api(name: str, clone_from: str = None,
         'enabled_skills': 0,
         'total_skills': 0,
     }
+
+
+def _drop_profile_models_cache(name: str) -> None:
+    """A deleted or new profile must never inherit a same-name models snapshot."""
+    from api.config import _get_models_cache_path
+
+    try:
+        _get_models_cache_path(name).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Failed to drop models cache for profile %s", name, exc_info=True)
 
 
 def delete_profile_api(name: str) -> dict:
@@ -2715,6 +2826,7 @@ def delete_profile_api(name: str) -> dict:
         else:
             raise ValueError(f"Profile '{name}' does not exist.")
 
+    _drop_profile_models_cache(name)
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()
     _invalidate_list_profiles_cache()

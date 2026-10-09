@@ -59,6 +59,41 @@ proposes. It is routed in `api/routes.py` and implemented by
 is a global invalidation signal, not a per-session lifecycle stream. The proposed
 `GET /api/sessions/{session_id}/events` is per-session and path-distinct.
 
+### Hidden-tab observation and recovery (implemented client behavior)
+
+The browser closes its persistent per-session SSE while hidden and uses
+`_startHiddenActiveStreamPoll()` in `static/messages.js` to poll
+`GET /api/session/status?session_id=...` immediately and then every six seconds,
+subject to browser timer throttling. An active stream can be attached through
+the existing replay path; successful attachment stops the poll.
+
+HTTP `404` is ambiguous: older profile-visibility guards and the legacy
+unknown-profile path can return it for a live session. Current master returns
+`409 session_profile_mismatch` for a known foreign profile; that response
+remains retryable when another tab changes the browser-wide profile cookie.
+A single `404` therefore keeps polling and retains the hidden-resume owner.
+After three consecutive `404` responses, the poll pauses to bound repeated
+missing-session requests, but retains that owner so returning to the visible
+tab can reopen SSE. Any other response or network error resets this budget;
+a newly started poll also starts with a fresh budget.
+
+HTTP `410` is terminal: it stops the interval and clears the matching
+hidden-resume session ID. Returning to the visible tab then does not reopen
+SSE through that owner. Responses and queued ticks belong to one poll timer,
+not merely a session ID: they cannot stop or attach a replacement poll, even
+when the replacement observes the same session. The budget counts responses
+received by the current poll. Cleanup affects browser observation state only;
+it does not delete a session or cancel an agent run.
+
+Successful idle responses with no `active_stream_id`, network failures, and
+other non-success HTTP responses (including `401`, `403`, `429`, and `5xx`)
+remain retryable. Visibility return normally restores per-session SSE when a
+resume owner still exists, including after repeated `404` responses. Only a
+terminal `410` removes that automatic recovery path. A profile restored before
+the three-miss limit can recover through the next hidden poll; after the limit,
+recovery waits for visibility return or explicit session loading. Behavior coverage lives in
+`tests/test_hidden_tab_server_initiated_turn.py`.
+
 ### Heartbeat
 
 `_SSE_HEARTBEAT_INTERVAL_SECONDS = 5` (defined in `api/routes.py`) is the current
@@ -162,7 +197,7 @@ gate rather than inventing values without source support.
 ## Authoritative emitted events (`/api/chat/stream`)
 
 These are the **real wire `event:` names** emitted by `api/streaming.py` today
-(23 names). Clients and docs must use this table — not the semantic draft above —
+(24 names). Clients and docs must use this table — not the semantic draft above —
 when integrating with the live chat SSE relay.
 
 | Wire name | Role |
@@ -179,6 +214,7 @@ when integrating with the live chat SSE relay.
 | `title` | Session title update (often after `done`) |
 | `title_status` | Title generation status / skip reason |
 | `warning` | Non-fatal provider/fallback warning |
+| `runtime_model` | Local Agent serving identity observed at output or successful completion |
 | `apperror` | Terminal application error (no trailing `stream_end`) |
 | `cancel` | Run cancelled |
 | `done` | Turn finalized (session payload); title/`stream_end` may follow |
@@ -198,6 +234,31 @@ Relay close set (stop draining the live queue): `stream_end`, `cancel`,
 The semantic taxonomy table remains a draft for the proposed per-session
 endpoint vocabulary and must be confirmed during maintainer review before that
 endpoint claims parity.
+
+### Observed local runtime model
+
+The local worker emits `runtime_model` with
+`{session_id, stream_id, model, provider?, fallback_active, phase}`. The IDs
+refer to the original run-journal owner even if compression rotates the Agent's
+session. `phase="observed_output"` means the Agent's own model was read at a
+nonempty token/reasoning callback or after successful completion (including a
+non-streaming reply or credential self-heal). It does not promise that a turn
+which emitted partial output will finish successfully. Missing Agent model
+sends no observation; the configured selection is not used as serving proof.
+`fallback_active` is true only when the Agent explicitly reports its fallback
+flag. Consecutive identical observations are deduplicated within the turn.
+
+Fallback lifecycle warnings invalidate older serving evidence and reset the
+deduplication; status text alone never establishes the replacement model. A
+fresh observation after the warning reestablishes it, including when a buffered
+success notice arrives after output. Durable replay retains the event IDs.
+The journal summary and HTTP `runtime_journal_snapshot.runtime_model` project
+the latest valid observation from the same session/stream event window, or null
+if a warning or malformed latest observation invalidated it. No previous run's
+footer or selected route fills an unknown current run. This is a local-worker
+producer; gateway attribution and frontend presentation are separate concerns
+(see #6272 and #7181). `route_observed` remains reserved for route-only data,
+not successful output.
 
 ## Cursor and resume semantics
 
