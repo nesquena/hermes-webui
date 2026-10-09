@@ -3023,6 +3023,7 @@ from api.goal_continuation_store import (
     consume_pending_goal_continuation,
     discard_goal_continuation_handoff,
     discard_goal_continuation_rollback_receipt,
+    pop_goal_continuation_handoff,
     pop_goal_continuation_rollback_receipt,
     reclaim_goal_continuation_receipt,
     restore_pending_goal_continuation,

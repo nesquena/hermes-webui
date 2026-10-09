@@ -234,7 +234,6 @@ def test_consume_writes_the_registry_exactly_once(clean_registry, monkeypatch):
 def test_a_successful_consume_leaves_both_halves_durable(clean_registry):
     """The committed snapshot has the record GONE and the handoff PRESENT."""
     import json
-    import tempfile
     from pathlib import Path
 
     store = _store()
