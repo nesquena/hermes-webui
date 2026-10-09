@@ -139,3 +139,22 @@ def test_moa_css_classes_present():
 
 def test_moa_status_uses_existing_animation_keyframes():
     assert "@keyframes hermes-cursor-blink" in STYLE_CSS
+
+
+# ── Scene Anchor / History Parity ──────────────────────────────────────────
+
+UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+
+
+def test_anchor_scene_node_handles_moa_reference():
+    fn = extract_fn(UI_JS, "_anchorSceneNodeForRow")
+    assert "'moa.reference'" in fn
+    assert "_moaReferenceActivityNode" in fn
+
+
+def test_moa_reference_activity_node_builder_exists():
+    fn = extract_fn(UI_JS, "_moaReferenceActivityNode")
+    assert "moa-reference" in fn
+    assert "data-moa-ref" in fn
+    assert "textContent = text" in fn
+

@@ -13078,6 +13078,26 @@ function _anchorSceneRowTimestampSeconds(row){
   }
   return null;
 }
+function _moaReferenceActivityNode(d, opts){
+  d = d || {};
+  const payload = d.payload || d;
+  const label = String(payload.label || d.label || d.name || 'Reference');
+  const index = payload.index != null ? payload.index : (d.index != null ? d.index : null);
+  const count = payload.count != null ? payload.count : (d.count != null ? d.count : null);
+  const text = payload.text !== undefined && payload.text !== null ? String(payload.text) : (d.text !== undefined && d.text !== null ? String(d.text) : '');
+  const key = (index != null && index !== '') ? ('idx:' + index) : label;
+  const counter = (index != null && count != null) ? ` <span class="moa-ref-counter">${typeof esc === 'function' ? esc(String(index)) : index}/${typeof esc === 'function' ? esc(String(count)) : count}</span>` : '';
+  const card = document.createElement('div');
+  card.className = 'agent-activity-thinking moa-reference';
+  card.setAttribute('data-moa-ref', key);
+  const labelEscaped = typeof esc === 'function' ? esc(label) : label;
+  const iconLayers = typeof li === 'function' ? li('layers', 14) : '';
+  const iconToggle = typeof li === 'function' ? li('chevron-right', 12) : '';
+  card.innerHTML = `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${iconLayers}</span><span class="thinking-card-label">${labelEscaped}${counter}</span><span class="thinking-card-btn-row"><span class="thinking-card-toggle">${iconToggle}</span></span></div><div class="thinking-card-body"><pre></pre></div></div>`;
+  const body = card.querySelector('.thinking-card-body pre');
+  if(body) body.textContent = text;
+  return card;
+}
 function _anchorSceneNodeForRow(row, opts){
   const settled=!!(opts&&opts.settled);
   if(!row) return null;
@@ -13112,6 +13132,13 @@ function _anchorSceneNodeForRow(row, opts){
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
     node=_thinkingActivityNode(text, false, row.row_id||row.local_id||'anchor-thinking');
+  }else if(row.role==='moa_reference'||row.kind==='moa_reference'||row.role==='moa.reference'||row.source_event_type==='moa.reference'){
+    const payload=row.payload||{};
+    const label=payload.label||row.label||row.name||'Reference';
+    const text=row.text||payload.text||'';
+    const index=payload.index!=null?payload.index:(row.index!=null?row.index:null);
+    const count=payload.count!=null?payload.count:(row.count!=null?row.count:null);
+    node=_moaReferenceActivityNode({label, text, index, count}, opts);
   }else if(row.role==='tool'){
     node=buildToolCard(_anchorSceneToolCallFromRow(row,opts));
   }else if(row.role==='lifecycle'){
