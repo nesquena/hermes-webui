@@ -1629,6 +1629,96 @@ def test_profile_switch_reconciliation_marks_the_tab_mirror_stale(tmp_path):
     assert _run_node(tmp_path, "reconcile_guard_probe.js", script).strip() == "ok"
 
 
+_OVERLAPPING_SWITCHES_PROBE = """
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+__COUNTER__
+__GUARD__
+globalThis.window = {};
+const S = {session: null};
+let _profileSwitchGeneration = 0;
+let pending = [];
+let applied = [];
+let stored = null;
+function api(path) {
+  assert(path === '/api/settings', 'unexpected api path: ' + path);
+  return new Promise(function (res, rej) { pending.push({res: res, rej: rej}); });
+}
+function loadWorkspaceList() { return Promise.resolve(); }
+function syncTopbar() {}
+function _setHiddenTabs(h) { stored = h.slice(); }
+function _setTabOrder() {}
+function _applyTabOrder() {}
+function _applyTabVisibility(h) { applied.push(h.slice()); }
+function _ensureComposerControlVisibilityState() {}
+function _setComposerControlOrder() { return []; }
+function _renderComposerControlChips() {}
+function _renderComposerSituationalControlChips() {}
+function _applyComposerFooterVisibilitySettings() {}
+function _applyTitlebarProfileVisibility() {}
+let resyncs = 0;
+function _syncChatTodosRailVisibility() { resyncs++; }
+__HELPER__
+function settled() { return new Promise(function (r) { setImmediate(r); }); }
+(async function () {
+  // Maintainer re-gate 2026-10-09T00:47:02Z (static/panels.js:6781): "switch to
+  // B, then C; receive C's settings; disable the tray; receive B's settings" —
+  // the final state used to be tray OFF, hidden_tabs [], guard cleared, Todos
+  // still hidden, because C could not replay while B held the counter and B
+  // could not replay because its generation was superseded. Both switches have
+  // already handed their guard to their own reconciliation, so no switch is in
+  // flight any more.
+  _profileSwitchGeneration = 1;
+  _refreshProfileSwitchBackground(1);              // B's settings fetch
+  assert(pending.length === 1, 'B must issue its settings fetch');
+  _profileSwitchGeneration = 2;
+  _refreshProfileSwitchBackground(2);              // C's settings fetch
+  assert(pending.length === 2, 'C must issue its settings fetch');
+  assert(_tabVisibilitySnapshotStale() === true,
+    'the mirror is stale while both reconciliations are in flight');
+  assert(resyncs === 0, 'nothing may replay inside the stale window');
+
+  // C's (authoritative) settings arrive first.
+  pending[1].res({hidden_tabs: [], tab_order: ['chat']});
+  await settled();
+  assert(_tabVisibilitySnapshotStale() === true,
+    'B still holds the counter after C settles');
+  assert(resyncs === 0,
+    'C must not replay while B keeps the counter positive');
+
+  // ...then the SUPERSEDED B settles last and takes the counter to zero.
+  pending[0].res({hidden_tabs: ['todos'], tab_order: ['chat']});
+  await settled();
+  assert(_tabVisibilitySnapshotStale() === false,
+    'the guard clears once the counter reaches zero');
+  assert(resyncs === 1,
+    'the release that brings the counter to zero must replay regardless of which '
+    + 'request releases last (got ' + resyncs + ' resyncs)');
+  console.log('ok');
+})().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def test_overlapping_switches_replay_when_the_counter_reaches_zero(tmp_path):
+    """Maintainer re-gate 2026-10-09T00:47:02Z, static/panels.js:6781: with two
+    overlapping profile switches, the release that reaches a zero counter may
+    belong to the SUPERSEDED reconciliation. It must still replay the tray rail
+    sync (nothing else ever will), while a superseded release that is NOT the
+    last one still must not."""
+    panels = _read_static("static/panels.js")
+    counter, guard = _extract_reconcile_guard(panels)
+    block = _extract(
+        panels,
+        "function _refreshProfileSwitchBackground(gen){",
+        "async function loadProfilesPanel()",
+    )
+    script = (
+        _OVERLAPPING_SWITCHES_PROBE.replace("__COUNTER__", counter)
+        .replace("__GUARD__", guard)
+        .replace("__HELPER__", block)
+    )
+    assert _run_node(tmp_path, "overlapping_switches_probe.js", script).strip() == "ok"
+
+
 def _extract_switch_guard_arms(panels: str) -> tuple[str, str, str]:
     """The three shipped statements of the switch's stale-snapshot guard:
     arm (at S.activeProfile), handoff (to the reconciliation), finally release."""
