@@ -71,6 +71,21 @@ entries there before using the isolated command above.
 For managed hosting or fully preconfigured images, set
 `HERMES_WEBUI_SKIP_ONBOARDING=1` to bypass the wizard.
 
+## If the port is already in use
+
+The bootstrap checks the resolved host and port before it installs the agent,
+sets up dependencies, or creates state. When another service already holds
+the port, it stops there and reports the address it could not bind together
+with a free alternative it verified, for example:
+
+```text
+Port 8787 on 127.0.0.1 is already in use by another service. Try an available port instead: ./start.sh 8789 Or set HERMES_WEBUI_PORT=8789 in /path/to/hermes-webui/.env. The existing service was left untouched; no configuration was changed.
+```
+
+Nothing is reconfigured for you: the running service is untouched and `.env`
+is not rewritten. Re-run with the suggested port as the argument
+(`./start.sh 8789`) or put `HERMES_WEBUI_PORT=8789` in `.env`.
+
 ## What the wizard checks
 
 The first screen reports the runtime state WebUI can see:
