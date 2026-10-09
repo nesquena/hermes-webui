@@ -89,6 +89,11 @@ separate OpenAI API catalog does not determine Codex subscription availability.
   every release so picker-shape fixes appear immediately instead of after the
   TTL expires. When the runtime version cannot be resolved (early boot), that
   check is skipped rather than wedging the boot.
+- `_built_at` records the POSIX timestamp (in seconds) of when the disk cache
+  was built by `_save_models_cache_to_disk`. Freshness checks evaluate age
+  against `now - _built_at` rather than filesystem `st_mtime` to prevent read/access
+  touches from resetting the cache age while preserving fallback to `st_mtime`
+  if the stamp is missing or invalid.
 
 ## Invalidation paths: memory vs. disk
 

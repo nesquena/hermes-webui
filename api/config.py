@@ -8896,6 +8896,7 @@ def _save_models_cache_to_disk(
                 if build_fingerprint is not None
                 else _models_cache_source_fingerprint()
             ),
+            "_built_at": time.time(),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -11768,11 +11769,39 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         return copy.deepcopy(_static_models_catalog_without_live_probes())
 
 
-def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+def _models_disk_cache_built_at(cache_path: Path) -> float | None:
+    """Return the persisted ``_built_at`` (last live rebuild) stamp, if present.
+
+    Returns None for caches written before the stamp existed (their freshness
+    falls back to file mtime), future-stamped caches, and any unreadable/unparseable
+    payload, so the freshness decision never hard-fails on a malformed cache.
+    """
     try:
-        return max(0.0, now - cache_path.stat().st_mtime)
+        with open(cache_path, encoding="utf-8") as f:
+            payload = json.load(f)
+        built_at = payload.get("_built_at")
+        if isinstance(built_at, (int, float)) and math.isfinite(built_at) and 0 < built_at <= time.time():
+            return float(built_at)
+        return None
+    except Exception:
+        return None
+
+
+def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+    """Age of the disk models cache judged against when it was built.
+
+    The refresh clock is the persisted ``_built_at`` stamp (last live rebuild)
+    written by ``_save_models_cache_to_disk``. A cache written before the stamp
+    existed (or carrying an invalid/future stamp) falls back to mtime age.
+    """
+    try:
+        mtime_age = max(0.0, now - cache_path.stat().st_mtime)
     except OSError:
         return None
+    built_at = _models_disk_cache_built_at(cache_path)
+    if built_at is not None:
+        return max(0.0, now - built_at)
+    return mtime_age
 
 
 def warm_models_catalog_provenance_if_cold() -> None:
