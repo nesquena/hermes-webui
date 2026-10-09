@@ -18,7 +18,6 @@ re-exec so an A→B→A rollback cancels it.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 import sys
 import subprocess
@@ -86,24 +85,27 @@ def _schedule_self_restart(delay: float = 2.0) -> None:
         return False
 
     def _do_restart() -> None:
+        global _SCHEDULED_RESTART
         try:
             from api.updates import _schedule_restart
-        except Exception:
-            # The shared authority is unavailable — never keep serving a
-            # mixed runtime. Exit so a supervisor (systemd, start.sh,
-            # Docker/Compose) respawns us.
-            logger.exception("restart authority unavailable; exiting for supervisor")
-            os._exit(1)
-        try:
             _schedule_restart(delay=delay, revalidate=_revalidate)
         except Exception:
-            # Same fail-safe: the restart authority refused to run, so exit
-            # for the supervisor instead of serving a mixed runtime.
-            logger.exception("restart authority failed; exiting for supervisor")
-            os._exit(1)
+            # On authority import or scheduler setup failure, do NOT blind-exit.
+            # Keep the runtime barrier fail-closed (it still raises AgentRuntimeChangedError),
+            # re-arm _SCHEDULED_RESTART, and let a subsequent barrier hit retry.
+            with _SCHEDULE_LOCK:
+                _SCHEDULED_RESTART = False
+            logger.exception(
+                "restart authority unavailable or failed; re-armed scheduler for retry"
+            )
 
-    t = threading.Thread(target=_do_restart, daemon=True)
-    t.start()
+    try:
+        t = threading.Thread(target=_do_restart, daemon=True)
+        t.start()
+    except Exception:
+        with _SCHEDULE_LOCK:
+            _SCHEDULED_RESTART = False
+        logger.exception("failed to start restart scheduler thread; re-armed scheduler")
 
 
 def _read_agent_revision(

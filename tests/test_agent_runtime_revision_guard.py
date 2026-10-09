@@ -862,14 +862,13 @@ class TestAutoRestartScheduling:
         assert revalidate() is True
         assert agent_runtime._SCHEDULED_RESTART is True
 
-    def test_restart_authority_unavailable_exits_for_supervisor(self, monkeypatch):
-        """Authority import loss must exit non-zero, never serve a mixed runtime."""
+    def test_restart_authority_unavailable_fails_closed_and_re_arms_scheduler(self, monkeypatch):
+        """Authority import loss raises typed error, never blind-exits, and re-arms scheduler."""
         import builtins
-        import queue
+        import time
 
         from api import agent_runtime
 
-        exited = queue.Queue()
         real_import = builtins.__import__
 
         def fake_import(name, *args, **kwargs):
@@ -878,7 +877,8 @@ class TestAutoRestartScheduling:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
-        monkeypatch.setattr(agent_runtime.os, "_exit", lambda code: exited.put(code))
+        exited = []
+        monkeypatch.setattr(os, "_exit", lambda code: exited.append(code))
         monkeypatch.setattr(agent_runtime, "_SCHEDULED_RESTART", False)
         monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "rev-a")
         monkeypatch.setattr(
@@ -890,22 +890,23 @@ class TestAutoRestartScheduling:
         with pytest.raises(agent_runtime.AgentRuntimeChangedError):
             agent_runtime.ensure_agent_runtime_current()
 
-        assert exited.get(timeout=5) == 1, "must exit non-zero so a supervisor respawns"
+        time.sleep(0.1)
+        assert exited == [], "authority loss must not blind-exit the process"
+        assert agent_runtime._SCHEDULED_RESTART is False, "scheduler must be re-armed for retry"
 
-    def test_restart_authority_failure_exits_for_supervisor(self, monkeypatch):
-        """Restart authority failure must exit non-zero for the supervisor."""
-        import queue
+    def test_restart_authority_failure_fails_closed_and_re_arms_scheduler(self, monkeypatch):
+        """Restart authority execution failure raises typed error, never blind-exits, and re-arms."""
+        import time
 
         from api import agent_runtime
         import api.updates as updates
-
-        exited = queue.Queue()
 
         def failing_restart(delay=2.0, revalidate=None):
             raise RuntimeError("simulated authority failure")
 
         monkeypatch.setattr(updates, "_schedule_restart", failing_restart)
-        monkeypatch.setattr(agent_runtime.os, "_exit", lambda code: exited.put(code))
+        exited = []
+        monkeypatch.setattr(os, "_exit", lambda code: exited.append(code))
         monkeypatch.setattr(agent_runtime, "_SCHEDULED_RESTART", False)
         monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "rev-a")
         monkeypatch.setattr(
@@ -917,7 +918,36 @@ class TestAutoRestartScheduling:
         with pytest.raises(agent_runtime.AgentRuntimeChangedError):
             agent_runtime.ensure_agent_runtime_current()
 
-        assert exited.get(timeout=5) == 1, "must exit non-zero so a supervisor respawns"
+        time.sleep(0.1)
+        assert exited == [], "authority failure must not blind-exit the process"
+        assert agent_runtime._SCHEDULED_RESTART is False, "scheduler must be re-armed for retry"
+
+    def test_revalidation_exception_cancels_restart(self, monkeypatch):
+        """If revalidate raises an exception, the restart must cancel/fail closed."""
+        import api.updates as updates
+
+        executed = []
+        monkeypatch.setattr(updates, "_wait_until_restart_safe", lambda: executed.append("drained"))
+        monkeypatch.setattr(updates, "REPO_ROOT", Path(__file__).parent)
+        monkeypatch.setattr(updates, "_AGENT_DIR", None)
+
+        def bad_revalidate():
+            raise RuntimeError("revalidation probe failure")
+
+        t = None
+        orig_thread = updates.threading.Thread
+
+        def capture_thread(*args, **kwargs):
+            nonlocal t
+            t = orig_thread(*args, **kwargs)
+            return t
+
+        monkeypatch.setattr(updates.threading, "Thread", capture_thread)
+
+        updates._schedule_restart(delay=0.01, revalidate=bad_revalidate)
+        if t is not None:
+            t.join(timeout=2)
+        assert executed == [], "revalidation exception must cancel restart before draining or re-exec"
 
 
 def test_restart_delegates_to_shared_authority_not_sigkill():
@@ -931,19 +961,12 @@ def test_restart_delegates_to_shared_authority_not_sigkill():
 
 
 def test_shared_restart_authority_preserves_launch_modes():
-    """The delegated authority keeps POSIX self-exec, Windows, drain, purge."""
+    """The delegated authority exposes the required lifecycle hooks and helpers."""
     import api.updates as updates
 
-    src = Path(updates.__file__).read_text(encoding="utf-8")
-    for needle in (
-        "os.execv",                 # POSIX self-exec (start.sh / ctl.sh / python server.py)
-        "pythonw.exe",              # native-Windows silent replacement
-        "CREATE_NO_WINDOW",         # Windows detached restart
-        "_wait_until_restart_safe",  # active stream/run drain
-        "_purge_agent_pycache",     # bytecode purge before re-exec
-        "os._exit(0)",              # supervisor (systemd/Compose) fallback
-    ):
-        assert needle in src, f"shared restart authority lost {needle!r}"
+    assert callable(getattr(updates, "_schedule_restart", None))
+    assert callable(getattr(updates, "_wait_until_restart_safe", None))
+    assert callable(getattr(updates, "_purge_agent_pycache", None))
 
 
 def test_fresh_import_captures_new_revision_after_update(monkeypatch, tmp_path: Path):

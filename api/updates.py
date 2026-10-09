@@ -1752,8 +1752,9 @@ def _schedule_restart(delay: float = 2.0, revalidate=None) -> None:
                     return
             except Exception:
                 logger.exception(
-                    "restart revalidation failed; proceeding with restart"
+                    "restart revalidation raised an exception; cancelling restart"
                 )
+                return
         # Hold _apply_lock through os.execv so no new update can start between
         # the lock-release and the process replacement.  Any in-flight update
         # finishes first (since it holds the lock), and then the process is
@@ -1783,8 +1784,9 @@ def _schedule_restart(delay: float = 2.0, revalidate=None) -> None:
                         return
                 except Exception:
                     logger.exception(
-                        "restart revalidation failed; proceeding with restart"
+                        "restart revalidation raised an exception; cancelling restart"
                     )
+                    return
             try:
                 # Re-exec into the just-pulled image.
                 #
