@@ -1857,7 +1857,7 @@ def test_lineage_segment_expansion_static_contract():
     assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
     assert "row.title=t('session_lineage_segment_open');" in js
     assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in js
-    assert "const openChildSession=async(childSession)=>{" in js
+    assert "const openChildSession=async(childSession, openOpts={})=>{" in js
     assert "await _openSidebarSession(childSession, {skipLineageResolve:true});" in js
     assert "if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){" in js
     assert ".session-lineage-count.expandable{" in css
@@ -2268,7 +2268,8 @@ def test_sidebar_search_and_rows_use_read_only_display_title():
     assert "const rawTitle=_sessionDisplayTitle(s);" in js
     assert "const tags=_sessionTitleTags(rawTitle);" in js
     assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
-    assert "const childTitle=_sessionDisplayTitle(child)||'Untitled child session';" in js
+    assert "const childTitle=_nestedChildTitle(child)||'Untitled child session';" in js
+    assert "  const title=_sessionDisplayTitle(s);\n  return _isDelegatedSubagentRow(s)?" in js
 
 
 def test_child_session_parent_segment_note_uses_display_title():
@@ -2378,3 +2379,50 @@ def test_nested_fork_rows_render_select_checkbox():
     fork_render_block = js[fork_render_start:fork_render_start + 2000]
     assert "session-select-cb" in fork_render_block
     assert "_sessionSelectMode" in fork_render_block
+
+
+def test_lineage_segments_inherit_row_owner_profile():
+    """[SHOULD-FIX round 2] Lineage-report rows are serialised by the owning
+    profile's state DB but ship WITHOUT a `profile` field, so the new-tab
+    profile gate treated a hidden lineage segment as ownerless -> refused it
+    under "show all profiles" while a plain click still opened it.
+
+    ``addSegment`` must attribute an ownerless segment to the row that owns the
+    report (always in the active profile). Red-before: ``segments.push({...seg})``
+    copied the segment verbatim, leaving ``profile`` undefined.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    start = js.index("function _lineageSegmentsForRender(")
+    brace = js.index("{", start)
+    depth = 0
+    end = None
+    for i in range(brace, len(js)):
+        ch = js[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    assert end, "unterminated _lineageSegmentsForRender"
+    fn = js[start:end]
+    row = {
+        "session_id": "row-1",
+        "profile": "alpha",
+        "_lineage_segments": [
+            {"session_id": "seg-ownerless", "title": "A"},
+            {"session_id": "seg-foreign", "title": "B", "profile": "beta"},
+        ],
+    }
+    source = (
+        "const row = " + json.dumps(row) + ";\n"
+        "const _lineageReportCache = new Map();\n"
+        + fn + "\n"
+        "console.log(JSON.stringify(_lineageSegmentsForRender(row, 'k', true)));\n"
+    )
+    segs = json.loads(_run_node(source))
+    by_sid = {seg["session_id"]: seg for seg in segs}
+    assert by_sid["seg-ownerless"]["profile"] == "alpha"
+    # An explicit owner on the segment is authoritative and left untouched.
+    assert by_sid["seg-foreign"]["profile"] == "beta"

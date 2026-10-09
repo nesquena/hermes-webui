@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import traceback
+import unicodedata
 import copy
 import inspect
 from pathlib import Path
@@ -44,10 +45,14 @@ from api.config import (
     clear_session_writeback_owner_if_owned,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
+    resolve_model_alias_runtime,
+    merge_model_alias_runtime_bundle,
     resolve_custom_provider_connection,
     apply_custom_provider_connection_authority,
     merge_custom_provider_runtime_bundle,
     CustomProviderRouteError,
+    MODEL_ALIAS_ROUTE_UNRESOLVED,
+    raise_for_unresolved_model_alias_route,
     CUSTOM_ROUTE_NO_CREDENTIAL,
     CUSTOM_ROUTE_NO_ENDPOINT,
     custom_provider_route_error,
@@ -64,6 +69,8 @@ from api.helpers import (
     redact_session_data,
     scrub_internal_replay_fields,
     _redact_text,
+    _is_client_disconnect_error,
+    _as_client_disconnect,
 )
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
@@ -75,10 +82,13 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
+    _cancelled_journal_turn_owner,
     _WEBUI_TRUSTED_AGENT_INPUT_FIELD,
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
+    _recovered_pending_timestamp,
+    _state_db_row_identity_details,
     _validated_webui_pending_user_timestamp_identity,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -94,6 +104,7 @@ from api.process_event_utils import (
     completion_delivery_id,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
+    restore_durable_process_completions,
     schedule_async_delegation_claim_retry,
     stamp_message_source,
 )
@@ -670,7 +681,7 @@ def _apply_profile_home_context_to_streaming_model(
         return model, provider_context, False
 
     try:
-        import yaml as _yaml_pp
+        from api import yaml_compat as _yaml_pp
 
         _pp_cfg_path = Path(profile_home) / "config.yaml"
         if not _pp_cfg_path.is_file():
@@ -811,6 +822,115 @@ def _resolve_runtime_connection_bundle(
             lookup_provider=lookup_provider,
             connection_resolver=resolve_custom_provider_connection,
         )
+
+
+def _resolve_model_alias_connection_bundle(
+    alias_route: dict,
+    runtime_provider: dict | None,
+    profile_name: str | None = None,
+) -> dict:
+    """Resolve an alias bundle inside the session profile's config scope."""
+    from api import profiles as _profiles_api
+
+    with _profiles_api.profile_scope_for_detached_worker(
+        profile_name, "model alias connection", logger_override=logger
+    ):
+        return merge_model_alias_runtime_bundle(
+            alias_route,
+            runtime_provider,
+            connection_resolver=resolve_custom_provider_connection,
+        )
+
+
+def _resolve_model_alias_endpoint_runtime(alias_route: dict, *, target_model=None) -> dict:
+    """Host-gated credential resolution for a URL-bearing alias with no declared key.
+
+    Delegates to Hermes Agent's own direct-alias policy
+    (``hermes_cli.model_switch._apply_direct_alias_endpoint``) so the local worker
+    reads the same configured alias exactly as the Gateway and runner do: the
+    lookup uses ``direct_alias_runtime_request`` (``requested="custom"``, which is
+    host-gated) against the alias URL, so an authoritative host such as
+    openrouter.ai or ollama.com resolves its own key and an unrelated host
+    resolves none. Only the credential is taken from Hermes; provider identity and
+    wire protocol are composed by :func:`merge_model_alias_runtime_bundle`.
+
+    Returns ``{}`` (keyless) for an alias without an endpoint, with a declared
+    credential, or when the installed Hermes cannot answer: failing closed never
+    sends a credential anywhere.
+    """
+    route = alias_route if isinstance(alias_route, dict) else {}
+    base_url = str(route.get("base_url") or "").strip()
+    if not route.get("base_url_explicit") or route.get("credential_explicit") or not base_url:
+        return {}
+    try:
+        from types import SimpleNamespace
+
+        from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+        from hermes_cli.model_switch import DirectAlias, _apply_direct_alias_endpoint
+
+        # No declared credential: the alias carries none, so Hermes takes its
+        # fresh host-gated resolution branch (there is no prior session key).
+        alias = DirectAlias(
+            model=str(route.get("model") or ""),
+            provider=str(route.get("provider") or "custom"),
+            base_url=base_url,
+        )
+        state = SimpleNamespace(
+            base_url="",
+            api_key="",
+            api_mode="",
+            target_provider=str(route.get("provider") or "custom"),
+            new_model=str(target_model or route.get("model") or ""),
+            validation_headers={},
+            suppress_ollama_headers=False,
+        )
+        resolve_runtime_provider_with_anthropic_env_lock(_apply_direct_alias_endpoint, state, alias)
+    except Exception as exc:
+        logger.warning("[webui] model alias host-gated credential resolution failed: %s", exc)
+        return {}
+    api_key = str(state.api_key or "").strip()
+    return {
+        "base_url": str(state.base_url or "").strip() or base_url,
+        "api_key": "" if api_key == "no-key-required" else api_key,
+    }
+
+
+def _attempt_model_alias_credential_self_heal(
+    provider_context, expected_model, session_id, _agent_lock_ref, *, target_model=None,
+):
+    """Credential self-heal (#1401) for an alias route: re-read the alias itself.
+
+    An alias-owned credential (``api_key``/``key_env``, or the host-gated key of
+    a URL-bearing alias) lives in the alias's authoritative source, not only in
+    auth.json, so retrying with the originally resolved route would resend the
+    same stale key. Re-resolve the alias from the active profile config/env,
+    then its runtime, and return ``(fresh_route, runtime)`` or ``None``.
+    """
+    try:
+        fresh_route = resolve_model_alias_runtime(provider_context, expected_model=expected_model)
+    except Exception as exc:
+        logger.warning("[webui] self-heal: model alias re-resolution failed: %s", exc)
+        return None
+    if fresh_route is None:
+        return None
+    if not fresh_route.get("base_url_explicit"):
+        runtime = _attempt_credential_self_heal(
+            fresh_route.get("provider") or "", session_id, _agent_lock_ref,
+            target_model=target_model,
+        )
+        return None if runtime is None else (fresh_route, runtime)
+    try:
+        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+
+        with SESSION_AGENT_CACHE_LOCK:
+            evicted = SESSION_AGENT_CACHE.pop(session_id, None)
+        if evicted is not None:
+            _close_cached_agent_entry_at_session_boundary(session_id, evicted)
+    except Exception:
+        logger.debug("[webui] self-heal: alias agent-cache eviction failed", exc_info=True)
+    return fresh_route, _resolve_model_alias_endpoint_runtime(
+        fresh_route, target_model=target_model,
+    )
 
 
 def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:
@@ -1119,6 +1239,53 @@ def _await_clarify_response(entry, timeout, cancel_evt) -> tuple[str, bool]:
             wait_for = min(1.0, remaining)
         if entry.event.wait(timeout=wait_for):
             return str(entry.result or "").strip(), False
+
+
+_CLARIFY_NO_RESPONSE_TEXT = (
+    "The user did not provide a response within the time limit. "
+    "Use your best judgement to make the choice and proceed."
+)
+
+
+def _clarify_batch_reply(questions, ask_one, cancel_evt) -> dict:
+    """Answer a Hermes Agent clarify batch with the current callback contract.
+
+    Newer Hermes Agent builds call ``clarify_callback(questions)`` with a list of
+    normalized ``{qid, question, choices, choices_offered, multi_select}``
+    entries and expect ``{"answers": {qid: answer}, "outcome", "notice"?}``
+    back (``tools/clarify_tool.py``). The WebUI card asks one question at a
+    time, so questions are asked in order and the batch stops at the first one
+    that ends without an answer, mirroring the messaging gateway.
+
+    ``ask_one(question, choices)`` returns ``(response, expired)`` from
+    ``_await_clarify_response`` or ``None`` when no clarify surface exists.
+    A question left out of ``answers`` is reported as unanswered by the tool;
+    ``outcome`` says why the wait ended.
+    """
+    answers: dict = {}
+    reply: dict = {"answers": answers, "outcome": "submitted"}
+    for index, entry in enumerate(questions or []):
+        if not isinstance(entry, dict):
+            entry = {"question": entry}
+        qid = str(entry.get("qid") or f"q{index}")
+        asked = ask_one(entry.get("question"), entry.get("choices"))
+        if asked is None:
+            reply["outcome"] = "undelivered"
+            reply["notice"] = "The WebUI clarify prompt is not available in this runtime."
+            break
+        response, expired = asked
+        if response:
+            answers[qid] = response
+            continue
+        if expired and not cancel_evt.is_set():
+            reply["outcome"] = "timed_out"
+            reply["notice"] = _CLARIFY_NO_RESPONSE_TEXT
+        else:
+            # Stop/cancel clears the pending prompt, which releases the wait
+            # without a response: the user cancelled, not a timeout.
+            reply["outcome"] = "cancelled"
+        break
+    return reply
 
 
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
@@ -1672,7 +1839,9 @@ def _custom_provider_route_classification(error) -> dict:
         reason = getattr(error, 'reason', None)
         hint = getattr(error, 'hint', '') or ''
         message = getattr(error, 'message', None) or str(error)
-    if reason == CUSTOM_ROUTE_NO_CREDENTIAL:
+    if reason == MODEL_ALIAS_ROUTE_UNRESOLVED:
+        label = 'Model alias unavailable'
+    elif reason == CUSTOM_ROUTE_NO_CREDENTIAL:
         label = 'Provider credential unavailable'
     elif reason == CUSTOM_ROUTE_NO_ENDPOINT:
         label = 'Provider endpoint unavailable'
@@ -2300,17 +2469,31 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
         existing_checkpoint = result_messages[_checkpoint_idx]
         _mark_active_turn_checkpoint(existing_checkpoint, identity)
         checkpoint = identity.get('checkpoint')
+        # #7361: the turn provenance stamp must not be gated on the eager
+        # checkpoint dict. The default deferred save mode carries no
+        # checkpoint row when the turn settles, so the stamp used to fall
+        # through silently here while the materialize path
+        # (_materialize_active_turn_user) still stamped — dropping _source
+        # (and the _wakeup_meta that rides on it) for every process_wakeup
+        # turn, plus the _fork_child_turn marker regeneration authorization
+        # relies on. Keep the id/timestamp/attachments merge gated on the
+        # checkpoint (that data only exists there); stamp unconditionally.
+        _settle_source = identity.get('source') or source or 'webui'
+        stamp_message_source(
+            existing_checkpoint,
+            _settle_source,
+            active_turn_token=identity.get('token'),
+        )
+        if str(_settle_source).strip().lower() == 'fork':
+            child_session_id = identity.get('session_id')
+            if child_session_id:
+                existing_checkpoint['_fork_child_turn'] = child_session_id
         if isinstance(checkpoint, dict):
             for key in ('id', 'timestamp'):
                 if existing_checkpoint.get(key) is None and checkpoint.get(key) is not None:
                     existing_checkpoint[key] = copy.deepcopy(checkpoint[key])
             if checkpoint.get('attachments'):
                 existing_checkpoint['attachments'] = copy.deepcopy(checkpoint['attachments'])
-            stamp_message_source(
-                existing_checkpoint,
-                identity.get('source') or source or 'webui',
-                active_turn_token=identity.get('token'),
-            )
         return result_messages
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
@@ -3490,6 +3673,7 @@ def _drain_webui_process_notifications(
     completion_queue = getattr(process_registry, 'completion_queue', None)
     if completion_queue is None:
         return []
+    restore_durable_process_completions(process_registry)
 
     # Computed once per drain (not per event): reads/validates the env cap a
     # single time so an invalid value logs at most one warning per drain.
@@ -4151,6 +4335,136 @@ def _split_thinking_from_content(raw_content, existing_reasoning=''):
     )
 
 
+def _turn_step_tool_call_ids(messages, prev_asst, started_ids):
+    """Map this turn's assistant step positions to their tool call IDs, in order.
+
+    ``prev_asst`` assistant messages belong to prior turns and are skipped.
+    ``started_ids`` lists every live tool start in order; an ID repeats when two
+    steps reuse it (agents derive IDs deterministically when providers omit them).
+
+    IDs come from the step's ``tool_calls``, else its following tool results.
+    ID-less results are bound by aligning every result slot of the turn with
+    the live starts in order; only when the counts match and each explicit ID
+    sits at its aligned start. Otherwise they stay unbound: misattribution is
+    worse than loss.
+    """
+    step_ids, slots = {}, []
+    positions = [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get('role') == 'assistant']
+    for pos in positions[prev_asst:]:
+        msg = messages[pos]
+        ids = [tc.get('id') for tc in msg.get('tool_calls') or [] if isinstance(tc, dict) and tc.get('id')]
+        slots.extend((pos, i) for i in ids)
+        if not ids:
+            for m in messages[pos + 1:]:
+                if not (isinstance(m, dict) and m.get('role') == 'tool'):
+                    break
+                slots.append((pos, m.get('tool_call_id') or None))
+                if m.get('tool_call_id'):
+                    ids.append(m['tool_call_id'])
+        step_ids[pos] = ids
+    started = list(started_ids)
+    if (any(i is None for _, i in slots) and len(slots) == len(started)
+            and all(i is None or i == s for (_, i), s in zip(slots, started, strict=True))):
+        for (pos, call_id), start_id in zip(slots, started, strict=True):
+            if call_id is None:
+                step_ids[pos].append(start_id)
+    return step_ids
+
+
+def _stream_reasoning_owner(msg, is_last, positional_idx, tool_call_segments, open_segment,
+                            interim_segments, call_ids):
+    """Return the stream segment index this assistant step owns, or None.
+
+    ``interim_segments`` is consumed in order: a step whose content holds an
+    interim message's visible text takes the segment bound to it (earlier
+    unmatched interims are dropped). ``tool_call_segments`` maps an ID to its
+    per-start segments; each step consumes the oldest one, so a repeated ID
+    resolves in step order.
+    """
+    bound = [tool_call_segments[i].pop(0) for i in call_ids if tool_call_segments.get(i)]
+    content = msg.get('content')
+    interim = None
+    # Codex Responses keeps a tool round's commentary in codex_message_items, not content
+    from api.media_snapshots import codex_commentary_text
+    match_text = (content if isinstance(content, str) else '') + codex_commentary_text(msg)
+    compact = _compact_for_echo_compare(match_text) if match_text else ''
+    # Exact text first, then the longest contained one, so an omitted interim
+    # that is a prefix of this step's text cannot claim it.
+    hits = [i for i, (text, _) in enumerate(interim_segments) if compact and text and text in compact]
+    hit = max(hits, key=lambda i: (interim_segments[i][0] == compact, len(interim_segments[i][0]), -i),
+              default=None)
+    if hit is not None:
+        interim = interim_segments[hit][1]
+        del interim_segments[:hit + 1]
+    if is_last and not bound and open_segment is not None and positional_idx is None:
+        # The final step's own thinking beats a repeated-commentary hit. Not when a
+        # positional mapping exists (Agents without tool_start_callback): there the
+        # positional index decides, or a silent final step inherits an earlier step's thinking.
+        return open_segment
+    if bound or interim is not None:
+        # parallel calls: only the first-started call carries the segment; a
+        # tool step with commentary had it bound at its interim message
+        return next((idx for idx in bound if idx is not None), interim)
+    if positional_idx is not None:
+        return positional_idx  # caller passes it only when no boundary bindings exist
+    return open_segment if is_last else None
+
+
+def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
+                           tool_call_segments=None, open_segment=None, interim_segments=None,
+                           tool_start_order=None):
+    """Persist per-step reasoning on this turn's assistant messages in ``s.messages``.
+
+    Contract (docs/sse-streams.md, "Reasoning settlement"): non-empty agent
+    ``reasoning`` wins; otherwise the stream segment the step owns is used.
+    Ownership comes from ``tool_call_segments`` (tool_call_id -> segment index
+    per start of that ID, in start order), ``interim_segments`` ((compact visible text,
+    segment index) per interim message, bound when it is delivered) and
+    ``open_segment`` (the final step's segment), so a step that streamed no
+    thinking never inherits a neighbour's segment.
+    Inline ``<think>`` blocks are split out of content either way.
+    """
+    # #3587: use per-message segments so each of this turn's assistant messages
+    # gets its own trace; skip prior-turn messages (multi-turn off-by-N).
+    if not s.messages:
+        return
+    tool_call_segments = {k: list(v) for k, v in (tool_call_segments or {}).items()}
+    interim_segments = list(interim_segments or [])
+    _positional = not tool_call_segments and not interim_segments
+    _prev_asst = sum(
+        1 for m in (_previous_messages or [])
+        if isinstance(m, dict) and m.get('role') == 'assistant'
+    )
+    _total_asst = sum(1 for m in s.messages if isinstance(m, dict) and m.get('role') == 'assistant')
+    _asst_count = 0
+    _step_ids = _turn_step_tool_call_ids(s.messages, _prev_asst, list(tool_start_order or []))
+    _pos = -1
+    for _rm in s.messages:
+        _pos += 1
+        if not (isinstance(_rm, dict) and _rm.get('role') == 'assistant'):
+            continue
+        _turn_idx = _asst_count
+        _asst_count += 1
+        if _turn_idx < _prev_asst:
+            continue  # prior-turn message: never touch its reasoning
+        _owner = _stream_reasoning_owner(
+            _rm, _asst_count == _total_asst, (_turn_idx - _prev_asst) if _positional else None,
+            tool_call_segments, open_segment, interim_segments,
+            _step_ids[_pos],
+        )
+        _existing_reasoning = _rm.get('reasoning') or _reasoning_segments.get(_owner, '')
+        _content = _rm.get('content')
+        if isinstance(_content, str) and _content:
+            _new_content, _merged_reasoning = _split_thinking_from_content(
+                _content, _existing_reasoning
+            )
+            _rm['content'] = _new_content
+            if _merged_reasoning:
+                _rm['reasoning'] = _merged_reasoning
+        elif _existing_reasoning:
+            _rm['reasoning'] = _existing_reasoning
+
+
 def _strip_thinking_markup(text: str) -> str:
     """Remove common reasoning/thinking wrappers from model text."""
     if not text:
@@ -4218,6 +4532,9 @@ def _strip_xml_tool_calls(text: str) -> str:
 
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
+    # Preserve newline candidate boundaries before markup normalization.
+    if _looks_like_title_option_menu(text):
+        return ''
     s = _strip_thinking_markup(text or '')
     s = re.sub(
         r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*:\s*(?:[*_`~]+\s*)?',
@@ -4226,12 +4543,120 @@ def _sanitize_generated_title(text: str) -> str:
         flags=re.IGNORECASE,
     )
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
+    if _looks_like_title_option_menu(s):
+        return ''
     s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
     if _is_bad_new_title(s):
         return ''
     return s[:80]
+
+
+_TITLE_OPTION_MENU_RE = re.compile(
+    r'^\s*(?:(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+)?'
+    r'(?:(?:here (?:are|is)|some|good|possible)\s+)*(?:here (?:are|is)\s+some\s+|some\s+of\s+the\s+)?'
+    r'(?:session\s+)?title\s+(?:options?|suggestions?|ideas?|candidates?)\s*:',
+    flags=re.IGNORECASE,
+)
+
+# Evidence that a preamble introduces MULTIPLE candidates rather than one
+# selected title: numbered/bulleted entries or delimited candidates.
+# Unanchored: callers may pass raw stored titles (multiline lists) OR the
+# whitespace-collapsed sanitize form, where list markers are inline.
+_TITLE_MENU_LIST_RE = re.compile(
+    r'(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+\S',
+    flags=re.IGNORECASE,
+)
+_TITLE_MENU_COMMA_JOIN_RE = re.compile(
+    r'\b(?:and|or|vs\.?|versus|then|but|while)\b', flags=re.IGNORECASE,
+)
+_TITLE_MENU_COMMA_SPAN_RE = re.compile(
+    r'^(?:and|or|vs\.?|versus|then|but|while|with|without|from|to|for|of|between|across|after|before)\b'
+    r'|\b(?:with|without|from|to|for|of|between|across|after|before)\s*$',
+    flags=re.IGNORECASE,
+)
+_TITLE_MENU_COMMA_VERB_RE = re.compile(
+    r'^(?:compare|comparing|contrast|contrasting|review|reviewing|explore|exploring|evaluate|evaluating)\b',
+    flags=re.IGNORECASE,
+)
+
+
+def _looks_like_title_option_menu(text: str) -> bool:
+    """Return True for a title-model menu rather than one selected title.
+
+    The preamble alone is not enough: legitimate single titles like
+    ``Title Suggestions: Migration Strategy`` or
+    ``Here Are Some Title Options for Session Naming`` exist and must not be
+    rejected. Classify as a menu only when multiple candidates follow —
+    two or more list entries, or delimiter-separated standalone alternatives.
+    Matching works on both raw stored text and the whitespace-collapsed sanitize
+    form. A grammatical comma inside one title is not a candidate boundary.
+    """
+    s = str(text or '')
+    s_m = _TITLE_OPTION_MENU_RE.match(s)
+    if not s_m:
+        return False
+    rest = s[s_m.end():]
+    if len(_TITLE_MENU_LIST_RE.findall(rest)) >= 2:
+        return True
+    # Only separators outside quoted terms delimit candidates. Two quoted
+    # words in a single comparison title are not a menu.
+    candidates = []
+    separators = []
+    start = 0
+    quote = None
+    for index, char in enumerate(rest):
+        if char in ('"', '\u201c', '\u201d'):
+            if quote is None:
+                quote = '\u201d' if char == '\u201c' else char
+            elif char == quote:
+                quote = None
+        elif quote is None and char in ',;\n':
+            candidates.append(rest[start:index].strip())
+            separators.append(char)
+            start = index + 1
+    candidates.append(rest[start:].strip())
+    if sum(bool(candidate) for candidate in candidates) < 2:
+        return False
+    if any(separator in ';\n' for separator in separators):
+        return True
+    # Two unquoted comma fragments are ambiguous even when both are short:
+    # "OAuth Tokens, Explained" is one title, not two choices. Explicit
+    # quotation or a leading list marker supplies the missing menu structure;
+    # otherwise require at least three alternatives. An explicit "or" between
+    # two fragments also marks a choice after an options preamble.
+    alternative = False
+    if len(candidates) == 2:
+        quoted = all(
+            (item.startswith('"') and item.endswith('"'))
+            or (item.startswith('\u201c') and item.endswith('\u201d'))
+            for item in candidates
+        )
+        marked = bool(re.match(r'^\s*(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+', s))
+        alternative = bool(re.match(r'^or\b', candidates[-1], re.IGNORECASE))
+        if not (quoted or marked or alternative):
+            return False
+    # A comma can also join clauses in ONE title ("Compare REST, GraphQL and
+    # gRPC"). Require short standalone alternatives: a leading action verb,
+    # boundary-spanning preposition, or a connective joining the final segment
+    # to its predecessor makes the split ambiguous, so preserve the title.
+    for index, candidate in enumerate(candidates):
+        if not candidate or len(candidate) > 50 or len(candidate.split()) > 6:
+            return False
+        if (candidate[0] == candidate[-1] == '"'
+                or (candidate[0] == '\u201c' and candidate[-1] == '\u201d')):
+            continue  # A fully quoted alternative may itself contain "and".
+        # An explicit "or" is the option separator, not a grammatical span
+        # within the second candidate; still inspect its remaining words.
+        span_candidate = candidate[3:].strip() if alternative and index == 1 else candidate
+        if (_TITLE_MENU_COMMA_SPAN_RE.search(span_candidate)
+                or (index == 0 and _TITLE_MENU_COMMA_VERB_RE.match(candidate))
+                or (index == len(candidates) - 1
+                    and _TITLE_MENU_COMMA_JOIN_RE.search(candidate)
+                    and not alternative)):
+            return False
+    return True
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
@@ -4252,6 +4677,7 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
+        or _looks_like_title_option_menu(s)
     )
 
 
@@ -4523,11 +4949,26 @@ def _latest_exchange_snippets(messages):
                 user_text = ''
                 asst_text = ''
                 break
-            if not user_text:
-                user_text = candidate
+            user_text = candidate
+            # Never cross a user boundary to borrow an older assistant reply.
+            break
         if user_text and asst_text:
             break
     return user_text[:500], asst_text[:500]
+
+
+def _title_exchange_for_unresolved_title(messages):
+    """Pick the best completed exchange while an automatic title is unresolved.
+
+    The first exchange is normally the right title source.  If its model output
+    was rejected, however, retrying that same opener on every later turn cannot
+    recover a session that starts with a warm-up message.  Use the latest
+    completed exchange once another user turn exists, while leaving successful
+    titles and configured periodic refreshes untouched.
+    """
+    if _count_exchanges(messages) > 1:
+        return _latest_exchange_snippets(messages)
+    return _first_exchange_snippets(messages)
 
 
 def _count_exchanges(messages):
@@ -4583,8 +5024,13 @@ def _is_provisional_title(current_title: str, messages) -> bool:
     return any(candidate and current == candidate for candidate in candidates)
 
 
-def _background_title_generation_inputs(session):
-    """Return sanitized first-exchange inputs when background title generation is eligible."""
+def _background_title_generation_eligible(session):
+    """True when background title generation should run for *session*.
+
+    Covers the default/provisional placeholders plus structurally invalid
+    generated titles (e.g. a persisted title-option menu), which must re-enter
+    the self-heal path even though ``llm_title_generated`` is set.
+    """
     messages = getattr(session, 'messages', None) or []
     title = getattr(session, 'title', '')
     invalid_existing_title = _looks_invalid_generated_title(title)
@@ -4595,11 +5041,24 @@ def _background_title_generation_inputs(session):
         or _is_provisional_title(title, messages)
         or invalid_existing_title
     )
-    if not eligible_title or (
-        getattr(session, 'llm_title_generated', False) and not invalid_existing_title
-    ):
+    if not eligible_title:
+        return False
+    return not (getattr(session, 'llm_title_generated', False) and not invalid_existing_title)
+
+
+def _background_title_generation_inputs(session):
+    """Return (user_text, assistant_text) title inputs when eligible, else None.
+
+    Exchange selection: normally the first completed exchange names the
+    session; if its model output was rejected, retrying the same warm-up
+    opener forever cannot recover, so a later completed exchange is used
+    instead once one exists.
+    """
+    if not _background_title_generation_eligible(session):
         return None
-    user_text, assistant_text = _first_exchange_snippets(messages)
+    user_text, assistant_text = _title_exchange_for_unresolved_title(
+        getattr(session, 'messages', None) or []
+    )
     return (user_text, assistant_text) if user_text and assistant_text else None
 
 
@@ -4620,17 +5079,76 @@ def _detect_title_language(text: str) -> str:
     return ''
 
 
+# Unicode-name keywords for alphabetic characters outside the fast ordinal
+# ranges below. Checked in order. This is how half-width katakana, full-width
+# Latin, ligatures, polytonic Greek, and presentation forms land in their real
+# script instead of being dropped or mistaken for foreign text.
+_SCRIPT_NAME_KEYWORDS = (
+    ('KATAKANA', 'cjk'),
+    ('HIRAGANA', 'cjk'),
+    ('HANGUL', 'cjk'),
+    ('IDEOGRAPH', 'cjk'),
+    ('LATIN', 'latin'),
+    ('CYRILLIC', 'cyrillic'),
+    ('ARABIC', 'arabic'),
+    ('HEBREW', 'hebrew'),
+    ('GREEK', 'greek'),
+    ('DEVANAGARI', 'devanagari'),
+    ('THAI', 'thai'),
+    ('GEORGIAN', 'georgian'),
+    ('ARMENIAN', 'armenian'),
+    ('ETHIOPIC', 'ethiopic'),
+    ('BENGALI', 'bengali'),
+    ('TAMIL', 'tamil'),
+    ('TELUGU', 'telugu'),
+    ('KANNADA', 'kannada'),
+    ('MALAYALAM', 'malayalam'),
+    ('GUJARATI', 'gujarati'),
+    ('GURMUKHI', 'gurmukhi'),
+    ('SINHALA', 'sinhala'),
+    ('KHMER', 'khmer'),
+    ('MYANMAR', 'myanmar'),
+    ('TIBETAN', 'tibetan'),
+    ('LAO', 'lao'),
+    ('MONGOLIAN', 'mongolian'),
+)
+
+
 def _script_counts(text: str) -> dict:
     """Return per-script alphabetic character counts for *text*.
 
     Buckets: ``latin``, ``cjk`` (Han/Hiragana/Katakana/Hangul), ``cyrillic``,
-    ``arabic``, ``hebrew``, ``greek``, ``devanagari``. Non-alphabetic and
-    unclassified characters are ignored.
+    ``arabic``, ``hebrew``, ``greek``, ``devanagari``, ``thai``,
+    ``georgian``, ``armenian``, ``ethiopic``, the Indic and South-East
+    Asian scripts named in ``_SCRIPT_NAME_KEYWORDS``, and ``other``. Common ranges are matched by
+    ordinal for speed; everything alphabetic outside them is classified by
+    its Unicode character name. Nothing alphabetic is dropped: a letter no
+    keyword recognizes counts as ``other``, so a title written in an
+    unclassified script is still visible to drift detection instead of
+    vanishing from the denominator. Each character is NFKC-expanded, so a
+    mathematical, circled, enclosed or fullwidth letter counts as the plain
+    letter it decomposes to, and a ligature counts as each of its letters.
+    Characters that are numbers in their original form (Roman numerals,
+    circled digits) are left out entirely.
     """
     counts: dict[str, int] = {}
-    for ch in str(text or ''):
-        if not ch.isalpha():
-            continue
+    # Enclosed letters (Ⓐ) are category So and fail isalpha() in their
+    # original form, and a ligature (ﬁ) expands to two letters; counting each
+    # character's NFKC expansion codepoint by codepoint makes both visible to
+    # the denominator. Number characters are excluded on their ORIGINAL
+    # category, before expansion: a Roman numeral (Ⅲ, category Nl) expands to
+    # Latin letters and would otherwise make a CJK chapter title (U+7B2C U+2162
+    # U+7AE0) look Latin-dominant, and
+    # circled digits (①, No) expand to digits. Scripts with no compatibility
+    # form (Ethiopic, Cherokee) are unchanged by NFKC.
+    def _letters():
+        for raw in str(text or ''):
+            if unicodedata.category(raw).startswith('N'):
+                continue
+            for ch in unicodedata.normalize('NFKC', raw):
+                if ch.isalpha():
+                    yield ch
+    for ch in _letters():
         o = ord(ch)
         if (0x0041 <= o <= 0x024F) or (0x1E00 <= o <= 0x1EFF):
             bucket = 'latin'
@@ -4651,7 +5169,12 @@ def _script_counts(text: str) -> dict:
         elif 0x0900 <= o <= 0x097F:
             bucket = 'devanagari'
         else:
-            continue
+            name = unicodedata.name(ch, '')
+            bucket = 'other'
+            for keyword, mapped in _SCRIPT_NAME_KEYWORDS:
+                if keyword in name:
+                    bucket = mapped
+                    break
         counts[bucket] = counts.get(bucket, 0) + 1
     return counts
 
@@ -4675,7 +5198,569 @@ def _dominant_script(text: str) -> str:
     return ''
 
 
-def _title_prompt_language_rule(user_text: str) -> str:
+# Languages a title pin can name, keyed by an English name. Each entry is
+# (default scripts, other aliases): the ``_script_counts`` buckets a title may
+# use when the pin carries no script qualifier, then the other spellings and
+# the ISO 639-1 code that name the same language. Aliases are lowercase ASCII
+# because this module has to stay English-only (see
+# test_title_generation_source_has_no_cjk_literals), so a pin written in its
+# own script is not recognized; diacritics are folded before lookup.
+#
+# Two defaults mean two scripts in majority use today. A script with minority
+# use (Kazakh in Latin or Arabic script, Malay in Jawi) is left out, so a bare
+# pin keeps rejecting it and a qualifier (``kk-Latn``, ``Malay (Jawi)``) is how
+# a user who writes that way opts in. Serbian, Bosnian and Uzbek have no
+# default at all: each is written in Cyrillic and Latin, so ``Serbian`` alone
+# keeps the conversation check and only ``sr-Latn`` or ``Serbian (Cyrillic)``
+# resolve.
+_TITLE_LANGUAGES = {
+    'english': (('latin',), ('en',)),
+    'latin': (('latin',), ('la',)),
+    'german': (('latin',), ('deutsch', 'de')),
+    'french': (('latin',), ('francais', 'fr')),
+    'spanish': (('latin',), ('espanol', 'castellano', 'es')),
+    'portuguese': (('latin',), ('portugues', 'pt')),
+    'italian': (('latin',), ('italiano', 'it')),
+    'dutch': (('latin',), ('nederlands', 'nl')),
+    'polish': (('latin',), ('polski', 'pl')),
+    'turkish': (('latin',), ('turkce', 'tr')),
+    'vietnamese': (('latin',), ('vi',)),
+    'indonesian': (('latin',), ('id',)),
+    'malay': (('latin',), ('ms',)),
+    'swedish': (('latin',), ('svenska', 'sv')),
+    'norwegian': (('latin',), ('norsk', 'no', 'nb', 'nn')),
+    'danish': (('latin',), ('dansk', 'da')),
+    'finnish': (('latin',), ('suomi', 'fi')),
+    'czech': (('latin',), ('cs',)),
+    'slovak': (('latin',), ('sk',)),
+    'hungarian': (('latin',), ('magyar', 'hu')),
+    'romanian': (('latin',), ('ro',)),
+    'croatian': (('latin',), ('hr',)),
+    'catalan': (('latin',), ('ca',)),
+    'filipino': (('latin',), ('tagalog', 'tl')),
+    'swahili': (('latin',), ('sw',)),
+    'russian': (('cyrillic',), ('ru',)),
+    'ukrainian': (('cyrillic',), ('uk',)),
+    'bulgarian': (('cyrillic',), ('bg',)),
+    'belarusian': (('cyrillic',), ('be',)),
+    'macedonian': (('cyrillic',), ('mk',)),
+    'kazakh': (('cyrillic',), ('kk',)),
+    'azerbaijani': (('latin',), ('azeri', 'az')),
+    'uyghur': (('arabic',), ('uighur', 'ug')),
+    'kashmiri': (('arabic',), ('ks',)),
+    'kyrgyz': (('cyrillic',), ('ky',)),
+    'tajik': (('cyrillic',), ('tg',)),
+    # cjk is one bucket for Han, Hiragana, Katakana and Hangul, as in _script_counts
+    'japanese': (('cjk',), ('ja',)),
+    'chinese': (('cjk',), ('mandarin', 'cantonese', 'zh', 'cmn', 'yue')),
+    'korean': (('cjk',), ('ko',)),
+    'arabic': (('arabic',), ('ar',)),
+    'persian': (('arabic',), ('farsi', 'fa')),
+    'urdu': (('arabic',), ('ur',)),
+    'pashto': (('arabic',), ('ps',)),
+    'hebrew': (('hebrew',), ('he',)),
+    'yiddish': (('hebrew',), ('yi',)),
+    'greek': (('greek',), ('el',)),
+    'hindi': (('devanagari',), ('hi',)),
+    'marathi': (('devanagari',), ('mr',)),
+    'nepali': (('devanagari',), ('ne',)),
+    'sanskrit': (('devanagari',), ('sa',)),
+    'thai': (('thai',), ('th',)),
+    'georgian': (('georgian',), ('ka',)),
+    'armenian': (('armenian',), ('hy',)),
+    'amharic': (('ethiopic',), ('am',)),
+    'tigrinya': (('ethiopic',), ('ti',)),
+    'bengali': (('bengali',), ('bangla', 'bn')),
+    'tamil': (('tamil',), ('ta',)),
+    'telugu': (('telugu',), ('te',)),
+    'kannada': (('kannada',), ('kn',)),
+    'malayalam': (('malayalam',), ('ml',)),
+    'gujarati': (('gujarati',), ('gu',)),
+    'sinhala': (('sinhala',), ('sinhalese', 'si')),
+    'khmer': (('khmer',), ('cambodian', 'km')),
+    'burmese': (('myanmar',), ('myanmar', 'my')),
+    'tibetan': (('tibetan',), ('bo',)),
+    'lao': (('lao',), ('lo',)),
+    # Punjabi: Gurmukhi in India, Shahmukhi (Arabic script) in Pakistan.
+    'punjabi': (('gurmukhi', 'arabic'), ('panjabi', 'pa')),
+    # Mongolian: Cyrillic in Mongolia, the traditional script in Inner Mongolia.
+    'mongolian': (('cyrillic', 'mongolian'), ('mn',)),
+    'serbian': ((), ('srpski', 'sr')),
+    # Bosnian and Uzbek are written in Latin and Cyrillic, like Serbian.
+    'bosnian': ((), ('bs',)),
+    'uzbek': ((), ('uz',)),
+}
+
+# Every alias, the English name included, to the language it names.
+_TITLE_LANGUAGE_IDENTITY = {
+    alias: name
+    for name, (_defaults, aliases) in _TITLE_LANGUAGES.items()
+    for alias in (name,) + aliases
+}
+
+
+# Script qualifiers a pin can carry beside its language: ISO 15924 codes as
+# used in BCP 47 tags (``pa-Arab``, ``sr-Latn``, ``zh-Hant``) and the English
+# names people write in parentheses (``Punjabi (Arabic)``). One qualifier
+# replaces the language's defaults, so ``pa-Arab`` accepts Shahmukhi alone.
+_TITLE_SCRIPT_QUALIFIERS = {
+    'latn': 'latin', 'latin': 'latin',
+    'roman': 'latin', 'romanized': 'latin', 'romanised': 'latin',
+    'romaji': 'latin', 'pinyin': 'latin',
+    'cyrl': 'cyrillic', 'cyrillic': 'cyrillic',
+    'arab': 'arabic', 'aran': 'arabic', 'arabic': 'arabic', 'shahmukhi': 'arabic', 'jawi': 'arabic',
+    'guru': 'gurmukhi', 'gurmukhi': 'gurmukhi',
+    'mong': 'mongolian',
+    'deva': 'devanagari', 'devanagari': 'devanagari',
+    'hans': 'cjk', 'hant': 'cjk', 'hani': 'cjk', 'jpan': 'cjk', 'kore': 'cjk',
+    'hebr': 'hebrew', 'grek': 'greek',
+    'thai': 'thai', 'geor': 'georgian', 'armn': 'armenian', 'ethi': 'ethiopic',
+    'beng': 'bengali', 'taml': 'tamil', 'telu': 'telugu', 'knda': 'kannada',
+    'mlym': 'malayalam', 'gujr': 'gujarati', 'sinh': 'sinhala', 'khmr': 'khmer',
+    'mymr': 'myanmar', 'tibt': 'tibetan', 'laoo': 'lao',
+    'hira': 'cjk', 'kana': 'cjk', 'hang': 'cjk',
+    'hiragana': 'cjk', 'katakana': 'cjk', 'hangul': 'cjk', 'kanji': 'cjk', 'hanzi': 'cjk',
+    'hanja': 'cjk', 'han': 'cjk', 'hrkt': 'cjk', 'jamo': 'cjk', 'bopo': 'cjk', 'bopomofo': 'cjk',
+}
+# Every bucket's own name is a qualifier too, so "Punjabi (Hebrew)" and
+# "Sanskrit (Bengali)" narrow the same way their ISO codes do. A token that
+# names the pin's own language is never its qualifier, so a bare "Mongolian"
+# or "Tamil" keeps the language's defaults.
+for _bucket in {'latin', 'cjk', 'cyrillic', 'arabic', 'hebrew', 'greek', 'devanagari'} | {
+    mapped for _keyword, mapped in _SCRIPT_NAME_KEYWORDS
+}:
+    _TITLE_SCRIPT_QUALIFIERS.setdefault(_bucket, _bucket)
+del _bucket
+
+# Qualifiers that mean a script only beside one language: "Traditional"
+# names the Mongolian script for Mongolian and Han for Chinese, so it cannot
+# sit in the general table.
+_TITLE_LANGUAGE_QUALIFIERS = {
+    'mongolian': {'traditional': 'mongolian', 'classical': 'mongolian'},
+    'chinese': {'traditional': 'cjk', 'simplified': 'cjk'},
+}
+
+# The cjk bucket validates several distinct ISO 15924 scripts, so two of them
+# in one pin ("ja-Hira-Kana") conflict even though they share a bucket. An
+# English name is an alias of its code; every other bucket's tokens are
+# aliases of one another ("pa-Arab-Aran" collapses).
+_TITLE_CJK_SCRIPT_ALIASES = {
+    'hiragana': 'hira', 'katakana': 'kana', 'hangul': 'hang', 'kanji': 'hani', 'hanzi': 'hani',
+    'hanja': 'hani', 'han': 'hani', 'bopomofo': 'bopo',
+    # Beside Chinese only (see _TITLE_LANGUAGE_QUALIFIERS).
+    'traditional': 'hant', 'simplified': 'hans',
+}
+
+
+def _title_pin_tokens(text: str, is_tag: bool) -> list:
+    """Split a folded title pin into (token, bracketed) pairs.
+
+    ``bracketed`` is True for a word inside parentheses or square brackets,
+    which ``_resolve_pinned_title_scripts`` reads only as a qualifier.
+    """
+    # Split into runs outside and inside brackets, tracking depth so a nested
+    # bracket ("(script [ISO 15924] Arabic)") does not end the outer one. An
+    # unclosed bracket runs to the end of the pin.
+    segments, run, depth = [], [], 0
+    for ch in text:
+        if ch in '([':
+            if depth == 0:
+                segments.append((''.join(run), False))
+                run = []
+            else:
+                run.append(' ')
+            depth += 1
+        elif ch in ')]' and depth:
+            depth -= 1
+            if depth == 0:
+                segments.append((''.join(run), True))
+                run = []
+            else:
+                run.append(' ')
+        else:
+            run.append(' ' if ch in ')]' else ch)
+    segments.append((''.join(run), depth > 0))
+
+    pairs = []
+    for segment, bracketed in segments:
+        # Letters, marks and digits make tokens; anything else separates,
+        # including invisible format characters (zero-width joiners, soft
+        # hyphens), so a stray "\u00b7", "\u060c" or U+200D between two qualifiers
+        # cannot glue them into one unknown token.
+        segment = ''.join(ch if unicodedata.category(ch)[0] in 'LMN' else ' ' for ch in segment)
+        for token in segment.split():
+            if len(token) == 1:
+                # In a tag, a BCP 47 singleton ("x", "u") starts an extension
+                # or private-use section, so nothing from it on is read
+                # ("x-arab" is wholly private use). Outside a tag a lone
+                # character (the initials in "U.S. English") is skipped.
+                if is_tag:
+                    return pairs
+                continue
+            if token:
+                pairs.extend((part, bracketed) for part in _title_unglued_qualifiers(token))
+    return pairs
+
+
+# Letters, marks and decimal digits survive into pin tokens. Letter-like
+# numbers (Nl, No) and superscript or subscript letters are left out because
+# NFKD turns them into letters ("\u2170" into "i", "\u00aa" into "a") that
+# would glue the qualifiers either side.
+_TITLE_PIN_KEPT_CATEGORIES = {'Lu', 'Ll', 'Lt', 'Lm', 'Lo', 'Mn', 'Mc', 'Me', 'Nd'}
+
+
+def _title_encoding_qualifiers(piece: str) -> list:
+    """Script qualifiers in one piece of a POSIX encoding ("en-Latn.Cyrl").
+
+    A piece that is exactly a qualifier counts, and so does one that glues two
+    or more ("cyrl1latn"). One qualifier with other letters is an encoding
+    name ("latin1", "iso8859"), which names no script.
+    """
+    def is_qualifier(word):
+        return word in _TITLE_SCRIPT_QUALIFIERS or any(
+            word in own for own in _TITLE_LANGUAGE_QUALIFIERS.values()
+        )
+
+    if is_qualifier(piece):
+        return [piece]
+    parts = _title_unglued_qualifiers(piece)
+    if len(parts) > 1 and all(is_qualifier(part) for part in parts):
+        return parts
+    return []
+
+
+def _title_pin_ascii_punctuation(ch: str) -> bool:
+    """True for a form NFKD folds to ASCII punctuation (fullwidth "\uff08",
+    "\uff3b", "\uff0d"), which has to reach the bracket and tag parsing."""
+    folded = unicodedata.normalize('NFKD', ch)
+    return folded.isascii() and not any(c.isalnum() or c.isspace() for c in folded)
+
+
+def _title_pin_glue_form(ch: str) -> bool:
+    """True for a compatibility form NFKD would turn into glue: a superscript
+    or subscript letter ("\u00aa" into "a"), or one whose expansion carries
+    punctuation ("\u013f" into "L\u00b7")."""
+    tag = unicodedata.decomposition(ch)
+    if not tag.startswith('<'):
+        return False
+    return tag.startswith(('<super>', '<sub>')) or any(
+        unicodedata.category(c)[0] not in 'LM' for c in unicodedata.normalize('NFKD', ch)
+    )
+
+
+def _title_glue_rank(parts: list) -> tuple:
+    """Prefer more qualifier words, then more letters covered, so "hanthans"
+    reads as "hant" and "hans" (a conflict) over "han" twice."""
+    return (len(parts), sum(len(part) for part in parts))
+
+
+def _title_unglued_qualifiers(token: str) -> list:
+    """Return *token*, or the qualifiers it glues together.
+
+    A mark or digit between two qualifiers ("arabic1gurmukhi") keeps them in
+    one token, which no table knows, so the pin would fall back to the bare
+    default. An unknown token whose letters split exactly into qualifier
+    words is read as those words, so the conflict is still seen.
+    """
+    if (
+        token in _TITLE_LANGUAGE_IDENTITY
+        or token in _TITLE_SCRIPT_QUALIFIERS
+        or any(token in own for own in _TITLE_LANGUAGE_QUALIFIERS.values())
+    ):
+        return [token]
+    # Every alias and qualifier is plain a-z, so anything else in the token,
+    # a modifier letter such as U+02BC included, is glue.
+    letters = ''.join(ch for ch in token if 'a' <= ch <= 'z')
+    words = set(_TITLE_SCRIPT_QUALIFIERS).union(*_TITLE_LANGUAGE_QUALIFIERS.values())
+    # best[i] is the longest word list whose last word ends exactly at
+    # letters[:i], or None. Glue letters of any length may sit between two
+    # words (an accented letter folds to one, "arabic\u00e0gurmukhi"; a
+    # ligature to two or three) and around them, so a word holding two or
+    # more qualifiers is read as those qualifiers wherever they sit. A single
+    # qualifier with extra letters ("latin1", "thailand") stays unknown.
+    best = [None] * (len(letters) + 1)
+    for end in range(3, len(letters) + 1):
+        for start in range(max(0, end - 12), end - 2):
+            word = letters[start:end]
+            if word not in words:
+                continue
+            prior = max(
+                (best[b] for b in range(0, start + 1) if best[b]),
+                key=_title_glue_rank,
+                default=[],
+            )
+            candidate = prior + [word]
+            if best[end] is None or _title_glue_rank(candidate) > _title_glue_rank(best[end]):
+                best[end] = candidate
+    found = max((parts for parts in best if parts), key=_title_glue_rank, default=[])
+    if len(found) > 1:
+        return found
+    if letters in words and letters != token:
+        return [letters]
+    return [token]
+
+
+# A pin longer than this, once folded, is not parsed: it is unresolved, so
+# the conversation check applies, and the title prompt leaves it out. The
+# longest real pin is a language, a region and a script qualifier; 64 leaves
+# room for that in any spelling.
+_TITLE_PIN_MAX_LENGTH = 64
+# The same applies to a pin longer than this before folding. Folding drops
+# combining marks, so without it a pin padded with them could fold under the
+# cap while the raw text still costs a linear fold and reaches the prompt.
+_TITLE_PIN_MAX_RAW_LENGTH = 256
+
+
+def _capped_title_pin(language) -> str:
+    """Return the folded pin, or '' when it is past either length cap."""
+    if len(str(language or '').strip()) > _TITLE_PIN_MAX_RAW_LENGTH:
+        return ''
+    folded = _fold_title_pin(language)
+    return folded if len(folded) <= _TITLE_PIN_MAX_LENGTH else ''
+
+
+def _fold_title_pin(language) -> str:
+    """Lowercase, separate and diacritic-fold a title pin for parsing."""
+    # Non-ASCII symbols and punctuation become spaces before NFKD, which
+    # would otherwise expand some into letters ("\u2122" into "tm") and glue
+    # the qualifiers either side into one unknown token. Unicode hyphens are
+    # kept as "-" so a tag still parses.
+    raw = str(language or '').strip().lower().translate({0x2010: '-', 0x2011: '-', 0x2212: '-'})
+    raw = ''.join(
+        ch
+        if ch.isascii()
+        or _title_pin_ascii_punctuation(ch)
+        or (
+            unicodedata.category(ch) in _TITLE_PIN_KEPT_CATEGORIES
+            and not _title_pin_glue_form(ch)
+        )
+        else ' '
+        for ch in raw
+    )
+    return ''.join(
+        ch for ch in unicodedata.normalize('NFKD', raw)
+        if not unicodedata.combining(ch)
+    ).strip()
+
+
+def _resolve_pinned_title_scripts(language: str) -> tuple:
+    """Map a pinned title language to the script buckets a title may use, or ().
+
+    The pin has to name exactly one known language. In a BCP 47 tag that is
+    the first subtag ("pt", "pt-BR", "ms-MY"); a POSIX locale suffix
+    ("en_US.UTF-8") is dropped first. In prose it is a language name
+    ("Portuguese", "Brazilian Portuguese", "Lao") anywhere outside brackets.
+    A two-letter code in prose collides with region codes and English words
+    ("Slovenian (SI)", "BE French", "No preference") and does not count on
+    its own, and a bracketed word only qualifies ("Klingon (Arabic)" names no
+    language). One exception names a language from inside brackets: a code
+    outside that agrees with the bracketed name ("mn (Mongolian)"). A native
+    name this table does not know ("Hrvatski (Croatian)") names nothing.
+
+    With a language established, at most one script qualifier may narrow it
+    ("pa-Arab", "Punjabi (Arabic)", "sr-Latn", "Mongolian (Traditional)").
+    A name that is both a language and a script ("Arabic") is read as the
+    qualifier when another language is present. Equivalent qualifiers
+    collapse ("Punjabi (Arabic, Shahmukhi)", "pa-Arab-Aran").
+
+    Everything else fails closed to (), which callers treat as "validate
+    against the conversation instead" (#3293 behaviour): an unknown language
+    even with a qualifier ("Klingon-Latn", "xx-Latn"), two languages
+    ("English French"), two different qualifiers ("English-Latn-Cyrl"), and a
+    language with no default script and no qualifier ("Serbian").
+
+    Diacritics are folded first. In a tag, a singleton such as ``x`` starts
+    an extension or private-use section, so nothing from it on is read.
+    """
+    folded = _capped_title_pin(language)
+    if not folded:
+        # Past either cap the pin is not parsed at all, so its cost is
+        # bounded; it stays unresolved and the conversation check applies.
+        return ()
+    # A POSIX locale ("en_US.UTF-8", "sr_RS@latin") is a tag plus an encoding
+    # and an optional modifier. The encoding says nothing about the script; a
+    # modifier that names one ("@latin", "@cyrillic") is kept as a qualifier,
+    # and any other ("@euro") is dropped.
+    locale = re.fullmatch(
+        r'([a-z]{2,3}(?:[-_][a-z0-9]{2,8})*)(?:\.([a-z0-9_-]+))?(?:@(.+))?', folded
+    )
+    script_modifier = []
+    if locale and locale.group(0) != locale.group(1):
+        folded = locale.group(1)
+        # Every qualifier in the modifier counts, so "@arabic-gurmukhi" or a
+        # glued "@arabic1gurmukhi" conflicts like the prose form. An encoding
+        # names no script ("utf-8", "latin1"), but a piece of it that is
+        # exactly a script qualifier ("en-Latn.Cyrl") counts too.
+        script_modifier = [
+            part
+            for piece in re.split(r'[^a-z0-9]+', locale.group(3) or '')
+            if piece
+            for part in _title_unglued_qualifiers(piece)
+            if part in _TITLE_SCRIPT_QUALIFIERS
+            or any(part in own for own in _TITLE_LANGUAGE_QUALIFIERS.values())
+        ] + [
+            part
+            for piece in re.split(r'[^a-z0-9]+', locale.group(2) or '')
+            if piece
+            for part in _title_encoding_qualifiers(piece)
+        ]
+    # BCP 47 shape: a primary subtag of one to three letters (x and i are
+    # singletons), then subtags of at most eight. "Brazilian-Portuguese" is
+    # not a tag.
+    is_tag = re.fullmatch(r'[a-z]{1,3}(?:[-_][a-z0-9]{1,8})*', folded) is not None
+    pairs = _title_pin_tokens(folded, is_tag) + [(m, True) for m in script_modifier]
+    tokens = [token for token, _bracketed in pairs]
+    if is_tag and any(
+        re.fullmatch(r'[a-z]{4}', token) and token not in _TITLE_SCRIPT_QUALIFIERS for token in tokens[1:]
+    ):
+        # A four-letter alphabetic subtag is an ISO 15924 script code. One
+        # this table does not know ("ja-Zyyy") could conflict with any other,
+        # so the pin fails closed.
+        return ()
+
+    # The tokens that name the language, by position. In a tag only the
+    # first subtag can ("xx-Arabic" is an unknown language); in prose a name
+    # counts anywhere outside brackets ("Klingon (Arabic)" names none).
+    named = [
+        (i, _TITLE_LANGUAGE_IDENTITY[token])
+        for i, (token, bracketed) in enumerate(pairs)
+        if token in _TITLE_LANGUAGE_IDENTITY
+        and (i == 0 if is_tag else (len(token) > 2 and not bracketed))
+    ]
+    tentative = set()
+    if not named and not is_tag:
+        # One prose form names a language from inside brackets: a code
+        # outside and its own language's name inside agree ("mn (Mongolian)").
+        # A bracketed name otherwise only qualifies, so an unknown word before
+        # it names nothing ("Klingon (English)", "BE (French)"), and a native
+        # name the table does not know ("Русский (Russian)") leaves the pin
+        # unresolved.
+        outside = {_TITLE_LANGUAGE_IDENTITY.get(t) for t, br in pairs if not br} - {None}
+        bracketed = [(t, _TITLE_LANGUAGE_IDENTITY.get(t)) for t, br in pairs if br and len(t) > 2]
+        inside = {name for _t, name in bracketed} - {None}
+        candidates = outside & inside
+        if any(
+            name and name not in candidates and t not in _TITLE_SCRIPT_QUALIFIERS
+            for t, name in bracketed
+        ):
+            # A second bracketed language ("mn (Mongolian, Russian)") makes
+            # the pin ambiguous; a bracketed script name ("mn (Mongolian,
+            # Cyrillic)") only qualifies.
+            candidates = set()
+        if len(candidates) == 1:
+            agreed = candidates.pop()
+            named = [(i, agreed) for i, t in enumerate(tokens) if _TITLE_LANGUAGE_IDENTITY.get(t) == agreed]
+            # A bracketed name that is also a script ("Arabic" in "ar
+            # (Arabic)") names the language only if nothing else qualifies;
+            # beside another qualifier ("ar (Arabic, Latin)") it is one too.
+            tentative = {i for i, _name in named if pairs[i][1] and tokens[i] in _TITLE_SCRIPT_QUALIFIERS}
+    if len({name for _i, name in named}) > 1:
+        # "Punjabi (Arabic)", "Latin American Spanish": a name that is also a
+        # script qualifies the other language instead of naming a second one.
+        named = [(i, name) for i, name in named if tokens[i] not in _TITLE_SCRIPT_QUALIFIERS]
+    languages = {name for _i, name in named}
+    if len(languages) != 1:
+        return ()
+    language_name = languages.pop()
+    naming = {i for i, _name in named}
+
+    # Every other token that names a script is an explicit qualifier, even
+    # when it spells the language itself ("th-Thai-Latn": Thai is the ISO
+    # 15924 code for the Thai script, and it conflicts with Latn).
+    own = _TITLE_LANGUAGE_QUALIFIERS.get(language_name, {})
+    qualifiers = [
+        token for i, token in enumerate(tokens)
+        if i not in naming and (token in own or token in _TITLE_SCRIPT_QUALIFIERS)
+    ]
+    if qualifiers:
+        qualifiers += [tokens[i] for i in tentative]
+    scripts = {}
+    for token in qualifiers:
+        bucket = own.get(token) or _TITLE_SCRIPT_QUALIFIERS[token]
+        identity = _TITLE_CJK_SCRIPT_ALIASES.get(token, token) if bucket == 'cjk' else bucket
+        scripts[identity] = bucket
+    if len(scripts) > 1 or (language_name == 'latin' and set(scripts.values()) - {'latin'}):
+        # "Latin" beside another script ("Cyrillic Latin", "Latin (Arabic)")
+        # reads as a second script as easily as the language, so it fails
+        # closed; "la-Latn" agrees with itself.
+        return ()
+    if scripts:
+        return tuple(scripts.values())
+    return _TITLE_LANGUAGES[language_name][0]
+
+
+def _script_drift(title: str, expected_script) -> bool:
+    """True when a substantial share of *title* is written outside *expected_script*.
+
+    *expected_script* is one bucket name or a collection of them; a title in
+    any accepted bucket is on-script.
+
+    Same proportion rule as the #3293 cross-script check: some single other
+    script holds >=35% of the title's alphabetic characters with at least 2
+    characters, so a borrowed technical term (a CJK title containing
+    "Python") does not trip it while genuine drift does.
+    """
+    counts = _script_counts(str(title or ''))
+    total = sum(counts.values())
+    if total < 2:
+        return False
+    # Sum every non-expected bucket, then apply the minimum-two / 35% rule to the
+    # aggregate. Per-bucket testing let a title that is 30% Greek and 30%
+    # Cyrillic pass a Latin pin because neither share reached 35% alone.
+    expected = {expected_script} if isinstance(expected_script, str) else set(expected_script)
+    if not expected:
+        return False
+    foreign = 0
+    for script, n in counts.items():
+        if script in expected:
+            continue
+        # CJK text routinely borrows Latin product/technical terms ("WeChat
+        # Pay", "Python", "ProRes RAW"), so when CJK is the expected script,
+        # Latin in the title is a borrowed term as long as the title also
+        # contains CJK -- the title is genuinely mixed, not pure drift. A
+        # pure-Latin title is still rejected. (#7727; applied here so the
+        # pinned path gets the same exemption as the conversation path.)
+        if 'cjk' in expected and script == 'latin' and counts.get('cjk', 0) >= 2:
+            continue
+        foreign += n
+    return foreign >= 2 and (foreign / total) >= 0.35
+
+
+def _configured_title_language() -> str:
+    """Return the trimmed ``auxiliary.title_generation.language`` pin, or ''.
+
+    A nonblank value is authoritative for a whole generation attempt: the same
+    snapshot must drive both the prompt instruction and output validation, so
+    a title requested in the pinned language is never rejected by a validator
+    that expected the conversation's language.
+    """
+    try:
+        return str((_get_aux_title_config() or {}).get("language", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _title_prompt_language_rule(user_text: str, pinned_language: Optional[str] = None) -> str:
+    """Return the language instruction used by every title prompt.
+
+    Honours ``auxiliary.title_generation.language`` when the user has pinned a
+    title language -- Hermes Agent's own generator applies the same pin via
+    ``_TITLE_PROMPT_PINNED_LANGUAGE``, so without this the setting only takes
+    effect on native surfaces and WebUI titles drift independently.
+
+    ``pinned_language`` lets callers that already snapshotted the setting pass
+    it through, keeping prompt and validation consistent within one attempt;
+    ``None`` means read the config here.
+
+    Falls back to the previous "match the conversation start" instruction when
+    no language is configured, so unpinned installs are unaffected, and when
+    the pin is past ``_TITLE_PIN_MAX_RAW_LENGTH`` or, once folded,
+    ``_TITLE_PIN_MAX_LENGTH``, which is also when validation falls back to the
+    conversation.
+    """
+    language = _configured_title_language() if pinned_language is None else str(pinned_language).strip()
+    if language and _capped_title_pin(language):
+        return f"Write the title in {language}.\n"
     return "Match the language of the user question.\n"
 
 
@@ -4711,20 +5796,8 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     # A pure-Latin title for a CJK conversation is still rejected.
     # Unrelated scripts (Cyrillic, Arabic, Greek …) are always flagged.
     user_script = _dominant_script(user_text)
-    if user_script:
-        title_counts = _script_counts(candidate)
-        title_total = sum(title_counts.values())
-        if title_total >= 2:
-            for script, n in title_counts.items():
-                if script == user_script:
-                    continue
-                # When user writes in CJK, Latin in the title is a borrowed
-                # term as long as the title also contains CJK characters.
-                if user_script == 'cjk' and script == 'latin':
-                    if title_counts.get('cjk', 0) >= 2:
-                        continue
-                if n >= 2 and (n / title_total) >= 0.35:
-                    return True
+    if user_script and _script_drift(candidate, user_script):
+        return True
 
     # (2) Legacy same-script German→English heuristic.
     if _detect_title_language(user_text) != 'de':
@@ -4741,9 +5814,35 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     return english_hits >= 2
 
 
-def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
+def _generated_title_language_mismatch(user_text: str, title: str, pinned_language: str = '') -> bool:
+    """Language-validate a generated title, honouring a resolvable pin.
+
+    A pin that resolves to script buckets retargets drift detection at the
+    configured language. The title then has to be mostly in the pinned
+    script (either script, for a language written in two), whatever
+    language the conversation is in. The conversation-based
+    check does not also run in that case, because it measures against the
+    wrong thing: it would reject the pinned title the prompt just asked for.
+
+    A pin the script map cannot resolve keeps the #3293 conversation-based
+    check, exactly as a blank pin does. Validating such a title against its
+    own dominant script was tried and it disables the guard outright: any
+    single-script title agrees with itself, so an English conversation with
+    an unmapped pin accepted a Russian title that an unpinned run rejects.
+    Cross-script languages this module means to support are listed in
+    ``_TITLE_LANGUAGES`` with a bucket of their own (Amharic maps to
+    ``ethiopic``, Bengali to ``bengali``, and so on), which is what makes a
+    compliant title in one of them survive validation.
+    """
+    pinned_scripts = _resolve_pinned_title_scripts(pinned_language)
+    if pinned_scripts:
+        return _script_drift(title, pinned_scripts)
+    return _title_language_mismatch(user_text, title)
+
+
+def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optional[str] = None) -> tuple[str, list[str]]:
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
-    language_rule = _title_prompt_language_rule(user_text)
+    language_rule = _title_prompt_language_rule(user_text, pinned_language)
     prompts = [
         (
             "Generate a short session title from this conversation start.\n"
@@ -4999,11 +6098,13 @@ def generate_title_raw_via_aux(
     provider: str = '',
     model: str = '',
     base_url: str = '',
+    *,
+    pinned_language: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via auxiliary LLM route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     configured = _get_aux_title_config()
     caller_supplied_route = bool(provider or model or base_url)
     provider = provider or configured.get('provider', '') or ''
@@ -5079,14 +6180,14 @@ def generate_title_raw_via_aux(
         return None, 'llm_error_aux'
 
 
-def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str]:
+def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via active-agent route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     if agent is None:
         return None, 'missing_agent'
 
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
         getattr(agent, 'model', ''),
@@ -5203,12 +6304,16 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
 
 def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
-    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text)
+    # One snapshot drives both the prompt and validation: when a resolvable
+    # language is pinned, the prompt asks for it and validation checks the
+    # title against the pinned script instead of the conversation start.
+    pinned_language = _configured_title_language()
+    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, pinned_language=pinned_language)
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _generated_title_language_mismatch(user_text, title, pinned_language):
             return None, 'llm_language_mismatch', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid', str(raw)[:120]
@@ -5236,6 +6341,11 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         provider = ''
         model = ''
         base_url = ''
+    # Same snapshot-once contract as _generate_llm_session_title_for_agent:
+    # a resolvable pin retargets language validation at the pinned script.
+    # Snapshot before the context token, since the validation below runs
+    # outside the try/finally.
+    pinned_language = _configured_title_language()
     ctx_token = None
     if conversation_id:
         try:
@@ -5252,6 +6362,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
             provider=provider,
             model=model,
             base_url=base_url,
+            pinned_language=pinned_language,
         )
     finally:
         if ctx_token is not None:
@@ -5264,7 +6375,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _generated_title_language_mismatch(user_text, title, pinned_language):
             return None, 'llm_language_mismatch_aux', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid_aux', str(raw)[:120]
@@ -5368,34 +6479,65 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     return 'Conversation topic'
 
 
-def _is_generic_fallback_title(title: str) -> bool:
+def _is_generic_fallback_title(title) -> bool:
     """Return True for low-information fallback labels that should not be persisted."""
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
-def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
-    """Generate and publish a better title after `done`, then end the stream."""
+# Recovery cap for a model that keeps answering badly: an invalid model output
+# suppresses the local fallback so the next completed exchange retries the LLM
+# (the local fallback would mark a warm-up opener as successfully titled). A
+# model that ALWAYS returns the wrong language or a list would otherwise retry
+# forever — one title call per turn plus the invalid-output backup chain. After
+# this many exchanges with a still-invalid title, accept the local fallback and
+# stop retrying (maintainer re-gate, #7318).
+_TITLE_RECOVERY_MAX_EXCHANGES = 3
+
+
+def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None, stream_owner_id: str = None):
+    """Generate and publish a better title after `done`, then end the stream.
+
+    ``session_id`` is the title target (the canonical/continuation session the
+    title is loaded from and persisted to). ``stream_owner_id`` is the SSE
+    stream owner: when context compression rotated the session ID mid-stream,
+    the client captured the ORIGINAL ``_run_agent_streaming`` session id and
+    its ``stream_end`` fence (static/messages.js) rejects mismatched ids — so
+    ``stream_end`` must be emitted with the original id or the EventSource
+    never closes.
+    """
     try:
+        # Read the canonical in-memory session while deciding whether this
+        # automatic pass may run. A manual rename can race the background LLM
+        # request, so the later write path rebinds under the same lock too.
+        # get_session() itself acquires the global session LOCK in its cache
+        # resolver, so it must run OUTSIDE the explicit critical section
+        # (plain non-reentrant threading.Lock); rebind under LOCK after it.
         try:
             s = get_session(session_id)
+            with LOCK:
+                cached_session = SESSIONS.get(session_id)
+                if cached_session is not None and getattr(cached_session, 'session_id', None) == session_id:
+                    s = cached_session
+                _invalid_existing = _looks_invalid_generated_title(s.title)
+                current = str(s.title or '').strip()
+                already_generated = getattr(s, 'llm_title_generated', False)
+                manual_title = session_has_manual_title(s)
+                still_auto = (
+                    current == placeholder_title
+                    or current in ('Untitled', 'New Chat', '')
+                    or _is_provisional_title(current, s.messages)
+                    or _invalid_existing
+                )
         except KeyError:
             _put_title_status(put_event, session_id, 'skipped', 'missing_session')
             return
         # Allow self-heal when a previously generated title leaked thinking text.
-        _invalid_existing = _looks_invalid_generated_title(s.title)
-        if getattr(s, 'llm_title_generated', False) and not _invalid_existing:
-            _put_title_status(put_event, session_id, 'skipped', 'already_generated', str(s.title or ''))
+        if already_generated and not _invalid_existing:
+            _put_title_status(put_event, session_id, 'skipped', 'already_generated', current)
             return
-        current = str(s.title or '').strip()
-        if session_has_manual_title(s):
+        if manual_title:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
-        still_auto = (
-            current == placeholder_title
-            or current in ('Untitled', 'New Chat', '')
-            or _is_provisional_title(current, s.messages)
-            or _invalid_existing
-        )
         if not still_auto:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
@@ -5406,19 +6548,48 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 _put_title_status(put_event, session_id, 'skipped', 'title_generation_disabled', current)
                 return
             aux_title_configured = _aux_title_configured()
+            rejected_model_output = False
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
+                rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch')
             source = llm_status
-            if not next_title:
+            # An invalid response is different from an unavailable title model:
+            # choosing a local fallback here would mark a warm-up opener as
+            # successfully titled, blocking the later unresolved-title retry.
+            # Keep the provisional title and retry on the next completed exchange.
+            invalid_model_output = rejected_model_output or llm_status in {
+                'llm_invalid',
+                'llm_invalid_aux',
+                'llm_language_mismatch',
+                'llm_language_mismatch_aux',
+            }
+            # Recovery cap: accept the local fallback once the session has this
+            # many exchanges — a model that keeps answering badly must not mint
+            # one title call per turn forever (#7318 re-gate, SHOULD-FIX). The
+            # count reads the already-materialized session messages snapshot
+            # (no lock held); a concurrently appended message can only make the
+            # cap more permissive by one turn, which is acceptable here.
+            try:
+                exchange_count = _count_exchanges(s.messages)
+            except Exception:
+                exchange_count = 0
+            recovery_capped = invalid_model_output and exchange_count >= _TITLE_RECOVERY_MAX_EXCHANGES
+            if not next_title and (not invalid_model_output or recovery_capped):
                 fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
                 if fallback_title and not _is_generic_fallback_title(fallback_title):
-                    logger.debug("Using local fallback for session title generation")
+                    logger.debug(
+                        "Using local fallback for session title generation%s",
+                        " (recovery cap reached)" if recovery_capped else "",
+                    )
                     next_title = fallback_title
                     source = 'fallback'
                 elif fallback_title:
@@ -5461,7 +6632,22 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 _put_title_status(put_event, session_id, source, fallback_reason, effective_title, raw_preview)
             else:
                 _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
-            put_event('title', {'session_id': session_id, 'title': effective_title})
+            put_event('title', {
+                # The listener keys its guard on session_id, so this must be the
+                # TITLE TARGET (B) — not the stream owner (A): after an A→B
+                # compression rotation, a reattached listener runs with
+                # activeSid=B and would reject an A-keyed event before ever
+                # checking expectedCurrent, leaving B's malformed title in place.
+                'session_id': session_id,
+                'stream_owner_session_id': stream_owner_id or session_id,
+                'target_session_id': session_id,
+                'title': effective_title,
+                # The title this event REPLACES. The client passes it back as
+                # expectedCurrent so a listener-style update is accepted even
+                # when the outgoing title is a malformed persisted value that
+                # no default/provisional candidate matches (#7318 re-gate).
+                'expectedCurrent': current,
+            })
             # Sync the generated title to state.db so `hermes sessions list` shows it.
             try:
                 from api.state_sync import sync_session_title
@@ -5471,7 +6657,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         else:
             _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
     finally:
-        put_event('stream_end', {'session_id': session_id})
+        put_event('stream_end', {'session_id': stream_owner_id or session_id})
 
 
 def _run_background_title_refresh(session_id: str, user_text: str, assistant_text: str, current_title: str, put_event, agent=None):
@@ -6080,6 +7266,48 @@ def _compact_session_image_parts_for_persistence(session) -> int:
     return changed
 
 
+def _is_non_replayable_history_row(msg) -> bool:
+    """Return True for an error marker or an empty partial: rows that are
+    never model-facing history.
+
+    One predicate for the legacy path (``_sanitize_messages_for_api``) and the
+    Gateway runs-API history builder, so both drop these two kinds of row
+    alike (#8034). It is not the whole of the legacy projection: the sanitizer
+    also drops reasoning-only assistant rows and ``_recovered`` user rows,
+    which the Gateway builder still sends.
+    """
+    if not isinstance(msg, dict):
+        return False
+    # Persisted error markers — never send them to the LLM as prior context.
+    if msg.get('_error'):
+        return True
+    # _partial markers with no visible content. Partial messages that carry
+    # actual text (e.g. "Python is a high-level…") are kept so the model can
+    # continue from the cut-off point (#893). But empty partials (reasoning-only
+    # or tool-only cancellations where thinking markup was stripped) have
+    # nothing for the model to continue from and cause API 400 errors on strict
+    # providers (empty assistant content).
+    if msg.get('_partial') and not str(msg.get('content') or '').strip():
+        return True
+    return False
+
+
+def _recovered_user_row_is_kept(prev_role, next_role) -> bool:
+    """Return True when a ``_recovered`` user row must stay in replayed history.
+
+    It stays only where it opens a turn that was answered: ``next_role`` (the
+    next surviving row's role) must be ``assistant``, and ``prev_role`` (the
+    previously kept row's role) must be ``assistant`` or absent. Between two
+    assistant turns dropping it would fuse them; as the first row of the history
+    it is the question its answer replies to (a first turn interrupted by a
+    restart is saved as ``[recovered prompt, journaled answer]``). Anywhere else
+    it is dropped: after a user turn it would sit beside it, and before a user
+    turn (or at the end) it is a stale prompt nobody answered (#4283). One rule
+    for the two legacy projections and the Gateway runs-API history builder (#8038).
+    """
+    return next_role == 'assistant' and prev_role in (None, 'assistant')
+
+
 def _sanitize_messages_for_api(
     messages,
     *,
@@ -6122,6 +7350,11 @@ def _sanitize_messages_for_api(
         allowed_keys = _API_SAFE_MSG_KEYS | {"api_content"}
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
+    # Late recovery can restore display rows without proving a context owner.
+    # Filter before tool-ID collection and metadata stripping on both paths.
+    messages = [message for message in messages if not (
+        isinstance(message, dict) and message.get('_recovered_display_only') is True
+    )]
     valid_tool_call_ids: set = set()
     for msg in messages:
         if not isinstance(msg, dict):
@@ -6142,16 +7375,8 @@ def _sanitize_messages_for_api(
         # metadata, not provider-facing assistant turns.
         if _is_reasoning_only_assistant_message(msg):
             continue
-        # Skip persisted error markers — never send them to the LLM as prior context.
-        if msg.get('_error'):
-            continue
-        # Skip _partial markers with no visible content. Partial messages that
-        # carry actual text (e.g. "Python is a high-level…") are kept so the
-        # model can continue from the cut-off point (#893). But empty partials
-        # (reasoning-only or tool-only cancellations where thinking markup was
-        # stripped) have nothing for the model to continue from and cause
-        # API 400 errors on strict providers (empty assistant content).
-        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+        # Skip persisted error markers and empty _partial markers.
+        if _is_non_replayable_history_row(msg):
             continue
         # Note: _recovered user messages are NOT skipped here — they may need
         # to be retained to preserve role alternation when a kept assistant
@@ -6249,8 +7474,8 @@ def _sanitize_messages_for_api(
             for j in range(i + 1, len(filtered_clean)):
                 next_role = filtered_clean[j].get('role')
                 break
-            # Keep only if this recovered user actually separates two assistants.
-            if not (prev_role == 'assistant' and next_role == 'assistant'):
+            # Keep only if this recovered user opens an answered turn (see the helper).
+            if not _recovered_user_row_is_kept(prev_role, next_role):
                 continue  # drop — fusing the neighbours is clean, or it's a stale prompt
             # Keep but strip the temporary marker
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
@@ -6289,7 +7514,7 @@ def _api_safe_message_positions(messages):
     """Return [(original_index, sanitized_message)] for API-safe messages."""
     valid_tool_call_ids: set = set()
     for msg in messages:
-        if not isinstance(msg, dict):
+        if not isinstance(msg, dict) or msg.get('_recovered_display_only') is True:
             continue
         if msg.get('role') == 'assistant':
             for tc in msg.get('tool_calls') or []:
@@ -6300,13 +7525,11 @@ def _api_safe_message_positions(messages):
 
     out = []
     for idx, msg in enumerate(messages):
-        if not isinstance(msg, dict):
+        if not isinstance(msg, dict) or msg.get('_recovered_display_only') is True:
             continue
         if _is_reasoning_only_assistant_message(msg):
             continue
-        if msg.get('_error'):
-            continue
-        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+        if _is_non_replayable_history_row(msg):
             continue
         # Note: _recovered user messages are NOT skipped here — deferred to
         # a final pass after orphaned tool_calls stripping (#4283).
@@ -6358,7 +7581,7 @@ def _api_safe_message_positions(messages):
     # Fourth pass: drop _recovered user messages unless removing one would fuse
     # two same-role neighbours — mirrors _sanitize_messages_for_api pass 4 (#4283).
     # Decide on the ACTUAL kept sequence: prev kept role (final_out[-1]) + next
-    # surviving role. Keep ONLY when it separates two assistants; otherwise drop.
+    # surviving role. Keep ONLY when it opens an answered turn (see the helper); otherwise drop.
     final_out = []
     for i, (idx, msg) in enumerate(filtered_out):
         if msg.get('_recovered') and msg.get('role') == 'user':
@@ -6367,7 +7590,7 @@ def _api_safe_message_positions(messages):
             for j in range(i + 1, len(filtered_out)):
                 next_role = filtered_out[j][1].get('role')
                 break
-            if not (prev_role == 'assistant' and next_role == 'assistant'):
+            if not _recovered_user_row_is_kept(prev_role, next_role):
                 continue
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
         final_out.append((idx, msg))
@@ -6726,6 +7949,12 @@ def _restore_reasoning_metadata_before_boundary(
             # with their display counterpart.
             if prev_msg.get('id') is not None and cur_msg.get('id') is None:
                 cur_msg['id'] = prev_msg['id']
+            # SQLite identity is private replay provenance, stripped before
+            # Agent input. Restore it only on this proved historical prefix,
+            # never onto the active turn even when the text is identical.
+            if (prev_msg.get('_state_db_row_id') is not None
+                    and cur_msg.get('_state_db_row_id') is None):
+                cur_msg['_state_db_row_id'] = prev_msg['_state_db_row_id']
             if (
                 prev_msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is True
                 and cur_msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is not True
@@ -6897,47 +8126,48 @@ def _strip_replayed_prefix(existing_messages, candidates):
     existing_messages = list(existing_messages or [])
     candidates = list(candidates or [])
     max_overlap = min(len(existing_messages), len(candidates))
-    for overlap in range(max_overlap, 0, -1):
-        left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
-        right = [_message_replay_key(m) for m in candidates[:overlap]]
-        if left == right:
-            return candidates[overlap:]
-    return candidates
+    if not max_overlap:
+        return candidates
+    # KMP matches the longest candidate prefix at the end of the old transcript.
+    # Each payload is keyed once; shrinking slices re-serialized O(n²) rows while
+    # settlement held the session lock. Keep the existing replay-key semantics.
+    keys = [_message_replay_key(m) for m in candidates[:max_overlap]]
+    fallback = [0] * max_overlap
+    matched = 0
+    for idx in range(1, max_overlap):
+        while matched and keys[idx] != keys[matched]:
+            matched = fallback[matched - 1]
+        if keys[idx] == keys[matched]:
+            matched += 1
+        fallback[idx] = matched
+    matched = 0
+    for message in existing_messages[-max_overlap:]:
+        key = _message_replay_key(message)
+        if matched == max_overlap:
+            matched = fallback[matched - 1]
+        while matched and key != keys[matched]:
+            matched = fallback[matched - 1]
+        if key == keys[matched]:
+            matched += 1
+    return candidates[matched:]
+
+
+def _session_arc_summary_key(message):
+    """Identify long summaries by role, provider payload and normalized prefix."""
+    if not isinstance(message, dict):
+        return None
+    text = ' '.join(_message_text(message.get('content', '')).split())
+    if len(text) < 2000 or not text.startswith('[Session Arc Summary'):
+        return None
+    api_content = message.get('api_content')
+    normalized = ' '.join(api_content.split()) if isinstance(api_content, str) and api_content else None
+    return (message.get('role'), normalized, text[:1500])
 
 
 def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
-    """Return True for repeated LCM/session summaries with refreshed hints.
-
-    LCM summary cards can be re-injected with the same long recovered context
-    and a different tail such as an expand hint. Exact identity misses those,
-    but appending both copies bloats every later model prompt.
-    """
-    if not isinstance(previous_msg, dict) or not isinstance(candidate_msg, dict):
-        return False
-    if previous_msg.get('role') != candidate_msg.get('role'):
-        return False
-    previous_api_content = previous_msg.get("api_content")
-    candidate_api_content = candidate_msg.get("api_content")
-    normalized_previous_api_content = (
-        " ".join(previous_api_content.split())
-        if isinstance(previous_api_content, str) and previous_api_content
-        else None
-    )
-    normalized_candidate_api_content = (
-        " ".join(candidate_api_content.split())
-        if isinstance(candidate_api_content, str) and candidate_api_content
-        else None
-    )
-    if normalized_previous_api_content != normalized_candidate_api_content:
-        return False
-    previous_text = " ".join(_message_text(previous_msg.get('content', '')).split())
-    candidate_text = " ".join(_message_text(candidate_msg.get('content', '')).split())
-    if len(previous_text) < 2000 or len(candidate_text) < 2000:
-        return False
-    marker = '[Session Arc Summary'
-    if not previous_text.startswith(marker) or not candidate_text.startswith(marker):
-        return False
-    return previous_text[:1500] == candidate_text[:1500]
+    """Recognize the same recovered context with a refreshed trailing hint."""
+    previous_key = _session_arc_summary_key(previous_msg)
+    return previous_key is not None and previous_key == _session_arc_summary_key(candidate_msg)
 
 
 def _strip_replayed_context_items(existing_messages, candidates):
@@ -6949,27 +8179,75 @@ def _strip_replayed_context_items(existing_messages, candidates):
 
     existing_keys = [_message_replay_key(m) for m in existing_messages]
     candidate_keys = [_message_replay_key(m) for m in candidates]
-    existing_large = [m for m in existing_messages if isinstance(m, dict)]
+    # Reversing both sequences turns a match starting at candidate idx into a
+    # match ending at the corresponding reversed position. A suffix automaton
+    # computes these longest matches without scanning every old start again.
+    transitions, links, lengths = [{}], [-1], [0]
+    last = 0
+    for key in reversed(existing_keys):
+        current = len(transitions)
+        transitions.append({})
+        lengths.append(lengths[last] + 1)
+        links.append(0)
+        parent = last
+        while parent >= 0 and key not in transitions[parent]:
+            transitions[parent][key] = current
+            parent = links[parent]
+        if parent >= 0:
+            target = transitions[parent][key]
+            if lengths[parent] + 1 == lengths[target]:
+                links[current] = target
+            else:
+                clone = len(transitions)
+                transitions.append(dict(transitions[target]))
+                lengths.append(lengths[parent] + 1)
+                links.append(links[target])
+                while parent >= 0 and transitions[parent].get(key) == target:
+                    transitions[parent][key] = clone
+                    parent = links[parent]
+                links[target] = links[current] = clone
+        last = current
+
+    matches = [0] * len(candidate_keys)
+    state = matched = 0
+    for idx in range(len(candidate_keys) - 1, -1, -1):
+        key = candidate_keys[idx]
+        while state and key not in transitions[state]:
+            state = links[state]
+            matched = min(matched, lengths[state])
+        target = transitions[state].get(key)
+        if target is None:
+            matched = 0
+        else:
+            state = target
+            matched += 1
+        matches[idx] = matched
+
+    summary_keys = set()
+    unusual_summary_keys = []
+    for message in existing_messages:
+        key = _session_arc_summary_key(message)
+        if key is not None:
+            try:
+                summary_keys.add(key)
+            except TypeError:
+                # Preserve the old equality rule for malformed, unhashable roles.
+                unusual_summary_keys.append(key)
     cleaned = []
     idx = 0
     min_block = 3
     while idx < len(candidates):
         msg = candidates[idx]
-        if any(_looks_like_replayed_session_arc_summary(prev, msg) for prev in existing_large):
+        key = _session_arc_summary_key(msg)
+        try:
+            repeated_summary = key is not None and key in summary_keys
+        except TypeError:
+            repeated_summary = key in unusual_summary_keys
+        if repeated_summary:
             idx += 1
             continue
 
-        best = 0
-        for start in range(len(existing_keys)):
-            length = 0
-            while (
-                idx + length < len(candidate_keys)
-                and start + length < len(existing_keys)
-                and candidate_keys[idx + length] == existing_keys[start + length]
-            ):
-                length += 1
-            if length > best:
-                best = length
+        best = matches[idx]
         if best >= min_block:
             idx += best
             continue
@@ -7600,7 +8878,29 @@ def _advance_truncation_watermark_after_commit(session) -> None:
             if isinstance(ts, (int, float)) and ts > 0:
                 session.truncation_watermark = float(ts)
                 return
-    session.truncation_watermark = time.time()
+    # No timestamped user row (e.g. a handoff/background-notification turn
+    # committed without one). The watermark's meaning is "suppress the
+    # REPLACED tail", so it must stay anchored to a real message timestamp --
+    # stamping wall-clock time here made the watermark NEWER than every row in
+    # the sidecar, which permanently starved the sidecar_advanced_past_watermark
+    # guard of the only signal that would let newer state.db rows merge back.
+    # That is a self-locking filter: the rows needed to advance the sidecar past
+    # the watermark are exactly the rows the watermark hides. Clamp to the
+    # newest real message instead, keeping the sidecar able to advance past it.
+    # Never 0.0 (the truncate-to-empty sentinel that must keep blocking replay,
+    # #2914) -- hence the >0 check.
+    newest_real_ts = None
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        ts = msg.get('timestamp') or msg.get('_ts')
+        if isinstance(ts, (int, float)) and ts > 0:
+            newest_real_ts = ts if newest_real_ts is None else max(newest_real_ts, ts)
+    if newest_real_ts is not None:
+        session.truncation_watermark = float(newest_real_ts)
+    # Otherwise: genuinely no timestamped row at all. Keep the existing (stale)
+    # value rather than inventing a wall-clock boundary — a too-old watermark
+    # only over-filters the replaced tail; it cannot self-lock the merge.
 
 
 def _merge_display_messages_after_agent_result(
@@ -8688,11 +9988,45 @@ def _upsert_current_turn_partial(
     return canonical
 
 
+def _sse_write(handler, payload: bytes) -> None:
+    """Write raw bytes to an SSE client, classifying a vanished peer correctly.
+
+    A dead peer is not always a BrokenPipe/Reset: when it disappeared at the
+    network layer (phone left the LAN, Tailscale peer dropped, stale ARP) the
+    write raises a bare OSError with a routing errno such as EHOSTUNREACH.
+    Those escaped every SSE handler's `except _CLIENT_DISCONNECT_ERRORS:` and
+    were reported as a 500 + traceback for what is just a normal disconnect.
+    Convert that narrow class of OSError here — a genuine failure (ENOSPC,
+    file errors) still propagates untouched.
+    """
+    try:
+        handler.wfile.write(payload)
+        handler.wfile.flush()
+    except OSError as exc:
+        if _is_client_disconnect_error(exc):
+            raise _as_client_disconnect(exc) from None
+        raise
+
+
+# App-level heartbeat comment. SSE lines starting with ':' are ignored by
+# EventSource; it only exists to keep the socket warm between real events.
+_SSE_KEEPALIVE_BYTES = b": keepalive\n\n"
+
+
+def _sse_keepalive(handler) -> None:
+    """Emit one app-level heartbeat comment on a long-lived SSE stream."""
+    _sse_write(handler, _SSE_KEEPALIVE_BYTES)
+
+
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-    handler.wfile.write(payload.encode('utf-8'))
-    handler.wfile.flush()
+    try:
+        encoded = payload.encode('utf-8')
+    except UnicodeEncodeError:
+        payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=True)}\n\n"
+        encoded = payload.encode('utf-8')
+    _sse_write(handler, encoded)
 
 
 # ── SSE write deadline (Defect A: per-connection thread exhaustion) ─────────
@@ -9300,6 +10634,118 @@ def _register_pending_user_timestamp_identity(
         save(touch_updated_at=False, skip_index=True)
 
 
+def _preserve_legacy_agent_row_identity(callable_obj, identity):
+    """Keep IDs returned by an older Agent's actual SQLite append calls.
+
+    Some Agents accept user timestamps but still discard returned row IDs.
+    Observe only this flush's calls on its own thread/DB instance, then attach
+    the returned IDs to those exact dicts. This is write provenance, not a
+    content-only guess about an independently read historical transcript.
+    """
+    agent = getattr(callable_obj, '__self__', None)
+    context = getattr(agent, '_webui_legacy_identity_context', None)
+    if not isinstance(identity, dict):
+        if isinstance(context, threading.local):
+            context.owner = None
+        return
+    flush = getattr(agent, '_flush_messages_to_session_db', None)
+    if not callable(flush):
+        return
+    if not isinstance(context, threading.local):
+        context = threading.local()
+        agent._webui_legacy_identity_context = context
+    context.owner = copy.deepcopy(identity)
+    if getattr(agent, '_webui_legacy_identity_adapter', False):
+        return
+
+    def flush_with_identity(messages, conversation_history=None):
+        owner = copy.deepcopy(getattr(context, 'owner', None))
+        if not isinstance(owner, dict):
+            return flush(messages, conversation_history)
+        db = getattr(agent, '_session_db', None)
+        append = getattr(db, 'append_message', None)
+        namespace = getattr(db, '__dict__', None)
+        if not callable(append) or not isinstance(namespace, dict):
+            return flush(messages, conversation_history)
+        lock = namespace.setdefault('_webui_legacy_identity_lock', threading.RLock())
+        with lock:
+            original_override = namespace.get('append_message')
+            had_override = 'append_message' in namespace
+            sid = getattr(agent, 'session_id', None)
+            start = max(len(conversation_history or []), getattr(agent, '_last_flushed_db_idx', 0))
+            rows = list(messages[start:])
+            observed = []
+            owner_thread = threading.get_ident()
+
+            def observed_append(*args, **kwargs):
+                row_id = append(*args, **kwargs)
+                if threading.get_ident() == owner_thread:
+                    observed.append((kwargs, row_id))
+                return row_id
+
+            db.append_message = observed_append
+            try:
+                result = flush(messages, conversation_history)
+            finally:
+                if namespace.get('append_message') is observed_append:
+                    if had_override:
+                        db.append_message = original_override
+                    else:
+                        del db.append_message
+            if (getattr(agent, '_session_db', None) is not db
+                    or getattr(agent, 'session_id', None) != sid
+                    or not rows or len(rows) != len(observed)):
+                return result
+            ids = [row_id for _, row_id in observed]
+            if not all(type(row_id) is int and row_id > 0 for row_id in ids) or len(set(ids)) != len(ids):
+                return result
+            index = getattr(agent, '_persist_user_message_idx', None)
+            for offset, (row, (written, row_id)) in enumerate(zip(rows, observed, strict=True)):
+                known_id, valid = _state_db_row_identity_details(row)
+                # Later legacy flushes apply the clean user override only to
+                # SQLite, leaving the workspace prefix in the live dict.
+                current_user_override = (
+                    type(index) is int and index == start + offset
+                    and owner.get('session_id') == sid and owner.get('token')
+                    and getattr(context, 'owner', None) == owner
+                    and written.get('role') == 'user'
+                    and written.get('content') == getattr(agent, '_persist_user_message_override', None)
+                    and written.get('content') == owner.get('text')
+                    and _active_turn_user_text_matches(row, owner.get('text'))
+                )
+                if (not isinstance(row, dict) or written.get('session_id') != sid
+                        or written.get('role') != row.get('role')
+                        or (written.get('content') != row.get('content') and not current_user_override)
+                        or not valid or known_id not in (None, str(row_id))):
+                    return result
+            # Native producers retain their own provenance and clock contract.
+            # The run signature alone does not establish that capability.
+            if all(_state_db_row_identity_details(row)[0] == str(row_id)
+                   for row, row_id in zip(rows, ids, strict=True)):
+                return result
+            for row, row_id in zip(rows, ids, strict=True):
+                row['_state_db_row_id'] = row_id
+            # The old Agent exports an index but no turn_id. Its own indexed
+            # dict plus this successful append proves the active user; retain
+            # WebUI's run token so shared settlement does not insert it again.
+            if (isinstance(owner, dict) and owner.get('session_id') == sid
+                    and getattr(context, 'owner', None) == owner
+                    and owner.get('token') and type(index) is int
+                    and start <= index < start + len(rows)
+                    and _active_turn_user_text_matches(messages[index], owner.get('text'))):
+                stamp_message_source(messages[index], owner.get('source') or 'webui',
+                                     active_turn_token=owner['token'])
+                row_timestamp, row_clock_valid = _message_exact_timestamp_details(messages[index])
+                owner_timestamp, owner_clock_valid = _message_exact_timestamp_details(
+                    {'timestamp': owner.get('timestamp')})
+                if row_clock_valid and row_timestamp is None and owner_clock_valid and owner_timestamp is not None:
+                    messages[index]['timestamp'] = owner_timestamp
+            return result
+
+    agent._flush_messages_to_session_db = flush_with_identity
+    agent._webui_legacy_identity_adapter = True
+
+
 def _build_run_conversation_kwargs(
     callable_obj,
     *,
@@ -9310,13 +10756,15 @@ def _build_run_conversation_kwargs(
     task_id,
     persist_user_message,
     persist_user_timestamp,
+    legacy_row_identity_owner=None,
 ):
-    """Build one rolling-compatible Agent invocation contract without mutation.
+    """Build one rolling-compatible Agent invocation contract.
 
     ``persist_user_timestamp`` is signature-gated (#6935): an older
     hermes-agent whose ``run_conversation()`` predates the kwarg must not
     receive it, or the call trips a TypeError before the turn starts.
     """
+    _preserve_legacy_agent_row_identity(callable_obj, legacy_row_identity_owner)
     kwargs = {
         "user_message": user_message,
         "system_message": system_message,
@@ -10634,8 +12082,12 @@ def _run_agent_streaming(
         except ImportError:
             logger.debug("Clarify module not available, falling back to polling")
 
-        def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
-            """Bridge Hermes clarify prompts to the WebUI."""
+        def _clarify_ask_one(question, choices, sid, cancel_evt):
+            """Show one clarify card and wait for it.
+
+            Returns ``(response, expired)`` or ``None`` when the clarify
+            module is unavailable.
+            """
             timeout = _clarify_timeout_seconds(_clarify_session_config(sid))
             choices_list = [str(choice) for choice in (choices or [])]
             data = {
@@ -10649,24 +12101,49 @@ def _run_agent_streaming(
             try:
                 from api.clarify import submit_pending as _submit_clarify_pending, clear_pending as _clear_clarify_pending
             except ImportError:
-                return (
-                    "The user did not provide a response within the time limit. "
-                    "Use your best judgement to make the choice and proceed."
-                )
+                return None
 
             entry = _submit_clarify_pending(sid, data)
             response, expired = _await_clarify_response(entry, timeout, cancel_evt)
             if expired:
                 _clear_clarify_pending(sid)
-            return (
-                response
-                or "The user did not provide a response within the time limit. "
-                   "Use your best judgement to make the choice and proceed."
-            )
+            return response, expired
+
+        def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
+            """Bridge legacy ``callback(question, choices) -> str`` clarify prompts."""
+            asked = _clarify_ask_one(question, choices, sid, cancel_evt)
+            response = asked[0] if asked else ''
+            return response or _CLARIFY_NO_RESPONSE_TEXT
+
+        def _clarify_callback(*args, **kwargs):
+            """Accept both Hermes Agent clarify callback contracts.
+
+            Current agents pass normalized questions either as the sole
+            positional argument or through ``questions=`` beside legacy
+            positional slots, and expect an ``{answers, outcome, notice?}``
+            dict. Older agents call ``callback(question, choices)`` and expect
+            the answer string.
+            """
+            questions = kwargs.get('questions')
+            if not isinstance(questions, (list, tuple)):
+                questions = args[0] if len(args) == 1 and not kwargs else None
+            if isinstance(questions, (list, tuple)):
+                return _clarify_batch_reply(
+                    questions,
+                    lambda question, choices: _clarify_ask_one(
+                        question, choices, session_id, cancel_event
+                    ),
+                    cancel_event,
+                )
+            question = args[0] if args else kwargs.get('question')
+            choices = args[1] if len(args) > 1 else kwargs.get('choices')
+            return _clarify_callback_impl(question, choices, session_id, cancel_event, put)
 
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
             _self_healed = False  # (#1401) prevents infinite self-heal retries
+            # Bound before resolution so both self-heal paths can test it.
+            _alias_route = None
             # Per-message reasoning: dict maps assistant-message index → accumulated text
             # (#3587) replaces the flat _reasoning_text string so each intermediate
             # assistant turn (before tool calls) keeps its own reasoning segment.
@@ -10681,6 +12158,15 @@ def _run_agent_streaming(
             _reasoning_buffer_index = _CompactEchoIndex()
             _current_reasoning_idx = 0
             _tool_boundary_advanced = False
+            # Segment ownership: tool_call_id -> segment streamed before each start
+            # of that ID (None = its step streamed no thinking; IDs can repeat
+            # across steps); interim -> (compact visible
+            # text, segment) per delivered interim message; unbound = the open
+            # step's segment.
+            _tool_call_reasoning_idx: dict = {}
+            _tool_start_order: list = []
+            _interim_reasoning_idx: list = []
+            _unbound_reasoning_idx = [None]
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
 
             # Throttle: emit metering events at most every 100 ms so the per-message
@@ -10842,6 +12328,7 @@ def _run_agent_streaming(
                 _reasoning_segments[_current_reasoning_idx] = (
                     _reasoning_segments.get(_current_reasoning_idx, '') + reasoning_delta
                 )
+                _unbound_reasoning_idx[0] = _current_reasoning_idx
                 # Keep the folded index in step with the segment text.
                 _reasoning_segment_indexes.setdefault(
                     _current_reasoning_idx, _CompactEchoIndex()
@@ -10888,6 +12375,12 @@ def _run_agent_streaming(
                 visible = str(text).strip()
                 if not visible:
                     return
+                # The interim message closes its step: bind the open segment to it
+                # so the next tool call cannot claim it (settlement matches by text).
+                # Agents without tool_start_callback keep positional settlement.
+                if 'tool_start_callback' in _agent_params:
+                    _interim_reasoning_idx.append((_compact_for_echo_compare(visible), _unbound_reasoning_idx[0]))
+                    _unbound_reasoning_idx[0] = None
                 reasoning_echo = _strip_reasoning_output_echo(visible)
                 already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
                 payload = {
@@ -10979,6 +12472,7 @@ def _run_agent_streaming(
                         _reasoning_segments[_current_reasoning_idx] = (
                             _reasoning_segments.get(_current_reasoning_idx, '') + reason_delta
                         )
+                        _unbound_reasoning_idx[0] = _current_reasoning_idx
                         _reasoning_segment_indexes.setdefault(
                             _current_reasoning_idx, _CompactEchoIndex()
                         ).append(reason_delta)
@@ -11125,6 +12619,10 @@ def _run_agent_streaming(
                     return
 
             def on_tool_start(tool_call_id, name, args):
+                if tool_call_id:
+                    _tool_call_reasoning_idx.setdefault(tool_call_id, []).append(_unbound_reasoning_idx[0])
+                    _tool_start_order.append(tool_call_id)
+                _unbound_reasoning_idx[0] = None
                 try:
                     _record_live_tool_start(tool_call_id, name, args)
                     if tool_call_id and tool_call_id not in _live_tool_event_start_ids:
@@ -11225,7 +12723,7 @@ def _run_agent_streaming(
             # send from a NAMED profile would resolve against the DEFAULT profile's
             # config and route to the wrong provider/base_url. Bind the captured
             # owning-session profile across warm + resolve so both see the right
-            # profile (no-op for the default/root profile).
+            # profile (default/root binds TLS without named-profile env mirroring).
             from api import profiles as profiles_api
             # #5979: treat this send as a deliberate pick ONLY when the persisted
             # explicit-pick signature matches the CURRENT model+provider routing
@@ -11258,34 +12756,61 @@ def _run_agent_streaming(
                 _resolved_profile_name, "model + credential resolution", logger_override=logger
             ):
                 warm_models_catalog_provenance_if_cold()
-                resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-                    model_with_provider_context(model, provider_context),
-                    explicitly_picked=_explicitly_picked,
-                )
+                _alias_route = resolve_model_alias_runtime(provider_context, expected_model=model)
+                if _alias_route is not None:
+                    resolved_model = _alias_route["model"]
+                    resolved_provider = _alias_route["provider"]
+                    resolved_base_url = _alias_route.get("base_url") or None
+                    resolved_api_key = _alias_route.get("api_key") or None
+                else:
+                    # An opaque alias lane that did not resolve (alias deleted,
+                    # owned by another profile, or now targeting a different
+                    # model) is terminal: the digest is not a provider id, so
+                    # falling through to generic provider resolution would let
+                    # the ambient/fallback chain answer a route the session no
+                    # longer owns. Stop before the agent kwargs, before
+                    # _AIAgent(), and before the cache write below; the outer
+                    # handler turns the typed error into a controlled
+                    # provider_unroutable apperror.
+                    raise_for_unresolved_model_alias_route(provider_context)
+                    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+                        model_with_provider_context(model, provider_context),
+                        explicitly_picked=_explicitly_picked,
+                    )
+                    resolved_api_key = None
                 configured_base_url = resolved_base_url
 
-                # Resolve API key via Hermes runtime provider (matches gateway behaviour).
-                # Pass the resolved provider so non-default providers get their own credentials.
-                resolved_api_key = None
                 # Default to an empty runtime dict so the constructor-routing
                 # bundle below stays buildable when resolution raises.
                 _rt = {}
-                try:
-                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                    from hermes_cli.runtime_provider import resolve_runtime_provider
-                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                        resolve_runtime_provider,
-                        requested=resolved_provider,
-                        target_model=resolved_model,
+                # An alias-declared endpoint owns its credential boundary. Never
+                # ask the active/provider resolver for its label's key (that key
+                # could then reach an unrelated endpoint); resolve host-gated
+                # against the alias URL exactly as Hermes Agent does instead.
+                _alias_has_endpoint = bool(
+                    _alias_route is not None and _alias_route.get("base_url_explicit")
+                )
+                if _alias_has_endpoint:
+                    _rt = _resolve_model_alias_endpoint_runtime(
+                        _alias_route, target_model=resolved_model,
                     )
-                    resolved_api_key = _rt.get("api_key")
-                    if not resolved_provider:
-                        resolved_provider = _rt.get("provider")
-                    resolved_base_url = _runtime_preferred_base_url(
-                        _rt, resolved_provider, configured_base_url
-                    )
-                except Exception as _e:
-                    print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+                else:
+                    try:
+                        from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                        from hermes_cli.runtime_provider import resolve_runtime_provider
+                        _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                            resolve_runtime_provider,
+                            requested=resolved_provider,
+                            target_model=resolved_model,
+                        )
+                        resolved_api_key = _rt.get("api_key")
+                        if not resolved_provider:
+                            resolved_provider = _rt.get("provider")
+                        resolved_base_url = _runtime_preferred_base_url(
+                            _rt, resolved_provider, configured_base_url
+                        )
+                    except Exception as _e:
+                        print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
                 # Named custom providers (custom:slug) may not be resolvable by
                 # hermes_cli.runtime_provider directly. Fall back to config.yaml
@@ -11302,11 +12827,18 @@ def _run_agent_streaming(
                 # a mixed authority: the list row's URL and key, but the ambient
                 # provider's transport, wire protocol and credential source.
                 _session_requested_provider = resolved_provider
-                _runtime_bundle = _resolve_runtime_connection_bundle(
-                    resolved_provider, resolved_api_key, resolved_base_url, _rt,
-                    profile_name=_resolved_profile_name,
-                    custom_provider_lookup=_session_requested_provider,
-                )
+                if _alias_route is not None:
+                    _runtime_bundle = _resolve_model_alias_connection_bundle(
+                        _alias_route,
+                        _rt,
+                        profile_name=_resolved_profile_name,
+                    )
+                else:
+                    _runtime_bundle = _resolve_runtime_connection_bundle(
+                        resolved_provider, resolved_api_key, resolved_base_url, _rt,
+                        profile_name=_resolved_profile_name,
+                        custom_provider_lookup=_session_requested_provider,
+                    )
                 # Stop HERE on a terminal route verdict — before the agent
                 # kwargs, before _AIAgent(), before the agent-cache write. A
                 # named custom:<slug> that resolved no complete
@@ -11505,11 +13037,7 @@ def _run_agent_streaming(
                 stream_delta_callback=on_token,
                 reasoning_callback=on_reasoning,
                 tool_progress_callback=on_tool,
-                clarify_callback=(
-                    lambda question, choices: _clarify_callback_impl(
-                        question, choices, session_id, cancel_event, put
-                    )
-                ),
+                clarify_callback=_clarify_callback,
             )
             # reasoning_config has been an AIAgent param for several releases,
             # but guard defensively to avoid TypeError on an older agent build.
@@ -11792,6 +13320,8 @@ def _run_agent_streaming(
                 session_id,
                 profile=getattr(s, 'profile', None),
                 with_revision=True,
+                **({'include_row_identity': True}
+                   if _cancelled_journal_turn_owner(s.messages) else {}),
             )
 
             def _context_and_revision_from_state_snapshot(state_snapshot):
@@ -11819,6 +13349,8 @@ def _run_agent_streaming(
                     session_id,
                     profile=getattr(s, 'profile', None),
                     with_revision=True,
+                    **({'include_row_identity': True}
+                       if _cancelled_journal_turn_owner(s.messages) else {}),
                 )
                 return _context_and_revision_from_state_snapshot(fresh_state_snapshot)
 
@@ -11946,6 +13478,9 @@ def _run_agent_streaming(
                 task_id=session_id,
                 persist_user_message=msg_text,
                 persist_user_timestamp=_persist_user_timestamp,
+                legacy_row_identity_owner=(
+                    _active_turn_identity if _cancelled_journal_turn_owner(s.messages) else None
+                ),
             )
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
@@ -12423,10 +13958,21 @@ def _run_agent_streaming(
                         with _profiles_api.profile_scope_for_detached_worker(
                             _resolved_profile_name, "credential self-heal", logger_override=logger
                         ):
-                            _heal_rt = _attempt_credential_self_heal(
-                                resolved_provider or '', session_id, _agent_lock,
-                                target_model=resolved_model,
-                            )
+                            if _alias_route is not None:
+                                # Re-read the alias's own credential source: the
+                                # original route would resend the stale key.
+                                _alias_heal = _attempt_model_alias_credential_self_heal(
+                                    provider_context, model, session_id, _agent_lock,
+                                    target_model=resolved_model,
+                                )
+                                _heal_rt = None
+                                if _alias_heal is not None:
+                                    _alias_route, _heal_rt = _alias_heal
+                            else:
+                                _heal_rt = _attempt_credential_self_heal(
+                                    resolved_provider or '', session_id, _agent_lock,
+                                    target_model=resolved_model,
+                                )
                         if _heal_rt is not None:
                             logger.info('[webui] self-heal: retrying stream after credential refresh')
                             # Rebuild runtime variables from the refreshed resolve
@@ -12450,11 +13996,18 @@ def _run_agent_streaming(
                             # return a different runtime authority, and a
                             # custom-provider override must clear its
                             # credential_pool / api_mode / ACP fields here too.
-                            _runtime_bundle = _resolve_runtime_connection_bundle(
-                                resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
-                                profile_name=_resolved_profile_name,
-                                custom_provider_lookup=_session_requested_provider,
-                            )
+                            if _alias_route is not None:
+                                _runtime_bundle = _resolve_model_alias_connection_bundle(
+                                    _alias_route,
+                                    _heal_rt,
+                                    profile_name=_resolved_profile_name,
+                                )
+                            else:
+                                _runtime_bundle = _resolve_runtime_connection_bundle(
+                                    resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
+                                    profile_name=_resolved_profile_name,
+                                    custom_provider_lookup=_session_requested_provider,
+                                )
                             # The re-resolve can turn a previously routable named
                             # route terminal (the record's key_cmd stopped
                             # minting, the pool drained, the row was edited
@@ -12541,6 +14094,9 @@ def _run_agent_streaming(
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                     persist_user_timestamp=_heal_persist_user_timestamp,
+                                    legacy_row_identity_owner=(
+                                        _active_turn_identity if _cancelled_journal_turn_owner(s.messages) else None
+                                    ),
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -12850,7 +14406,11 @@ def _run_agent_streaming(
                 # Only auto-generate title when still default; preserves user renames
                 if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                     s.title = title_from(s.messages, s.title)
-                _bg_title_inputs = _background_title_generation_inputs(s)
+                _bg_title_inputs = None
+                if _background_title_generation_eligible(s):
+                    _u0, _a0 = _title_exchange_for_unresolved_title(s.messages)
+                    if _u0 and _a0:
+                        _bg_title_inputs = (_u0, _a0)
                 # Read token/cost usage from the agent object (if available).
                 # Per-turn overwrite (#1857): replace cumulative session totals with the
                 # agent's most recent values, which already represent the current turn's
@@ -12914,37 +14474,12 @@ def _run_agent_streaming(
                 # assistant content into m['reasoning'] (server-side twin of the JS
                 # _splitThinkFromContent). Inline-thinking providers (e.g. MiniMax-M3)
                 # otherwise leave the thinking trace in m['content'], bloating the
-                # persisted session file 30-50% and bypassing the thinking card. The
-                # #3587: use per-message segments so intermediate assistant turns
-                # (before tool calls) each receive their own reasoning trace rather
-                # than all reasoning being written only to the last assistant message.
-                # Scope the walk to this turn's newly-appended assistant messages
-                # to prevent cross-turn reasoning clobber (multi-turn off-by-N).
-                if s.messages:
-                    _prev_asst = sum(
-                        1 for m in (_previous_messages or [])
-                        if isinstance(m, dict) and m.get('role') == 'assistant'
-                    )
-                    _asst_count = 0
-                    for _rm in s.messages:
-                        if not (isinstance(_rm, dict) and _rm.get('role') == 'assistant'):
-                            continue
-                        _turn_idx = _asst_count
-                        _asst_count += 1
-                        if _turn_idx < _prev_asst:
-                            continue  # prior-turn message — never touch its reasoning
-                        _seg_reasoning = _reasoning_segments.get(_turn_idx - _prev_asst, '')
-                        _existing_reasoning = _seg_reasoning or _rm.get('reasoning') or ''
-                        _content = _rm.get('content')
-                        if isinstance(_content, str) and _content:
-                            _new_content, _merged_reasoning = _split_thinking_from_content(
-                                _content, _existing_reasoning
-                            )
-                            _rm['content'] = _new_content
-                            if _merged_reasoning:
-                                _rm['reasoning'] = _merged_reasoning
-                        elif _existing_reasoning:
-                            _rm['reasoning'] = _existing_reasoning
+                # persisted session file 30-50% and bypassing the thinking card.
+                _settle_turn_reasoning(
+                    s, _previous_messages, _reasoning_segments,
+                    _tool_call_reasoning_idx, _unbound_reasoning_idx[0], _interim_reasoning_idx,
+                    _tool_start_order,
+                )
                 try:
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
                 except Exception:
@@ -13598,6 +15133,7 @@ def _run_agent_streaming(
                 threading.Thread(
                     target=_run_background_title_update,
                     args=(s.session_id, *_bg_title_inputs, str(s.title or '').strip(), put, agent),
+                    kwargs={'stream_owner_id': session_id},
                     daemon=True,
                 ).start()
             else:
@@ -13777,10 +15313,21 @@ def _run_agent_streaming(
                 with _profiles_api.profile_scope_for_detached_worker(
                     _resolved_profile_name, "credential self-heal", logger_override=logger
                 ):
-                    _heal_rt = _attempt_credential_self_heal(
-                        resolved_provider or '', session_id, _agent_lock,
-                        target_model=resolved_model,
-                    )
+                    if _alias_route is not None:
+                        # Re-read the alias's own credential source: the
+                        # original route would resend the stale key.
+                        _alias_heal = _attempt_model_alias_credential_self_heal(
+                            provider_context, model, session_id, _agent_lock,
+                            target_model=resolved_model,
+                        )
+                        _heal_rt = None
+                        if _alias_heal is not None:
+                            _alias_route, _heal_rt = _alias_heal
+                    else:
+                        _heal_rt = _attempt_credential_self_heal(
+                            resolved_provider or '', session_id, _agent_lock,
+                            target_model=resolved_model,
+                        )
                 if _heal_rt is not None:
                     logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
                     _self_healed = True
@@ -13803,11 +15350,18 @@ def _run_agent_streaming(
                     # above): replacing only provider/key/base_url would leave
                     # the pre-heal credential_pool / api_mode / ACP fields on a
                     # custom endpoint that owns none of them.
-                    _runtime_bundle = _resolve_runtime_connection_bundle(
-                        resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
-                        profile_name=_resolved_profile_name,
-                        custom_provider_lookup=_session_requested_provider,
-                    )
+                    if _alias_route is not None:
+                        _runtime_bundle = _resolve_model_alias_connection_bundle(
+                            _alias_route,
+                            _heal_rt,
+                            profile_name=_resolved_profile_name,
+                        )
+                    else:
+                        _runtime_bundle = _resolve_runtime_connection_bundle(
+                            resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
+                            profile_name=_resolved_profile_name,
+                            custom_provider_lookup=_session_requested_provider,
+                        )
                     _heal_route_verdict = custom_provider_route_error(_runtime_bundle)
                     if _heal_route_verdict is not None:
                         # The refreshed credential did not produce a routable
@@ -13908,6 +15462,9 @@ def _run_agent_streaming(
                             task_id=session_id,
                             persist_user_message=msg_text,
                             persist_user_timestamp=_heal_persist_user_timestamp,
+                            legacy_row_identity_owner=(
+                                _active_turn_identity if _cancelled_journal_turn_owner(s.messages) else None
+                            ),
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
@@ -14204,6 +15761,33 @@ def _run_agent_streaming(
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
+        # Mirror the workspace into state.db sessions.cwd on EVERY exit (success,
+        # provider error, exception, cancel): the Agent creates the row during
+        # run_conversation() but only stamps cwd for CLI sources, so Desktop
+        # filed WebUI sessions under "Home". Never creates a row, and only
+        # touches rows whose source is "webui".
+        # The worker-held ``s`` may be a detached snapshot (cancel admitted a
+        # successor, or /api/session/update moved the workspace while this
+        # worker unwound), so the CURRENT session is resolved under the
+        # canonical lock when the write runs, failing closed when it cannot be
+        # resolved. The write itself runs in the background: SessionDB retries
+        # for up to ~20 s on a busy state.db and must not delay cleanup (the
+        # run stays registered until then and the next send would get a 409).
+        if s is not None and agent is not None:
+            try:
+                from api.state_sync import sync_session_cwd_background
+                _cwd_lock = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
+
+                def _resolve_cwd_target(_s=s, _lock=_cwd_lock):
+                    with _lock:
+                        _cur = _resolve_current_session_for_write(_s)
+                        if _cur is None:
+                            return None
+                        return (_cur.session_id, _cur.workspace, getattr(_cur, 'profile', None))
+
+                sync_session_cwd_background(_resolve_cwd_target)
+            except Exception:
+                logger.debug("Failed to schedule session cwd sync", exc_info=True)
         _clear_thread_env()  # TD1: always clear thread-local context
         if _streaming_cron_profile_home_token is not None:
             _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
@@ -14737,6 +16321,12 @@ def cancel_stream(stream_id: str) -> bool:
                     )
                     _emit_cancel_event = False
                     return True
+                # Decide the saved-partial path before creating a provisional
+                # journal-only owner. Existing partials must remain available
+                # to the next-send history through the established projection.
+                _partial_msg = _build_partial_message(
+                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
+                )
                 # ── Preserve the user's typed message before clearing pending state (#1298) ──
                 # The agent's internal messages list (where the user message was appended at
                 # the start of run_conversation()) may not have been merged back into
@@ -14754,18 +16344,24 @@ def cancel_stream(stream_id: str) -> bool:
                 # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
                 # in unit tests using Mock sessions) cannot escape and skip the rest of
                 # the cleanup.
+                _cancel_turn_start = None
+                _cancel_turn_token = None
                 try:
                     _pending_user = getattr(_cs, 'pending_user_message', None)
                     _pending_source = getattr(_cs, 'pending_user_source', None)
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
+                    _cancel_turn_token = build_active_turn_token(stream_id, _pending_started)
                     _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
                     if _pending_user and _msgs_for_recovery is not None:
                         _last_user = None
-                        for _m in reversed(_msgs_for_recovery):
+                        _last_user_idx = None
+                        for _idx in range(len(_msgs_for_recovery) - 1, -1, -1):
+                            _m = _msgs_for_recovery[_idx]
                             if isinstance(_m, dict) and _m.get('role') == 'user':
                                 _last_user = _m
+                                _last_user_idx = _idx
                                 break
                         _already_persisted = False
                         if _last_user is not None:
@@ -14781,19 +16377,109 @@ def cancel_stream(stream_id: str) -> bool:
                                 # Tolerate the workspace prefix the streaming thread prepends.
                                 if _pending_user == _last_content or _pending_user in _last_content:
                                     _already_persisted = True
-                        if not _already_persisted:
-                            _recovered_ts = int(time.time())
-                            if isinstance(_pending_started, (int, float)) and _pending_started > 0:
-                                _recovered_ts = int(_pending_started)
+                        if _already_persisted:
+                            _cancel_turn_start = _last_user_idx
+                        else:
+                            _recovered_ts = _recovered_pending_timestamp(_pending_started)
                             _user_turn: dict = {
                                 'role': 'user',
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn,
+                                _pending_source,
+                                active_turn_token=_cancel_turn_token,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
+                            _cancel_turn_start = len(_msgs_for_recovery) - 1
+
+                        if isinstance(_cancel_turn_start, int):
+                            # Bind the durable cancel hook to the same exact turn
+                            # identity used by normal settlement. A display ordinal
+                            # cannot be translated into provider context after
+                            # compression because the two lists may have different
+                            # user-row counts.
+                            _cancel_owner = _msgs_for_recovery[_cancel_turn_start]
+                            if _cancel_turn_token:
+                                stamp_message_source(
+                                    _cancel_owner,
+                                    _pending_source,
+                                    active_turn_token=_cancel_turn_token,
+                                )
+
+                            if _partial_msg is None:
+                                # Provisional recovery boundary, not a queued
+                                # request. Only journal-only Stop needs an owner
+                                # awaiting durable model-visible output.
+                                _cancel_owner['_recovered'] = True
+                                # Keep the cancelled user boundary in provider context
+                                # so a later exact-stream recovery can be inserted before
+                                # a successor instead of becoming orphaned display state.
+                                from api.models import (
+                                    _append_recovered_turn_to_context,
+                                    _message_matches_pending_checkpoint,
+                                )
+
+                                _context_messages = getattr(_cs, 'context_messages', None)
+                                if not _cancel_turn_token:
+                                    _append_recovered_turn_to_context(_cs, _cancel_owner)
+                                elif not isinstance(_context_messages, list):
+                                    # Let the existing helper initialize context from
+                                    # the now-token-bearing display history.
+                                    _append_recovered_turn_to_context(_cs, _cancel_owner)
+                                else:
+                                    _token_matches = [
+                                        _row
+                                        for _row in _context_messages
+                                        if (
+                                            isinstance(_row, dict)
+                                            and _row.get('role') == 'user'
+                                            and _row.get('_active_turn_token') == _cancel_turn_token
+                                        )
+                                    ]
+                                    for _context_owner in _token_matches:
+                                        _context_owner['_recovered'] = True
+                                    if not _token_matches:
+                                        _strict_matches = [
+                                            _row
+                                            for _row in _context_messages
+                                            if _message_matches_pending_checkpoint(
+                                                _row,
+                                                _pending_user,
+                                                _pending_started,
+                                                _pending_source,
+                                                _pending_atts,
+                                            )
+                                        ]
+                                        _tail = _context_messages[-1] if _context_messages else None
+                                        if (
+                                            len(_strict_matches) == 1
+                                            and _strict_matches[0] is _tail
+                                            and isinstance(_tail, dict)
+                                            and not _tail.get('_active_turn_token')
+                                        ):
+                                            # Only a unique tokenless checkpoint at
+                                            # the exact context tail may be upgraded.
+                                            # Repeated equal prompts or a row already
+                                            # owned by another token are ambiguous and
+                                            # must remain untouched.
+                                            stamp_message_source(
+                                                _tail,
+                                                _pending_source,
+                                                active_turn_token=_cancel_turn_token,
+                                            )
+                                            _tail['_recovered'] = True
+                                        elif not _strict_matches:
+                                            # The current pending user is absent from
+                                            # provider context. Append the exact
+                                            # token-bearing owner rather than binding
+                                            # an older content-equal row.
+                                            _append_recovered_turn_to_context(
+                                                _cs, _cancel_owner
+                                            )
                 except Exception:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",
@@ -14824,9 +16510,6 @@ def cancel_stream(stream_id: str) -> bool:
                 # call and strict providers would 400 on the malformed entries.
                 # The underscore-prefixed key is not in the whitelist, so sanitize
                 # strips it. The UI reads it via static/messages.js. (v0.50.251.)
-                _partial_msg = _build_partial_message(
-                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
-                )
                 _cancel_marker_exists = _session_has_cancel_marker(_cs)
                 _cancel_marker_idx = len(_cs.messages)
                 if _cancel_marker_exists:
@@ -14864,6 +16547,42 @@ def cancel_stream(stream_id: str) -> bool:
                         'provider_details_label': 'Cancellation details',
                         'timestamp': int(time.time()),
                     })
+
+                # A journal-only turn has no in-memory partial to carry into the
+                # cancel save. Persist an exact-stream recovery capability on
+                # its marker before returning success. If this process exits
+                # while the old worker is unwinding, a later ordinary session
+                # read can recover already-emitted journal output without
+                # replaying provider execution. Live-buffer partials keep their
+                # existing path and deliberately do not opt into this slice.
+                if (
+                    _partial_msg is None
+                    and isinstance(_cancel_turn_start, int)
+                    and _cancel_turn_token
+                ):
+                    _cancel_retry_marker = None
+                    for _candidate in reversed(_cs.messages):
+                        if not isinstance(_candidate, dict) or _candidate.get('role') != 'assistant':
+                            continue
+                        _candidate_content = str(_candidate.get('content') or '').strip().lower()
+                        if (
+                            _candidate.get('_error') is True
+                            and any(pattern in _candidate_content for pattern in _CANCEL_MARKER_PATTERNS)
+                        ):
+                            _cancel_retry_marker = _candidate
+                            break
+                    if _cancel_retry_marker is not None:
+                        _cancel_retry_marker['_pending_journal_recovery'] = True
+                        _cancel_retry_marker['_journal_retry_kind'] = 'cancelled'
+                        _cancel_retry_marker['_journal_retry_stream_id'] = str(stream_id)
+                        _cancel_retry_marker['_journal_retry_attempts'] = 0
+                        _cancel_retry_marker['_journal_retry_first_seen_ts'] = int(time.time())
+                        from api.models import _JOURNAL_RECOVERY_PROCESS_TOKEN
+
+                        _cancel_retry_marker['_journal_retry_process_token'] = (
+                            _JOURNAL_RECOVERY_PROCESS_TOKEN
+                        )
+                        _cancel_retry_marker['_journal_retry_owner_token'] = _cancel_turn_token
                 _cs.save()
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:

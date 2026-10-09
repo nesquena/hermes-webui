@@ -3,7 +3,9 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -754,6 +756,32 @@ def test_update_cache_is_scoped_by_agent_inclusion(tmp_path):
     assert calls == ['webui', 'webui', 'agent']
 
 
+@pytest.mark.parametrize('in_progress,force', [(False, False), (True, True)])
+def test_check_for_updates_marks_every_cache_return(in_progress, force, monkeypatch):
+    cache = {
+        'webui': {'name': 'webui', 'behind': 1},
+        'agent': {
+            'name': 'agent',
+            'behind': 1,
+            'recovery': {'force': False, 'clear_lock': False},
+        },
+        'checked_at': time.time(),
+        'include_agent': True,
+        'channel': 'stable',
+    }
+    monkeypatch.setattr(updates, '_check_in_progress', in_progress)
+    monkeypatch.setattr(
+        updates,
+        '_check_repo',
+        lambda *a, **k: pytest.fail('a cache return must not start a repo check'),
+    )
+    with patch.dict(updates._update_cache, cache, clear=True):
+        result = updates.check_for_updates(
+            force=force, include_agent=True, channel='stable',
+        )
+    assert result['cached'] is True
+
+
 def test_run_git_returns_stderr_on_failure(tmp_path):
     """When a git command fails, _run_git should return stderr (not empty string)."""
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
@@ -784,6 +812,21 @@ def test_run_git_returns_stdout_when_no_stderr(tmp_path):
     assert 'Already up to date' in out
 
 
+def test_run_git_preserves_whitespace_in_nul_delimited_output(tmp_path):
+    """Path-bearing -z output must remain byte-for-byte intact."""
+    with patch.object(updates.shutil, 'which', return_value='/usr/bin/git'), \
+         patch('subprocess.run') as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=' lead.txt\0trailing.txt \0',
+            stderr='',
+        )
+        out, ok = updates._run_git(['diff-tree', '--name-only', '-z'], tmp_path)
+
+    assert ok is True
+    assert out == ' lead.txt\0trailing.txt \0'
+
+
 def test_run_git_returns_exit_code_when_no_output(tmp_path):
     """If both stdout and stderr are empty, report the exit code."""
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
@@ -797,6 +840,69 @@ def test_run_git_returns_exit_code_when_no_output(tmp_path):
 
     assert ok is False
     assert 'status 1' in out
+
+
+def test_run_git_never_launches_an_interactive_credential_prompt(tmp_path, monkeypatch):
+    """A background update check must not be able to open a credential prompt.
+
+    Reported symptom: the WebUI was checking for updates from a desktop session,
+    so the git child inherited ``SSH_ASKPASS=/usr/bin/ksshaskpass`` and
+    ``DISPLAY``. Its ``git fetch`` reached an origin that answered 401, git fell
+    back to the inherited askpass helper, and a modal "Enter SSH Credentials"
+    window appeared on the user's desktop while the check blocked.
+
+    Bind the test to that scene: serve a 401 the way an HTTPS remote does,
+    install an askpass helper that records being run, and assert the helper is
+    never executed. The fetch itself must fail closed instead of prompting.
+    """
+    marker = tmp_path / 'askpass-was-invoked'
+    helper = tmp_path / 'askpass-helper.sh'
+    helper.write_text(
+        f'#!/bin/sh\ntouch "{marker}"\necho placeholder-credential\n', encoding='utf-8'
+    )
+    helper.chmod(0o755)
+    # The environment a desktop WebUI session hands to its children.
+    monkeypatch.setenv('GIT_ASKPASS', str(helper))
+    monkeypatch.setenv('SSH_ASKPASS', str(helper))
+    monkeypatch.setenv('SSH_ASKPASS_REQUIRE', 'prefer')
+    monkeypatch.setenv('DISPLAY', ':0')
+    monkeypatch.delenv('GIT_TERMINAL_PROMPT', raising=False)
+
+    requests_seen = []
+
+    class _AuthRequiredHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib handler naming
+            requests_seen.append(self.path)
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', 'Basic realm="git"')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(('127.0.0.1', 0), _AuthRequiredHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        _git(repo, 'init', '-q')
+        _git(
+            repo, 'remote', 'add', 'origin',
+            f'http://127.0.0.1:{server.server_address[1]}/origin.git',
+        )
+        out, ok = updates._run_git(['fetch', 'origin'], repo, timeout=30)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert requests_seen, (
+        'the fetch never reached the 401 remote, so this test proves nothing'
+    )
+    assert not marker.exists(), (
+        f'the update check launched an interactive credential helper: {out!r}'
+    )
+    assert ok is False, out
 
 
 def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):
@@ -1825,3 +1931,289 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
     # No stash pop on a clean pull-lock path.
     assert not any(c[0] == 'stash' for c in git_calls)
 
+
+def test_update_recovery_hints_report_conflict_and_lock(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    (tmp_path / '.git' / 'index.lock').write_text('', encoding='utf-8')
+    monkeypatch.setattr(updates, '_run_git', lambda *a, **k: ('UU src/app.py\0', True))
+    hints = updates._update_recovery_hints(tmp_path)
+    assert hints == {'force': True, 'clear_lock': True}
+
+
+def test_update_recovery_hints_clear_on_clean_repo(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(
+        updates,
+        '_run_git',
+        lambda args, *a, **k: ('0\t1', True) if args[0] == 'rev-list' else ('', True),
+    )
+    assert updates._update_recovery_hints(tmp_path, 'origin/main') == {
+        'force': False,
+        'clear_lock': False,
+    }
+
+
+def test_update_recovery_hints_keep_force_for_diverged_checkout(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(
+        updates,
+        '_run_git',
+        lambda args, *a, **k: ('2\t3', True) if args[0] == 'rev-list' else ('', True),
+    )
+    assert updates._update_recovery_hints(tmp_path, 'origin/main')['force'] is True
+
+
+def test_update_recovery_hints_keep_force_for_untracked_collision(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, *a, **k):
+        if 'status' in args:
+            return '?? src/generated.py\0', True
+        if args[0] == 'rev-list':
+            return '0\t1', True
+        if args[0] == 'diff-tree':
+            return 'src/generated.py\0', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    assert updates._update_recovery_hints(tmp_path, 'origin/main')['force'] is True
+
+
+def test_update_recovery_hints_treat_pattern_characters_as_literal_names(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    calls = []
+
+    def fake_git(args, *a, **k):
+        calls.append(args)
+        if 'status' in args:
+            return '?? src/generated[1].py\0', True
+        if args[0] == 'rev-list':
+            return '0\t1', True
+        if args[0] == 'diff-tree':
+            return 'src/generated[1].py\0', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    assert updates._update_recovery_hints(tmp_path, 'origin/main')['force'] is True
+    diff_tree = next(args for args in calls if args[0] == 'diff-tree')
+    assert diff_tree == [
+        'diff-tree', '-r', '--no-renames', '--diff-filter=A', '--name-only', '-z',
+        'HEAD', 'origin/main',
+    ]
+
+
+def test_update_recovery_hints_clear_for_benign_untracked_file(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, *a, **k):
+        if 'status' in args:
+            return '?? notes.txt\0', True
+        if args[0] == 'rev-list':
+            return '0\t1', True
+        if args[0] == 'diff-tree':
+            return '', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    assert updates._update_recovery_hints(tmp_path, 'origin/main')['force'] is False
+
+
+def test_update_recovery_hints_stay_unknown_when_status_probe_fails(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(updates, '_run_git', lambda *a, **k: ('fatal: bad object', False))
+    hints = updates._update_recovery_hints(tmp_path)
+    assert hints['force'] is None
+    assert hints['clear_lock'] is False
+
+
+@pytest.mark.parametrize(
+    'untracked,incoming',
+    [
+        ('collision/local.txt', 'collision'),
+        ('foo', 'foo/bar.txt'),
+        (':(top)x.txt', ':(top)x.txt'),
+    ],
+)
+def test_update_recovery_hints_detect_path_and_ancestor_collisions(
+    tmp_path, monkeypatch, untracked, incoming,
+):
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, *a, **k):
+        if 'status' in args:
+            return f'?? {untracked}\0', True
+        if args[0] == 'rev-list':
+            return '0\t1', True
+        if args[0] == 'diff-tree':
+            return f'{incoming}\0', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    assert updates._update_recovery_hints(tmp_path, 'origin/main')['force'] is True
+
+
+def test_update_recovery_hints_status_is_read_only_and_disables_renames(
+    tmp_path, monkeypatch,
+):
+    (tmp_path / '.git').mkdir()
+    calls = []
+
+    def fake_git(args, *a, **k):
+        calls.append(args)
+        if 'status' in args:
+            return 'R  renamed.txt\0', True
+        if args[0] == 'rev-list':
+            return '0\t1', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    assert updates._update_recovery_hints(tmp_path, 'origin/main')['force'] is False
+    status = next(args for args in calls if 'status' in args)
+    assert status[0] == '--no-optional-locks'
+    assert '--no-renames' in status
+
+
+def test_update_recovery_hints_leave_gitfile_lock_state_unknown(tmp_path, monkeypatch):
+    (tmp_path / '.git').write_text('gitdir: ../worktrees/agent\n', encoding='utf-8')
+    monkeypatch.setattr(updates, '_run_git', lambda *a, **k: ('UU src/app.py\0', True))
+    hints = updates._update_recovery_hints(tmp_path)
+    assert hints == {'force': True, 'clear_lock': None}
+
+
+@pytest.mark.parametrize(
+    'untracked,incoming',
+    [
+        ('collision/local.txt', 'collision'),
+        ('foo', 'foo/bar.txt'),
+        (':weird.txt', ':weird.txt'),
+        (' lead.txt', ' lead.txt'),
+    ],
+)
+def test_update_recovery_hints_real_git_collision_matrix(
+    tmp_path, untracked, incoming,
+):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    (repo / 'base.txt').write_text('base\n', encoding='utf-8')
+    _git(repo, 'add', 'base.txt')
+    _git(repo, 'commit', '-q', '-m', 'base')
+    _git(repo, 'branch', 'base')
+    _git(repo, 'checkout', '-q', '-b', 'incoming')
+    incoming_path = repo / incoming
+    incoming_path.parent.mkdir(parents=True, exist_ok=True)
+    incoming_path.write_text('incoming\n', encoding='utf-8')
+    _git(repo, '--literal-pathspecs', 'add', '--', incoming)
+    _git(repo, 'commit', '-q', '-m', 'incoming')
+    _git(repo, 'checkout', '-q', 'base')
+    local_path = repo / untracked
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    local_path.write_text('local\n', encoding='utf-8')
+
+    hints = updates._update_recovery_hints(repo, 'incoming')
+
+    assert hints == {'force': True, 'clear_lock': False}
+
+
+def test_update_recovery_hints_nested_untracked_repo_overlap_is_inconclusive(tmp_path):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    (repo / 'base.txt').write_text('base\n', encoding='utf-8')
+    _git(repo, 'add', 'base.txt')
+    _git(repo, 'commit', '-q', '-m', 'base')
+    _git(repo, 'branch', 'base')
+    _git(repo, 'checkout', '-q', '-b', 'incoming')
+    (repo / 'foo').mkdir()
+    (repo / 'foo' / 'bar.txt').write_text('incoming\n', encoding='utf-8')
+    _git(repo, 'add', 'foo/bar.txt')
+    _git(repo, 'commit', '-q', '-m', 'incoming')
+    _git(repo, 'checkout', '-q', 'base')
+    _git(repo, 'init', '-q', 'foo')
+    (repo / 'foo' / 'unrelated.txt').write_text('local\n', encoding='utf-8')
+
+    hints = updates._update_recovery_hints(repo, 'incoming')
+
+    assert hints == {'force': None, 'clear_lock': False}
+
+
+def test_update_recovery_hints_nested_untracked_repo_below_incoming_blob_is_inconclusive(tmp_path):
+    """A collapsed ``?? foo/bar/`` entry under an incoming blob ``foo`` is a blocker git refuses; never report it gone."""
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    (repo / 'base.txt').write_text('base\n', encoding='utf-8')
+    _git(repo, 'add', 'base.txt')
+    _git(repo, 'commit', '-q', '-m', 'base')
+    _git(repo, 'branch', 'base')
+    _git(repo, 'checkout', '-q', '-b', 'incoming')
+    (repo / 'foo').write_text('incoming blob\n', encoding='utf-8')
+    _git(repo, 'add', 'foo')
+    _git(repo, 'commit', '-q', '-m', 'incoming')
+    _git(repo, 'checkout', '-q', 'base')
+    (repo / 'foo').mkdir()
+    _git(repo, 'init', '-q', 'foo/bar')
+    (repo / 'foo' / 'bar' / 'x.txt').write_text('local\n', encoding='utf-8')
+
+    hints = updates._update_recovery_hints(repo, 'incoming')
+
+    assert hints == {'force': None, 'clear_lock': False}
+
+
+def test_update_recovery_hints_real_git_staged_rename_is_not_a_conflict(tmp_path):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    (repo / 'AUTHORS').write_text('maintainers\n', encoding='utf-8')
+    _git(repo, 'add', 'AUTHORS')
+    _git(repo, 'commit', '-q', '-m', 'base')
+    _git(repo, 'mv', 'AUTHORS', 'renamed.txt')
+
+    hints = updates._update_recovery_hints(repo, 'HEAD')
+
+    assert hints == {'force': False, 'clear_lock': False}
+
+
+def test_update_recovery_hints_real_git_incoming_rename_collision(tmp_path):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    (repo / 'source.txt').write_text('same contents\n', encoding='utf-8')
+    _git(repo, 'add', 'source.txt')
+    _git(repo, 'commit', '-q', '-m', 'base')
+    _git(repo, 'branch', 'base')
+    _git(repo, 'checkout', '-q', '-b', 'incoming')
+    _git(repo, 'mv', 'source.txt', 'target.txt')
+    _git(repo, 'commit', '-q', '-m', 'rename source to target')
+    _git(repo, 'checkout', '-q', 'base')
+    (repo / 'target.txt').write_text('local untracked\n', encoding='utf-8')
+
+    hints = updates._update_recovery_hints(repo, 'incoming')
+
+    assert hints == {'force': True, 'clear_lock': False}
+
+
+def test_check_repo_attaches_recovery_hints(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(updates, '_check_repo_release', lambda *a, **k: None)
+
+    def fake_git(args, cwd, timeout=10):
+        if 'status' in args:
+            return 'UU src/app.py\0', True
+        return '', False  # fetch fails -> minimal stale payload
+
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    info = updates._check_repo(tmp_path, 'agent')
+    assert info is not None
+    assert info.get('stale_check') is True
+    assert info['recovery'] == {'force': True, 'clear_lock': False}

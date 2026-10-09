@@ -46,6 +46,13 @@ contributor guidance; it does not change runtime behavior or CI gates.
   work under #3926. Use it to distinguish shipped wiring from historical slice
   boundaries before changing live SSE, replay, settlement, `INFLIGHT`, or
   `renderMessages()` paths.
+- [`docs/architecture/transcript-auto-follow-scroll.md`](architecture/transcript-auto-follow-scroll.md):
+  implemented contract for transcript auto-follow: the pinned/unpinned state
+  model, the input-tail capture and reader-resume re-pinning rules (including
+  one-consumption-per-input and reader input outranking queued restores), and
+  the `overscroll-behavior-y: none` rationale for `.messages`. Start here
+  before changing the scroll listener, the settle writer, or the queued
+  live-render restore paths.
 - [`docs/rfcs/canonical-session-resolution.md`](rfcs/canonical-session-resolution.md):
   proposed contract for resolving URL routes, query parameters, localStorage,
   sidebar rows, and compression-lineage IDs to one canonical visible session
@@ -92,6 +99,15 @@ contributor guidance; it does not change runtime behavior or CI gates.
   `models_cache.json` refresh timestamps), the stat-identity fallbacks, and the
   schema/version stamps. Start here before changing model-catalog caching, the
   `/api/models` cache keys, or the Codex catalog dependency (#2443, #7540).
+- [`docs/architecture/send-path-model-provider.md`](architecture/send-path-model-provider.md):
+  current contract for which provider the browser routes an outgoing chat turn
+  to: the `_modelProviderForSend()` precedence order (explicit `@provider:model`
+  tag → dropdown provider **with** session-scoped pick evidence → the loaded
+  session's own provider → persisted state → `null`), why a bare dropdown match
+  is not intent after a restore, and the lifecycle of the picker's explicit-pick
+  marker. Start here before changing provider precedence for outgoing turns,
+  the picker's pick evidence, or restored-session provider resolution
+  (#7860, #7865).
 - [`docs/architecture/live-models-allowlist.md`](architecture/live-models-allowlist.md):
   current contract for how `/api/models/live` filters a custom provider's
   upstream catalog: the four signals in evaluation order (discovered catalog

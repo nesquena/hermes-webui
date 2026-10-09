@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-import yaml
+from api import yaml_compat as yaml
 
 from api.paths import _atomic_write_text
 from api.session_events import publish_session_list_changed
@@ -403,6 +403,11 @@ def _read_active_profile_file() -> str:
 _root_profile_name_cache: set[str] = {'default'}
 _root_profile_name_cache_lock = threading.Lock()
 _root_profile_name_cache_loaded = False
+
+
+def _root_profile_names_snapshot() -> set[str] | None:
+    with _root_profile_name_cache_lock:
+        return {str(name) for name in _root_profile_name_cache} if _root_profile_name_cache_loaded else None
 
 
 def _invalidate_root_profile_cache() -> None:
@@ -894,7 +899,7 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     env: dict[str, str] = {}
 
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
 
         cfg_path = home / 'config.yaml'
         cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
@@ -1520,26 +1525,35 @@ def profile_scope_for_detached_worker(
     Pass the profile name CAPTURED on the spawning thread (where the TLS is
     valid) into the worker, then enter this scope at the top of the worker body.
     It sets the request-profile TLS for this (worker) thread and applies the
-    profile env via ``profile_env_for_background_worker``, restoring both on exit.
-    No-op for the default/root profile.
+    profile env via ``profile_env_for_background_worker`` for named profiles,
+    restoring both on exit. An explicit default/root profile still binds the TLS
+    but keeps the existing root process environment. Only an empty profile name
+    is a no-op.
 
     Unlike ``profile_env_for_active_request`` (which reads the *current* thread's
-    TLS and must NOT clear it — the request thread keeps using it after the call),
-    this sets and then CLEARS the TLS, which is correct for a dedicated worker
-    thread that has no other use for it.
+    TLS), this temporarily replaces the worker thread's TLS and restores the exact
+    previous profile afterward. That keeps nested scopes and reused executor
+    threads compositional on both normal and exceptional exits.
     """
     name = (profile_name or "").strip()
-    if not name or _is_root_profile(name):
+    if not name:
         yield
         return
+    previous_profile = getattr(_tls, "profile", None)
     set_request_profile(name)
     try:
-        with profile_env_for_background_worker(
-            name, purpose, logger_override=logger_override
-        ):
+        if _is_root_profile(name):
             yield
+        else:
+            with profile_env_for_background_worker(
+                name, purpose, logger_override=logger_override
+            ):
+                yield
     finally:
-        clear_request_profile()
+        if previous_profile is None:
+            clear_request_profile()
+        else:
+            set_request_profile(previous_profile)
 
 
 def _set_hermes_home(home: Path):
@@ -1725,8 +1739,10 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         if not home.is_dir():
             raise ValueError(f"Profile '{name}' does not exist.")
 
+    # The skill-stats cache is deliberately left alone here (#7940). A profile's
+    # counts come from its own config.yaml and SKILL.md files, so which profile
+    # is active changes none of them, and the mtime probe catches real changes.
     with _profile_lock:
-        _SKILLS_STATS_CACHE.clear()
         if process_wide:
             global _active_profile
             _active_profile = name
@@ -1754,7 +1770,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     else:
         # Direct disk read — does not touch _cfg_cache
         try:
-            import yaml as _yaml
+            from api import yaml_compat as _yaml
             cfg_path = home / 'config.yaml'
             cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
             if not isinstance(cfg, dict):
@@ -1830,7 +1846,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
-_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float]] = {}
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float, str | None]] = {}
 _SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because .clear() handles programmatic changes
 
 # Per-profile compute locks (#5364). Without these, concurrent cold-startup
@@ -1857,6 +1873,21 @@ def _skills_stats_lock_for(profile_dir: Path) -> threading.Lock:
             lock = threading.Lock()
             _SKILLS_STATS_LOCKS[profile_dir] = lock
         return lock
+
+
+def _active_org_marker(skills_dir: Path) -> str | None:
+    """The org whose mirror counts, read the way the agent's index walk reads it.
+
+    None when there is no marker, or no agent to gate on it.
+    """
+    try:
+        from agent.skill_utils import read_active_org_id
+    except Exception:
+        return None
+    try:
+        return read_active_org_id(skills_dir)
+    except Exception:
+        return None
 
 
 def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
@@ -1920,7 +1951,7 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     config_path = profile_dir / "config.yaml"
     if config_path.exists():
         try:
-            import yaml as _yaml
+            from api import yaml_compat as _yaml
             cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
             if isinstance(cfg, dict):
                 skills_cfg = cfg.get("skills")
@@ -1995,23 +2026,30 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     # Always run the cheap stat-only probe first — this is what catches an
     # out-of-band create/edit/delete within the same request (not after the TTL).
     current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    current_org = _active_org_marker(skills_dir)
 
     # Read via .get() (not membership-check + index) so a concurrent
     # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
     # between the `in` test and the lookup.
     cached = _SKILLS_STATS_CACHE.get(profile_dir)
     if cached is not None:
-        enabled, compat, cached_mtime_ns, expiry = cached
+        enabled, compat, cached_mtime_ns, expiry, cached_org = cached
         # Fast path: files unchanged (by the cheap probe above) AND still within
         # the TTL → serve cached without re-reading any SKILL.md. The mtime probe
         # already ran, so an out-of-band change is caught immediately regardless
         # of the TTL. On TTL expiry we deliberately fall through to a full
         # recompute (the TTL is a safety net for mtime-preserving changes that
         # the probe can't see — e.g. a git checkout that restores the old mtime).
-        if current_mtime_ns == cached_mtime_ns and now < expiry:
+        # The active-org marker is carried IN the same tuple, so a reader never
+        # sees a new org beside stale counts (single atomic publish below).
+        if (
+            current_mtime_ns == cached_mtime_ns
+            and now < expiry
+            and cached_org == current_org
+        ):
             return enabled, compat
 
-    # Cache miss, mtime changed, or TTL expired — serialize per-profile so a
+    # Cache miss, mtime changed, active org changed, or TTL expired — serialize per-profile so a
     # burst of concurrent misses (cold startup) collapses to ONE compute instead
     # of a thundering herd of simultaneous os.walk + SKILL.md parses (#5364).
     lock = _skills_stats_lock_for(profile_dir)
@@ -2021,17 +2059,25 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # still matches and the entry is within its TTL — no second compute.
         cached = _SKILLS_STATS_CACHE.get(profile_dir)
         if cached is not None:
-            enabled, compat, cached_mtime_ns, expiry = cached
-            if current_mtime_ns == cached_mtime_ns and time.time() < expiry:
+            enabled, compat, cached_mtime_ns, expiry, cached_org = cached
+            if (
+                current_mtime_ns == cached_mtime_ns
+                and time.time() < expiry
+                and cached_org == current_org
+            ):
                 return enabled, compat
 
         # Snapshot mtime BEFORE compute so any concurrent SKILL.md write during
         # the compute window causes a mismatch on the next probe instead of
         # silently serving stale data (TOCTOU).
         new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+        new_org = _active_org_marker(skills_dir)
         res = _compute_profile_skills_stats(profile_dir)
+        # Publish counts + mtime + org in ONE tuple assignment: a lock-free
+        # fast-path reader sees either the whole old entry or the whole new one,
+        # never a new org tag beside pre-rewrite counts.
         _SKILLS_STATS_CACHE[profile_dir] = (
-            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL
+            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL, new_org
         )
         return res
 
@@ -2447,7 +2493,7 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
         return
     config_path = profile_dir / 'config.yaml'
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return
     cfg = {}
@@ -2605,7 +2651,7 @@ def _write_model_defaults_to_config(
         return
     config_path = profile_dir / 'config.yaml'
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return
     cfg = {}

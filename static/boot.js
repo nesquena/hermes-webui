@@ -158,6 +158,54 @@ async function _finalizeComposerPrefillOnBoot(prefillIntent){
 
 // Mobile navigation.
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
+// When the user deliberately closes the panel (e.g. tapping the chat box to
+// type on mobile), the on-screen keyboard fires a viewport resize which
+// re-runs syncWorkspacePanelState(). That used to see the still-visible
+// preview + 'closed' mode and force the panel back open — intrusive while
+// typing. This flag records the deliberate close so the resize sync leaves
+// the panel alone; the preview DOM (file + scroll position) stays intact so
+// reopening restores exactly where the user was reading.
+let _workspacePanelUserDismissed=false;
+// Monotonic ACTION-generation counter, advanced by every deliberate
+// `closeWorkspacePanel()` on ANY viewport (never on a clear). An artifact open
+// captures it before its awaits and only promotes the panel if it is unchanged:
+// a read that was still pending when the user closed the panel must not erase
+// that newer intent and force the panel back open.
+//
+// The fence is deliberately NOT the same thing as `_workspacePanelUserDismissed`:
+// that flag is the mobile-only *resize* guard, while the generation guards the
+// caller-to-sink race (`openArtifactPath` → `ensureWorkspacePreviewVisible`) and
+// therefore has to advance on desktop too. Tying the fence to the flag alone left
+// a desktop hole: close during an in-flight read bumped nothing, so the read saw
+// an unchanged generation and reopened the panel over the newer close
+// (#6710 gate, 21 Sep).
+//
+// It must NOT bump when the flag is cleared. Clearing is a promote (explicit
+// reopen via `openWorkspacePanel`, or the artifact reveal itself), and the
+// user's newest intent there is "panel open" — the same thing the in-flight
+// reveal wants. Counting it as a change made the guard reject the very read
+// the reopen agreed with, so an explicit reopen during a pending read skipped
+// the promotion and left the panel in browse mode without the artifact
+// (#6710 review: "Reopen invalidates artifact reveal").
+let _workspacePanelDismissGen=0;
+function _setWorkspacePanelDismissed(dismissed){
+  if(dismissed) _workspacePanelDismissGen++;
+  _workspacePanelUserDismissed=dismissed;
+}
+// Deliberate close: always advance the action-generation fence (all viewports),
+// and record the resize guard only where it applies. Splitting the two is what
+// closes the desktop race: `closeWorkspacePanel()` used to call the setter only
+// on compact, so a desktop close during an in-flight artifact read advanced
+// nothing and the read's `_dismissalUnchanged()` check still passed.
+function _markWorkspacePanelClosedByUser(){
+  const compact=_isCompactWorkspaceViewport();
+  // The setter bumps the fence when it is told about a dismissal, so pass the
+  // compact result (on desktop that writes "not dismissed" but must still
+  // advance the fence) and bump explicitly only for the non-compact case —
+  // calling the setter twice would double-increment on compact.
+  _setWorkspacePanelDismissed(compact);
+  if(!compact) _workspacePanelDismissGen++;
+}
 
 function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
@@ -247,7 +295,98 @@ function _hasWorkspacePreviewVisible(){
   return !!(preview&&preview.classList.contains('visible'));
 }
 
-function _setWorkspacePanelMode(mode){
+// Take an off-canvas panel out of the tab order (and of AT/hit-testing) while it
+// closes. The closed panels stay laid out so their slide-out can animate, which
+// leaves their whole subtree tabbable during the closing window — the subtree only
+// becomes invisibility:hidden (and therefore untabbable) once the animation ends.
+// A keyboard user who dismisses a drawer and immediately Tabs walks back into the
+// disappearing panel, and when the visibility flip lands the focus they just moved
+// is stranded on an invisible control: the exact failure this series removes.
+// inert closes that window with no delay and -- unlike display:none -- still lets the
+// transition play, so it is set only while the panel is closed (the open state clears
+// it, and content-selection closes that re-open the panel see it cleared too).
+// The CSS property would be the declarative home for this, but it is not yet a
+// computed value in every engine we support; the reflective HTML attribute is.
+function _setPanelInert(panel, open){
+  if(!panel)return;
+  // Arm only inside the panel's own compact drawer band. At wider widths the
+  // panel is a normal, visible pane, and the inert HTML attribute would kill it
+  // there no matter what the CSS says: closeMobileSidebar() runs on desktop too
+  // (opening a session calls it unconditionally, and _applySidebarState() calls
+  // it when leaving phone widths), so arming outside the drawer band would
+  // strand the desktop sidebar — the same trap the focus-rescue phone-band guard
+  // avoids.
+  //
+  // #7924: `inert` is a DOM attribute, not a CSS state, so an out-of-band call
+  // must still RECONCILE it rather than return early. Closing at 390px and then
+  // widening to 641/804/1280px (rotation, iPad split view, window resize) used
+  // to leave the desktop sidebar inert forever: the early return skipped the
+  // clear, and neither toggleSidebar() nor _applySidebarState() recovers it.
+  // So compute the armed state and set OR remove accordingly — an out-of-band
+  // close clears, a resize back into the band arms.
+  const compact = panel.classList.contains('sidebar')
+    ? _isPhoneWidthViewport()
+    : _isCompactWorkspaceViewport();
+  const armed = !open && compact;
+  try{
+    if(armed)panel.setAttribute('inert','');
+    else panel.removeAttribute('inert');
+  }catch(_){}
+}
+
+// Park focus somewhere real when an off-canvas panel closes out from under it (#7713).
+// The closed drawer/sidebar is visibility:hidden, so the browser keeps reporting the
+// now-invisible control as document.activeElement: a subsequent Tab restarts from that
+// dead node and focus appears to vanish for a press. Only rescue the focus when it is
+// actually inside the panel being closed — grabbing it unconditionally would yank a
+// user out of the composer mid-sentence on every close.
+//
+// `fallback` is the control that opened the panel, for the explicit-dismiss paths (the
+// "Close menu" X, the overlay, the drawer's collapse button). Handing focus back to the
+// invoker is the common drawer pattern (WAI-ARIA dialog, Bootstrap Offcanvas, Radix
+// Sheet, Material nav drawer): the next Tab then continues from where the user was,
+// instead of restarting at the top of the document. Content-selection closes leave it
+// undefined — they already move focus to the composer, and stealing it back to a
+// toolbar button would undo that.
+function _releaseFocusFromClosedPanel(panel, fallback){
+  if(!panel)return;
+  const active=document.activeElement;
+  if(!active||active===document.body)return;
+  if(!panel.contains(active))return;
+  if(fallback&&_isFocusableControl(fallback)){
+    try{fallback.focus();}catch(_){}
+    // A reachable-looking control can still refuse focus() (a display:none
+    // control that slipped past the guard, or one a concurrent close hid in the
+    // same tick). Verify it actually took focus, and fall through to the blur
+    // path when it did not: staying on the dead node inside the now-hidden
+    // panel is the bug this helper exists to prevent.
+    if(document.activeElement===fallback)return;
+  }
+  // <body> is the neutral landing spot: it holds no tab stop, so the next Tab
+  // continues from the document start.
+  try{active.blur();}catch(_){}
+}
+
+// A fallback is only worth focusing if it is actually reachable right now: the panel
+// closing may be about to reveal it, or a concurrent close may have hidden it. A hidden
+// control would take focus and immediately strand it, which is the bug we just fixed.
+function _isFocusableControl(el){
+  if(!el||!el.isConnected)return false;
+  if(el.disabled)return false;
+  // offsetParent is null for display:none subtrees; getComputedStyle catches
+  // visibility:hidden, which still lays the element out.
+  if(!el.offsetParent&&getComputedStyle(el).position!=='fixed')return false;
+  if(getComputedStyle(el).visibility==='hidden')return false;
+  // getClientRects is the rendered-truth check that closes the display:none hole:
+  // offsetParent is null for a fixed element whether it is painted or not, so the
+  // position:'fixed' exemption above let a display:none control pass. The edge
+  // toggle is display:none across the whole 641-900px band, and focus() on it
+  // silently fails, which lands the user on browser chrome at the next Tab.
+  if(!el.getClientRects().length)return false;
+  return true;
+}
+
+function _setWorkspacePanelMode(mode, returnFocusTo){
   const {layout,panel}= _workspacePanelEls();
   if(!layout||!panel)return;
   _workspacePanelMode=(mode==='browse'||mode==='preview')?mode:'closed';
@@ -258,8 +397,21 @@ function _setWorkspacePanelMode(mode){
   // so that toggleWorkspacePanel(false) from the toolbar doesn't clear the setting.
   try{localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');}catch(_){}
   layout.classList.toggle('workspace-panel-collapsed',!open);
+  // #7924: reconcile the inert attribute on EVERY mode change, not just inside
+  // the compact band. `inert` is a DOM attribute, not a CSS state, so closing
+  // the drawer at 800px and then widening to 1280px used to leave it set: the
+  // desktop branch never called the setter, and reopening gave a Files panel
+  // that rejected focus and clicks. Calling it here (armed = !open && compact)
+  // clears an out-of-band close and arms an in-band one.
+  _setPanelInert(panel, open);
   if(_isCompactWorkspaceViewport()){
     panel.classList.toggle('mobile-open',open);
+    // Open panels drop inert; closed ones take it for the whole closing window,
+    // not just after the 250ms visibility flip (see _setPanelInert).
+    // returnFocusTo is set only by the explicit-dismiss path (tapping outside the
+    // drawer), so focus returns to the edge toggle; automatic mode syncs leave it
+    // undefined and keep the plain <body> landing.
+    if(!open)_releaseFocusFromClosedPanel(panel, returnFocusTo);
   }else{
     panel.classList.remove('mobile-open');
   }
@@ -269,7 +421,14 @@ function _setWorkspacePanelMode(mode){
 function syncWorkspacePanelState(){
   const hasPreview=_hasWorkspacePreviewVisible();
   if(hasPreview){
-    if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
+    // Only auto-promote closed→preview when the user did NOT deliberately
+    // dismiss the panel (chat-tap close on mobile). The keyboard resize that
+    // follows typing would otherwise force the panel back open mid-reply.
+    // Scoped to compact viewports: the dismissal is a mobile-only concept (see
+    // closeWorkspacePanel), so desktop keeps its long-standing behaviour of
+    // restoring a still-visible preview on resize.
+    const dismissed=_isCompactWorkspaceViewport()&&_workspacePanelUserDismissed;
+    if(_workspacePanelMode==='closed'&&!dismissed) _setWorkspacePanelMode('preview');
     else syncWorkspacePanelUI();
     return;
   }
@@ -286,6 +445,9 @@ function syncWorkspacePanelState(){
 }
 
 function openWorkspacePanel(mode='browse'){
+  // Explicit user reopen — clear the dismissal flag so future previews
+  // auto-open the panel again normally.
+  _setWorkspacePanelDismissed(false);
   if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()&&!S._profileDefaultWorkspace)return;
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();
@@ -294,12 +456,32 @@ function openWorkspacePanel(mode='browse'){
   _setWorkspacePanelMode(mode);
 }
 
-function closeWorkspacePanel(){
-  _setWorkspacePanelMode('closed');
+function closeWorkspacePanel(returnFocusTo){
+  // Deliberate user close. Two separate records come out of this:
+  //
+  // 1. The ACTION-GENERATION fence advances on EVERY viewport. It guards the
+  //    caller-to-sink race — an artifact read in flight must not reopen the
+  //    panel over this close. Previously the fence advanced only via the
+  //    dismissal flag, and that write was compact-only, so a desktop close
+  //    during a pending read changed nothing and the read promoted the panel
+  //    anyway (#6710 gate, 21 Sep).
+  // 2. The resize guard (`_workspacePanelUserDismissed`) is set on COMPACT
+  //    viewports only: the resurrection it prevents is the soft-keyboard
+  //    viewport churn, which does not exist on desktop. Marking it
+  //    unconditionally would silently change desktop behaviour, where a resize
+  //    has always restored the still-visible preview.
+  //
+  // The preview (file + scroll position) stays in the DOM and is restored when
+  // the user reopens the panel.
+  _markWorkspacePanelClosedByUser();
+  _setWorkspacePanelMode('closed', returnFocusTo);
 }
 
 function ensureWorkspacePreviewVisible(){
-  if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
+  if(_workspacePanelMode==='closed'){
+    _setWorkspacePanelDismissed(false);
+    _setWorkspacePanelMode('preview');
+  }
   else syncWorkspacePanelUI();
 }
 
@@ -308,7 +490,20 @@ function handleWorkspaceClose(){
     clearPreview();
     return;
   }
-  closeWorkspacePanel();
+  // Explicit dismiss: hand focus back to the control that opened the panel, like
+  // the "Close menu" X. Capture it BEFORE closing — the panel sync disables this
+  // very button, and a disabled focused button drops focus to <body>, which once
+  // made the rescue a no-op and left the next Tab walking the hidden drawer.
+  closeWorkspacePanel(_workspacePanelInvokerForBand());
+}
+
+// The control that opens the workspace drawer in the band the code is running in.
+// The edge toggle only exists above 900px; at or below it the edge toggle is
+// display:none and the composer's workspace toggle is the reachable invoker.
+function _workspacePanelInvokerForBand(){
+  return _isCompactWorkspaceViewport()
+    ? $('btnWorkspacePanelToggle')
+    : $('btnWorkspacePanelEdgeToggle');
 }
 
 async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
@@ -400,6 +595,14 @@ function syncWorkspacePanelUI(){
 }
 
 function toggleMobileSidebar(){
+  // At >=641px the sidebar is the real desktop column, not the phone drawer.
+  // Route through toggleSidebar() so the click produces the persistent
+  // expanded/collapsed state instead of the drawer's temporary `mobile-open`
+  // class: that class is cleared by the next _applySidebarState() run, and on
+  // tablets/foldables a same-width resize happens constantly (on-screen
+  // keyboard, browser toolbar collapsing, split-screen), so the sidebar used
+  // to close by itself right after the user opened it.
+  if(_isDesktopWidth()){toggleSidebar();return;}
   const sidebar=document.querySelector('.sidebar');
   if(!sidebar)return;
   const isOpen=sidebar.classList.contains('mobile-open');
@@ -407,13 +610,31 @@ function toggleMobileSidebar(){
   else{
     try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
     sidebar.classList.remove('mobile-session-page');sidebar.classList.add('mobile-panel-drawer','mobile-open');
+    _setPanelInert(sidebar, true);
   }
 }
-function closeMobileSidebar(){
+function closeMobileSidebar(returnFocusTo){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open','mobile-session-page','mobile-panel-drawer');
   if(overlay)overlay.classList.remove('visible');
+  // Out of the tab order for the whole closing window, not just once the
+  // visibility flip lands 250ms later (see _setPanelInert).
+  _setPanelInert(sidebar, false);
+  // The parked sidebar is visibility:hidden (#7713), so rescue the focus if it was
+  // inside — otherwise the next Tab restarts from an invisible control. Guard on the
+  // phone-width band where the sidebar actually hides: this function also runs on
+  // desktop (opening a session calls it unconditionally), where the sidebar stays
+  // visible and blurring would dump keyboard focus onto <body> on every session open.
+  // `returnFocusTo` is set only by the explicit-dismiss paths (the "Close menu" X and
+  // the overlay) so focus lands back on the hamburger; the many content-selection
+  // callers leave it undefined and keep the plain <body> landing.
+  if(_isPhoneWidthViewport())_releaseFocusFromClosedPanel(sidebar, returnFocusTo);
+}
+// Explicit dismiss (X / overlay) hands focus back to the hamburger that opened the
+// drawer. The default closeMobileSidebar() stays the content-selection behaviour.
+function dismissMobileSidebar(){
+  closeMobileSidebar($('btnHamburger'));
 }
 
 const _PWA_SIDEBAR_SWIPE_EDGE=80;
@@ -458,6 +679,7 @@ function _openMobileSidebarFromGesture(){
   sidebar.classList.remove('mobile-session-page');
   sidebar.classList.add('mobile-panel-drawer');
   sidebar.classList.add('mobile-open');
+  _setPanelInert(sidebar, true);
 }
 
 function _onPwaSidebarSwipeStart(e){
@@ -530,6 +752,54 @@ function _isSidebarCollapsed(){
   return document.querySelector('.layout')?.classList.contains('sidebar-collapsed')||false;
 }
 
+// Tri-state sidebar collapse preference.
+//   '1'  = user explicitly collapsed the sidebar  -> collapsed everywhere
+//   '0'  = user explicitly opened the sidebar     -> open everywhere
+//   null = no explicit preference -> collapsed ONLY in the compact desktop
+//          band (641-900px, foldable/tablet inner screens) so the chat isn't
+//          squeezed by the 300px sidebar; open everywhere else (including
+//          phones <641px, which use the mobile slide-in drawer instead).
+// This is the single source of truth used by boot restore, bfcache restore,
+// and viewport-change handling so all paths agree on the default.
+function _sidebarShouldCollapse(){
+  let pref=null;
+  try{pref=localStorage.getItem(_SIDEBAR_COLLAPSED_KEY);}catch(_){pref=null;}
+  if(pref==='1') return true;
+  if(pref==='0') return false;
+  // No explicit preference: default collapsed only in the compact desktop band
+  // (641-900px). _isDesktopWidth() gates out phones (<641px) so the desktop
+  // sidebar-collapsed class is never applied to the mobile slide-in drawer.
+  return _isDesktopWidth() && _isCompactWorkspaceViewport();
+}
+
+// Shared non-persisting reconciliation of sidebar state. Calculates the
+// desired state via _sidebarShouldCollapse() and applies it to the DOM:
+//   1. when at desktop width, clear any mobile drawer state (mobile-open,
+//      mobile-panel-drawer, mobile-session-page, overlay) so the mobile
+//      classes cannot block the desktop collapse selector (:not(.mobile-open));
+//   2. apply the desktop sidebar-collapsed class ONLY while
+//      _isDesktopWidth() is true — an explicit stored '1' is left in
+//      localStorage untouched so it still applies at the next desktop-width
+//      transition, but a derived compact default is never persisted;
+//   3. synchronize ARIA after the final class state.
+// Used by boot restore, window resize, and bfcache restore so the lifecycle
+// paths cannot drift apart.
+function _applySidebarState(){
+  const layout=document.querySelector('.layout');
+  if(!layout) return;
+  const desktop=_isDesktopWidth();
+  if(desktop){
+    // Leaving phone widths: clear mobile drawer ownership so the desktop
+    // collapse selector (.sidebar:not(.mobile-open)) can take effect.
+    closeMobileSidebar();
+    layout.classList.toggle('sidebar-collapsed', _sidebarShouldCollapse());
+  } else {
+    // Phone width: mobile drawer owns the sidebar; clear desktop ownership.
+    layout.classList.remove('sidebar-collapsed');
+  }
+  if(typeof _syncSidebarAria==='function') _syncSidebarAria();
+}
+
 function _syncSidebarAria(){
   // Mirror the open/collapsed state on the active rail button via aria-expanded
   // so screen readers announce the toggle. Open=true, collapsed=false.
@@ -566,13 +836,7 @@ function expandSidebar(){
 (function _restoreSidebarState(){
   try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
   if(!_isDesktopWidth())return;
-  try{
-    if(localStorage.getItem(_SIDEBAR_COLLAPSED_KEY)==='1'){
-      const layout=document.querySelector('.layout');
-      if(layout)layout.classList.add('sidebar-collapsed');
-    }
-  }catch(_){}
-  _syncSidebarAria();
+  _applySidebarState();
 })();
 // ── Boot-time tab visibility ────────────────────────────────────────────────
 // Apply hidden tabs from localStorage. The primary flash-prevention is an
@@ -604,7 +868,23 @@ function closeMobileWorkspacePanelFromChat(e){
   if(!_isCompactWorkspaceViewport()||_workspacePanelMode==='closed') return;
   const panel=document.querySelector('.rightpanel');
   if(panel&&panel.contains(e.target)) return;
-  closeWorkspacePanel();
+  // Don't close when the tap target is a workspace-panel toggle control — let
+  // that button's own onclick (toggleWorkspacePanel) handle open/close. Without
+  // this, tapping the folder toggle while the panel is open fires pointerdown
+  // here (closing the panel) and then the button's click reopens it, leaving
+  // the panel stuck open.
+  const t=e.target&&e.target.closest
+    ? e.target.closest('#btnWorkspacePanelToggle, #btnWorkspacePanelEdgeToggle, .workspace-toggle-btn, .mobile-files-btn')
+    : null;
+  if(t) return;
+  // Deliberate close (see closeWorkspacePanel): the keyboard-triggered
+  // resize must not force the panel back open in preview mode while the
+  // user is typing. The preview (file + scroll position) stays intact in
+  // the DOM and is restored when the user reopens the panel.
+  // Tapping outside the drawer is an explicit dismiss, so hand focus back to the
+  // control that opened it (#7713 follow-up: a plain <body> landing would restart
+  // the next Tab at the top of the document).
+  closeWorkspacePanel(_workspacePanelInvokerForBand());
 }
 function toggleWorkspacePanel(force){
   const {panel}= _workspacePanelEls();
@@ -623,10 +903,19 @@ function mobileSwitchPanel(name){
   if(name==='chat'){
     closeMobileSidebar();
   } else {
+    // Same reason as toggleMobileSidebar(): above 640px reveal the real
+    // expanded sidebar rather than a drawer state that the next resize (or
+    // _applySidebarState()) would immediately drop.
+    if(_isDesktopWidth()){expandSidebar();return;}
     const sidebar=document.querySelector('.sidebar');
     if(sidebar){
       sidebar.classList.remove('mobile-session-page');
       sidebar.classList.add('mobile-panel-drawer','mobile-open');
+      // #7924: an open drawer must never stay inert. A prior close at this
+      // width armed the attribute, and adding mobile-open alone left the
+      // drawer's controls rejecting focus and clicks (a tap on its own nav
+      // tab fell through to the hamburger beneath and closed it).
+      if(typeof _setPanelInert==='function')_setPanelInert(sidebar,true);
     }
   }
 }
@@ -1584,6 +1873,16 @@ window.renderTranscript=function(container, messages, opts){
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
+  // Generation snapshot for the current voice-mode turn (set by _speakResponse
+  // right after the stop/start boundary). Stale watchdogs compare against it
+  // so a replacement playback never has the mic reopened underneath it.
+  let _voiceTtsGenStart=0;
+  // Delayed mic rearm scheduled by a playback's terminal callbacks. Owned by
+  // the generation that scheduled it: a stale timer from playback A must not
+  // reopen the mic underneath a replacement playback B. Cleared on
+  // replacement/deactivation (defense in depth); the timer re-checks
+  // active+speaking+generation at execution time — the required guard.
+  let _voiceMicRearmTimer=null;
   // Configurable via localStorage keys (set from dev console or a future settings panel).
   //   hermes-voice-silence-ms, pause duration before auto-send (ms, default 1800)
   //   hermes-voice-continuous, keep mic open across natural pauses ("true"/"false", default false)
@@ -1603,21 +1902,73 @@ window.renderTranscript=function(container, messages, opts){
     }
   }
 
+  // Owner-aware delayed mic rearm for every playback terminal callback.
+  // Captures the playback generation at schedule time; when the timer fires
+  // it requires voice mode to still be active+speaking AND the same
+  // generation to still own TTS, so a stale terminal callback from playback
+  // A can never construct SpeechRecognition while a replacement playback B
+  // is starting. A generation mismatch RESCHEDULES under the generation that
+  // now owns playback (see below) instead of dropping the rearm.
+  // Replacement/deactivation clear it as defense in depth.
+  function _clearVoiceMicRearm(){
+    if(_voiceMicRearmTimer){ clearTimeout(_voiceMicRearmTimer); _voiceMicRearmTimer=null; }
+  }
+  function _scheduleVoiceMicRearm(delayMs){
+    const _gen=_ttsGeneration;
+    _clearVoiceMicRearm();
+    _voiceMicRearmTimer=setTimeout(function(){
+      _voiceMicRearmTimer=null;
+      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      if(_ttsSpeaking||(typeof speechSynthesis!=='undefined'&&speechSynthesis.speaking)){
+        // Something is still audible: this rearm's own generation playing,
+        // a replacement that claimed the generation, or a browser utterance.
+        // The mic stays closed — reschedule and re-check, rather than
+        // dropping the rearm (a replacement's chain may never schedule one
+        // of its own, so dropping it would stall hands-free mode) or firing
+        // it early (which would reopen the mic underneath live audio).
+        _scheduleVoiceMicRearm(delayMs);
+        return;
+      }
+      // Nothing is audible. That covers both the normal completion of this
+      // rearm's own playback and a replacement that has since stopped; the
+      // generation check below only has to reject a rearm whose playback is
+      // still pending-but-silent (a fetch that never resolves), which the
+      // speaking/audible branch above already refuses.
+      if(_ttsGeneration!==_gen&&_ttsSpeaking){ _scheduleVoiceMicRearm(delayMs); return; }
+      _startListening();
+    },delayMs);
+  }
+  // Voice-closure notification, emitted by stopTTS() (ui.js) after it cancels
+  // and resets playback. While voice mode is speaking, a cancel that lands
+  // before the cancelled playback's terminal callback (user hits Stop/Listen,
+  // auto-read replaces the reply) must still hand the mic back for whatever
+  // owns the turn now: the owner-aware rearm above defers while replacement
+  // audio is audible and fires once it has gone quiet. _speakResponse()'s own
+  // replacement boundary clears the rearm immediately after its stopTTS()
+  // (that playback re-arms the mic itself), and _deactivate() emits the
+  // notification with voice mode already inactive, so neither is affected.
+  window._hermesTtsVoiceClosure=function(){
+    if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+    _scheduleVoiceMicRearm(500);
+  };
   function _armBrowserTtsRecovery(clean, rate){
+    // Capture this turn's generation: if a replacement playback claims a new
+    // one, these recovery timers are stale and must never reopen the mic.
+    const _gen=_voiceTtsGenStart;
     _clearBrowserTtsRecovery();
     _browserTtsSuppressNextErrorRearm=false;
     const safeRate=(Number.isFinite(rate)&&rate>0)?rate:1;
     // Chromium can drop utter.onend on later turns, so force a recovery path.
     const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
     _browserTtsWatchdog=setTimeout(()=>{
-      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      if(!_voiceModeActive||_voiceModeState!=='speaking'||_ttsGeneration!==_gen) return;
       _browserTtsSuppressNextErrorRearm=true;
       try{ speechSynthesis.cancel(); }catch(_){}
       _clearBrowserTtsRecovery();
       _startListening();
     },watchdogMs);
     _browserTtsKeepAlive=setInterval(()=>{
-      if(!_voiceModeActive||_voiceModeState!=='speaking'){
+      if(!_voiceModeActive||_voiceModeState!=='speaking'||_ttsGeneration!==_gen){
         _clearBrowserTtsRecovery();
         return;
       }
@@ -1773,11 +2124,31 @@ window.renderTranscript=function(container, messages, opts){
         .trim();
     }
     if(!clean){ _startListening(); return; }
+
+    // Canonical replacement boundary — the same stop/start boundary as
+    // autoReadLastAssistant()/speakMessage(). Entering voice-mode speech
+    // replaces any active playback of any engine: stopTTS() invalidates every
+    // in-flight generation, cancels browser speech, stops Web Audio/audio
+    // elements, and resets every [data-speaking="1"] button. Stale browser
+    // recovery handles from a previous turn are cleared too, so their
+    // watchdog cannot reopen the mic under the new playback.
+    if(typeof stopTTS==='function') stopTTS();
+    _clearBrowserTtsRecovery();
+    _clearVoiceMicRearm();
+    _browserTtsSuppressNextErrorRearm=false;
+    // Snapshot for this turn's continuations (browser callbacks + watchdog):
+    // any later stop/replacement invalidates it.
+    const _voiceGenStart=_ttsGeneration;
+    _voiceTtsGenStart=_voiceGenStart;
+
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
     // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
     // via the extension, then play through the same Audio lifecycle as edge.
+    // The generation token gates the late synth completion: a promise that
+    // resolves after a stop/replacement must not start audio or mutate state.
     if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-      _ttsSpeaking=true;
+      const gen=_beginTtsPlayback();
+      const _owns=function(){ return _ownsTtsPlayback(gen); };
       const _opts={
         voice: localStorage.getItem("hermes-tts-voice")||'',
         rate: parseFloat(localStorage.getItem("hermes-tts-rate")),
@@ -1785,112 +2156,137 @@ window.renderTranscript=function(container, messages, opts){
       };
       Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
         .then(function(buf){
+          if(!_owns()) return;
           const blob=new Blob([buf]);
           const url=URL.createObjectURL(blob);
           const audio=new Audio(url);
           _playingEdgeAudio=audio;
           audio.onended=function(){
-            _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},500);
+            if(!_owns()) return;
+            _ttsSpeaking=false;
+            _scheduleVoiceMicRearm(500);
           };
           audio.onerror=function(){
-            _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+            if(!_owns()) return;
+            _ttsSpeaking=false;
+            _scheduleVoiceMicRearm(1000);
           };
           audio.play().catch(function(){
-            _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+            if(!_owns()) return;
+            _ttsSpeaking=false;
+            _scheduleVoiceMicRearm(1000);
           });
         })
         .catch(function(){
+          if(!_owns()) return;
           _ttsSpeaking=false;
-          if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+          _scheduleVoiceMicRearm(1000);
         });
       return;
     }
     if(engine==="elevenlabs"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      const gen=_beginTtsPlayback();
+      const _owns=function(){ return _ownsTtsPlayback(gen); };
+      // #7529: capture the profile at request-build time (see the openai branch).
+      const _ttsProfile=(S&&S.activeProfile)||'default';
+      // Shared /api/tts scheduler: paced across engines/generations with a
+      // bounded owner-aware 429 retry — a voice-mode request right after any
+      // other engine's fetch waits for the slot instead of hitting 429.
+      _sendTtsRequest({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'elevenlabs'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
+        body: JSON.stringify({text: clean, engine: 'elevenlabs', profile: _ttsProfile})
+      }, _owns)
+      .then(res => {
+        if(!_owns()) return;
+        if(!res.ok) throw new Error((res.err&&res.err.message)||'TTS request failed');
+        const blob=new Blob([res.buf],{type:res.type});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(500);
         };
         audio.onerror = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         };
         audio.play().catch(e => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         });
       })
       .catch(() => {
+        if(!_owns()) return;
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        _scheduleVoiceMicRearm(1000);
       });
       return;
     }
     if(engine==="openai"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      const gen=_beginTtsPlayback();
+      const _owns=function(){ return _ownsTtsPlayback(gen); };
+      // #7529: capture the profile at request-build time. The shared scheduler
+      // can hold this request for up to 2s and re-send it after a 429, where
+      // master sent immediately — a profile switch during that wait would
+      // otherwise send it under the new profile.
+      const _ttsProfile=(S&&S.activeProfile)||'default';
+      // Same shared scheduler as the other engines: this request competes for
+      // the per-client slot with every other /api/tts call.
+      _sendTtsRequest({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'openai'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
+        body: JSON.stringify({text: clean, engine: 'openai', profile: _ttsProfile})
+      }, _owns)
+      .then(res => {
+        if(!_owns()) return;
+        if(!res.ok) throw new Error((res.err&&res.err.message)||'TTS request failed');
+        const blob=new Blob([res.buf],{type:res.type});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(500);
         };
         audio.onerror = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         };
         audio.play().catch(() => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         });
       })
       .catch(() => {
+        if(!_owns()) return;
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        _scheduleVoiceMicRearm(1000);
       });
       return;
     }
@@ -1901,17 +2297,19 @@ window.renderTranscript=function(container, messages, opts){
       let rate='', pitch='';
       if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
       if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      const gen=_beginTtsPlayback();
+      const _owns=function(){ return _ownsTtsPlayback(gen); };
+      // #7529: capture the profile at request-build time (see the openai branch).
+      const _ttsProfile=(S&&S.activeProfile)||'default';
+      _sendTtsRequest({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, voice, rate, pitch, engine: 'edge'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
+        body: JSON.stringify({text: clean, voice, rate, pitch, engine: 'edge', profile: _ttsProfile})
+      }, _owns)
+      .then(res => {
+        if(!_owns()) return;
+        if(!res.ok) throw new Error((res.err&&res.err.message)||'TTS request failed');
+        const blob=new Blob([res.buf],{type:res.type});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         // Register with the shared handle (declared in ui.js, same global scope;
@@ -1920,26 +2318,31 @@ window.renderTranscript=function(container, messages, opts){
         // Edge playback. Without this the audio is local here and unstoppable.
         _playingEdgeAudio=audio;
         audio.onended = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(500);
         };
         audio.onerror = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         };
         audio.play().catch(e => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          URL.revokeObjectURL(url);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         });
       })
       .catch(() => {
+        if(!_owns()) return;
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        _scheduleVoiceMicRearm(1000);
       });
       return;
     }
@@ -1958,18 +2361,22 @@ window.renderTranscript=function(container, messages, opts){
     if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
 
     utter.onend=()=>{
+      // A stale utterance (replaced/stopped) must not resume listening under
+      // a newer playback — it would see state==='speaking' and reopen the mic.
+      if(_ttsGeneration!==_voiceGenStart) return;
       _browserTtsSuppressNextErrorRearm=false;
       _clearBrowserTtsRecovery();
       // After speaking, go back to listening
-      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
+      _scheduleVoiceMicRearm(500);
     };
     utter.onerror=()=>{
+      if(_ttsGeneration!==_voiceGenStart) return;
       _clearBrowserTtsRecovery();
       if(_browserTtsSuppressNextErrorRearm){
         _browserTtsSuppressNextErrorRearm=false;
         return;
       }
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      _scheduleVoiceMicRearm(1000);
     };
 
     _armBrowserTtsRecovery(clean, utter.rate);
@@ -1977,7 +2384,7 @@ window.renderTranscript=function(container, messages, opts){
       speechSynthesis.speak(utter);
     }catch(_){
       _clearBrowserTtsRecovery();
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      _scheduleVoiceMicRearm(1000);
     }
   }
 
@@ -2045,6 +2452,7 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _clearBrowserTtsRecovery();
+    _clearVoiceMicRearm();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
@@ -2100,7 +2508,9 @@ $('btnNewChat').onclick=async()=>{
      && await _restoreRememberedNewChatDraftSession()){
     await renderSessionList();closeMobileSidebar();$('msg').focus();return;
   }
-  await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+  // newSession() schedules the sidebar refresh itself; awaiting another here
+  // queued a second full list read in front of the composer focus (#7936).
+  await newSession();closeMobileSidebar();$('msg').focus();
 };
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
@@ -2220,6 +2630,9 @@ $('importFileInput').onchange=async(e)=>{
   }
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
+// #6710: closing the preview retires any in-flight preview open (the counter is
+// advanced in the body below), so a slow completion cannot repaint the panel
+// after the user closed it — see _previewOpenOwned() in static/workspace.js.
 function clearPreview(opts={}){
   const keepPanelOpen=!!(opts&&opts.keepPanelOpen);
   // Restore directory breadcrumb after closing file preview
@@ -2234,6 +2647,9 @@ function clearPreview(opts={}){
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  if(typeof _previewOpenGen==='number') _previewOpenGen++;
+  // #6710: retire any in-flight preview open (guarded so harnesses that extract
+  // this function alone keep working).
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();
@@ -2266,10 +2682,23 @@ $('modelSelect').onchange=async()=>{
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
+  if(typeof _rememberComposerModelPick==='function'){
+    _rememberComposerModelPick(modelState.model,modelState.model_provider);
+  }
   if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
+  // #7865: record THIS pick as explicit picker evidence for the active session,
+  // so _modelProviderForSend may let the dropdown's provider win over the
+  // session's on the next send. Session-scoped and NOT consumed by send()
+  // (unlike the _pendingSessionModel family) — the evidence must survive until
+  // the session is switched or reloaded. Cleared in the session load/switch
+  // paths so a stale pick can never authorize an override for a restored
+  // session whose provider the session itself holds.
+  if(typeof _rememberExplicitPickerPick==='function'&&S.session){
+    _rememberExplicitPickerPick(S.session.session_id,selectedModel,modelState.model_provider);
+  }
   if(!S.session){
     if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
     if(typeof syncModelChip==='function') syncModelChip();
@@ -2313,11 +2742,15 @@ $('msg').addEventListener('input',()=>{
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
+  // The user edited the text, so an earlier pick/Escape no longer holds the list closed (#8050).
+  if(typeof clearSlashDropdownDismissed==='function') clearSlashDropdownDismissed();
   const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;
   if(_slashIdx>=0&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
       getSlashAutocompleteMatches(text).then(matches=>{
         if(($('msg').value||'')!==text) return;
+        // A pick or Escape that landed while this lookup was in flight wins (#8050).
+        if(typeof slashDropdownDismissedFor==='function'&&slashDropdownDismissedFor(text)) return;
         if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
       });
     }else{
@@ -2423,7 +2856,7 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='ArrowUp'){e.preventDefault();navigateCmdDropdown(-1);return;}
     if(e.key==='ArrowDown'){e.preventDefault();navigateCmdDropdown(1);return;}
     if(e.key==='Tab'){e.preventDefault();selectCmdDropdownItem();return;}
-    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();return;}
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();if(typeof markSlashDropdownDismissed==='function')markSlashDropdownDismissed();return;}
     if(e.key==='Enter'&&!e.shiftKey){
       if(_isImeEnter(e)){return;}
       if(window._sendKey==='shift+enter'){
@@ -2514,7 +2947,8 @@ document.addEventListener('keydown',async e=>{
     // a long generation to finish before they could start something new — exactly
     // the moment they want to switch context. newSession() leaves the in-flight
     // stream running on its own session; the user just gets a fresh blank one.
-    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+    // As in $('btnNewChat').onclick: newSession() owns the sidebar refresh.
+    await newSession();closeMobileSidebar();$('msg').focus();
   }
   // Cmd/Ctrl+, opens/closes Settings (VS Code convention).
   // Fire globally — like VS Code, don't skip text inputs.
@@ -2634,6 +3068,14 @@ function applyEmptyStatePanelPref(){
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
+  // Re-apply the sidebar state on viewport change (e.g. foldable unfold:
+  // phone 640px -> inner 804px, or desktop -> inner). The shared apply helper
+  // clears mobile drawer ownership when entering desktop width (so the mobile
+  // classes cannot block the desktop collapse selector), applies the tri-state
+  // default, and syncs ARIA — all without persisting anything to localStorage.
+  try{
+    if(typeof _applySidebarState==='function') _applySidebarState();
+  }catch(_){}
   if(!window.visualViewport) _forceMobileViewportReflow();
 });
 
@@ -2672,30 +3114,77 @@ if(window.visualViewport){
       if(saved) targetEl.style.width = saved + 'px';
     }
 
-    let startX=0, startW=0;
+    let startX=0, startW=0, activePointer=null, fallbackDoc=false;
+    const endResize=()=>{
+      if(activePointer===null) return;
+      const id=activePointer;
+      activePointer=null;
+      try{ handle.releasePointerCapture(id); }catch(_){}
+      if(fallbackDoc){
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        document.removeEventListener('pointercancel', onCancel);
+        fallbackDoc=false;
+      }
+      handle.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      const w=parseInt(targetEl.style.width,10);
+      if(Number.isFinite(w)){ try{ localStorage.setItem(storageKey, w); }catch(_){} }
+    };
+    const onMove = ev=>{
+      if(activePointer===null || ev.pointerId!==activePointer) return;
+      ev.preventDefault();
+      const delta = edge==='right' ? ev.clientX - startX : startX - ev.clientX;
+      const newW = Math.min(maxW, Math.max(minW, startW + delta));
+      targetEl.style.width = newW + 'px';
+    };
+    const onUp = ev=>{
+      if(activePointer===null || (ev.pointerId!==undefined && ev.pointerId!==activePointer)) return;
+      endResize();
+    };
+    // Cancel/revoke events from OTHER pointers (a pen or touch contact
+    // elsewhere) must not end this drag; only the active pointer's own
+    // cancel does. Window blur still ends the drag unconditionally.
+    const onCancel = ev=>{
+      if(activePointer===null || ev.pointerId!==activePointer) return;
+      endResize();
+    };
 
-    handle.addEventListener('mousedown', e=>{
-      e.preventDefault();
-      startX = e.clientX;
+    handle.addEventListener('pointerdown', ev=>{
+      if(ev.pointerType==='touch') return;
+      // A second pointer pressing the handle mid-drag must not take the drag
+      // over: without this guard the new press replaces the active pointer and
+      // starting width, the original pointer's move/release is ignored, and the
+      // panel unexpectedly follows the second pointer (greptile review of the
+      // merged #7954 fix).
+      if(activePointer!==null) return;
+      ev.preventDefault();
+      activePointer=ev.pointerId;
+      startX = ev.clientX;
       startW = targetEl.getBoundingClientRect().width;
       handle.classList.add('dragging');
       document.body.classList.add('resizing');
-
-      const onMove = ev=>{
-        const delta = edge==='right' ? ev.clientX - startX : startX - ev.clientX;
-        const newW = Math.min(maxW, Math.max(minW, startW + delta));
-        targetEl.style.width = newW + 'px';
-      };
-      const onUp = ()=>{
-        handle.classList.remove('dragging');
-        document.body.classList.remove('resizing');
-        localStorage.setItem(storageKey, parseInt(targetEl.style.width));
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      // Pointer capture keeps move/up routed to the handle even when the
+      // pointer leaves the window, so a release can never be lost (#7954).
+      let captured=false;
+      try{ handle.setPointerCapture(ev.pointerId); captured=true; }catch(_){ captured=false; }
+      if(!captured){
+        // Capture is unavailable or threw: without a document-level fallback
+        // the drag would stall the moment the pointer leaves this handle, and
+        // the drag state would stick (the #7954 regression this must avoid).
+        fallbackDoc=true;
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+        document.addEventListener('pointercancel', onCancel);
+      }
     });
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onCancel);
+    // The platform can still revoke capture (tab switch, OS gesture); that
+    // must end the drag instead of leaving the panel stuck to the cursor.
+    handle.addEventListener('lostpointercapture', onCancel);
+    window.addEventListener('blur', endResize);
   }
 
   // Run after DOM ready (called from boot)
@@ -3553,7 +4042,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
+    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
+    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d,_recoveryGenerationAtCheck);}).catch(()=>{});
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';
@@ -3790,6 +4280,39 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
   }
+  // #7652 review round 4: a sessionless cron notification carries an explicit
+  // panel intent (e.g. ?panel=tasks) so the click lands on the panel the run
+  // belongs to instead of the last chat the user had open.
+  // Review round 5: this must NOT boot and return on its own. Round 4 switched
+  // panels and returned before the saved-session restore below, so the chat the
+  // user had open — and any live stream still running in it — stayed detached
+  // until they picked the session again. The intent is therefore only *decided*
+  // here; the normal restore runs, and `switchPanel` is applied on top of it
+  // once that path has finished. Constrained to the same intent family as
+  // profile/launch-action: only a real panel, and never when a URL session names
+  // the target already.
+  const panelIntent=(typeof _panelQueryIntentFromLocation==='function')?_panelQueryIntentFromLocation():null;
+  let pendingPanelIntent=null;
+  if(panelIntent&&panelIntent.hasParam&&panelIntent.valid&&!urlSession
+     &&typeof switchPanel==='function'&&panelIntent.name!=='chat'){
+    try{
+      _consumePanelQueryParamFromLocation();
+      pendingPanelIntent=panelIntent.name;
+    }catch(e){console.warn('[boot] panel intent launch failed', e);}
+  }
+  // Apply the honored intent over whatever the restore path below settled on.
+  // Every terminal point of that path calls this, so the panel is shown on top
+  // of a restored session (and its in-flight recovery) rather than in place of
+  // it. A missing/failed panel must never strand the user, hence the catch.
+  const _applyPendingPanelIntent=async()=>{
+    if(!pendingPanelIntent) return;
+    const _panelName=pendingPanelIntent;
+    pendingPanelIntent=null;
+    try{
+      await switchPanel(_panelName);
+      await renderSessionList();
+    }catch(e){console.warn('[boot] panel intent launch failed', e);}
+  };
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{
@@ -3812,6 +4335,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       if(_rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent)){
@@ -3824,9 +4348,18 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
-      await loadSession(saved, {preserveActiveInput:true});
+      // A child row's new-tab link marks its URL exact (`?exact=1`) so this new
+      // tab lands on that child instead of folding it into its compressed
+      // parent's lineage row (#7429 review 2026-10-08). Ordinary deep links —
+      // e.g. a historical lineage segment URL — keep landing on the tip.
+      if(!!urlSession&&typeof _sessionUrlRequestsExactTarget==='function'&&_sessionUrlRequestsExactTarget()){
+        await loadSession(saved, {preserveActiveInput:true, skipLineageResolve:true});
+      }else{
+        await loadSession(saved, {preserveActiveInput:true});
+      }
       // Hard refresh starts from the static HTML model list. Hydrate the live
       // catalog after the saved session is known, then re-apply that session's
       // model before S._bootReady lets syncModelChip reveal the composer label.
@@ -3862,6 +4395,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
         return;
       }
       // Restore the panel from localStorage when the session has a workspace.
@@ -3873,8 +4407,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
-    catch(e){localStorage.removeItem('hermes-webui-session');}
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);
+      // Applied last on purpose: a panel intent must not come at the cost of
+      // the session restore or its in-flight stream recovery (#7652 r5).
+      await _applyPendingPanelIntent();return;}
+    catch(_){/* loadSession owns targeted 404 cleanup; retain unrelated saved sessions */}
   }
   // no saved session - show empty state, wait for user to hit +
   S._bootReady=true;
@@ -3884,12 +4421,15 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
-  await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+  // A route-only 404 can leave another saved session available for the next boot.
+  if(!localStorage.getItem('hermes-webui-session')) await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
+  // No saved session to restore, so the intent is simply the landing view.
+  await _applyPendingPanelIntent();
 })().catch(e=>{
   console.error('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}
@@ -3939,16 +4479,15 @@ window.addEventListener('pageshow', async (event) => {
   }
   // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
   if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
-  // Re-sync sidebar collapse state from localStorage. bfcache restored the
-  // frozen DOM but another tab may have toggled the sidebar in the meantime.
-  if (typeof _isSidebarCollapsed === 'function' && typeof toggleSidebar === 'function') {
-    try {
-      const _want = localStorage.getItem('hermes-webui-sidebar-collapsed') === '1';
-      const _have = _isSidebarCollapsed();
-      if (_want !== _have) toggleSidebar(_want);
-      if (typeof _syncSidebarAria === 'function') _syncSidebarAria();
-    } catch (_) {}
-  }
+  // Re-sync sidebar state after bfcache restore. bfcache restored the frozen
+  // DOM but another tab may have toggled the sidebar in the meantime. The
+  // shared apply helper clears mobile drawer ownership when at desktop width,
+  // applies the tri-state default, and syncs ARIA — all without persisting
+  // anything to localStorage (so a derived compact-band default never leaks
+  // into widths above 900px).
+  try{
+    if(typeof _applySidebarState==='function') _applySidebarState();
+  }catch(_){}
 });
 
 async function shutdownServer() {

@@ -16,6 +16,8 @@ from api.config import ACTIVE_RUNS, STREAMS, STREAMS_LOCK, create_stream_channel
 from api import profiles
 from api.models import new_session
 
+_REAL_OPEN_EVENTS = gateway_chat._open_gateway_run_events
+
 
 @pytest.fixture
 def isolated_sessions(tmp_path, monkeypatch):
@@ -33,7 +35,15 @@ def isolated_sessions(tmp_path, monkeypatch):
         "status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": [],
     })
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    # Default: a gateway without event replay, so reattach falls back to status polling.
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", _events_http_error(404))
     return session_dir
+
+
+def _events_http_error(code):
+    def fail(base_url, headers, run_id, last_seq=-1):
+        raise urllib.error.HTTPError(f"{base_url}/v1/runs/{run_id}/events", code, "no", Message(), io.BytesIO(b""))
+    return fail
 
 
 def _orphaned_gateway_turn(run_id="run_survivor", stream_id="stream-before-restart"):
@@ -93,6 +103,7 @@ def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessi
 
     monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", _REAL_OPEN_EVENTS)
     with STREAMS_LOCK:
         STREAMS[stream_id] = create_stream_channel()
 
@@ -107,6 +118,43 @@ def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessi
     assert saved["gateway_run"] is None
     assert saved["active_stream_id"] is None
     assert saved["messages"][-1]["content"] == "done"
+
+
+def test_live_send_keeps_relaying_after_initial_replay_truncated(isolated_sessions, monkeypatch):
+    s = new_session()
+    stream_id = "stream-live-trunc"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "hi"
+    s.pending_attachments = []
+    s.pending_started_at = 123.0
+    s.save()
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "POST":
+            return io.BytesIO(b'{"run_id":"run_live_trunc"}')
+        return io.BytesIO(
+            b'data: {"event":"replay.truncated","oldest_retained_seq":1200}\n\n'
+            b'data: {"event":"message.delta","delta":"kept answer","seq":1200}\n\n'
+            b'data: {"event":"run.completed","output":"kept answer","seq":1201}\n\n'
+            b"data: [DONE]\n\n"
+        )
+
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", _REAL_OPEN_EVENTS)
+    monkeypatch.setattr(
+        gateway_chat, "_get_gateway_run_status",
+        lambda *a: pytest.fail("live send must not fall back to status polling"),
+    )
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(s.session_id, "hi", "test-model", "/tmp", stream_id, [])
+
+    saved = _saved(s.session_id)
+    assert saved["active_stream_id"] is None
+    assert saved["messages"][-1]["role"] == "assistant"
+    assert saved["messages"][-1]["content"] == "kept answer"
 
 
 def test_restart_reattaches_and_writes_back_real_answer(isolated_sessions, monkeypatch):
@@ -528,3 +576,304 @@ def test_approval_reply_reaches_the_gateway_that_owns_a_reattached_run(
         streaming.cancel_stream(stream_id)
         _wait_for_reattach_threads()
         approvals._pending.pop(sid, None)
+
+
+def _sse(*payloads):
+    frames = []
+    for seq, payload in payloads:
+        frames.append(f"id: {seq}\n".encode() if seq is not None else b"")
+        body = dict(payload, **({"seq": seq} if seq is not None else {}))
+        frames.append(f"data: {json.dumps(body)}\n\n".encode())
+    return io.BytesIO(b"".join(frames))
+
+
+def _journal(sid, stream_id):
+    from api.run_journal import read_run_events
+    return read_run_events(sid, stream_id)["events"]
+
+
+def _relayed_before_restart(sid, stream_id, rows):
+    """Journal rows exactly as the pre-restart worker relayed them."""
+    from api.run_journal import append_run_event
+    for event, payload in rows:
+        append_run_event(sid, stream_id, event, payload)
+
+
+def test_reattach_streams_from_the_journal_cursor_and_keeps_reasoning_and_tools(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_live_after_restart")
+    _relayed_before_restart(sid, stream_id, [
+        ("context_status", {"session_id": sid}),
+        ("reasoning", {"text": "plan. ", "gateway_seq": 0}),
+        ("tool", {"name": "terminal", "args": {"command": "ls"}, "tid": "t1", "gateway_seq": 1}),
+        ("tool_complete", {"name": "terminal", "tid": "t1", "is_error": False, "gateway_seq": 2}),
+        ("token", {"text": "Before ", "gateway_seq": 3}),
+    ])
+    opened = []
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append((run_id, last_seq))
+        return _sse(
+            (4, {"event": "reasoning.available", "text": "then check."}),
+            (5, {"event": "tool.started", "tool": "read_file", "toolCallId": "t2", "args": {"path": "a"}}),
+            (6, {"event": "tool.completed", "tool": "read_file", "toolCallId": "t2"}),
+            (7, {"event": "message.delta", "delta": "after."}),
+            (8, {"event": "run.completed", "output": "Before after.", "usage": {"input_tokens": 5}}),
+        )
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    probes = []
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: probes.append(r) or {"run_id": r, "status": "running"})
+
+    assert gateway_chat.resume_gateway_runs_after_restart() == [sid]
+    _wait_for_reattach_threads()
+
+    assert opened == [("run_live_after_restart", 3)]
+    assert probes == ["run_live_after_restart"]  # one parked-approval probe, then no polling
+    relayed = [(e["event"], e["payload"].get("gateway_seq")) for e in _journal(sid, stream_id)]
+    # Reopened tabs replay these from the WebUI journal: live text, tool cards and reasoning after the restart.
+    assert [r for r in relayed if r[1] is not None and r[1] >= 4] == [
+        ("reasoning", 4), ("tool", 5), ("tool_complete", 6), ("token", 7),
+    ]
+    assert relayed[-2:] == [("done", None), ("stream_end", None)]
+    saved = _saved(sid)
+    final = saved["messages"][-1]
+    assert final["content"] == "Before after."
+    assert final["reasoning"] == "plan. then check."
+    assert saved["active_stream_id"] is None and saved["gateway_run"] is None
+
+
+def test_reattach_reconnects_after_the_event_stream_drops(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_flaky")
+    opened = []
+    streams = iter([
+        _sse((0, {"event": "message.delta", "delta": "one "})),  # EOF before the run ends
+        _sse((1, {"event": "message.delta", "delta": "two"}), (2, {"event": "run.completed", "output": "one two"})),
+    ])
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append(last_seq)
+        return next(streams)
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {"run_id": r, "status": "running"})
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert opened == [-1, 0]
+    assert _saved(sid)["messages"][-1]["content"] == "one two"
+
+
+@pytest.mark.parametrize("why", ["truncated", "unaligned_journal"])
+def test_reattach_falls_back_to_status_polling(isolated_sessions, monkeypatch, why):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_fallback")
+    opened = []
+    if why == "unaligned_journal":
+        # Relayed by a WebUI that did not record gateway seqs: no safe cursor exists.
+        _relayed_before_restart(sid, stream_id, [("token", {"text": "partial"})])
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append(last_seq)
+        return _sse((None, {"event": "replay.truncated", "oldest_retained_seq": 40}), (40, {"event": "message.delta", "delta": "x"}))
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    statuses = iter(["running"])  # the pre-stream probe sees the run still going
+    monkeypatch.setattr(
+        gateway_chat, "_get_gateway_run_status",
+        lambda b, k, r: {"run_id": r, "status": next(statuses, "completed"), "output": "full answer from status"},
+    )
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert opened == ([-1] if why == "truncated" else [])
+    assert _saved(sid)["messages"][-1]["content"] == "full answer from status"
+    assert not any(e["event"] == "token" and e["payload"].get("text") == "x" for e in _journal(sid, stream_id))
+
+
+def test_reattach_polls_without_replay_when_the_journal_read_fails(isolated_sessions, monkeypatch):
+    from api import run_journal
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_journal_unreadable")
+    _relayed_before_restart(sid, stream_id, [("token", {"text": "A", "gateway_seq": 0})])
+    real_read, failed = run_journal.read_run_events, []
+
+    def read_once_broken(*args, **kwargs):
+        if not failed:
+            failed.append(True)
+            raise OSError("journal unreadable")
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(run_journal, "read_run_events", read_once_broken)
+    opened = []
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append(last_seq)
+        return _sse((0, {"event": "message.delta", "delta": "A"}), (1, {"event": "message.delta", "delta": "B"}))
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    statuses = iter(["running"])  # the pre-stream probe sees the run still going
+    monkeypatch.setattr(
+        gateway_chat, "_get_gateway_run_status",
+        lambda b, k, r: {"run_id": r, "status": next(statuses, "completed"), "output": "AB"},
+    )
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert failed and opened == []  # an unread journal proves no cursor: poll only
+    tokens = [(e["payload"].get("gateway_seq"), e["payload"].get("text")) for e in _journal(sid, stream_id) if e["event"] == "token"]
+    assert tokens == [(0, "A")]
+    saved = _saved(sid)
+    assert saved["messages"][-1]["content"] == "AB"
+    assert saved["active_stream_id"] is None and saved["gateway_run"] is None
+
+
+def test_reattach_resurfaces_an_approval_relayed_before_the_restart(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_parked_stream")
+    _relayed_before_restart(sid, stream_id, [("token", {"text": "checking ", "gateway_seq": 0})])
+    parked = {"event": "approval.request", "approval_id": "appr-9", "command": "rm x", "description": "d"}
+    relayed = []
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {
+        "run_id": r, "status": "waiting_for_approval", "approval": parked,
+    })
+    monkeypatch.setattr(
+        gateway_chat, "_relay_gateway_run_approval",
+        lambda session_id, run_id, payload, *a, **k: relayed.append(payload["approval_id"]),
+    )
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", lambda b, h, r, last_seq=-1: _sse(
+        (2, {"event": "message.delta", "delta": "done"}), (3, {"event": "run.completed"}),
+    ))
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert relayed == ["appr-9"]
+    assert _saved(sid)["messages"][-1]["content"] == "checking done"
+
+
+def test_reattach_cursor_includes_a_journaled_approval_so_it_is_not_relayed_twice(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_parked_journaled")
+    parked = {"event": "approval.request", "approval_id": "appr-7", "command": "rm y", "description": "d"}
+    _relayed_before_restart(sid, stream_id, [
+        ("token", {"text": "checking ", "gateway_seq": 0}),
+        ("approval", {"approval_id": "appr-7", "command": "rm y", "pending_count": 1, "gateway_seq": 1}),
+    ])
+    relayed, opened = [], []
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {
+        "run_id": r, "status": "waiting_for_approval", "approval": parked,
+    })
+    monkeypatch.setattr(
+        gateway_chat, "_relay_gateway_run_approval",
+        lambda session_id, run_id, payload, *a, **k: relayed.append(payload["approval_id"]),
+    )
+    history = [(1, parked), (2, {"event": "message.delta", "delta": "done"}), (3, {"event": "run.completed"})]
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append(last_seq)  # sent as Last-Event-ID; the gateway replays only seq > last_seq
+        return _sse(*[(s, p) for s, p in history if s > last_seq])
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert opened == [1]
+    assert relayed == ["appr-7"]
+    assert _saved(sid)["messages"][-1]["content"] == "checking done"
+
+
+class _ResetAfter(io.BytesIO):
+    """An event stream whose connection resets once its bytes are consumed."""
+
+    def __next__(self):
+        line = self.readline()
+        if not line:
+            raise ConnectionResetError("reset by peer")
+        return line
+
+
+def test_reattach_cursor_commits_an_event_as_soon_as_it_is_relayed(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_reset_mid_frame")
+    _relayed_before_restart(sid, stream_id, [("token", {"text": "", "gateway_seq": 0})])
+    history = [(1, {"event": "message.delta", "delta": "A"}), (2, {"event": "run.completed", "output": "A"})]
+    opened = []
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append(last_seq)
+        if len(opened) == 1:
+            # Token A arrives, then the connection resets before the blank frame separator.
+            return _ResetAfter(b"id: 1\n" + f"data: {json.dumps(dict(history[0][1], seq=1))}\n".encode())
+        return _sse(*[(s, p) for s, p in history if s > last_seq])
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {"run_id": r, "status": "running"})
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert opened == [0, 1]
+    assert [e["payload"]["text"] for e in _journal(sid, stream_id) if e["event"] == "token" and e["payload"].get("text")] == ["A"]
+    assert _saved(sid)["messages"][-1]["content"] == "A"
+
+
+@pytest.mark.parametrize("journaled", [True, False], ids=["cursor", "empty_journal"])
+def test_reattach_probe_and_replay_surface_one_approval_once(isolated_sessions, monkeypatch, journaled):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_parked_replayed")
+    if journaled:
+        _relayed_before_restart(sid, stream_id, [("token", {"text": "checking ", "gateway_seq": 0})])
+    parked = {"event": "approval.request", "approval_id": "appr-3", "command": "rm z", "description": "d"}
+    order = []
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: order.append("probe") or {
+        "run_id": r, "status": "waiting_for_approval", "approval": parked,
+    })
+    monkeypatch.setattr(
+        gateway_chat, "_relay_gateway_run_approval",
+        lambda session_id, run_id, payload, *a, **k: order.append(("approval", payload["approval_id"])),
+    )
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        order.append("events")
+        # The gateway replays the still-pending approval after the cursor.
+        return _sse((1, parked), (2, {"event": "message.delta", "delta": "done"}), (3, {"event": "run.completed"}))
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    # The status probe runs before the first blocking /events read, whatever the cursor.
+    assert order == ["probe", ("approval", "appr-3"), "events"]
+    assert _saved(sid)["messages"][-1]["content"].endswith("done")
+
+
+def test_reattach_saves_the_run_output_over_the_restored_partial(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_transformed")
+    _relayed_before_restart(sid, stream_id, [("token", {"text": "raw", "gateway_seq": 0})])
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {"run_id": r, "status": "running"})
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", lambda b, h, r, last_seq=-1: _sse(
+        (1, {"event": "run.completed", "output": "transformed"}),
+    ))
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    # The Agent can rewrite its answer after streaming; run.completed.output is the final answer.
+    assert _saved(sid)["messages"][-1]["content"] == "transformed"
+
+
+def test_reattach_drops_a_replayed_approval_the_gateway_already_settled(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_auto_approved")
+    _relayed_before_restart(sid, stream_id, [("token", {"text": "checking ", "gateway_seq": 0})])
+    stale = {"event": "approval.request", "approval_id": "appr-auto", "command": "ls", "description": "d"}
+    relayed, opened = [], []
+    # Auto-approved before the restart (no journal row): the run is running again, nothing parked.
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {"run_id": r, "status": "running"})
+    monkeypatch.setattr(
+        gateway_chat, "_relay_gateway_run_approval",
+        lambda session_id, run_id, payload, *a, **k: relayed.append(payload["approval_id"]),
+    )
+    history = [(1, stale), (2, {"event": "message.delta", "delta": "done"}), (3, {"event": "run.completed"})]
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append(last_seq)
+        return _sse(*[(s, p) for s, p in history if s > last_seq])
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert relayed == []
+    assert opened == [0]
+    assert _saved(sid)["messages"][-1]["content"] == "checking done"
