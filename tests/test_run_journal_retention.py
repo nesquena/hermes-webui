@@ -2742,3 +2742,247 @@ def test_invalid_high_seq_archive_row_does_not_suppress_live_suffix(tmp_path):
     merged = rj._read_run_file_text(live)
     seqs = [json.loads(line)["seq"] for line in merged.splitlines() if line.strip()]
     assert seqs == [1, 2, 99, 3], merged
+
+
+# ── 14:32Z re-gate: UTF-8 archive tails + archive refusal beside a suffix ──
+
+
+def test_partial_utf8_archive_tail_survives_cold_recovery_and_repaired_append(tmp_path):
+    """A crash tail cut mid-UTF-8 must survive archival as a tolerated torn tail.
+
+    Reproduces the re-gate finding: the real writer stopped mid-append after a
+    partial UTF-8 sequence (``e2 82``) at EOF; cold recovery tolerated it while
+    the file was live, but the real sweep archived those exact bytes and the
+    archive reader strict-decoded them — discarding the WHOLE run (zero events)
+    and refusing every later append with ``archive_sequence_unavailable``. The
+    archive decode/encode round-trip is byte-reversible now (surrogateescape,
+    not replacement decoding): the byte scanner sees the ORIGINAL bytes, so
+    cold recovery keeps [1,2] + recovery_torn_tail and the repaired append
+    commits seq 3; the union then reads back complete.
+    """
+    sid, rid = "s1", "r1"
+    rj.append_run_event(sid, rid, "token", {"text": "one"}, session_dir=tmp_path)
+    rj.append_run_event(sid, rid, "done", {"terminal_state": "completed"}, session_dir=tmp_path)
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+
+    # Crash mid-append: unterminated fragment ending in a partial UTF-8
+    # sequence (two bytes of a three-byte character) — strictly undecodable.
+    with open(live, "ab") as fh:
+        fh.write(b'{"version":2,"event_id":"' + rid.encode()
+                 + b':3","seq":3,"payload":{"text":"\xe2\x82')
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    _simulate_restart()
+    torn = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in torn["events"]] == [1, 2], torn
+    assert torn["malformed"] == [{"line": 3, "reason": "recovery_torn_tail"}]
+
+    # Age + real sweep: the run is archived WITH the tail bytes.
+    old = time.time() - 30 * 86400.0
+    os.utime(live, (old, old))
+    counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+    assert not live.exists()
+
+    # Cold recovery over the archived copy: the tolerated-torn-tail rule must
+    # apply to the original bytes, not be discarded by a strict decode.
+    _simulate_restart()
+    recovered = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in recovered["events"]] == [1, 2], recovered
+    assert recovered["malformed"] == [{"line": 3, "reason": "recovery_torn_tail"}]
+
+    # The repaired append continues the durable maximum and commits seq 3.
+    row = rj.append_run_event(sid, rid, "token", {"text": "three"}, session_dir=tmp_path)
+    assert row["seq"] == 3
+    _simulate_restart()
+    repaired = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in repaired["events"]] == [1, 2, 3], repaired
+    assert repaired["malformed"] == []
+
+
+def test_ordinary_read_tolerates_partial_utf8_live_tail(tmp_path):
+    """The ordinary read path must decode live journals reversibly (no raise).
+
+    Same root cause as the archive-tail loss: a crash-truncated UTF-8 sequence
+    at live EOF is the tolerated uncommitted torn tail, but the plain decode
+    raised ``UnicodeDecodeError`` out of every ordinary read of the run. The
+    merge decode is reversible now: the valid prefix survives and the fragment
+    surfaces as one malformed row.
+    """
+    sid, rid = "s1", "r1"
+    rj.append_run_event(sid, rid, "token", {"text": "one"}, session_dir=tmp_path)
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+    with open(live, "ab") as fh:
+        fh.write(b'{"version":2,"event_id":"' + rid.encode()
+                 + b':2","seq":2,"payload":{"text":"\xe2\x82')
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    read = rj.read_run_events(sid, rid, session_dir=tmp_path)
+    assert [int(e["seq"]) for e in read["events"]] == [1], read
+    assert len(read["malformed"]) == 1
+    assert read["malformed"][0]["line"] == 2
+
+
+_DAMAGED_SEQ2_VARIANTS = [
+    ("event", {"event": "cancel"}, "recovery_event_type"),
+    ("type", {"type": "cancel"}, "recovery_event_type"),
+    ("terminal-flag", {"terminal": False}, "recovery_terminal_identity"),
+    ("terminal-state", {"terminal_state": "errored"}, "recovery_terminal_identity"),
+    ("version", {"version": 1}, "recovery_protocol_version"),
+    ("event-id", {"event_id": "r1:9"}, "recovery_identity_or_sequence"),
+]
+
+
+def _setup_archived_run_with_live_suffix(root: Path, sid: str, rid: str) -> Path:
+    """Real writer + real sweep + real append: archived seq 1,2 and live seq 3."""
+    rj.append_run_event(sid, rid, "token", {"text": "one"}, session_dir=root)
+    rj.append_run_event(sid, rid, "done", {"terminal_state": "completed"}, session_dir=root)
+    live = root / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+    old = time.time() - 30 * 86400.0
+    os.utime(live, (old, old))
+    counters = _sweep(root, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+    assert not live.exists()
+    # Fresh process view: the re-created suffix seeds from the archived prefix.
+    _simulate_restart()
+    assert rj.append_run_event(sid, rid, "token", {"text": "three"}, session_dir=root)["seq"] == 3
+    return live
+
+
+def _archive_with_damaged_seq2(root: Path, sid: str, rid: str, mutation: dict) -> None:
+    """Rewrite the archived copy's seq2 row with a metadata/writer-state change.
+
+    Written to a temp entry and atomically replaced, so the damage is a fresh
+    inode: the hot-path cache must miss on identity alone even if a rewrite
+    happened to preserve size and timestamps.
+    """
+    archive = _archive_path(root, sid, rid)
+    raw = gzip.decompress(archive.read_bytes())
+    rows = [json.loads(line) for line in raw.decode("utf-8").splitlines()]
+    assert len(rows) == 2
+    rows[-1].update(mutation)
+    body = "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
+    tmp = archive.with_name(archive.name + ".dmg")
+    with gzip.open(tmp, "wb") as gz:
+        gz.write(body.encode("utf-8"))
+    os.replace(tmp, archive)
+
+
+@pytest.mark.parametrize(
+    "mutation,reason",
+    [(mutation, reason) for _label, mutation, reason in _DAMAGED_SEQ2_VARIANTS],
+    ids=[label for label, _mutation, _reason in _DAMAGED_SEQ2_VARIANTS],
+)
+def test_damaged_archive_beside_live_suffix_refuses_cold_append(tmp_path, mutation, reason):
+    """A damaged archive must refuse COLD appends even with a live suffix.
+
+    Reproduces the re-gate finding: with archived seq1/2 and live seq3, the
+    cold writer consulted the archive only when the live scan was EMPTY, so
+    damaged seq2 metadata (event/type, terminal metadata, version downgrade,
+    identity) was never seen — the writer acknowledged seq4 into a union no
+    reader can recover (validated recovery stays empty). The canonical
+    archive-prefix authority now runs on EVERY append that can see an archive
+    and refuses before any mutate/acknowledge; the live suffix stays untouched.
+    """
+    sid, rid = "s1", "r1"
+    live = _setup_archived_run_with_live_suffix(tmp_path, sid, rid)
+
+    _simulate_restart()
+    _archive_with_damaged_seq2(tmp_path, sid, rid, mutation)
+    before = live.read_bytes()
+
+    # The reader rejects the union (the failure the writer must respect)...
+    read = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert read["events"] == []
+    assert read["malformed"][0]["reason"] == reason
+
+    # ...and the cold writer refuses instead of acknowledging seq 4.
+    with pytest.raises(ValueError, match="archive_sequence_unavailable"):
+        rj.append_run_event(sid, rid, "token", {"text": "four"}, session_dir=tmp_path)
+    assert live.read_bytes() == before
+    read_again = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert read_again["events"] == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [mutation for _label, mutation, _reason in _DAMAGED_SEQ2_VARIANTS],
+    ids=[label for label, _mutation, _reason in _DAMAGED_SEQ2_VARIANTS],
+)
+def test_damaged_archive_beside_live_suffix_refuses_hot_append(tmp_path, mutation):
+    """The append cache must miss when the ARCHIVE changes, not just the live file.
+
+    Reproduces the re-gate finding: the cached next seq was keyed on the live
+    inode only, so damaging the archived seq2 (live untouched) left the cache
+    warm — the writer acknowledged seq4 straight off the stale validation while
+    recovery stayed empty. The cache key now folds the archive's
+    identity/generation in, so the same append goes cold, re-consults the
+    canonical authority, and refuses.
+    """
+    sid, rid = "s1", "r1"
+    live = _setup_archived_run_with_live_suffix(tmp_path, sid, rid)
+
+    # Warm-cache precondition: the just-completed seq3 append published a
+    # signature for this path (no restart below — this is the hot path).
+    with rj._SEQ_CACHE_LOCK:
+        assert str(live) in rj._SEQ_CACHE_SIGNATURES
+
+    _archive_with_damaged_seq2(tmp_path, sid, rid, mutation)
+    before = live.read_bytes()
+    with pytest.raises(ValueError, match="archive_sequence_unavailable"):
+        rj.append_run_event(sid, rid, "token", {"text": "four"}, session_dir=tmp_path)
+    assert live.read_bytes() == before
+
+
+def test_live_suffix_beside_healthy_archive_continues_cold_and_hot(tmp_path):
+    """Control: a healthy archive must keep seeding appends cold AND hot.
+
+    Guards the always-consulted authority against over-refusal: after archival
+    plus a re-created live suffix, appends continue at the durable maximum with
+    fresh caches (cold) and with the warm cache (hot; the archive is unchanged),
+    and the union reads back complete.
+    """
+    sid, rid = "s1", "r1"
+    _setup_archived_run_with_live_suffix(tmp_path, sid, rid)  # live seq 3
+    # Hot: warm cache, archive unchanged -> continues.
+    assert rj.append_run_event(sid, rid, "token", {"text": "four"}, session_dir=tmp_path)["seq"] == 4
+    _simulate_restart()
+    # Cold: fresh caches -> reseeds from the healthy archive + live pair.
+    assert rj.append_run_event(sid, rid, "token", {"text": "five"}, session_dir=tmp_path)["seq"] == 5
+    _simulate_restart()
+    read = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in read["events"]] == [1, 2, 3, 4, 5], read
+    assert read["malformed"] == []
+
+
+def test_tolerated_torn_archive_tail_does_not_refuse_live_suffix_appends(tmp_path):
+    """Control: a torn (uncommitted) archive tail must NOT refuse appends.
+
+    The always-consulted archive authority tolerates the one uncommitted crash
+    tail: with archived 1,2 + an unterminated fragment and a re-created live
+    seq3, the next append continues at 4 and the union validates whole. This is
+    the boundary the refusal must not cross.
+    """
+    sid, rid = "s1", "r1"
+    rj.append_run_event(sid, rid, "token", {"text": "one"}, session_dir=tmp_path)
+    rj.append_run_event(sid, rid, "done", {"terminal_state": "completed"}, session_dir=tmp_path)
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+    with open(live, "ab") as fh:
+        fh.write(b'{"version":2,"event_id":"' + rid.encode() + b':3","seq":3,')
+        fh.flush()
+        os.fsync(fh.fileno())
+    old = time.time() - 30 * 86400.0
+    os.utime(live, (old, old))
+    counters = _sweep(tmp_path, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0)
+    assert counters["archived_files"] == 1
+
+    _simulate_restart()
+    assert rj.append_run_event(sid, rid, "token", {"text": "three"}, session_dir=tmp_path)["seq"] == 3
+    _simulate_restart()
+    assert rj.append_run_event(sid, rid, "token", {"text": "four"}, session_dir=tmp_path)["seq"] == 4
+    _simulate_restart()
+    read = rj.read_run_events(sid, rid, session_dir=tmp_path, validated_recovery=True)
+    assert [int(e["seq"]) for e in read["events"]] == [1, 2, 3, 4], read
+    assert read["malformed"] == []

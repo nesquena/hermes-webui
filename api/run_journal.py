@@ -66,10 +66,12 @@ _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
 # Next sequence per path; a complete append publishes it under the per-path
 # lock. Cold writers validate and repair an uncommitted EOF tail before reuse;
-# hot writers avoid rereading the growing file. The shared dict mutex also
+# hot writers avoid rereading the growing file. Signatures fold in the live
+# inode plus the run's ARCHIVE identity (`_archive_cache_signature`) so a
+# change to either copy forces the cold path. The shared dict mutex also
 # protects structural access against cross-path deletion/eviction.
 _SEQ_CACHE: dict[str, int] = {}
-_SEQ_CACHE_SIGNATURES: dict[str, tuple[int, int, int, int, int]] = {}
+_SEQ_CACHE_SIGNATURES: dict[str, tuple[int, ...]] = {}
 _SEQ_CACHE_LOCK = threading.Lock()
 # Summary callers only need terminal state and the latest cursor. Re-parsing a
 # completed journal's full payload (which can include multi-megabyte tool or
@@ -356,6 +358,41 @@ def _held_journal_signature(fd: int) -> tuple[int, int, int, int, int]:
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
+def _archive_cache_signature(path: Path | None) -> tuple[int, ...] | None:
+    """Identity/generation of ``path``'s archive for append-cache validity.
+
+    The cached next seq is derived from BOTH copies readers union (archived
+    prefix + live suffix), so the cache key must be invalidated by a change to
+    EITHER: a damaged, replaced, pruned, or newly created archive beside an
+    untouched live file must miss the cache and re-run the canonical archive-
+    prefix authority before another append is acknowledged (acknowledging into
+    a union no reader can recover is exactly the failure this closes). Returns
+    an empty tuple when there is provably no archive, the archive's stat
+    identity when one exists, and ``None`` when its state cannot be
+    established — callers must treat the cache as invalid then (fail closed).
+    ``lstat`` (no symlink follow) keeps the present/absent/unknown three-state
+    the rest of the module uses; ``ctime_ns`` catches a same-inode, same-size
+    rewrite the way `_summary_cache_signature` does, and an atomic replace
+    changes the inode.
+    """
+    archived = _archive_path_for(path) if path is not None else None
+    if archived is None:
+        return ()
+    try:
+        st = os.lstat(archived)
+    except FileNotFoundError:
+        return ()
+    except OSError:
+        return None
+    return (
+        int(st.st_dev),
+        int(st.st_ino),
+        int(st.st_size),
+        int(st.st_mtime_ns),
+        int(st.st_ctime_ns),
+    )
+
+
 def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
     """Return the complete filesystem identity used for summary-cache validity.
 
@@ -555,7 +592,12 @@ def _read_run_file_text(path: Path) -> str | None:
         return _read_gz_text(path)
     live_text = None
     try:
-        live_text = path.read_text(encoding="utf-8")
+        # Reversible decode: a crash-truncated UTF-8 sequence at live EOF is
+        # the same uncommitted torn tail the byte scanner tolerates. A strict
+        # read raises on a readable run; surrogateescape preserves the exact
+        # bytes so this merge stays lossless and downstream readers surface a
+        # malformed trailing row instead of failing the whole read.
+        live_text = path.read_text(encoding="utf-8", errors="surrogateescape")
     except FileNotFoundError:
         pass
     except OSError:
@@ -581,10 +623,13 @@ def _scan_archive_prefix(text: str, session_id: str, run_id: str) -> tuple[list[
     uncommitted crash tail after a valid prefix. Any other failure returns its
     reason: rows past the failure point never carry authority, and callers
     that would CREATE rows must refuse rather than acknowledge appends into a
-    union no reader can recover.
+    union no reader can recover. The encode side is reversible
+    (``surrogateescape``) so bytes decoded losslessly by ``_read_gz_text``
+    reach the scanner exactly as stored and the torn-tail rule applies to the
+    ORIGINAL bytes.
     """
     events, malformed, _prefix_bytes = _scan_validated_journal(
-        io.BytesIO((text or "").encode("utf-8")),
+        io.BytesIO((text or "").encode("utf-8", errors="surrogateescape")),
         session_id,
         run_id,
         keep_prefix_on_error=True,
@@ -689,7 +734,15 @@ def _read_gz_text(archive_path: Path) -> str | None:
     try:
         with fh:
             with gzip.GzipFile(fileobj=fh, mode="rb") as gz:
-                return gz.read().decode("utf-8", errors="strict")
+                # Reversible decode: a crash-truncated UTF-8 sequence at the
+                # archive's EOF must survive losslessly so the byte scanner's
+                # tolerated-torn-tail rule can still see it — a strict decode
+                # discards the WHOLE run (the live file is gone by then) and
+                # every later append refuses. surrogateescape round-trips
+                # byte-exactly through the matching encode sites and is NOT
+                # replacement decoding: the scanner still rejects complete
+                # corruption on the bytes it rebuilds.
+                return gz.read().decode("utf-8", errors="surrogateescape")
     except FileNotFoundError:
         return None
     except (OSError, EOFError, UnicodeDecodeError):
@@ -910,7 +963,10 @@ def _iter_bounded_raw_jsonl_lines(path: Path, *, max_bytes: int, retained_bytes:
         if merged is None:
             return
         for raw in merged.splitlines(keepends=True):
-            raw_bytes = raw.encode("utf-8")
+            # Reversible encode mirrors the lossless decode: lone surrogates
+            # reproduce the ORIGINAL bytes so the replay path sees exactly what
+            # is stored (and its strict per-row decode still fails closed).
+            raw_bytes = raw.encode("utf-8", errors="surrogateescape")
             line_no += 1
             total_bytes += len(raw_bytes)
             if total_bytes > max_bytes:
@@ -978,8 +1034,19 @@ def append_run_event(
                 # cache seeds/repairs from disk; ordinary appends stay O(1).
                 signature = _held_journal_signature(fd)
                 size = signature[2]
+                # Fold the archive's identity/generation into the cache key: a
+                # cached next seq is a union derivation (archived prefix + live
+                # suffix), so an archive change — damage, replacement, prune, or
+                # creation — beside an untouched live file must force the cold
+                # path and re-run the canonical archive-prefix authority. None =
+                # archive state unknown: never trust a cached acknowledgement
+                # (fail closed).
+                archive_signature = _archive_cache_signature(path)
+                cache_signature = (
+                    None if archive_signature is None else signature + archive_signature
+                )
                 with _SEQ_CACHE_LOCK:
-                    if _SEQ_CACHE_SIGNATURES.get(key) != signature:
+                    if cache_signature is None or _SEQ_CACHE_SIGNATURES.get(key) != cache_signature:
                         cached_next = None
                 if cached_next is None:
                     with os.fdopen(os.dup(fd), "rb") as fh:
@@ -1037,7 +1104,19 @@ def append_run_event(
                     raise
                 with _SEQ_CACHE_LOCK:
                     _SEQ_CACHE[key] = max(next_seq, assigned_seq + 1)
-                    _SEQ_CACHE_SIGNATURES[key] = _held_journal_signature(fd)
+                    if archive_signature is None:
+                        # Archive state could not be established at entry: a
+                        # live-only signature would let a later append trust an
+                        # acknowledgement this pass could not derive. Drop the
+                        # entry — the next append must re-derive from disk.
+                        _SEQ_CACHE_SIGNATURES.pop(key, None)
+                    else:
+                        # Live identity post-write (matches the next append's
+                        # pre-write stat) + the archive identity this pass
+                        # actually derived from. A change to either misses.
+                        _SEQ_CACHE_SIGNATURES[key] = (
+                            _held_journal_signature(fd) + archive_signature
+                        )
                 _discard_cached_summary(path)
         finally:
             os.close(fd)
@@ -1237,13 +1316,30 @@ def _archived_next_seq(path: Path | None) -> int:
 def _prepare_journal_append(
     lines, session_id: str, run_id: str, size: int, *, path: Path | None = None,
 ) -> tuple[int, int, bool]:
-    """Plan first-process tail repair and reseeding before any bytes are changed."""
+    """Plan first-process tail repair and reseeding before any bytes are changed.
+
+    The seed is derived from the UNION contract readers apply — archived prefix
+    plus live continuity — not from whichever copy happens to have rows: the
+    canonical archive-prefix authority (``_archived_next_seq``) is consulted on
+    EVERY append that can see an archive, even when the live scan already
+    produced rows. A damaged or unreadable archive refuses HERE — before the
+    truncate/write below — because a row acknowledged beside it lands in a
+    union no reader can recover (live rows alone do not start at seq 1, so
+    validated recovery stays empty). A healthy archive yields its next seq so a
+    re-created suffix continues the union; a tolerated uncommitted torn tail
+    (archive or live) does not refuse; and 1 is returned only when there is
+    provably no archive.
+    """
     events, malformed, prefix_bytes = _scan_validated_journal(
         lines, session_id, run_id, writer_seed=True,
     )
     if malformed and malformed[0]["reason"] != "recovery_torn_tail":
         raise ValueError(malformed[0]["reason"])
-    next_seq = events[-1]["seq"] + 1 if events else _archived_next_seq(path)
+    archived_next = _archived_next_seq(path)
+    if events:
+        next_seq = max(int(events[-1]["seq"]) + 1, archived_next)
+    else:
+        next_seq = archived_next
     if malformed:
         return next_seq, prefix_bytes, False
     if size:
