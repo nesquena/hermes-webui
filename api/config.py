@@ -13197,6 +13197,7 @@ _SETTINGS_SKIN_VALUES = {
     "geist-contrast",
     "zeus",
     "verdigris",
+    "gruvbox",
     "neon-soft",
     "neon-paint",
 }
