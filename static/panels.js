@@ -12372,6 +12372,15 @@ async function checkUpdatesNow(channelOverride){
   const spinner=$('checkUpdatesSpinner');
   const status=$('checkUpdatesStatus');
   if(!btn||!label) return;
+  // #7679 finding 2 (latest-owner): stamp this check with a fresh epoch so a
+  // slower, older check that resolves AFTER a newer one never overwrites the
+  // banner/status the newer check published (owner guard).
+  const epoch=(typeof _beginUpdateCheck==='function')?_beginUpdateCheck():null;
+  // #7679 finding 1 (round 3): declared at function scope, not inside the try.
+  // The rejection path needs the generation this check captured (it is what
+  // tells the reconciler whether a recovery control predates or postdates the
+  // failure), and a try-block-scoped const is not visible from the catch.
+  let _recoveryGenerationAtCheck=0;
   // Disable button, show spinner
   btn.disabled=true;
   if(spinner) spinner.style.display='';
@@ -12385,10 +12394,24 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
-    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
+    _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
+    // #7679 finding 2: an older check resolving after a newer one began must
+    // not publish — it would overwrite the newer banner/status and re-arm
+    // destructive state from stale payload. Drop it entirely.
+    if(epoch!==null && typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
+      // #7679 finding 3 (round 2): reconcile the banner on EVERY terminal
+      // branch, not just the ones that have something to announce. A dirty
+      // result leaves the previous render's Force button visible and enabled,
+      // and the grant that made it operable was retired at the top of this
+      // render — so the control now does nothing when clicked.
+      //
+      // Passing the payload through the normal render path hides, disables and
+      // detargets the obsolete controls, and re-arms only what this check still
+      // validates (a live Agent recovery keeps its operable Force).
+      if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
     } else {
       const errorParts=[];
       const formatUpdateError=(typeof _formatUpdateCheckError==='function')
@@ -12421,19 +12444,46 @@ async function checkUpdatesNow(channelOverride){
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+        // #7679 finding 3 (round 2): reconcile the banner on this branch too —
+        // an error is a terminal state and the previous render's Force is now
+        // inert.
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
+        // #7679 finding 3 (round 2): same reconciliation for a no-git target.
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       } else {
-        if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
+        // #7679 round 2: a dirty-at-latest install has no "N updates
+        // available" parts, no error and is not no-git, so it landed here and
+        // the Settings line read "Up to date ✓" while the banner directly above
+        // it said "Local changes detected". The banner was right; this line was
+        // contradicting it. Report the dirty state here too.
+        const _dirtyParts=[];
+        if(data.webui&&data.webui.dirty&&!data.webui.manual_update) _dirtyParts.push('WebUI');
+        if(data.agent&&data.agent.dirty&&!data.agent.ignored) _dirtyParts.push('Agent');
+        if(_dirtyParts.length){
+          if(status){status.textContent=t('update_dirty_local_changes','Local changes detected')+': '+_dirtyParts.join(', ');status.style.color='var(--muted)';}
+        } else {
+          if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
+        }
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,epoch,_recoveryGenerationAtCheck);
       }
     }
   } catch(e){
     // Never expose raw e.message in UI — log to console for debugging only
     console.warn('[checkUpdatesNow]', e);
+    // #7679 finding 2 (round 2): an OLDER check that REJECTS after a newer one
+    // began must not overwrite the newer status. The success path has had an
+    // epoch guard since the last round; the rejection path never did, so a
+    // stale failure erased a fresh "up to date" / "available" line and left the
+    // banner describing a state that no longer exists.
+    //
+    // Note the guard is on the REJECTION, not on the error text: a genuinely
+    // current failure still reports, so this narrows nothing but the race.
+    if(epoch!==null && typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
     // Show a generic user-facing error; if the API returned a message body use it
     let userMsg=t('settings_update_check_failed');
     if(e&&e.response){
@@ -12443,7 +12493,43 @@ async function checkUpdatesNow(channelOverride){
       }catch(_){}
     }
     if(status){status.textContent=userMsg;status.style.color='var(--error)';}
+    // #7679 finding 1 (round 3): a CURRENT rejection is a terminal state, and
+    // the previous render's Force is now inert — the check it was armed by no
+    // longer describes a forceable target, so the grant this failure just
+    // invalidated must go with it. Leaving the button visible and enabled
+    // while its grant is null makes it a decoy: forceUpdate() finds no grant,
+    // opens zero confirmations and sends zero POSTs.
+    //
+    // Retire the OWNED control (target + grant) rather than rendering an empty
+    // payload: _showUpdateBanner would also hide independently newer recovery
+    // controls, which finding 2 is about. A dirty install keeps its recovery
+    // path — the error state itself does not clear a lock or a conflict that
+    // the user still needs a button for.
+    //
+    // NOTE: `data` is block-scoped to the try above and is NOT visible here —
+    // the request failed, so there is no payload to hand the reconciler. The
+    // catch therefore reconciles with a null payload, which is exactly the
+    // "no authoritative recovery state" case: it may retire the control the
+    // failing check owned, and nothing else.
+    if(typeof _retireForceUpdate==='function') _retireForceUpdate();
+    if(typeof _reconcileObsoleteUpdateControls==='function'){
+      _reconcileObsoleteUpdateControls(null, _recoveryGenerationAtCheck);
+    }else{
+      const _forceBtn=$('btnForceUpdate');
+      if(_forceBtn&&_forceBtn.dataset.target!=='agent'){_forceBtn.disabled=true;_forceBtn.style.display='none';_forceBtn.dataset.target='';}
+      const _lockBtn=$('btnClearUpdateLock');
+      if(_lockBtn&&_lockBtn.dataset.target!=='agent'){_lockBtn.disabled=true;_lockBtn.style.display='none';_lockBtn.dataset.target='';}
+    }
   } finally {
+    // #7679 finding 2 (round 2): the SAME ownership question applies to the
+    // control restoration. A stale request's finally re-enabled Check, cleared
+    // the spinner and reset the label while the NEWER request was still
+    // pending — the button then read "Check now" and was clickable during an
+    // in-flight check, and the spinner vanished mid-flight.
+    //
+    // Only the latest owner may restore the controls; an older one leaves them
+    // exactly as the newer request set them.
+    if(epoch!==null && typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
     btn.disabled=false;
     if(spinner) spinner.style.display='none';
     if(label) label.textContent=t('settings_check_now');

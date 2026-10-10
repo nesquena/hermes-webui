@@ -11444,6 +11444,65 @@ function _formatUpdateTargetStatus(label,info){
   const noun=info.release_based?'release':'update';
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
 }
+function _isForceCleanTarget(info){
+  // #7679 ONE predicate for the destructive force-clean affordance
+  // (reviewer CORE #2 + SILENT #4). The banner status parts and the
+  // force button must answer the same question: is this checkout
+  // dirty, at-latest, and actually forceable?
+  //
+  //  - ``dirty === true`` (exact): a missing/falsy flag means the
+  //    probe never ran or reported clean — never a reason to offer
+  //    a destructive reset.
+  //  - ``behind === 0``: an install with pending upstream commits is
+  //    served by Apply, not by discarding local changes.
+  //  - ``!error``: a stale/failed check payload must not gate a
+  //    destructive action. This is the gate the old ``webuiDirty``
+  //    flag omitted, so a WebUI fetch error plus an Agent update
+  //    left the force button visible (targeting "webui") on a
+  //    payload whose force endpoint was not forceable at all.
+  //  - ``!no_git && !manual_update``: there is no checkout to reset
+  //    (Docker / pip installs); /api/updates/force refuses those
+  //    targets as well.
+  //
+  // Deliberately target-agnostic (SILENT #4): /api/updates/force
+  // accepts both ``webui`` and ``agent``, and the check payload
+  // probes ``dirty`` for BOTH, so an Agent-only dirty install gets
+  // the same recovery action instead of a banner with nowhere to go.
+  return !!(info&&info.dirty===true&&!(info.behind>0)&&!info.error&&!info.no_git&&!info.manual_update);
+}
+function _updatePayloadHasActionableState(data){
+  // #7679 SILENT #3: does a check payload carry any state the update
+  // banner exists for? Used by the unattended boot-time check in
+  // boot.js, which previously only looked at ``behind > 0`` — so a
+  // dirty-at-latest payload was fetched, parsed, and thrown away,
+  // and the user only discovered the "Local changes detected" state
+  // by manually opening Settings and pressing Check for updates.
+  //
+  // ``behind > 0`` keeps its own semantics (a real update is
+  // available); the dirty branch adds the at-latest destructive
+  // recovery case. ``error``-only and ``no_git``-only payloads are
+  // deliberately excluded — they have their own surfaces, and the
+  // banner would have nothing actionable to show for them.
+  if(!data) return false;
+  if((data.webui&&data.webui.behind>0)||(data.agent&&data.agent.behind>0)) return true;
+  return _isForceCleanTarget(data.webui)||_isForceCleanTarget(data.agent);
+}
+function _formatUpdateDirtyStatus(label,info){
+  // #4085: a dirty install at-or-past latest is a distinct
+  // surfaced state, not a bare "up to date." The Settings
+  // panel renders this as a separate "Local changes detected"
+  // banner with a destructive force-clean action wired to
+  // /api/updates/force (reuses ``forceUpdate()`` and its
+  // existing danger confirm). Skips the no_git case —
+  // manual-update installs have no checkout to dirty, and the
+  // /api/updates/force endpoint refuses no_git targets.
+  //
+  // Shares ``_isForceCleanTarget`` with ``_showUpdateBanner``
+  // so the banner text and the destructive button can never
+  // disagree about whether the state is forceable.
+  if(!_isForceCleanTarget(info)) return null;
+  return `${label}: ${t('update_dirty_local_changes','Local changes detected')}`;
+}
 function _formatManualUpdateInstruction(info){
   if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
   const tag=info.channel==='experimental'?'experimental':'latest';
@@ -11748,18 +11807,214 @@ function _renderUpdateWhatsNewLinks(data){
   }
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
-function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
+// #7679 findings 1 & 2 — every update publication and every destructive
+// force offer must be race-safe against out-of-order completions.
+//
+// ``_updateCheckEpoch`` advances each time a new check/apply begins. A stale
+// check (an older POST resolving after a newer one started) can prove itself
+// stale and back off before mutating the banner, the Settings status text, or
+// the destructive affordance — the latest-owner lifecycle. ``boot.js`` and
+// ``panels.js`` route their banner publications through ``_showUpdateBanner``
+// with this epoch.
+//
+// ``_forceUpdateGrant`` is the work-authority that arms /api/updates/force.
+// It records the target plus the channel that target was offering WHEN the
+// destructive button was exposed, and it is retired whenever superseded (a
+// newer check, a channel change, or an Apply retry). forceUpdate() validates
+// that exact grant again after its (long) danger-confirm dialog, so an open
+// confirm can never authorize a destructive POST from a state that no longer
+// justifies it (stale-authority fix).
+let _updateCheckEpoch = 0;
+let _forceUpdateGrant = null;
+function _beginUpdateCheck(){
+  _updateCheckEpoch += 1;
+  _forceUpdateGrant = null;
+  return _updateCheckEpoch;
+}
+function _isUpdateCheckStale(epoch){
+  return typeof epoch === 'number' && epoch !== _updateCheckEpoch;
+}
+function _retireForceUpdate(){
+  _forceUpdateGrant = null;
+}
+function _grantForceUpdate(target, channel){
+  _forceUpdateGrant = {
+    target: target,
+    channel: (channel==='stable'||channel==='experimental') ? channel : null,
+    epoch: _updateCheckEpoch,
+  };
+}
+// #7679 finding 2 (round 3): separate CHECK-STATUS ownership from RECOVERY
+// ownership. _showUpdateBanner starts by retiring every grant and then re-arms
+// only what its payload validates, so an observation that carries no
+// authoritative recovery state (an error-only, no-git-only or disabled payload)
+// erases a recovery that a NEWER observation established. The reviewer's
+// schedule: a valid manual-WebUI + updatable-Agent check completes; a second
+// Check starts and captures recovery generation 0; applyUpdates() then
+// publishes generation 1 with a live Agent/stable Force grant; and the
+// already-pending Check finally returns one of those three payloads — each of
+// which hid, disabled or detargeted Force and cleared that newer grant.
+//
+// Two different clocks are in play and they must not be collapsed:
+//   epoch                  — advanced by _beginUpdateCheck(). Answers "may this
+//                            payload publish at all?"
+//   _updateRecoveryGeneration — advanced only when a recovery is actually
+//                            established. Answers "is the recovery authority
+//                            this payload carries still current?"
+//
+// An observation captured BEFORE a newer recovery, carrying no authoritative
+// recovery state, must not retire it. Only an equally current recovery
+// observation that explicitly proves the condition gone (recovery[kind]===false)
+// may retire that owner. This predicate is the single place that rule lives.
+function _recoveryObservationMayRetire(data, recoveryGenerationAtCheck){
+  if(!data||typeof data!=='object') return false;
+  const recovery=(data.agent&&data.agent.recovery)||null;
+  if(!recovery) return false; // no authoritative recovery state -> may not retire
+  const captured=recoveryGenerationAtCheck===null||recoveryGenerationAtCheck===undefined
+    ? null
+    : Number(recoveryGenerationAtCheck);
+  const current=Number(window._updateRecoveryGeneration)||0;
+  if(captured!==null&&captured!==current) return false; // older observation
+  if(data.cached) return false; // a cache hit predates the recovery it would judge
+  const explicitlyGone=recovery.force===false||recovery.clear_lock===false;
+  return !!explicitlyGone;
+}
+// Retire the controls a terminal CHECK-OUTCOME invalidates, while preserving
+// independently newer recovery. `data` may be the failed payload (or null when
+// the request never produced one); `recoveryGenerationAtCheck` is the
+// generation the failing request captured when it started.
+function _reconcileObsoleteUpdateControls(data, recoveryGenerationAtCheck){
+  if(typeof _retireForceUpdate!=='function') return;
+  const mayRetire=_recoveryObservationMayRetire(data, recoveryGenerationAtCheck);
+  const forceBtn=(typeof $==='function')?$('btnForceUpdate'):null;
+  const clearLockBtn=(typeof $==='function')?$('btnClearUpdateLock'):null;
+  const keepAgent=(btn)=>{
+    // Preserve an Agent recovery control a newer observation established: a
+    // live target plus a recovery state that has not been proven gone.
+    if(!btn||btn.dataset.target!=='agent') return false;
+    if(btn.style.display!=='inline-block'||btn.disabled) return false;
+    return !mayRetire;
+  };
+  const keepForce=keepAgent(forceBtn);
+  const keepLock=keepAgent(clearLockBtn);
+  if(!keepForce){
+    _retireForceUpdate();
+  }
+  if(forceBtn&&!keepForce){
+    forceBtn.disabled=true;
+    forceBtn.style.display='none';
+    forceBtn.dataset.target='';
+  }
+  if(clearLockBtn&&!keepLock){
+    clearLockBtn.disabled=true;
+    clearLockBtn.style.display='none';
+    clearLockBtn.dataset.target='';
+  }
+  // A preserved control must stay armed: retiring the grant above would have
+  // left it a decoy, and a preserved lock without its target is inert too.
+  if(keepForce&&typeof _grantForceUpdate==='function'){
+    const recovery=(data&&data.agent&&data.agent.recovery)||null;
+    if(!mayRetire&&recovery&&(recovery.force===true||recovery.force===null||recovery.force===undefined)){
+      _grantForceUpdate('agent', data&&data.agent?data.agent.channel:null);
+    }
+  }
+  return {keepForce:!!keepForce,keepLock:!!keepLock};
+}
+// #7679: two independent staleness counters meet at this call, and they are
+// NOT the same clock — collapsing them into one parameter is what made the
+// round-3 patch look right while disabling #8040's authority guard:
+//
+//   epoch                    — advanced by _beginUpdateCheck() on every NEW
+//                               check/apply. Answers "may this payload publish
+//                               at all?" (latest-owner).
+//   recoveryGenerationAtCheck — advanced only by forceUpdate()/apply in
+//                               ui.js. Answers "is the Force/Clear-lock
+//                               authority this payload carries still current?"
+//                               (#8040, Greptile P1).
+//
+// So the signature takes both. ``epoch`` is optional (legacy call sites and
+// the panels.js manual check, which already dropped its own stale payload
+// before reaching here, pass null); ``recoveryGenerationAtCheck`` is what the
+// manual_update branch reads for the recovery-gone probe.
+function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
+  // Latest-owner guard: a stale publication (older check resolving after a
+  // newer one began) must not overwrite banner/status state or re-arm the
+  // destructive control. Undefined epoch (legacy call sites) bypasses it.
+  if(epoch!==null&&epoch!==undefined&&typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
+  // A fresh render supersedes any in-flight force grant; it is re-armed below
+  // only if this payload is still forceable.
+  //
+  // #7679 finding 2 (round 3): snapshot the recovery authority FIRST. An
+  // observation captured before a newer recovery established one — and which
+  // carries no authoritative recovery state of its own — must not erase it.
+  // The unconditional retire below is what did; the snapshot is restored right
+  // after, so a preserved recovery stays armed instead of becoming a decoy.
+  // Only an equally current observation that explicitly proves the condition
+  // gone may drop it, which is exactly what _recoveryObservationMayRetire says.
+  const _recoveryMayRetire=typeof _recoveryObservationMayRetire==='function'
+    ? _recoveryObservationMayRetire(data, recoveryGenerationAtCheck)
+    : false;
+  const _preservedRecoveryTarget=(typeof _forceUpdateGrant!=='undefined'&&_forceUpdateGrant&&_forceUpdateGrant.target==='agent')
+    ? _forceUpdateGrant
+    : null;
+  if(typeof _retireForceUpdate==='function') _retireForceUpdate();
+  if(_preservedRecoveryTarget&&!_recoveryMayRetire&&typeof _grantForceUpdate==='function'){
+    _grantForceUpdate('agent', _preservedRecoveryTarget.channel);
+  }
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
   if(webuiPart) parts.push(webuiPart);
   if(agentPart) parts.push(agentPart);
+  // #4085: also surface dirty-at-latest as a distinct banner
+  // state. ``_formatUpdateDirtyStatus`` returns null when
+  // ``behind > 0`` (the upstream banner covers it) or when
+  // ``no_git``/``error`` apply, so this only adds a banner for
+  // a real "dirty and at latest" install.
+  const webuiDirtyPart=_formatUpdateDirtyStatus('WebUI',data.webui);
+  const agentDirtyPart=_formatUpdateDirtyStatus('Agent',data.agent);
+  if(webuiDirtyPart) parts.push(webuiDirtyPart);
+  if(agentDirtyPart) parts.push(agentDirtyPart);
   window._updateData=data;
   const btnApply=$('btnApplyUpdate');
+  // #4085: the dirty-at-latest state is destructive-only,
+  // so expose the existing force button rather than the
+  // plain Apply (which would no-op on behind == 0). The
+  // existing ``forceUpdate()`` already wires the destructive
+  // endpoint, carries the channel from the check payload,
+  // and gates on a danger confirm — see line 10822.
+  //
+  // ONE shared predicate drives every dirty banner part and the
+  // destructive button (reviewer CORE #2 + SILENT #4). The old code
+  // derived ``webuiDirty`` and ``webuiForceable`` separately and only
+  // for WebUI, so they could disagree: a WebUI fetch ``error`` was
+  // dropped by ``_formatUpdateDirtyStatus`` but still satisfied
+  // ``webuiDirty`` (it never read ``error``), leaving the force
+  // button visible on a payload whose force target is not even
+  // forceable. Deriving BOTH visibility and target from the one
+  // predicate removes that class of bug, and makes an Agent-only
+  // dirty install recoverable (SILENT #4) — the backend force
+  // endpoint accepts the agent target too, and forceUpdate() reads
+  // the channel from ``window._updateData[target]``, so that target
+  // needs no new plumbing (the agent is channel-neutral server-side).
+  //
+  // Both-dirty precedence: WebUI wins. The WebUI checkout is the
+  // one the Settings panel is looking at, and resetting it is what a
+  // user in that panel most likely intends; the banner text still
+  // lists BOTH dirty states, so nothing is hidden — only the single
+  // destructive button's target is decided here.
+  const webuiForceClean=_isForceCleanTarget(data.webui);
+  const agentForceClean=_isForceCleanTarget(data.agent);
+  const forceTarget=webuiForceClean?'webui':(agentForceClean?'agent':'');
+  const forceable=!!forceTarget;
+  // Declared at this scope on purpose: the manual-update carve-outs further
+  // down (which protect an unrelated Agent recovery button from being retired
+  // by the dirty-affordance reset) need these three facts too, and reading
+  // block-scoped consts from an outer scope is a ReferenceError.
+  const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
+  const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
+  const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
   if(btnApply){
-    const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
-    const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
-    const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
     const hasApplyTargets=webuiUpdatable||agentUpdatable;
     btnApply.disabled=!hasApplyTargets;
     btnApply.style.display=hasApplyTargets?'':'none';
@@ -11775,11 +12030,100 @@ function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
       const _currentRecoveryGeneration=Number(window._updateRecoveryGeneration)||0;
       const _recoveryGenerationIsCurrent=recoveryGenerationAtCheck===null||Number(recoveryGenerationAtCheck)===_currentRecoveryGeneration;
       const _recoveryGone=(kind)=>!!(!data.cached&&_recoveryGenerationIsCurrent&&_agentRecovery&&_agentRecovery[kind]===false);
+      // #7679 finding 2 (round 3): an independently newer Agent recovery
+      // survives an observation that never saw it. Without this carve-out the
+      // hide below fires whenever `agentUpdatable` is false — which is exactly
+      // the shape of an error-only / no-git-only / disabled payload — and the
+      // reviewer's schedule loses a live recovery button on all three.
+      const _preserveAgentRecovery=!!(_preservedRecoveryTarget&&!_recoveryMayRetire&&!_recoveryGone('force'));
       const forceBtn=$('btnForceUpdate');
-      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent'&&!_recoveryGone('force'))){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
+      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent'&&!_recoveryGone('force'))&&!_preserveAgentRecovery){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
       const clearLockBtn=$('btnClearUpdateLock');
-      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent'&&!_recoveryGone('clear_lock'))){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent'&&!_recoveryGone('clear_lock'))&&!_preserveAgentRecovery){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
     }
+  }
+  // #4085: when a dirty install is the only signal, surface
+  // the force button so the user has a destructive recovery
+  // path.
+  //
+  // Reset on EVERY fresh render before deciding (reviewer CORE
+  // #2): previously the button was only ever shown, so once a
+  // dirty check exposed it, a later clean check — or a check that
+  // stopped being forceable (error, manual, no_git) — left it
+  // visible and pointing at "webui", offering git clean -fd on an
+  // install with no local changes. Hiding unless the predicate
+  // holds makes "ding" and "stale button" the same code path.
+  //
+  // ``forceTarget`` is derived from the SAME predicate above, so
+  // the button can never be visible while pointing at a target that
+  // predicate just rejected (SILENT #4: an Agent-only dirty state
+  // targets "agent", never the WebUI checkout the user did not
+  // report as dirty).
+  const forceBtn=$('btnForceUpdate');
+  // Manual-update WebUI (#8040): the branch above may have deliberately kept
+  // this button armed on the Agent target. Do not undo that here — this block
+  // owns the *dirty* affordance, and "not forceable for a dirty reset" must
+  // not silently retire an unrelated, still-valid Agent recovery.
+  const _forceBtnManualAgentKeep=(webuiManual&&forceBtn&&forceBtn.dataset.target==='agent'&&forceBtn.style.display==='inline-block'&&!forceBtn.disabled);
+  // #7679 finding 2 (round 3): the same preserved-recovery carve-out for the
+  // dirty-affordance reset. A payload that is not forceable for a dirty reset
+  // must not silently retire an unrelated, still-valid Agent recovery that a
+  // newer observation established.
+  const _forceBtnPreservedRecoveryKeep=!!(_preservedRecoveryTarget&&!_recoveryMayRetire&&forceBtn&&forceBtn.dataset.target==='agent'&&forceBtn.style.display==='inline-block'&&!forceBtn.disabled);
+  if(forceBtn&&!_forceBtnManualAgentKeep&&!_forceBtnPreservedRecoveryKeep){
+    if(forceable){
+      forceBtn.dataset.target=forceTarget;
+      forceBtn.style.display='inline-block';
+      forceBtn.disabled=false;
+      forceBtn.textContent=t('update_force','Force update');
+      // #7679 finding 1: arm the destructive grant with the exact target and
+      // channel this payload offers. forceUpdate() revalidates this grant
+      // after its danger confirm, so a superseding state cannot authorize a
+      // stale POST.
+      if(typeof _grantForceUpdate==='function') _grantForceUpdate(forceTarget, data&&data[forceTarget]?data[forceTarget].channel:null);
+    }else{
+      forceBtn.disabled=true;
+      forceBtn.style.display='none';
+      forceBtn.dataset.target='';
+    }
+  }else if(forceBtn&&_forceBtnManualAgentKeep){
+    // #7679 finding 1 (round 2): the manual-Agent preservation branch above
+    // kept the control VISIBLE and ENABLED while this render had already
+    // retired every grant. The button therefore looked operable and did
+    // nothing: forceUpdate() found no grant, opened zero confirmations and
+    // sent zero POSTs.
+    //
+    // Keeping the button without re-arming it is only half the fix. Re-arm it
+    // here, but ONLY with authority this payload actually validates — the same
+    // ``agentUpdatable && !recoveryGone`` predicate the block above uses to
+    // decide an Agent recovery is live. Granting unconditionally would be worse
+    // than the original bug: it would arm the destructive control on a payload
+    // that no longer supports it, and the next click would POST without
+    // authority.
+    //
+    // ``_recoveryGone`` is deliberately NOT referenced here: it is declared
+    // inside the block above and is out of scope at this point, so calling it
+    // would throw a ReferenceError from inside the banner render. The predicate
+    // is re-derived from the same three inputs instead.
+    const _keptRecovery=(data&&data.agent&&data.agent.recovery)||null;
+    const _keptGenerationCurrent=recoveryGenerationAtCheck===null||Number(recoveryGenerationAtCheck)===(Number(window._updateRecoveryGeneration)||0);
+    const _keptRecoveryGone=!!(!data.cached&&_keptGenerationCurrent&&_keptRecovery&&_keptRecovery.force===false);
+    if(typeof _grantForceUpdate==='function'&&agentUpdatable&&!_keptRecoveryGone){
+      _grantForceUpdate('agent', data&&data.agent?data.agent.channel:null);
+    }
+    forceBtn.dataset.target='agent';
+  }
+  // Clear-lock is a conflict/lock recovery control, not a dirty-state
+  // one, so it is reset here too — otherwise a lock error from a
+  // previous apply leaves it pinned on a target that no longer
+  // applies (same stale-button class as CORE #2).
+  const clearLockBtn=$('btnClearUpdateLock');
+  // Same manual-update carve-out as the force button above (#8040).
+  const _lockBtnManualAgentKeep=(webuiManual&&clearLockBtn&&clearLockBtn.dataset.target==='agent'&&clearLockBtn.style.display==='inline-block'&&!clearLockBtn.disabled);
+  if(clearLockBtn&&!forceable&&!_lockBtnManualAgentKeep){
+    clearLockBtn.disabled=true;
+    clearLockBtn.style.display='none';
+    clearLockBtn.dataset.target='';
   }
   if(!parts.length){
     _renderUpdateWhatsNewLinks(data);
@@ -11790,7 +12134,22 @@ function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
   const msg=$('updateMsg');
   if(msg){
     const manualInstruction=_formatManualUpdateInstruction(data&&data.webui);
-    msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'');
+    // #7679 finding 4 (round 3): "available" belongs to real upstream updates
+    // only. The banner rendered `WebUI: Local changes detected available` for
+    // a dirty-only install — there is nothing to download, the checkout is
+    // merely dirty — and Settings one line below already says "Local changes
+    // detected". Split the parts: the upstream ones (behind>0) keep the word,
+    // the dirty-only ones do not, and a mixed install lists both accurately.
+    const _upstreamParts=[];
+    const _dirtyOnlyParts=[];
+    for(const _p of parts){
+      if(String(_p).indexOf(t('update_dirty_local_changes','Local changes detected'))!==-1) _dirtyOnlyParts.push(_p);
+      else _upstreamParts.push(_p);
+    }
+    const _segments=[];
+    if(_upstreamParts.length) _segments.push(_upstreamParts.join(', ')+' available');
+    if(_dirtyOnlyParts.length) _segments.push(_dirtyOnlyParts.join(', '));
+    msg.textContent='\u2B06 '+_segments.join(' \u00B7 ')+(manualInstruction?' \u00B7 '+manualInstruction:'');
   }
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
@@ -11840,6 +12199,9 @@ async function applyUpdates(){
   // retry starts clean (otherwise stale state points at the wrong target).
   const forceBtnReset=$('btnForceUpdate');
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
+  // #7679 finding 1: an Apply retry supersedes any in-flight force grant, so
+  // a confirm opened for the earlier conflict cannot authorize a stale POST.
+  if(typeof _retireForceUpdate==='function') _retireForceUpdate();
   const targets=[];
   if(window._updateData?.agent?.behind>0) targets.push('agent');
   if(window._updateData?.webui?.behind>0&&!window._updateData?.webui?.manual_update) targets.push('webui');
@@ -11907,6 +12269,12 @@ function _showUpdateError(target,res){
     forceBtn.dataset.target=target;
     forceBtn.disabled=false;
     forceBtn.style.display='inline-block';
+    // #7679 finding 1: armed from the check payload's channel; forceUpdate()
+    // validates this grant (including that a newer check/retry hasn't retired
+    // it) after the danger confirm.
+    if(typeof _grantForceUpdate==='function'){
+      _grantForceUpdate(target, window._updateData&&window._updateData[target]?window._updateData[target].channel:null);
+    }
   }
   // Show "Clear lock and retry update" when the only failure was a stale
   // git lock. This calls the new non-destructive /api/updates/clear_lock
@@ -12056,6 +12424,12 @@ async function _readHealthServerIdentity() {
 async function forceUpdate(btn){
   const target=btn&&btn.dataset.target;
   if(!target) return;
+  // #7679 finding 1: bind the destructive POST to the grant that actually
+  // armed this button. Only a live grant (produced by the initiating
+  // check/apply, carrying the target + the channel that target offered) may
+  // be confirmed; a button without a grant has no authority to discard.
+  const grantSnapshot=(typeof _forceUpdateGrant!=='undefined')?_forceUpdateGrant:null;
+  if(!grantSnapshot||grantSnapshot.target!==target) return;
   const confirmed=await showConfirmDialog({
     title:'Force update '+target+'?',
     message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
@@ -12064,15 +12438,68 @@ async function forceUpdate(btn){
     focusCancel:true,
   });
   if(!confirmed) return;
+  // Revalidate the preserved grant after the (long) confirm: a newer check, a
+  // channel change, or an Apply retry — including while the confirm was open —
+  // retires the grant, so it must never authorize the destructive POST.
+  const stale=(typeof _forceUpdateGrant==='undefined')||_forceUpdateGrant!==grantSnapshot
+    || (typeof _isUpdateCheckStale==='function'&&_isUpdateCheckStale(grantSnapshot.epoch))
+    || target!==(btn&&btn.dataset.target);
+  if(stale){
+    const msg=((typeof t==='function')?t('force_no_longer_applicable','Force update is no longer applicable — the update state changed. Please check again.'):'Force update is no longer applicable — the update state changed. Please check again.');
+    const errEl=$('updateError');
+    if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+    else showToast(msg,5000,'error');
+    return;
+  }
   btn.disabled=true;btn.textContent='Force updating\u2026';
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
+    // #7679 finding 4 (round 2): the grant was validated BEFORE the confirm,
+    // but this health read is another await on the same path — and a check that
+    // completes while it is in flight retires the grant, hides the button and
+    // leaves the handler still holding a snapshot it already proved stale.
+    //
+    // Deterministic replay: confirm a stable Force, pause health, let a newer
+    // clean experimental check complete (grant null, button hidden, zero POSTs),
+    // then settle health. The old handler still posted
+    // {target:'webui',channel:'stable'}. Recheck the exact grant identity, the
+    // check epoch and the button's live target immediately after health returns
+    // and BEFORE the destructive POST.
+    const staleAfterHealth=(typeof _forceUpdateGrant==='undefined')||_forceUpdateGrant!==grantSnapshot
+      || (typeof _isUpdateCheckStale==='function'&&_isUpdateCheckStale(grantSnapshot.epoch))
+      || target!==(btn&&btn.dataset.target)
+      || !(btn&&btn.dataset.target);
+    if(staleAfterHealth){
+      const msg=((typeof t==='function')?t('force_no_longer_applicable','Force update is no longer applicable — the update state changed. Please check again.'):'Force update is no longer applicable — the update state changed. Please check again.');
+      const errEl2=$('updateError');
+      if(errEl2){errEl2.textContent=msg;errEl2.style.display='block';}
+      else showToast(msg,5000,'error');
+      // Restore the control so the user can act on the newer state instead of
+      // being left with a dead button.
+      btn.disabled=false;btn.textContent=t('update_force','Force update');
+      return;
+    }
+    // Use the grant's FROZEN channel, not a live re-read of the latest state:
+    // a channel switch that races the confirm must not silently change the
+    // destructive action's target channel (stale-authority bug).
+    const body={target};
+    if(grantSnapshot.channel) body.channel=grantSnapshot.channel;
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(body),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
+      return;
+    }
+    // #7679 round 2: a backend no-op (``{ok:true,up_to_date:true}``) is NOT a
+    // restart. Announcing one and running the restart waiter left the Force
+    // button disabled for the whole poll window on an install that never
+    // restarted, so the user's only destructive recovery path was dead until
+    // they reloaded. Handle the no-op as its own outcome.
+    if(res.up_to_date){
+      showToast('Already up to date — nothing to reset.','4000');
+      btn.disabled=false;btn.textContent=t('update_force','Force update');
       return;
     }
     showToast('Force update applied — restarting…');

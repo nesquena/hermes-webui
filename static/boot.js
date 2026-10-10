@@ -4042,8 +4042,15 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
+    // #7679 finding 2: stamp the boot check with the shared epoch so a manual
+    // Settings check that resolves first cannot be overwritten by this older
+    // auto-check's publication (latest-owner lifecycle). The snapshot of
+    // _updateRecoveryGeneration travels separately — it is a different clock
+    // (advanced by forceUpdate, not by checks) and #8040's manual-update
+    // recovery guard needs it.
+    const _epoch=(typeof _beginUpdateCheck==='function')?_beginUpdateCheck():null;
     const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d,_recoveryGenerationAtCheck);}).catch(()=>{});
+    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if(_updatePayloadHasActionableState(d))_showUpdateBanner(d,_epoch,_recoveryGenerationAtCheck);}).catch(()=>{});
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';

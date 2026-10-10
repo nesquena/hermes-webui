@@ -338,7 +338,7 @@ class TestCheckRepoDirtyFlag:
         (tmp_path / '.git').mkdir()
 
         def fake_git(args, cwd, timeout=10):
-            if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            if args == ['diff', '--quiet', 'HEAD', '--']:
                 return '', False  # dirty
             if args == ['fetch', 'origin', '--tags', '--force']:
                 return 'network unavailable', False  # fail fast

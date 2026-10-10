@@ -2014,9 +2014,35 @@ body.resizing added during drag to suppress text selection.
 Permissive: blocks only non-existent, non-directory, and system root paths. The user is
 consciously registering an external path (e.g. `/mnt/d/Projects` in WSL), so we trust intent.
 
-**`resolve_trusted_workspace(path)`** — used for actual file read/write operations inside
-an existing workspace. Strict: path must be under home, in the saved workspace list, or under
+**`resolve_trusted_workspace(path)`** — used for actual file read/write operations inside an
+existing workspace. Strict: path must be under home, in the saved workspace list, or under
 `BOOT_DEFAULT_WORKSPACE`. Prevents path traversal and unauthorized file access.
 
 The distinction matters because add uses permissive validation to avoid the circular
 dependency: you cannot get a path into the saved list if you need the saved list to add it.
+
+
+## Force-clean recovery in the update banner
+
+`POST /api/updates/force` discards uncommitted changes in a checkout. It is the only
+destructive recovery the update flow offers, so the client-side affordance is gated by a
+single predicate — `_isForceCleanTarget(info)` in `static/ui.js` — instead of per-call-site
+flag checks. Both the banner's status text and the force button call it, so they cannot
+disagree about whether the action is available.
+
+All four conditions must hold:
+
+| condition | rationale |
+|---|---|
+| `info.dirty === true` (exact) | a missing or falsy flag means the probe never ran or reported clean — never a reason to offer a destructive reset |
+| `info.behind === 0` | a checkout with pending upstream commits is served by *Apply*, which preserves work; discarding is the wrong tool while upstream work exists |
+| `!info.error` | a stale or failed check payload must not gate a destructive action. This is the gate the earlier `webuiDirty` flag omitted, so a WebUI fetch error plus an Agent update left the force button visible on a payload whose force endpoint was not forceable at all |
+| `!info.no_git && !info.manual_update` | there is no checkout to reset (Docker / pip installs); the endpoint refuses those targets too |
+
+Deliberately **target-agnostic**: the endpoint accepts both `webui` and `agent`, and the
+check payload probes `dirty` for both, so an Agent-only dirty install gets the same
+recovery action rather than a banner with nowhere to go.
+
+The unattended boot-time check in `static/boot.js` uses the companion
+`_updatePayloadHasActionableState(data)` rather than re-deriving `behind > 0`; gating only
+on pending commits caused a dirty-at-latest payload to be fetched, parsed, and discarded.

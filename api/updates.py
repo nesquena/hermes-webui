@@ -488,10 +488,16 @@ def _resolve_git_executable():
 
 def _dirty_suffix(path: Path, timeout=1) -> str:
     """Return a best-effort ``-dirty`` suffix without blocking version display."""
-    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    # ``git diff --quiet HEAD --`` — NOT ``git diff-index --quiet HEAD --``.
+    # diff-index keys off the index stat cache, so a tracked file whose
+    # mtime moved but whose content is identical (fresh clone, rsync,
+    # branch checkout) reads as dirty and badges a clean install
+    # ``-dirty``. ``git diff`` compares blob content, so only real edits
+    # are reported.
+    out, ok = _run_git(['diff', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return ""
-    # Only diff-index status 1 means dirty. Keep version display consistent
+    # Only diff status 1 means dirty. Keep version display consistent
     # with the strict action-time probe; all other failures suppress the suffix.
     if out != 'git exited with status 1':
         return ""
@@ -1541,7 +1547,17 @@ def _probe_dirty(
     path: Path, timeout: int = 1, *, legacy_empty_is_dirty: bool = False,
 ) -> bool | None:
     """Return dirty, clean, or unknown for a working-tree probe."""
-    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    # ``git diff --quiet HEAD --`` — deliberately NOT ``git diff-index
+    # --quiet HEAD --``. diff-index consults the index stat cache, so a
+    # tracked file whose mtime moved without a content change reports
+    # "dirty" (verified: `touch` an unchanged file → diff-index exits 1,
+    # `git diff --quiet` exits 0). A stat-only false positive here told
+    # the Settings panel to offer force-clean, and force update then ran
+    # ``git clean -fd`` (:1920) and deleted unrelated untracked work for
+    # a user who had changed nothing. ``git diff`` compares blob content,
+    # so only real edits read as dirty. The force-update gate therefore
+    # keys on the same content-truth as the text diff.
+    out, ok = _run_git(['diff', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return False
     if out == 'git exited with status 1' or (legacy_empty_is_dirty and (not out or out.startswith('git exited with status '))):
@@ -1556,13 +1572,18 @@ def _probe_dirty(
 def _is_dirty(path: Path, timeout: int = 1) -> bool:
     """Return True when the working tree has uncommitted changes vs HEAD.
 
-    Same primitive as ``_dirty_suffix`` (issue #4085): ``git diff-index
-    --quiet HEAD --`` exits 0 on a clean tree and 1 on a dirty tree (not an
+    Same primitive as ``_dirty_suffix`` (issue #4085): ``git diff --quiet
+    HEAD --`` exits 0 on a clean tree and 1 on a dirty tree (not an
     error). Real errors (timeout, missing git, fatal) are conservatively
     reported as clean so a transient probe failure never produces a false-
     positive "local changes" alert.
+
+    Content-based on purpose: ``git diff-index`` is stat-cache sensitive,
+    so an mtime-only change to an unchanged tracked file would otherwise
+    report dirty, surface the destructive force-clean affordance, and let
+    ``git clean -fd`` remove untracked work for a user with no edits.
     """
-    # Older checker consumers model diff-index status 1 as ('', False). Keep
+    # Older checker consumers model diff status 1 as ('', False). Keep
     # that boolean contract here; force updates use the strict tri-state form.
     return _probe_dirty(
         path, timeout=timeout, legacy_empty_is_dirty=True,
@@ -2229,16 +2250,48 @@ def apply_force_update(target: str, channel=None) -> dict:
             }
 
         compare_ref = _select_apply_compare_ref(path, channel, target)
-        # Stable channel, already up to date on the promoted subset: nothing to
-        # force to. Do NOT fall back to origin/master (firehose). See
-        # _select_apply_compare_ref channel semantics.
+
+        # #7679 finding 3 — a branch name is not evidence the reset moves
+        # forward. In an isolated git fixture with no release tags the
+        # experimental WebUI and Agent select ``origin/master``, which is
+        # exactly HEAD: the reset is a dirty-only same-commit cleanup, not a
+        # forward/divergent recovery. Resolve the ref's ancestry against HEAD
+        # (the same two primitives the rewind guard below uses) so equality is
+        # decided by commit authority, not by a literal ref string.
+        same_commit = (
+            False
+            if compare_ref is None
+            else (_head_contains_ref(path, compare_ref) and _can_fast_forward_to(path, compare_ref))
+        )
         if compare_ref is None:
+            # Stable channel, already up to date on the promoted subset:
+            # nothing to force to. Only the WebUI stable checkout can fall
+            # back to a literal reset of its own HEAD (no forward move).
             dirty_state = None
             if target == 'webui' and channel == 'stable':
                 dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
             if dirty_state is True:
                 compare_ref = 'HEAD'
             else:
+                return {
+                    'ok': True,
+                    'message': f'{target} is already up to date on the {channel} channel.',
+                    'target': target,
+                    'up_to_date': True,
+                    'channel': channel,
+                }
+        elif same_commit:
+            # Dirty-only same-commit cleanup (origin/HEAD ref == HEAD),
+            # including Agent and experimental — the ONLY legitimate use is
+            # discarding the tracked local edits that armed the force-clean
+            # affordance. Revalidate that a dirty signal is still present
+            # immediately before discard, under the apply lock. A lapsed
+            # signal (the tracked edit resolved, only untracked files added
+            # since) must FAIL CLOSED rather than let ``git clean -fd``
+            # delete untracked work that was never part of the dirty probe;
+            # unknown (None) and clean both refuse without disabling genuine
+            # forward/divergent recovery (handled by the branch below).
+            if _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT) is not True:
                 return {
                     'ok': True,
                     'message': f'{target} is already up to date on the {channel} channel.',

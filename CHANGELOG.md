@@ -28,6 +28,7 @@
   toasts" flag: the detail view shows it, the cron APIs (`/api/crons`, `/recent`, `/create`, `/update`) carry
   `badge_notifications`, and jobs saved without the key keep counting. The toast hint no longer claims the badge
   still updates when toasts are off. Thanks @BruceAi66. (#7375)
+- **A dirty-at-latest install gets a recovery action, and the destructive one is gated properly.** The update banner existed for two states but only acted on one: it showed for pending upstream commits, while an install whose checkout had local edits on top of an already-current version got a banner with nowhere to go. That state now offers a recovery action for both `webui` and `agent` targets. The destructive affordance — which discards local changes to get back to a clean checkout — is gated by one shared predicate (`_isForceCleanTarget`) rather than flag-scattered checks: it is offered only when the probe actually reported `dirty` (a missing or falsy flag means the probe never ran or reported clean, never a reason to discard work), the install is not behind upstream (a checkout with pending commits is served by Apply, not by discarding changes), the check itself did not error (a stale or failed payload must never gate a destructive action), and a checkout exists to reset — Docker and pip installs are excluded, as the force endpoint already refused them. The unattended boot-time check also stops discarding this state: it fetched and parsed the payload, then threw it away because it only looked at pending commits. Thanks @happy5318. (#4085, #7679)
 - **The settings file can live outside the state directory.** `HERMES_WEBUI_SETTINGS_FILE` points one
   instance at its own `settings.json`, while sessions, workspaces and projects stay in the state
   directory. It is read once at startup, so restart after changing it. (#6433 by @futureworld678-create)
@@ -40,7 +41,6 @@
   children can nest at once, so raise it for wide fan-outs. Invalid or non-positive values fall back to
   20, values above 200 are clamped, and it is resolved before profile init so a profile `.env` cannot
   override it. (#7631 by @carlotestor)
-
 ### Performance
 
 - **Very long conversations no longer stall on the model-context step after a reply.** Following #8072, the
