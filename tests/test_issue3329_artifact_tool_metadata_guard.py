@@ -54,6 +54,9 @@ def _collect_via_node(messages):
     fns = "\n".join(consts) + "\n" + "\n".join(
         _extract_fn(n)
         for n in (
+            "_isWindowsStylePath",
+            "_stripWorkspacePrefix",
+            "_canonicalizeRelativePath",
             "_normalizeArtifactPath",
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
