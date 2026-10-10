@@ -86,7 +86,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
-  form.addEventListener('submit', doLogin);
+  if (input) form.addEventListener('submit', doLogin);
 
   function b64uToBytes(s) {
     s = String(s || '').replace(/-/g, '+').replace(/_/g, '/');
