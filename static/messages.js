@@ -853,14 +853,49 @@ async function _loadSavedPrompts(){
   return _savedPromptsCache;
 }
 
+// #7647 (CR minor): dismissing the popup must disarm the pending ✕. Escape
+// used to be a no-op here and click-away only hid the popup, so the first-click
+// confirmation stayed armed behind a hidden element — one Enter away from
+// deleting the prompt the user had just decided to keep.
+function _disarmSavedPromptDeletes(){
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  if(!popup||!popup.querySelectorAll)return;
+  for(const del of popup.querySelectorAll('.saved-prompt-delete')){
+    // The row's own closure clears the 4 s arm timer and restores title/label;
+    // the class fallback covers rows built without one.
+    if(typeof del._disarmDelete==='function'){del._disarmDelete();continue;}
+    del.classList.remove('is-confirming');
+    const row=del.closest?del.closest('.saved-prompt-row'):null;
+    if(row)row.classList.remove('is-confirm-pending');
+  }
+}
+function _closeSavedPromptsPopup(){
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
+  if(!popup||popup.style.display==='none')return false;
+  _disarmSavedPromptDeletes();
+  popup.style.display='none';
+  if(btn)btn.setAttribute('aria-expanded','false');
+  return true;
+}
 async function toggleSavedPromptsPopup(){
   const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
   const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
   if(!popup)return;
   if(popup.style.display!=='none'){
-    popup.style.display='none';
-    if(btn)btn.setAttribute('aria-expanded','false');
+    _closeSavedPromptsPopup();
     return;
+  }
+  // #7647: Escape inside the popup must close it (and with it the armed ✕
+  // confirmation); bound once on the popup element, which survives re-renders.
+  if(!popup._savedPromptsKeydownBound){
+    popup._savedPromptsKeydownBound=true;
+    popup.addEventListener('keydown',(e)=>{
+      if(e.key!=='Escape')return;
+      e.preventDefault();
+      e.stopPropagation();
+      _closeSavedPromptsPopup();
+    });
   }
   popup.innerHTML='<div class="saved-prompts-loading">Loading…</div>';
   popup.style.display='flex';
@@ -889,12 +924,51 @@ async function toggleSavedPromptsPopup(){
       const del=document.createElement('button');
       del.className='saved-prompt-delete';
       del.type='button';
-      del.title=(typeof t==='function'&&t('saved_prompts_delete'))||'Delete';
+      const delTitle=(typeof t==='function'&&t('saved_prompts_delete'))||'Delete prompt';
+      const delConfirmTitle=(typeof t==='function'&&t('saved_prompts_delete_confirm'))||'Click again to delete';
+      del.title=delTitle;
+      del.setAttribute('aria-label',delTitle);
       del.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      // #7644: the ✕ is 12x12 and sits right next to the label, so a single
+      // mis-click used to permanently delete the prompt. The first click only
+      // arms the row (red "confirm" state, auto-disarmed after 4s); the delete
+      // request needs a second, deliberate click. Server-side the previous
+      // generation is kept in saved_prompts.json.bak, so even a confirmed
+      // delete stays recoverable from disk.
+      let deleteArmTimer=null;
+      const disarmDelete=()=>{
+        if(deleteArmTimer){clearTimeout(deleteArmTimer);deleteArmTimer=null;}
+        del.classList.remove('is-confirming');
+        row.classList.remove('is-confirm-pending');
+        del.title=delTitle;
+        del.setAttribute('aria-label',delTitle);
+      };
+      // Published so Escape / click-away / toggle can disarm this row through
+      // its own closure (clearing the arm timer) — #7647 minor.
+      del._disarmDelete=disarmDelete;
       del.onclick=async(e)=>{
         e.stopPropagation();
-        try{await api('/api/prompts',{method:'DELETE',body:JSON.stringify({id:p.id})});}catch(_e){}
+        if(!del.classList.contains('is-confirming')){
+          del.classList.add('is-confirming');
+          row.classList.add('is-confirm-pending');
+          del.title=delConfirmTitle;
+          del.setAttribute('aria-label',delConfirmTitle);
+          deleteArmTimer=setTimeout(disarmDelete,4000);
+          return;
+        }
+        disarmDelete();
+        del.disabled=true;
+        try{
+          await api('/api/prompts',{method:'DELETE',body:JSON.stringify({id:p.id})});
+        }catch(_e){
+          // Never swallow a failed delete: the row is still on screen and the
+          // user must know it was NOT removed.
+          del.disabled=false;
+          if(typeof showToast==='function') showToast(_e&&_e.message||'Failed to delete prompt',2000,'error');
+          return;
+        }
         _savedPromptsCache=null;
+        if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_deleted'))||'Prompt deleted',1600);
         await toggleSavedPromptsPopup();
         await toggleSavedPromptsPopup();
       };
@@ -934,8 +1008,9 @@ document.addEventListener('click',(e)=>{
   const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
   if(!popup||popup.style.display==='none')return;
   if(!popup.contains(e.target)&&e.target!==btn&&!(btn&&btn.contains(e.target))){
-    popup.style.display='none';
-    if(btn)btn.setAttribute('aria-expanded','false');
+    // Shared close routine: hide AND disarm, so a click-away cannot leave an
+    // armed ✕ behind a hidden popup (#7647 minor).
+    _closeSavedPromptsPopup();
   }
 },{capture:false});
 function _addNamedContextBlock(text){
