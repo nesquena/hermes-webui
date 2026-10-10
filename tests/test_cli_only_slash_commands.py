@@ -318,10 +318,13 @@ def test_agent_command_metadata_helper_resolves_name_and_alias():
         const byAlias = await getAgentCommandMetadata('browse');
         const unknown = await getAgentCommandMetadata('does-not-exist');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true,
-          unknown: unknown === null
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true,
+          available: byName && byName.available === true
+            && byAlias && byAlias.available === true
+            && unknown && unknown.available === true,
+          unknown: unknown && unknown.command === null
         };
         """
     )
@@ -330,6 +333,7 @@ def test_agent_command_metadata_helper_resolves_name_and_alias():
         "by_name": "browser",
         "by_alias": "browser",
         "cli_only": True,
+        "available": True,
         "unknown": True,
     }
 
@@ -339,7 +343,7 @@ def test_cli_only_response_helper_uses_canonical_command_name():
         """
         const meta = await getAgentCommandMetadata('browse');
         return {
-          response: cliOnlyCommandResponse('browse', meta)
+          response: cliOnlyCommandResponse('browse', meta && meta.command)
         };
         """
     )
@@ -655,9 +659,9 @@ def test_reload_skills_agent_command_metadata_resolves_alias():
         const byName = await getAgentCommandMetadata('reload-skills');
         const byAlias = await getAgentCommandMetadata('reload_skills');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true
         };
         """
     )
@@ -675,9 +679,9 @@ def test_codex_runtime_agent_command_metadata_resolves_alias():
         const byName = await getAgentCommandMetadata('codex-runtime');
         const byAlias = await getAgentCommandMetadata('codex_runtime');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true
         };
         """
     )
@@ -997,7 +1001,7 @@ def test_alias_typed_text_reaches_exec_dispatch():
     result = _run_commands_js(
         """
         const byAlias = await getAgentCommandMetadata('reload_skills');
-        const canonical = byAlias && byAlias.name;
+        const canonical = byAlias && byAlias.command && byAlias.command.name;
         return { canonical, dispatched: canonical === 'reload-skills' };
         """
     )

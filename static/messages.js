@@ -1,13 +1,27 @@
-const _AGENT_COMMAND_ALIASES = {
-  'reload_mcp': 'reload-mcp',
-  'reload_skills': 'reload-skills',
-  'codex_runtime': 'codex-runtime',
-  'credits': 'credits'
-};
+// _AGENT_COMMANDS_RUN_ON_WEBUI gates the send() intercept. The set holds
+// both the canonical registry names AND the underscore alias forms so
+// typing `/reload_mcp` (an alias) still matches when the agent metadata
+// cache is empty and getAgentCommandMetadata() can't canonicalize the
+// input. Canonical names also let the success path match metadata-loaded
+// commands. Mirrors _WEBUI_DISPATCHABLE_AGENT_COMMANDS in commands.js for
+// the backend-exec family (moa/sessions/resume/pet are WebUI-native and
+// dispatched elsewhere in send()). The formerly dead underscore-alias
+// map at the top of this file was removed; its alias membership now
+// lives in the set below (#7675 follow-up #4).
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
   'reload-mcp','reload-skills','codex-runtime','credits',
   'reload_mcp','reload_skills','codex_runtime','credits'
 ]);
+function _fallbackNonDispatchableAgentCommandCheck(_agentCmd){
+  // Degraded-mode fallback used only when the real dispatchability helper
+  // (_isWebuiDispatchableAgentCommand from commands.js) is absent. Mirrors the
+  // former inline predicate: block anything that is neither a Plugin-category
+  // command nor a member of the backend-exec dispatch set. The caller
+  // guarantees _agentCmd is non-null, so the dereferences are safe (#7683).
+  return _agentCmd.category!=='Plugin'
+    && !_AGENT_COMMANDS_RUN_ON_WEBUI.has(String(_agentCmd.name||'').toLowerCase());
+}
+
 function _markSessionViewed(sid, messageCount) {
   if(typeof _setSessionViewedCount!=='function' || !sid) return;
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -1561,10 +1575,45 @@ async function send(){
         if(typeof renderSessionList==='function') await renderSessionList();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
-      const _agentCmd=typeof getAgentCommandMetadata==='function'
+      const _agentCmdMeta=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
+      const _agentCmd=_agentCmdMeta&&_agentCmdMeta.command||null;
+      // Metadata availability is preserved separately from the lookup result:
+      // when the registry fetch failed (available:false) we cannot tell a
+      // genuinely unknown command from a known CLI-only one, so the
+      // availability flag is carried forward and the fail-closed block runs
+      // AFTER bundle resolution below (#7683) — not here. Running it here
+      // blocked commands that master dispatches without registry metadata:
+      // native /moa, the _AGENT_COMMANDS_RUN_ON_WEBUI backend-exec family and
+      // plugin commands all resolve through their own branches, and a bundle
+      // command may still be waiting.
+      const _registryUnavailable=!!(_agentCmdMeta&&_agentCmdMeta.available===false);
       if(_agentCmd&&_agentCmd.cli_only){
+        if(!S.session){await newSession();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
+      // Non-dispatchable registry commands (e.g. /agents) must not leak as
+      // plain text to the model. Route them through the CLI-only explainer
+      // so the boundary is self-explaining (#7675 follow-up #3).
+      //
+      // The predicate must be the dispatchability check itself, NOT "absent
+      // from _AGENT_COMMANDS_RUN_ON_WEBUI": that set holds only the
+      // backend-exec family, so WebUI-native commands (moa/sessions/
+      // resume/pet) are intentionally absent and would be swallowed here
+      // before their own native handlers below (e.g. /moa at the native
+      // MoA branch). _isWebuiDispatchableAgentCommand() answers the real
+      // question: does send() dispatch this command (backend exec, plugin
+      // transport, or a native branch)? Any remaining command is CLI-only
+      // and gets the explainer (#7683).
+      if(_agentCmd && (
+        typeof _isWebuiDispatchableAgentCommand==='function'
+          ? !_isWebuiDispatchableAgentCommand(_agentCmd)
+          : _fallbackNonDispatchableAgentCommandCheck(_agentCmd)
+      )){
         if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
@@ -1642,6 +1691,33 @@ async function send(){
           renderMessages();
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
+      }
+      // #7683 [CORE]: the fail-closed guard runs LAST, after every dispatch
+      // branch above has had its chance. `_agentCmdName` is only meaningful
+      // once those branches have run, and a bundle command that resolved must
+      // not be blocked by a registry that happened to be unavailable — the
+      // bundle metadata does not come from that registry at all.
+      //
+      // `/moa` is exempt because it is a native WebUI branch that never
+      // consults the registry: master reaches its own resolver with
+      // `/api/commands` returning 503, so blocking it here would be a
+      // regression.
+      //
+      // A plain skill is exempt for the same reason: its metadata comes from
+      // /api/skills, not from the command registry, so a 503 there says
+      // nothing about whether the skill is enabled. Resolve it before the
+      // guard and let a positively matched skill through.
+      const _skillCmd =
+        _registryUnavailable && !_bundleCmd && _agentCmdName !== 'moa'
+        && typeof loadSkillCommands === 'function'
+          ? (await loadSkillCommands()).find(skill => skill.name === _parsedCmd.name)
+          : null;
+      if(!_bundleCmd&&!_skillCmd&&_registryUnavailable&&_agentCmdName!=='moa'){
+        if(!S.session){await newSession();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        S.messages.push({role:'assistant',content:'Command metadata is temporarily unavailable — please try again.',_ts:Date.now()/1000});
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
       }
     }
   }
