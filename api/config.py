@@ -3370,6 +3370,13 @@ def _custom_record_base_url(record: object) -> str | None:
     return str(record.get("base_url") or "").strip() or None
 
 
+def _custom_record_key_env(record: dict) -> str:
+    """Read either credential hint spelling, with nonblank key_env winning."""
+    key_env = str(record.get("key_env") or "").strip()
+    alias = record.get("api_key_env")
+    return key_env or (alias.strip() if isinstance(alias, str) else "")
+
+
 def _resolve_custom_record_key(
     raw_api_key: object,
     raw_key_env: object,
@@ -3594,7 +3601,7 @@ def _custom_record_owns_connection(record: dict, pid: str) -> bool:
     # authority instead of surfacing the misconfiguration.
     if _custom_record_declares_credential(record, base_url, None):
         return True
-    if _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid):
+    if _resolve_custom_record_key(record.get("api_key"), _custom_record_key_env(record), pid):
         return True
     if _custom_record_api_mode(record):
         return True
@@ -3740,10 +3747,8 @@ def _normalized_raw_provider_record(record: dict, ep_name: str) -> dict:
         if isinstance(value, str) and value.strip():
             normalized["base_url"] = value.strip()
             break
-    if not str(normalized.get("key_env") or "").strip():
-        api_key_env = record.get("api_key_env")
-        if isinstance(api_key_env, str) and api_key_env.strip():
-            normalized["key_env"] = api_key_env.strip()
+    if key_env := _custom_record_key_env(record):
+        normalized["key_env"] = key_env
     if not str(normalized.get("provider_key") or "").strip() and str(ep_name or "").strip():
         # The record's OWN config key is its identity. Stamping it keeps the
         # credential-pool lookup and the ``key_cmd`` token process labelled with
@@ -3999,7 +4004,7 @@ def resolve_custom_provider_connection(
         return None, None
 
     base_url = _custom_record_base_url(record)
-    api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+    api_key = _resolve_custom_record_key(record.get("api_key"), _custom_record_key_env(record), pid)
     if return_provenance:
         return api_key, base_url, is_exact
     return api_key, base_url
@@ -4178,7 +4183,9 @@ def _custom_record_declares_credential(
     ``credential_pool``, a pool that actually resolved for this endpoint, and a
     host-gated env credential the runtime would accept for it.
     """
-    for field in ("api_key", "key_env", "key_cmd"):
+    if _custom_record_key_env(record):
+        return True
+    for field in ("api_key", "key_cmd"):
         if str(record.get(field) or "").strip():
             return True
     # A configured pool is a declaration even when empty or exhausted: the user
@@ -4336,7 +4343,7 @@ def resolve_custom_provider_bundle(
             owned["credential_pool"] = pool_runtime.get("credential_pool")
 
     if not api_key:
-        api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+        api_key = _resolve_custom_record_key(record.get("api_key"), _custom_record_key_env(record), pid)
     if not api_key:
         api_key = _host_gated_env_key(base_url)
 

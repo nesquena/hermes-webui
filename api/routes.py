@@ -14982,7 +14982,13 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/onboarding/status":
-        return j(handler, get_onboarding_status())
+        # Agent imports may load dotenv into process-wide environment. Check
+        # them before installing the request's context-local Hermes home.
+        from api.onboarding import verify_hermes_imports
+        from api.profiles import profile_env_for_active_request_readonly
+        import_status = verify_hermes_imports()
+        with profile_env_for_active_request_readonly("/api/onboarding/status", logger_override=logger):
+            return j(handler, get_onboarding_status(import_status=import_status))
 
     if parsed.path == "/api/extensions/status":
         from api.extensions import get_extension_status
