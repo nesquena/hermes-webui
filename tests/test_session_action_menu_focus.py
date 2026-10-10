@@ -432,9 +432,12 @@ def _picker_deferred_fork_release_script() -> str:
 
     The long-press completion (as `_scheduleForkLongPressMenu` performs it)
     arms `_skipNextChildOpen` on the pressed fork row and opens its action
-    menu; the deferred repaint replaces that row, so the pending suppression
-    must reach the replacement before the browser's release click lands on
-    its main button. The click handler below is the production one.
+    menu; the deferred repaint replaces that row while the finger is still
+    down, so the pending suppression must reach the replacement before the
+    browser's release click lands on its main button. The fixture paints the
+    row first, so the caller can hold a real touch from before the handoff
+    through the repaint and release it after. The click handler below is the
+    production one.
     """
     return "\n".join(
         _picker_handoff_common_stubs()
@@ -472,19 +475,32 @@ def _picker_deferred_fork_release_script() -> str:
             _function_source("_projectPickerSessionActionHandoff"),
             _function_source("_openSessionActionMenu"),
             """
-            window.__pickerForkSetup = () => {
+            window.__pickerForkPaint = () => {
               const first = paintRows();
+              window.__pickerForkPressedPicker = first.picker;
+              const btn = first.row.querySelector('.session-child-session-main');
+              const rect = btn.getBoundingClientRect();
+              const tapX = rect.x + rect.width / 2;
+              const tapY = rect.y + rect.height / 2;
+              return {
+                tapX,
+                tapY,
+                pressOnRowButton: document.elementFromPoint(tapX, tapY) === btn,
+              };
+            };
+            window.__pickerForkLongPress = () => {
               // Exactly what _scheduleForkLongPressMenu() does when the
               // long-press fires: arm the one-click suppression, open the menu.
-              first.row._skipNextChildOpen = true;
-              _projectPickerTeardown = () => first.picker.remove();
+              const pressed = document.querySelector('.session-child-session[data-sid="fork-child"]');
+              pressed._skipNextChildOpen = true;
+              _projectPickerTeardown = () => window.__pickerForkPressedPicker.remove();
               _sessionListRepaintDeferredByPicker = true;
-              _openSessionActionMenu({session_id: 'fork-child'}, first.row);
+              _openSessionActionMenu({session_id: 'fork-child'}, pressed);
               const replacement = document.querySelector('.session-child-session[data-sid="fork-child"]');
               const btn = replacement && replacement.querySelector('.session-child-session-main');
               const rect = btn ? btn.getBoundingClientRect() : {x: 0, y: 0, width: 0, height: 0};
               return {
-                repaintReplacedRow: repaintCount === 1 && !first.row.isConnected && Boolean(replacement),
+                repaintReplacedRow: repaintCount === 1 && !pressed.isConnected && replacement !== pressed,
                 menuOpened: Boolean(document.querySelector('.session-action-menu')),
                 anchorIsPressedRowReplacement: _sessionActionAnchor === replacement,
                 suppressionCarried: Boolean(replacement && replacement._skipNextChildOpen),
@@ -545,8 +561,17 @@ def test_picker_deferred_fork_release_keeps_parent_session_in_browser(width, hei
         page = browser.new_page(viewport={"width": width, "height": height}, has_touch=True)
         page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
         page.add_script_tag(content=_picker_deferred_fork_release_script())
-        setup = page.evaluate("window.__pickerForkSetup()")
-        page.touchscreen.tap(setup["tapX"], setup["tapY"])
+        press = page.evaluate("window.__pickerForkPaint()")
+        # Start the touch on the row, hold it while the long-press handoff
+        # repaints that row out of the DOM, then release it. The browser
+        # synthesizes the release click on whatever replaced the pressed row.
+        cdp = page.context.new_cdp_session(page)
+        cdp.send(
+            "Input.dispatchTouchEvent",
+            {"type": "touchStart", "touchPoints": [{"x": press["tapX"], "y": press["tapY"]}]},
+        )
+        setup = page.evaluate("window.__pickerForkLongPress()")
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         page.wait_for_timeout(50)
         after_release = page.evaluate("window.__pickerForkAfterRelease()")
         page.touchscreen.tap(setup["tapX"], setup["tapY"])
@@ -554,6 +579,7 @@ def test_picker_deferred_fork_release_keeps_parent_session_in_browser(width, hei
         after_second = page.evaluate("window.__pickerForkAfterSecondTap()")
         browser.close()
 
+    assert press["pressOnRowButton"] is True
     assert after_release == {
         "releaseClickDidNotOpenChild": True,
     }

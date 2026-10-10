@@ -1,0 +1,19 @@
+{
+  "status": "fixed",
+  "summary": "Held the fork long-press touch across the picker-deferred repaint in the release regression.",
+  "commit_message": "test(sessions): hold the fork long-press touch across the picker repaint",
+  "tests": "tests/test_session_action_menu_focus.py",
+  "commands_run": [
+    ".venv/bin/pip install -q playwright && .venv/bin/python -m playwright install chromium",
+    ".venv/bin/python -m pytest tests/test_session_action_menu_focus.py -q --timeout=120",
+    ".venv/bin/python /tmp/probe_fork_release.py",
+    "git show 3cfc7612:static/sessions.js > static/sessions.js && .venv/bin/python -m pytest tests/test_session_action_menu_focus.py -q --timeout=120 -k fork_release",
+    "git checkout -- static/sessions.js",
+    ".venv/bin/python -m pytest tests/test_project_picker_viewport_position.py tests/test_session_touch_actions.py tests/test_project_chip_ui.py tests/test_issue8044_project_picker_a11y.py -q --timeout=180",
+    ".venv/bin/python -m pytest tests/test_session_middle_click_new_tab.py tests/test_mobile_titlebar_session_actions.py -q --timeout=180",
+    "./scripts/test.sh tests/test_session_action_menu_focus.py -q",
+    ".venv/bin/ruff check tests/test_session_action_menu_focus.py"
+  ],
+  "files_changed": ["tests/test_session_action_menu_focus.py"],
+  "risks": "Test-only change; no production code changed. Results: the changed file 10 passed; a scratch CDP probe showed the browser sends the release click to the replacement row, and with the pre-fix extraction (3cfc7612) the strengthened case failed 2 of 2 while the current head passes; neighbouring picker/menu/touch files 104 passed and 48 passed; the repo entry point 10 passed; Ruff clean. The new case needs Chromium, so it skips where Playwright is absent under the existing browser-dependency guard. The activity recorded in AGENT_CONTEXT.json (maintainer review on 5f141ce4 plus three greptile notes) is already fixed on the checked-out head by 08ed3c9e and 3cfc7612, so this commit answers the newer greptile review left on head 31322828. Note that fix-stage.sh commits with git add -A, so its own AGENT_CONTEXT.json and agent.out would be included unless it excludes them."
+}
