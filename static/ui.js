@@ -574,24 +574,6 @@ function _messageVirtualDefaultHeightForRole(role){
     role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
   ];
 }
-// Cycle-aware measurement burst tracking (#6654/#6717): instead of a flat
-// render cap, the burst remembers every window cycle key it has already seen.
-// An UNSEEN key means the window is still converging forward (A->B->C->settled
-// — content reflow, late fonts/images, dynamic height) and may proceed; a key
-// that REPEATS means the browser is oscillating (A->B->A->B) and the burst
-// terminates. Keys repeat only when geometry flaps, so legitimate convergence
-// is never capped while oscillation is always bounded.
-// Absolute per-burst ceiling (#6717 re-gate): the seen-key rule alone only
-// ends the burst on a REPEATED key, so a browser emitting a monotonically
-// changing geometry (A->B->C->D->... never repeating) would still loop without
-// limit — the #6654 CPU-runaway class under a different trigger — and the
-// seen-key collection would grow without bound (memory). A distinct-key
-// convergence realistically settles in a handful of frames, so this
-// conservative cap (the historical MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS
-// was 2) ends the burst regardless of key novelty AND bounds the seen-key
-// memory to the cap. Reset through _resetMessageVirtualMeasurementBurst().
-const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=12;
-let _messageVirtualMeasurementSeenKeys=[];
 // #7591: the flat per-role constants above are only a PRIOR. On long sessions
 // with tall tool outputs, tables and inline images they ran 3.6x the measured
 // row height (#7591) — and 34% short on a 2,000-message session (#7283) — so
@@ -639,6 +621,24 @@ function _messageVirtualCalibratedRoleHeight(role){
   const blended=(sum+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES*prior)/(slot.rows.size+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES);
   return Math.max(1,Math.round(blended));
 }
+// Cycle-aware measurement burst tracking (#6654/#6717): instead of a flat
+// render cap, the burst remembers every window cycle key it has already seen.
+// An UNSEEN key means the window is still converging forward (A->B->C->settled
+// — content reflow, late fonts/images, dynamic height) and may proceed; a key
+// that REPEATS means the browser is oscillating (A->B->A->B) and the burst
+// terminates. Keys repeat only when geometry flaps, so legitimate convergence
+// is never capped while oscillation is always bounded.
+// Absolute per-burst ceiling (#6717 re-gate): the seen-key rule alone only
+// ends the burst on a REPEATED key, so a browser emitting a monotonically
+// changing geometry (A->B->C->D->... never repeating) would still loop without
+// limit — the #6654 CPU-runaway class under a different trigger — and the
+// seen-key collection would grow without bound (memory). A distinct-key
+// convergence realistically settles in a handful of frames, so this
+// conservative cap (the historical MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS
+// was 2) ends the burst regardless of key novelty AND bounds the seen-key
+// memory to the cap. Reset through _resetMessageVirtualMeasurementBurst().
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=12;
+let _messageVirtualMeasurementSeenKeys=[];
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 let _messageVirtualHeightCache=[];
@@ -19949,7 +19949,8 @@ function renderMessages(options){
       try{
         _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
         if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
-      }finally{ _messageRenderScrollRestoreDepth--; }      _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
+      }finally{ _messageRenderScrollRestoreDepth--; }
+      _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
@@ -21659,7 +21660,8 @@ function renderMessages(options){
   try{
     _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
     if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
-  }finally{ _messageRenderScrollRestoreDepth--; }  // Apply syntax highlighting after DOM is built
+  }finally{ _messageRenderScrollRestoreDepth--; }
+  // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){

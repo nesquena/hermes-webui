@@ -265,6 +265,7 @@ let _loadingSessionId = null;
 let _messageRenderWindowSid = null;
 let _messageUserUnpinned = false;
 let _programmaticScroll = false;
+let _messageRenderScrollRestoreDepth = 0;
 let _programmaticScrollSetAt = 0;
 let _sessionHtmlCacheSid = null;
 let _messagesTruncated = false;
