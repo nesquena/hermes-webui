@@ -43,7 +43,9 @@ WHAT IT CHECKS
   - the same for the conversation's ⋮ menu, which opens the picker: 44px rows
     under a coarse pointer, compact ones with a mouse; and on a phone on its
     side, where ten such rows do not fit, the menu stays on the screen and
-    scrolls to its last row.
+    scrolls to its last row, and End, Home and the arrow keys bring the row
+    they move focus to into the menu's box; the same in a 300px-tall desktop
+    window, which the compact rows do not fit either.
   the focus cue, on the dark and on the light theme
   - on the light theme the focused row's ring is the skin's accent, solid, at
     least 3:1 against the picker (the translucent --focus-ring was 1.4:1), and
@@ -657,6 +659,54 @@ def _check_menu_rows(page, seed, *, coarse, label=None):
         )
     if not state["lastRowInBox"]:
         failures.append(f"  [⋮ menu, {label}] the last row cannot be scrolled into the menu")
+    return failures
+
+
+# Where the focused row of the open ⋮ menu is, against the menu's own box.
+MENU_FOCUS_JS = """() => {
+  const menu = document.querySelector('.session-action-menu');
+  const row = document.activeElement;
+  if (!menu || !row || !menu.contains(row)) return {problem: 'focus is not in the ⋮ menu'};
+  const box = menu.getBoundingClientRect(), rect = row.getBoundingClientRect();
+  return {
+    text: row.textContent.trim(),
+    top: Math.round(rect.top), bottom: Math.round(rect.bottom),
+    boxTop: Math.round(box.top), boxBottom: Math.round(box.bottom),
+    scrolls: menu.scrollHeight > menu.clientHeight + 1,
+  };
+}"""
+
+
+def _check_menu_keyboard_reveal(page, seed, label, *, from_row=True):
+    """A menu too tall for the screen scrolls inside itself; the row a key moves
+    focus to must be brought into its box, since the focus itself does not
+    scroll. Returns failure lines."""
+    problem = page.evaluate(OPEN_MENU_JS, {"sid": seed["beta"], "fromRow": from_row})
+    if problem:
+        return [f"  [⋮ menu keys, {label}] {problem}"]
+    page.wait_for_timeout(SETTLE_MS)
+    failures = []
+    scrolls = None
+    # End, Home, then ArrowUp from the first row, which wraps to the last, and
+    # ArrowDown from the last, which wraps to the first.
+    for key in ("End", "Home", "ArrowUp", "ArrowDown"):
+        page.keyboard.press(key)
+        page.wait_for_timeout(150)
+        state = page.evaluate(MENU_FOCUS_JS)
+        if state.get("problem"):
+            failures.append(f"  [⋮ menu keys, {label}] after {key}: {state['problem']}")
+            break
+        scrolls = state["scrolls"]
+        if state["top"] < state["boxTop"] - 1 or state["bottom"] > state["boxBottom"] + 1:
+            failures.append(
+                f"  [⋮ menu keys, {label}] {key} put focus on '{state['text']}' at"
+                f" y={state['top']}..{state['bottom']}, outside the menu's {state['boxTop']}..{state['boxBottom']}"
+            )
+    if scrolls is False:
+        # Guard: on these screens the menu is taller than its box, or the
+        # checks above would pass without anything being revealed.
+        failures.append(f"  [⋮ menu keys, {label}] the menu does not scroll here, so nothing was tested")
+    page.evaluate("() => closeSessionActionMenu()")
     return failures
 
 
@@ -1626,9 +1676,10 @@ def main():
                 page.evaluate("() => { document.querySelector('.session-list, #sessionList').scrollTop = 0; }")
                 page.wait_for_timeout(200)
                 found = _check_menu_rows(page, seed, coarse=True, label=f"touch {size}")
+                found += _check_menu_keyboard_reveal(page, seed, size)
                 failures.extend(found)
                 if not found:
-                    print(f"OK  ⋮ menu {size} — finger-sized rows, on the screen, the last one reachable")
+                    print(f"OK  ⋮ menu {size} — finger-sized rows, on the screen, the last one reachable, and End, Home and the arrows reveal the row they focus")
                 failures.extend(f"  [tall anchor, short list {size}] pageerror: {err}" for err in errors)
                 ctx.close()
 
@@ -1637,6 +1688,19 @@ def main():
             failures.extend(found)
             if not found:
                 print("OK  resize — an open picker follows a shorter window and a turned tablet, and closes without taking focus when the resize hides its sidebar")
+
+            # With a mouse the rows are compact, and ten of them are still
+            # taller than a 300px window: the same reveal, on master's own sizes.
+            ctx, page, errors = _new_page(browser, viewport={"width": 1440, "height": 300})
+            if page is None:
+                failures.append(f"  [⋮ menu keys, short window] {errors}")
+            else:
+                found = _check_menu_keyboard_reveal(page, seed, "1440x300, mouse", from_row=False)
+                failures.extend(found)
+                if not found:
+                    print("OK  ⋮ menu 1440x300 — End, Home and the arrows reveal the row they focus in a short window")
+                failures.extend(f"  [⋮ menu keys, short window] pageerror: {err}" for err in errors)
+                ctx.close()
 
             ctx, page, errors = _new_page(browser, viewport={"width": 1440, "height": 420})
             if page is None:

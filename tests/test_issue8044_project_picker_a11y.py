@@ -508,6 +508,17 @@ def test_the_menu_that_opens_the_picker_has_finger_tall_rows_on_touch():
     assert ".session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;" in STYLE_CSS
 
 
+def test_a_key_that_moves_focus_in_the_menu_reveals_the_row():
+    """With 44px rows the menu scrolls inside itself on a phone on its side,
+    and its rows are focused with preventScroll. What this does on a real
+    screen is in the browser gate."""
+    mount = _between(SESSIONS_JS, "function _mountSessionActionMenu(", "function _findSessionRenameRow(")
+    focus = "try{items[nextIndex].focus({preventScroll:true});}catch(_){items[nextIndex].focus();}"
+
+    assert mount.count("items[nextIndex].scrollIntoView({block:'nearest'});") == 1
+    assert mount.index(focus) < mount.index("items[nextIndex].scrollIntoView({block:'nearest'});")
+
+
 def test_the_button_keeps_the_rows_look():
     """A bare <button> brings its own border, background, font and centring. The
     reset has no specificity and sits before the row rules, so the create row's

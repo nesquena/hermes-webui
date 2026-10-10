@@ -173,7 +173,8 @@ batch picker must open on its first row and return focus to the selection
 bar's Move button. "No project" and "+ New project" must follow the interface
 language; in a touch context, with the drawer open, every row must be at least
 44px tall, and so must every row of the ⋮ menu that opens the picker, which on
-a phone on its side must stay on the screen and scroll to its last row; on the
+a phone on its side must stay on the screen, scroll to its last row, and reveal
+the row a key moves focus to; on the
 light theme the focused row's ring must be the skin's accent at 3:1 or more
 against the picker, and a row under the pointer must show a wash; and in a long list the focused row must be inside the picker's box,
 or, in the batch picker, scrolled onto the screen by the conversation list.
