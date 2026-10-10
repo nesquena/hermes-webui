@@ -183,9 +183,34 @@ Per-request environment variables (set by chat handler, restored after):
     HERMES_HOME          Set to the active profile's directory before running agent.
                          Saved and restored around each agent run.
 
-WARNING: These env vars are process-global. Two concurrent chat requests will clobber
-each other. This is safe only for single-user, single-concurrent-request use.
-See Architecture Phase B for the fix.
+Per-turn terminal policy scope (agents that expose tools.terminal_scope):
+
+    In addition to the env mirror above, each streaming turn binds the
+    active profile's complete TERMINAL_* policy as context-local state via
+    install_profile_terminal_scope() (_set_streaming_terminal_scope in
+    api/streaming.py). Scope-aware readers in the agent resolve the turn's
+    own backend/cwd from this scope and are immune to a concurrent turn's
+    env-mirror writes. The scope is built from the profile's files, then
+    the turn's effective values are applied last so they win exactly as
+    they won in the env mirror: the profile runtime env (WebUI applies
+    .env after config.yaml, so .env wins) and TERMINAL_CWD = the session
+    workspace. For the process-owning home, the launch process's frozen
+    TERMINAL_* environment (env-only policies with no file to rebuild
+    from) is overlaid — but only while the process owner is still the
+    home that owned it at capture: a process-wide profile switch means
+    the new owner's policy comes from its own files, not the previous
+    deployment's env (the snapshot is owner-anchored; switching back
+    restores it). On agents without the scope machinery the env mirror above
+    remains the only mechanism (unchanged fallback); on a profile whose
+    policy files cannot be read the agent's fail-closed refusal scope
+    applies (terminal tools refuse rather than run on ambient env).
+
+WARNING: The env-mirror vars above are still process-global. Two concurrent
+chat requests still clobber each other's env mirror; with a scope-capable
+agent the scope (not the mirror) is authoritative for TERMINAL_* reads, so
+the terminal backend/cwd race is closed for scope-aware readers. Non-terminal
+vars (HERMES_EXEC_ASK, HERMES_SESSION_KEY, HERMES_HOME) remain process-global
+until Phase B.
 
 ---
 
