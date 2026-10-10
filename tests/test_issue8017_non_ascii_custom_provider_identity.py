@@ -1047,7 +1047,6 @@ def test_a_fallback_entry_with_no_endpoint_keeps_the_model_connection(monkeypatc
     )
     assert bundle["base_url"] == u, "the merged route is not left endpoint-unresolved"
     assert bundle.get(config.CUSTOM_ROUTE_ERROR_FIELD) is None
-import api.config as config
 
 
 def _write_cfg(tmp_path, body: str) -> "config.Path":
