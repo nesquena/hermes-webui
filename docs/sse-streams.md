@@ -107,6 +107,30 @@ Regression coverage: `tests/test_settlement_agent_reasoning_authoritative.py`.
 
 ## Heartbeats and proxy behavior
 
+### Background-process progress
+
+Process heartbeats are distinct from SSE keepalive comments. On Hermes Agent
+builds that support them, bounded jobs spawned with `heartbeat=N` (minimum 60
+seconds) produce progress events as well as the final `notify=true` completion.
+`notify=true` alone requests completion, not periodic progress; watch patterns
+remain one-shot readiness signals, not a progress substitute.
+
+WebUI routes new, non-empty output to the spawning session through the existing
+server-side `process_wakeup` turn. Idle sessions wake immediately; busy sessions
+defer to the existing turn-teardown/next-turn delivery path. Empty output,
+unchanged output and duplicate/out-of-order heartbeat sequences do not trigger
+model input. Progress dedupe is bounded and keyed by the resolved UI session and
+process, separately from the final completion-consumed marker, so progress cannot
+swallow the final result.
+
+Clients observe the ordinary `server_turn_started` event and attach to
+`/api/chat/stream`; progress does not emit a fake `bg_task_complete`. Closed tabs
+are not required for server-side delivery and returning clients use the existing
+session/stream recovery paths. This is chat delivery, not device push notification
+support. No additional scheduler, polling agent or process timer is introduced.
+
+### SSE transport keepalives
+
 - All long-lived streams emit SSE keepalive comment lines on the
   `_SSE_HEARTBEAT_INTERVAL_SECONDS` cadence (currently 5 seconds), which is
   short enough to survive typical reverse-proxy idle timeouts.

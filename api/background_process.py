@@ -53,8 +53,10 @@ from typing import Any, Optional
 from api.process_event_utils import (
     ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
     claim_async_delegation_delivery,
+    claim_process_heartbeat,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    forget_process_heartbeat,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     restore_durable_process_completions,
@@ -1002,6 +1004,16 @@ def format_wakeup_prompt(evt: object) -> str | None:
         if sup:
             body += f"\n({sup} earlier matches were suppressed by rate limit)"
         return body + "]"
+    if evt_type == "heartbeat":
+        out = _truncate(str(evt.get("output") or "").strip(), 4000)
+        if not sid or not out:
+            return None
+        return (
+            f"[IMPORTANT: Background process {sid} still running "
+            f"(elapsed={evt.get('elapsed', '?')}s).\n"
+            f"Command: {cmd}\n"
+            f"Output since last update:\n{out}]"
+        )
     if evt_type == "async_delegation":
         # A background ``delegate_task`` completion. The agent-side formatter
         # renders these; delegate to it so the subagent result re-enters the
@@ -1873,6 +1885,22 @@ def _process_one(evt: dict) -> None:
                 "falling back to BG_TASK_COMPLETE_EVENTS_SEEN gate",
                 exc_info=True,
             )
+    if evt.get("type") == "heartbeat":
+        # Separate identity for each progress delivery: never consume the
+        # final completion or collide with its deferred-wakeup process id.
+        wakeup_prompt = format_wakeup_prompt(evt)
+        if not claim_process_heartbeat(evt, session_id) or not wakeup_prompt:
+            return
+        progress_id = f"heartbeat:{process_id}:{evt['seq']}"
+        if _session_has_active_turn(session_id):
+            record_deferred_wakeup(session_id, progress_id, wakeup_prompt)
+        else:
+            _start_server_side_wakeup_turn(
+                session_id, wakeup_prompt, process_id=progress_id
+            )
+        # No bg_task_complete/legacy alias: server_turn_started attaches
+        # clients to the ordinary wakeup turn without a second renderer.
+        return
     # Secondary (ours-original) idempotency: if we've already emitted for this
     # (session_id, process_id) pair via THIS module, skip the duplicate. Two
     # _move_to_finished() callers (kill_process racing the reader thread) can
@@ -1894,6 +1922,8 @@ def _process_one(evt: dict) -> None:
     # consumed for the coupling contract + why a future rename now fails loud).
     if process_id:
         _mark_registry_completion_consumed(process_id)
+        if evt.get("type", "completion") == "completion":
+            forget_process_heartbeat(session_id, process_id)
 
     # ── Option Z (PRIMARY): server-side wakeup, NO browser round-trip ──────
     # The SSE emit above is now demoted to a pure live-view layer (an open tab

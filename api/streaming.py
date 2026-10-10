@@ -3768,6 +3768,16 @@ def _drain_webui_process_notifications(
         elif not _completion_event_targets_webui_session(evt_session_key, session_id):
             skipped_events.append(evt)
             continue
+        if evt.get('type') == 'heartbeat':
+            # Same atomic progress gate as the background drain; never mark
+            # the process completion consumed, even for an empty heartbeat.
+            from api.background_process import format_wakeup_prompt
+            from api.process_event_utils import claim_process_heartbeat
+
+            notification = format_wakeup_prompt(evt)
+            if claim_process_heartbeat(evt, session_id) and notification:
+                notifications.append(notification)
+            continue
         # Age-gate stale completions: a completion that fires long after the
         # user moved on must not be prepended to an unrelated later turn
         # (nesquena/hermes-webui#4029). Drop (consume, do not requeue) any
@@ -3852,6 +3862,10 @@ def _drain_webui_process_notifications(
         # Matched but unformattable process completions are consumed rather than
         # replayed forever on later turns.
         _mark_process_completion_consumed(process_registry, evt_sid)
+        if evt.get('type') == 'completion':
+            from api.process_event_utils import forget_process_heartbeat
+
+            forget_process_heartbeat(session_id, evt_sid)
 
     for evt, durable in async_retry_events:
         requeue_async_delegation_event(
