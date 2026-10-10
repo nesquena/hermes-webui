@@ -17792,6 +17792,11 @@ def handle_post(handler, parsed) -> bool:
         command = str(body.get("command", "") or "").strip()
         if not command:
             return bad(handler, "command is required")
+        if command.split()[0].lower() in ("/loop", "loop"):
+            from api.loops import run_loop_command  # session_id ownership: generic POST guard above
+            sid = str(body.get("session_id", "") or "")
+            return j(handler, {"output": run_loop_command(sid, command.partition(" ")[2],
+                                                          request_profile=_get_active_profile_name())})
 
         try:
             return j(handler, {"output": execute_agent_command(command)})
@@ -26184,8 +26189,9 @@ def _handle_goal_command(handler, body):
         except ImportError:
             requested_profile = ""
     if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-        session_profile, retag_result = _retag_empty_session_profile(
-            s, requested_profile
+        from api.loops import retag_session_profile
+        session_profile, retag_result = retag_session_profile(
+            s, requested_profile, _retag_empty_session_profile
         )
         if retag_result == "pinned_empty":
             return _session_profile_mismatch_response(
@@ -26580,8 +26586,9 @@ def _handle_chat_start(handler, body, diag=None):
                 requested_profile
                 and _profiles_match(requested_profile, active_profile)
             ):
-                session_profile, retag_result = (
-                    _retag_empty_session_profile(s, requested_profile)
+                from api.loops import retag_session_profile
+                session_profile, retag_result = retag_session_profile(
+                    s, requested_profile, _retag_empty_session_profile
                 )
                 if retag_result not in ("same_owner", "retagged"):
                     return _session_profile_mismatch_response(
