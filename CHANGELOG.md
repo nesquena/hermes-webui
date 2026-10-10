@@ -140,6 +140,14 @@
 
 ### Fixed
 
+- **Starting the WebUI on a port that is already taken explains what to do.** `bootstrap.py` / `start.sh` now check the
+  port before launching: if your own WebUI is already running there it says so (and opens it), otherwise it names the
+  port as busy and suggests a free one instead of failing later with a bind error. Works for IPv4, IPv6 and HTTPS.
+  Thanks @mercael91. (#8112, #8111)
+
+- **A Git "terminal prompts disabled" answer from Git Credential Manager is reported as an authentication failure.**
+  Workspace Git status and fetch now show the sign-in message instead of a generic Git error when GCM refuses to prompt
+  because interactivity is disabled. Thanks @PeterPunk1320. (#8127)
 - **The "Move to project" picker is keyboard-reachable, translated and finger-sized.** Arrow keys, Home, End and Escape work (focus
   returns to the ⋮ trigger), labels are translated in all 15 locales, and rows are 44px on touch. The picker uses the same placement
   as the ⋮ menu (below the row, flipping above when that fits, pinned 8px inside the window and scrolling when taller), follows window
@@ -982,6 +990,9 @@
 
 ### Documentation
 
+- **Troubleshooting no longer sends package-managed installs to the stale in-tree venv.** It resolves the store
+  Python with `hermes --print-runtime-command` at each start (no `jq` needed) and stops the launcher instead of exporting
+  an empty path when that lookup fails. Thanks @smhc. (#8110)
 - **The README's remote-access paragraph now leads with Tailscale Serve.** It sent users straight to a
   `HERMES_WEBUI_HOST=0.0.0.0` bind, which contradicted the guide it links to. It now recommends Serve, which
   keeps WebUI on loopback behind tailnet-only HTTPS, and keeps the authenticated direct-IP bind as the
