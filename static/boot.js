@@ -3384,6 +3384,71 @@ function _syncSkinPicker(active){
   });
 }
 
+function _normalizeIconTint(color){
+  return /^#[0-9a-f]{6}$/i.test(color||'')?color.toUpperCase():'#08EBF1';
+}
+
+function _iconTintGradientEnd(tint){
+  if(tint==='#08EBF1') return '#3889FD';
+  return '#'+[1,3,5].map(i=>Math.round(parseInt(tint.slice(i,i+2),16)*0.7).toString(16).padStart(2,'0')).join('').toUpperCase();
+}
+
+function _syncIconTintPicker(tint){
+  const cells=document.querySelectorAll('#iconTintPickerGrid .icon-tint-pick-btn');
+  const preset=Array.from(cells).some(cell=>cell.dataset.iconTintVal===tint);
+  cells.forEach(cell=>{
+    const active=cell.dataset.iconTintVal===tint || (cell.dataset.iconTintVal==='custom'&&!preset);
+    cell.classList.toggle('active',active);
+    if(cell.tagName==='BUTTON') cell.setAttribute('aria-pressed',String(active));
+  });
+}
+
+// Track user tint edits with a monotonic counter so an /api/settings GET that
+// started before the edit cannot revert the newer choice when it resolves — both
+// boot hydration and the Appearance panel's initial fetch race a fast pick.
+function _iconTintEditCount(){
+  return window._hermesIconTintEdit||0;
+}
+
+function _applyIconTintFromServer(tint,editCountAtRequest){
+  if(_iconTintEditCount()!==editCountAtRequest) return false;
+  localStorage.setItem('hermes-icon-tint',tint);
+  _applyIconTint(tint);
+  return true;
+}
+
+function _applyIconTint(color){
+  const tint=_normalizeIconTint(color);
+  const url=`static/favicon.svg?tint=${tint.slice(1)}`;
+  document.querySelectorAll('link[rel~="icon"][type="image/svg+xml"]').forEach(link=>{
+    link.href=url;
+  });
+  const preview=$('iconTintPreview');
+  if(preview) preview.src=url;
+  const input=$('settingsIconTint');
+  if(input) input.value=tint;
+  _syncIconTintPicker(tint);
+  const end=_iconTintGradientEnd(tint);
+  for(const [selector,stopColor] of [
+    ['#app-titlebar-mark stop:first-child',tint],
+    ['#app-titlebar-mark stop:last-child',end],
+    ['.empty-logo .hm-g0',tint],
+    ['.empty-logo .hm-g1',end],
+  ]){
+    document.querySelectorAll(selector).forEach(stop=>{
+      stop.style.stopColor=tint==='#08EBF1'?'':stopColor;
+    });
+  }
+}
+
+function _pickIconTint(color){
+  const tint=_normalizeIconTint(color);
+  window._hermesIconTintEdit=(window._hermesIconTintEdit||0)+1;
+  localStorage.setItem('hermes-icon-tint',tint);
+  _applyIconTint(tint);
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
+}
+
 function _applyFontSize(size){
   if(size&&size!=='default'){
     document.documentElement.dataset.fontSize=size;
@@ -3791,6 +3856,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // Load send key preference
   let _bootSettings={};
   const prefillIntent=(typeof _composerPrefillIntentFromLocation==='function')?_composerPrefillIntentFromLocation():null;
+  const iconTintEditAtRequest=_iconTintEditCount();
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
@@ -3942,6 +4008,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
+    const iconTint=s.icon_tint||localStorage.getItem('hermes-icon-tint')||'#08EBF1';
+    _applyIconTintFromServer(iconTint,iconTintEditAtRequest);
     if(typeof setLocale==='function'){
       // #7622 (round 3): the settings payload's `s.language` is
       // absent (None) for a fresh install, so an explicit non-empty

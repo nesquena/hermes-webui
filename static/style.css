@@ -243,6 +243,7 @@
   :root[data-skin="graphite"] #mainSettings .theme-pick-btn.active,
   :root[data-skin="graphite"] #mainSettings .skin-pick-btn.active,
   :root[data-skin="graphite"] #mainSettings .font-size-pick-btn.active{border-color:var(--border2)!important;box-shadow:inset 0 0 0 1px var(--accent)!important;background:var(--surface)!important;}
+  :root[data-skin="graphite"] #mainSettings .icon-tint-pick-btn.active{border-color:var(--border2)!important;box-shadow:inset 0 0 0 1px var(--accent)!important;background:var(--surface)!important;}
   :root[data-skin="graphite"] .new-chat-btn,
   :root[data-skin="graphite"] button.send-btn:not(:disabled),
   :root[data-skin="graphite"] .btn.primary,
@@ -368,7 +369,8 @@
   :root.dark[data-skin="codex"] .session-jump-btn{box-shadow:0 1px 2px rgba(0,0,0,0.28)!important;}
   :root[data-skin="codex"] #mainSettings .theme-pick-btn.active,
   :root[data-skin="codex"] #mainSettings .skin-pick-btn.active,
-  :root[data-skin="codex"] #mainSettings .font-size-pick-btn.active{border-color:var(--border2)!important;box-shadow:inset 0 0 0 1px var(--accent)!important;background:var(--surface)!important;}
+  :root[data-skin="codex"] #mainSettings .font-size-pick-btn.active,
+  :root[data-skin="codex"] #mainSettings .icon-tint-pick-btn.active{border-color:var(--border2)!important;box-shadow:inset 0 0 0 1px var(--accent)!important;background:var(--surface)!important;}
   :root[data-skin="codex"] .new-chat-btn,
   :root[data-skin="codex"] button.send-btn:not(:disabled),
   :root[data-skin="codex"] .btn.primary,
@@ -494,7 +496,8 @@
   :root.dark[data-skin="terracotta"] .session-jump-btn{box-shadow:0 1px 2px rgba(0,0,0,0.28)!important;}
   :root[data-skin="terracotta"] #mainSettings .theme-pick-btn.active,
   :root[data-skin="terracotta"] #mainSettings .skin-pick-btn.active,
-  :root[data-skin="terracotta"] #mainSettings .font-size-pick-btn.active{border-color:var(--border2)!important;box-shadow:inset 0 0 0 1px var(--accent)!important;background:var(--surface)!important;}
+  :root[data-skin="terracotta"] #mainSettings .font-size-pick-btn.active,
+  :root[data-skin="terracotta"] #mainSettings .icon-tint-pick-btn.active{border-color:var(--border2)!important;box-shadow:inset 0 0 0 1px var(--accent)!important;background:var(--surface)!important;}
   :root[data-skin="terracotta"] .new-chat-btn,
   :root[data-skin="terracotta"] button.send-btn:not(:disabled),
   :root[data-skin="terracotta"] .btn.primary,
@@ -620,7 +623,8 @@
   :root.dark[data-skin="github"] .session-jump-btn{box-shadow:0 1px 2px rgba(0,0,0,0.28)!important;}
   :root[data-skin="github"] #mainSettings .theme-pick-btn.active,
   :root[data-skin="github"] #mainSettings .skin-pick-btn.active,
-  :root[data-skin="github"] #mainSettings .font-size-pick-btn.active{border-color:var(--border2)!important;box-shadow:inset 0 0 0 1px var(--accent)!important;background:var(--surface)!important;}
+  :root[data-skin="github"] #mainSettings .font-size-pick-btn.active,
+  :root[data-skin="github"] #mainSettings .icon-tint-pick-btn.active{border-color:var(--border2)!important;box-shadow:inset 0 0 0 1px var(--accent)!important;background:var(--surface)!important;}
   :root[data-skin="github"] .new-chat-btn,
   :root[data-skin="github"] button.send-btn:not(:disabled),
   :root[data-skin="github"] .btn.primary,
@@ -965,9 +969,10 @@
   :root[data-skin="geist-contrast"] .profile-opt.active,
   :root[data-skin="geist-contrast"] .chip.model,
   :root[data-skin="geist-contrast"] .side-menu-item.active,
-  :root[data-skin="geist-contrast"] .skin-pick-btn.active,
-  :root[data-skin="geist-contrast"] .theme-pick-btn.active,
-  :root[data-skin="geist-contrast"] .font-size-pick-btn.active{background:var(--surface-subtle)!important;border-color:var(--border2)!important;color:var(--text)!important;box-shadow:inset 0 0 0 1px var(--border)!important;font-weight:500!important;}
+  :root[data-skin="geist-contrast"] #mainSettings .skin-pick-btn.active,
+  :root[data-skin="geist-contrast"] #mainSettings .theme-pick-btn.active,
+  :root[data-skin="geist-contrast"] #mainSettings .font-size-pick-btn.active,
+  :root[data-skin="geist-contrast"] #mainSettings .icon-tint-pick-btn.active{background:var(--surface-subtle)!important;border-color:var(--border2)!important;color:var(--text)!important;box-shadow:inset 0 0 0 1px var(--border)!important;font-weight:500!important;}
   :root[data-skin="geist-contrast"] .session-item.active{position:relative;border:1px solid var(--border2)!important;}
   :root[data-skin="geist-contrast"] .session-item.active::before{content:"";position:absolute;left:6px;top:10px;bottom:10px;width:2px;border-radius:999px;background:var(--accent);}
   :root[data-skin="geist-contrast"] .session-item.active .session-title,
@@ -5271,14 +5276,28 @@ main.main > #mainPlugin{display:none;}
    tokens so all skins flip correctly. */
 #mainSettings .theme-pick-btn,
 #mainSettings .skin-pick-btn,
-#mainSettings .font-size-pick-btn{background:var(--bg)!important;border-color:var(--border)!important;}
+#mainSettings .font-size-pick-btn,
+#mainSettings .icon-tint-pick-btn{background:var(--bg)!important;border-color:var(--border)!important;}
 #mainSettings .theme-pick-btn:hover,
 #mainSettings .skin-pick-btn:hover,
-#mainSettings .font-size-pick-btn:hover{border-color:var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .font-size-pick-btn:hover,
+#mainSettings .icon-tint-pick-btn:hover{border-color:var(--accent-bg-strong)!important;background:var(--surface)!important;}
 /* Active/selected state for picker cards — must use !important to beat the base border-color:var(--border)!important rule above */
 #mainSettings .theme-pick-btn.active,
 #mainSettings .skin-pick-btn.active,
-#mainSettings .font-size-pick-btn.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .font-size-pick-btn.active,
+#mainSettings .icon-tint-pick-btn.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .icon-tint-control{display:flex;align-items:flex-start;gap:12px;min-width:0;}
+#mainSettings .icon-tint-preview{width:48px;height:48px;flex:none;}
+#mainSettings .icon-tint-picker{display:flex;flex-wrap:wrap;gap:6px;min-width:0;}
+#mainSettings .icon-tint-pick-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:64px;min-height:48px;padding:5px 8px;border:1px solid var(--border2);border-radius:8px;color:var(--text);font-size:11px;cursor:pointer;position:relative;}
+#mainSettings .icon-tint-swatch{width:17px;height:17px;border-radius:50%;border:1px solid var(--border2);}
+#mainSettings .icon-tint-custom{min-height:48px;overflow:hidden;}
+#mainSettings .icon-tint-custom-swatch{background:conic-gradient(#E5484D,#F59E0B,#08EBF1,#7C3AED,#E5484D);}
+#mainSettings #settingsIconTint{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;}
+#mainSettings .icon-tint-pick-btn:focus-visible,
+#mainSettings .icon-tint-custom:focus-within{outline:2px solid var(--accent);outline-offset:2px;}
+#mainSettings .icon-tint-caption{font-size:12px;color:var(--muted);line-height:1.5;margin-top:8px;}
 #mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:4px;}
 #mainSettings .chat-activity-mode-btn{min-height:34px;padding:7px 10px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;}
 #mainSettings .chat-activity-mode-btn:hover{border-color:var(--accent-bg-strong);color:var(--text);background:var(--hover-bg);}

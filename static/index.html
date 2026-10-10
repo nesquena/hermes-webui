@@ -8,9 +8,9 @@
      MUST appear before manifest/favicon links so browsers resolve relative URLs against the
      correct base when the page is served from /session/<id> routes. See #2226. -->
 <script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
-<link rel="icon" type="image/svg+xml" href="static/favicon.svg">
+<link rel="icon" href="static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="static/favicon-32.png">
-<link rel="shortcut icon" href="static/favicon.ico">
+<link rel="icon" type="image/svg+xml" href="static/favicon.svg">
 <link rel="manifest" href="manifest.json" crossorigin="use-credentials">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -990,7 +990,21 @@
               </div>
               <input type="hidden" id="settingsSkin" value="default">
             </div>
-                        <div class="settings-field">
+            <div class="settings-field">
+              <label id="iconTintLabel" data-i18n="settings_label_icon_tint">App icon color</label>
+              <div class="icon-tint-control">
+                <img id="iconTintPreview" class="icon-tint-preview" src="static/favicon.svg?tint=08EBF1" alt="" aria-hidden="true">
+                <div id="iconTintPickerGrid" class="icon-tint-picker" role="group" aria-labelledby="iconTintLabel">
+                  <button type="button" class="icon-tint-pick-btn" data-icon-tint-val="#08EBF1" onclick="_pickIconTint('#08EBF1')" aria-label="Default" data-i18n-aria-label="settings_icon_tint_default"><span class="icon-tint-swatch" style="background:#08EBF1"></span><span data-i18n="settings_icon_tint_default">Default</span></button>
+                  <button type="button" class="icon-tint-pick-btn" data-icon-tint-val="#E5484D" onclick="_pickIconTint('#E5484D')" aria-label="Red" data-i18n-aria-label="settings_icon_tint_red"><span class="icon-tint-swatch" style="background:#E5484D"></span><span data-i18n="settings_icon_tint_red">Red</span></button>
+                  <button type="button" class="icon-tint-pick-btn" data-icon-tint-val="#7C3AED" onclick="_pickIconTint('#7C3AED')" aria-label="Purple" data-i18n-aria-label="settings_icon_tint_purple"><span class="icon-tint-swatch" style="background:#7C3AED"></span><span data-i18n="settings_icon_tint_purple">Purple</span></button>
+                  <button type="button" class="icon-tint-pick-btn" data-icon-tint-val="#F59E0B" onclick="_pickIconTint('#F59E0B')" aria-label="Amber" data-i18n-aria-label="settings_icon_tint_amber"><span class="icon-tint-swatch" style="background:#F59E0B"></span><span data-i18n="settings_icon_tint_amber">Amber</span></button>
+                  <label class="icon-tint-pick-btn icon-tint-custom" data-icon-tint-val="custom"><span class="icon-tint-swatch icon-tint-custom-swatch"></span><span data-i18n="settings_icon_tint_custom">Custom</span><input type="color" id="settingsIconTint" value="#08EBF1" oninput="_pickIconTint(this.value)" aria-label="Custom color" data-i18n-aria-label="settings_icon_tint_custom"></label>
+                </div>
+              </div>
+              <div class="icon-tint-caption" data-i18n="settings_desc_icon_tint">Changes the tab icon in Chrome, Edge and Firefox. Safari and installed-app icons keep the default color.</div>
+            </div>
+            <div class="settings-field">
               <label data-i18n="settings_label_font_size">Font size</label>
               <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:4px">
                 <button type="button" data-font-size-val="small" onclick="_pickFontSize('small')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
