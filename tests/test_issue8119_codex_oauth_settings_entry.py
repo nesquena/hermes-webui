@@ -318,7 +318,6 @@ def test_flow_started_under_one_profile_persists_there_after_a_profile_switch(mo
     """The server binds the flow to the profile active at start; switching profiles
     while the user authorizes must not redirect the credential."""
     import threading
-    import time
 
     import api.oauth as oauth
 
