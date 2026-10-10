@@ -108,16 +108,16 @@ const flatTool = MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS.tool_call;
 const before = _messageVirtualCalibratedRoleHeight('tool_call');
 const early = [];
 for (let i = 0; i < 3; i++) {
-  _recordMessageVirtualRoleMeasurement('tool_call', 150);
+  _recordMessageVirtualRoleMeasurement('tool_call', i, 150);
   early.push(_messageVirtualCalibratedRoleHeight('tool_call'));
 }
-const frozenSamples = [];
 for (let i = 0; i < 40; i++) {
-  _recordMessageVirtualRoleMeasurement('tool_call', 150);
+  // Distinct rows: the freeze counts rows, not repeated measure passes.
+  _recordMessageVirtualRoleMeasurement('tool_call', i, 150);
 }
 const frozen = _messageVirtualCalibratedRoleHeight('tool_call');
 // A later outlier must not move a frozen role mean.
-_recordMessageVirtualRoleMeasurement('tool_call', 4000);
+_recordMessageVirtualRoleMeasurement('tool_call', 999, 4000);
 const afterOutlier = _messageVirtualCalibratedRoleHeight('tool_call');
 // Roles never measured still fall back to the flat constant (factor ~1 here).
 const untouched = _messageVirtualCalibratedRoleHeight('assistant');
@@ -155,7 +155,7 @@ eval(extractFunc('_messageVirtualCalibratedRoleHeight'));
 eval(extractFunc('_updateMessageVirtualMeasurements'));
 
 const entries = [];
-for (let i = 0; i < 25; i++) entries.push({ role: 'tool_call', height: 160 });
+for (let i = 0; i < 25; i++) entries.push({ role: 'tool_call', height: 160, rawIdx: i });
 const idxs = entries.map((_, i) => i);
 // First pass: heights recorded and cache filled, so a refresh is scheduled.
 _updateMessageVirtualMeasurements(entries, idxs, { virtualized: true });
@@ -195,7 +195,7 @@ eval(extractFunc('_recordMessageVirtualRoleMeasurement'));
 eval(extractFunc('_resetMessageVirtualRoleCalibration'));
 eval(extractFunc('_messageVirtualCalibratedRoleHeight'));
 eval(extractFunc('_clearMessageVirtualHeightCache'));
-for (let i = 0; i < 25; i++) _recordMessageVirtualRoleMeasurement('tool_call', 150);
+for (let i = 0; i < 25; i++) _recordMessageVirtualRoleMeasurement('tool_call', i, 150);
 const before = _messageVirtualCalibratedRoleHeight('tool_call');
 _clearMessageVirtualHeightCache();
 const after = _messageVirtualCalibratedRoleHeight('tool_call');
@@ -337,3 +337,114 @@ console.log(JSON.stringify({ recovered, renderCalls, scrollTop: container.scroll
     ]
     # Cannot clamp against an in-flight programmatic write.
     assert metrics["scrollTop"] == 800
+
+
+def test_blank_viewport_recovery_clamps_across_the_head_tail_gap():
+    """The render window is head rows + retained tail with a bottomPad gap in
+    between; a viewport parked in that gap is neither above the union top nor
+    below the union bottom, so the clamp must work per row, not per block."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let deletes = [];
+let renderCalls = [];
+const _sessionHtmlCache = { delete(sid){ deletes.push(sid); } };
+let _sessionHtmlCacheSid = 'sid-123';
+const S = { session: { session_id: 'sid-123' } };
+let _messageVirtualWindowKey = 'stale';
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+let _lastScrollTop = 0;
+let _messageVirtualBlankClampAttempts = 0;
+let _messageRenderScrollRestoreDepth = 0;
+const performance = { now: () => 1000 };
+function _freshProgrammaticScrollActive(){ return false; }
+function _deferClearProgrammaticScroll(){}
+function _messageViewportIntersectsRenderedRow(){ return false; }
+function renderMessages(options){ renderCalls.push(options); }
+
+// Head block ends at document y=800, tail block starts at document y=2700;
+// the viewport (1000..1600) sits in the gap between them.
+const container = {
+  scrollTop: 1000,
+  clientHeight: 600,
+  scrollHeight: 4000,
+  getBoundingClientRect(){ return { top: 0, bottom: 600 }; },
+  querySelectorAll(){ return [
+    { getBoundingClientRect(){ return { top: -500, bottom: -200 }; } },
+    { getBoundingClientRect(){ return { top: 1700, bottom: 2000 }; } },
+  ]; },
+};
+function $(id){ return id === 'messages' ? container : null; }
+eval(extractFunc('_clampVirtualizedBlankViewportToRenderedEdge'));
+eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
+const recovered = _maybeRecoverVirtualizedBlankViewport({}, true, { virtualized: true });
+console.log(JSON.stringify({ recovered, scrollTop: container.scrollTop, renderCalls }));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["recovered"] is True
+    # Nearest edge is the head block's bottom (800) -> 800 - 0.5 * 600.
+    assert metrics["scrollTop"] == 500
+    assert metrics["renderCalls"] == [{"preserveScroll": True}]
+
+
+def test_blank_viewport_recovery_clamps_during_the_render_own_scroll_restore():
+    """renderMessages' own scroll restore re-arms _programmaticScroll right
+    before recovery runs; that write is ours, so it must not disable the clamp."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let deletes = [];
+let renderCalls = [];
+const _sessionHtmlCache = { delete(sid){ deletes.push(sid); } };
+let _sessionHtmlCacheSid = 'sid-123';
+const S = { session: { session_id: 'sid-123' } };
+let _messageVirtualWindowKey = 'stale';
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+let _lastScrollTop = 0;
+let _messageVirtualBlankClampAttempts = 0;
+let _messageRenderScrollRestoreDepth = 1;
+const performance = { now: () => 1000 };
+function _freshProgrammaticScrollActive(){ return true; }
+function _deferClearProgrammaticScroll(){}
+function _messageViewportIntersectsRenderedRow(){ return false; }
+function renderMessages(options){ renderCalls.push(options); }
+const container = {
+  scrollTop: 800,
+  clientHeight: 600,
+  scrollHeight: 20000,
+  getBoundingClientRect(){ return { top: 0, bottom: 600 }; },
+  querySelectorAll(){ return [
+    { getBoundingClientRect(){ return { top: 4000, bottom: 4500 }; } },
+    { getBoundingClientRect(){ return { top: 4500, bottom: 6000 }; } },
+  ]; },
+};
+function $(id){ return id === 'messages' ? container : null; }
+eval(extractFunc('_clampVirtualizedBlankViewportToRenderedEdge'));
+eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
+const recovered = _maybeRecoverVirtualizedBlankViewport({}, true, { virtualized: true });
+console.log(JSON.stringify({ recovered, scrollTop: container.scrollTop, renderCalls }));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["recovered"] is True
+    assert metrics["scrollTop"] == 4500
+    assert metrics["renderCalls"] == [{"preserveScroll": True}]
+
+
+def test_role_calibration_freeze_requires_distinct_measured_rows():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _calibration_block(js) + """
+eval(extractFunc('_recordMessageVirtualRoleMeasurement'));
+eval(extractFunc('_messageVirtualCalibratedRoleHeight'));
+// The measure pass re-measures the SAME mounted row on every render: repeating
+// one row must never freeze the role's estimate.
+for (let i = 0; i < 40; i++) _recordMessageVirtualRoleMeasurement('tool_call', 0, 150);
+const repeatedOneRow = _messageVirtualCalibratedRoleHeight('tool_call');
+_recordMessageVirtualRoleMeasurement('tool_call', 1, 200);
+const afterNewRow = _messageVirtualCalibratedRoleHeight('tool_call');
+console.log(JSON.stringify({ repeatedOneRow, afterNewRow }));
+"""
+    metrics = json.loads(_run_node(source))
+    # Still the 5-prior shrinkage over ONE sample: (150 + 5*400)/6 = 358.
+    assert metrics["repeatedOneRow"] == 358
+    # A second distinct row moves the estimate: (150+200+5*400)/7 = 336.
+    assert metrics["afterNewRow"] == 336
