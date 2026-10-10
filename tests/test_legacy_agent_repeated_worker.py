@@ -32,6 +32,10 @@ def test_old_persistence_shapes_keep_each_turn_in_actual_worker(tmp_path, monkey
             self.context_compressor = self.ephemeral_system_prompt = None
             self.platform, self.model = 'webui', 'test-model'
             self._flushed_objects = set()
+            # ``id(row)`` is only unique while the dict is alive. Keep the
+            # rows alive for every ID retained by this historical mock so a
+            # recycled CPython address cannot suppress a later turn.
+            self._flushed_object_refs = {}
 
         def local_provider(self, prompt, history, clean, timestamp):
             histories.append(copy.deepcopy(history))
@@ -68,6 +72,9 @@ def test_old_persistence_shapes_keep_each_turn_in_actual_worker(tmp_path, monkey
                 if shape == 'timestamp-markers' and row.get('_db_persisted'):
                     continue
                 if shape != 'timestamp-markers' and id(row) in self._flushed_objects:
+                    # A seen ID must still identify this same live object, not
+                    # a fresh row whose address CPython happened to recycle.
+                    assert self._flushed_object_refs[id(row)] is row
                     continue
                 content = row['content']
                 if shape == 'timestamp-markers' and index == self._persist_user_message_idx:
@@ -76,7 +83,9 @@ def test_old_persistence_shapes_keep_each_turn_in_actual_worker(tmp_path, monkey
                 if shape == 'timestamp-markers':
                     row['_db_persisted'] = True
                 else:
-                    self._flushed_objects.add(id(row))
+                    row_id = id(row)
+                    self._flushed_objects.add(row_id)
+                    self._flushed_object_refs[row_id] = row
             self._last_flushed_db_idx = len(messages)
 
     if shape.startswith('timestamp-'):
