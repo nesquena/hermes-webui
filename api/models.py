@@ -6443,6 +6443,35 @@ def get_session(sid, metadata_only=False):
     return _resolve_session(sid, metadata_only=metadata_only)
 
 
+def get_session_profile_readonly(sid):
+    """Read ownership without repairing sidecars or publishing/promoting cache entries."""
+    if not is_safe_session_id(sid):
+        raise KeyError(sid)
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if cached is not None and str(getattr(cached, 'session_id', '') or '') == sid:
+            profile = getattr(cached, 'profile', None)
+            if profile is not None and not isinstance(profile, str):
+                raise ValueError('Invalid session profile')
+            return profile
+    path = SESSION_DIR / f'{sid}.json'
+    try:
+        prefix = _read_metadata_json_prefix(path)
+        data = json.loads(prefix) if prefix else None
+        # Legacy layouts may put profile after messages/scenes. Read the JSON
+        # directly: Session.load() can collapse partials and save a shrink backup.
+        if not isinstance(data, dict) or 'profile' not in data:
+            data = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        raise KeyError(sid) from None
+    if not isinstance(data, dict) or data.get('session_id') != sid:
+        raise ValueError('Invalid session ownership metadata')
+    profile = data.get('profile')
+    if profile is not None and not isinstance(profile, str):
+        raise ValueError('Invalid session profile')
+    return profile
+
+
 _COMPRESSION_RECOVERY_PROFILE_UNSET = object()
 
 
