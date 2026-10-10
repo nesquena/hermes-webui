@@ -1264,3 +1264,72 @@ def test_preserved_task_list_rendering_does_not_mutate_history():
     assert "S.messages" not in preserved_helpers
     assert ".splice(" not in preserved_helpers
     assert "delete " not in preserved_helpers
+
+
+def test_compression_row_position_matches_journal_ordinal_across_mixed_bursts(
+    tmp_path, monkeypatch
+):
+    """A compression row must sit where the journal put it, even when the
+    surrounding tool bursts mix grouped (post-prose) and ungrouped (pre-prose)
+    tools.
+
+    The previous render walk drained ungrouped tool rows AFTER the burst walk
+    and gated compression on ``tool_rows_rendered`` (a RENDER count, not a
+    journal position). So a compression event journaled between two tool
+    events could land after both if one was ungrouped and one was grouped.
+    Ordinal-based merging pins each row to its journal position instead.
+    """
+    from api import routes
+
+    stream = "stream-ord-regression"
+    session = "sess-ord-regression"
+    events = [
+        # Ungrouped tool (no prose yet -> activityBurstId=0)
+        {"event": "tool", "seq": 1, "run_id": "r", "payload": {"name": "read_file", "tool_id": "t1"}},
+        {"event": "tool_complete", "seq": 2, "run_id": "r", "payload": {"name": "read_file", "tool_id": "t1"}},
+        {"event": "token", "seq": 3, "run_id": "r", "payload": {"text": "first prose. "}},
+        # Grouped tool (prose has been emitted -> activityBurstId=1)
+        {"event": "tool", "seq": 4, "run_id": "r", "payload": {"name": "search_files", "tool_id": "t2"}},
+        {"event": "tool_complete", "seq": 5, "run_id": "r", "payload": {"name": "search_files", "tool_id": "t2"}},
+        {
+            "event": "compressing",
+            "seq": 6,
+            "run_id": "r",
+            "created_at": "2026-08-05T00:00:06Z",
+            "payload": {},
+        },
+        {"event": "token", "seq": 7, "run_id": "r", "payload": {"text": "after compression."}},
+    ]
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {"session_id": session, "run_id": "r"},
+    )
+    monkeypatch.setattr(routes, "read_run_events", lambda s, st: {"events": events})
+
+    snap = routes._run_journal_live_snapshot(stream)
+    assert snap is not None
+    rows = snap["anchor_activity_scene"]["activity_rows"]
+
+    def kind_of(row):
+        role = row.get("role")
+        if role == "lifecycle":
+            return "COMPRESSION"
+        if role == "tool":
+            return f"tool:{(row.get('tool') or {}).get('name') or ''}"
+        if role == "prose":
+            return f"prose:{(row.get('text') or '')[:5]}"
+        return f"{role}:{row.get('kind')}"
+
+    sequence = [kind_of(r) for r in rows]
+    assert "COMPRESSION" in sequence, sequence
+    ci = sequence.index("COMPRESSION")
+
+    # Everything journaled before the compression event must render before it.
+    assert "tool:read_file" in sequence[:ci], sequence
+    assert "prose:first" in sequence[:ci], sequence
+    assert "tool:search_files" in sequence[:ci], sequence
+    # Prose journaled AFTER the compression event must render after it.
+    tail = sequence[ci + 1 :]
+    assert any(s.startswith("prose:after") for s in tail), sequence
