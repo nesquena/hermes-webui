@@ -617,3 +617,93 @@ def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
         assert key in live_tid_block
         assert key in find_block
         assert key in upsert_block
+
+
+def test_wakeup_pending_row_never_hides_real_user_row_by_text_alone():
+    """#7882 gate review finding 4: a delegation_wakeup pending prompt that
+    text-matches an EARLIER real user row must not stamp that row hidden.
+    Stamping/adoption requires the pending turn's identity (token or exact
+    pending_started_at timestamp); on text-only match the earlier row is left
+    alone and the pending row is materialized separately."""
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _stripWorkspaceDisplayPrefix"),
+            _function_body(UI_SRC, "function msgContent"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _function_body(UI_SRC, "function _messageTimestampSeconds"),
+            _function_body(UI_SRC, "function _activeTurnTokenMatches"),
+            _function_body(UI_SRC, "function _pendingActiveTurnUserMessage"),
+            _function_body(UI_SRC, "function _isContextCompactionText"),
+            _function_body(UI_SRC, "function _isContextCompactionMessage"),
+            _function_body(UI_SRC, "function getPendingSessionMessage"),
+        ]
+    )
+    script = f"""
+const _PENDING_ACTIVE_TURN_TS_EPSILON=1e-6;
+{helpers}
+const prompt = 'continue the task';
+
+// Case 1: a REAL earlier row with the same text and a DIFFERENT timestamp.
+// The wakeup pending prompt must NOT adopt/stamp it — the row stays clean and
+// the pending row is materialized separately.
+const earlierRealRow = {{role:'user', content:prompt, timestamp:100}};
+const resultNoIdentity = getPendingSessionMessage(
+  {{
+    pending_user_message:prompt,
+    pending_started_at:900,
+    pending_user_source:'delegation_wakeup',
+  }},
+  [earlierRealRow]
+);
+const earlierRowClean = !earlierRealRow._source;
+const pendingMaterialized = !!resultNoIdentity
+  && resultNoIdentity._pending===true
+  && resultNoIdentity._source==='delegation_wakeup';
+
+// Case 2: the row that IS the pending turn (exact timestamp) gets stamped so
+// the deferred-save hidden-row predicate still applies.
+const pendingTurnRow = {{role:'user', content:prompt, timestamp:900}};
+getPendingSessionMessage(
+  {{
+    pending_user_message:prompt,
+    pending_started_at:900,
+    pending_user_source:'delegation_wakeup',
+  }},
+  [pendingTurnRow]
+);
+const identityRowStamped = pendingTurnRow._source==='delegation_wakeup';
+
+// Case 3: ordinary webui prompts keep text-only dedupe — no identity needed.
+const webuiTailRow = {{role:'user', content:prompt, timestamp:300}};
+const webuiResult = getPendingSessionMessage(
+  {{
+    pending_user_message:prompt,
+    pending_started_at:900,
+    pending_user_source:'webui',
+  }},
+  [webuiTailRow]
+);
+const webuiTextDedupeIntact = webuiResult===null;
+
+process.stdout.write(JSON.stringify({{
+  earlierRowClean,
+  pendingMaterialized,
+  identityRowStamped,
+  webuiTextDedupeIntact,
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["earlierRowClean"] is True, (
+        "a real earlier user row must never be stamped delegation_wakeup on "
+        "text equality alone"
+    )
+    assert result["pendingMaterialized"] is True
+    assert result["identityRowStamped"] is True
+    assert result["webuiTextDedupeIntact"] is True

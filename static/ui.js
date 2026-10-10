@@ -687,6 +687,9 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
+  // Internal delegation handoffs remain in S.messages for model/recovery state,
+  // but never acquire a transcript row (including attachment-only rows).
+  if(m._source==='delegation_wakeup') return false;
   if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
@@ -12333,14 +12336,42 @@ function getPendingSessionMessage(session, messagesOverride=null){
       ? _sameTranscriptMessage(row,pendingCandidate)
       : String(msgContent(row)||'').trim()===text;
   };
+  const _rowIdentityMatchesPending=(row)=>{
+    if(!row) return false;
+    if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(row,session)) return true;
+    const ts=_messageTimestampSeconds(row);
+    const startedAt=Number(session?.pending_started_at);
+    return ts!==null&&Number.isFinite(startedAt)&&startedAt>0
+      &&Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON;
+  };
   const _adoptExistingRow=(row)=>{
     if(attachments.length&&!row.attachments?.length) row.attachments=attachments;
+    // #quiet-delegation: a state.db copy adopted on reload may predate the
+    // _source stamp (deferred save). Carry the pending turn's provenance so
+    // the hidden-row predicate still applies to the adopted row — but ONLY on
+    // identity proof (token or exact timestamp). Text equality alone must
+    // never stamp a real earlier row hidden (#quiet-delegation gate review
+    // finding 4).
+    const pendingSource=session?.pending_user_source;
+    if(pendingSource&&row&&!row._source&&_rowIdentityMatchesPending(row)) row._source=pendingSource;
     return null;
   };
   const currentTailUser=_pendingCurrentTailUserMessage(messages);
   if(currentTailUser){
     const sameCurrentTurn=_matchesPending(currentTailUser);
-    if(sameCurrentTurn) return _adoptExistingRow(currentTailUser);
+    if(sameCurrentTurn){
+      // A wakeup-sourced pending prompt that text-matches a real row WITHOUT
+      // the pending turn's token/timestamp identity must not swallow that
+      // row: leave it alone and materialize the pending row separately, so a
+      // delegation_wakeup stamp can never hide a real user turn (gate review
+      // finding 4). Ordinary webui prompts keep text-only dedupe — their row
+      // is never hidden and the deferred-save flow relies on it.
+      const pendingSource=session?.pending_user_source;
+      const wakeupSourced=!!pendingSource&&pendingSource!=='webui';
+      if(!wakeupSourced||_rowIdentityMatchesPending(currentTailUser)){
+        return _adoptExistingRow(currentTailUser);
+      }
+    }
   }
   // Fallback: the current turn's user row is already in the transcript but the
   // strict tail scan above could not see it because this turn's assistant/tool
@@ -12391,11 +12422,16 @@ async function checkInflightOnBoot(sid) {
 
 function _topbarLoadedMessageCount(){
   const messages=Array.isArray(S.messages)?S.messages:[];
-  return messages.filter(m=>m&&m.role&&m.role!=='tool').length;
+  return messages.filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length;
 }
 function _topbarMessageMetaText(){
   const loadedCount=_topbarLoadedMessageCount();
-  const totalCount=Number(S.session&&S.session.message_count);
+  // #quiet-delegation: prefer the server's visible count (hidden internal
+  // rows excluded) so "N of M messages" never counts delegation handoffs.
+  // Fall back to the raw count on servers that don't send it yet.
+  const rawTotal=Number(S.session&&S.session.message_count);
+  const visibleTotal=Number(S.session&&S.session.visible_message_count);
+  const totalCount=Number.isFinite(visibleTotal)&&visibleTotal>=0?visibleTotal:rawTotal;
   const hasTotal=Number.isFinite(totalCount)&&totalCount>0;
   const isTruncated=!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
   if(isTruncated&&hasTotal&&totalCount>loadedCount){

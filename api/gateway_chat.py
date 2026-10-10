@@ -2486,7 +2486,7 @@ def _run_gateway_chat_streaming(
             )
 
             def _restore_cancelled_success_writeback():
-                if pending_source == "process_wakeup":
+                if pending_source in ("process_wakeup", "delegation_wakeup"):
                     s.context_messages = previous_context
                     s.messages = previous_messages
                     s.process_wakeup_pause = dict(previous_process_wakeup_pause)

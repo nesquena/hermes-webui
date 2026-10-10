@@ -236,7 +236,16 @@ def render_session_html(session: dict, theme: str = "dark", palette: dict | None
     updated = _fmt_ts(session.get("updated_at"))
     messages = session.get("messages") or []
     # Skip system messages by default (usually long boilerplate); keep user/assistant/tool.
-    visible = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
+    # Hidden internal rows (delegation_wakeup) are private model plumbing — they
+    # must not leak into a shared/exported document (#quiet-delegation gate).
+    from api.process_event_utils import is_hidden_transcript_row
+
+    visible = [
+        m for m in messages
+        if isinstance(m, dict)
+        and m.get("role") != "system"
+        and not is_hidden_transcript_row(m)
+    ]
 
     blocks = []
     for m in visible:

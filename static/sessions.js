@@ -3877,6 +3877,21 @@ async function _ensureMessagesLoaded(sid, opts) {
   if(S.session&&S.session.session_id===sid){
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    // #quiet-delegation: keep the visible total in step with the reload — the
+    // server derives it from the merged transcript on message loads, so the
+    // sidebar/topbar cannot report a stale count after state.db outgrows the
+    // sidecar (gate review finding 3).
+    if(typeof data.session.visible_message_count==='number'&&data.session.visible_message_count>=0){
+      S.session.visible_message_count=data.session.visible_message_count;
+    }
+    // #7882 (greptile round-4 P2): the server transcript just landed in
+    // S.messages wholesale — re-baseline the send's optimistic-count
+    // snapshot so the next send bumps exactly its own rows. When a send is
+    // in flight the send-time snapshot stays authoritative (the server
+    // count here predates the optimistic turn).
+    if(!S.busy){
+      S.session._visibleBaselineLocal=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+    }
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
     // `todo_state` snapshot, derived server-side from the FULL untruncated
@@ -4462,6 +4477,17 @@ async function _loadOlderMessages() {
     }
     S.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
+    // #7882 (greptile round-4 P2): older rows prepended during an in-flight
+    // send are server-known rows — advance the send's optimistic-count
+    // baseline by exactly the prepended visible rows so the send's eventual
+    // bump stays its own rows only. When idle there is no pending bump to
+    // protect; the next send snapshots fresh anyway.
+    if(S.session && S.session.session_id === sid && S.busy){
+      const prependedVisible=olderMsgs.filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+      if(typeof S.session._visibleBaselineLocal==='number'){
+        S.session._visibleBaselineLocal+=prependedVisible;
+      }
+    }
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
     // hidden and the "hidden" counter rises while the viewport appears stuck.
@@ -4470,6 +4496,7 @@ async function _loadOlderMessages() {
     const addedRenderable = olderMsgs.filter(m=>{
       if(typeof _messageIsRenderable==='function') return _messageIsRenderable(m);
       if(!m||!m.role||m.role==='tool') return false;
+      if(m._source==='delegation_wakeup') return false;
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)) return false;
       if(typeof _isPreservedCompressionTaskListMessage==='function'&&_isPreservedCompressionTaskListMessage(m)) return false;
       if(typeof _isRecoveryControlMessage==='function'&&_isRecoveryControlMessage(m)) return false;
@@ -4572,6 +4599,11 @@ async function _ensureAllMessagesLoaded() {
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
+      // #7882 (greptile round-4 P2): full transcript landed — re-baseline the
+      // optimistic-count snapshot so the next send bumps exactly its own rows.
+      if(!S.busy){
+        S.session._visibleBaselineLocal=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+      }
       if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
         S.session.regeneration_revision = data.session.regeneration_revision;
       } else {
@@ -7279,6 +7311,12 @@ function startGatewaySSE(){
                     S.messages = _nextToAssign;
                     if(S.session && S.session.session_id === activeSid){
                       S.session.message_count = next.length;
+                      // #7882 (greptile round-4 P2): gateway refresh replaced
+                      // the transcript while idle — re-baseline the
+                      // optimistic-count snapshot.
+                      if(!S.busy){
+                        S.session._visibleBaselineLocal=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+                      }
                       const newest = next.length ? next[next.length - 1] : null;
                       const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
                       if(newestTs){
@@ -8274,13 +8312,54 @@ function _activeSessionIdForSidebar(){
   return null;
 }
 
-function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now()}={}){
+function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now(), localVisibleBeforePush=null}={}){
   if(!S.session||!S.session.session_id) return;
   const sid=S.session.session_id;
   const nowSec=Math.floor((Number(timestampMs)||Date.now())/1000);
   const localCount=Array.isArray(S.messages)?S.messages.length:0;
   const count=Math.max(Number(S.session.message_count||0),Number(messageCount||0),localCount,1);
+  // #7882 re-gate (greptile follow-up): send() calls this updater up to twice
+  // per send (initial optimistic pass + provisional-title pass), so the count
+  // bump must be IDEMPOTENT per send — derive from the authoritative local
+  // transcript length instead of incrementing a cached scalar. A turn already
+  // present in S.messages adds nothing; a fresh optimistic turn adds exactly
+  // one visible row. Hidden delegation rows are the only messages that don't
+  // render, and those never originate from a local send.
+  // #7882 re-gate round-3 must-fix 3: the server's visible count includes
+  // tool rows (only hidden delegation wakeups are excluded), so localVisible
+  // must use the same definition — counting tool rows too — or a send in a
+  // conversation with tool results reports 4 msgs where master shows 5. Keep
+  // the idempotent derivation (no cached-scalar increment) and the
+  // delegation-wakeup exclusion.
+  const localVisible=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
   S.session.message_count=count;
+  // #7882 (greptile round-4 P2): count only rows the send itself added.
+  // localVisible from the loaded tail alone is wrong in both directions for
+  // paginated chats — 100 visible rows with 30 loaded makes a tail-only
+  // count DEMOTE the server total, and promoting the raw `count` counts a
+  // hidden wakeup (the round-2 bug). Snapshot the authoritative local
+  // transcript length the first time this send adopts a server visible
+  // count; the bump is (localVisible − snapshot), so repeated updater calls
+  // within one send are idempotent and a send in a paginated chat promotes
+  // exactly one visible row.
+  if(typeof S.session.visible_message_count==='number'&&S.session.visible_message_count>=0){
+    if(typeof S.session._visibleBaselineLocal!=='number'){
+      // First optimistic pass of this send: snapshot the visible tail length
+      // from BEFORE the push (caller-provided) and the server's visible
+      // total. The send's bump is exactly (localVisible − baselineLocal),
+      // so repeated updater calls within one send are idempotent and a
+      // send in a paginated chat promotes exactly one visible row.
+      S.session._visibleBaselineLocal=(typeof localVisibleBeforePush==='number'&&localVisibleBeforePush>=0)
+        ?localVisibleBeforePush
+        :localVisible-1;
+      S.session._visibleBaselineServer=S.session.visible_message_count;
+    }
+    const optimisticVisible=Math.max(0,localVisible-S.session._visibleBaselineLocal);
+    S.session.visible_message_count=Math.max(
+      S.session.visible_message_count,
+      S.session._visibleBaselineServer+optimisticVisible
+    );
+  }
   S.session.last_message_at=nowSec;
   S.session.updated_at=nowSec;
   if((S.session.title==='Untitled'||!S.session.title)&&title){
@@ -9368,9 +9447,14 @@ function renderSessionListFromCache(){
     if(density==='detailed'){
       const metaBits=[];
       const msgCount=typeof s.message_count==='number'?s.message_count:0;
+      // #quiet-delegation: prefer the visible count (hidden internal rows
+      // excluded); fall back to the raw count when absent (legacy servers).
+      const _visibleCount=typeof s.visible_message_count==='number'&&s.visible_message_count>=0
+        ? s.visible_message_count
+        : msgCount;
       const msgLabel=(typeof t==='function')
-        ? t('session_meta_messages', msgCount)
-        : `${msgCount} msg${msgCount===1?'':'s'}`;
+        ? t('session_meta_messages', _visibleCount)
+        : `${_visibleCount} msg${_visibleCount===1?'':'s'}`;
       metaBits.push(msgLabel);
       if(childCount>0) metaBits.push(t('session_meta_children', childCount));
       const modelMeta=_formatSessionModelWithGateway(s);

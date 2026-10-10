@@ -50,6 +50,7 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
+from api.process_event_utils import is_hidden_transcript_row
 from api.compression_recovery import (
     COMPRESSION_RECOVERY_ACTION_START_FOCUSED,
     clear_compression_recovery,
@@ -9345,8 +9346,14 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     to keep thinking/tool details inspectable, but they are not reply text. A
     tail page containing only transient metadata makes the frontend open to
     collapsed activity while newer real replies sit behind "load older messages".
+    Hidden internal rows (``delegation_wakeup``) are retained in storage for
+    model/recovery state but are never renderable, so they cannot consume the
+    visible-row budget — otherwise the 30-row restore window can be all-hidden
+    and the transcript opens blank (#quiet-delegation gate review).
     """
     if not isinstance(message, dict):
+        return False
+    if is_hidden_transcript_row(message):
         return False
     if _is_empty_partial_activity_message(message):
         return False
@@ -9737,6 +9744,13 @@ def _limited_webui_messages_for_display_with_sidecar(
             owner_positions.update(sidecar_owners)
         return sidecar_messages
     state_db_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_db_messages,
+    )
+    # #quiet-delegation: stamp pending-turn provenance here too, so the
+    # paginated (msg_limit) load path matches the full-load path's behaviour
+    # during the deferred-save window.
+    state_db_messages = _stamp_pending_source_for_display(
         session,
         state_db_messages,
     )
@@ -11218,6 +11232,7 @@ from api.models import (
     _reindex_tool_owners_after_message_reorder,
     _project_native_image_payload_conflicts_for_display,
     _suppress_native_image_display_mirrors,
+    _stamp_pending_source_for_display,
     _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
@@ -13978,6 +13993,14 @@ def _handle_session_get(handler, parsed) -> bool:
                     s,
                     state_db_messages,
                 )
+                # #quiet-delegation: stamp the pending turn's _source onto the
+                # freshly-read state.db rows BEFORE merge/projection, so a
+                # reload during the deferred-save window cannot adopt the
+                # hidden handoff as a visible user row.
+                state_db_messages = _stamp_pending_source_for_display(
+                    s,
+                    state_db_messages,
+                )
                 lineage_owners = {}
                 sidecar_messages = _webui_sidecar_lineage_messages_for_display(
                     s, owner_positions=lineage_owners,
@@ -14233,6 +14256,16 @@ def _handle_session_get(handler, parsed) -> bool:
             # keep the raw count available as ``actual_message_count`` but
             # do not let it make the frontend expect phantom messages.
             raw["message_count"] = _merged_message_count
+        if load_messages and _all_msgs:
+            # #quiet-delegation gate review finding 3: after state.db has
+            # grown past the sidecar, compact()'s visible total can be stale
+            # (it trusts the sidecar prefix / metadata counts). On message
+            # loads the merged display transcript is the authority — derive
+            # the visible total from it.
+            raw["visible_message_count"] = sum(
+                1 for m in _all_msgs
+                if isinstance(m, dict) and not is_hidden_transcript_row(m)
+            )
         # Signal to the frontend that older messages were omitted. The
         # message window cursor already reflects visible-row pagination and
         # avoids false positives when raw hidden tool rows exceed msg_limit.
@@ -19267,7 +19300,13 @@ def _handle_sessions_search(handler, parsed):
                 sess = get_session_for_scan(s["session_id"])
                 if sess is None:
                     continue
-                msgs = sess.messages[:depth] if depth else sess.messages
+                # Hidden internal rows neither match nor consume the search
+                # depth budget (#quiet-delegation gate review).
+                scan_pool = [
+                    m for m in (sess.messages or [])
+                    if not is_hidden_transcript_row(m)
+                ]
+                msgs = scan_pool[:depth] if depth else scan_pool
                 for m in msgs:
                     c = _session_search_message_text(m)
                     if q in str(c).lower():
@@ -24056,6 +24095,19 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     """
     if not msg:
         return
+    # Fork-internal delegation wakeup: the row's _source stays
+    # delegation_wakeup (the hidden-row predicate keys on it), but the
+    # fork-ownership proof regeneration authorization reads rides on
+    # _fork_child_turn. The deferred producer stamps that proof at
+    # settlement (streaming.py _materialize_active_turn_user /
+    # _settle_current_turn_boundary); the eager checkpoint must carry it
+    # from chat-start too, or a regeneration after an async delegation in
+    # a fork hits regeneration_read_only (403) for every turn saved before
+    # settlement (#7882 re-gate must-fix, eager mode).
+    _checkpoint_source = str(source or "").strip().lower()
+    _fork_owned_wakeup = _checkpoint_source == "delegation_wakeup" and (
+        str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+    )
     existing = list(getattr(s, "messages", None) or [])
     if existing:
         latest = existing[-1]
@@ -24063,7 +24115,7 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             latest_text = " ".join(str(latest.get("content") or "").split())
             msg_text = " ".join(str(msg or "").split())
             if latest_text == msg_text:
-                if str(source or "").strip().lower() == "fork":
+                if _checkpoint_source == "fork" or _fork_owned_wakeup:
                     latest["_fork_child_turn"] = s.session_id
                 return
     user_msg = {"role": "user", "content": msg}
@@ -24074,7 +24126,7 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         source,
         active_turn_token=build_active_turn_token(getattr(s, "active_stream_id", None), started_at),
     )
-    if str(source or "").strip().lower() == "fork":
+    if _checkpoint_source == "fork" or _fork_owned_wakeup:
         user_msg["_fork_child_turn"] = s.session_id
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = float(started_at)
@@ -24336,9 +24388,19 @@ def _prepare_chat_start_session_for_stream(
     a normal session message. Empty sessions are never saved here because this
     helper only runs after a non-empty message is validated.
     """
+    # The internal delegation producer's explicit ``delegation_wakeup`` stamp
+    # is ROW provenance: the hidden-row predicate keys on it, so a fork
+    # session's ``session_source`` ownership override must never clobber it —
+    # otherwise the handoff renders as a human bubble in a fork (#7882 gate
+    # review, finding 3). Ordinary fork-human rows keep the fork identity via
+    # ``_fork_child_turn``, which is stamped from ``session_source`` below.
+    _prompt_is_delegation_wakeup = str(source or "").strip().lower() == "delegation_wakeup"
     effective_source = (
         "fork"
-        if str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+        if (
+            str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+            and not _prompt_is_delegation_wakeup
+        )
         else source
     )
     s.workspace = workspace
@@ -24393,7 +24455,14 @@ def _prepare_chat_start_session_for_stream(
                     context_row["_fork_child_turn"] = s.session_id
                 break
     current_title = getattr(s, "title", None)
-    if retained_user is None and _is_default_or_empty_session_title(current_title):
+    # A delegation_wakeup handoff is not a human prompt: never let it name an
+    # untitled session (#quiet-delegation gate review).
+    _prompt_is_hidden_row = effective_source == "delegation_wakeup"
+    if (
+        retained_user is None
+        and not _prompt_is_hidden_row
+        and _is_default_or_empty_session_title(current_title)
+    ):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
         if provisional_title and not _is_default_or_empty_session_title(provisional_title):
             s.title = provisional_title
@@ -25854,7 +25923,7 @@ def start_session_turn(
                     session_id,
                     exc_info=True,
                 )
-        if turn_source == "process_wakeup":
+        if turn_source in ("process_wakeup", "delegation_wakeup"):
             _credential_state_changed = False
             try:
                 _credential_state_changed = process_wakeup_pause_credential_state_changed(s)
