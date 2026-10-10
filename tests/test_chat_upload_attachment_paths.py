@@ -19,7 +19,10 @@ def test_image_uploads_use_server_path_in_attached_files_context():
     src = MESSAGES_JS.read_text(encoding="utf-8")
 
     assert "uploadedPaths=uploaded.map(u=>u&&u.is_image?" not in src
-    assert "uploadedPaths=uploaded.map(u=>u&&u.path?u.path" in src
+    # The marker prefers the server-provided sandbox-visible path (agent_path)
+    # and falls back to the host path, which is what local backends see (#6939).
+    assert "uploadedPaths=uploaded.map(u=>u&&(u.agent_path||u.path)" in src
+    assert "u.agent_path||u.path" in src
 
 
 def test_attached_files_context_is_hidden_from_user_message_display():
