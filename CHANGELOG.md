@@ -135,6 +135,9 @@
 
 ### Fixed
 
+- **Codex sign-in sends an explicit User-Agent on its device-code requests**, so the OAuth endpoint no longer
+  sees a bare library default. Thanks @angelusbr. (#8118)
+
 - **A reply line that legitimately repeats earlier text is no longer hidden while it streams.** Echo suppression used to
   match on text alone, so two different events with the same words (for example "Processing…" on both sides of a tool
   call) collapsed into one. Rows are now de-duplicated by their identity, and only a genuinely re-delivered row is
