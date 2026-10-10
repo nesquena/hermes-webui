@@ -3810,6 +3810,10 @@ body.resizing .sidebar{transition:none!important;}
 .tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]) .as-dot{
   display:none;
 }
+.tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .as-dot{display:block;background:var(--accent-text);opacity:1;animation:wlpulse 1.3s ease-in-out infinite;}
+@media (prefers-reduced-motion: reduce){
+  .tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .as-dot{animation:none;}
+}
 .tool-worklog-running-label{display:none;color:var(--accent-text);font-family:var(--font-mono);font-size:12px;font-weight:600;line-height:1.4;}
 .tool-worklog-group[data-tool-worklog-running="1"] .tool-worklog-running-label{display:inline-flex;}
 .tool-worklog-body{
