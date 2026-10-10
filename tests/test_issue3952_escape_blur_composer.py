@@ -59,7 +59,8 @@ def test_jk_session_navigation_still_ignores_interactive_targets():
     """Composer text entry still owns j/k until Escape blurs it."""
     nav_start = SESSIONS_JS.index("// Keyboard session navigation — J/K bindings")
     nav_block = SESSIONS_JS[nav_start:]
-    assert "if(typeof _isInteractiveSwipeTarget==='function'&&_isInteractiveSwipeTarget(e.target)) return;" in nav_block
+    assert "const onSessionTitle=e.target instanceof Element&&e.target.matches('.session-open-control');" in nav_block
+    assert "if(!onSessionTitle&&typeof _isInteractiveSwipeTarget==='function'&&_isInteractiveSwipeTarget(e.target)) return;" in nav_block
 
 
 def test_escape_dismisses_command_dropdown_without_blurring_composer():

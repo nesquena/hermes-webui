@@ -83,7 +83,7 @@ def test_mobile_session_menu_opens_from_long_press_and_hides_dots():
     mobile_touch = STYLE_CSS[STYLE_CSS.find("@media (hover:none) and (pointer:coarse)"):STYLE_CSS.find("@media (max-width: 340px)")]
     assert ".session-item{padding-right:6px;}" in mobile_touch
     assert ".session-item.streaming,.session-item.unread{padding-right:40px;}" in mobile_touch
-    assert ".session-item:focus-within,.session-item.menu-open{padding-right:6px;}" in mobile_touch
+    assert ".session-item:has(:focus-visible),.session-item.menu-open{padding-right:6px;}" in mobile_touch
 
 
 def test_nested_fork_mobile_menu_uses_long_press_fallback():
