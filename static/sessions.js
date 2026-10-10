@@ -346,7 +346,20 @@ function _clearComposerDraft(sid, text, files) {
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+// A deleted session's acknowledgement must not return from a stale client's
+// cache. Membership in the rendered list cannot decide this: the sidebar filters
+// by profile, project, and source, so an absent row is not evidence of deletion.
+// Each deletion therefore records its own key, and merges drop any entry whose
+// session has one. Records are pruned by age so the store stays bounded.
+const SESSION_VIEWED_COUNTS_DELETED_PREFIX = 'hermes-session-viewed-counts:deleted:v1:';
+const SESSION_VIEWED_COUNTS_DELETED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
+// Clear ordering is stored per session so two clients clearing different
+// sessions never replace one another's tombstones with whole-map writes. The
+// unsuffixed key is the legacy map read during migration.
+const SESSION_COMPLETION_UNREAD_CLEARED_KEY = 'hermes-session-completion-unread-cleared';
+const SESSION_COMPLETION_UNREAD_CLEARED_PREFIX = `${SESSION_COMPLETION_UNREAD_CLEARED_KEY}:v1:`;
+const SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
 // Per-profile session-count cache (issue #4717 / #4662 Phase 1.5). Records how
 // many sessions each profile rendered last time, keyed by profile name, so a
@@ -359,6 +372,7 @@ const SESSION_PROFILE_COUNTS_KEY = 'hermes-session-profile-counts';
 let _sessionProfileCounts = null;
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
+let _sessionCompletionUnreadClearedMemory = {};
 let _sessionObservedStreaming = null;
 const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
@@ -476,23 +490,216 @@ function _knownSessionProfileCount(profile) {
   return (typeof v === 'number' && Number.isFinite(v)) ? v : null;
 }
 
+// Read a persisted sid -> value map. Missing or unreadable values read as an
+// empty map, matching the getters above.
+function _readStoredJsonMap(key) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    return {};
+  }
+}
+
+// Does this session still exist as far as this client can tell? The sidebar list
+// is the authority (deletion drops the row) and the visit snapshot covers the
+// window before the first list render.
+function _sessionExistsForUnreadState(sid) {
+  if (!sid) return false;
+  if (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions)
+    && _allSessions.some((s) => s && s.session_id === sid)) {
+    return true;
+  }
+  return typeof _sessionListSnapshotById !== 'undefined' && _sessionListSnapshotById
+    && typeof _sessionListSnapshotById.has === 'function'
+    && _sessionListSnapshotById.has(sid);
+}
+
+// Is there a session list to judge existence against at all? Without one,
+// "unknown" must not be read as "deleted": a client that has not rendered a list
+// yet would otherwise refuse to persist a fresh acknowledgement, and would prune
+// every tombstone it holds.
+function _sessionListLoaded() {
+  if (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions)
+    && _allSessions.length > 0) {
+    return true;
+  }
+  return typeof _sessionListSnapshotById !== 'undefined' && _sessionListSnapshotById
+    && typeof _sessionListSnapshotById.size === 'number'
+    && _sessionListSnapshotById.size > 0;
+}
+
+// Viewed acknowledgements are generation-scoped. Transcript mutation routes
+// increment `transcript_generation` whenever the visible message list shrinks;
+// counts are monotonic only within one generation. Legacy numeric entries belong
+// to generation zero and are migrated on their next save.
+function _sessionViewedCountRecord(value, transcriptGeneration = 0) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return {
+      message_count: Number(value.message_count) || 0,
+      transcript_generation: Math.max(0, Number(value.transcript_generation) || 0),
+    };
+  }
+  return {
+    message_count: Number(value) || 0,
+    transcript_generation: Math.max(0, Number(transcriptGeneration) || 0),
+  };
+}
+
+function _sessionViewedCountValue(value) {
+  return _sessionViewedCountRecord(value).message_count;
+}
+
+function _sessionViewedRecordWins(candidate, current) {
+  const ours = _sessionViewedCountRecord(candidate);
+  const theirs = _sessionViewedCountRecord(current);
+  if (ours.transcript_generation !== theirs.transcript_generation) {
+    return ours.transcript_generation > theirs.transcript_generation;
+  }
+  return ours.message_count > theirs.message_count;
+}
+
+function _sessionTranscriptGenerationForUnread(sid, explicit = null) {
+  if (explicit !== null && explicit !== undefined && Number.isFinite(Number(explicit))) {
+    return Math.max(0, Number(explicit) || 0);
+  }
+  let active = null;
+  try {
+    active = (S && S.session && S.session.session_id === sid) ? S.session : null;
+  } catch (_) {}
+  const snapshot = (typeof _sessionListSnapshotById !== 'undefined' && _sessionListSnapshotById)
+    ? _sessionListSnapshotById.get(sid) : null;
+  const listed = (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions))
+    ? _allSessions.find((s) => s && s.session_id === sid) : null;
+  const session = active || snapshot || listed;
+  return Math.max(0, Number(session && session.transcript_generation) || 0);
+}
+
+function _mergeSessionViewedCounts(disk, cache) {
+  const deleted = _readSessionViewedCountDeletions();
+  const gone = (sid) => Object.prototype.hasOwnProperty.call(deleted, sid);
+  const counts = {};
+  let changed = false;
+  for (const sid of Object.keys(disk || {})) {
+    if (gone(sid)) {
+      changed = true;
+      continue;
+    }
+    const record = _sessionViewedCountRecord(disk[sid]);
+    counts[sid] = record;
+    if (!disk[sid] || typeof disk[sid] !== 'object' || Array.isArray(disk[sid])) changed = true;
+  }
+  for (const sid of Object.keys(cache || {})) {
+    if (gone(sid)) continue;
+    const ours = _sessionViewedCountRecord(cache[sid]);
+    if (Object.prototype.hasOwnProperty.call(counts, sid)) {
+      if (_sessionViewedRecordWins(ours, counts[sid])) {
+        counts[sid] = ours;
+        changed = true;
+      }
+      continue;
+    }
+    if (_sessionListLoaded() && !_sessionExistsForUnreadState(sid)) continue;
+    counts[sid] = ours;
+    changed = true;
+  }
+  const live = {};
+  for (const sid of Object.keys(counts)) live[sid] = counts[sid];
+  for (const sid of Object.keys(cache || {})) {
+    if (gone(sid)) continue;
+    const ours = _sessionViewedCountRecord(cache[sid]);
+    if (!Object.prototype.hasOwnProperty.call(live, sid) || _sessionViewedRecordWins(ours, live[sid])) {
+      live[sid] = ours;
+    }
+  }
+  return {counts, live, changed};
+}
+
+function _sessionViewedCountDeletedKey(sid) {
+  return `${SESSION_VIEWED_COUNTS_DELETED_PREFIX}${encodeURIComponent(String(sid))}`;
+}
+
+// Read the deletion records, dropping any that have aged out.
+function _readSessionViewedCountDeletions() {
+  const deleted = {};
+  let keys = [];
+  try {
+    keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+  } catch (_) {
+    return deleted;
+  }
+  const now = Date.now();
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key.startsWith(SESSION_VIEWED_COUNTS_DELETED_PREFIX)) continue;
+    const encoded = key.slice(SESSION_VIEWED_COUNTS_DELETED_PREFIX.length);
+    let sid = '';
+    try {
+      sid = decodeURIComponent(encoded);
+    } catch (_) {
+      continue;
+    }
+    if (!sid) continue;
+    let stamp = 0;
+    try {
+      stamp = Number(localStorage.getItem(key)) || 0;
+    } catch (_) {}
+    if (stamp && now - stamp > SESSION_VIEWED_COUNTS_DELETED_TTL_MS) {
+      try { localStorage.removeItem(key); } catch (_) {}
+      continue;
+    }
+    deleted[sid] = stamp;
+  }
+  return deleted;
+}
+
+function _recordSessionViewedCountDeleted(sid) {
+  if (!sid) return;
+  try {
+    localStorage.setItem(_sessionViewedCountDeletedKey(sid), String(Date.now()));
+  } catch (_) {
+    // Without the record the deletion still removed the entry; the next delete
+    // or merge attempt records it again.
+  }
+}
+
 function _saveSessionViewedCounts() {
   try {
-    localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(_getSessionViewedCounts()));
+    const merged = _mergeSessionViewedCounts(
+      _readStoredJsonMap(SESSION_VIEWED_COUNTS_KEY),
+      _getSessionViewedCounts()
+    );
+    // Write only when we hold something the store does not (a strictly greater
+    // count, or an entry it is missing). Rewriting an unchanged map would let two
+    // clients ping-pong storage events forever.
+    if (merged.changed) {
+      localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(merged.counts));
+    }
+    _sessionViewedCounts = merged.live;
   } catch (_){
     // Ignore localStorage write failures.
   }
 }
 
-function _setSessionViewedCount(sid, messageCount = 0) {
+function _setSessionViewedCount(sid, messageCount = 0, transcriptGeneration = null) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  counts[sid] = next;
+  const generation = _sessionTranscriptGenerationForUnread(sid, transcriptGeneration);
+  const incoming = _sessionViewedCountRecord(next, generation);
+  const hadCount = Object.prototype.hasOwnProperty.call(counts, sid);
+  const previous = hadCount ? _sessionViewedCountRecord(counts[sid]) : null;
+  if (!previous || _sessionViewedRecordWins(incoming, previous)) {
+    counts[sid] = incoming;
+  } else {
+    counts[sid] = previous;
+  }
   _saveSessionViewedCounts();
-  // If the viewed count is now current, any prior completion-unread marker is
-  // stale — clear it so _hasUnreadForSession doesn't short-circuit (#3020).
-  _clearSessionCompletionUnread(sid);
+  // A generation change or count advance acknowledges completion state even if
+  // another client prepared an older marker before this save.
+  const advanced = !previous
+    || generation > previous.transcript_generation
+    || (generation === previous.transcript_generation && next > previous.message_count);
+  _clearSessionCompletionUnread(sid, advanced);
 }
 
 function _getSessionCompletionUnread() {
@@ -506,9 +713,140 @@ function _getSessionCompletionUnread() {
   return _sessionCompletionUnread;
 }
 
+// Completion-unread markers are add/remove, so unlike viewed counts they cannot
+// be max-merged: the later event has to win. Every clear records a tombstone
+// (sid -> clearedAt) in SESSION_COMPLETION_UNREAD_CLEARED_KEY, and a marker only
+// survives when it does not predate its sid's clear.
+function _markerLosesToUnreadClear(marker, clearedAt) {
+  const cleared = Number(clearedAt) || 0;
+  if (!cleared) return false;
+  return _sessionCompletionUnreadOrder(marker) <= cleared;
+}
+
+function _sessionCompletionUnreadOrder(marker) {
+  return Number(marker && (marker.unread_order || marker.completed_at)) || 0;
+}
+
+function _sessionCompletionUnreadClearedKey(sid, clearedAt = null) {
+  const base = `${SESSION_COMPLETION_UNREAD_CLEARED_PREFIX}${encodeURIComponent(String(sid))}`;
+  return clearedAt == null ? base : `${base}:${Number(clearedAt) || 0}`;
+}
+
+function _parseSessionCompletionUnreadClearedKey(key) {
+  if (!key || !key.startsWith(SESSION_COMPLETION_UNREAD_CLEARED_PREFIX)) return null;
+  const suffix = key.slice(SESSION_COMPLETION_UNREAD_CLEARED_PREFIX.length);
+  const separator = suffix.lastIndexOf(':');
+  const encodedSid = separator > 0 ? suffix.slice(0, separator) : suffix;
+  const version = separator > 0 ? Number(suffix.slice(separator + 1)) || 0 : 0;
+  let sid = '';
+  try { sid = decodeURIComponent(encodedSid); } catch (_) { return null; }
+  if (!sid) return null;
+  return { sid, version };
+}
+
+// Read persisted clear ordering independently from the in-memory fallback. The
+// distinction matters during pruning: a higher clear that failed quota and lives
+// only in memory must not delete the older durable record it supersedes.
+function _readPersistedSessionCompletionUnreadCleared() {
+  // Snapshot keys before values. A clear that starts after this operation began
+  // is deliberately excluded, so a marker prepared first gets the same logical
+  // order and loses the clear-wins tie. A marker started after a completed clear
+  // observes that clear and advances beyond it.
+  let keys = [];
+  try {
+    keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+  } catch (_) {}
+  const cleared = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+  try {
+    for (const key of keys) {
+      const parsed = _parseSessionCompletionUnreadClearedKey(key);
+      if (!parsed) continue;
+      const storedValue = Number(localStorage.getItem(key)) || 0;
+      const value = parsed.version || storedValue;
+      if (value > (Number(cleared[parsed.sid]) || 0)) cleared[parsed.sid] = value;
+    }
+  } catch (_) {
+    // A storage implementation that cannot enumerate still retains legacy data.
+  }
+  return cleared;
+}
+
+// Combine durable clear ordering with this client's in-memory fallback. The
+// fallback keeps the current window correct when quota rejects a new key.
+function _readSessionCompletionUnreadCleared() {
+  const cleared = _readPersistedSessionCompletionUnreadCleared();
+  const now = Date.now();
+  for (const [sid, memoryRecord] of Object.entries(_sessionCompletionUnreadClearedMemory || {})) {
+    const value = Number(memoryRecord && memoryRecord.order) || 0;
+    const recordedAt = Number(memoryRecord && memoryRecord.recorded_at) || 0;
+    if (recordedAt && now - recordedAt > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS) {
+      delete _sessionCompletionUnreadClearedMemory[sid];
+      continue;
+    }
+    if (value > (Number(cleared[sid]) || 0)) cleared[sid] = value;
+  }
+  return cleared;
+}
+
+function _nextSessionCompletionUnreadOrder(sid, cleared = null) {
+  const clears = cleared || _readSessionCompletionUnreadCleared();
+  const cached = _getSessionCompletionUnread()[sid];
+  const stored = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY)[sid];
+  return Math.max(
+    Date.now(),
+    Number(clears[sid]) || 0,
+    _sessionCompletionUnreadOrder(cached),
+    _sessionCompletionUnreadOrder(stored)
+  ) + 1;
+}
+
+// Merge the persisted marker map with our cache under the tombstones. Markers
+// the store holds that a clear already outranks are dropped from the result, so
+// the caller can write the repaired map back and no reader sees them again.
+function _mergeSessionCompletionUnread(disk, cache, cleared) {
+  const markers = {};
+  let changed = false;
+  for (const sid of Object.keys(disk || {})) {
+    const stored = disk[sid];
+    if (_markerLosesToUnreadClear(stored, (cleared || {})[sid])) {
+      changed = true;
+      continue;
+    }
+    markers[sid] = stored;
+  }
+  for (const sid of Object.keys(cache || {})) {
+    const ours = cache[sid];
+    if (_markerLosesToUnreadClear(ours, (cleared || {})[sid])) continue;
+    if (Object.prototype.hasOwnProperty.call(markers, sid)) {
+      // Both sides hold a marker: the later logical operation wins, which is the
+      // same order the clear comparison uses. Comparing completed_at here would
+      // keep the earlier of two markers written in one millisecond and leave that
+      // one's message count or cron profile metadata for later cleanup.
+      if (_sessionCompletionUnreadOrder(ours) > _sessionCompletionUnreadOrder(markers[sid])) {
+        markers[sid] = ours;
+        changed = true;
+      }
+      continue;
+    }
+    markers[sid] = ours;
+    changed = true;
+  }
+  return {markers, changed};
+}
+
 function _saveSessionCompletionUnread() {
   try {
-    localStorage.setItem(SESSION_COMPLETION_UNREAD_KEY, JSON.stringify(_getSessionCompletionUnread()));
+    const merged = _mergeSessionCompletionUnread(
+      _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY),
+      _getSessionCompletionUnread(),
+      _readSessionCompletionUnreadCleared()
+    );
+    // Same convergence rule as the viewed counts: write only when the store does
+    // not already hold the merged result.
+    if (merged.changed) {
+      localStorage.setItem(SESSION_COMPLETION_UNREAD_KEY, JSON.stringify(merged.markers));
+    }
+    _sessionCompletionUnread = merged.markers;
   } catch (_){
     // Ignore localStorage write failures.
   }
@@ -518,7 +856,12 @@ function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
   const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  const entry = {message_count: count, completed_at: Date.now()};
+  const clearsAtIntent = _readSessionCompletionUnreadCleared();
+  const entry = {
+    message_count: count,
+    completed_at: Date.now(),
+    unread_order: _nextSessionCompletionUnreadOrder(sid, clearsAtIntent),
+  };
   // Cron markers carry source+profile so profile switches can clear only that
   // cross-profile leak without wiping ordinary chat completion unread (#5960).
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
@@ -550,11 +893,88 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
   return true;
 }
 
-function _clearSessionCompletionUnread(sid) {
+// Record that the completion-unread marker(s) for `sidOrSids` were cleared at
+// `clearedAt`. Each session owns a separate key: clears for different sessions
+// are independent atomic writes and cannot discard one another. Markers carry a
+// completed_at timestamp, so a marker that does not postdate the clear loses,
+// while a completion that happened afterwards still wins. Old or deleted-session
+// tombstones are pruned opportunistically to bound quota use.
+function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
+  const justCleared = new Set(
+    (Array.isArray(sidOrSids) ? sidOrSids : [sidOrSids]).map((sid) => String(sid))
+  );
+  const at = Number(clearedAt) || 0;
+  for (const sid of justCleared) {
+    const previous = _sessionCompletionUnreadClearedMemory[sid];
+    if (at > (Number(previous && previous.order) || 0)) {
+      _sessionCompletionUnreadClearedMemory[sid] = {order: at, recorded_at: Date.now()};
+    }
+  }
+
+  // One-way migration. The previous representation kept every clear fact in one
+  // shared blob, so concurrent clears could replace one another and the blob
+  // only ever grew. Import those facts as independently addressable records and
+  // drop the blob. A client still running the previous revision will not observe
+  // clears recorded after this point; that is a reload boundary, not something a
+  // dual write could have fixed, because the shared blob cannot be written
+  // concurrently without losing an update.
+  const legacy = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY);
+  let migrated = true;
+  for (const [sid, value] of Object.entries(legacy)) {
+    const stamp = Number(value) || 0;
+    if (!stamp) continue;
+    try {
+      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, stamp), String(Date.now()));
+    } catch (_) {
+      migrated = false;
+    }
+  }
+  for (const sid of justCleared) {
+    try {
+      localStorage.setItem(_sessionCompletionUnreadClearedKey(sid, at), String(Date.now()));
+    } catch (_) {}
+  }
+  if (Object.keys(legacy).length && migrated) {
+    try { localStorage.removeItem(SESSION_COMPLETION_UNREAD_CLEARED_KEY); } catch (_) {}
+  }
+
+  const persistedCleared = _readPersistedSessionCompletionUnreadCleared();
+  let keys = [];
+  try {
+    keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+  } catch (_) {}
+  for (const key of keys) {
+    const parsed = _parseSessionCompletionUnreadClearedKey(key);
+    if (!parsed) continue;
+    try {
+      const recordedAt = Number(localStorage.getItem(key)) || 0;
+      const version = parsed.version || recordedAt;
+      const expired = recordedAt > 0 && Date.now() - recordedAt > SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS;
+      const superseded = version < (Number(persistedCleared[parsed.sid]) || 0);
+      // Prune by age, or when a newer ordering fact is itself durable. A
+      // memory-only clear may keep this window correct under quota pressure, but
+      // it cannot safely replace the older record across reload.
+      if (expired || superseded) localStorage.removeItem(key);
+    } catch (_) {}
+  }
+}
+
+function _clearSessionCompletionUnread(sid, recordIfMissing = true) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
-  if (!Object.prototype.hasOwnProperty.call(unread, sid)) return;
+  let stored = false;
+  if (!Object.prototype.hasOwnProperty.call(unread, sid)) {
+    // Another client may have recorded this marker since our cache was loaded,
+    // so the store decides whether there is anything to clear.
+    stored = Object.prototype.hasOwnProperty.call(
+      _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY), sid);
+    if (!stored && !recordIfMissing) return;
+  }
+  const order = _nextSessionCompletionUnreadOrder(sid);
   delete unread[sid];
+  // Write the ordering fact before the marker map. This is required even when
+  // the marker has been prepared by another client but has not reached storage.
+  _writeSessionCompletionUnreadCleared(sid, order);
   _saveSessionCompletionUnread();
 }
 
@@ -666,6 +1086,7 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
     : 'default';
   const unread = _getSessionCompletionUnread();
   let changed = false;
+  const clearedSids = [];
   for (const sid of Object.keys(unread)) {
     const marker = unread[sid];
     if (!marker || typeof marker !== 'object' || Array.isArray(marker)) continue;
@@ -676,9 +1097,16 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
     if (!resolved.profile) continue;
     if (_cronMarkerProfileMatchesActive(resolved.profile, active)) continue;
     delete unread[sid];
+    clearedSids.push(sid);
     changed = true;
   }
   if (!changed) return false;
+  // Each cleared marker needs its durable ordering fact, or the merge in
+  // _saveSessionCompletionUnread() (and a stale client's later save) would
+  // restore it from the store.
+  for (const sid of clearedSids) {
+    _writeSessionCompletionUnreadCleared(sid, _nextSessionCompletionUnreadOrder(sid));
+  }
   _saveSessionCompletionUnread();
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   return true;
@@ -687,9 +1115,34 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
 function _clearSessionViewedCount(sid) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
-  if (!Object.prototype.hasOwnProperty.call(counts, sid)) return;
+  const hadCachedEntry = Object.prototype.hasOwnProperty.call(counts, sid);
   delete counts[sid];
-  _saveSessionViewedCounts();
+  // Record the deletion before any merge, so this client cannot re-adopt the
+  // entry it is deleting and another client holding the same acknowledgement
+  // prunes it instead of writing it back.
+  _recordSessionViewedCountDeleted(sid);
+  // A removal must actually leave disk, unlike the additive max-merge used on
+  // the set path (which never deletes). Delete just this key from the persisted
+  // map so entries a concurrent client added are preserved. The store is
+  // consulted even when our cache never held the key: an entry another client
+  // added since our cache was loaded is exactly the one this path has to prune.
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_VIEWED_COUNTS_KEY) || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (Object.prototype.hasOwnProperty.call(parsed, sid)) {
+        delete parsed[sid];
+        localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(parsed));
+      }
+      // Adopt the store's entries but keep any higher count we already hold: we
+      // are the only client left that can repair a count another client
+      // lowered, so dropping ours here would lose the acknowledgement.
+      _sessionViewedCounts = _mergeSessionViewedCounts(parsed, counts).live;
+      return;
+    }
+  } catch (_){
+    // Fall through to the cache-only write on read/parse failure.
+  }
+  if (hadCachedEntry) _saveSessionViewedCounts();
 }
 
 function _hasSessionCompletionUnread(sid) {
@@ -739,12 +1192,22 @@ function _hasUnreadForSession(s) {
   if (!s || !s.session_id) return false;
   if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
+  const generation = _sessionTranscriptGenerationForUnread(s.session_id, s.transcript_generation);
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
-    _setSessionViewedCount(s.session_id, Number(s.message_count || 0));
+    _setSessionViewedCount(s.session_id, Number(s.message_count || 0), generation);
     return false;
   }
-  if (!Number.isFinite(s.message_count)) return false;
-  return s.message_count > Number(counts[s.session_id] || 0);
+  const viewed = _sessionViewedCountRecord(counts[s.session_id]);
+  if (generation > viewed.transcript_generation) {
+    const baseline = Math.max(0, Math.min(
+      Number(s.message_count || 0),
+      Number(s.transcript_generation_baseline) || 0
+    ));
+    _setSessionViewedCount(s.session_id, baseline, generation);
+    return Number.isFinite(s.message_count) && s.message_count > baseline;
+  }
+  if (generation < viewed.transcript_generation || !Number.isFinite(s.message_count)) return false;
+  return s.message_count > viewed.message_count;
 }
 
 // Keep the sidebar polling snapshot current for a just-visited session so a
@@ -852,6 +1315,14 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
+  // Sidebar idle metadata can beat the terminal frame on the independent chat
+  // SSE. Let its exact OPEN transport finish the Anchor handoff; orphaned or
+  // disconnected streams still use the existing idle recovery below.
+  if (_hasOwnedOpenLiveStream(sid)) {
+    const live=LIVE_STREAMS[sid];
+    if(typeof live.recoverFromSidebarIdle==='function') live.recoverFromSidebarIdle();
+    return false;
+  }
   let changed=false;
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
@@ -940,6 +1411,8 @@ function _purgeStaleInflightEntries() {
     if (typeof _sendInProgress !== 'undefined' && _sendInProgress && sid === _sendInProgressSid) {
       continue;
     }
+    // The sidebar render must not purge what the idle reconciler preserved.
+    if (_hasOwnedOpenLiveStream(sid)) continue;
     if (!sessionsById.has(sid)) {
       const knownSource = sourceById ? sourceById.get(sid) : null;
       if (currentSidebarSource && (!knownSource || knownSource !== currentSidebarSource)) {
@@ -959,6 +1432,14 @@ function _purgeStaleInflightEntries() {
     }
     // Sessions that exist and are still streaming are preserved.
   }
+}
+
+function _hasOwnedOpenLiveStream(sid) {
+  if (typeof S === 'undefined' || !S || !S.session || S.session.session_id !== sid || !S.activeStreamId) return false;
+  const live = typeof LIVE_STREAMS === 'object' && LIVE_STREAMS ? LIVE_STREAMS[sid] : null;
+  // readyState 1 is EventSource.OPEN. A cached stream ID or busy flag alone
+  // is not ownership and must never disable recovery for a stuck indicator.
+  return Boolean(live && live.streamId === S.activeStreamId && live.source && live.source.readyState === 1);
 }
 
 function _rememberSessionListSource(s, sid = null, allowScopeFallback = true) {
@@ -1015,6 +1496,74 @@ function _inflightHasVisibleLiveState(inflight) {
     });
   }
   return false;
+}
+
+// #7640: a run-journal replay cursor is only safe when the recovery object can
+// still repaint the live assistant turn. `_inflightHasVisibleLiveState()` above
+// deliberately counts a plain user row (the optimistic row has to survive a
+// mid-turn reload), but such an object carries no assistant projection at all:
+// seeding `after_seq` from it tells the server to skip every journal event that
+// would rebuild the body, so the settled footer lands over a blank message until
+// a manual reload replays the journal from the zero floor. Only recoverable live
+// output may raise the replay floor.
+function _inflightCanSeedJournalReplay(inflight){
+  if(!inflight||typeof inflight!=='object') return false;
+  if(String(inflight.lastAssistantText||'').trim()) return true;
+  if(String(inflight.lastReasoningText||'').trim()) return true;
+  if(String(inflight.liveTurnHtml||'').trim()) return true;
+  if(Array.isArray(inflight.toolCalls)&&inflight.toolCalls.length) return true;
+  if(Array.isArray(inflight.activityBurstAnchors)&&inflight.activityBurstAnchors.length) return true;
+  const anchorScene=inflight.anchorActivityScene;
+  if(anchorScene&&Array.isArray(anchorScene.activity_rows)&&anchorScene.activity_rows.length) return true;
+  if(Array.isArray(inflight.messages)){
+    // The transcript copy carries every earlier turn (#7651): in an established
+    // conversation the last assistant row is the PREVIOUS turn's reply, not the
+    // one the cursor belongs to, so it must never authorize a nonzero floor.
+    // Message evidence counts only from a current `_live` assistant standing
+    // after the latest user boundary; anything historical fails closed to zero.
+    const list=inflight.messages;
+    let latestUserIdx=-1;
+    for(let i=list.length-1;i>=0;i--){
+      const row=list[i];
+      if(row&&row.role==='user'){latestUserIdx=i;break;}
+    }
+    return list.some((msg,idx)=>{
+      if(!msg||msg.role!=='assistant') return false;
+      if(!msg._live) return false;
+      if(idx<=latestUserIdx) return false;
+      const content=msg.content;
+      if(typeof content==='string') return Boolean(content.trim());
+      if(Array.isArray(content)) return content.length>0;
+      return Boolean(content);
+    });
+  }
+  return false;
+}
+
+function _runJournalReplayFloorForInflight(inflight){
+  if(!_inflightCanSeedJournalReplay(inflight)) return 0;
+  return Math.max(0,Number((inflight&&inflight.lastRunJournalSeq)||0)||0);
+}
+
+function _runJournalReplayEventIdForInflight(inflight){
+  if(!_runJournalReplayFloorForInflight(inflight)) return '';
+  return String((inflight&&inflight.lastRunJournalEventId)||'');
+}
+
+// #7640: re-validate the selected recovery object immediately before reattach
+// instead of trusting its existence. A cursor that outlived its assistant
+// projection is dropped here so it cannot reach the wire as a replay floor; the
+// replay then restarts from zero, which is the path a manual reload already
+// proves out. Normalising the object (not just the floor) also keeps a later
+// persist from resurrecting the stale cursor on the next reattach.
+function _normalizeInflightReplayCursorForReattach(inflight){
+  if(!inflight||typeof inflight!=='object') return inflight;
+  const seq=Math.max(0,Number(inflight.lastRunJournalSeq||0)||0);
+  if(seq>0&&!_inflightCanSeedJournalReplay(inflight)){
+    inflight.lastRunJournalSeq=0;
+    inflight.lastRunJournalEventId='';
+  }
+  return inflight;
 }
 
 function _serverLiveSnapshotToolId(tc){
@@ -1319,6 +1868,55 @@ function _clearEmptyComposerModelOverride(){
   _emptyComposerModelOverrideHost._emptyComposerModelOverride=null;
 }
 
+const _composerModelPickHost=typeof window!=='undefined'?window:globalThis;
+
+// Track explicit picker intent independently of S.session. During deletion the
+// picker can change both before and after the active session is cleared.
+function _rememberComposerModelPick(model, modelProvider){
+  const resolvedModel=String(model||'').trim();
+  if(!resolvedModel) return;
+  const previous=_composerModelPickHost._composerModelPick;
+  _composerModelPickHost._composerModelPick={
+    model:resolvedModel,
+    model_provider:modelProvider||null,
+    revision:(Number(previous&&previous.revision||0)||0)+1,
+  };
+}
+
+function _readComposerModelPick(){
+  const state=_composerModelPickHost._composerModelPick;
+  if(!state||!state.model) return null;
+  return {
+    model:String(state.model||''),
+    model_provider:state.model_provider||null,
+    revision:Number(state.revision||0)||0,
+  };
+}
+
+function _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete){
+  const currentPick=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const currentRevision=Number(currentPick&&currentPick.revision||0)||0;
+  const preservePick=currentPick&&currentRevision!==(Number(modelPickRevisionAtDelete||0)||0);
+  const model=String(preservePick?currentPick.model:(window._defaultModel||'')).trim();
+  const provider=preservePick?currentPick.model_provider:(window._activeProvider||null);
+  if(preservePick){
+    if(typeof _rememberEmptyComposerModelOverride==='function'){
+      _rememberEmptyComposerModelOverride(model,provider);
+    }
+  }else if(typeof _clearEmptyComposerModelOverride==='function'){
+    _clearEmptyComposerModelOverride();
+  }
+  const modelSel=$('modelSelect');
+  if(!model||!modelSel) return null;
+  const applied=typeof _ensureModelOptionInDropdown==='function'
+    ? _ensureModelOptionInDropdown(model,modelSel,provider)
+    : (typeof _applyModelToDropdown==='function'?_applyModelToDropdown(model,modelSel,provider):null);
+  if(applied&&typeof syncReasoningChip==='function') syncReasoningChip();
+  return applied;
+}
+
 let _newSessionWorkspaceAnnouncementClearTimer=null;
 
 function _setNewSessionWorkspaceCue(message){
@@ -1501,6 +2099,13 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    // #7865: New Chat replaces S.session without going through loadSession(),
+    // so drop the previous session's explicit-picker evidence here (placed
+    // AFTER the provider fallback assignment on purpose — see the note in
+    // _pickerExplicitPickKey about not disturbing the newSession source-shape
+    // window). The marker must never authorize a provider override for a
+    // different (new) session.
+    if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(S.session.session_id);
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
@@ -1579,40 +2184,18 @@ async function newSession(flash, options={}){
       if(_dirP&&typeof _dirP.catch==='function') _dirP.catch(()=>{});
     }
     // Refresh sidebar to include the newly created session (#3874).
-    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    // force:true -> deferWhileInteracting:false so the new row paints and the
+    // active highlight moves even while the pointer hovers #sessionList. The
+    // handlers used to guarantee this with their own awaited render (#7936);
+    // now that newSession() owns the sole refresh it must force the paint,
+    // matching the project "+" path (#5002: "newSession doesn't render; callers must").
+    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session',{force:true})).catch(()=>{})}
   })();
   try{
     return await _newSessionInFlight;
   }finally{
     _newSessionInFlight=null;
     _setNewSessionPending(false);
-  }
-}
-
-/**
- * Self-heal: clear the stuck session ID from localStorage and URL when a
- * loadSession() call failed during boot (no currentSid). This prevents the
- * browser from retrying the same dead session on every refresh.
- *
- * Called from loadSession() after 401 redirect (undefined data) or any
- * non-404 error (400, 403, 500, network). The 404 path has its own
- * inline self-heal; this helper consolidates the non-404 cases.
- *
- * Only clears when !currentSid — no session is active on screen, so
- * the stored ID is definitely stale. When currentSid is set (already
- * viewing a session), a non-404 failure could be a transient server error
- * and the session may still exist on the server; wiping localStorage in
- * that case is unnecessarily destructive (#4028 follow-up).
- *
- * A click into a *different* dead session (currentSid && currentSid!==sid)
- * must not run it: localStorage and the URL still point at the live session
- * (both are only updated on a successful load), so wiping them would log
- * the user out of a healthy session (#2782).
- */
-function _clearStuckSessionOnBoot(sid, currentSid){
-  if(!currentSid){
-    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-    try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
   }
 }
 
@@ -1691,13 +2274,17 @@ async function _switchProfileForSessionLoad(profile){
 }
 
 async function loadSession(sid){
-  const opts = arguments[1] || {};
+  let opts = arguments[1] || {};
+  const requestedSid=sid;
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
-    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
-    if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+    const resolvedSid=(typeof _sessionUrlTargetsExactSid==='function' && _sessionUrlTargetsExactSid(sid)) ? sid : _resolveSessionIdFromSidebarLineage(sid);
+    if(resolvedSid&&resolvedSid!==sid){
+      if(!opts._continuationParentSid) opts={...opts,_continuationParentSid:sid};
+      sid=resolvedSid;
+    }
   }
   // Extension pre-open hook — fires once per sidebar click, not on every call.
   // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
@@ -1765,6 +2352,22 @@ async function loadSession(sid){
   // triggered compression.
   if(typeof clearCompressionUi==='function') clearCompressionUi();
   else window._compressionUi=null;
+  // #7865: drop the explicit-picker evidence for the session being left. The
+  // marker authorizes _modelProviderForSend to let the dropdown override the
+  // loaded session's provider, so it must never outlive the session it was
+  // written for: a restored session's provider comes from the session itself,
+  // and a stale pick from the previous session would hijack it when the
+  // catalog repaint leaves another provider's identically-valued option
+  // selected (the restore syncs the topbar before the catalog refresh).
+  if(currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(currentSid);
+  // #7865: also drop the marker for the session being LOADED, not just the one
+  // being left. The marker lives in sessionStorage, so it survives a page
+  // reload: on a fresh boot S.session is null, so currentSid above is null and
+  // nothing is cleared for the session the boot is restoring. A stale pick
+  // would then survive into the restored session and let the dropdown override
+  // the provider the session itself holds. Clearing the target sid covers both
+  // the fresh-boot restore and the A->B->A round trip.
+  if(sid&&sid!==currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(sid);
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
@@ -1800,6 +2403,13 @@ async function loadSession(sid){
     }
   }
   const _keepStaleUntilLoaded = !!opts.keepStaleUntilLoaded && sameSessionForceReload;
+  // #7865: a force-reload (external refresh / state.db change / boot restore of
+  // the SAME session) is also a session load. Clear this session's explicit
+  // picker evidence so the reloaded session's own provider stays authoritative:
+  // the catalog repaint after a restore can leave another provider's
+  // identically-valued option selected, and a surviving pick would let that
+  // option hijack the provider the session record holds.
+  if(sameSessionForceReload&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(sid);
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we
@@ -1858,6 +2468,7 @@ async function loadSession(sid){
   try {
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
+    const metadataErrorStatus=e.status;
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
       if (!_isCurrentLoad()) {
@@ -1880,6 +2491,7 @@ async function loadSession(sid){
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
+        if(e&&metadataErrorStatus!==undefined) e.status=metadataErrorStatus;
       }
     }
     const _msgInner = $('msgInner');
@@ -1894,36 +2506,49 @@ async function loadSession(sid){
       _rearmActiveSessionStream();
       return;
     }
+    // A continuation retry (including one after a profile switch) still owns
+    // the original parent navigation. If that child is definitively missing,
+    // load the parent once with hint resolution disabled.
+    if(e.status===404&&opts._continuationParentSid){
+      const parentSid=opts._continuationParentSid;
+      _clearSameSessionForceReloadHint(sid);
+      if(_isCurrentLoad()) _loadingSessionId=null;
+      return loadSession(parentSid,{
+        ...opts,
+        _continuationParentSid:null,
+        skipLineageResolve:true,
+        skipContinuationResolve:true,
+        skipProfileResolve:false,
+        force:true,
+        _preloadNotified:true
+      });
+    }
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
-        // Self-heal (clear saved id + strip /session/<id> URL) only when the
-        // 404'd id is the one we are activating: a boot-time restore
-        // (!currentSid, #2798) or a mid-session reload of the *current* session
-        // whose sidecar was deleted server-side (#2782). A click into a
-        // *different* dead session (currentSid && currentSid!==sid) must not run
-        // it: localStorage and the URL still point at the live session (both are
-        // only updated on a successful load), so wiping them would log the user
-        // out of a healthy session. The URL strip is needed in the self-heal
-        // case because _sessionIdFromLocation() re-injects the id on reload.
-        // Only the rethrow stays gated on !currentSid: boot rethrows to fall
-        // through to empty-state; mid-session there is no boot path to reach.
-        if(!currentSid || currentSid===sid){
-          try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-          try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-          if (_isCurrentLoad()) _loadingSessionId = null;
-          if(!currentSid){
-            throw e;
+        // Self-heal only the route/localStorage component that still names the
+        // missing requested ID. A route can override a different valid saved
+        // session during boot, which must remain available for the next load.
+        // The current-load guard above owns this cleanup; each component is
+        // checked independently so unrelated saved or routed sessions survive.
+        try{
+          if(localStorage.getItem('hermes-webui-session')===requestedSid){
+            localStorage.removeItem('hermes-webui-session');
           }
+        }catch(_){ }
+        try{
+          if(typeof _sessionIdFromLocation==='function'&&_sessionIdFromLocation()===requestedSid){
+            history.replaceState(null,'',_appRootPath());
+          }
+        }catch(_){ }
+        if (_isCurrentLoad()) _loadingSessionId = null;
+        if(!currentSid){
+          throw e;
         }
       } else {
-        // Non-404, non-401 failure (400, 403, 500, network): 401 is handled
-        // via the if(!data) guard below since api() returns undefined on 401
-        // rather than throwing. Clear the stuck session ID only during boot
-        // (!currentSid) so the next boot doesn't retry the same dead session.
-        // When currentSid is set, a 500/network error may be transient — the
-        // session might still exist on the server (#4028 follow-up).
-        _clearStuckSessionOnBoot(sid, currentSid);
+        // Non-404, non-401 failures (400, 403, 500, network) do not establish
+        // that the session is gone. Preserve route and localStorage so boot can
+        // retry; 401 returns undefined and is handled below.
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
@@ -1984,12 +2609,12 @@ async function loadSession(sid){
   // follow the backend's continuation hint to the visible continuation so a
   // mobile reload mid-compression doesn't strand the user on a hidden snapshot.
   // Do NOT write URL/localStorage here — let the re-entrant loadSession update
-  // them only once the continuation actually loads, so a rejected/deleted/
-  // cross-profile continuation can't poison restore state with an unusable id.
+  // them only once the continuation actually loads. If the hint is definitively
+  // missing, retry this valid parent once without following the hint.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
     _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
+    return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
@@ -2169,6 +2794,12 @@ async function loadSession(sid){
     S.activeStreamId=activeStreamId;
     const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
     const replayPersistedLiveToolCards=(opts)=>{
+      // The journal-backed Anchor scene is authoritative through its resume
+      // cursor; newer rows arrive through the reattached SSE stream. Replaying
+      // the older INFLIGHT tool cache after a successful scene restore would
+      // redraw all N rows N times. Keep the #3707 replay only for legacy HTML
+      // restoration or a failed/unavailable scene render.
+      if(restoredAnchorScene) return;
       const liveToolCalls=Array.isArray(S.toolCalls)
         ? S.toolCalls
         : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
@@ -2184,6 +2815,11 @@ async function loadSession(sid){
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (!_isCurrentLoad()) return;
+      // #7640: validate the selected recovery object at the moment of reattach
+      // rather than trusting its existence. A cache that kept `lastRunJournalSeq`
+      // but lost the live assistant projection would otherwise seed the replay
+      // floor and skip the journal range that rebuilds the message body.
+      _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
       didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
@@ -2313,6 +2949,8 @@ async function loadSession(sid){
     if(activeStreamId){
       S.busy=true;
       S.activeStreamId=activeStreamId;
+      // #7640: same reattach validation as the `reattach` branch above.
+      if(INFLIGHT[sid]) _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
       updateSendBtn();
@@ -3908,7 +4546,7 @@ async function _ensureAllMessagesLoaded() {
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=all`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
     // Session may have been switched while we awaited. Bail rather than
@@ -4195,6 +4833,63 @@ function _profileQueryIntentFromLocation(){
     };
   }catch(_e){return empty;}
 }
+// #7652 review round 4: a sessionless cron notification carries an explicit
+// panel intent so the click lands on the panel the run belongs to instead of
+// the last chat the user had open. Only panels the main view actually renders
+// are accepted, so a stray parameter can never leave the app on a blank view.
+// Review round 5: a bare `^[a-z0-9][a-z0-9_-]*$` shape check accepted
+// `?panel=doesnotexist` — a valid-looking intent that made boot skip the
+// saved-chat restore and then had switchPanel select nothing. The name is
+// validated against the real panel set instead: the rail's own data-panel
+// attributes when the DOM is available, with the rendered panel views as a
+// headless fallback.
+function _knownPanelNames(){
+  const names=new Set();
+  try{
+    if(typeof document!=='undefined'&&document&&typeof document.querySelectorAll==='function'){
+      document.querySelectorAll('[data-panel]').forEach((el)=>{
+        const n=el&&el.dataset?el.dataset.panel:'';
+        if(n) names.add(String(n));
+      });
+      document.querySelectorAll('.panel-view').forEach((el)=>{
+        if(!el||!el.id) return;
+        const m=/^panel([A-Z][A-Za-z]*)$/.exec(el.id);
+        if(m) names.add(m[1].charAt(0).toLowerCase()+m[1].slice(1));
+      });
+    }
+  }catch(_e){/* fall through to the static set */}
+  if(!names.size){
+    ['chat','tasks','kanban','skills','memory','workspaces','profiles','todos','insights','logs','settings','plugin']
+      .forEach((n)=>names.add(n));
+  }
+  return names;
+}
+function _panelQueryIntentFromLocation(){
+  const empty={hasParam:false,valid:false,name:''};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    if(!qs.has('panel')) return empty;
+    const name=String(qs.get('panel')||'');
+    return {
+      hasParam:true,
+      valid:/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)&&_knownPanelNames().has(name),
+      name
+    };
+  }catch(_e){return empty;}
+}
+function _consumePanelQueryParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('panel');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _consumeProfileQueryParamFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{
@@ -4239,6 +4934,10 @@ function _sessionUrlForSid(sid){
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
+    // `exact` is a one-shot child-row new-tab hint (see _markSessionUrlExact),
+    // not a durable page parameter: drop it so it cannot leak into the next
+    // session URL this tab navigates to.
+    current.searchParams.delete('exact');
     const retained=new URLSearchParams();
     current.searchParams.forEach((value,key)=>{
       if(key!=='action'||value!=='new-chat') retained.append(key,value);
@@ -4250,7 +4949,15 @@ function _sessionUrlForSid(sid){
 }
 function _setActiveSessionUrl(sid){
   if(typeof window==='undefined'||!window.history||!sid) return;
-  const next=_sessionUrlForSid(sid);
+  let next=_sessionUrlForSid(sid);
+  // Keep the one-shot exact-target marker while this tab stays on the same
+  // session, so a refresh of a child row's new tab still lands on the child
+  // instead of folding into its compressed parent; switching sessions drops it.
+  if(typeof _sessionUrlRequestsExactTarget==='function' && typeof _markSessionUrlExact==='function'
+     && typeof _sessionIdFromLocation==='function'
+     && _sessionIdFromLocation()===sid && _sessionUrlRequestsExactTarget()){
+    next=_markSessionUrlExact(next);
+  }
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
     let consumeLaunchAction=false;
     try{
@@ -4260,6 +4967,178 @@ function _setActiveSessionUrl(sid){
     const method=consumeLaunchAction?'replaceState':'pushState';
     window.history[method]({session_id:sid},'',next);
   }
+}
+
+/**
+ * Middle-click (or Ctrl/Cmd+click) on a sidebar session row opens that
+ * session's deep link (`/session/<id>`) in a new browser tab instead of
+ * switching the current tab. Boot already resolves the id from the URL
+ * (`_sessionIdFromLocation` + `loadSession(saved)`), so the new tab lands
+ * directly on the session. Never fires for the ⋮ action menu, checkboxes,
+ * tag chips, lineage/child toggles, while renaming, or in batch select mode.
+ */
+// Whether the row's owning agent profile can be loaded in a NEW tab without
+// breaking the tab that issued the gesture. A new tab that boots a session
+// owned by another profile switches the shared `hermes_profile` cookie, so the
+// source tab keeps its session but its next /api/chat/start, approval and
+// metadata calls fail with 409 session_profile_mismatch. With "show sessions
+// from all profiles" off every row belongs to the active profile; with it on,
+// an unknown owner is treated as unverifiable and refused.
+function _newTabOwningProfileAllowed(session){
+  const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)?S.activeProfile:'default';
+  const owningProfile=(typeof _sidebarSessionProfileName==='function')?_sidebarSessionProfileName(session):'';
+  // A KNOWN owner is authoritative regardless of the show-all toggle: turning
+  // "show sessions from all profiles" off flips `_showAllProfiles` immediately,
+  // but the sidebar keeps rendering the previous scope's foreign rows until the
+  // refetch lands. A toggle-based shortcut would wave those retained foreign
+  // rows through, switching the shared cookie and 409'ing the source tab. So
+  // always compare a known owner against the active profile.
+  if(owningProfile){
+    return _profileMatchesActiveProfile(owningProfile,activeProfile);
+  }
+  // Unknown owner: allow only when the loaded sidebar cache is definitively a
+  // single-profile scope for the active profile (show-all off). Anything else —
+  // show-all on, no scope, an all-profiles scope, or a different scope profile —
+  // is unverifiable and refused.
+  if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles) return false;
+  const scope=(typeof _allSessionsScope!=='undefined'&&_allSessionsScope)?_allSessionsScope:null;
+  if(!scope||scope.allProfiles!==false) return false;
+  const scopeProfile=(typeof scope.profile==='string')?scope.profile.trim():'';
+  if(!scopeProfile) return false;
+  return _profileMatchesActiveProfile(scopeProfile,activeProfile);
+}
+// Whether this environment can actually open a session in a second window.
+// The native macOS shell (hermes-swift-mac) exposes `window.open` but its
+// WKWebView delegate does not implement `webView(_:createWebViewWith:…)`, so
+// WebKit silently drops the tab (hermes-swift-mac#102). Callers that mutate
+// gesture state before opening must consult this *first*: otherwise they park
+// the gesture to idle and the fall-through _finishSessionGesture early-returns,
+// turning the click into a dead click instead of master's same-tab load.
+function _newTabOpenSupported(){
+  if(typeof window==='undefined'||typeof window.open!=='function') return false;
+  const wk=(window.webkit&&window.webkit.messageHandlers)?window.webkit.messageHandlers:null;
+  if(wk&&(wk.hermesNotify||wk.hermesTheme)) return false; // hermes-swift-mac#102
+  return true;
+}
+// Mark a `/session/<id>` deep link as an *exact* target. Boot honors the marker
+// (see `_sessionUrlRequestsExactTarget`) and loads that id without lineage
+// folding, so a nested child row opened in a new tab lands on the child rather
+// than on its compressed parent's lineage row (#7429 review 2026-10-08).
+function _markSessionUrlExact(url){
+  if(!url||typeof url!=='string') return url;
+  if(/([?&])exact=1(\b|$)/.test(url)) return url;
+  const hashIdx=url.indexOf('#');
+  const head=hashIdx>=0?url.slice(0,hashIdx):url;
+  const tail=hashIdx>=0?url.slice(hashIdx):'';
+  return head+(head.indexOf('?')>=0?'&':'?')+'exact=1'+tail;
+}
+// Whether the current deep link carries the exact-target marker. Boot passes
+// `skipLineageResolve` when it does, mirroring a plain child-row same-tab click
+// (`_openSidebarSession(child, {skipLineageResolve:true})`), so the child row's
+// new tab lands on the child and not on its compressed parent's lineage tip.
+// Ordinary deep links keep the lineage-tip landing an old segment URL expects.
+function _sessionUrlRequestsExactTarget(){
+  if(typeof window==='undefined'||!window.location) return false;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    return qs.get('exact')==='1';
+  }catch(_e){return false;}
+}
+// Lineage folding maps a nested child id onto its compressed parent's row. A tab
+// opened on a child via its exact-target link (`/session/<child>?exact=1`) must
+// keep showing that child on every load of it, not only at boot: browser Back
+// to that entry and same-session refreshes (poll, session-updated) also go
+// through loadSession() (#7429 release review). Only the session the URL names
+// is exempt, so navigating elsewhere from that tab folds lineage as usual.
+function _sessionUrlTargetsExactSid(sid){
+  if(!sid || typeof _sessionUrlRequestsExactTarget!=='function' || typeof _sessionIdFromLocation!=='function') return false;
+  return _sessionUrlRequestsExactTarget() && _sessionIdFromLocation()===sid;
+}
+function _openSessionUrlInNewTab(sid, session, opts){
+  if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
+  // Native macOS shell (hermes-swift-mac): its WKWebView delegate does not
+  // implement webView(_:createWebViewWith:…), so WebKit silently drops
+  // window.open(url,'_blank','noopener'), and `noopener` makes window.open
+  // return null so the drop is undetectable here. Treat the embedded shell as
+  // having no multi-window support and decline, so every tap path falls back
+  // to its same-tab load (hermes-swift-mac#102). Drop this once the app
+  // implements the delegate.
+  const _wkHandlers=(typeof window!=='undefined'&&window.webkit&&window.webkit.messageHandlers)?window.webkit.messageHandlers:null;
+  if(_wkHandlers&&(_wkHandlers.hermesNotify||_wkHandlers.hermesTheme)) return false;
+  if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
+  if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
+  // Foreign/unknown owning profile: consume the gesture (return true so callers
+  // skip the same-tab path) and surface a notice instead of switching cookies.
+  if(session&&!_newTabOwningProfileAllowed(session)){
+    if(typeof showToast==='function') showToast(t('session_new_tab_other_profile'),3000);
+    return true;
+  }
+  let url=null;
+  try{url=_sessionUrlForSid(sid);}catch(_e){return false;}
+  if(!url) return false;
+  // Child-row call sites pass {exact:true}: the deep link declares the child id
+  // authoritative so boot does not fold it into its compressed parent's row.
+  if(opts&&opts.exact) url=_markSessionUrlExact(url);
+  try{
+    window.open(url,'_blank','noopener');
+    return true;
+  }catch(_e){return false;}
+}
+// Shared choke point for the pointer-tap paths below: returns true when the
+// event was consumed as an open-in-new-tab (caller must skip same-tab open).
+// `opts.exact` (child rows) marks the deep link as the exact target.
+function _consumeSessionNewTabClick(e, sid, session, opts){
+  if(!e||!sid) return false;
+  const isModifiedClick=!!(e.ctrlKey||e.metaKey);
+  const isMiddleClick=(typeof e.button==='number'&&e.button===1)||e.which===2;
+  if(!isModifiedClick&&!isMiddleClick) return false;
+  // The class exclusion list below is the authoritative action-target guard:
+  // every row kind's ⋮ menu lives under `.session-actions` (plus the checkbox,
+  // tag, child/lineage count and lineage-segment controls). The per-row closure
+  // `_isSessionActionTarget` is not visible here and its `typeof` probe never
+  // fired, so it was removed rather than left as a dead check.
+  if(e.target&&e.target.closest){
+    try{
+      if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return false;
+    }catch(_e){}
+  }
+  if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
+  if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
+  if(typeof e.preventDefault==='function') e.preventDefault();
+  if(typeof e.stopPropagation==='function') e.stopPropagation();
+  return _openSessionUrlInNewTab(sid, session, opts);
+}
+// `auxclick` fires for the middle button where `click` never does; `mousedown`
+// also preventDefaults button-1 so the browser doesn't start autoscroll.
+function _wireSessionNewTabListeners(node, getSid, getSession, opts){
+  if(!node||typeof node.addEventListener!=='function'||typeof getSid!=='function') return;
+  node.addEventListener('auxclick',(e)=>{
+    if(!e) return;
+    const btn=(typeof e.button==='number')?e.button:(e.which===2?1:0);
+    if(btn!==1) return;
+    if(e.target&&e.target.closest){
+      try{
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return;
+      }catch(_e2){}
+    }
+    if(typeof e.preventDefault==='function') e.preventDefault();
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    _openSessionUrlInNewTab(getSid(), typeof getSession==='function'?getSession():undefined, opts);
+  });
+  node.addEventListener('mousedown',(e)=>{
+    if(!e) return;
+    const btn=(typeof e.button==='number')?e.button:(e.which===2?1:0);
+    if(btn!==1) return;
+    if(e.target&&e.target.closest){
+      try{
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return;
+      }catch(_e2){}
+    }
+    // Swallow the middle-button default (autoscroll / back-nav chord) without
+    // claiming the gesture: pointerup's _finishSessionGesture still ignores
+    // button!==0, so no swipe/rename/tap side effects can fire from this.
+    if(typeof e.preventDefault==='function') e.preventDefault();
+  });
 }
 
 // ── Batch select mode ──
@@ -4344,7 +5223,7 @@ function _renderBatchActionBar(){
   // Move
   const moveBtn=document.createElement('button');moveBtn.className='batch-action-btn';
   moveBtn.textContent=t('session_batch_move');
-  moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker();};bar.appendChild(moveBtn);
+  moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker(moveBtn);};bar.appendChild(moveBtn);
   // Delete
   const deleteBtn=document.createElement('button');deleteBtn.className='batch-action-btn batch-action-btn-danger';
   deleteBtn.textContent=t('session_batch_delete');
@@ -4358,6 +5237,10 @@ function _renderBatchActionBar(){
       danger:true
     });
     if(!ok)return;
+    const modelPickAtDelete=typeof _readComposerModelPick==='function'
+      ? _readComposerModelPick()
+      : null;
+    const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
     try{
       const results=await Promise.all(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
@@ -4371,7 +5254,10 @@ function _renderBatchActionBar(){
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-        else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+        else{
+          _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
+          $('msgInner').innerHTML='';$('emptyState').style.display='';
+        }
       }
       if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
@@ -4379,19 +5265,19 @@ function _renderBatchActionBar(){
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
-function _showBatchProjectPicker(){
+function _showBatchProjectPicker(openerEl){
   const ids=[..._selectedSessions];if(!ids.length)return;
   const bar=$('batchActionBar');if(!bar)return;
   bar.querySelectorAll('.batch-project-picker').forEach(p=>p.remove());
   const picker=document.createElement('div');picker.className='project-picker batch-project-picker';
-  const none=document.createElement('div');none.className='project-picker-item';none.textContent='No project';
+  const none=_projectPickerItem();none.textContent=t('project_picker_none');
   none.onclick=async()=>{picker.remove();
     try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:null})})));
       showToast('Removed from project');exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Move failed: '+(e.message||e));}
   };picker.appendChild(none);
   for(const p of(_allProjects||[])){
-    const item=document.createElement('div');item.className='project-picker-item';
+    const item=_projectPickerItem();
     if(p.color){const dot=document.createElement('span');dot.className='color-dot';
       dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';item.appendChild(dot);}
     const name=document.createElement('span');name.textContent=p.name;item.appendChild(name);
@@ -4404,6 +5290,13 @@ function _showBatchProjectPicker(){
   bar.appendChild(picker);
   const close=(e)=>{if(!picker.contains(e.target)){picker.remove();document.removeEventListener('click',close);}};
   setTimeout(()=>document.addEventListener('click',close),0);
+  // Escape closes the picker and hands focus back to the Move button (#8044).
+  picker.setAttribute('aria-label',t('session_batch_move'));
+  _wireProjectPickerKeys(picker,()=>{
+    picker.remove();document.removeEventListener('click',close);
+    _focusSessionActionMenuRestoreTarget(openerEl);
+  });
+  _focusProjectPickerItem(picker);
 }
 
 function _focusSessionActionMenuRestoreTarget(target){
@@ -4610,6 +5503,8 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
     const inp=document.createElement('input');
     inp.className='session-title-input';
     inp.value=oldTitle;
+    // #7542: chat-title editor in the sidebar, not a credentials field.
+    _markNonCredentialInput(inp);
     ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
       inp.addEventListener(ev, e2=>e2.stopPropagation())
     );
@@ -5272,7 +6167,8 @@ function _shouldKeepLocalOnlyOptimisticSessionRow(local){
 function _dropStaleOptimisticSessionRow(sid){
   if(!sid) return;
   if(typeof _rememberSessionListSource==='function') _rememberSessionListSource(null, sid, false);
-  if(INFLIGHT&&INFLIGHT[sid]){
+  // Retiring sidebar optimism must not retire the independent chat owner.
+  if(INFLIGHT&&INFLIGHT[sid]&&!_hasOwnedOpenLiveStream(sid)){
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
@@ -6700,6 +7596,62 @@ function _formatInServerTz(date, options) {
   return adjusted.toLocaleString(undefined, { ...options, timeZone: 'UTC' });
 }
 
+function _isoOffsetMinutes(iso) {
+  // Extract the ±HH:MM / ±HHMM / ±HH offset (in minutes, signed) embedded in
+  // an ISO 8601 timestamp string, e.g. "2026-09-24T09:00:00-07:00" → -420.
+  //
+  // Returns 0 for a trailing "Z" (explicit UTC — the wall clock needs no
+  // shift) and null for a naive string (no offset at all: the zone is
+  // unknown, so the caller must fall back to its own resolver rather than
+  // silently render it as one zone or another).
+  // Also returns null when the string is not a parseable timestamp.
+  if (typeof iso !== 'string' || !iso.trim()) return null;
+  const trimmed = iso.trim();
+  const m = trimmed.match(/([+-])(\d{2}):?(\d{2})(?::?\d{2}(?:\.\d+)?)?$/);
+  if (!m) {
+    if (/Z$/i.test(trimmed)) return 0;
+    return null;
+  }
+  const sign = m[1] === '+' ? 1 : -1;
+  const min = sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
+  if (!Number.isFinite(min) || Math.abs(min) > 14 * 60) return null;  // no real zone
+  return min;
+}
+
+function _formatInIsoTz(date, options) {
+  // Format `date` in the wall-clock zone its own ISO string carries.
+  //
+  // The agent serialises cron `next_run_at` / `last_run_at` with the
+  // offset of the zone the job was scheduled in (per-profile:
+  // hermes_time._resolve_timezone_name() → the active profile's
+  // config.yaml timezone), e.g. "2026-09-24T09:00:00-07:00" for a job
+  // whose container runs UTC but whose operator configured
+  // America/Los_Angeles. Formatting from the string's own offset is the
+  // only source that is correct for that job — no process-level inference
+  // (HERMES_TIMEZONE / TZ / strftime) and no per-browser guess can know
+  // which profile's zone a given job used.
+  //
+  // Strategy mirrors _formatInServerTz: shift the instant by the string's
+  // offset, then format with timeZone:'UTC' so no further conversion is
+  // applied — the output reads as the wall-clock time in the timestamp's
+  // own zone, including fractional-hour zones (Sao Paulo is whole-hour
+  // but India/Newfoundland are not).
+  //
+  // Returns null when the input carries no usable offset (naive string,
+  // non-string, unparseable), so the caller can fall back to its own
+  // resolver instead of silently rendering the wrong zone.
+  const iso = typeof date === 'string' ? date
+    : (date && typeof date === 'object' && typeof date.iso === 'string') ? date.iso
+    : null;
+  const offsetMin = iso ? _isoOffsetMinutes(iso) : null;
+  if (offsetMin === null || !Number.isFinite(offsetMin)) return null;
+  const instant = new Date(iso.trim());
+  if (Number.isNaN(instant.getTime())) return null;
+  if (offsetMin === 0) return instant.toLocaleString(undefined, { ...options, timeZone: 'UTC' });
+  const adjusted = new Date(instant.getTime() + offsetMin * 60 * 1000);
+  return adjusted.toLocaleString(undefined, { ...options, timeZone: 'UTC' });
+}
+
 function _localDayOrdinal(timestampMs) {
   const date = new Date(timestampMs);
   return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000);
@@ -6934,7 +7886,14 @@ function _lineageSegmentsForRender(s,lineageKey,skipCached){
     if(!seg||!seg.session_id||seg.session_id===currentSid||seen.has(seg.session_id)) return;
     if(seg.role==='child_session') return;
     seen.add(seg.session_id);
-    segments.push({...seg});
+    const copy={...seg};
+    // Lineage-report rows are serialised by the owning profile's state DB but
+    // ship without a `profile` field (api/agent_sessions.py), so the new-tab
+    // profile gate would treat them as unverifiable and refuse them under
+    // "show all profiles". Attribute an ownerless segment to the row that owns
+    // the report, which is always in the active profile.
+    if(!(typeof copy.profile==='string'&&copy.profile.trim())&&s&&typeof s.profile==='string'&&s.profile.trim()) copy.profile=s.profile;
+    segments.push(copy);
   };
   for(const seg of (Array.isArray(s&&s._lineage_segments)?s._lineage_segments:[])) addSegment(seg);
   if(!skipCached){
@@ -7571,7 +8530,57 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
+// Nesting under the parent already marks a delegated run, so the nested label drops the
+// agent's "Subagent: " prefix. Display only: rename and search keep _sessionDisplayTitle().
+function _nestedChildTitle(s){
+  const title=_sessionDisplayTitle(s);
+  return _isDelegatedSubagentRow(s)?title.replace(/^Subagent:\s*/i,''):title;
+}
+
+function _isDelegatedSubagentRow(s){
+  if(!_isChildSession(s)) return false;
+  const role=[s.raw_source,s.source_tag,s.source].map(v=>String(v||'').trim().toLowerCase()).find(Boolean)||'';
+  return role==='subagent';
+}
+
+// Delegated subagents without a project_id take their nearest ancestor's project;
+// every other row keeps its own. Memoized per render, so each lineage resolves once.
+function _sidebarProjectResolver(rowsById){
+  const memo=new Map();
+  return function projectIdFor(s){
+    if(!s) return null;
+    const path=[];
+    const onPath=new Set();
+    let cur=s, result=null;
+    while(cur){
+      const sid=cur.session_id;
+      if(memo.has(sid)){ result=memo.get(sid); break; }
+      if(cur.project_id||!_isDelegatedSubagentRow(cur)){ result=cur.project_id||null; if(sid) path.push(sid); break; }
+      if(onPath.has(sid)) break;
+      onPath.add(sid); path.push(sid);
+      cur=rowsById?rowsById.get(cur.parent_session_id):null;
+    }
+    for(const sid of path) memo.set(sid,result);
+    return result;
+  };
+}
+
+function _sidebarRowsById(rows){
+  const byId=new Map();
+  for(const list of rows){
+    if(!Array.isArray(list)) continue;
+    for(const s of list) if(s&&s.session_id&&!byId.has(s.session_id)) byId.set(s.session_id,s);
+  }
+  return byId;
+}
+
+// True when any row resolves to no project, using the filter's own ancestor map.
+function _sidebarHasUnprojectedRows(rows, projectIdFor){
+  return rows.some(s=>!projectIdFor(s));
+}
+
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
+  const projectIdFor=_sidebarProjectResolver(_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]));
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
@@ -7590,10 +8599,11 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     const referenceRaw=isCli ? cliReferenceRaw : webuiReferenceRaw;
     const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
     profileFiltered.push(s);
+    const projectId=projectIdFor(s);
     if(_activeProject===NO_PROJECT_FILTER){
-      if(s.project_id) continue;
+      if(projectId) continue;
     } else if(_activeProject){
-      if(s.project_id!==_activeProject) continue;
+      if(projectId!==_activeProject) continue;
     }
     referenceRaw.push(s);
     if(s.archived){
@@ -7617,6 +8627,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     cliReferenceRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
+    projectIdFor,
   };
 }
 
@@ -7628,15 +8639,18 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 // suppression context — silently hiding a visible child/fork whose archived
 // ancestor lives outside the current view. Scope the references to the same
 // project + source bucket as the render they feed before using them.
-function _scopedSidebarReferenceRows(isCli){
+// projectIdFor: the render's shared resolver; standalone callers get one over references + _allSessions.
+function _scopedSidebarReferenceRows(isCli, projectIdFor){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
+  const resolve=projectIdFor||_sidebarProjectResolver(_sidebarRowsById([_sidebarReferenceSessions, typeof _allSessions!=='undefined'?_allSessions:null]));
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
     // Source scope: only references in the same webui/cli bucket as this render.
     if(_isCliSession(s)!==!!isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
-    if(_activeProject===NO_PROJECT_FILTER){ if(s.project_id) return false; }
-    else if(_activeProject){ if(s.project_id!==_activeProject) return false; }
+    const projectId=resolve(s);
+    if(_activeProject===NO_PROJECT_FILTER){ if(projectId) return false; }
+    else if(_activeProject){ if(projectId!==_activeProject) return false; }
     return true;
   });
 }
@@ -7742,19 +8756,20 @@ function renderSessionListFromCache(){
     cliReferenceRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
+    projectIdFor,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
   const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, projectIdFor)]);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
   // null is a deliberate "not computed" sentinel consumed only by
   // _sessionSourceTabCount's fallback path below.
   const renderedWebuiSessionCount=_serverWebuiSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length
+    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)]).length
     : null;
   const renderedCliSessionCount=_serverCliSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length
+    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)]).length
     : null;
   const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);
   const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);
@@ -7816,7 +8831,7 @@ function renderSessionListFromCache(){
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
-  const hasUnprojected=profileFiltered.some(s=>!s.project_id);
+  const hasUnprojected=_sidebarHasUnprojectedRows(profileFiltered, projectIdFor);
   if(_allProjects.length>0||hasUnprojected){
     const bar=document.createElement('div');
     bar.className='project-bar';
@@ -7963,10 +8978,58 @@ function renderSessionListFromCache(){
   const unpinned=orderedSessions.filter(s=>!s.pinned);
   // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
-  // Collapse state persisted in localStorage
-  let _groupCollapsed={};
-  try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
-  const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
+  // Collapse state: in-memory authority, localStorage as best-effort
+  // persistence. If the write fails (quota, blocked storage) the toggle must
+  // still take effect for this session instead of silently reverting (#7953).
+  if(!window.__hermesDateGroupCollapsed) window.__hermesDateGroupCollapsed={};
+  if(!window.__hermesDateGroupPending) window.__hermesDateGroupPending=new Set();
+  const _groupCollapsed=window.__hermesDateGroupCollapsed;
+  const _pending=window.__hermesDateGroupPending;
+  // localStorage is the shared cross-tab authority. A local toggle is only a
+  // PENDING override until its snapshot is successfully written; that write
+  // releases the key so a newer successful choice from another tab wins on
+  // the next read. A failed write keeps the key pending so the local intent
+  // still takes effect for this session (#7953).
+  const _readStoredCollapsed=()=>{
+    // Distinguish a valid snapshot (possibly empty/cleared) from an
+    // unavailable or malformed read: only a valid one may change state.
+    let raw=null;
+    try{ raw=localStorage.getItem('hermes-date-groups-collapsed'); }catch(e){ return null; }
+    if(raw===null||raw==='') return {};
+    // A valid snapshot must be a JSON object. Non-object roots (string,
+    // number, boolean, array) route through the malformed-read fallback:
+    // `k in fresh` in the merge throws on them and kills the render after
+    // the list has already been cleared. Stored `null` is a valid empty
+    // snapshot (everything expanded).
+    try{ const v=JSON.parse(raw); if(v===null) return {}; return (typeof v==='object'&&!Array.isArray(v))?v:null; }catch(e){ return null; }
+  };
+  const _mergeStoredCollapsed=()=>{
+    const fresh=_readStoredCollapsed();
+    if(fresh===null) return; // unavailable/malformed: keep fallback + pending
+    // Copy only boolean values: a same-origin write of
+    // {"__proto__":{"Older":true}} must not replace this map's prototype
+    // through _groupCollapsed[k]=fresh[k] (gate Oct 4, Opus nit).
+    for(const k in fresh){ if(!_pending.has(k)&&typeof fresh[k]==='boolean') _groupCollapsed[k]=fresh[k]; }
+    // A valid snapshot (even an empty/cleared one) also removes non-pending
+    // keys it no longer contains; a merge that only adds/updates would keep
+    // stale collapses visible.
+    for(const k in _groupCollapsed){
+      if(typeof fresh[k]!=='boolean' && !_pending.has(k)) delete _groupCollapsed[k];
+    }
+  };
+  _mergeStoredCollapsed();
+  const _saveCollapsed=()=>{
+    _mergeStoredCollapsed();
+    try{
+      localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));
+      // The complete intended snapshot is persisted: release the pending
+      // overrides so another tab's newer successful choice can win next read.
+      _pending.clear();
+    }catch(e){
+      // Failed write: keep the keys pending so the local intent survives.
+      if(typeof console!=='undefined'&&console.warn) console.warn('hermes: date-group collapse state could not be persisted', e);
+    }
+  };
   // Group sessions by date
   const groups=[];
   let curLabel=null,curItems=[];
@@ -8059,6 +9122,7 @@ function renderSessionListFromCache(){
       const isCollapsed=body.style.display==='none';
       body.style.display=isCollapsed?'':'none';
       caret.classList.toggle('collapsed',!isCollapsed);
+      _pending.add(g.label);
       _groupCollapsed[g.label]=!isCollapsed;
       _saveCollapsed();
       renderSessionListFromCache();
@@ -8343,8 +9407,10 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
+          if(_consumeSessionNewTabClick(e, seg.session_id, seg)) return;
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
+        _wireSessionNewTabListeners(row, ()=>seg.session_id, ()=>seg);
         lineageList.appendChild(row);
       }
       sessionText.appendChild(lineageList);
@@ -8354,11 +9420,14 @@ function renderSessionListFromCache(){
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions];
-      const openChildSession=async(childSession)=>{
+      const openChildSession=async(childSession, openOpts={})=>{
+        // A child row's deep link must land on the child, not on its
+        // compressed parent's lineage tip: mark the new-tab URL exact.
+        if(openOpts&&openOpts.newTab) return _openSessionUrlInNewTab(childSession.session_id, childSession, {exact:true});
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
-        const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
+        const childTitle=_nestedChildTitle(child)||'Untitled child session';
         const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
         return `-> ${childTitle}${parentNote} - ${childTime}`;
@@ -8588,8 +9657,10 @@ function renderSessionListFromCache(){
               return;
             }
             e.stopPropagation();
+            if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
             await openChildSession(child);
           };
+          _wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child, {exact:true});
           row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
             mainBtn.textContent=childLabelFor(child);
           });
@@ -8640,6 +9711,7 @@ function renderSessionListFromCache(){
             e.stopPropagation();
             _openSessionActionMenu(child, actions||row);
           };
+          _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
           childList.appendChild(row);
           continue;
         }
@@ -8650,8 +9722,10 @@ function renderSessionListFromCache(){
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
+          if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
           await openChildSession(child);
         };
+        _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
         childList.appendChild(row);
       }
       sessionText.appendChild(childList);
@@ -9015,11 +10089,42 @@ function renderSessionListFromCache(){
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
+      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode && !_renamingSid && _gestureState!=='idle' && !_longPressMenuOpened && (typeof _newTabOpenSupported!=='function'||_newTabOpenSupported())){
+        // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
+        // Gated on select/rename mode: _consumeSessionNewTabClick refuses
+        // those modes, and mutating gesture state first would make the
+        // fall-through _finishSessionGesture early-return on 'idle',
+        // breaking the row (de)select toggle.
+        // Also gated on _gestureState!=='idle' (a press must have begun on
+        // THIS row: a Ctrl-release over a row the user never pressed on must
+        // do nothing, mirroring _finishSessionGesture's own first check) and
+        // on !_longPressMenuOpened (a pen long-press menu is already open, so
+        // don't stack a new tab on top of it — the open Greptile P1).
+        // Settle the gesture machine first via the shared choke point: a pen
+        // (or touch-emulated) drag may have painted swipe offsets, and a
+        // shaky click may have added the 'dragging' class — parking
+        // _gestureState alone would leave the row visually displaced.
+        // _clearPointerDragState() parks idle, disarms the long-press timer,
+        // and settles swipe paint when a drag was in flight.
+        clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
+        _clearPointerDragState();
+        el.classList.remove('loading');
+        if(_consumeSessionNewTabClick(e, s.session_id, s)) return;
+      }
       if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();
     };
+    _wireSessionNewTabListeners(el, ()=>s.session_id, ()=>s);
     // Add ondblclick for more reliable double-click detection
     el.ondblclick=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
+      // A Ctrl/Cmd+double-click is two modified clicks: each pointerup opens
+      // one new tab. Don't also start a rename in the current tab (master
+      // only renamed). Outside select mode, bail entirely.
+      if(typeof _newTabOpenSupported!=='function'||_newTabOpenSupported()){
+        if((e.ctrlKey||e.metaKey) && !_sessionSelectMode) return;
+      }
+      // On a shell with no second window _newTabOpenSupported() is false, so
+      // the bail above is skipped and master's rename path stays.
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
       if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
@@ -9065,10 +10170,31 @@ async function _handleShowAllProfilesStorageEvent(e){
   if(typeof renderSessionList==='function') await renderSessionList({deferWhileInteracting:false});
 }
 
+function _handleUnreadStorageEvent(e){
+  if(!e || !e.key) return;
+  // A concurrent WebUI client on the same origin/profile changed one of the
+  // unread stores. Both saves re-read the store, merge our cache into it (max for
+  // viewed counts, tombstone-ordered for completion markers), keep the merged map
+  // as the live cache, and write back only what the store is missing. So this
+  // client re-asserts the acknowledgement it still holds instead of dropping it
+  // and re-reading a value the other client's write already lost.
+  if(e.key === SESSION_VIEWED_COUNTS_KEY
+    || (typeof e.key === 'string' && e.key.startsWith(SESSION_VIEWED_COUNTS_DELETED_PREFIX))){
+    _saveSessionViewedCounts();
+  }
+  else if(e.key === SESSION_COMPLETION_UNREAD_KEY
+    || e.key === SESSION_COMPLETION_UNREAD_CLEARED_KEY
+    || (typeof e.key === 'string'
+      && e.key.startsWith(SESSION_COMPLETION_UNREAD_CLEARED_PREFIX))){
+    _saveSessionCompletionUnread();
+  }
+}
+
 if(typeof window!=='undefined'){
   window.addEventListener('storage', (e) => {
     void _handleActiveSessionStorageEvent(e);
     void _handleShowAllProfilesStorageEvent(e);
+    void _handleUnreadStorageEvent(e);
   });
   window.addEventListener('popstate', () => {
     const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
@@ -9167,6 +10293,10 @@ async function deleteSession(sid, beforeDelete=null){
     danger:true
   });
   if(!ok)return false;
+  const modelPickAtDelete=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
   const reflowPositions=_captureSessionReflowPositions();
   const beforeDeleteHold=beforeDelete?Promise.resolve().then(beforeDelete):null;
   const previousSessions=_allSessions;
@@ -9210,6 +10340,7 @@ async function deleteSession(sid, beforeDelete=null){
     if(remaining.sessions&&remaining.sessions.length){
       await loadSession(remaining.sessions[0].session_id);
     }else{
+      _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
       const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
@@ -9236,9 +10367,8 @@ function _showProjectPicker(session, anchorEl){
   const picker=document.createElement('div');
   picker.className='project-picker';
   // "No project" option
-  const none=document.createElement('div');
-  none.className='project-picker-item'+(!session.project_id?' active':'');
-  none.textContent='No project';
+  const none=_projectPickerItem('',!session.project_id);
+  none.textContent=t('project_picker_none');
   none.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
@@ -9274,8 +10404,7 @@ function _showProjectPicker(session, anchorEl){
   };
   for(const p of _allProjects){
     if (_profileHidesProject(p.profile)) continue;
-    const item=document.createElement('div');
-    item.className='project-picker-item'+(session.project_id===p.project_id?' active':'');
+    const item=_projectPickerItem('',session.project_id===p.project_id);
     if(p.color){
       const dot=document.createElement('span');
       dot.className='color-dot';
@@ -9300,9 +10429,8 @@ function _showProjectPicker(session, anchorEl){
     picker.appendChild(item);
   }
   // "+ New project" shortcut at the bottom
-  const createItem=document.createElement('div');
-  createItem.className='project-picker-item project-picker-create';
-  createItem.textContent='+ New project';
+  const createItem=_projectPickerItem('project-picker-create');
+  createItem.textContent=t('project_picker_new');
   createItem.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
@@ -9334,26 +10462,198 @@ function _showProjectPicker(session, anchorEl){
   // Append to body and position using getBoundingClientRect so it isn't clipped
   // by overflow:hidden on .session-item ancestors
   document.body.appendChild(picker);
-  const rect=anchorEl.getBoundingClientRect();
   picker.style.position='fixed';
   picker.style.zIndex='999';
-  // Prefer opening below; flip above if too close to bottom of viewport
-  const spaceBelow=window.innerHeight-rect.bottom;
-  if(spaceBelow<160&&rect.top>160){
-    picker.style.bottom=(window.innerHeight-rect.top+4)+'px';
-    picker.style.top='auto';
-  }else{
-    picker.style.top=(rect.bottom+4)+'px';
-    picker.style.bottom='auto';
+  _positionProjectPicker(picker,anchorEl);
+  // Close on outside click
+  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
+  setTimeout(()=>document.addEventListener('click',close),0);
+  // Keyboard (#8044): arrows move between the rows, Escape closes the picker
+  // and hands focus back to the conversation's ⋮ trigger.
+  picker.setAttribute('aria-label',t('session_move_project'));
+  const dismiss=(opts)=>{
+    picker.remove();
+    document.removeEventListener('click',close);
+    // Not to a row that is going out of sight with its sidebar.
+    if(opts&&opts.restoreFocus===false) return;
+    _focusSessionActionMenuRestoreTarget(_projectPickerFocusReturnTarget(session,anchorEl));
+  };
+  _wireProjectPickerKeys(picker,dismiss);
+  _openProjectPicker={picker,anchorEl,sessionId:session.session_id,dismiss};
+  _focusProjectPickerItem(picker);
+}
+
+// The open single-conversation picker, for the resize listener below. A closed
+// picker is found out by being detached, so no close path has to clear this.
+let _openProjectPicker=null;
+
+function _positionProjectPicker(picker, anchorEl){
+  const rect=anchorEl.getBoundingClientRect();
+  // Placed as _positionSessionActionMenu places the ⋮ menu: below the anchor,
+  // above it when that fits whole, else slid up over the anchor until it fits.
+  // Natural height first (the CSS already caps it at 100dvh - 16px).
+  picker.style.maxHeight='';
+  const pickerH=picker.offsetHeight||0;
+  const margin=8;
+  const maxAvail=window.innerHeight-margin*2;
+  let top=rect.bottom+4;
+  if(top+pickerH>window.innerHeight-margin && rect.top>pickerH+12){
+    top=rect.top-pickerH-4;            // flip above when there is room
   }
+  if(pickerH>maxAvail){
+    picker.style.maxHeight=maxAvail+'px'; // taller than the screen: pin and scroll
+    top=margin;
+  }else{
+    if(top+pickerH>window.innerHeight-margin) top=window.innerHeight-margin-pickerH;
+    if(top<margin) top=margin;         // slide to fit, overlapping the anchor
+  }
+  picker.style.top=top+'px';
+  picker.style.bottom='auto';
   // Align right edge of picker with right edge of button; keep within viewport
   const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
   let left=rect.right-pickerW;
   if(left<8) left=8;
   picker.style.left=left+'px';
-  // Close on outside click
-  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
-  setTimeout(()=>document.addEventListener('click',close),0);
+}
+
+// An open picker follows a resize or a rotation, as the ⋮ menu does. A sidebar
+// repaint may have replaced the row it was opened from: place it by the row
+// that conversation has now.
+window.addEventListener('resize',()=>{
+  const open=_openProjectPicker;
+  if(!open) return;
+  if(!open.picker.isConnected){
+    _openProjectPicker=null;
+    return;
+  }
+  // On the next frame: boot.js collapses the sidebar in a resize listener of
+  // its own, which runs after this one.
+  requestAnimationFrame(()=>{
+    if(!open.picker.isConnected) return;
+    let anchor=open.anchorEl;
+    if(!anchor.isConnected){
+      // The row for a long press, the row's own ⋮ trigger for a picker opened from one.
+      anchor=_findSessionRenameRow(open.sessionId);
+      if(anchor&&open.anchorEl.classList.contains('session-actions-trigger')){
+        anchor=_projectPickerFocusReturnTarget({session_id:open.sessionId},null)||anchor;
+      }
+    }
+    // A resize can hide the sidebar the row is in. The row is then still laid
+    // out for a moment, inside a sidebar that fades or slides out of sight, so
+    // the hidden state is read from what hides it, and focus is not handed
+    // back to the row.
+    if(!anchor||!anchor.offsetParent||_projectPickerSidebarHidden(anchor)){
+      open.dismiss({restoreFocus:false});
+      return;
+    }
+    _positionProjectPicker(open.picker,anchor);
+    // A shorter window can cap the picker's height over the row the keyboard is on.
+    const focused=document.activeElement;
+    if(focused&&open.picker.contains(focused)) _focusProjectPickerRow(open.picker,focused);
+  });
+});
+
+// Whether the sidebar that holds `el` is out of sight: collapsed at desktop
+// widths (a turned phone closes the drawer and collapses it), or a drawer that
+// is not open at phone widths (a large phone turned upright, a window narrowed
+// below boot.js's 641px).
+function _projectPickerSidebarHidden(el){
+  const sidebar=el.closest('.sidebar');
+  if(!sidebar||sidebar.classList.contains('mobile-open')) return false;
+  if(sidebar.closest('.layout.sidebar-collapsed')) return true;
+  return typeof _isDesktopWidth==='function'&&!_isDesktopWidth();
+}
+
+// ── Project picker rows and keyboard (#8044) ────────────────────────────
+// A picker row is a real button, so Tab reaches it and Enter/Space activate
+// it. `active` is the session's current project: the single-session picker
+// passes a boolean and the row becomes a checked radio item; the batch picker
+// passes nothing, since several sessions have no one current project.
+function _projectPickerItem(extraClass, active){
+  const item=document.createElement('button');
+  item.type='button';
+  item.className='project-picker-item'+(extraClass?' '+extraClass:'')+(active?' active':'');
+  if(typeof active==='boolean'){
+    item.setAttribute('role','menuitemradio');
+    item.setAttribute('aria-checked',active?'true':'false');
+  }else{
+    item.setAttribute('role','menuitem');
+  }
+  return item;
+}
+
+// Menu keys for a project picker, as on the session ⋮ menu: ArrowDown/ArrowUp
+// wrap, Home/End jump, Escape runs `onEscape`. Tab closes the menu too and is
+// then left to the browser, so focus moves on from where the picker was opened
+// instead of leaving an open picker behind that no key can reach any more.
+function _wireProjectPickerKeys(picker, onEscape){
+  picker.setAttribute('role','menu');
+  const pickerItems=()=>Array.from(picker.querySelectorAll('.project-picker-item:not([disabled])'));
+  picker.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){
+      e.preventDefault();
+      e.stopPropagation();
+      onEscape();
+      return;
+    }
+    if(e.key==='Tab'){
+      onEscape();
+      return;
+    }
+    const items=pickerItems();
+    if(!items.length) return;
+    const currentIndex=Math.max(0,items.indexOf(document.activeElement));
+    let nextIndex=null;
+    if(e.key==='ArrowDown') nextIndex=(currentIndex+1)%items.length;
+    else if(e.key==='ArrowUp') nextIndex=(currentIndex-1+items.length)%items.length;
+    else if(e.key==='Home') nextIndex=0;
+    else if(e.key==='End') nextIndex=items.length-1;
+    if(nextIndex===null) return;
+    e.preventDefault();
+    _focusProjectPickerRow(picker,items[nextIndex]);
+  });
+}
+
+// Focus a row and bring it into the picker's own scroll box. The focus itself
+// must not scroll (that would move the sidebar or the page), so a row past the
+// edge of a long, scrolling picker is revealed here instead.
+function _focusProjectPickerRow(picker, row){
+  if(!_focusSessionActionMenuRestoreTarget(row)) return false;
+  // Inside the picker's border, or the edge row's focus ring is clipped.
+  const top=picker.getBoundingClientRect().top+picker.clientTop;
+  const bottom=top+picker.clientHeight;
+  const rect=row.getBoundingClientRect();
+  if(rect.top<top) picker.scrollTop-=top-rect.top;
+  else if(rect.bottom>bottom) picker.scrollTop+=rect.bottom-bottom;
+  // With a mouse the batch picker is no scroll box: it grows inside the
+  // conversation list, and the list is what brings its row onto the screen.
+  row.scrollIntoView({block:'nearest'});
+  return true;
+}
+
+// On open, focus lands on the session's current project, else on the first row.
+function _focusProjectPickerItem(picker){
+  const target=picker.querySelector('.project-picker-item.active')||picker.querySelector('.project-picker-item');
+  return _focusProjectPickerRow(picker,target);
+}
+
+// Where focus returns when a session's picker closes: the conversation's ⋮
+// trigger. The picker is anchored on that trigger, or, after a right click or
+// a long press, on the row or its actions box, which hold the trigger but
+// cannot take focus themselves. The sidebar may also have been repainted
+// since, which replaces all of them: then it is the trigger of the row now
+// showing the session.
+function _projectPickerFocusReturnTarget(session, anchorEl){
+  const triggerOf=el=>{
+    if(!el||!el.isConnected) return null;
+    if(el.classList&&el.classList.contains('session-actions-trigger')) return el;
+    // An expanded parent row also holds its fork children's rows, each with a
+    // trigger of its own, and they come before the parent's in the DOM. Only
+    // the row's own trigger will do: a child of the actions box, which is a
+    // child of the row.
+    return el.querySelector(':scope > .session-actions-trigger, :scope > .session-actions > .session-actions-trigger');
+  };
+  return triggerOf(anchorEl)||triggerOf(_findSessionRenameRow(session&&session.session_id));
 }
 
 // Resize a .project-create-input to fit its current value (or placeholder).
@@ -9380,6 +10680,8 @@ function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.placeholder='Project name';
+  // #7542: free-text project-name editor, not a credentials field.
+  _markNonCredentialInput(inp);
   let _finishDone=false;
   const finish=async(save)=>{
     if(_finishDone) return;
@@ -9418,6 +10720,8 @@ function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.value=proj.name;
+  // #7542: free-text project-name editor, not a credentials field.
+  _markNonCredentialInput(inp);
   let _finishDone=false;
   const finish=async(save)=>{
     if(_finishDone) return;

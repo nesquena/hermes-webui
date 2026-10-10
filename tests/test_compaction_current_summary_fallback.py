@@ -50,6 +50,10 @@ _REAL_FUNCTIONS = (
     "_insertPreservedCompressionTaskFallback",
     "_pinCompactionCardAtTop",
     "_pinSettledCompressionReferenceAtTop",
+    # #2051: renderMessages() inserts a message block through this helper, so it has to be
+    # evaluated with it. The shim's createElement() returns no template `content`, so the
+    # helper takes its insertAdjacentHTML fallback here, exactly as before.
+    "_insertSegmentBlock",
     "renderMessages",
 )
 

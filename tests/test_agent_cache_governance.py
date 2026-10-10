@@ -481,7 +481,6 @@ def test_finishing_stream_does_not_overwrite_successor_lease(monkeypatch):
     its lease write.
     """
     import api.config as config
-    import threading
     from collections import OrderedDict
 
     agent = _FakeAgent(turn_active=True)
@@ -530,7 +529,8 @@ def test_finishing_stream_does_not_overwrite_successor_lease(monkeypatch):
 
 def test_compression_rotation_updates_run_row_session_id(monkeypatch):
     """When compression rotates the session id, the ACTIVE_RUNS row must
-    follow so the final unregister clears the lease under the NEW id.
+    carry the moved cache key so the final unregister clears the lease
+    under the NEW id.
 
     The cache key moves from old_sid to new_sid mid-turn (streaming.py
     moves the entry).  If the registry row keeps old_sid, the final
@@ -538,14 +538,21 @@ def test_compression_rotation_updates_run_row_session_id(monkeypatch):
     holds a cache entry — and the agent under new_sid keeps ``_turn_active``
     True forever, so both governor passes skip it permanently.
 
+    The row's ``session_id`` itself deliberately does NOT rotate: steer and
+    ownership checks read it as the stream's owning session, and rewriting
+    it flips late/stale steer classification (pinned by
+    test_steer_worker_boundaries).  The moved cache key travels in its own
+    ``lease_session_id`` field instead.
+
     Two halves:
-    1. config-layer contract: update_active_run rewrites the row's session
-       id (the row is keyed by stream id, so the update is unconditional).
+    1. config-layer contract: update_active_run records the row's
+       lease_session_id (the row is keyed by stream id, so the update is
+       unconditional) and unregister_active_run clears the lease under it.
     2. wiring contract: the rotation site in streaming.py carries the
-       ``update_active_run(stream_id, session_id=new_sid)`` call (static
-       AST check — the codebase has no runtime harness for this private
-       worker block, so the assertion pins the exact wiring to prevent it
-       being dropped in a future refactor).
+       ``update_active_run(stream_id, lease_session_id=new_sid)`` call
+       (static AST check — the codebase has no runtime harness for this
+       private worker block, so the assertion pins the exact wiring to
+       prevent it being dropped in a future refactor).
     """
     import api.config as config
     import ast
@@ -560,8 +567,10 @@ def test_compression_rotation_updates_run_row_session_id(monkeypatch):
     config.register_active_run("stream-1", session_id="old-sid")
     assert agent._turn_active is True
 
-    # Rotation: update the row's session id to the new cache key.
-    config.update_active_run("stream-1", session_id="new-sid")
+    # Rotation: record the new cache key for lease clearing; the row's
+    # session_id must keep the original id (steer/ownership reads it).
+    config.update_active_run("stream-1", lease_session_id="new-sid")
+    assert config.ACTIVE_RUNS["stream-1"]["session_id"] == "old-sid"
 
     assert agent._turn_active is True
     # Final unregister finds the row under new-sid and clears the lease.
@@ -589,11 +598,11 @@ def test_compression_rotation_updates_run_row_session_id(monkeypatch):
                     and _call.func.id == "update_active_run"
                 ):
                     _kw = {k.arg: ast.unparse(k.value) for k in _call.keywords}
-                    if _kw.get("session_id") == "new_sid":
+                    if _kw.get("lease_session_id") == "new_sid":
                         _rotation_wired = True
     assert _rotation_wired, (
         "streaming.py rotation block must call "
-        "update_active_run(stream_id, session_id=new_sid)"
+        "update_active_run(stream_id, lease_session_id=new_sid)"
     )
 
 

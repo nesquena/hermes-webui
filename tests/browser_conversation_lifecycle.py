@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -39,6 +40,7 @@ SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
+_FRAME_PROOF_BITES = {"settle-worklog-frame-proof", "sidebar-idle-missing-terminal"}
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
@@ -267,8 +269,17 @@ def _start_webui_server(repo_root: Path, env: dict, artifact_dir: Path):
         suffix = "" if attempts == 1 else f"-attempt-{attempt + 1}"
         log_path = artifact_dir / f"server{suffix}.log"
         log = log_path.open("w", encoding="utf-8")
+        command = [sys.executable, str(repo_root / "server.py")]
+        barrier_dir = env.get("HERMES_TEST_TERMINAL_BARRIER_DIR")
+        if barrier_dir:
+            command = [
+                sys.executable,
+                str(repo_root / "tests" / "sidebar_terminal_barrier_server.py"),
+                str(repo_root),
+                barrier_dir,
+            ]
         proc = subprocess.Popen(
-            [sys.executable, str(repo_root / "server.py")],
+            command,
             cwd=repo_root,
             env=run_env,
             stdout=log,
@@ -284,6 +295,50 @@ def _start_webui_server(repo_root: Path, env: dict, artifact_dir: Path):
     if last_tail:
         detail += f"; last server log tail:\n{last_tail}"
     raise RuntimeError(f"WebUI server did not become healthy{detail}")
+
+
+def _exercise_sidebar_terminal_handoff(page, barrier_dir: Path, artifact_dir: Path):
+    """Order the real idle-list response before the real terminal SSE write."""
+    deadline = time.monotonic() + 10
+    while not (barrier_dir / "ready").exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError("terminal HTTP barrier was not reached")
+        page.wait_for_timeout(10)
+    observation = page.evaluate(
+        """async () => {
+          const sid = S.session.session_id;
+          const stream = S.activeStreamId;
+          const inflight = INFLIGHT[sid];
+          const source = LIVE_STREAMS[sid] && LIVE_STREAMS[sid].source;
+          const registries = window._liveAnchorRegistries;
+          const registry = registries && registries.get(stream);
+          await renderSessionList();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const live = document.querySelector('#liveAssistantTurn');
+          return {
+            serverIdle: _allSessions.some(row => row.session_id === sid && _isServerIdleSessionRow(row)),
+            paneRetained: S.busy === true && S.activeStreamId === stream,
+            inflightRetained: !!inflight && INFLIGHT[sid] === inflight,
+            sourceRetained: !!source && source.readyState === EventSource.OPEN &&
+              LIVE_STREAMS[sid] && LIVE_STREAMS[sid].source === source,
+            registryRetained: !!registry && registries.get(stream) === registry,
+            liveRows: live ? live.querySelectorAll('[data-anchor-scene-row="1"]').length : 0,
+          };
+        }"""
+    )
+    (artifact_dir / "sidebar-before-terminal.json").write_text(
+        json.dumps(observation, indent=2), encoding="utf-8"
+    )
+    page.screenshot(path=str(artifact_dir / "sidebar-before-terminal.png"), full_page=True)
+    for invariant in ("serverIdle", "paneRetained", "inflightRetained", "sourceRetained", "registryRetained"):
+        assert observation[invariant] is True, {
+            "message": "idle sidebar response revoked the live terminal handoff",
+            "invariant": invariant,
+            "observation": observation,
+        }
+    assert observation["liveRows"] > 0, observation
+    if TEST_BITE != "sidebar-idle-missing-terminal":
+        (barrier_dir / "release").touch()
 
 
 class DeterministicGateway:
@@ -523,19 +578,40 @@ def _activity_snapshot(page) -> dict:
               expanded: (group.querySelector('.tool-worklog-summary,.tool-call-group-summary') || {})
                 .getAttribute?.('aria-expanded') || '',
             })),
-            rows: rows.map(row => ({
-              role: row.getAttribute('data-anchor-row-role'),
-              rowId: row.getAttribute('data-anchor-row-id') || '',
-              toolCallId: (sceneRows.find(sceneRow =>
-                String(sceneRow && (sceneRow.row_id || sceneRow.local_id) || '') ===
-                String(row.getAttribute('data-anchor-row-id') || '')
-              ) || {}).tool_call_id || '',
-              source: row.getAttribute('data-anchor-source-event-type'),
-              status: row.getAttribute('data-anchor-row-status'),
-              tool: row.getAttribute('data-tool-name'),
-              text: row.innerText.trim(),
-              classes: row.className,
-            })),
+            rows: rows.map(row => {
+              // The renderer puts the locale clock in its own
+              // .agent-activity-status-time element, a SIBLING of
+              // .agent-activity-status-copy. Capture the clock and the label
+              // text separately so a reload that drops the clock is still
+              // caught: stripping the last line of `text` compared
+              // "…error.\\n9:14 PM" with "…error." as equal. textContent keeps
+              // this layout-independent, and reading the copy block directly
+              // excludes the clock element instead of guessing where it landed.
+              const clockEl = row.querySelector('.agent-activity-status-time');
+              const clock = (clockEl && clockEl.textContent || '').trim();
+              const copyEl = row.querySelector('.agent-activity-status-copy');
+              let label = ((copyEl && copyEl.textContent) || row.textContent || '').trim();
+              if (!copyEl && clock && label.endsWith(clock)) {
+                // Rows without a copy block have no clock of their own, so never
+                // let a clock bleed back into the label comparison.
+                label = label.slice(0, -clock.length).trim();
+              }
+              return {
+                role: row.getAttribute('data-anchor-row-role'),
+                rowId: row.getAttribute('data-anchor-row-id') || '',
+                toolCallId: (sceneRows.find(sceneRow =>
+                  String(sceneRow && (sceneRow.row_id || sceneRow.local_id) || '') ===
+                  String(row.getAttribute('data-anchor-row-id') || '')
+                ) || {}).tool_call_id || '',
+                source: row.getAttribute('data-anchor-source-event-type'),
+                status: row.getAttribute('data-anchor-row-status'),
+                tool: row.getAttribute('data-tool-name'),
+                text: row.innerText.trim(),
+                label,
+                clock,
+                classes: row.className,
+              };
+            }),
             visibleFinal,
             assistantMessage: lastAssistant ? {
               turnDuration: lastAssistant._turnDuration,
@@ -575,8 +651,61 @@ def _expand_settled_worklog(page) -> None:
     )
 
 
+_RENDERED_TIMESTAMP_RE = re.compile(
+    r"(?:\r?\n)[ \t]*\d{1,2}:\d{2}(?::\d{2})?[ \t]*(?:AM|PM)?[ \t]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_rendered_timestamp(text: str) -> str:
+    """Strip trailing rendered clock timestamp from a row's innerText, preserving all internal whitespace."""
+    return _RENDERED_TIMESTAMP_RE.sub("", text or "")
+
+
 def _terminal_rows(snapshot: dict) -> list[dict]:
     return [row for row in snapshot["rows"] if row["role"] == "terminal"]
+
+
+def _assert_terminal_parity(settled_terminal: list[dict], reloaded_terminal: list[dict]) -> None:
+    """Assert the terminal row survives a hard reload unchanged.
+
+    The renderer puts the clock in its own ``.agent-activity-status-time``
+    element, so the snapshot exposes ``label`` (row text minus the clock) and
+    ``clock`` separately.  Comparing stripped last lines instead would let a
+    reload that dropped the clock entirely pass as identical, which is a real
+    user-visible regression.  The clock VALUES are allowed to differ (the
+    wall clock can cross a minute boundary between the two snapshots).
+    """
+    assert len(settled_terminal) == len(reloaded_terminal) == 1, {
+        "settled_terminal": settled_terminal,
+        "reloaded_terminal": reloaded_terminal,
+    }
+    settled = settled_terminal[0]
+    reloaded = reloaded_terminal[0]
+    assert settled.get("rowId"), {
+        "settled_terminal": settled,
+        "hint": "terminal row is missing data-anchor-row-id; rowId parity is vacuous",
+    }
+    assert reloaded.get("rowId"), {
+        "reloaded_terminal": reloaded,
+        "hint": "terminal row is missing data-anchor-row-id; rowId parity is vacuous",
+    }
+    assert settled["rowId"] == reloaded["rowId"], {
+        "settled_rowId": settled.get("rowId"),
+        "reloaded_rowId": reloaded.get("rowId"),
+    }
+    assert settled.get("label") == reloaded.get("label"), {
+        "settled_label": settled.get("label"),
+        "reloaded_label": reloaded.get("label"),
+    }
+    assert settled.get("clock"), {
+        "settled_terminal": settled,
+        "hint": "settled terminal row lost its rendered clock",
+    }
+    assert reloaded.get("clock"), {
+        "reloaded_terminal": reloaded,
+        "hint": "reloaded terminal row lost its rendered clock",
+    }
 
 
 def _process_rows(snapshot: dict) -> list[dict]:
@@ -733,11 +862,12 @@ def main() -> int:
         "drop-anchor-persistence",
         "drop-terminal-anchor-row",
         "settle-worklog-frame-proof",
+        "sidebar-idle-missing-terminal",
     }:
         raise ValueError(
             f"Unsupported LIFECYCLE_TEST_BITE {TEST_BITE!r}; "
             "expected one of '', 'drop-anchor-persistence', "
-            "'drop-terminal-anchor-row', 'settle-worklog-frame-proof'"
+            "'drop-terminal-anchor-row', 'settle-worklog-frame-proof', 'sidebar-idle-missing-terminal'"
         )
     if TEST_BITE == "drop-terminal-anchor-row" and scenario != "terminal-error":
         raise ValueError(
@@ -782,6 +912,12 @@ def main() -> int:
         "NO_PROXY": "127.0.0.1,localhost",
         "no_proxy": "127.0.0.1,localhost",
     })
+    env.pop("HERMES_TEST_TERMINAL_BARRIER_DIR", None)
+    terminal_barrier_dir = None
+    if TEST_BITE in _FRAME_PROOF_BITES and scenario == "normal":
+        terminal_barrier_dir = state_dir / "terminal-barrier"
+        terminal_barrier_dir.mkdir()
+        env["HERMES_TEST_TERMINAL_BARRIER_DIR"] = str(terminal_barrier_dir)
     proc = None
     log = None
     log_path = None
@@ -873,7 +1009,7 @@ def main() -> int:
         # must never expose an expanded empty Worklog shell or an activity-less
         # gap.  Sample after rAF callbacks for a frame have drained; DOM mutations
         # within one task or earlier rAF callbacks are not user-visible frames.
-        if TEST_BITE == "settle-worklog-frame-proof":
+        if TEST_BITE in _FRAME_PROOF_BITES:
             page.evaluate(
                 """() => {
                   const samples = [];
@@ -941,12 +1077,17 @@ def main() -> int:
                 timeout=10000,
             )
             gateway.release_terminal.set()
+            if terminal_barrier_dir is not None:
+                _exercise_sidebar_terminal_handoff(page, terminal_barrier_dir, artifact_dir)
             page.wait_for_function(
                 """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
                   ((document.querySelector('#msgInner') || {}).innerText || '').includes(text)""",
                 arg=FINAL_TEXT,
-                timeout=15000,
+                timeout=11000 if TEST_BITE == "sidebar-idle-missing-terminal" else 15000,
             )
+            if TEST_BITE == "sidebar-idle-missing-terminal":
+                assert not (terminal_barrier_dir / "release").exists(), "terminal frame was unexpectedly released"
+                print("OK  missing terminal: canonical snapshot settled the still-OPEN transport before terminal delivery")
         else:
             gateway.release_terminal.set()
             page.wait_for_function(
@@ -958,7 +1099,7 @@ def main() -> int:
             )
         session_id = page.evaluate("S.session && S.session.session_id")
         assert session_id, "active session id missing after settlement"
-        if TEST_BITE == "settle-worklog-frame-proof":
+        if TEST_BITE in _FRAME_PROOF_BITES:
             page.wait_for_timeout(100)
             settle_proof = page.evaluate(
                 "window.__lifecycleSettleFrameProof && window.__lifecycleSettleFrameProof.stop()"
@@ -1130,18 +1271,11 @@ def main() -> int:
                 "settled_process": settled_process,
                 "reloaded_process": reloaded_process,
             }
-            assert settled_process[0]["text"] == reloaded_process[0]["text"], {
+            assert _strip_rendered_timestamp(settled_process[0]["text"]) == _strip_rendered_timestamp(reloaded_process[0]["text"]), {
                 "settled_process": settled_process,
                 "reloaded_process": reloaded_process,
             }
-            assert len(settled_terminal) == len(reloaded_terminal) == 1, {
-                "settled_terminal": settled_terminal,
-                "reloaded_terminal": reloaded_terminal,
-            }
-            assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
-                "settled_terminal": settled_terminal[0],
-                "reloaded_terminal": reloaded_terminal[0],
-            }
+            _assert_terminal_parity(settled_terminal, reloaded_terminal)
         print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 
         assert gateway.request_body and gateway.request_body.get("input") == PROMPT, gateway.request_body
@@ -1176,6 +1310,8 @@ def main() -> int:
         exit_code = 1
         return 1
     finally:
+        if terminal_barrier_dir is not None:
+            (terminal_barrier_dir / "release").touch()
         gateway.close()
         if browser is not None:
             browser.close()

@@ -689,6 +689,72 @@ def test_streaming_next_turn_claims_and_completes_without_registry_growth(monkey
     assert registry._completion_consumed == set()
 
 
+def test_streaming_drain_restores_durable_completions_before_reading(monkeypatch):
+    """Current Agent restores its ledger on first consume, not on import."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_durable_delivery_api(monkeypatch)
+    restores: list[int] = []
+
+    def _restore_completions():
+        restores.append(1)
+        if len(restores) == 1:
+            registry.completion_queue.put(_async_delegation_event())
+        return 1
+
+    registry.restore_completions = _restore_completions
+
+    notifications = streaming._drain_webui_process_notifications("webui-session-1")
+
+    assert restores == [1]
+    assert len(notifications) == 1
+    assert "ASYNC DELEGATION BATCH COMPLETE" in notifications[0]
+
+
+def test_streaming_drain_survives_durable_restore_failure(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_durable_delivery_api(monkeypatch)
+    registry.completion_queue.put(_async_delegation_event())
+
+    def _restore_completions():
+        raise RuntimeError("ledger unavailable")
+
+    registry.restore_completions = _restore_completions
+
+    notifications = streaming._drain_webui_process_notifications("webui-session-1")
+
+    assert len(notifications) == 1
+
+
+def test_background_drain_restores_durable_completions_on_start(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    processed: list[dict] = []
+
+    def _restore_completions():
+        registry.completion_queue.put(_async_delegation_event())
+        return 1
+
+    def _process_one(evt):
+        processed.append(evt)
+        bp._DRAIN_STOP.set()
+
+    registry.restore_completions = _restore_completions
+    monkeypatch.setattr(bp, "_process_one", _process_one)
+    bp._DRAIN_STOP.clear()
+    drain = threading.Thread(target=bp._drain_loop, daemon=True)
+    try:
+        drain.start()
+        drain.join(timeout=3.0)
+    finally:
+        bp._DRAIN_STOP.set()
+        drain.join(timeout=3.0)
+        bp._DRAIN_STOP.clear()
+
+    assert [evt["delegation_id"] for evt in processed] == ["deleg_test123"]
+
+
 def test_streaming_live_turn_defers_ack_until_agent_acceptance_boundary(monkeypatch):
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
@@ -1515,7 +1581,14 @@ def test_busy_predicate_covers_stream_publication_window_before_active_runs(
     active turn. Otherwise a sibling same-origin completion would pass the busy
     pre-check, reserve, claim, and 409 against the already-published stream,
     burning the finite delivery-attempt budget. With the fix, completions that
-    arrive in that window defer WITHOUT claiming (zero claims, zero attempts)."""
+    arrive in that window defer WITHOUT claiming (zero claims, zero attempts).
+
+    The window carries its launch-phase claim: every registration edge publishes
+    the claim in the SAME ``STREAMS_LOCK`` critical section that creates the
+    ``STREAMS`` entry (api/routes.py, #7302 finding 5), so a published stream that
+    is still launching always holds one. Bare ``STREAMS`` membership is not
+    liveness on its own -- a worker that died before admission leaves the entry
+    behind, and that shape must not defer a sibling completion."""
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
@@ -1527,6 +1600,14 @@ def test_busy_predicate_covers_stream_publication_window_before_active_runs(
         cfg,
         "STREAM_SESSION_OWNERS",
         {"stream-preactive": "webui-session-1"},
+    )
+    # The publication window carries its launch-phase claim (see the docstring:
+    # the entry and its claim are published on ONE STREAMS_LOCK edge), so this
+    # fixture models the launching stream, not a worker-less orphan.
+    monkeypatch.setattr(
+        cfg,
+        "PRE_ADMISSION_CLAIMS",
+        {"stream-preactive": "publication-window-claim"},
     )
     monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
     monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)

@@ -1440,7 +1440,7 @@ async function send(){
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();await renderSessionList();}
+      if(!S.session){await newSession();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, /yolo, or /stop while the agent is running and have
@@ -1518,7 +1518,7 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1536,7 +1536,7 @@ async function send(){
     }
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1565,7 +1565,7 @@ async function send(){
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
@@ -1573,7 +1573,7 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
@@ -1588,7 +1588,7 @@ async function send(){
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
@@ -1604,7 +1604,7 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
@@ -1636,7 +1636,7 @@ async function send(){
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session){await newSession();await renderSessionList();}
+          if(!S.session){await newSession();}
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
@@ -1645,7 +1645,7 @@ async function send(){
       }
     }
   }
-  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session){await newSession();}
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
@@ -2089,6 +2089,7 @@ function closeLiveStream(sessionId, streamId, source){
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
+  if(typeof live.cancelIdleRecovery==='function') live.cancelIdleRecovery();
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
   // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
   // SSE events, so switching away during a quiet window (mid tool-exec, silent
@@ -2759,11 +2760,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _currentActivityBurstId=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentActivityBurstId)||0)||0;
   let _currentLiveSegmentSeq=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentLiveSegmentSeq)||0)||0;
   let _assistantSegmentSeq=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentLiveSegmentSeq)||0)||0;
-  let _lastRunJournalSeq=reconnecting
-    ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
+  // #7640: the replay floor is only as trustworthy as the recovery state behind
+  // it. A cache that kept the cursor but lost the live assistant projection must
+  // not raise `after_seq`: the server would then replay only the tail (often just
+  // `stream_end`), and the missing journal range never gets a chance to rebuild
+  // the body — the settled footer paints over a blank message until a reload.
+  // Fall back to the zero floor whenever the state cannot be validated.
+  const _replayCursorInflight=reconnecting?INFLIGHT[activeSid]:null;
+  let _lastRunJournalSeq=(typeof _runJournalReplayFloorForInflight==='function')
+    ? _runJournalReplayFloorForInflight(_replayCursorInflight)
     : 0;
-  let _lastRunJournalEventId=reconnecting
-    ? String((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId)||'')
+  let _lastRunJournalEventId=(typeof _runJournalReplayEventIdForInflight==='function')
+    ? _runJournalReplayEventIdForInflight(_replayCursorInflight)
     : '';
   const _STREAM_FADE_MS=620;
   const _STREAM_FADE_MAX_MS=900;
@@ -3612,7 +3620,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
       return `tool:${row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||row.row_id||''}`;
     }
-    if(row.role==='prose'||row.role==='thinking') return `${row.role}:${_anchorSceneTextKey(row.text)}`;
+    if(row.role==='prose'||row.role==='thinking'){
+      const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
+      const durableId=row.local_id||row.row_id||row.event_id||identity.local_id||identity.row_id||identity.event_id;
+      if(durableId) return `${row.role}:id:${durableId}`;
+      return `${row.role}:${_anchorSceneTextKey(row.text)}`;
+    }
     return `${row.role||row.kind}:${row.source_event_type||''}:${row.status||''}:${row.row_id||''}`;
   }
   function _anchorSceneRowHasLiveIdentity(row){
@@ -3725,18 +3738,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seen=new Set();
     const seenTextKeys=[];
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
-    const orderedRows=[];
-    for(const row of projectedRows){
-      if(row&&row.role==='terminal') continue;
-      orderedRows.push(row);
-    }
-    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
-      const bucket=messageRows.get(idx)||[];
-      for(const row of bucket) orderedRows.push(row);
-    }
-    for(const row of projectedRows){
-      if(row&&row.role==='terminal') orderedRows.push(row);
-    }
+    // ── provenance-aware projection mirror tracking ────────────
+    // (allocated below, after the final-answer guards are defined, so slots
+    // are reserved only by projected rows that survive running-row
+    // settlement, final-answer filtering, and same-ID coalescing)
     // #5758 gap: final-segment eligibility must be judged against the LIVE
     // projection's own chronology. The settled per-message tool rows appended
     // into orderedRows above re-list tools that ran EARLIER in the turn, so an
@@ -3752,7 +3757,86 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
     });
     const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
-    const pushRow=(row)=>{
+    // ── provenance-aware projection mirror tracking ────────────
+    // Mirror slots are allocated ONLY from projected rows that survive
+    // running-row settlement (_anchorSceneSettleLiveRunningRow), the
+    // final-answer guards, and same-ID coalescing. A projected running
+    // thinking row that is discarded because settled thinking replaced it
+    // must not reserve a mirror slot, or its settled replacement would be
+    // consumed as a mirror and the thinking would disappear entirely.
+    // Mirror capacity is keyed by ROLE + normalized text, never by text alone:
+    // a projected PROSE row and a settled THINKING row can carry the same
+    // normalized text (the content-parts path emits prose and thinking
+    // independently and does not reject cross-role text equality). Keyed by
+    // text alone, a surviving projected prose row reserved a slot that an
+    // EARLIER settled thinking row of the same text then consumed, so the
+    // settled thinking disappeared and the real settled prose survived as a
+    // duplicate.
+    const _mirrorSlotKey=(role,textKey)=>`${String(role||'').toLowerCase()}\u0000${textKey}`;
+    const projectedMirrorSlots={};
+    const _idToLatestSlot={};
+    for(const row of projectedRows){
+      if(!row||row.role==='terminal'||(row.role!=='prose'&&row.role!=='thinking')) continue;
+      // Running rows discarded by settlement (e.g. projected running thinking
+      // with a settled-thinking replacement) allocate no slot.
+      const settledRow=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
+      if(!settledRow||typeof settledRow!=='object') continue;
+      const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
+      const textKey=_anchorSceneTextKey(settledRow.text);
+      if(!textKey) continue;
+      // Rows dropped by the final-answer guards allocate no slot either.
+      if(rowIsLiveTokenFinalPrefix(settledRow,textKey,finalSegmentEligible)) continue;
+      if(_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) continue;
+      const key=_anchorSceneExistingRowKey(settledRow)||'__no_key__';
+      const slotKey=_mirrorSlotKey(settledRow.role,textKey);
+      const prevSlot=_idToLatestSlot[key];
+      if(prevSlot){
+        if(prevSlot!==slotKey){
+          // Same identity re-appeared under a different role/text key: move its
+          // single slot to the latest key instead of allocating a second one.
+          projectedMirrorSlots[prevSlot]=(projectedMirrorSlots[prevSlot]||1)-1;
+          if(projectedMirrorSlots[prevSlot]<=0) delete projectedMirrorSlots[prevSlot];
+          _idToLatestSlot[key]=slotKey;
+          projectedMirrorSlots[slotKey]=(projectedMirrorSlots[slotKey]||0)+1;
+        }
+        // Same key + same role/text: the identity already holds one slot; do not
+        // double-count repeated snapshots of the same identity.
+      }else{
+        _idToLatestSlot[key]=slotKey;
+        projectedMirrorSlots[slotKey]=(projectedMirrorSlots[slotKey]||0)+1;
+      }
+    }
+    const _projectedSlotKeys=Object.keys(projectedMirrorSlots);
+    // ── end provenance tracking ────────────────────────────────
+    const _consumeMirror=(role,textKey)=>{
+      if(!role||!textKey) return false;
+      const slotKey=_mirrorSlotKey(role,textKey);
+      if(!projectedMirrorSlots[slotKey]) return false;
+      if(projectedMirrorSlots[slotKey]<=0) return false;
+      projectedMirrorSlots[slotKey]-=1;
+      return true;
+    };
+    const _tryNearOverlapMirror=(role,textKey)=>{
+      if(!role||!textKey||textKey.length<80) return false;
+      const selfKey=_mirrorSlotKey(role,textKey);
+      const rolePrefix=`${String(role||'').toLowerCase()}\u0000`;
+      for(const slotKey of _projectedSlotKeys){
+        // Near-overlap capacity is role-scoped too: a thinking write-up that
+        // happens to contain a projected prose prefix is a different identity
+        // class and must not be consumed by the prose mirror.
+        if(slotKey===selfKey||slotKey.indexOf(rolePrefix)!==0) continue;
+        const pk=slotKey.slice(rolePrefix.length);
+        if(!pk||pk.length<80) continue;
+        if(pk.includes(textKey)||textKey.includes(pk)){
+          if(projectedMirrorSlots[slotKey]>0){
+            projectedMirrorSlots[slotKey]-=1;
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    const pushRow=(row,origin)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
@@ -3761,11 +3845,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)) return;
       const isTextual=row.role==='prose'||row.role==='thinking';
       if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
-      if(isTextual&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
       const key=_anchorSceneExistingRowKey(row);
-      if(key&&seen.has(key)) return;
+      // ── same-identity enrichment: keep latest/richest value ──
+      if(key&&seen.has(key)){
+        const existingIdx=rows.findIndex(r=>_anchorSceneExistingRowKey(r)===key);
+        if(isTextual&&existingIdx>=0){
+          rows[existingIdx]={...rows[existingIdx],...row,display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode)};
+        }
+        return;
+      }
       if(key) seen.add(key);
-      if(isTextual&&textKey) seenTextKeys.push(textKey);
+      // ── provenance-aware mirror consumption (settled rows) ───
+      if(origin==='settled'&&isTextual&&textKey){
+        if(_consumeMirror(row.role,textKey)) return;
+        // Fallback: near-overlap mirror matching for >=80 char texts
+        if(_tryNearOverlapMirror(row.role,textKey)) return;
+      }
+      // ── legacy text-only dedup ────────────────────────────────────
+      // Exact-text dedup applies only to rows without a durable ID
+      // (rows with IDs are already deduped by _anchorSceneExistingRowKey).
+      // Long-text ≥80 near-overlap protection applies unconditionally.
+      if(isTextual&&textKey){
+        const hasDurableId=!!(row.local_id||row.row_id||row.event_id||(row.identity&&(row.identity.local_id||row.identity.row_id||row.identity.event_id)));
+        if(!hasDurableId){
+          if(_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+          seenTextKeys.push(textKey);
+        }else if(textKey.length>=80){
+          // For rows that carry a durable ID, only the >=80 char near-overlap leg applies
+          if(_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+        }
+      }
       rows.push({
         ...row,
         display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode),
@@ -3773,7 +3882,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         seq:rows.length,
       });
     };
-    orderedRows.forEach((row)=>pushRow(row));
+    // Phase 1: projected non-terminal rows
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') continue;
+      pushRow(row,'projected');
+    }
+    // Phase 2: settled/backfill rows (from per-message buckets)
+    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
+      const bucket=messageRows.get(idx)||[];
+      for(const row of bucket) pushRow(row,'settled');
+    }
+    // Phase 3: projected terminal rows
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') pushRow(row,'projected');
+    }
     const scene={
       ...base,
       version:'activity_scene_v1',
@@ -4568,7 +4690,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdImgSrcAllowed(v){
     const s=String(v||'');
     if(/^data:/i.test(s)) return typeof _isSafeDataImageUri==='function'&&_isSafeDataImageUri(s);
-    return _SMD_SAFE_IMG_URL_RE.test(s);
+    if(!_SMD_SAFE_IMG_URL_RE.test(s)) return false;
+    // #7941: a remote image outside the CSP img-src allowlist gets no src while
+    // streaming (nothing is fetched); the settled renderMd() pass then shows the
+    // inert click-to-open link.
+    return typeof _remoteImageAllowed!=='function'||_remoteImageAllowed(s);
   }
   function _smdLinkHref(raw){
     const href=String(raw||'');
@@ -4836,18 +4962,39 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailSameOwner(entry, parent, baseAddText, writeText){
     return !!entry && entry.parent===parent && entry.baseAddText===baseAddText && entry.writeText===writeText;
   }
-  function _smdMediaRefHasReliableBoundary(rawRef){
-    const raw=String(rawRef||'');
-    if(/[?#]$/.test(raw)) return false;
-    const ref=raw.split(/[?#]/,1)[0];
-    return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
+  function _smdMediaTokenParts(source, matchOffset, rawRef, parent){
+    const value=String(source||'');
+    const offset=Number(matchOffset)||0;
+    const before=value.slice(0,offset);
+    const quotedSource=(candidate)=>{
+      const normalized=String(candidate||'').replace(/&amp;(quot;|#39;)$/,'&$1');
+      return normalized.endsWith('"')||normalized.endsWith("'")||/(?:&quot;|&#39;)$/.test(normalized)
+        ? normalized
+        : '';
+    };
+    const quotedRef=(candidate)=>String(candidate||'').replace(/&(?:amp;)?(quot|#39);?(?=[.,;:!?]*$)/,'&$1;');
+    const localQuotedSource=quotedSource(before);
+    if(localQuotedSource){
+      return _mediaTokenParts(localQuotedSource,localQuotedSource.length,quotedRef(rawRef));
+    }
+    // Keep enough same-owner context to reconstruct a split parser-escaped
+    // HTML-entity quote opener. &amp;quot; is the longest accepted form
+    // (10 chars); literal and singly encoded quotes are shorter.
+    const prior=parent&&typeof parent.textContent==='string'?parent.textContent.slice(-10):'';
+    const contextQuotedSource=quotedSource(prior);
+    if(contextQuotedSource){
+      return _mediaTokenParts(contextQuotedSource,contextQuotedSource.length,quotedRef(rawRef));
+    }
+    return _mediaTokenParts(prior+value,prior.length+offset,rawRef);
   }
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
     const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
-    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
-    if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
+    const parts=m&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(String(chunk),0,m[1],entry&&entry.parent):null;
+    const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
+    if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
+    else if(!emitted&&entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
   }
   function _smdMediaTailFlush(parser){
     if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
@@ -4891,8 +5038,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     // Walk the combined string, slicing into prose + MEDIA token runs.
     // Prose runs go through the owning text writer. MEDIA tokens go through
-    // the single-token DOMParser helper only after a delimiter or
-    // reliable filename suffix proves the ref is complete.
+    // the single-token DOMParser helper only after a grammar delimiter or
+    // authoritative parser finalization proves the ref is complete.
     const re=/MEDIA:([^\s\)\]]+)/g;
     let last=0, m;
     let unmatchedTail=null;
@@ -4902,7 +5049,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const slice = combined.slice(last, m.index);
         writeCurrent(slice);
       }
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+      const parts=typeof _mediaTokenParts==='function'?_smdMediaTokenParts(combined,m.index,m[1],parent):null;
+      // An add_text callback boundary is never proof that the logical ref is
+      // complete: later callbacks can append a filename suffix, query, or
+      // fragment even when this callback ends at a familiar extension. Keep
+      // the trailing candidate buffered until grammar or parser finalization
+      // supplies an authoritative boundary.
+      if(matchEnd===combined.length){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
@@ -4912,7 +5065,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         last = combined.length;
         break;
       }
-      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
+      if(parts&&_smdAppendMediaNode(parent,parts[0])){
+        if(parts[1]) writeCurrent(parts[1]);
+      }else{
+        writeCurrent(m[0]);
+      }
       last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
@@ -5745,12 +5902,82 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
 
+  function _bindSidebarIdleRecovery(live){
+    let pending=null;
+    live.cancelIdleRecovery=()=>{
+      if(pending&&pending.timer) clearTimeout(pending.timer);
+      pending=null;
+    };
+    live.recoverFromSidebarIdle=()=>{
+      if(pending||_streamFinalized||_terminalStateReached||_pendingStreamEndRecovery) return;
+      const request={inflight:INFLIGHT[activeSid],timer:null};
+      const isCurrent=()=>pending===request&&!_streamFinalized&&!_terminalStateReached&&
+        LIVE_STREAMS[activeSid]===live&&live.source.readyState===1&&
+        S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&
+        INFLIGHT[activeSid]===request.inflight&&
+        !(typeof _sendInProgress!=='undefined'&&_sendInProgress&&activeSid===_sendInProgressSid);
+      pending=request;
+      // Give the independently delivered terminal frame a short handoff window,
+      // then use canonical session recovery even if the transport stays OPEN.
+      // One ticket spans both timer and request; list refreshes cannot extend it.
+      request.timer=setTimeout(async()=>{
+        request.timer=null;
+        if(!isCurrent()){
+          if(pending===request) live.cancelIdleRecovery();
+          return;
+        }
+        try{
+          let runtimeStatus=null;
+          try{
+            runtimeStatus=await api(
+              `/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`,
+              {timeoutMs:8000,retries:0,timeoutToast:false}
+            );
+          }catch(_){
+            // Runtime ownership is authoritative here.  If the probe itself
+            // fails, do not infer completion from already-cleared session
+            // fields; surface the existing interrupted-stream path instead.
+            if(isCurrent()) _handleStreamError(live.source);
+            return;
+          }
+          if(!isCurrent()) return;
+          if(!runtimeStatus||typeof runtimeStatus.active!=='boolean'){
+            _handleStreamError(live.source);
+            return;
+          }
+          // Gateway success writeback clears persisted active/pending fields
+          // before post-turn goal evaluation and terminal event emission.
+          // STREAMS-backed status therefore owns this decision: an exact active
+          // runtime must keep its OPEN browser handoff even if the sidebar row
+          // already looks idle.
+          if(runtimeStatus.active) return;
+          const status=await _restoreSettledSession(live.source,{
+            status:true,
+            isCurrent,
+            requestOptions:{timeoutMs:8000,retries:0,timeoutToast:false},
+            preserveVisibleOnShorterTerminalSnapshot:true,
+          });
+          // A stale sidebar response is not permission to terminate a worker
+          // which the authoritative session snapshot still reports as active.
+          if(isCurrent()&&status!=='restored'&&status!=='active') _handleStreamError(live.source);
+        }finally{
+          if(pending===request) live.cancelIdleRecovery();
+        }
+      },1500);
+    };
+    for(const event of ['done','cancel','apperror','stream_end','error']){
+      live.source.addEventListener(event,live.cancelIdleRecovery);
+    }
+  }
+
   function _wireSSE(source){
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
+      if(typeof existingLive.cancelIdleRecovery==='function') existingLive.cancelIdleRecovery();
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
+    _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -6017,7 +6244,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
+      // Browser notification is owned by showApprovalCard()/_notifyPromptCard()
+      // so every surfacing path (SSE, fallback poll, post-respond refresh,
+      // reload) dedupes through the same per-id gate.
     });
 
     source.addEventListener('clarify',e=>{
@@ -6025,7 +6254,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
+      // Browser notification is owned by showClarifyCard()/_notifyPromptCard().
     });
 
     source.addEventListener('state_saved',e=>{
@@ -6037,11 +6266,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
+    // Stream-local titles survive the delayed done/fade rebind after compression.
+    const _pendingTitleUpdates=new Map();
+    const _pendingTitleExpectedCurrent=new Map();
     source.addEventListener('title',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
-      if((d.session_id||activeSid)!==activeSid) return;
-      applySessionTitleUpdate(activeSid, d.title);
+      // Accept either the title TARGET session or the stream OWNER session:
+      // after an A→B compression rotation a reattached listener runs with
+      // activeSid=B, and the server keys this event on the title target (B)
+      // while a mid-stream listener that captured the pre-rotation activeSid=A
+      // must still receive it. Matching either id rejects only genuinely
+      // foreign streams (#7318 re-gate).
+      if((d.session_id||activeSid)!==activeSid && d.stream_owner_session_id!==activeSid) return;
+      const targetSid=d.target_session_id||d.session_id||activeSid;
+      _pendingTitleUpdates.set(targetSid, d.title);
+      _pendingTitleExpectedCurrent.set(targetSid, d.expectedCurrent);
+      // Pass the server-declared previous title as expectedCurrent: after a
+      // compression rotation or SSE reattach, the open session's title is the
+      // malformed persisted value and nothing is remembered provisionally, so
+      // a bare listener-style call would be refused and the recovered title
+      // would only appear after a full reload (#7318 re-gate).
+      applySessionTitleUpdate(targetSid, d.title, {expectedCurrent:d.expectedCurrent});
     });
 
     source.addEventListener('title_status',e=>{
@@ -6237,6 +6483,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          if(_pendingTitleUpdates.has(completedSid)){
+            applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
+            _pendingTitleUpdates.delete(completedSid);
+            _pendingTitleExpectedCurrent.delete(completedSid);
+          }
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
@@ -6677,6 +6928,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             S.session=d.session;
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
+            // Same persist-before-offset trap as settle/cancel: refresh paging
+            // before attaching the projected scene (#7628).
+            if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!d.session._messages_truncated;
+            if(typeof _oldestIdx!=='undefined') _oldestIdx=d.session._messages_offset||0;
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
             if(S.session&&S.session.session_id){
@@ -6918,6 +7173,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.session=sessionPayload;
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
+        // A bounded cancel-recovery reload returns a tail window: keep the
+        // Load-earlier paging gate honest, and refresh _oldestIdx BEFORE
+        // persisting the projected scene (#7310/#7625/#7628).
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!sessionPayload._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=sessionPayload._messages_offset||0;
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -6939,8 +7199,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
           // Fetch latest session from server to get accurate message list (includes cancel status)
           // This ensures messages stay in sync with server, fixing race condition where local
-          // "*Task cancelled.*" message gets lost when done event overwrites S.messages
-          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          // "*Task cancelled.*" message gets lost when done event overwrites S.messages.
+          // Bounded tail: a bare reload used to pull and re-redact the whole transcript
+          // on every cancel recovery (#7310/#7625).
+          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
@@ -7024,13 +7286,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
+    const isCurrent=options&&typeof options.isCurrent==='function'?options.isCurrent:null;
+    if(isCurrent&&!isCurrent()) return returnStatus?'stale':false;
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      // Bounded tail: a bare reload used to pull and re-redact the whole
+      // transcript on every stream-end settle/reconnect recovery (#7310/#7625).
+      // The Load-earlier paging gate is restored from the response below.
+      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`,options&&options.requestOptions||{});
+      if(isCurrent&&!isCurrent()) return returnStatus?'stale':false;
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -7064,6 +7332,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
+        // Restore paging from the bounded tail BEFORE attaching/persisting the
+        // projected scene: _persistSettledAnchorScene reads _oldestIdx to
+        // compute the absolute transcript index (#7628).
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
+        if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
+        if(S.session&&S.session.session_id){
+          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+        }
         const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);
         const _currentVisibleEndsWithTerminalMarker=(
           _currentVisibleMessages.length>0 &&
@@ -7079,18 +7357,40 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return !!stagedKey && stagedKey===currentKey;
           })
         );
-        const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&_stagedMatchesCurrentPrefix;
+        // Bounded settle returns a suffix of the durable transcript, not a
+        // prefix of the currently visible window. On a long session the
+        // prefix check fails and would drop the terminal recovery marker
+        // (#7628). Treat a suffix match the same as a prefix match.
+        const _durableVisibleCount=_currentVisibleEndsWithTerminalMarker
+          ? _currentVisibleMessages.length-1
+          : _currentVisibleMessages.length;
+        const _stagedSuffixStart=_durableVisibleCount-_stagedMessages.length;
+        const _stagedMatchesCurrentSuffix=(
+          _stagedMessages.length>0 &&
+          _stagedSuffixStart>=0 &&
+          _stagedMessages.length<_currentVisibleMessages.length &&
+          _currentVisibleEndsWithTerminalMarker &&
+          _stagedMessages.every((message, idx)=>{
+            const stagedKey=_messageIdentityKey(message);
+            const currentKey=_messageIdentityKey(_currentVisibleMessages[_stagedSuffixStart+idx]);
+            return !!stagedKey && stagedKey===currentKey;
+          })
+        );
+        // The server's truncation signal decides the strategy, not an `||`:
+        // a bounded settle returns a SUFFIX of the durable transcript, so
+        // suffix matching is the only correct strategy when truncated. Prefix
+        // preservation is reserved for untruncated snapshots. When repeated
+        // identical turns make BOTH comparisons succeed, preferring the prefix
+        // splices at the wrong offset and silently drops/duplicates rows
+        // (#7628). Never prefer prefix when truncation is active.
+        const _truncatedRecovery=(typeof _messagesTruncated!=='undefined'&&!!_messagesTruncated)||(typeof _oldestIdx!=='undefined'&&!!(_oldestIdx>0));
+        const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&(_truncatedRecovery?_stagedMatchesCurrentSuffix:_stagedMatchesCurrentPrefix);
         const _resolvedMessages=_preserveCurrentTranscript
-          ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMessages.length)]
+          ? [..._stagedMessages,..._currentVisibleMessages.slice(_truncatedRecovery?_stagedSuffixStart+_stagedMessages.length:_stagedMessages.length)]
           : _stagedMessages;
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-        if(S.session&&S.session.session_id){
-          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
-        }
-        if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
         if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
         const hasMessageToolMetadata=S.messages.some(m=>{
@@ -7489,19 +7789,25 @@ function hideApprovalCard(force=false) {
 let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
+const _approvalPromptGenerationBySession = new Map();
 let _approvalResponding = null;
 let _approvalClearedOwner = null;
 let _approvalDisplayedOwner = null;
 
 const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 
-// Dismissed approvals are namespaced by session so that two sessions carrying
-// the SAME approval_id (e.g. a gateway/run source that reuses externally
-// supplied IDs across sessions) can't have a dismissal in one session hide the
-// other's still-pending approval. Stored value is "<sid>\u0000<approval_id>".
+// Dismissal uses the same injective full-owner tuple as notifications.
+// Legacy session/ID-only tombstones cannot safely identify a gateway run.
 function _approvalDismissKey(sid, approvalId) {
   if (!approvalId) return '';
-  return String(sid || '') + '\u0000' + String(approvalId);
+  const pending = typeof approvalId === 'object' ? approvalId : {approval_id: approvalId};
+  return _promptNotifyKey('approval', sid, pending);
+}
+
+function _legacyApprovalDismissKey(sid, approvalId) {
+  const pending = typeof approvalId === 'object' ? approvalId : {approval_id: approvalId};
+  const id = pending && pending.approval_id;
+  return sid && id ? String(sid) + '\0' + String(id) : '';
 }
 
 function _getDismissedApprovals() {
@@ -7512,7 +7818,23 @@ function _getDismissedApprovals() {
 function _isApprovalDismissed(sid, approvalId) {
   const key = _approvalDismissKey(sid, approvalId);
   if (!key) return false;
-  return _getDismissedApprovals().includes(key);
+  const dismissed = _getDismissedApprovals();
+  if (dismissed.includes(key)) return true;
+  const pending = typeof approvalId === "object" ? approvalId : {approval_id: approvalId};
+  const legacyId = pending && pending.approval_id;
+  const legacyKey = sid && legacyId ? String(sid) + "\0" + String(legacyId) : "";
+  if (!legacyKey || !dismissed.includes(legacyKey)) return false;
+  // Bind an old session/ID tombstone to the currently observed full owner.
+  // This keeps an unresolved dismissal quiet through upgrade without letting
+  // the ambiguous legacy key suppress every future gateway run forever.
+  const migrated = dismissed.filter(item => item !== legacyKey && item !== key);
+  const hasFullOwner = !!(pending && pending.run_id && pending._gateway_mirror_token);
+  // A legacy tombstone cannot identify a gateway run. Consume it rather than
+  // transferring its authority to an unrelated later owner that reused the ID.
+  if (!hasFullOwner) migrated.push(key);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(migrated.slice(-100))); }
+  catch (_) {}
+  return !hasFullOwner;
 }
 
 function _markApprovalDismissed(sid, approvalId) {
@@ -7543,15 +7865,38 @@ function _approvalPromptBelongsToActiveSession(sid) {
 function activeSessionHasPendingPromptAttention() {
   const sid = _promptActiveSessionId();
   return !!(sid && (
-    _approvalPendingBySession.has(sid) ||
+    (_approvalPendingBySession.has(sid) &&
+      !_isApprovalDismissed(sid, _approvalPendingBySession.get(sid).pending)) ||
     _clarifyPendingBySession.has(sid)
   ));
+}
+
+function _approvalPromptGeneration(sid) {
+  return Number(_approvalPromptGenerationBySession.get(sid) || 0);
+}
+
+function _bumpApprovalPromptGeneration(sid) {
+  if (sid) _approvalPromptGenerationBySession.set(sid, _approvalPromptGeneration(sid) + 1);
 }
 
 function _rememberApprovalPending(pending, pendingCount) {
   if (!pending) return null;
   const sid = pending._session_id || _promptActiveSessionId();
   if (!sid) return null;
+  const prev = _approvalPendingBySession.get(sid);
+  // A replacement pending entry DISPLACES the previous prompt for this
+  // session: retire the displaced prompt notification-dedupe key so the same
+  // externally supplied ID can legitimately notify again later. A re-render
+  // of the SAME prompt serializes to the same owner key - skip retirement
+  // there so repeated poll ticks stay deduped.
+  if (prev && prev.pending
+      && _promptNotifyKey("approval", sid, prev.pending) !== _promptNotifyKey("approval", sid, pending)) {
+    _retirePromptNotifyKey("approval", sid, prev.pending);
+    _unmarkApprovalDismissed(sid, prev.pending);
+    _bumpApprovalPromptGeneration(sid);
+  } else if (!prev) {
+    _bumpApprovalPromptGeneration(sid);
+  }
   const nextPending = {...pending, _session_id: sid};
   _approvalPendingBySession.set(sid, {pending: nextPending, pendingCount: pendingCount || 1});
   return sid;
@@ -7559,7 +7904,11 @@ function _rememberApprovalPending(pending, pendingCount) {
 
 function _clearApprovalPendingForSession(sid) {
   if (sid) {
+    const entry = _approvalPendingBySession.get(sid);
     _approvalPendingBySession.delete(sid);
+    _bumpApprovalPromptGeneration(sid);
+    if (entry && entry.pending) _unmarkApprovalDismissed(sid, entry.pending);
+    if (entry && entry.pending) _retirePromptNotifyKey('approval', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
 }
@@ -7702,8 +8051,9 @@ function showApprovalForSession(sid, pending, pendingCount) {
 
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
+  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending)) return;
+  if(typeof _notifyPromptCard==='function') _notifyPromptCard('approval', sid, pending);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
-  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
   _approvalClearedOwner = null;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
@@ -7762,9 +8112,12 @@ function showApprovalCard(pending, pendingCount) {
 
 function dismissApprovalCard() {
   const sid = _approvalSessionId;
-  if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
+  const entry = _approvalPendingBySession.get(sid);
+  if (entry && entry.pending) _markApprovalDismissed(sid, entry.pending);
+  // Keep the unresolved owner for authoritative resolution/replacement.
+  // Local dismissal hides attention, not the server-owned prompt.
+  if (typeof syncTopbar === 'function') syncTopbar();
   hideApprovalCard(true);
-  if (sid) _clearApprovalPendingForSession(sid);
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -7944,8 +8297,14 @@ function startApprovalPolling(sid) {
 let _approvalEventSource = null;
 let _approvalSSEHealthTimer = null;
 let _approvalPollingSessionId = null;
+// Session whose poller stopped on a profile-mismatch 409; re-armed on focus/visibility.
+let _approvalProfilePausedSessionId = null;
+// Bumped on every focus/visibility return. A mismatch 409 for a request that began before
+// the latest return may predate a cookie switch-back, so it earns one retry before pausing.
+let _promptPollerFocusEpoch = 0;
 
 function _startApprovalFallbackPoll(sid) {
+  _approvalProfilePausedSessionId = null;
   // Run one tick immediately so a session already blocked on a pending approval
   // shows its card instantly (the removed SSE 'initial' event used to do this);
   // then poll on the 1500ms cadence. (#3913 SHOULD-FIX)
@@ -7955,8 +8314,11 @@ function _startApprovalFallbackPoll(sid) {
     }
     if (_approvalFallbackPollInFlight) return;
     _approvalFallbackPollInFlight = true;
+    const focusEpoch = _promptPollerFocusEpoch;
     try {
+      const generation = _approvalPromptGeneration(sid);
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
+      if (_approvalPollingSessionMissingOrMismatched(sid) || _approvalPromptGeneration(sid) !== generation) return;
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
         const _resolvedEntry = _approvalPendingBySession.get(sid);
@@ -7968,10 +8330,20 @@ function _startApprovalFallbackPoll(sid) {
           stopApprovalPollingForSession(sid);
         }
       }
-    } catch(e) { /* ignore poll errors */ }
-    finally { _approvalFallbackPollInFlight = false; }
+    } catch(e) {
+      // Another profile owns this session now (e.g. a different tab switched the shared
+      // profile cookie): every further poll would 409, so stop and leave the card as-is.
+      // Only this poller may stop itself: a late 409 from a replaced poller must not kill its successor.
+      if (typeof _sessionProfileMismatchFromError === 'function' && _sessionProfileMismatchFromError(e)
+          && _approvalPollTimer === pollTimer) {
+        // Focus returned mid-request: the cookie may be back, so retry once (after finally).
+        if (focusEpoch !== _promptPollerFocusEpoch) queueMicrotask(_tick);
+        else { stopApprovalPolling(); _approvalProfilePausedSessionId = sid; }
+      }
+    }
+    finally { if (_approvalPollTimer === pollTimer) _approvalFallbackPollInFlight = false; }
   };
-  _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
+  const pollTimer = _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
   _tick();
 }
 
@@ -8120,17 +8492,37 @@ function _startHiddenActiveStreamPoll(sid) {
   if (!sid) return;
   _stopHiddenActiveStreamPoll();
   _sessionStreamHiddenPollSid = sid;
+  let notFoundCount = 0;
+  let pollTimer = null;
+  const ownsPoll = () => _sessionStreamHiddenPollSid === sid &&
+    _sessionStreamHiddenPollTimer === pollTimer;
   const tick = () => {
+    // A queued tick/response must not mutate a replacement, even for the same sid.
+    if (!ownsPoll()) return;
     // Stop conditions: tab became visible (real SSE takes over), session
     // switched, or we're already rendering a stream.
     if (typeof document !== 'undefined' && !document.hidden) { _stopHiddenActiveStreamPoll(); return; }
-    if (_sessionStreamHiddenPollSid !== sid) { _stopHiddenActiveStreamPoll(); return; }
     if (S.activeStreamId) return; // already rendering; wait it out
     try {
       fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
-        .then(r => r.ok ? r.json() : null)
+        .then(r => {
+          if (!ownsPoll()) return null;
+          if (r && r.status === 404) {
+            // Profile visibility also returns 404. Bound repeated misses, but
+            // retain the resume owner so a profile flip back can self-heal.
+            if (++notFoundCount >= 3) _stopHiddenActiveStreamPoll();
+            return null;
+          }
+          notFoundCount = 0;
+          if (r && r.status === 410) {
+            if (_sessionStreamHiddenSid === sid) _sessionStreamHiddenSid = null;
+            _stopHiddenActiveStreamPoll();
+            return null;
+          }
+          return r && r.ok ? r.json() : null;
+        })
         .then(d => {
-          if (!d || _sessionStreamHiddenPollSid !== sid) return;
+          if (!d || !ownsPoll()) return;
           const streamId = d.active_stream_id;
           if (streamId && S.activeStreamId !== String(streamId)) {
             // Server-initiated turn in flight while hidden → attach as replay.
@@ -8163,10 +8555,11 @@ function _startHiddenActiveStreamPoll(sid) {
             }
           }
         })
-        .catch(() => {});
-    } catch (_) {}
+        .catch(() => { notFoundCount = 0; });
+    } catch (_) { notFoundCount = 0; }
   };
-  _sessionStreamHiddenPollTimer = setInterval(tick, 6000);
+  pollTimer = setInterval(tick, 6000);
+  _sessionStreamHiddenPollTimer = pollTimer;
   // Fire one immediately so a turn already running when we go hidden is caught
   // without waiting a full interval.
   tick();
@@ -8511,16 +8904,36 @@ let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
 let _clarifyExpiresAt = 0;
 let _clarifyPendingBySession = new Map();
+const _clarifyPromptGenerationBySession = new Map();
 const CLARIFY_MIN_VISIBLE_MS = 30000;
 
 function _clarifyPromptBelongsToActiveSession(sid) {
   return !!(sid && _promptActiveSessionId() === sid);
 }
 
+function _clarifyPromptGeneration(sid) {
+  return Number(_clarifyPromptGenerationBySession.get(sid) || 0);
+}
+
+function _bumpClarifyPromptGeneration(sid) {
+  if (sid) _clarifyPromptGenerationBySession.set(sid, _clarifyPromptGeneration(sid) + 1);
+}
+
 function _rememberClarifyPending(pending) {
   if (!pending) return null;
   const sid = pending._session_id || _promptActiveSessionId();
   if (!sid) return null;
+  const prev = _clarifyPendingBySession.get(sid);
+  // Mirror of the approval displacement retirement above: a NEW clarification
+  // replaces the session pending entry, so the displaced prompt dedupe key
+  // retires (same-owner re-renders keep their key).
+  if (prev && prev.pending
+      && _promptNotifyKey("clarify", sid, prev.pending) !== _promptNotifyKey("clarify", sid, pending)) {
+    _retirePromptNotifyKey("clarify", sid, prev.pending);
+    _bumpClarifyPromptGeneration(sid);
+  } else if (!prev) {
+    _bumpClarifyPromptGeneration(sid);
+  }
   const nextPending = {...pending, _session_id: sid};
   _clarifyPendingBySession.set(sid, {pending: nextPending});
   return sid;
@@ -8528,9 +8941,17 @@ function _rememberClarifyPending(pending) {
 
 function _clearClarifyPendingForSession(sid) {
   if (sid) {
+    const entry = _clarifyPendingBySession.get(sid);
     _clarifyPendingBySession.delete(sid);
+    _bumpClarifyPromptGeneration(sid);
+    if (entry && entry.pending) _retirePromptNotifyKey('clarify', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
+}
+
+function _clearPendingPromptsForSession(sid) {
+  _clearApprovalPendingForSession(sid);
+  _clearClarifyPendingForSession(sid);
 }
 
 function _hideClarifyCardIfOwner(sid, force=false, reason="dismissed") {
@@ -8820,6 +9241,7 @@ function _clarifySetControlsDisabled(disabled, loading=false) {
 
 function showClarifyCard(pending) {
   const sid = _rememberClarifyPending(pending);
+  if(typeof _notifyPromptCard==='function') _notifyPromptCard('clarify', sid, pending);
   if (!_clarifyPromptBelongsToActiveSession(sid)) return;
   const question = pending.question || pending.description || '';
   const choices = Array.isArray(pending.choices_offered)
@@ -9047,6 +9469,7 @@ var _clarifyFallbackTimer = null;
 var _clarifyHealthTimer = null;
 let _clarifyFallbackPollInFlight = false;
 let _clarifyPollingSessionId = null;
+let _clarifyProfilePausedSessionId = null;
 
 function startClarifyPolling(sid) {
   stopClarifyPolling();
@@ -9069,6 +9492,7 @@ function startClarifyPolling(sid) {
 
 function _startClarifyFallbackPoll(sid) {
   _clarifyPollingSessionId = sid || null;
+  _clarifyProfilePausedSessionId = null;
   // Run one tick immediately so a session already blocked on a pending clarify
   // shows its card instantly (the removed SSE 'initial' event used to do this);
   // then poll on the 3000ms cadence. (#3913 SHOULD-FIX)
@@ -9078,8 +9502,11 @@ function _startClarifyFallbackPoll(sid) {
     }
     if (_clarifyFallbackPollInFlight) return;
     _clarifyFallbackPollInFlight = true;
+    const focusEpoch = _promptPollerFocusEpoch;
     try {
+      const generation = _clarifyPromptGeneration(sid);
       const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
+      if (!S.session || S.session.session_id !== sid || _clarifyPromptGeneration(sid) !== generation) return;
       if (data.pending) { showClarifyForSession(sid, data.pending); }
       else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
     } catch(e) {
@@ -9097,6 +9524,16 @@ function _startClarifyFallbackPoll(sid) {
         currentSessionId: currentSid,
         message: msg,
       };
+      // Profile-mismatch 409: the session is owned by another profile under the current
+      // cookie, so polling can never succeed. Stop quietly; the live card stays standing.
+      // Only this poller may stop itself: a late 409 from a replaced poller must not kill its successor.
+      if (typeof _sessionProfileMismatchFromError === "function" && _sessionProfileMismatchFromError(e)) {
+        if (_clarifyFallbackTimer === pollTimer) {
+          if (focusEpoch !== _promptPollerFocusEpoch) queueMicrotask(_tick);
+          else { stopClarifyPolling(); _clarifyProfilePausedSessionId = sid; }
+        }
+        return;
+      }
       // A 404 from the active session domain is a STALE-SESSION signal — e.g.
       // the old profile's session still polling briefly after a profile switch,
       // or a session deleted server-side — NOT a missing clarify endpoint. Stop
@@ -9145,10 +9582,10 @@ function _startClarifyFallbackPoll(sid) {
         console.warn("[clarify] pending poll failed", logDetails);
       }
     } finally {
-      _clarifyFallbackPollInFlight = false;
+      if (_clarifyFallbackTimer === pollTimer) _clarifyFallbackPollInFlight = false;
     }
   };
-  _clarifyFallbackTimer = setInterval(_tick, 3000);
+  const pollTimer = _clarifyFallbackTimer = setInterval(_tick, 3000);
   _tick();
 }
 
@@ -9164,6 +9601,21 @@ function stopClarifyPolling() {
   _clarifyFallbackPollInFlight = false;
   _clarifyPollingSessionId = null;
 }
+
+// Another tab may have switched the shared profile cookie back: re-arm pollers that a
+// profile-mismatch 409 paused while their session is still open. A still-mismatched
+// profile just 409s once and pauses them again.
+function _resumeProfilePausedPromptPollers() {
+  if (typeof document !== 'undefined' && document.hidden) return;
+  _promptPollerFocusEpoch++;
+  const current = (S.session && S.session.session_id) || null;
+  const approvalSid = _approvalProfilePausedSessionId;
+  const clarifySid = _clarifyProfilePausedSessionId;
+  if (approvalSid && approvalSid === current && !_approvalPollTimer) startApprovalPolling(approvalSid);
+  if (clarifySid && clarifySid === current && !_clarifyFallbackTimer) startClarifyPolling(clarifySid);
+}
+document.addEventListener('visibilitychange', _resumeProfilePausedPromptPollers);
+window.addEventListener('focus', _resumeProfilePausedPromptPollers);
 
 // ── Notifications and Sound ──────────────────────────────────────────────────
 
@@ -9251,9 +9703,24 @@ function playAttentionSound(key){
 }
 
 function _notificationOptions(body,options={}){
-  const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
-  const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
-  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+  // #7652 review: a falsy sid used to fall through to the CURRENT session, so
+  // a notification for a sessionless surface (e.g. a cron completion with no
+  // session_id) opened whatever chat the user happened to be in and reused its
+  // notification tag. An explicit {sessionless:true} marker routes away from
+  // the current session, with its own tag, instead.
+  const sessionless=!!(options&&options.sessionless);
+  const sid=sessionless?null:((options&&options.sid)||(S&&S.session&&S.session.session_id));
+  // A sessionless surface still needs a DESTINATION to land on: the root URL
+  // alone restores whatever chat was last open (boot's saved-session restore),
+  // so the alert about a cron run opened the chat instead of the panel the run
+  // belongs to (#7652 review round 4). An explicit panel intent is carried in
+  // the URL; boot honors it ahead of the saved-chat restore.
+  const panel=(options&&options.panel)?String(options.panel).slice(0,64):'';
+  const rootWithPanelIntent=panel
+    ? `${location.origin}${_appRootPath()}${_appRootPath().includes('?')?'&':'?'}panel=${encodeURIComponent(panel)}`
+    : `${location.origin}${_appRootPath()}`;
+  const url=sessionless?rootWithPanelIntent:(sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href);
+  return {body:body||'',tag:sessionless?'hermes-webui-sessionless':(sid?`hermes-${sid}`:'hermes-webui'),renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
@@ -9298,6 +9765,81 @@ function requestNotificationPermission(){
     return p;
   });
 }
+const _promptNotifySeen = new Map();
+// Prompt-card notifications: an approval or clarify card BLOCKS the run until
+// it is answered, so every surfacing path must notify — the live SSE event,
+// the 1.5s fallback poll, the post-respond "next approval" refresh, and a
+// page reload while a prompt is still pending. The chokepoint is the card
+// renderer itself (showApprovalCard / showClarifyCard); this helper dedupes
+// per logical OWNER - the typed tuple [kind, sid, prompt id, run owner id,
+// mirror token] serialized with JSON.stringify so delimiter-bearing producer
+// strings cannot collide (the gateway accepts approval_id as an unrestricted
+// string) - so repeated poll ticks, re-renders, and session switches ping
+// exactly once per owner. The run-owner fields mirror the approval-owner
+// identity used elsewhere in this file (_approvalOwnerForPending): the same
+// externally supplied approval_id may legitimately be pending in two
+// sessions, or in two gateway runs within one session, and each owner must
+// notify on its own. Seen entries are retired by PROMPT LIFECYCLE, not by
+// wall-clock age: _clearApprovalPendingForSession() and
+// _clearClarifyPendingForSession() (the resolution/dismissal/terminal
+// chokepoints) call _retirePromptNotifyKey(), so a prompt left pending for
+// hours never re-notifies, while a resolved prompt whose ID is later reused
+// legitimately notifies again. Entries are also NOT recorded when
+// notifications are disabled, so enabling mid-prompt re-notifies that owner.
+function _promptNotifyKey(kind, sid, pending){
+  const p = pending || {};
+  // Older clarify producers can omit clarify_id. Their stable prompt payload is
+  // still a usable lifecycle identity and is retired with the pending entry.
+  const id = p.approval_id || p.clarify_id || (kind === 'clarify'
+    ? JSON.stringify([p.question || p.description || '', p.choices_offered || p.choices || [], p.requested_at || ''])
+    : '');
+  const runId = String(p.run_id || '').trim();
+  const mirrorToken = String(p._gateway_mirror_token || '').trim();
+  return JSON.stringify([kind, String(sid || ''), String(id),
+    runId && mirrorToken ? runId : '',
+    runId && mirrorToken ? mirrorToken : '']);
+}
+function _retirePromptNotifyKey(kind, sid, pending){
+  if (!pending) return;
+  const key = _promptNotifyKey(kind, sid, pending);
+  if (!key) return;
+  _promptNotifySeen.delete(key);
+}
+function _notifyPromptCard(kind, sid, pending){
+  const p = pending || {};
+  const id = p.approval_id || p.clarify_id || (kind === 'clarify' ? p.question || p.description || '' : '');
+  if (!id) return;
+  const key = _promptNotifyKey(kind, sid, p);
+  if (_promptNotifySeen.has(key)) return;
+  // Suppress ONLY when the user is effectively looking at this prompt right
+  // now: it belongs to the session open in the pane AND the tab is visible
+  // AND focused. Every other combination pings:
+  //   1. prompt for a non-active session (even with the tab focused)
+  //   2. active session, but a different tab is selected
+  //   3. active session, tab active, but the Chrome window is not focused
+  // Suppression is NOT recorded, so the same prompt still pings exactly once
+  // the moment the user is no longer looking at it.
+  if (typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid)) return;
+  if (typeof sendBrowserNotification !== 'function') return;
+  if (typeof window !== 'undefined' && !window._notificationsEnabled) return;
+  const attempt = {};
+  _promptNotifySeen.set(key, attempt);
+  // forceHidden: this caller already made the visibility decision (the
+  // actively-viewed gate above). sendBrowserNotification's own live gate
+  // ("notify only when document.hidden") would otherwise veto the
+  // unfocused-but-visible case, which this feature explicitly notifies for.
+  const rollback = () => {
+    if (_promptNotifySeen.get(key) === attempt) _promptNotifySeen.delete(key);
+  };
+  try {
+    const delivery = kind === 'clarify'
+      ? sendBrowserNotification('Clarification needed', p.question || p.description || 'Tool clarification needed', { sid, forceHidden: true })
+      : sendBrowserNotification('Approval required', p.description || p.command || 'Tool approval needed', { sid, forceHidden: true });
+    Promise.resolve(delivery).then(accepted => {
+      if (accepted !== true) rollback();
+    }, rollback);
+  } catch (_) { rollback(); }
+}
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
   // #4416: `forceHidden` means the caller already determined the tab was hidden
@@ -9310,14 +9852,32 @@ function sendBrowserNotification(title,body,options={}){
   if(!force&&!window._notificationsEnabled) return;
   if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;
   if(!('Notification' in window)) return;
-  if(Notification.permission==='granted'){
-    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
-  }else if(Notification.permission==='denied'){
+  const deliver = async () => {
+    try {
+      await _showPwaNotification(title,body,options);
+      return true;
+    } catch (_) {
+      try {
+        new Notification(title||assistantDisplayName(),_notificationOptions(body,options));
+        return true;
+      } catch (_err) { return false; }
+    }
+  };
+  if(Notification.permission==='granted') return deliver();
+  if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
-  }else{
-    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
+    return false;
   }
+  // Permission still 'default': prompt-card owners retry on every 1.5s poll
+  // tick while pending, so an automatic (non-gesture) request is made at most
+  // once per page — otherwise each tick re-prompts and re-toasts "denied".
+  // The explicit "Send test" (force) path always asks.
+  if(!force){
+    if(sendBrowserNotification._autoPermissionRequested) return false;
+    sendBrowserNotification._autoPermissionRequested=true;
+  }
+  return requestNotificationPermission().then(p => p==='granted' ? deliver() : false).catch(() => false);
 }
 
 // ── /btw ephemeral stream ────────────────────────────────────────────────────

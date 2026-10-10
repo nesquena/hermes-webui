@@ -211,6 +211,8 @@ def test_stop_during_agent_creation_prevents_provider_run(worker_scene, monkeypa
             release.set()
         worker.result(timeout=10)
     assert "run" not in scene.calls, "accepted Stop must prevent the provider/tool run"
+    cached = config.SESSION_AGENT_CACHE.get("original")
+    assert not cached or cached[0] is not scene.agent, "cancelled initial candidate remained reusable"
     assert finalized, "cancelled turn was not finalized"
     assert "run" not in config.AGENT_INSTANCES
     assert "run" not in config.ACTIVE_RUNS
@@ -276,3 +278,10 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
     assert scene.agent.pending == []
     assert finalizing_edges == [True], "final drain admission must close under the stream lock"
     assert "run" not in config.ACTIVE_RUNS
+
+
+def test_successfully_registered_new_agent_remains_cached(worker_scene):
+    scene = worker_scene
+    scene.run()
+    assert scene.calls.count("run") == 1
+    assert config.SESSION_AGENT_CACHE["original"][0] is scene.agent
