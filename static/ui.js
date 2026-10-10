@@ -10108,7 +10108,10 @@ function _stopActivePlaybackAudio(){
       _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0;
     }
   }catch(_){}
+  const previousAudio=_playingEdgeAudio;
   _playingEdgeAudio=null;
+  // Native WAV chains must release their URL and settle on cancellation too.
+  if(previousAudio&&typeof previousAudio._ttsCleanup==='function') previousAudio._ttsCleanup();
 }
 
 function _playEdgeTtsChunked(text, btn){
@@ -10188,6 +10191,54 @@ function _playEdgeTtsChunked(text, btn){
   _playOne(0);
 }
 
+// Native WAV playback uses the same generation, profile and request scheduler
+// as the other built-in engines. No separate cancellation or retry clock.
+function _playGeminiTtsChunked(text, btn){
+  const gen=_beginTtsPlayback();
+  _stopActivePlaybackAudio();
+  const playbackProfile=(S&&S.activeProfile)||'default';
+  const chunks=_splitForTTS(text);
+  const owns=()=>_ownsTtsPlayback(gen)&&_ttsSpeaking;
+  if(btn) btn.dataset.speaking='1';
+  const playOne=function(idx){
+    if(!owns()||idx>=chunks.length) return Promise.resolve();
+    return _sendTtsRequest({
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:chunks[idx],engine:'gemini',profile:playbackProfile})
+    }, owns).then(function(res){
+      if(!owns()) return;
+      if(!res.ok) throw res.err||new Error('Gemini TTS failed');
+      return new Promise(function(resolve,reject){
+        const url=URL.createObjectURL(new Blob([res.buf],{type:res.type}));
+        let audio=null, settled=false;
+        const cleanup=function(error){
+          if(settled) return;
+          settled=true;
+          URL.revokeObjectURL(url);
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          if(error) reject(error); else resolve();
+        };
+        try{
+          audio=new Audio(url);
+          _playingEdgeAudio=audio;
+          audio._ttsCleanup=()=>cleanup();
+          audio.onended=()=>cleanup();
+          audio.onerror=()=>cleanup(new Error('Gemini TTS audio playback failed'));
+          audio.play().catch(cleanup);
+        }catch(e){ cleanup(e); }
+      });
+    }).then(()=>playOne(idx+1));
+  };
+  return playOne(0).catch(function(e){
+    if(owns()&&typeof showToast==='function') showToast(e.message||'Gemini TTS failed',4000,'error');
+  }).then(function(){
+    if(!_ownsTtsPlayback(gen)) return;
+    _stopActivePlaybackAudio();
+    _ttsSpeaking=false;
+    if(btn) btn.dataset.speaking='0';
+  });
+}
+
 function speakMessage(btn){
   if(btn&&btn.dataset.speaking==='1'){
     stopTTS();
@@ -10203,6 +10254,10 @@ function speakMessage(btn){
   if(!clean) return;
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='gemini'){
+    _playGeminiTtsChunked(clean, btn);
+    return;
+  }
   if(engine==='openai'){
     _playOpenaiTts(clean, btn);
     return;
@@ -10579,6 +10634,10 @@ function autoReadLastAssistant(){
   // Without it, a new auto-read could overlap the previous engine's audio
   // and leave a manual button visibly stuck in the speaking state.
   stopTTS();
+  if(engine==='gemini'){
+    _playGeminiTtsChunked(clean, null);
+    return;
+  }
   if(engine==='openai'){
     _playOpenaiTts(clean, null);
     return;

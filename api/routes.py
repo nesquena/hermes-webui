@@ -21197,7 +21197,7 @@ def _handle_tts(handler, parsed):
     voice = "zh-CN-XiaoxiaoNeural"
     rate_str = ""
     pitch_str = ""
-    engine = "edge"  # "edge" | "elevenlabs" | "openai" | "browser" (browser is client-side only)
+    engine = "edge"  # "edge" | "elevenlabs" | "openai" | "gemini" | "browser" (client-side only)
 
     if handler.command != "POST":
         from api.helpers import bad as _bad
@@ -21220,11 +21220,13 @@ def _handle_tts(handler, parsed):
                 persisted_engine = ""
             engine = (
                 persisted_engine
-                if persisted_engine in {"edge", "elevenlabs", "openai"}
+                if persisted_engine in {"edge", "elevenlabs", "openai", "gemini"}
                 else "edge"
             )
         else:
             engine = (request_engine or "edge").strip().lower()
+        if engine == "gemini" and text:
+            text = data["text"]  # Send the supplied text verbatim; no instruction wrapper.
     except Exception:
         from api.helpers import bad as _bad
         return _bad(handler, "invalid request body", 400)
@@ -21318,6 +21320,81 @@ def _handle_tts(handler, parsed):
         logger.warning("TTS rate limit hit for client=%s", limiter._get_client_key(handler))
         from api.helpers import bad as _bad
         return _bad(handler, "rate limit exceeded — please wait", 429)
+
+    # ── Gemini TTS (Interactions API, native WAV) ────────────────────────
+    if engine == "gemini":
+        from api.helpers import bad as _bad
+        api_key = ""
+        try:
+            from api.onboarding import _load_env_file
+            from api import profiles as _profiles
+            # Only request-local profile credentials are safe: process env can
+            # contain another profile's key during or after a failed reload.
+            env_cfg = _load_env_file(_profiles.get_active_hermes_home() / ".env")
+            api_key = (env_cfg.get("GEMINI_API_KEY", "").strip()
+                       or env_cfg.get("GOOGLE_API_KEY", "").strip())
+        except Exception:
+            # Fail closed if profile credential resolution is unavailable.
+            pass
+        if not api_key:
+            return _bad(handler, "Gemini API key not configured", 503)
+
+        model, gemini_voice = "gemini-3.8-flash-lite-tts", "Kore"
+        try:
+            from api.config import get_config
+            tts_cfg = (get_config() or {}).get("tts", {})
+            gemini_cfg = tts_cfg.get("gemini", {}) if isinstance(tts_cfg, dict) else {}
+            if isinstance(gemini_cfg, dict):
+                model = gemini_cfg.get("model") or model
+                gemini_voice = gemini_cfg.get("voice") or gemini_voice
+        except Exception:
+            pass
+        if any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", v)
+               for v in (model, gemini_voice)):
+            return _bad(handler, "invalid Gemini model or voice in config", 400)
+
+        req = Request("https://generativelanguage.googleapis.com/v1beta/interactions",
+                      data=json.dumps({
+                          "model": model,
+                          "input": [{"type": "user_input", "content": [{"type": "text", "text": text}]}],
+                          "response_format": {"type": "audio"},
+                          "generation_config": {"speech_config": [{"voice": gemini_voice}]},
+                          "store": False,
+                      }).encode("utf-8"),
+                      headers={"x-goog-api-key": api_key, "Content-Type": "application/json"})
+        try:
+            import base64
+            # JSON includes base64 audio; bound both wire and decoded sizes.
+            with _tts_open(req, timeout=60, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler())) as resp:
+                response_data = resp.read(_TTS_PROXY_MAX_BYTES * 2 + 1)
+            if len(response_data) > _TTS_PROXY_MAX_BYTES * 2:
+                raise ValueError("oversized Gemini response")
+            result = json.loads(response_data)
+            audio_parts = [content for step in result.get("steps", [])
+                           if step.get("type") == "model_output"
+                           for content in step.get("content", []) if content.get("type") == "audio"]
+            # One single-speaker WAV is expected; do not concatenate WAV headers.
+            if len(audio_parts) != 1:
+                raise ValueError("missing or ambiguous Gemini audio")
+            audio_data = base64.b64decode(audio_parts[0]["data"], validate=True)
+            if (len(audio_data) > _TTS_PROXY_MAX_BYTES or len(audio_data) < 12
+                    or audio_data[:4] != b"RIFF" or audio_data[8:12] != b"WAVE"):
+                raise ValueError("invalid Gemini WAV")
+        except Exception:
+            # Provider exceptions/bodies can echo credentials; never log them.
+            logger.warning("Gemini TTS generation failed")
+            return _bad(handler, "Gemini TTS generation failed", 502)
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/wav")
+        handler.send_header("Content-Length", str(len(audio_data)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return True
 
     # ── ElevenLabs TTS ──────────────────────────────────────────────────
     if engine == "elevenlabs":
