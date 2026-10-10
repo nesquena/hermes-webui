@@ -357,6 +357,12 @@ def test_apply_project_auto_assign_files_existing_sessions(tmp_path, monkeypatch
 
     proj = {"project_id": "proj_xyz", "profile": "default",
             "workspaces": [ws_str], "auto_assign": True}
+    # The sweep re-reads the LIVE project row before filing anything (Greptile
+    # P1 2026-10-10T02:22:51Z). This test drives it from an in-memory snapshot
+    # with no projects catalog on disk, so pin the unchanged-bindings answer.
+    monkeypatch.setattr(
+        routes, "_auto_assign_live_binding", lambda pid: (True, {ws_str})
+    )
     changed = routes._apply_project_auto_assign(proj)
 
     # sess_aaa: bound ws, unowned → re-filed.
@@ -416,6 +422,12 @@ def test_apply_project_auto_assign_named_profile_never_sweeps_default(tmp_path, 
 
     proj = {"project_id": "proj_named", "profile": "haku",
             "workspaces": [ws_str], "auto_assign": True}
+    # The sweep re-reads the LIVE project row before filing anything (Greptile
+    # P1 2026-10-10T02:22:51Z). This test drives it from an in-memory snapshot
+    # with no projects catalog on disk, so pin the unchanged-bindings answer.
+    monkeypatch.setattr(
+        routes, "_auto_assign_live_binding", lambda pid: (True, {ws_str})
+    )
     changed = routes._apply_project_auto_assign(proj)
 
     assert saved.get("sess_haku") == "proj_named"
