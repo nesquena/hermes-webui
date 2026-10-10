@@ -1644,6 +1644,25 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
     return ids
 
 
+def _gateway_home_for_profile(profile_name):
+    """Home directory of the session's own profile; the default profile's for no name."""
+    from api import profiles as _profiles
+
+    return _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
+
+
+def _gateway_config_for_profile(profile_name) -> dict:
+    """Config of the session's own profile, root included, never the process-active profile.
+
+    The Gateway worker runs on a detached thread with no request-profile
+    context, so the ambient ``get_config()`` resolves the process-default
+    profile there (#8152, the #3294 pattern).
+    """
+    from api.config import get_config_for_profile_home
+
+    return get_config_for_profile_home(_gateway_home_for_profile(profile_name))
+
+
 def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     """URL and key of the session's own profile, root included, never the process-active profile."""
     from api import profiles as _profiles
@@ -2060,18 +2079,23 @@ def _run_gateway_chat_streaming(
     s = None
     final_text = ""
     terminal_error = ""
+    gateway_api_key = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        from api.config import get_config  # imported lazily to avoid config-cycle churn
-
-        cfg = get_config()
+        # #8152: this thread has no request-profile context, so the ambient
+        # get_config() and os.environ are the process-default profile's. Read
+        # the session's own profile: its config for everything below, and its
+        # Gateway URL and key, as a resumed run already does.
+        _session_profile = getattr(s, "profile", None)
+        cfg = _gateway_config_for_profile(_session_profile)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
             model_provider=model_provider,
         )
-        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
+        base_url, api_key = reattach_endpoint or _gateway_endpoint_for_profile(_session_profile)
+        gateway_api_key = api_key
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:
@@ -2112,6 +2136,7 @@ def _run_gateway_chat_streaming(
                     "workspace": s.workspace if s is not None else str(workspace),
                 },
                 config_data=cfg,
+                hermes_home=_gateway_home_for_profile(_session_profile),
             )
             prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
@@ -2586,7 +2611,7 @@ def _run_gateway_chat_streaming(
             err_body = ""
         put_gateway_event(
             "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+            _gateway_http_error_event(exc, err_body, api_key_configured=bool(gateway_api_key)),
         )
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]

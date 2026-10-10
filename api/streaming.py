@@ -1377,6 +1377,7 @@ def _webui_ephemeral_system_prompt(
     personality_prompt: Optional[str],
     surface_context: Optional[dict] = None,
     config_data: Optional[dict] = None,
+    hermes_home=None,
 ) -> str:
     """Build WebUI-only runtime instructions that are not persisted to history."""
     parts = []
@@ -1386,7 +1387,7 @@ def _webui_ephemeral_system_prompt(
     if surface_prompt:
         parts.append(surface_prompt)
     parts.append(_WEBUI_PROGRESS_PROMPT)
-    delivery_prompt = _webui_delivery_context_prompt(config_data)
+    delivery_prompt = _webui_delivery_context_prompt(config_data, hermes_home)
     if delivery_prompt:
         parts.append(delivery_prompt)
     # Last on purpose (#8148): the only per-session text in this prompt.
@@ -1637,7 +1638,9 @@ def _public_prefill_context_status(prefill_context: dict) -> dict:
     }
 
 
-def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
+def _webui_delivery_context_prompt(
+    config_data: Optional[dict] = None, hermes_home=None
+) -> str:
     """Return platform/delivery context for the ephemeral system prompt.
 
     Connected platforms, home channels, and scheduled-task delivery hints
@@ -1651,6 +1654,11 @@ def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
     ``_webui_ephemeral_system_prompt()`` before this helper.  If you
     refactor this area, keep that surface call in place — the two helpers
     together produce the full session context block.
+
+    ``hermes_home`` names the profile home whose ``gateway_state.json`` lists
+    the connected platforms. The Gateway worker passes the session's own: its
+    thread has no profile context, so ``get_hermes_home()`` is the process
+    profile's there (#8152). Left out, the ambient home is used as before.
     """
     cfg = config_data if isinstance(config_data, dict) else get_config()
     lines: list[str] = []
@@ -1664,8 +1672,11 @@ def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
 
     connected = ["local (files on this machine)"]
     try:
-        if get_hermes_home is not None:
-            state_path = get_hermes_home() / "gateway_state.json"
+        state_home = Path(hermes_home) if hermes_home is not None else None
+        if state_home is None and get_hermes_home is not None:
+            state_home = get_hermes_home()
+        if state_home is not None:
+            state_path = state_home / "gateway_state.json"
             if state_path.exists():
                 raw_state = json.loads(state_path.read_text(encoding="utf-8"))
                 platforms = raw_state.get("platforms") if isinstance(raw_state, dict) else {}
