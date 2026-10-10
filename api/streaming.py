@@ -6486,6 +6486,35 @@ def _is_generic_fallback_title(title) -> bool:
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
+# Internal title-generation statuses are diagnostics, not user-facing text.
+# The manual regenerate route renders its 422 body verbatim in the sidebar
+# toast, so any status a user can trigger manually must be translated (#7693:
+# the toast used to show the raw internal code "llm_language_mismatch_aux").
+_TITLE_FAILURE_HUMAN_REASONS = {
+    'llm_language_mismatch': 'the generated title did not match the conversation language',
+    'llm_language_mismatch_aux': 'the generated title did not match the conversation language',
+    'llm_invalid': 'the title model returned an unusable title',
+    'llm_invalid_aux': 'the title model returned an unusable title',
+    'llm_empty': 'the title model returned an empty title',
+    'llm_empty_aux': 'the title model returned an empty title',
+    'llm_error': 'the title model could not be reached',
+    'llm_error_aux': 'the title model could not be reached',
+    'empty_user_message': 'this session has no user message to title yet',
+    'empty_title': 'no title could be produced for this session',
+    'title_generation_disabled': 'title generation is disabled for this profile',
+}
+
+
+def _human_title_failure_reason(status) -> str:
+    """Map an internal title-generation status to readable failure text.
+
+    Known internal codes are translated; anything else passes through unchanged
+    so a new status stays debuggable instead of turning into an empty message.
+    """
+    key = str(status or '').strip()
+    return _TITLE_FAILURE_HUMAN_REASONS.get(key, key)
+
+
 # Recovery cap for a model that keeps answering badly: an invalid model output
 # suppresses the local fallback so the next completed exchange retries the LLM
 # (the local fallback would mark a warm-up opener as successfully titled). A

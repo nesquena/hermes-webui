@@ -16841,7 +16841,16 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Read-only imported sessions cannot regenerate titles", 403)
         next_title, reason, raw_preview = generate_session_title_for_session(s, prefer_latest=prefer_latest)
         if not next_title:
-            return bad(handler, f"Could not generate a better title ({reason or 'empty'})", 422)
+            # The 422 body is rendered verbatim in the sidebar toast, so map
+            # internal statuses to readable text instead of leaking codes like
+            # "llm_language_mismatch_aux" (#7693). The existing title is kept
+            # either way — nothing is persisted on this path.
+            from api.streaming import _human_title_failure_reason
+            return bad(
+                handler,
+                f"Could not generate a better title ({_human_title_failure_reason(reason) or 'empty'})",
+                422,
+            )
         _persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")
         return j(handler, {
             "session": s.compact(),
