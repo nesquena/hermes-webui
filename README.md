@@ -221,7 +221,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
 - Session projects -- named groups with colors for organizing sessions
-- Session tags -- add #tag to titles for colored chips; clicking a chip filters the list without opening the conversation
+- Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
 - Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls
@@ -229,6 +229,8 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
+
+Clicking a session tag chip filters the list without opening the conversation.
 
 ### Workspace file browser
 - Directory tree with expand/collapse (single-click toggles, double-click navigates)
