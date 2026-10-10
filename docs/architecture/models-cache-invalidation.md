@@ -38,6 +38,20 @@ the fingerprint captured at publish time.
 The over-budget stale fallback (`_load_stale_models_cache_from_disk`) tolerates a stale
 `_webui_version` but never a source-fingerprint mismatch: such a snapshot is a wrong catalog.
 
+## Keyless model-provider plugins
+
+Plugin-only providers without an API key (including `external_process` plugins)
+are admitted to the cold static catalog when Hermes reports `logged_in` or
+`configured` authentication. A missing, malformed, or failing auth-status lookup
+is not authentication evidence. API-key plugins keep their existing key check;
+being installed alone does not make a plugin usable.
+
+An authenticated plugin's group survives an empty live catalog. It contains no
+invented model entries; the empty group communicates provider availability,
+not account entitlement. This exception does not apply to unauthenticated
+plugins. Declared fallback models remain the source for the cold static catalog.
+No cache identity or invalidation rules change.
+
 ## Codex catalog and routing
 
 The configured default is checked against the active provider's own group
