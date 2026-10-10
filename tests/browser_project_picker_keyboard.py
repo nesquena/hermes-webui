@@ -39,7 +39,16 @@ WHAT IT CHECKS
     instead: the row End, Home or ArrowUp puts focus on is on screen.
   rows under a coarse pointer (a touch context, 390x844, the sidebar drawer open)
   - every row of both pickers is at least 44px tall; with a mouse they keep
-    their compact height.
+    their compact height;
+  - the same for the conversation's ⋮ menu, which opens the picker: 44px rows
+    under a coarse pointer, compact ones with a mouse; and on a phone on its
+    side, where ten such rows do not fit, the menu stays on the screen and
+    scrolls to its last row.
+  the focus cue, on the dark and on the light theme
+  - on the light theme the focused row's ring is the skin's accent, solid, at
+    least 3:1 against the picker (the translucent --focus-ring was 1.4:1), and
+    a row under the pointer has a dark wash (the white one cannot be seen
+    there); on the dark theme the ring and the wash are what they were.
   a long list of conversations (forty more), still three projects
   - on a phone upright (390x844, 375x667, touch) the five rows show whole, below
     their anchor, and above it from the last conversation on screen;
@@ -587,6 +596,160 @@ def _check_heights(page, seed, *, coarse):
             failures.append(f"  [touch] {name} picker rows are {heights}px tall, under {MIN_TOUCH_ROW_PX}px")
         if not coarse and max(heights) >= MIN_TOUCH_ROW_PX:
             failures.append(f"  [mouse] {name} picker rows grew to {heights}px with a fine pointer")
+    return failures
+
+
+# The conversation's ⋮ menu, as data: its rows' heights, where it sits, and
+# whether its last row can be brought into its box.
+# On a phone the ⋮ menu opens from a long press on the row, so the row is the
+# anchor there; with a mouse it is the row's ⋮ trigger.
+OPEN_MENU_JS = """({sid, fromRow}) => {
+  const row = document.querySelector('.session-item[data-sid="' + sid + '"]');
+  const anchor = row && (fromRow ? row : row.querySelector('.session-actions-trigger'));
+  const session = _allSessions.find(s => s && s.session_id === sid);
+  if (!anchor || !session) return 'the conversation has no row or no ⋮ trigger';
+  if (row.getBoundingClientRect().left < 0) return 'the conversation row is off screen: is the drawer closed?';
+  _openSessionActionMenu(session, anchor);
+  return document.querySelector('.session-action-menu') ? null : 'the ⋮ menu did not open';
+}"""
+
+MENU_ROWS_JS = """() => {
+  const menu = document.querySelector('.session-action-menu');
+  if (!menu) return {problem: 'the ⋮ menu is gone'};
+  const rows = Array.from(menu.querySelectorAll('.session-action-opt'));
+  const box = menu.getBoundingClientRect();
+  menu.scrollTop = menu.scrollHeight;
+  const last = rows[rows.length - 1].getBoundingClientRect();
+  const state = {
+    heights: rows.map(opt => Math.round(opt.getBoundingClientRect().height)),
+    top: Math.round(box.top), bottom: Math.round(box.bottom), viewport: window.innerHeight,
+    lastRowInBox: last.top >= box.top - 1 && last.bottom <= box.bottom + 1,
+  };
+  closeSessionActionMenu();
+  return state;
+}"""
+
+
+def _check_menu_rows(page, seed, *, coarse, label=None):
+    """The ⋮ menu that opens the picker: finger-sized rows on a touch screen,
+    compact ones with a mouse, on the screen, its last row reachable."""
+    label = label or ("touch" if coarse else "mouse")
+    if page.evaluate("matchMedia('(pointer:coarse)').matches") != coarse:
+        return [f"  [⋮ menu, {label}] the context's pointer is not {'coarse' if coarse else 'fine'}"]
+    problem = page.evaluate(OPEN_MENU_JS, {"sid": seed["beta"], "fromRow": coarse})
+    if problem:
+        return [f"  [⋮ menu, {label}] {problem}"]
+    # The menu scales in over 450ms; a rectangle read before that is too small.
+    page.wait_for_timeout(SETTLE_MS)
+    state = page.evaluate(MENU_ROWS_JS)
+    if state.get("problem"):
+        return [f"  [⋮ menu, {label}] {state['problem']}"]
+    failures = []
+    heights = state["heights"]
+    if coarse and min(heights) < MIN_TOUCH_ROW_PX:
+        failures.append(f"  [⋮ menu, {label}] rows are {heights}px tall, under {MIN_TOUCH_ROW_PX}px")
+    if not coarse and max(heights) >= MIN_TOUCH_ROW_PX:
+        failures.append(f"  [⋮ menu, {label}] rows grew to {heights}px with a fine pointer")
+    if state["top"] < 0 or state["bottom"] > state["viewport"]:
+        failures.append(
+            f"  [⋮ menu, {label}] the menu spans {state['top']}..{state['bottom']}px"
+            f" of a {state['viewport']}px screen"
+        )
+    if not state["lastRowInBox"]:
+        failures.append(f"  [⋮ menu, {label}] the last row cannot be scrolled into the menu")
+    return failures
+
+
+# The focused row of the open single picker, as its ring and wash are painted,
+# and the two custom properties a ring can come from, resolved to colours.
+FOCUS_CUE_JS = """() => {
+  const row = document.activeElement;
+  if (!row || !row.classList.contains('project-picker-item')) return {problem: 'focus is not on a picker row'};
+  const resolved = name => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(' + name + ')';
+    document.body.appendChild(probe);
+    const colour = getComputedStyle(probe).color;
+    probe.remove();
+    return colour;
+  };
+  const parse = c => { const m = c.match(/[\\d.]+/g).map(Number); return {r: m[0], g: m[1], b: m[2], a: m.length > 3 ? m[3] : 1}; };
+  const over = (top, under) => ({
+    r: top.r * top.a + under.r * (1 - top.a), g: top.g * top.a + under.g * (1 - top.a),
+    b: top.b * top.a + under.b * (1 - top.a), a: 1,
+  });
+  const channel = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const luminance = c => 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+  const style = getComputedStyle(row);
+  const picker = parse(getComputedStyle(row.closest('.project-picker')).backgroundColor);
+  const ring = over(parse(style.outlineColor), picker);
+  const light = luminance(ring), dark = luminance(picker);
+  return {
+    dark: document.documentElement.classList.contains('dark'),
+    ring: style.outlineColor, ringStyle: style.outlineStyle, ringWidth: style.outlineWidth,
+    accent: resolved('--accent'), focusRing: resolved('--focus-ring'),
+    contrast: Math.round((Math.max(light, dark) + 0.05) / (Math.min(light, dark) + 0.05) * 100) / 100,
+  };
+}"""
+
+HOVER_WASH_JS = """() => {
+  const row = document.querySelector('.project-picker:not(.batch-project-picker) .project-picker-item:hover');
+  return row ? getComputedStyle(row).backgroundColor : null;
+}"""
+
+# WCAG 2.2 SC 1.4.11: a focus indicator needs 3:1 against what is next to it.
+MIN_RING_CONTRAST = 3.0
+
+
+def _check_focus_cue(page, seed):
+    """On a light theme the focused row's ring is the skin's accent, not the
+    translucent --focus-ring, and a hovered row shows a wash; a dark theme keeps
+    the ring and the wash it had."""
+    failures = []
+    hover = {"dark": "rgba(255, 255, 255, 0.08)", "light": "rgba(0, 0, 0, 0.05)"}
+    try:
+        for theme in ("dark", "light"):
+            page.evaluate("(name) => _applyTheme(name)", theme)
+            page.wait_for_timeout(200)
+            problem = _open_single_picker(page, seed["alpha"])
+            if problem:
+                failures.append(f"  [focus cue, {theme}] {problem}")
+                continue
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(150)
+            cue = page.evaluate(FOCUS_CUE_JS)
+            if cue.get("problem"):
+                failures.append(f"  [focus cue, {theme}] {cue['problem']}")
+            else:
+                if cue["dark"] != (theme == "dark"):
+                    failures.append(f"  [focus cue, {theme}] the page is not on the {theme} theme")
+                if (cue["ringStyle"], cue["ringWidth"]) != ("solid", "2px"):
+                    failures.append(
+                        f"  [focus cue, {theme}] the ring is {cue['ringStyle']} {cue['ringWidth']}, expected solid 2px"
+                    )
+                wanted = cue["focusRing"] if theme == "dark" else cue["accent"]
+                if cue["ring"] != wanted:
+                    name = "--focus-ring" if theme == "dark" else "--accent"
+                    failures.append(
+                        f"  [focus cue, {theme}] the ring is {cue['ring']}, expected {name} ({wanted})"
+                    )
+                if theme == "light" and cue["contrast"] < MIN_RING_CONTRAST:
+                    failures.append(
+                        f"  [focus cue, light] the ring is {cue['contrast']}:1 on the picker,"
+                        f" under {MIN_RING_CONTRAST}:1"
+                    )
+            # The pointer on another row: the wash under it.
+            page.hover(f"{SINGLE} .project-picker-item >> nth=0")
+            page.wait_for_timeout(250)
+            wash = page.evaluate(HOVER_WASH_JS)
+            if wash != hover[theme]:
+                failures.append(f"  [focus cue, {theme}] a hovered row's background is {wash}, expected {hover[theme]}")
+            page.mouse.move(700, 450)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(150)
+    finally:
+        page.evaluate("() => _applyTheme('dark')")
+        page.wait_for_timeout(200)
     return failures
 
 
@@ -1393,6 +1556,14 @@ def main():
             failures.extend(found)
             if not found:
                 print("OK  mouse — rows keep their compact height")
+            found = _check_menu_rows(page, seed, coarse=False)
+            failures.extend(found)
+            if not found:
+                print("OK  mouse — the ⋮ menu's rows keep their compact height")
+            found = _check_focus_cue(page, seed)
+            failures.extend(found)
+            if not found:
+                print("OK  focus cue — the accent as ring and a wash under the pointer on the light theme, the dark theme as it was")
             found = _check_fork_parent(page, seed)
             failures.extend(found)
             if not found:
@@ -1419,6 +1590,10 @@ def main():
                 failures.extend(found)
                 if not found:
                     print(f"OK  touch — every row is at least {MIN_TOUCH_ROW_PX}px tall")
+                found = _check_menu_rows(page, seed, coarse=True)
+                failures.extend(found)
+                if not found:
+                    print(f"OK  touch — every row of the ⋮ menu is at least {MIN_TOUCH_ROW_PX}px tall")
                 failures.extend(f"  [touch] pageerror: {err}" for err in errors)
                 ctx.close()
 
@@ -1446,6 +1621,14 @@ def main():
                 failures.extend(found)
                 if not found:
                     print(f"OK  tall anchor, short list {size} — all five rows show without scrolling, at every list position")
+                # A phone on its side has no room for ten 44px rows: the menu
+                # must stay on the screen and scroll to its last one.
+                page.evaluate("() => { document.querySelector('.session-list, #sessionList').scrollTop = 0; }")
+                page.wait_for_timeout(200)
+                found = _check_menu_rows(page, seed, coarse=True, label=f"touch {size}")
+                failures.extend(found)
+                if not found:
+                    print(f"OK  ⋮ menu {size} — finger-sized rows, on the screen, the last one reachable")
                 failures.extend(f"  [tall anchor, short list {size}] pageerror: {err}" for err in errors)
                 ctx.close()
 

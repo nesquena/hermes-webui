@@ -488,6 +488,26 @@ def test_a_focused_row_can_be_seen():
     assert ".project-picker-item.active:focus-visible{color:var(--blue);}" in STYLE_CSS
 
 
+def test_on_a_light_theme_the_ring_is_the_accent_and_the_pointer_has_a_wash():
+    """The white wash and the translucent --focus-ring are both near invisible
+    on a light picker. Scoped to :root:not(.dark), so a dark theme keeps both."""
+    assert (
+        ":root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent);}"
+        in STYLE_CSS
+    )
+    assert (
+        ":root:not(.dark) .project-picker-item:hover{background:rgba(0,0,0,.05);}" in STYLE_CSS
+    )
+
+
+def test_the_menu_that_opens_the_picker_has_finger_tall_rows_on_touch():
+    assert (
+        "@media (pointer:coarse){.session-action-opt .ws-opt-action{min-height:44px;}}" in STYLE_CSS
+    )
+    # The row's own box is the .ws-opt-action inside it: that is what is padded.
+    assert ".session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;" in STYLE_CSS
+
+
 def test_the_button_keeps_the_rows_look():
     """A bare <button> brings its own border, background, font and centring. The
     reset has no specificity and sits before the row rules, so the create row's
