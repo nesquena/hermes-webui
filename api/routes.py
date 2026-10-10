@@ -3012,6 +3012,9 @@ from api.config import (
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
+    _load_yaml_config_file_raw,
+    _expand_env_vars,
+    _has_env_ref,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -30665,13 +30668,44 @@ def _normalize_names_list(names) -> list[str]:
 
 
 def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
-    """Add or remove *name* from *names*, returning a new list."""
-    names = _normalize_names_list(names)
+    """Add or remove *name* from *names*, returning the new field value."""
+    return _toggle_skill_name_value(names, name, enabled)[0]
+
+
+def _toggle_skill_name_value(raw_value, name: str, enabled: bool):
+    """Toggle *name* in one RAW ``disabled`` field; return ``(value, resolved_ref)``.
+
+    The field is edited in its raw form so ``${VAR}`` references survive the
+    save (#8032), but every decision uses the names the READER sees
+    (``_get_disabled_skill_names_for_profile``: expand first, then decode a
+    serialized list and strip each name):
+
+    * entries compare by their expanded, stripped name, so ``${SKILL}`` with
+      ``SKILL=" demo "`` is removed when enabling ``demo`` and never duplicated;
+    * a scalar reference that the edit doesn't need to touch is kept verbatim;
+    * a scalar reference that expands to a serialized LIST can't be kept as a
+      list entry (the reader would no longer decode it, silently enabling the
+      other names), so a partial edit writes the remaining resolved names
+      explicitly and reports ``resolved_ref=True``.
+    """
+    resolved = _normalize_names_list(_expand_env_vars(raw_value))
+    satisfied = (name not in resolved) if enabled else (name in resolved)
+    if isinstance(raw_value, str) and _has_env_ref(raw_value):
+        if satisfied:
+            return raw_value, False
+        raw_entries = _normalize_names_list(raw_value)
+        if _normalize_names_list(_expand_env_vars(raw_entries)) != resolved:
+            if enabled:
+                return [n for n in resolved if n != name], True
+            return resolved + [name], True
+    else:
+        raw_entries = _normalize_names_list(raw_value)
+    entry_names = [str(_expand_env_vars(entry)).strip() for entry in raw_entries]
     if enabled:
-        return [d for d in names if d != name]
-    if name not in names:
-        names.append(name)
-    return names
+        return [e for e, n in zip(raw_entries, entry_names, strict=True) if n != name], False
+    if name not in entry_names:
+        raw_entries.append(name)
+    return raw_entries, False
 
 
 def _handle_skill_toggle(handler, body):
@@ -30698,8 +30732,12 @@ def _handle_skill_toggle(handler, body):
         return bad(handler, f"Skill '{name}' not found", 404)
 
     config_path = _active_profile_config_path()
+    resolved_refs: list[str] = []
+    applied = False
     with _cfg_lock:
-        cfg = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): the profile's other ${VAR} references
+        # must be saved back verbatim, never as their resolved values.
+        cfg = _load_yaml_config_file_raw(config_path)
 
         # Ensure skills section exists as a dict
         if "skills" not in cfg or not isinstance(cfg["skills"], dict):
@@ -30707,25 +30745,50 @@ def _handle_skill_toggle(handler, body):
         skills_cfg = cfg["skills"]
 
         # Always update the global disabled list
-        skills_cfg["disabled"] = _toggle_name_in_list(
+        skills_cfg["disabled"], resolved_ref = _toggle_skill_name_value(
             skills_cfg.get("disabled"), name, enabled
         )
+        if resolved_ref:
+            resolved_refs.append("skills.disabled")
+        effective = skills_cfg["disabled"]
 
         # Write-through to platform_disabled.webui if it exists so that the
         # toggle takes effect for WebUI sessions (the agent checks the
         # platform-specific list first when HERMES_SESSION_PLATFORM=webui).
         platform_disabled = skills_cfg.get("platform_disabled")
         if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
-            platform_disabled["webui"] = _toggle_name_in_list(
+            platform_disabled["webui"], resolved_ref = _toggle_skill_name_value(
                 platform_disabled["webui"], name, enabled
             )
+            if resolved_ref:
+                resolved_refs.append("skills.platform_disabled.webui")
+            effective = platform_disabled["webui"]
 
-        cfg["skills"] = skills_cfg
-        _save_yaml_config_file(config_path, cfg)
+        # Only save (and report ok) when the reader will see the requested state.
+        applied = (name in _normalize_disabled_set(_expand_env_vars(effective))) != enabled
+        if applied:
+            cfg["skills"] = skills_cfg
+            _save_yaml_config_file(config_path, cfg)
 
+    if not applied:
+        return bad(
+            handler,
+            f"Could not {'enable' if enabled else 'disable'} skill '{name}' in config.yaml",
+            409,
+        )
+    if resolved_refs:
+        logger.warning(
+            "Skill toggle for %r wrote explicit names to %s: the ${VAR} there expands "
+            "to a list, which a partial edit cannot keep as a reference",
+            name,
+            ", ".join(resolved_refs),
+        )
     reload_config()  # outside with block — reload_config() acquires the lock itself
     _SKILLS_STATS_CACHE.clear()
-    return j(handler, {"ok": True, "name": name, "enabled": enabled})
+    payload = {"ok": True, "name": name, "enabled": enabled}
+    if resolved_refs:
+        payload["env_refs_resolved"] = resolved_refs
+    return j(handler, payload)
 
 
 def _handle_memory_write(handler, body):
