@@ -127,22 +127,34 @@ def register_agent(session_id: str, agent) -> None:
         _condition.notify_all()
 
 
-def unregister_agent(session_id: str) -> None:
+def unregister_agent(session_id: str, agent=None) -> None:
     """Clear the current future-generation agent handle.
 
     Dirty segment owners are intentionally preserved so failed work remains
     retryable even if the cache drops the current agent reference.
+
+    ``agent`` makes the clear conditional on ownership: a same-session request
+    can register a replacement agent between the cache pop and the eviction
+    teardown, and the outgoing agent's cleanup must not drop the replacement's
+    freshly registered handle.  A handle that is already clear (``None``) is
+    not "someone else's", so the conditional form still clears it.  Callers
+    without an agent identity (session delete / clear / model switch) omit it
+    and keep the unconditional behavior.
     """
     if not session_id:
         return
     with _condition:
         entry = _sessions.get(session_id)
         if entry is not None:
+            owner = entry["agent"]
+            if agent is not None and owner is not None and owner is not agent:
+                # A replacement agent owns this entry now — leave it alone.
+                return
             entry["agent"] = None
         _condition.notify_all()
 
 
-def discard_session(session_id: str) -> bool:
+def discard_session(session_id: str, agent=None) -> bool:
     """Permanently drop a session's lifecycle entry to bound memory growth.
 
     The ``_sessions`` dict is process-global and historically only ever grew:
@@ -159,6 +171,14 @@ def discard_session(session_id: str) -> bool:
 
     Returns True when the entry was removed (or was already absent), False when
     it was retained because work is still pending.
+
+    ``agent`` adds an ownership precondition: when a replacement agent has
+    registered itself for this session (the cache pop and the eviction teardown
+    are not atomic), the entry belongs to that replacement and is retained
+    instead of deleted.  A handle that is already clear (``None``) does not
+    block removal, so the two-step eviction path (unregister, then discard)
+    still bounds the dict.  Callers without an agent identity omit it and keep
+    the unconditional behavior.
     """
     if not session_id:
         return False
@@ -166,6 +186,9 @@ def discard_session(session_id: str) -> bool:
         entry = _sessions.get(session_id)
         if entry is None:
             return True
+        owner = entry["agent"]
+        if agent is not None and owner is not None and owner is not agent:
+            return False  # a replacement agent owns this entry now
         if entry["in_flight"]:
             return False
         if entry["generation"] > entry["committed_generation"]:

@@ -14,8 +14,8 @@ def test_evicted_agent_lifecycle_commits_unregisters_and_shutdowns(monkeypatch):
         events.append(("has_uncommitted", session_id))
         return False
 
-    def fake_unregister(session_id):
-        events.append(("unregister", session_id))
+    def fake_unregister(session_id, *, agent=None):
+        events.append(("unregister", session_id, agent))
 
     monkeypatch.setattr(streaming, "_lifecycle_commit_session_memory", fake_commit)
     monkeypatch.setattr(streaming, "_lifecycle_has_uncommitted_work", fake_has_uncommitted_work)
@@ -30,7 +30,7 @@ def test_evicted_agent_lifecycle_commits_unregisters_and_shutdowns(monkeypatch):
 
     assert ("commit", "old-session", agent, True) in events
     assert ("has_uncommitted", "old-session") in events
-    assert ("unregister", "old-session") in events
+    assert ("unregister", "old-session", agent) in events
     agent.shutdown_memory_provider.assert_called_once_with(agent._session_messages)
     session_db.close.assert_called_once()
 
@@ -119,3 +119,59 @@ def test_identity_mismatch_cache_evictions_close_entries_outside_cache_lock():
             and len(line) - len(line.lstrip()) <= lock_indent
             for line in between
         ), f"{marker} still appears inside the SESSION_AGENT_CACHE_LOCK block"
+
+
+def _fresh_lifecycle():
+    """Reload api.session_lifecycle so each test starts from a clean registry."""
+    import importlib
+
+    lifecycle = importlib.import_module("api.session_lifecycle")
+    lifecycle = importlib.reload(lifecycle)
+    reset = getattr(lifecycle, "_reset_for_tests", None)
+    if callable(reset):
+        reset()
+    return lifecycle
+
+
+def test_evicted_teardown_leaves_a_replacement_agents_lifecycle_entry_intact():
+    """The eviction release is ownership-conditional.
+
+    The cache pop and the eviction teardown are not atomic, so a same-session
+    request can rebuild the agent and register itself in between.  The lifecycle
+    entry is keyed by session id alone, so an unconditional release would drop
+    the replacement's freshly registered handle (and any generation it owns),
+    losing pending memory work.
+    """
+    import api.streaming as streaming
+
+    lifecycle = _fresh_lifecycle()
+
+    evicted = MagicMock()
+    evicted._session_db = MagicMock()
+    replacement = MagicMock()
+
+    lifecycle.register_agent("shared-session", evicted)
+    lifecycle.register_agent("shared-session", replacement)
+
+    streaming._close_evicted_agent_at_session_boundary("shared-session", evicted)
+
+    assert lifecycle._sessions["shared-session"]["agent"] is replacement
+    # The outgoing agent is still closed out even when its lifecycle entry is
+    # left to the replacement.
+    evicted._session_db.close.assert_called_once()
+
+
+def test_evicted_teardown_still_releases_its_own_lifecycle_entry():
+    """With no replacement the entry is still cleared and dropped (#3506)."""
+    import api.streaming as streaming
+
+    lifecycle = _fresh_lifecycle()
+
+    evicted = MagicMock()
+    evicted._session_db = MagicMock()
+    lifecycle.register_agent("own-session", evicted)
+
+    streaming._close_evicted_agent_at_session_boundary("own-session", evicted)
+
+    assert "own-session" not in lifecycle._sessions
+    evicted._session_db.close.assert_called_once()

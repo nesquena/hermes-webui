@@ -655,6 +655,7 @@ def main() -> None:
             print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+    from api.agent_cache_governance import start_server_governor; start_server_governor()  # idle-TTL eviction + memory-pressure soft eviction
 
     try:
         from api.background_process import start_drain_thread
