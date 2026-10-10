@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -26,10 +27,42 @@ def test_apply_bot_name_does_not_overwrite_active_session_document_title():
     src = BOOT_JS.read_text()
     body = _extract_function(src, "function applyBotName(){")
 
-    assert "if(!S.session) document.title=name;" in body
-    assert "document.title=name;" not in body.replace(
-        "if(!S.session) document.title=name;",
-        "",
+    # #7611 wrapped the bare title write in a `!S.session{...}` block so the
+    # installation-scoped instance label shares the same guard. The contract
+    # this test locks is the GUARD, not the brace style, so normalise the
+    # whitespace before matching and assert both halves explicitly:
+    #   1. the !S.session guard exists;
+    #   2. the bare write `document.title=name;` sits inside it; and
+    #   3. NO document.title write survives outside it.
+    compact = re.sub(r"\s+", "", body)
+    guard = compact.find("if(!S.session){")
+    assert guard != -1, (
+        "applyBotName must wrap its document.title write in an explicit "
+        "!S.session block so syncTopbar() stays the sole owner of the "
+        "session title (#4086)"
+    )
+
+    depth = 0
+    end = len(compact)
+    for idx in range(guard, len(compact)):
+        ch = compact[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    guarded = compact[guard:end]
+    unguarded = compact[:guard] + compact[end:]
+
+    assert "document.title=name;" in guarded, (
+        "the bare title write must live inside the !S.session guard"
+    )
+    assert "document.title=" not in unguarded, (
+        "no document.title write may sit outside the !S.session guard — "
+        "session titles belong to syncTopbar() while a chat session is "
+        "active (#4086)"
     )
 
 
