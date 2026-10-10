@@ -162,6 +162,25 @@ class TestChipAlwaysVisible:
         assert out["label"] == "High"
         assert out["inactive"] is False
 
+    def test_xhigh_keeps_short_chip_label(self, driver_path):
+        """#7697 re-gate: the chip renders the SHORT `XHigh` wording.
+
+        Routing the chip through the dropdown's `reasoning_effort_xhigh`
+        ('Extra High') key was a side effect of the i18n refactor, not an
+        intentional copy change — it grew the chip 78px -> 106px on the
+        composer footer. The chip therefore has its own
+        `reasoning_effort_xhigh_short` key while the dropdown option keeps
+        'Extra High'.
+        """
+        out = _apply(driver_path, "xhigh")
+        assert out["display"] == ""
+        assert out["label"] == "XHigh", (
+            "the composer chip must stay display-neutral at 'XHigh': "
+            f"got {out['label']!r}"
+        )
+        assert out["inactive"] is False
+        assert out["title"] == "Reasoning effort: XHigh"
+
 
 class TestNormalizationEdgeCases:
     """Pin the input-normalisation contract so it can't silently shift."""
