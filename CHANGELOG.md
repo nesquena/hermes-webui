@@ -135,6 +135,11 @@
 
 ### Fixed
 
+- **Bootstrap checks the port before installing anything.** An occupied port now fails fast with the address and a
+  checked-free alternative (with the matching `./start.sh` and `.env` commands), before any dependency or state work.
+  Re-running bootstrap against a WebUI that's already up still reports it as running and opens the browser; a
+  foreground or systemd launch against it says it's already running instead of blaming another service. Thanks
+  @mercael91. (#8112, closes #8111)
 - **A conversation no longer gets stuck on "session already has an active stream".** A tab that went away without a
   clean disconnect (a half-open connection) kept its session channel alive for the life of the server, and a stream left
   behind by a worker that exited without cleaning up blocked every new message in that conversation, sometimes for hours.
