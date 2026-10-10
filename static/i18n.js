@@ -43,7 +43,7 @@ const LOCALES = {
     session_imported: 'Session imported',
     session_new_tab_other_profile: 'This session belongs to another profile. Open it from the current tab instead.',
     sessions_source_webui: 'WebUI sessions ({0})',
-    sessions_source_cli: 'CLI sessions ({0})',
+    sessions_source_cli: 'Desktop / CLI sessions ({0})',
     import_failed: 'Import failed: ',
     import_invalid_json: 'Invalid JSON',
     image_pasted: 'Image pasted: ',
@@ -1903,7 +1903,7 @@ const LOCALES = {
     ext_status_true: 'true',
     ext_status_false: 'false',
     sessions_source_webui: 'Sessioni WebUI ({0})',
-    sessions_source_cli: 'Sessioni CLI ({0})',
+    sessions_source_cli: 'Sessioni Desktop / CLI ({0})',
     _speech: 'it-IT',
     // boot.js
     cancelling: 'Annullamento\u2026',
@@ -3728,7 +3728,7 @@ const LOCALES = {
     ext_status_true: 'true',
     ext_status_false: 'false',
     sessions_source_webui: 'WebUIセッション ({0})',
-    sessions_source_cli: 'CLIセッション ({0})',
+    sessions_source_cli: 'Desktop / CLIセッション ({0})',
     _speech: 'ja-JP',
     // boot.js
     cancelling: 'キャンセル中…',
@@ -5582,7 +5582,7 @@ const LOCALES = {
     ext_status_true: 'да',
     ext_status_false: 'нет',
     sessions_source_webui: 'Сеансы WebUI ({0})',
-    sessions_source_cli: 'Сеансы CLI ({0})',
+    sessions_source_cli: 'Сеансы Desktop / CLI ({0})',
     import_failed: 'Не удалось импортировать: ',
     import_invalid_json: 'Неверный JSON',
     image_pasted: 'Изображение вставлено: ',
@@ -7362,7 +7362,7 @@ const LOCALES = {
     ext_status_true: 'true',
     ext_status_false: 'false',
     sessions_source_webui: 'Sesiones WebUI ({0})',
-    sessions_source_cli: 'Sesiones CLI ({0})',
+    sessions_source_cli: 'Sesiones Desktop / CLI ({0})',
     _speech: 'es-ES',
     // boot.js
     cancelling: 'Cancelando…',
@@ -9133,7 +9133,7 @@ const LOCALES = {
     ext_status_true: 'true',
     ext_status_false: 'false',
     sessions_source_webui: 'WebUI-Sitzungen ({0})',
-    sessions_source_cli: 'CLI-Sitzungen ({0})',
+    sessions_source_cli: 'Desktop- / CLI-Sitzungen ({0})',
     _speech: 'de-DE',
     // boot.js
     cancelling: 'Wird abgebrochen\u2026',
@@ -10898,7 +10898,7 @@ const LOCALES = {
     ext_status_true: '是',
     ext_status_false: '否',
     sessions_source_webui: 'WebUI 会话 ({0})',
-    sessions_source_cli: 'CLI 会话 ({0})',
+    sessions_source_cli: 'Desktop / CLI 会话 ({0})',
     _speech: 'zh-CN',
     // boot.js
     cancelling: '正在取消...',
@@ -12658,7 +12658,7 @@ const LOCALES = {
     ext_status_true: '是',
     ext_status_false: '否',
     sessions_source_webui: 'WebUI 對話 ({0})',
-    sessions_source_cli: 'CLI 對話 ({0})',
+    sessions_source_cli: 'Desktop / CLI 對話 ({0})',
     _speech: 'zh-TW',
     // boot.js
     cancelling: '正在取消……',
@@ -14485,7 +14485,7 @@ const LOCALES = {
     ext_status_true: 'true',
     ext_status_false: 'false',
     sessions_source_webui: 'Sessões WebUI ({0})',
-    sessions_source_cli: 'Sessões CLI ({0})',
+    sessions_source_cli: 'Sessões Desktop / CLI ({0})',
     _speech: 'pt-BR',
     // boot.js
     cancelling: 'Cancelando…',
@@ -16128,7 +16128,7 @@ const LOCALES = {
     ext_status_true: 'true',
     ext_status_false: 'false',
     sessions_source_webui: 'WebUI 세션 ({0})',
-    sessions_source_cli: 'CLI 세션 ({0})',
+    sessions_source_cli: 'Desktop / CLI 세션 ({0})',
     _speech: 'ko-KR',
     // boot.js
     cancelling: '취소 중\u2026',
@@ -17943,7 +17943,7 @@ const LOCALES = {
     ext_status_true: 'true',
     ext_status_false: 'false',
     sessions_source_webui: 'Sessions WebUI ({0})',
-    sessions_source_cli: 'Sessions CLI ({0})',
+    sessions_source_cli: 'Sessions Desktop / CLI ({0})',
     _speech: 'fr-FR',
     cancelling: 'Annulation\u2026',
     cancel_failed: 'Échec de l\'annulation.',
@@ -19687,7 +19687,7 @@ const LOCALES = {
   cs: {
     _label: 'Čeština',
     sessions_source_webui: 'Relace WebUI ({0})',
-    sessions_source_cli: 'Relace CLI ({0})',
+    sessions_source_cli: 'Relace Desktop / CLI ({0})',
     _lang: 'cs',
     remote_image_open: 'Otevřít obrázek',
     remote_image_reason: 'Vzdálený obrázek nebyl načten automaticky. Otevře {host} na nové kartě.',
@@ -21529,7 +21529,7 @@ const LOCALES = {
     ext_status_true: 'true',
     ext_status_false: 'false',
     sessions_source_webui: 'WebUI oturumları ({0})',
-    sessions_source_cli: 'CLI oturumları ({0})',
+    sessions_source_cli: 'Desktop / CLI oturumları ({0})',
     _speech: 'tr-TR',
     // boot.js
     cancelling: 'İptal ediliyor\u2026',
@@ -23345,7 +23345,7 @@ const LOCALES = {
     ext_status_true: 'tak',
     ext_status_false: 'nie',
     sessions_source_webui: 'Sesje WebUI ({0})',
-    sessions_source_cli: 'Sesje CLI ({0})',
+    sessions_source_cli: 'Sesje Desktop / CLI ({0})',
     _speech: 'pl-PL',
     // boot.js
     cancelling: 'Anulowanie…',
@@ -25165,7 +25165,7 @@ const LOCALES = {
     ext_status_true: 'true',
     ext_status_false: 'false',
     sessions_source_webui: 'Phiên WebUI ({0})',
-    sessions_source_cli: 'Phiên CLI ({0})',
+    sessions_source_cli: 'Phiên Desktop / CLI ({0})',
     _speech: 'vi-VN',
     // boot.js
     cancelling: 'Đang hủy…',

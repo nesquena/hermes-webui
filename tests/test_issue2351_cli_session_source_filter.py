@@ -21,15 +21,31 @@ def test_session_source_labels_are_locale_keys_with_number_placeholder():
     counts, not hardcoded English template literals."""
     i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
     assert "sessions_source_webui: 'WebUI sessions ({0})'" in i18n  # en bundle
-    assert "sessions_source_cli: 'CLI sessions ({0})'" in i18n  # en bundle
+    assert "sessions_source_cli: 'Desktop / CLI sessions ({0})'" in i18n  # en bundle
     assert "sessions_source_webui: 'Сеансы WebUI ({0})'" in i18n  # ru bundle
-    assert "sessions_source_cli: 'Сеансы CLI ({0})'" in i18n  # ru bundle
+    assert "sessions_source_cli: 'Сеансы Desktop / CLI ({0})'" in i18n  # ru bundle
     sessions_src = SESSIONS_JS.read_text(encoding="utf-8")
     assert "t('sessions_source_cli', n)" in sessions_src
     assert "t('sessions_source_webui', n)" in sessions_src
     # The template-literal fallback must be gone: labels now come from the locale.
     assert "`CLI sessions (${n})`" not in sessions_src
     assert "`WebUI sessions (${n})`" not in sessions_src
+
+
+def test_cli_source_label_and_empty_state_name_desktop_sessions():
+    # The CLI source bucket also carries Hermes Desktop conversations, so the
+    # user-facing label and the empty-state copy must say so (AGENT-HUB#2660).
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    assert "sessions_source_cli: 'Desktop / CLI sessions ({0})'" in i18n
+    # Every shipped locale keeps the "Desktop" / "CLI" pair on the cli label.
+    import re as _re
+    cli_labels = _re.findall(r"sessions_source_cli: '([^']+)'", i18n)
+    assert len(cli_labels) == 15
+    assert all('Desktop' in label and 'CLI' in label for label in cli_labels)
+    sessions_src = SESSIONS_JS.read_text(encoding="utf-8")
+    assert "'No Desktop / CLI sessions found.'" in sessions_src
+    assert "'Enable Show non-WebUI sessions in Settings to list Desktop / CLI sessions here.'" in sessions_src
+    assert "'No CLI sessions found.'" not in sessions_src
 
 
 def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
