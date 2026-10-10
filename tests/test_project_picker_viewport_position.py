@@ -795,6 +795,75 @@ console.log(JSON.stringify(placement()));
     assert data["gap"] == 4
     assert data["top"] >= 8
     assert data["bottom"] <= 892
+    assert data["left"] == 260, "Fallback placement must align the picker's right edge to its anchor."
+    assert data["right"] == 440
+
+
+def test_window_fallback_caps_width_and_contains_narrow_picker():
+    data = _run_picker_cases("""
+window.visualViewport = null;
+setViewport(500, 120);
+setAnchor({top: 100, bottom: 140, left: 82, right: 112});
+openPicker(120);
+console.log(JSON.stringify(placement()));
+""")
+    assert data["removed"] is False
+    assert data["left"] >= 8
+    assert data["right"] <= 112
+    assert data["width"] == 104
+
+
+@pytest.mark.parametrize("first_event", ["viewport", "scroll"])
+def test_coalesced_viewport_and_scroll_events_preserve_close_requirement(first_event):
+    first = (
+        "vvEmitter.dispatch('resize'); sessionList.scroll();"
+        if first_event == "viewport"
+        else "sessionList.scroll(); vvEmitter.dispatch('resize');"
+    )
+    data = _run_picker_cases(f"""
+listRect = {{top: 200, bottom: 650, left: 0, right: 500}};
+setAnchor({{top: 400, bottom: 440, left: 410, right: 440}});
+openPicker(120);
+setAnchor({{top: 150, bottom: 190, left: 410, right: 440}});
+{first}
+const queued = frames.size;
+flushFrames();
+console.log(JSON.stringify({{queued, after: placement()}}));
+""")
+    assert data["queued"] == 1, "The picker must coalesce both events into one frame."
+    assert data["after"]["removed"] is True
+    assert data["after"]["observers"] == 0
+    assert data["after"]["listenerCounts"] == {
+        "window": 1,
+        "visualViewport": 0,
+        "document": 0,
+    }
+
+
+def test_context_point_tracks_its_row_during_partial_scroll():
+    data = _run_picker_cases("""
+const expandedRow = {
+  isConnected: true,
+  rect: {top: -208, bottom: 902, left: 16, right: 374, width: 358, height: 1110},
+  getBoundingClientRect() { return this.rect; },
+};
+anchorEl.closest = selector => selector === '.session-child-session-fork,.session-item'
+  ? expandedRow
+  : (selector === '.session-list' ? sessionList : null);
+_recordProjectPickerContextPoint(anchorEl, {clientX: 310, clientY: 420});
+setViewport(620, 390);
+setAnchor({top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0});
+openPicker(120);
+const before = placement();
+expandedRow.rect = {top: -308, bottom: 802, left: 16, right: 374, width: 358, height: 1110};
+sessionList.scroll();
+flushFrames();
+const after = placement();
+console.log(JSON.stringify({before, after}));
+""")
+    assert data["before"]["removed"] is False
+    assert data["after"]["removed"] is False
+    assert data["before"]["top"] - data["after"]["top"] == 100
 
 
 def test_replacement_before_delayed_click_registration_keeps_one_owner():

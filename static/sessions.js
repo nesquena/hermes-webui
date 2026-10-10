@@ -9776,9 +9776,7 @@ function renderSessionListFromCache(){
             // Coarse-pointer CSS hides the semantic actions anchor. Preserve
             // the trusted mouse point so an expanded parent's oversized rect
             // cannot swallow the fork child's project picker placement.
-            if(actions&&Number.isFinite(e.clientX)&&Number.isFinite(e.clientY)){
-              actions._projectPickerContextPoint={clientX:e.clientX,clientY:e.clientY};
-            }
+            _recordProjectPickerContextPoint(actions,e);
             _openSessionActionMenu(child, actions||row);
           };
           _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
@@ -9884,9 +9882,7 @@ function renderSessionListFromCache(){
       // anchor. Remember the real mouse point so a project picker opened from
       // this menu is not positioned from the expanded parent row's full rect.
       // That rect can be taller than the session list when children are open.
-      if(actions&&Number.isFinite(e.clientX)&&Number.isFinite(e.clientY)){
-        actions._projectPickerContextPoint={clientX:e.clientX,clientY:e.clientY};
-      }
+      _recordProjectPickerContextPoint(actions,e);
       _openSessionActionMenu(s, actions||el);
     };
 
@@ -10552,6 +10548,7 @@ function _showProjectPicker(session, anchorEl){
   picker.style.right='auto';
   const visualViewport=window.visualViewport;
   let repositionFrame=null;
+  let pendingCloseWhenAway=false;
   let closeTimer=null;
   let anchorObserver=null;
 
@@ -10575,10 +10572,13 @@ function _showProjectPicker(session, anchorEl){
   // orientation changes. Coalesce with rAF so a burst of events costs one
   // reposition per frame.
   const scheduleReposition=(closeWhenAway)=>{
+    pendingCloseWhenAway=pendingCloseWhenAway||closeWhenAway;
     if(repositionFrame!==null) return;
     repositionFrame=requestAnimationFrame(()=>{
       repositionFrame=null;
-      reposition(closeWhenAway);
+      const shouldClose=pendingCloseWhenAway;
+      pendingCloseWhenAway=false;
+      reposition(shouldClose);
     });
   };
   const onViewportChange=()=>scheduleReposition(false);
@@ -10597,6 +10597,7 @@ function _showProjectPicker(session, anchorEl){
     if(_projectPickerTeardown===teardown) _projectPickerTeardown=null;
     if(_openProjectPicker&&_openProjectPicker.picker===picker) _openProjectPicker=null;
     if(repositionFrame!==null){cancelAnimationFrame(repositionFrame);repositionFrame=null;}
+    pendingCloseWhenAway=false;
     if(closeTimer!==null){clearTimeout(closeTimer);closeTimer=null;}
     if(anchorObserver){anchorObserver.disconnect();anchorObserver=null;}
     window.removeEventListener('resize',onViewportChange);
@@ -10674,9 +10675,15 @@ function _positionProjectPicker(picker, anchorEl){
   const gap=4;
   const bounds=_projectPickerVisibleBounds();
   const rect=_projectPickerAnchorRect(anchorEl, bounds);
+  picker.style.maxHeight='';
+  picker.style.overflowY='';
+  // Width affects wrapping and therefore height, so both the visual-viewport
+  // path and the older window-dimensions fallback size it before measuring.
+  const availableWidth=Math.max(0,bounds.right-bounds.left-margin*2);
+  picker.style.minWidth=Math.min(160,availableWidth)+'px';
+  picker.style.maxWidth=Math.min(220,availableWidth)+'px';
   if(!window.visualViewport){
     // No visual viewport (older browsers): place from the layout window.
-    picker.style.maxHeight='';
     const pickerH=picker.offsetHeight||0;
     const maxAvail=window.innerHeight-margin*2;
     let top=rect.bottom+4;
@@ -10685,6 +10692,7 @@ function _positionProjectPicker(picker, anchorEl){
     }
     if(pickerH>maxAvail){
       picker.style.maxHeight=maxAvail+'px'; // taller than the screen: pin and scroll
+      picker.style.overflowY='auto';
       top=margin;
     }else{
       if(top+pickerH>window.innerHeight-margin) top=window.innerHeight-margin-pickerH;
@@ -10692,59 +10700,66 @@ function _positionProjectPicker(picker, anchorEl){
     }
     picker.style.top=top+'px';
     picker.style.bottom='auto';
-    return;
-  }
-  // The visible viewport can be smaller AND offset from the layout window (the
-  // on-screen keyboard, browser chrome, zoom). Place from its bounds.
-  const belowTop=Math.max(bounds.top+margin,rect.bottom+gap);
-  const aboveBottom=Math.min(bounds.bottom-margin,rect.top-gap);
-  const spaceBelow=Math.max(0,bounds.bottom-margin-belowTop);
-  const spaceAbove=Math.max(0,aboveBottom-(bounds.top+margin));
-  picker.style.maxHeight='';
-  picker.style.overflowY='';
-  // Apply the horizontal cap BEFORE measuring height, since narrow menus can
-  // wrap, and relax the CSS minimum when zoom leaves less than 160px.
-  const availableWidth=Math.max(0,bounds.right-bounds.left-margin*2);
-  picker.style.minWidth=Math.min(160,availableWidth)+'px';
-  picker.style.maxWidth=Math.min(220,availableWidth)+'px';
-  // Measure the rendered picker instead of guessing its height. A fixed
-  // threshold fails as soon as the user has enough projects to make the menu
-  // taller, and a cap left over from the previous viewport would keep a
-  // desktop clamp on a phone-sized screen.
-  const pickerHeight=picker.offsetHeight||0;
-  picker.style.top='auto';
-  picker.style.bottom='auto';
-  if(pickerHeight<=spaceBelow){
-    // Preferred placement: directly below the session action button.
-    picker.style.top=belowTop+'px';
-  }else if(pickerHeight<=spaceAbove){
-    // Keep above-positioned pickers bottom-anchored so they stay attached to
-    // the row they belong to across resizes.
-    picker.style.bottom=(window.innerHeight-aboveBottom)+'px';
-  }else if(pickerHeight<=bounds.bottom-bounds.top-margin*2){
-    // The full list fits the visible viewport: slide it up from the bottom as
-    // far as it must, overlapping the anchor rather than clipping it.
-    picker.style.top=Math.max(bounds.top+margin,bounds.bottom-margin-pickerHeight)+'px';
-    picker.style.maxHeight=pickerHeight+'px';
-    picker.style.overflowY='auto';
   }else{
-    // Taller than the visible viewport: cap to the roomier side and keep every
-    // row reachable by scrolling inside; keep at least a few rows visible when
-    // both sides are cramped.
-    let cap=Math.max(spaceAbove,spaceBelow);
-    let capTop=spaceAbove>spaceBelow?bounds.top+margin:belowTop;
-    if(cap<132){
-      cap=Math.max(0,bounds.bottom-bounds.top-margin*2);
-      capTop=bounds.top+margin;
+    // The visible viewport can be smaller AND offset from the layout window
+    // (the on-screen keyboard, browser chrome, zoom). Place from its bounds.
+    const belowTop=Math.max(bounds.top+margin,rect.bottom+gap);
+    const aboveBottom=Math.min(bounds.bottom-margin,rect.top-gap);
+    const spaceBelow=Math.max(0,bounds.bottom-margin-belowTop);
+    const spaceAbove=Math.max(0,aboveBottom-(bounds.top+margin));
+    // Measure the rendered picker instead of guessing its height. A fixed
+    // threshold fails as soon as the user has enough projects to make the menu
+    // taller, and a cap left over from the previous viewport would keep a
+    // desktop clamp on a phone-sized screen.
+    const pickerHeight=picker.offsetHeight||0;
+    picker.style.top='auto';
+    picker.style.bottom='auto';
+    if(pickerHeight<=spaceBelow){
+      // Preferred placement: directly below the session action button.
+      picker.style.top=belowTop+'px';
+    }else if(pickerHeight<=spaceAbove){
+      // Keep above-positioned pickers bottom-anchored so they stay attached to
+      // the row they belong to across resizes.
+      picker.style.bottom=(window.innerHeight-aboveBottom)+'px';
+    }else if(pickerHeight<=bounds.bottom-bounds.top-margin*2){
+      // The full list fits the visible viewport: slide it up from the bottom as
+      // far as it must, overlapping the anchor rather than clipping it.
+      picker.style.top=Math.max(bounds.top+margin,bounds.bottom-margin-pickerHeight)+'px';
+      picker.style.maxHeight=pickerHeight+'px';
+      picker.style.overflowY='auto';
+    }else{
+      // Taller than the visible viewport: cap to the roomier side and keep
+      // every row reachable by scrolling inside; keep at least a few rows
+      // visible when both sides are cramped.
+      let cap=Math.max(spaceAbove,spaceBelow);
+      let capTop=spaceAbove>spaceBelow?bounds.top+margin:belowTop;
+      if(cap<132){
+        cap=Math.max(0,bounds.bottom-bounds.top-margin*2);
+        capTop=bounds.top+margin;
+      }
+      picker.style.maxHeight=cap+'px';
+      picker.style.overflowY='auto';
+      picker.style.top=capTop+'px';
     }
-    picker.style.maxHeight=cap+'px';
-    picker.style.overflowY='auto';
-    picker.style.top=capTop+'px';
   }
   // Align right edge of picker with right edge of button; keep within viewport
   const pickerW=picker.offsetWidth;
   const left=Math.max(bounds.left+margin,Math.min(rect.right-pickerW,bounds.right-margin-pickerW));
   picker.style.left=left+'px';
+}
+
+function _recordProjectPickerContextPoint(anchorEl,event){
+  if(!anchorEl||!Number.isFinite(event&&event.clientX)||!Number.isFinite(event&&event.clientY)) return;
+  const point={clientX:event.clientX,clientY:event.clientY};
+  const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
+  if(row&&row.isConnected!==false){
+    const rowRect=row.getBoundingClientRect();
+    if(Number.isFinite(rowRect&&rowRect.left)&&Number.isFinite(rowRect&&rowRect.top)){
+      point.rowOffsetX=event.clientX-rowRect.left;
+      point.rowOffsetY=event.clientY-rowRect.top;
+    }
+  }
+  anchorEl._projectPickerContextPoint=point;
 }
 
 // An open picker follows a resize or a rotation, as the ⋮ menu does. A sidebar
@@ -10813,9 +10828,11 @@ function _projectPickerAnchorRect(anchorEl, bounds){
       // the actual click point while the owning row still intersects the
       // list; once the row leaves, fall back to its rect so teardown wins.
       if(point&&Number.isFinite(point.clientX)&&Number.isFinite(point.clientY)&&!_projectPickerAnchorAway(anchorEl,rowRect,bounds)){
+        const pointX=Number.isFinite(point.rowOffsetX)?rowRect.left+point.rowOffsetX:point.clientX;
+        const pointY=Number.isFinite(point.rowOffsetY)?rowRect.top+point.rowOffsetY:point.clientY;
         rect={
-          top:point.clientY,bottom:point.clientY+1,
-          left:point.clientX,right:point.clientX+1,
+          top:pointY,bottom:pointY+1,
+          left:pointX,right:pointX+1,
           width:1,height:1,
         };
       }else{
