@@ -2275,7 +2275,16 @@
     .project-bindings-ws-row .ws-row-default{min-height:32px;display:inline-flex;align-items:center;justify-content:center;padding:2px 12px;}
   }
   .project-bindings-ws-add{display:flex;gap:6px;align-items:center;}
-  .project-bindings-ws-add .project-bindings-combo{flex:1;margin-bottom:0;}
+  /* min-width:0 opts the flex item out of the default min-width:auto clamp: a
+     picked workspace whose name+path is long (~45+ chars) otherwise forces the
+     combo to its min-content width and pushes the Add button past the dialog's
+     right edge (measured scrollWidth 559 vs clientWidth 458 desktop, 557 vs 364
+     phone; Add button at x996-1050 while the dialog ends at x950). A click that
+     should have hit Add lands on the overlay instead, which closes the dialog
+     and drops every unsaved row/default/model change. With min-width:0 the
+     trigger shrinks and its existing .combo-trigger-name ellipsis applies.
+     (UX re-gate r6 2026-10-10T20:33:37Z) */
+  .project-bindings-ws-add .project-bindings-combo{flex:1;min-width:0;margin-bottom:0;}
   .project-bindings-ws-add .ws-add-btn{flex:0 0 auto;padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);cursor:pointer;font-size:12px;}
   .project-bindings-ws-add .ws-add-btn:hover{border-color:var(--accent);color:var(--accent-text);}
   .project-bindings-auto-assign{display:flex;align-items:flex-start;gap:8px;margin:4px 0 12px;cursor:pointer;}
