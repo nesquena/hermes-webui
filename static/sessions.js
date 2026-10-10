@@ -3884,6 +3884,14 @@ async function _ensureMessagesLoaded(sid, opts) {
     if(typeof data.session.visible_message_count==='number'&&data.session.visible_message_count>=0){
       S.session.visible_message_count=data.session.visible_message_count;
     }
+    // #7882 (greptile round-4 P2): the server transcript just landed in
+    // S.messages wholesale — re-baseline the send's optimistic-count
+    // snapshot so the next send bumps exactly its own rows. When a send is
+    // in flight the send-time snapshot stays authoritative (the server
+    // count here predates the optimistic turn).
+    if(!S.busy){
+      S.session._visibleBaselineLocal=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+    }
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
     // `todo_state` snapshot, derived server-side from the FULL untruncated
@@ -4469,6 +4477,17 @@ async function _loadOlderMessages() {
     }
     S.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
+    // #7882 (greptile round-4 P2): older rows prepended during an in-flight
+    // send are server-known rows — advance the send's optimistic-count
+    // baseline by exactly the prepended visible rows so the send's eventual
+    // bump stays its own rows only. When idle there is no pending bump to
+    // protect; the next send snapshots fresh anyway.
+    if(S.session && S.session.session_id === sid && S.busy){
+      const prependedVisible=olderMsgs.filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+      if(typeof S.session._visibleBaselineLocal==='number'){
+        S.session._visibleBaselineLocal+=prependedVisible;
+      }
+    }
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
     // hidden and the "hidden" counter rises while the viewport appears stuck.
@@ -4580,6 +4599,11 @@ async function _ensureAllMessagesLoaded() {
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
+      // #7882 (greptile round-4 P2): full transcript landed — re-baseline the
+      // optimistic-count snapshot so the next send bumps exactly its own rows.
+      if(!S.busy){
+        S.session._visibleBaselineLocal=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+      }
       if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
         S.session.regeneration_revision = data.session.regeneration_revision;
       } else {
@@ -7280,6 +7304,12 @@ function startGatewaySSE(){
                     S.messages = _nextToAssign;
                     if(S.session && S.session.session_id === activeSid){
                       S.session.message_count = next.length;
+                      // #7882 (greptile round-4 P2): gateway refresh replaced
+                      // the transcript while idle — re-baseline the
+                      // optimistic-count snapshot.
+                      if(!S.busy){
+                        S.session._visibleBaselineLocal=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+                      }
                       const newest = next.length ? next[next.length - 1] : null;
                       const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
                       if(newestTs){
@@ -8275,7 +8305,7 @@ function _activeSessionIdForSidebar(){
   return null;
 }
 
-function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now()}={}){
+function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now(), localVisibleBeforePush=null}={}){
   if(!S.session||!S.session.session_id) return;
   const sid=S.session.session_id;
   const nowSec=Math.floor((Number(timestampMs)||Date.now())/1000);
@@ -8296,15 +8326,32 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   // delegation-wakeup exclusion.
   const localVisible=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
   S.session.message_count=count;
-  // #7882 re-gate should-fix 4 / round-2 finding: the topbar and sidebar
-  // prefer the visible count. Promote ONLY the local-transcript authority:
-  // the raw `count` includes hidden delegation rows (a session with a hidden
-  // wakeup — raw 4 / visible 3 — plus one send would otherwise report visible
-  // 5 instead of 4, and repeated updater calls would keep the wrong total).
-  // When the server has not sent a visible total yet, leave it absent so the
-  // renderer's raw-count fallback applies.
+  // #7882 (greptile round-4 P2): count only rows the send itself added.
+  // localVisible from the loaded tail alone is wrong in both directions for
+  // paginated chats — 100 visible rows with 30 loaded makes a tail-only
+  // count DEMOTE the server total, and promoting the raw `count` counts a
+  // hidden wakeup (the round-2 bug). Snapshot the authoritative local
+  // transcript length the first time this send adopts a server visible
+  // count; the bump is (localVisible − snapshot), so repeated updater calls
+  // within one send are idempotent and a send in a paginated chat promotes
+  // exactly one visible row.
   if(typeof S.session.visible_message_count==='number'&&S.session.visible_message_count>=0){
-    S.session.visible_message_count=Math.max(S.session.visible_message_count,localVisible);
+    if(typeof S.session._visibleBaselineLocal!=='number'){
+      // First optimistic pass of this send: snapshot the visible tail length
+      // from BEFORE the push (caller-provided) and the server's visible
+      // total. The send's bump is exactly (localVisible − baselineLocal),
+      // so repeated updater calls within one send are idempotent and a
+      // send in a paginated chat promotes exactly one visible row.
+      S.session._visibleBaselineLocal=(typeof localVisibleBeforePush==='number'&&localVisibleBeforePush>=0)
+        ?localVisibleBeforePush
+        :localVisible-1;
+      S.session._visibleBaselineServer=S.session.visible_message_count;
+    }
+    const optimisticVisible=Math.max(0,localVisible-S.session._visibleBaselineLocal);
+    S.session.visible_message_count=Math.max(
+      S.session.visible_message_count,
+      S.session._visibleBaselineServer+optimisticVisible
+    );
   }
   S.session.last_message_at=nowSec;
   S.session.updated_at=nowSec;

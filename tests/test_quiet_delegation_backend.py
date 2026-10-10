@@ -46,6 +46,70 @@ def test_delegation_source_survives_eager_recovery_and_merge():
     assert merged[1]["content"] == "Synthesized findings"
 
 
+def test_eager_checkpoint_stamps_fork_ownership_for_delegation_wakeup():
+    """Re-gate must-fix (eager mode): the eager checkpoint must carry the
+    fork-ownership proof for a fork-internal delegation wakeup at chat-start,
+    not only at settlement — regeneration before the turn settles otherwise
+    hits regeneration_read_only (403). The row keeps ``_source:
+    delegation_wakeup`` (the hidden-row predicate) AND gains
+    ``_fork_child_turn`` (the ownership proof the gate reads), in both the
+    create and reuse branches."""
+    from api.session_ops import _selected_regeneration_turn_owned
+
+    # Create branch: no existing row — the checkpoint appends a new one.
+    create_session = Session(
+        session_id="fork-child-eager",
+        session_source="fork",
+        parent_session_id="parent-7882",
+    )
+    routes._checkpoint_user_message_for_eager_session_save(
+        create_session,
+        "[ASYNC DELEGATION COMPLETE d1] internal handoff",
+        [],
+        1781024055.0,
+        source="delegation_wakeup",
+    )
+    row = create_session.messages[0]
+    assert row["_source"] == "delegation_wakeup", "hidden-row predicate must keep keying on _source"
+    assert row["_fork_child_turn"] == "fork-child-eager"
+    # The REAL gate must accept the checkpoint row (regeneration authorized).
+    assert _selected_regeneration_turn_owned(create_session, row) is True
+
+    # Reuse branch: the latest user row already holds the same text — the
+    # stamp must land there too.
+    reuse_session = Session(
+        session_id="fork-child-eager-2",
+        session_source="fork",
+        parent_session_id="parent-7882",
+    )
+    reuse_session.messages = [
+        {"role": "user", "content": "[ASYNC DELEGATION COMPLETE d1] internal handoff"}
+    ]
+    routes._checkpoint_user_message_for_eager_session_save(
+        reuse_session,
+        "[ASYNC DELEGATION COMPLETE d1] internal handoff",
+        [],
+        1781024056.0,
+        source="delegation_wakeup",
+    )
+    reuse_row = reuse_session.messages[0]
+    assert reuse_row["_fork_child_turn"] == "fork-child-eager-2"
+
+    # A webui-session wakeup is NOT fork-owned: no proof stamp, gate rejects.
+    webui_session = Session(
+        session_id="webui-eager",
+        session_source="webui",
+    )
+    routes._checkpoint_user_message_for_eager_session_save(
+        webui_session,
+        "[ASYNC DELEGATION COMPLETE d2] internal handoff",
+        [],
+        1781024057.0,
+        source="delegation_wakeup",
+    )
+    assert "_fork_child_turn" not in webui_session.messages[0]
+
+
 def test_delegation_completion_event_has_explicit_kind():
     child = bp._build_payload({"type": "async_delegation", "delegation_id": "deleg-1"}, "sid")
     process = bp._build_payload({"type": "completion", "session_id": "proc-1"}, "sid")

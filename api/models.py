@@ -11517,9 +11517,14 @@ def _reconciled_visible_count_for_sidebar(sid) -> int | None:
             profile=getattr(session, 'profile', None),
         )
     except Exception:
-        state_messages = None
+        # #7882 (greptile P2): a failed detailed read is NOT "no state rows".
+        # Converting it to [] makes the merge count the sidecar tail alone and
+        # the caller treats that as a successful recount — freezing the stale
+        # sidecar total even though the growth guard already saw newer state.db
+        # rows. Return None so the caller's raw-delta fallback runs instead.
+        return None
     if not isinstance(state_messages, list):
-        state_messages = []
+        return None
     if not sidecar_messages and not state_messages:
         return None
     try:
@@ -11534,9 +11539,11 @@ def _reconciled_visible_count_for_sidebar(sid) -> int | None:
             truncation_boundary=getattr(session, 'truncation_boundary', None),
         )
     except Exception:
-        # Merge failure: fall back to counting the sidecar's own stamped rows
-        # (always provenance-stamped on modern sidecars).
-        merged = sidecar_messages
+        # Merge failure is the same contract as a failed read: no proved
+        # reconciled total exists, so None (fallback) — never the sidecar's
+        # own count, which can be older than the state.db rows the growth
+        # guard just observed (#7882 greptile P2).
+        return None
     if not merged:
         return None
     return sum(

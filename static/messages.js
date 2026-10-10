@@ -1726,6 +1726,13 @@ async function send(){
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
+  // #7882 (greptile round-4 P2): visible-length of the transcript BEFORE the
+  // optimistic push — the local tail the server could already know. Passed to
+  // every upsertActiveSessionForLocalTurn call of this send so the visible-count
+  // bump is exactly the rows this send added (idempotent across the updater's
+  // multiple passes, and correct when only a paginated tail is loaded). Same
+  // hidden-row rule as the updater in sessions.js.
+  const _localVisibleBeforePush=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
@@ -1738,7 +1745,7 @@ async function send(){
     // can save pending state on the server.
     _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.initial', ()=>{
       if(typeof upsertActiveSessionForLocalTurn==='function'){
-        upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+        upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now(),localVisibleBeforePush:_localVisibleBeforePush});
       }
     });
     optimisticMessages=[...S.messages];
@@ -1769,12 +1776,12 @@ async function send(){
         if(typeof upsertActiveSessionForLocalTurn==='function'){
           // Second optimistic pass: carry the provisional title into the cached row
           // without re-fetching /api/sessions before pending state exists server-side.
-          upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+          upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now(),localVisibleBeforePush:_localVisibleBeforePush});
         }
       });
     } else if(typeof upsertActiveSessionForLocalTurn==='function'){
       _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.titled', ()=>{
-        upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+        upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now(),localVisibleBeforePush:_localVisibleBeforePush});
       });
     } else {
       _runOptionalPreStartUiStep('renderSessionListFromCache.prestart', ()=>{
@@ -1967,7 +1974,7 @@ async function send(){
     if(typeof upsertActiveSessionForLocalTurn==='function'){
       // Third optimistic pass: stream_id is now known, so the row can reconcile
       // against real active-stream metadata before the background refresh lands.
-      upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+      upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now(),localVisibleBeforePush:_localVisibleBeforePush});
     }
     if(!INFLIGHT[activeSid]){
       INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};

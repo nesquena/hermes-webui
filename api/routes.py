@@ -24049,6 +24049,19 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     """
     if not msg:
         return
+    # Fork-internal delegation wakeup: the row's _source stays
+    # delegation_wakeup (the hidden-row predicate keys on it), but the
+    # fork-ownership proof regeneration authorization reads rides on
+    # _fork_child_turn. The deferred producer stamps that proof at
+    # settlement (streaming.py _materialize_active_turn_user /
+    # _settle_current_turn_boundary); the eager checkpoint must carry it
+    # from chat-start too, or a regeneration after an async delegation in
+    # a fork hits regeneration_read_only (403) for every turn saved before
+    # settlement (#7882 re-gate must-fix, eager mode).
+    _checkpoint_source = str(source or "").strip().lower()
+    _fork_owned_wakeup = _checkpoint_source == "delegation_wakeup" and (
+        str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+    )
     existing = list(getattr(s, "messages", None) or [])
     if existing:
         latest = existing[-1]
@@ -24056,7 +24069,7 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             latest_text = " ".join(str(latest.get("content") or "").split())
             msg_text = " ".join(str(msg or "").split())
             if latest_text == msg_text:
-                if str(source or "").strip().lower() == "fork":
+                if _checkpoint_source == "fork" or _fork_owned_wakeup:
                     latest["_fork_child_turn"] = s.session_id
                 return
     user_msg = {"role": "user", "content": msg}
@@ -24067,7 +24080,7 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         source,
         active_turn_token=build_active_turn_token(getattr(s, "active_stream_id", None), started_at),
     )
-    if str(source or "").strip().lower() == "fork":
+    if _checkpoint_source == "fork" or _fork_owned_wakeup:
         user_msg["_fork_child_turn"] = s.session_id
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = float(started_at)
