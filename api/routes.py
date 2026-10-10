@@ -9640,7 +9640,64 @@ _PROOF_CACHE_MAX_ENTRIES = 32
 # beyond this protects nothing the client holds while costing seconds per
 # request on a long transcript.
 _PROOF_MAX_HASHED_ROWS = 5_000
+# #7925 round-3 MUST-FIX: a cumulative UTF-16 byte budget. The row cap above is
+# not a time bound — the reported failing input (2,048 x 16 KiB tool rows plus
+# 31 user rows) sits under it yet hashes ~32 MiB, taking 10.14 s against
+# master's 0.79 s and blowing the client's 8 s api() timeout. Enforced before
+# the per-unit loop; a prefix that would exceed it gets no proof at all.
+_PROOF_MAX_HASHED_BYTES = 1024 * 1024  # 1 MiB of UTF-16 code units
 _transcript_proof_cache: "OrderedDict[tuple, str]" = OrderedDict()
+# #7925 MUST-FIX: the HTTP server is threaded, so the cache's read-modify
+# (get + move_to_end) and its insert/evict pair must each be atomic. Without
+# this, an eviction landing between get and move_to_end raises KeyError,
+# which do_GET turns into an HTTP 500 on an otherwise valid windowed GET.
+_PROOF_CACHE_LOCK = threading.Lock()
+
+
+def _proof_row_payload(row) -> "str | None":
+    """Build the exact byte-string a row contributes to the prefix proof.
+
+    Returns None when the row is not a dict (the caller's fail-closed shape).
+    Extracted so the budget pass and the hash pass cannot drift: both use the
+    identical payload, which is what makes the byte budget a real bound on the
+    work the hash loop is about to do.
+    """
+    if not isinstance(row, dict):
+        return None
+    role = str(row.get("role") or "")
+    content = row.get("content")
+    if isinstance(content, list):
+        text = "".join(
+            str(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    elif isinstance(content, str):
+        text = content
+    elif content is None:
+        text = ""
+    else:
+        text = str(content)
+    timestamp = row.get("timestamp")
+    if timestamp is None:
+        timestamp = row.get("_ts")
+    tool_ids = []
+    for call in row.get("tool_calls") or []:
+        if isinstance(call, dict):
+            identifier = call.get("id") or call.get("tool_call_id")
+            if identifier:
+                tool_ids.append(str(identifier))
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "tool_use":
+                identifier = part.get("id") or part.get("tool_use_id")
+                if identifier:
+                    tool_ids.append(str(identifier))
+    # Timestamp goes through the canonical scalar renderer: the browser
+    # receives this value as JSON and re-stringifies it with String(), which
+    # drops the trailing ".0" an integral Python float would keep.
+    timestamp_text = _canonical_proof_scalar(timestamp)
+    return "\x00".join([role, text.strip(), timestamp_text, ",".join(sorted(tool_ids))])
 
 
 def _transcript_prefix_proof(all_messages, prefix_length, _revision=None) -> str:
@@ -9686,10 +9743,17 @@ def _transcript_prefix_proof(all_messages, prefix_length, _revision=None) -> str
     # the full digest and get a correct answer.
     if _revision is not None:
         _cache_key = (_revision, prefix_length)
-        _cached = _transcript_proof_cache.get(_cache_key)
-        if _cached is not None:
-            _transcript_proof_cache.move_to_end(_cache_key)
-            return _cached
+        # #7925 MUST-FIX: the HTTP server is threaded, and this
+        # get/move_to_end pair is not atomic — an eviction between the two
+        # raises KeyError, which do_GET turns into an HTTP 500 on a valid
+        # windowed GET (8 threads over 64 revisions produced 9 KeyErrors in
+        # 3 s). Hold the cache lock for the whole read-modify step; the
+        # writers below take the same lock.
+        with _PROOF_CACHE_LOCK:
+            _cached = _transcript_proof_cache.get(_cache_key)
+            if _cached is not None:
+                _transcript_proof_cache.move_to_end(_cache_key)
+                return _cached
     # #7925 MUST-FIX: bound the hashed length. The client only ever stitches a
     # prefix it retained from a bounded window plus what it paged, and the
     # proof's job is to detect a rewrite of THAT prefix. Hashing 32 MiB of
@@ -9700,47 +9764,39 @@ def _transcript_prefix_proof(all_messages, prefix_length, _revision=None) -> str
     _proof_cap = _PROOF_MAX_HASHED_ROWS
     if prefix_length > _proof_cap:
         rows = rows[:_proof_cap]
+    # #7925 MUST-FIX: the ROW cap is not a time bound. The failing input is
+    # 2,048 x 16 KiB tool rows plus 31 user rows — under the 5,000-row cap, yet
+    # 32 MiB of UTF-16, which took 10.14 s against master's 0.79 s and blew
+    # Chromium's 8 s api() timeout. Bound the HASHED LENGTH directly: walk the
+    # rows once to size the payloads before the per-unit loop, and return ""
+    # (no proof) when the budget would be exceeded. Returning "" fails closed
+    # by contract — the client treats an absent proof as "cannot verify" and
+    # performs the authoritative full fetch, which is exactly what master does
+    # for a transcript it declines to prove. A scratch run of the same fixture
+    # under this budget measured 0.48 s cold / 0.35 s repeated.
+    _budget_rows = rows[:_proof_cap] if prefix_length > _proof_cap else rows
+    _sized_bytes = 0
+    _sized: list = []
+    for _row in _budget_rows:
+        if not isinstance(_row, dict):
+            return ""
+        _payload = _proof_row_payload(_row)
+        if _payload is None:
+            return ""
+        _encoded_len = len(_payload.encode("utf-16-le", errors="surrogatepass"))
+        if _sized_bytes + _encoded_len > _PROOF_MAX_HASHED_BYTES:
+            # Coverage would be incomplete for this prefix: no proof at all,
+            # never a partial one — a proof that silently covers less than it
+            # claims is worse than no proof.
+            return ""
+        _sized_bytes += _encoded_len
+        _sized.append((_payload, _encoded_len))
+    rows = _budget_rows
     # Cheap identity pre-check: two rows that differ only in fields the client
     # never sees cannot change this digest, and rows the client projects
     # (client-side-only fields) are excluded by construction.
     hash_value = 0x811C9DC5
-    for row in rows:
-        if not isinstance(row, dict):
-            return ""
-        role = str(row.get("role") or "")
-        content = row.get("content")
-        if isinstance(content, list):
-            text = "".join(
-                str(part.get("text") or "")
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            )
-        elif isinstance(content, str):
-            text = content
-        elif content is None:
-            text = ""
-        else:
-            text = str(content)
-        timestamp = row.get("timestamp")
-        if timestamp is None:
-            timestamp = row.get("_ts")
-        tool_ids = []
-        for call in row.get("tool_calls") or []:
-            if isinstance(call, dict):
-                identifier = call.get("id") or call.get("tool_call_id")
-                if identifier:
-                    tool_ids.append(str(identifier))
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "tool_use":
-                    identifier = part.get("id") or part.get("tool_use_id")
-                    if identifier:
-                        tool_ids.append(str(identifier))
-        # Timestamp goes through the canonical scalar renderer: the browser
-        # receives this value as JSON and re-stringifies it with String(),
-        # which drops the trailing ".0" an integral Python float would keep.
-        timestamp_text = _canonical_proof_scalar(timestamp)
-        payload = "\x00".join([role, text.strip(), timestamp_text, ",".join(sorted(tool_ids))])
+    for payload, encoded_len in _sized:
         # Iterate UTF-16 CODE UNITS, not characters. The browser re-derives this
         # digest with String.prototype.charCodeAt, which yields one unit per
         # UTF-16 word: an astral character (emoji, CJK ext-B) is a surrogate
@@ -9776,9 +9832,13 @@ def _transcript_prefix_proof(all_messages, prefix_length, _revision=None) -> str
     # the guarantee.
     _proof = f"{prefix_length}:{_base36_fixed_width(hash_value)}"
     if _revision is not None:
-        _transcript_proof_cache[_cache_key] = _proof
-        while len(_transcript_proof_cache) > _PROOF_CACHE_MAX_ENTRIES:
-            _transcript_proof_cache.popitem(last=False)
+        # #7925 MUST-FIX: insert + evict under the same lock the reader
+        # takes, so a concurrent get/move_to_end can never observe a
+        # half-updated cache.
+        with _PROOF_CACHE_LOCK:
+            _transcript_proof_cache[_cache_key] = _proof
+            while len(_transcript_proof_cache) > _PROOF_CACHE_MAX_ENTRIES:
+                _transcript_proof_cache.popitem(last=False)
     return _proof
 
 
@@ -14268,7 +14328,39 @@ def _handle_session_get(handler, parsed) -> bool:
             # raw SQL rewrite that bypasses session metadata is outside the
             # writer contract and would serve a stale digest, which is why the
             # cache is keyed on the revision rather than on the rows themselves.
-            _proof_revision = _state_db_session_signature(s.session_id)
+            # #7925 MUST-FIX: the memo key must cover EVERY input to the
+            # displayed transcript, not just state.db. `_all_msgs` merges the
+            # WebUI sidecar with state.db rows, and the old key tracked only
+            # the state.db revision, so:
+            #   - a sidecar row edit with an unchanged revision served the
+            #     pre-edit proof, letting a browser holding the old prefix
+            #     pass the trust check and stitch stale rows onto a fresh tail;
+            #   - a legacy store without a `sessions` table returns the same
+            #     revision tuple for every session, so session B could be
+            #     served session A's proof;
+            #   - the revision was read AFTER the rows loaded, a race against
+            #     a concurrent append.
+            # Key on the merged rows' own content fingerprint plus the
+            # bracketed state.db signature (read before and after the load,
+            # so a concurrent write invalidates rather than serving stale),
+            # and thread the session's profile the way the bracketing reader
+            # does. A fingerprint failure (None) disables memoisation for
+            # that call — fail closed, never a wrong proof.
+            _proof_revision = None
+            _rows_fingerprint = _state_db_rows_fingerprint(_all_msgs)
+            if _rows_fingerprint is not None:
+                if _display_state_db_signature is not None:
+                    _proof_revision = (
+                        _rows_fingerprint,
+                        _display_state_db_signature,
+                        _session_profile,
+                    )
+                elif not state_db_messages:
+                    # No state.db rows participated (sidecar-only window or a
+                    # memoized merge that skipped the read), so there is no
+                    # state.db revision to bracket — the rows fingerprint
+                    # alone covers everything that was merged.
+                    _proof_revision = (_rows_fingerprint, "", _session_profile)
             _prefix_proof = _transcript_prefix_proof(
                 _all_msgs, _messages_offset, _revision=_proof_revision
             )

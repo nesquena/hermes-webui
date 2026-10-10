@@ -219,17 +219,40 @@ def test_the_proof_accepts_a_lone_surrogate():
 
 
 def test_the_proof_is_bounded_on_a_long_prefix():
-    """Hashing 32 MiB of omitted history per request is the reported 8 s timeout."""
-    from api.routes import _PROOF_MAX_HASHED_ROWS, _transcript_prefix_proof
+    """Hashing 32 MiB of omitted history per request is the reported 8 s timeout.
+
+    #7925 round-3 MUST-FIX: the row cap is not a time bound — the reported
+    failing input (2,048 x 16 KiB tool rows plus 31 user rows) sits under the
+    row cap yet hashes 32 MiB. The bound is now a cumulative 1 MiB UTF-16
+    budget enforced BEFORE the per-unit loop, and a prefix that would exceed
+    it gets NO proof at all (``""``) rather than a proof that silently covers
+    less than it claims. The client fails closed on an absent proof.
+    """
+    from api.routes import (
+        _PROOF_MAX_HASHED_BYTES,
+        _PROOF_MAX_HASHED_ROWS,
+        _transcript_prefix_proof,
+    )
 
     rows = [{"role": "user", "content": "x" * 100} for _ in range(20_000)]
     proof = _transcript_prefix_proof(rows, 20_000)
-    # The reported row count is the real one; only the hashed span is capped.
-    assert proof.startswith("20000:"), proof
+    # 20,000 x ~100 chars is far past the byte budget, so no proof is minted.
+    assert proof == "", (
+        f"an over-budget prefix must decline to prove, got {proof!r}"
+    )
     assert _PROOF_MAX_HASHED_ROWS < 20_000, (
         "the hash cap is above the row count used here, so this test is not "
         "exercising the bound"
     )
+    assert _PROOF_MAX_HASHED_BYTES <= 1024 * 1024, (
+        "the byte budget is above 1 MiB, so the reported 32 MiB input is not "
+        "exercising the bound"
+    )
+    # A prefix comfortably inside the budget is still proven, and the reported
+    # row count stays the real one.
+    small = [{"role": "user", "content": "x" * 100} for _ in range(50)]
+    small_proof = _transcript_prefix_proof(small, 50)
+    assert small_proof.startswith("50:"), small_proof
 
 
 def test_the_proof_cache_is_keyed_on_the_revision_not_the_rows():
@@ -289,7 +312,16 @@ def test_the_proof_cache_is_bounded():
 
 
 def test_the_proof_route_passes_a_revision():
-    """Without a revision at the call site the cache never fires."""
+    """Without a revision at the call site the cache never fires.
+
+    #7925 round-3 MUST-FIX: the key must cover EVERY input to the displayed
+    transcript, not only state.db. ``_all_msgs`` merges the WebUI sidecar with
+    state.db rows, so the call site now derives a rows fingerprint and pairs it
+    with the bracketed state.db signature and the session's profile — a
+    sidecar-only edit, a legacy store that returns one revision tuple for every
+    session, and a revision read after the rows loaded all used to serve a
+    proof that did not describe the rows being returned.
+    """
     from pathlib import Path
 
     src = (
@@ -297,10 +329,18 @@ def test_the_proof_route_passes_a_revision():
     ).read_text(encoding="utf-8")
     idx = src.find("_prefix_proof = _transcript_prefix_proof(")
     assert idx > 0, "the proof call site is gone"
-    window = src[max(0, idx - 1200) : idx + 400]
-    assert "_state_db_session_signature" in window, (
-        "the proof is still minted without a revision, so the memo never hits "
-        "and the per-request digest cost remains (#7925 MUST-FIX 2)"
+    window = src[max(0, idx - 2200) : idx + 400]
+    assert "_state_db_rows_fingerprint" in window, (
+        "the proof is keyed without the merged rows' own fingerprint, so a "
+        "sidecar edit or a legacy store can serve a stale proof (#7925 "
+        "MUST-FIX 3)"
+    )
+    assert "_display_state_db_signature" in window, (
+        "the proof no longer carries the bracketed state.db signature"
+    )
+    assert "_session_profile" in window, (
+        "the proof key omits the session's profile, so two profiles of the "
+        "same session id can share a memo entry"
     )
 
 
@@ -331,4 +371,83 @@ def test_the_proof_helper_uses_the_server_digest():
     )
     assert "_run_digest" not in body, (
         "the proof helper still calls the client digest"
+    )
+
+
+# ── Round-3 findings: the three remaining must-fix items ────────────────────
+
+
+def test_the_proof_declines_an_over_budget_prefix_without_partial_coverage():
+    """#7925 round-3 MUST-FIX 1: the reported failing input (2,048 x 16 KiB
+    tool rows plus 31 user rows) sits UNDER the row cap yet hashes ~32 MiB,
+    which took 10.14 s against master's 0.79 s and blew the client's 8 s
+    timeout. The bound is a cumulative byte budget, and an over-budget prefix
+    gets NO proof rather than one that covers less than it claims."""
+    import time
+
+    from api.routes import _transcript_prefix_proof
+
+    rows = [{"role": "user", "content": f"u{i}", "timestamp": float(i)} for i in range(31)]
+    rows += [
+        {"role": "assistant", "content": "x" * 16384, "timestamp": float(1000 + i)}
+        for i in range(2048)
+    ]
+    started = time.time()
+    proof = _transcript_prefix_proof(rows, len(rows), _revision="rev-budget")
+    elapsed = time.time() - started
+    assert proof == "", f"an over-budget prefix must decline to prove, got {proof!r}"
+    assert elapsed < 8.0, (
+        f"the budget pass must reject before the per-unit loop; took {elapsed:.2f}s"
+    )
+    # An in-budget prefix of the same shape is still proven.
+    small = [{"role": "user", "content": f"u{i}", "timestamp": float(i)} for i in range(31)]
+    assert _transcript_prefix_proof(small, 31, _revision="rev-ok").startswith("31:")
+
+
+def test_the_proof_cache_is_safe_under_concurrent_access():
+    """#7925 round-3 MUST-FIX 2: the HTTP server is threaded, and the
+    get/move_to_end pair plus the insert/evict pair were unsynchronised — an
+    eviction between them raised KeyError, which do_GET turned into an HTTP
+    500 on a valid windowed GET."""
+    import threading
+
+    from api.routes import (
+        _PROOF_CACHE_MAX_ENTRIES,
+        _transcript_prefix_proof,
+        _transcript_proof_cache,
+    )
+
+    rows = [{"role": "user", "content": f"m{i}"} for i in range(40)]
+    _transcript_proof_cache.clear()
+    errors: list = []
+
+    def worker(worker_id: int) -> None:
+        try:
+            for i in range(_PROOF_CACHE_MAX_ENTRIES + 20):
+                _transcript_prefix_proof(rows, 40, _revision=f"rev-{worker_id}-{i}")
+        except Exception as exc:  # pragma: no cover - only on regression
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"concurrent proof access raised: {errors[:3]}"
+    assert len(_transcript_proof_cache) <= _PROOF_CACHE_MAX_ENTRIES
+
+
+def test_the_proof_cache_read_and_write_take_the_same_lock():
+    """The lock must guard BOTH the read-modify and the insert/evict, or one
+    half still races against the other."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text(
+        encoding="utf-8"
+    )
+    idx = src.find("def _transcript_prefix_proof(")
+    assert idx > 0
+    body = src[idx : idx + 12000]
+    assert body.count("with _PROOF_CACHE_LOCK:") >= 2, (
+        "both the cache read-modify and the insert/evict must hold the lock"
     )
