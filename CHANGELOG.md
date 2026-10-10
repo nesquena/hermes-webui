@@ -140,6 +140,11 @@
   Re-running bootstrap against a WebUI that's already up still reports it as running and opens the browser; a
   foreground or systemd launch against it says it's already running instead of blaming another service. Thanks
   @mercael91. (#8112, closes #8111)
+
+- **A reply line that legitimately repeats earlier text is no longer hidden while it streams.** Echo suppression used to
+  match on text alone, so two different events with the same words (for example "Processing…" on both sides of a tool
+  call) collapsed into one. Rows are now de-duplicated by their identity, and only a genuinely re-delivered row is
+  dropped. Thanks @webtecnica. (#6293)
 - **A conversation no longer gets stuck on "session already has an active stream".** A tab that went away without a
   clean disconnect (a half-open connection) kept its session channel alive for the life of the server, and a stream left
   behind by a worker that exited without cleaning up blocked every new message in that conversation, sometimes for hours.
