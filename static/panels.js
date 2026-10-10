@@ -11606,7 +11606,12 @@ function _buildCodexOAuthLogin(p){
       flow:()=>flow,
       btn:()=>btn,
       label:()=>label,
-      onSuccess:()=>loadProvidersPanel(),
+      onSuccess:()=>{
+        // Same refresh the other provider-save paths do, so the model
+        // picker picks up the newly available Codex models.
+        _refreshModelDropdownsAfterProviderChange();
+        return loadProvidersPanel();
+      },
     });
   });
   return wrap;

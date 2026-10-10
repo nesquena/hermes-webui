@@ -68,6 +68,8 @@ globalThis.clearTimeout = () => {};
 let providersReloads = 0;
 let wizardReloads = 0;
 globalThis.loadProvidersPanel = async () => { providersReloads += 1; };
+let modelRefreshes = 0;
+globalThis._refreshModelDropdownsAfterProviderChange = () => { modelRefreshes += 1; };
 globalThis.loadOnboardingWizard = async () => { wizardReloads += 1; };
 
 eval(src);
@@ -117,17 +119,21 @@ eval(src);
   if (scenario.race) {
     // Flow f1 (profile "default") has a poll in flight when the user switches to
     // "work" and starts f2 from the rebuilt card; then f1's poll answers late.
+    // With sameFlow, the restart happens in the same profile and the server's
+    // single-flight hands back the same pending flow (f1) instead of a new one.
     let starts = 0;
     let releaseF1 = null;
+    let f1Polls = 0;
     globalThis.api = async (url, opts) => {
       calls.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
       if (url === '/api/onboarding/oauth/start') {
         starts += 1;
-        return Object.assign({}, startResponse, starts === 1
-          ? { flow_id: 'f1', user_code: 'CODE-ONE' }
-          : { flow_id: 'f2', user_code: 'CODE-TWO' });
+        if (scenario.sameFlow || starts === 1) return Object.assign({}, startResponse, { flow_id: 'f1', user_code: 'CODE-ONE' });
+        return Object.assign({}, startResponse, { flow_id: 'f2', user_code: 'CODE-TWO' });
       }
       if (url === '/api/onboarding/oauth/poll?flow_id=f1') {
+        f1Polls += 1;
+        if (f1Polls > 1) return { status: 'success' };
         return new Promise((resolve) => { releaseF1 = () => resolve({ status: scenario.lateStatus }); });
       }
       if (url === '/api/onboarding/oauth/poll?flow_id=f2') return { status: 'success' };
@@ -142,7 +148,7 @@ eval(src);
     };
     await open();
     const f1Poll = timers.shift()();  // f1 poll now awaiting the server
-    S.activeProfile = 'work';
+    if (!scenario.sameFlow) S.activeProfile = 'work';
     const flowB = await open();
     releaseF1();
     await f1Poll;
@@ -153,6 +159,41 @@ eval(src);
     result.flowBFinal = flowB.innerHTML;
   }
 
+  if (scenario.cancelRace) {
+    // Cancel f1 from card A; while the cancel request is in flight the panel is
+    // rebuilt and f2 is started from card B; then the cancel response arrives.
+    let starts = 0;
+    let releaseCancel = null;
+    globalThis.api = async (url, opts) => {
+      calls.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
+      if (url === '/api/onboarding/oauth/start') {
+        starts += 1;
+        return Object.assign({}, startResponse, starts === 1
+          ? { flow_id: 'f1', user_code: 'CODE-ONE' }
+          : { flow_id: 'f2', user_code: 'CODE-TWO' });
+      }
+      if (url === '/api/onboarding/oauth/cancel') {
+        return new Promise((resolve) => { releaseCancel = () => resolve({ ok: true, status: 'cancelled' }); });
+      }
+      return { status: 'pending' };
+    };
+    const codex = scenario.providers.find((p) => p.id === 'openai-codex');
+    const open = async () => {
+      const card = _buildProviderCard(codex);
+      const login = walk(card).find((el) => el.dataset.codexOauthLogin === '1');
+      const btn = walk(login).find((el) => el.tag === 'button');
+      await btn.listeners.click();
+      return { btn, flow: login.children[login.children.length - 1] };
+    };
+    await open();
+    const cancelling = cancelCodexOAuth();
+    const b = await open();
+    releaseCancel();
+    await cancelling;
+    result.newBtnDisabled = b.btn.disabled;
+    result.newFlowHtml = b.flow.innerHTML;
+  }
+
   if (scenario.wizard) {
     await startCodexOAuth();
     result.wizardShowsCode = wizardFlow.innerHTML.includes('ABCD-1234');
@@ -161,6 +202,7 @@ eval(src);
   }
 
   result.calls = calls;
+  result.modelRefreshes = modelRefreshes;
   result.providersReloads = providersReloads;
   result.wizardReloads = wizardReloads;
   process.stdout.write(JSON.stringify(result));
@@ -243,6 +285,7 @@ def test_settings_login_runs_device_flow_and_refreshes_providers_not_wizard(tmp_
     assert result["wizardFlowTouched"] is False
     assert "oauth_codex_success" in result["flowHtml"]
     assert result["providersReloads"] == 1
+    assert result["modelRefreshes"] == 1
     assert result["wizardReloads"] == 0
 
 
@@ -251,6 +294,7 @@ def test_wizard_login_still_renders_in_wizard_and_reloads_it(tmp_path):
     assert result["wizardShowsCode"] is True
     assert result["wizardReloads"] == 1
     assert result["providersReloads"] == 0
+    assert result["modelRefreshes"] == 0
 
 
 def test_profile_note_is_refreshed_when_the_flow_starts(tmp_path):
@@ -380,3 +424,28 @@ def test_late_poll_from_an_abandoned_flow_does_not_touch_the_new_one(tmp_path, l
     assert result["providersReloads"] == 1
     polled = [c["url"] for c in result["calls"] if "/oauth/poll" in c["url"]]
     assert polled == ["/api/onboarding/oauth/poll?flow_id=f1", "/api/onboarding/oauth/poll?flow_id=f2"]
+
+
+def test_restart_in_the_same_profile_keeps_a_single_poll_loop(tmp_path):
+    # Single-flight returns the same pending flow id on restart, so a late
+    # "pending" from the earlier poll must not schedule a second loop.
+    result = _run(tmp_path, {
+        "race": True,
+        "sameFlow": True,
+        "lateStatus": "pending",
+        "providers": [_oauth_provider("openai-codex", auth_error="No Codex credentials stored.")],
+    })
+    assert "CODE-ONE" in result["flowBAfterLate"]
+    assert result["timersAfterLate"] == 1
+    assert "oauth_codex_success" in result["flowBFinal"]
+    assert result["providersReloads"] == 1
+
+
+def test_late_cancel_response_does_not_re_enable_a_newer_flow(tmp_path):
+    result = _run(tmp_path, {
+        "cancelRace": True,
+        "providers": [_oauth_provider("openai-codex", auth_error="No Codex credentials stored.")],
+    })
+    assert "CODE-TWO" in result["newFlowHtml"]
+    assert "cancelled" not in result["newFlowHtml"]
+    assert result["newBtnDisabled"] is True

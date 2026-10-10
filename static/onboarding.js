@@ -647,11 +647,14 @@ async function copyCodexOAuthCode(code){
 async function cancelCodexOAuth(){
   const flowDiv=_codexOAuthCurrentUi().flow();
   const flowId=_codexOAuthFlowId;
+  const seq=_codexOAuthStartSeq;
   _clearCodexOAuthPoll();
   _codexOAuthFlowId=null;
   if(flowId){
     try{await api('/api/onboarding/oauth/cancel',{method:'POST',body:JSON.stringify({flow_id:flowId})});}catch(e){}
   }
+  // A newer start owns the button and surface now; leave them alone.
+  if(seq!==_codexOAuthStartSeq)return;
   _setCodexOAuthButton(true);
   if(flowDiv){
     flowDiv.innerHTML=`<div class="onboarding-oauth-card"><div class="onboarding-oauth-icon">⏹</div><div><strong>OAuth login cancelled</strong><p style="margin-top:6px;color:var(--muted);font-size:13px">Start again whenever you're ready.</p></div></div>`;
@@ -671,15 +674,18 @@ function _renderCodexOAuthTerminal(status,message){
     </div>`;
 }
 
-async function _pollCodexOAuth(){
+async function _pollCodexOAuth(seq){
   const flowId=_codexOAuthFlowId;
   if(!flowId)return;
+  // A restart in the same profile gets the same pending flow_id back, so the
+  // flow id alone cannot tell this poll from the newer start's.
+  const stale=()=>seq!==_codexOAuthStartSeq||_codexOAuthFlowId!==flowId;
   try{
     const resp=await api('/api/onboarding/oauth/poll?flow_id='+encodeURIComponent(flowId));
-    if(_codexOAuthFlowId!==flowId)return;
+    if(stale())return;
     const status=(resp&&resp.status)||'error';
     if(status==='pending'){
-      _codexOAuthPollTimer=setTimeout(_pollCodexOAuth,3000);
+      _codexOAuthPollTimer=setTimeout(()=>_pollCodexOAuth(seq),3000);
       return;
     }
     _clearCodexOAuthPoll();
@@ -697,7 +703,7 @@ async function _pollCodexOAuth(){
       _renderCodexOAuthTerminal('error',(resp&&resp.error)||'OAuth login failed. Please try again.');
     }
   }catch(e){
-    if(_codexOAuthFlowId!==flowId)return;
+    if(stale())return;
     _clearCodexOAuthPoll();
     _codexOAuthFlowId=null;
     _setCodexOAuthButton(true);
@@ -737,7 +743,7 @@ async function startCodexOAuth(ui){
           <p style="margin-top:8px;color:var(--muted);font-size:13px">${t('oauth_codex_polling')}</p>
         </div>
       </div>`;
-    _codexOAuthPollTimer=setTimeout(_pollCodexOAuth,Math.max(1000,Number(resp.poll_interval_seconds||3)*1000));
+    _codexOAuthPollTimer=setTimeout(()=>_pollCodexOAuth(seq),Math.max(1000,Number(resp.poll_interval_seconds||3)*1000));
   }catch(e){
     if(seq!==_codexOAuthStartSeq)return;
     _clearCodexOAuthPoll();
