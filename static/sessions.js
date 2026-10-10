@@ -3970,7 +3970,32 @@ function _hasInflightTailUserDuplicate(messages,candidate){
         // is ambiguous and must NOT match (a rapid "继续" repeat lands ~1s later).
         return !!_sameTranscriptMessage(msg,candidate);
       }
-      if(_aTs||_bTs) return false; // asymmetric stamp -> genuinely different turns
+      if(_aTs||_bTs){
+        // #6649 SHOULD-FIX (2026-10-06 re-gate): an asymmetric stamp alone is
+        // not evidence of different turns. The rule was written to keep an old
+        // UNSTAMPED repeat ("go") apart from the current stamped "go", but it
+        // also split a transcript that ends in an unstamped `go` from a local
+        // stamped `go` with a live tail — master shows one row there and this
+        // head showed two.
+        //
+        // The discriminator the court actually asked for is a COMPLETED
+        // ANSWER between the two rows: that is what makes the earlier one a
+        // settled turn of its own. With no completed assistant between them
+        // the pair is the same turn seen by two producers (one of which never
+        // stamps), so text equality decides. The scan already walks past live
+        // rows and tool rows, so "no completed answer between" is exactly
+        // "we reached this user without passing a settled assistant".
+        const _sawCompletedAnswer=(()=>{
+          for(let j=i+1;j<list.length;j++){
+            const between=list[j];
+            if(!between) continue;
+            if(String(between.role||'')==='assistant'&&!between._live) return true;
+          }
+          return false;
+        })();
+        if(_sawCompletedAnswer) return false; // different turns, correctly
+        return !!_sameTranscriptMessage(msg,candidate);
+      }
       // Neither carries identity: indistinguishable text turns collapse to one.
       return !!_sameTranscriptMessage(msg,candidate);
     }
@@ -4276,7 +4301,27 @@ function _assistantOnlySnapshotUserTurn(session, inflightMessages){
   // pending truthiness or trailing answer text is not.
   if(!session) return null;
   if(typeof getPendingSessionMessage!=='function') return null;
-  const pending=getPendingSessionMessage(session, null);
+  // #6649 MUST-FIX (2026-10-06 re-gate): resolve the pending prompt against
+  // the transcript, not against nothing. Passing `null` here made
+  // getPendingSessionMessage fall back to `session.messages` — which for the
+  // assistant-only recovery snapshot does NOT hold the loaded transcript — so
+  // it always built a NEW pending user row. The only thing then stopping the
+  // duplicate was _hasInflightTailUserDuplicate's strict equality (exact id or
+  // exact timestamp), which misses master's real producer shapes: a row
+  // stamped `pending_started_at` with sub-microsecond drift (state.db
+  // round-trips drop sub-µs precision), a row carrying `_active_turn_user`
+  // with no timestamp, and a transcript that already ends at the current
+  // prompt. Each of those showed the prompt twice on this head and once on
+  // master.
+  //
+  // Passing the inflight rows routes the lookup through
+  // getPendingSessionMessage's own identity rules (the strict tail scan plus
+  // _pendingActiveTurnUserMessage's `_active_turn_user` marker, the
+  // `_active_turn_token`, and the 1e-6 timestamp epsilon) — the same rules
+  // master uses for the active turn. When the prompt is already present the
+  // function adopts that row and returns null, so no duplicate is injected;
+  // when it is genuinely missing we still materialize it below.
+  const pending=getPendingSessionMessage(session, Array.isArray(inflightMessages)?inflightMessages:null);
   if(!pending||typeof pending!=='object') return null;
   if(pending._pending!==true) return null; // already materialized / adopted -> no recovery needed
   const streamId=String(session&&(session.active_stream_id||session.activeStreamId||'')||'').trim();
@@ -4327,13 +4372,39 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
   // older settled answers. Otherwise the current reply is text-deduped against a
   // previous turn's repeat answer and disappears.
   if(!turnUser&&session){
-    const recovered=_assistantOnlySnapshotUserTurn(session, inflight);
-    if(recovered){
-      // Insert BEFORE the live assistant so the current user owns the tail.
-      const liveIdx=inflight.findIndex(m=>m&&m.role==='assistant'&&m._live);
-      if(liveIdx>=0) inflight.splice(liveIdx,0,recovered);
-      else inflight.unshift(recovered);
-      turnUser=recovered;
+    // #6649 MUST-FIX (2026-10-06 re-gate): the recovery must not inject a
+    // prompt the loaded transcript already holds. _assistantOnlySnapshotUserTurn
+    // resolves the pending prompt against the session/inflight alone, and the
+    // assistant-only HTTP projection clears `session.messages` of user rows, so
+    // it can conclude "missing" while the row is sitting in the base transcript
+    // the caller is about to merge into. Injecting it there produced the
+    // reported duplicate prompt. Only recover when no row in the loaded
+    // transcript already IS this prompt, judged by _sameTranscriptMessage —
+    // exact id, or matching text with timestamps inside the 1e-6 epsilon that
+    // master's own producer shapes need (state.db round-trips drop sub-µs
+    // precision).
+    const _pendingForGuard=typeof getPendingSessionMessage==='function'
+      ? getPendingSessionMessage(session, Array.isArray(baseMessages)&&baseMessages.length?baseMessages:inflight)
+      : null;
+    // getPendingSessionMessage returns NULL when the pending prompt is already
+    // present in the rows it was handed (it adopts that row in place), and a
+    // fresh pending row when it is not. So "already in the loaded transcript"
+    // is exactly `_pendingForGuard === null` while the resolver was given the
+    // base rows. Recovering in that case re-injects a prompt the merged view
+    // already holds — the reported duplicate.
+    const _alreadyInBase=_pendingForGuard===null&&Array.isArray(baseMessages)&&baseMessages.length>0;
+    // The prompt is already in the merged view: skip the recovery so nothing is
+    // injected, but fall through to the settled-belongs-to-current-turn logic
+    // below — that is what reconciles the live tail correctly in this case.
+    if(!_alreadyInBase){
+      const recovered=_assistantOnlySnapshotUserTurn(session, inflight);
+      if(recovered){
+        // Insert BEFORE the live assistant so the current user owns the tail.
+        const liveIdx=inflight.findIndex(m=>m&&m.role==='assistant'&&m._live);
+        if(liveIdx>=0) inflight.splice(liveIdx,0,recovered);
+        else inflight.unshift(recovered);
+        turnUser=recovered;
+      }
     }
   }
   const settledBelongsToCurrentTurn=!!(turnUser&&_hasInflightTailUserDuplicate(baseMessages,turnUser));
