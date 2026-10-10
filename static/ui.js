@@ -21241,6 +21241,7 @@ async function submitEdit(msgIdx, newText) {
   _submitEditInFlight = true;
   try {
     const initialSid = S.session.session_id;
+    const initialProfile = S.activeProfile || 'default';
     const absoluteKeepCount = _oldestIdx + msgIdx;
     // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
     // initialSid — a non-default session model (vs profile default), which is
@@ -21256,6 +21257,12 @@ async function submitEdit(msgIdx, newText) {
         session_id: initialSid,
         keep_count: absoluteKeepCount
       })});
+      // A truncated transcript no longer authoritatively owns browser-retained
+      // command ids. Reusing one after its row was removed could repeat a side
+      // effect under an apparently idempotent retry.
+      if(typeof _clearApprovalCommandStateForSession==='function'){
+        _clearApprovalCommandStateForSession(initialProfile,initialSid);
+      }
       // #5924 SILENT-race guard: a session switch during the truncate await must not
       // let this recovery apply session A's intent (truncate/re-arm/send) to the
       // newly-visible session.
