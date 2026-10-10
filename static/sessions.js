@@ -2048,7 +2048,11 @@ async function newSession(flash, options={}){
     };
     if(S.session&&S.session.session_id){
       reqBody.prev_session_id=S.session.session_id;
-      if(sessionWs) reqBody.workspace_inherited_from_prev_session=true;
+      // Provenance flag ONLY when the workspace actually came from the previous
+      // session: the server uses it to RECOVER a deleted inherited path from the
+      // last workspace, so flagging an explicit project-bound path let a project
+      // chat silently open elsewhere (Greptile P1 2026-10-10T05:08:54Z).
+      if(sessionWs&&!boundWs) reqBody.workspace_inherited_from_prev_session=true;
     }
     // Three-value worktree contract (#6022): explicit true/false is forwarded
     // verbatim; an ABSENT key lets the server apply the agent's config-level
@@ -10721,6 +10725,11 @@ function _makeBindingsCombo(o){
   // (Greptile P2 2026-10-10T03:29:51Z). The highlight helper keeps
   // aria-activedescendant in step with the 'active' row.
   trigger.setAttribute('aria-controls',_cid+'-list');
+  // Accessible name: the visible field labels are sibling divs with no id link,
+  // so a screen reader could not tell a model change from a workspace add
+  // (Greptile P2 2026-10-10T05:08:46Z). Callers pass a localized name; the
+  // add-workspace combo has no visible label at all, so it MUST have one.
+  if(o&&o.ariaLabel) trigger.setAttribute('aria-label',o.ariaLabel);
   wrap.appendChild(trigger);
   wrap.appendChild(menu);
 
@@ -11197,6 +11206,7 @@ function _showProjectBindingsDialog(proj){
   // paths).
   const addCombo=_makeBindingsCombo({
     placeholder:t('pb_add_workspace_placeholder'),
+    ariaLabel:t('pb_add_workspace_title'),
     value:'',
     options:[],
     // Drop workspaces this project already binds, evaluated on every open: the
@@ -11321,6 +11331,7 @@ function _showProjectBindingsDialog(proj){
   });
   const modelCombo=_makeBindingsCombo({
     placeholder:t('pb_none_inherit'),
+    ariaLabel:t('pb_field_model'),
     value:_initialModelKey,
     options:(()=>{ if(!_hasDuplicateModelValues) return modelOptions; return modelOptions.map(o=>({value:o._key, name:o.name, sub:o.sub})); })(),
   });
