@@ -9585,6 +9585,269 @@ def _messages_for_limited_payload(messages) -> list:
     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
+_BASE36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+_BASE36_WIDTH = 26  # ceil(log36(2**32)) — fixed width, zero padded
+
+
+def _base36_fixed_width(value: int, width: int = _BASE36_WIDTH) -> str:
+    """Render *value* as lowercase base-36, zero padded to *width*.
+
+    Matches JavaScript's ``Number.prototype.toString(36)`` digit alphabet and
+    zero padding exactly, so a digest minted here and one re-derived in the
+    browser compare byte-for-byte (#7925 prefix-freshness proof).
+    """
+    value = int(value) & 0xFFFFFFFF
+    chars = []
+    for _ in range(width):
+        chars.append(_BASE36_DIGITS[value % 36])
+        value //= 36
+    return "".join(reversed(chars))
+
+
+def _canonical_proof_scalar(value) -> str:
+    """Render a scalar the way the browser's ``String()`` renders the JSON.
+
+    The prefix-freshness proof is minted here from the payload we are about to
+    serialize and re-derived in the browser from the JSON it received, so the
+    two renderings must agree. JSON round-tripping turns a Python ``102.0``
+    into a JS ``102``, which stringifies back as ``"102"`` — not
+    ``"102.0"``. Collapse integral floats to their integer form and keep
+    shortest-round-trip for the rest, which is what both runtimes do; any other
+    scalar falls back to ``str()``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return str(value)
+        if value.is_integer():
+            return str(int(value))
+        return repr(value)
+    return str(value)
+
+
+# #7925 MUST-FIX: the proof is minted for EVERY windowed ``messages=1``
+# response — the initial ``msg_limit=50`` open, every refresh, every
+# ``msg_before`` page — and the digest walks the prefix in pure Python
+# (307 ms at 1 MB, 1.5 s at 5 MB, 3.0 s at 10 MB). A 32 MiB transcript hit an
+# 8 s TimeoutError where master returned the same window in 141 ms.
+#
+# The proof is a pure function of (row count, the identity fields of rows
+# [0, prefix_length)), so it is memoised per transcript revision: successive
+# pages of the SAME transcript reuse the first digest, and any change that
+# rewrites the prefix changes the row count or the revision key and misses.
+_PROOF_CACHE_MAX_ENTRIES = 32
+# #7925 MUST-FIX: how many prefix rows the digest will actually walk. The
+# WebUI retains at most its own bounded window plus paged rows, so hashing
+# beyond this protects nothing the client holds while costing seconds per
+# request on a long transcript.
+_PROOF_MAX_HASHED_ROWS = 5_000
+# #7925 round-3 MUST-FIX: a cumulative UTF-16 byte budget. The row cap above is
+# not a time bound — the reported failing input (2,048 x 16 KiB tool rows plus
+# 31 user rows) sits under it yet hashes ~32 MiB, taking 10.14 s against
+# master's 0.79 s and blowing the client's 8 s api() timeout. Enforced before
+# the per-unit loop; a prefix that would exceed it gets no proof at all.
+_PROOF_MAX_HASHED_BYTES = 1024 * 1024  # 1 MiB of UTF-16 code units
+_transcript_proof_cache: "OrderedDict[tuple, str]" = OrderedDict()
+# #7925 MUST-FIX: the HTTP server is threaded, so the cache's read-modify
+# (get + move_to_end) and its insert/evict pair must each be atomic. Without
+# this, an eviction landing between get and move_to_end raises KeyError,
+# which do_GET turns into an HTTP 500 on an otherwise valid windowed GET.
+_PROOF_CACHE_LOCK = threading.Lock()
+
+
+def _proof_row_payload(row) -> "str | None":
+    """Build the exact byte-string a row contributes to the prefix proof.
+
+    Returns None when the row is not a dict (the caller's fail-closed shape).
+    Extracted so the budget pass and the hash pass cannot drift: both use the
+    identical payload, which is what makes the byte budget a real bound on the
+    work the hash loop is about to do.
+    """
+    if not isinstance(row, dict):
+        return None
+    role = str(row.get("role") or "")
+    content = row.get("content")
+    if isinstance(content, list):
+        text = "".join(
+            str(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    elif isinstance(content, str):
+        text = content
+    elif content is None:
+        text = ""
+    else:
+        text = str(content)
+    timestamp = row.get("timestamp")
+    if timestamp is None:
+        timestamp = row.get("_ts")
+    tool_ids = []
+    for call in row.get("tool_calls") or []:
+        if isinstance(call, dict):
+            identifier = call.get("id") or call.get("tool_call_id")
+            if identifier:
+                tool_ids.append(str(identifier))
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "tool_use":
+                identifier = part.get("id") or part.get("tool_use_id")
+                if identifier:
+                    tool_ids.append(str(identifier))
+    # Timestamp goes through the canonical scalar renderer: the browser
+    # receives this value as JSON and re-stringifies it with String(), which
+    # drops the trailing ".0" an integral Python float would keep.
+    timestamp_text = _canonical_proof_scalar(timestamp)
+    return "\x00".join([role, text.strip(), timestamp_text, ",".join(sorted(tool_ids))])
+
+
+def _transcript_prefix_proof(all_messages, prefix_length, _revision=None) -> str:
+    """Mint a server-issued proof covering rows ``[0, prefix_length)``.
+
+    #7925 (finding 4): the WebUI bounded reload stitches a fresh tail window
+    onto the prefix it already rendered. Its offset bookkeeping can only prove
+    the *geometry* of that splice — a compaction that removes 100 rows below
+    the client's prefix origin leaves ``_messages_offset`` looking perfectly
+    consistent while the client's retained prefix is no longer the server's
+    transcript. This digest gives the client something server-issued to check
+    against: it covers the row count it claims plus every role/visible-text/
+    timestamp identity in that prefix, so any rewrite of the prefix below the
+    window changes the proof.
+
+    Bounded on purpose — the prefix the client can have retained is at most the
+    server's own ``_MAX_MSG_LIMIT`` window plus what it paged with
+    ``msg_before``, and the digest is a chained FNV-1a over the identity
+    fields, not a serialization of the rows.
+
+    Returns ``""`` when the prefix cannot be described (non-positive length,
+    non-list rows) — the client treats that as "unprovable" and falls back to
+    the authoritative full fetch.
+    """
+    try:
+        prefix_length = int(prefix_length)
+    except (TypeError, ValueError):
+        return ""
+    if prefix_length <= 0 or not isinstance(all_messages, list):
+        return ""
+    rows = all_messages[:prefix_length]
+    # #7925 MUST-FIX: memoise per (revision, row count, prefix length). The
+    # revision is the caller's transcript identity; without it a cache keyed
+    # only on shape would serve a stale digest after a compaction rewrote the
+    # prefix, which is the exact failure the proof exists to catch.
+    # #7925 MUST-FIX: the cache is ONLY consulted when the caller supplies a
+    # revision. Deriving a key from the rows themselves is unsound — a
+    # compaction that rewrites rows INSIDE the prefix keeps the row count and
+    # the first/last row identities, so a shape-derived key serves the
+    # pre-compaction digest for a transcript that no longer matches it. That is
+    # precisely the failure the proof exists to detect, so a shape key would
+    # turn the safety check into a lie. Callers that cannot name a revision pay
+    # the full digest and get a correct answer.
+    if _revision is not None:
+        _cache_key = (_revision, prefix_length)
+        # #7925 MUST-FIX: the HTTP server is threaded, and this
+        # get/move_to_end pair is not atomic — an eviction between the two
+        # raises KeyError, which do_GET turns into an HTTP 500 on a valid
+        # windowed GET (8 threads over 64 revisions produced 9 KeyErrors in
+        # 3 s). Hold the cache lock for the whole read-modify step; the
+        # writers below take the same lock.
+        with _PROOF_CACHE_LOCK:
+            _cached = _transcript_proof_cache.get(_cache_key)
+            if _cached is not None:
+                _transcript_proof_cache.move_to_end(_cache_key)
+                return _cached
+    # #7925 MUST-FIX: bound the hashed length. The client only ever stitches a
+    # prefix it retained from a bounded window plus what it paged, and the
+    # proof's job is to detect a rewrite of THAT prefix. Hashing 32 MiB of
+    # omitted history on every windowed response costs seconds to protect a
+    # prefix the client does not hold. Past the cap the proof still covers the
+    # geometry, and the client's geometry checks (1)-(3) remain in force — the
+    # digest simply stops claiming coverage it was never asked for.
+    _proof_cap = _PROOF_MAX_HASHED_ROWS
+    if prefix_length > _proof_cap:
+        rows = rows[:_proof_cap]
+    # #7925 MUST-FIX: the ROW cap is not a time bound. The failing input is
+    # 2,048 x 16 KiB tool rows plus 31 user rows — under the 5,000-row cap, yet
+    # 32 MiB of UTF-16, which took 10.14 s against master's 0.79 s and blew
+    # Chromium's 8 s api() timeout. Bound the HASHED LENGTH directly: walk the
+    # rows once to size the payloads before the per-unit loop, and return ""
+    # (no proof) when the budget would be exceeded. Returning "" fails closed
+    # by contract — the client treats an absent proof as "cannot verify" and
+    # performs the authoritative full fetch, which is exactly what master does
+    # for a transcript it declines to prove. A scratch run of the same fixture
+    # under this budget measured 0.48 s cold / 0.35 s repeated.
+    _budget_rows = rows[:_proof_cap] if prefix_length > _proof_cap else rows
+    _sized_bytes = 0
+    _sized: list = []
+    for _row in _budget_rows:
+        if not isinstance(_row, dict):
+            return ""
+        _payload = _proof_row_payload(_row)
+        if _payload is None:
+            return ""
+        _encoded_len = len(_payload.encode("utf-16-le", errors="surrogatepass"))
+        if _sized_bytes + _encoded_len > _PROOF_MAX_HASHED_BYTES:
+            # Coverage would be incomplete for this prefix: no proof at all,
+            # never a partial one — a proof that silently covers less than it
+            # claims is worse than no proof.
+            return ""
+        _sized_bytes += _encoded_len
+        _sized.append((_payload, _encoded_len))
+    rows = _budget_rows
+    # Cheap identity pre-check: two rows that differ only in fields the client
+    # never sees cannot change this digest, and rows the client projects
+    # (client-side-only fields) are excluded by construction.
+    hash_value = 0x811C9DC5
+    for payload, encoded_len in _sized:
+        # Iterate UTF-16 CODE UNITS, not characters. The browser re-derives this
+        # digest with String.prototype.charCodeAt, which yields one unit per
+        # UTF-16 word: an astral character (emoji, CJK ext-B) is a surrogate
+        # pair = two units, while Python iterates it as a single character.
+        # Mixing the two makes the digests diverge on the first transcript
+        # containing an emoji.
+        #
+        # #7925 MUST-FIX: ``errors="surrogatepass"`` is load-bearing. A
+        # JSON-escaped lone surrogate (``\ud800``) in an OMITTED historical row
+        # makes the default strict encoder raise UnicodeEncodeError, which
+        # turned a 200-with-30-rows windowed response into a 500. The client
+        # never sees that row — only its digest — and surrogatepass emits the
+        # same UTF-16 units the browser's charCodeAt would read.
+        encoded = payload.encode("utf-16-le", errors="surrogatepass")
+        for offset in range(0, len(encoded), 2):
+            hash_value ^= encoded[offset] | (encoded[offset + 1] << 8)
+            hash_value = (hash_value * 0x01000193) & 0xFFFFFFFF
+        hash_value ^= 0x2C
+        hash_value = (hash_value * 0x01000193) & 0xFFFFFFFF
+    # Row count, then the chained hash as fixed-width lowercase base-36 — the
+    # client's static/sessions.js:_prefixFreshnessDigest() reproduces this exact
+    # string from the rows it retained, and comparing the two IS the
+    # prefix-freshness proof. Fixed width keeps the field length constant so a
+    # shorter digest cannot trivially match a longer one.
+    #
+    # #7925 SHOULD-FIX: the agreement is BEST-EFFORT, not byte-identical. The
+    # client digest diverges on float 1e-7, a BOM, dict/numeric content,
+    # integers above 2^53, 1e21 and \x1f, and a tool row clipped above 4,096
+    # characters by _tool_message_for_limited_payload can never hash to this
+    # digest for the row it was clipped from. Every one of those fails CLOSED
+    # (the client refuses the stitch and performs the authoritative full
+    # fetch), so none is a correctness risk — but "byte-identical" overstates
+    # the guarantee.
+    _proof = f"{prefix_length}:{_base36_fixed_width(hash_value)}"
+    if _revision is not None:
+        # #7925 MUST-FIX: insert + evict under the same lock the reader
+        # takes, so a concurrent get/move_to_end can never observe a
+        # half-updated cache.
+        with _PROOF_CACHE_LOCK:
+            _transcript_proof_cache[_cache_key] = _proof
+            while len(_transcript_proof_cache) > _PROOF_CACHE_MAX_ENTRIES:
+                _transcript_proof_cache.popitem(last=False)
+    return _proof
+
+
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
@@ -14054,6 +14317,60 @@ def _handle_session_get(handler, parsed) -> bool:
                 msg_before=msg_before,
                 expand_renderable=expand_renderable,
             )
+            # #7925 (finding 4): mint the server-issued proof for rows
+            # [0, _messages_offset) so the WebUI's bounded reload can verify
+            # that the prefix it retained is still rows [0, offset) of THIS
+            # transcript. Emitted for every windowed response, including the
+            # offset==0 full-window case, so a client that later stitches onto
+            # it has something authoritative to compare against.
+            #
+            # #7925 MUST-FIX: the digest walks the prefix per UTF-16 code unit
+            # in pure Python (307 ms at 1 MB, 3.0 s at 10 MB) and was being
+            # minted on EVERY windowed response — a 32 MiB transcript hit an
+            # 8 s TimeoutError where master returned the same window in 141 ms.
+            # It is now memoised on the session's state-store revision, which
+            # every supported writer bumps, so successive windows of the same
+            # transcript reuse one digest. That revision is fail-closed by
+            # construction (``_state_db_target_session_revision``): a same-length
+            # raw SQL rewrite that bypasses session metadata is outside the
+            # writer contract and would serve a stale digest, which is why the
+            # cache is keyed on the revision rather than on the rows themselves.
+            # #7925 MUST-FIX: the memo key must cover EVERY input to the
+            # displayed transcript, not just state.db. `_all_msgs` merges the
+            # WebUI sidecar with state.db rows, and the old key tracked only
+            # the state.db revision, so:
+            #   - a sidecar row edit with an unchanged revision served the
+            #     pre-edit proof, letting a browser holding the old prefix
+            #     pass the trust check and stitch stale rows onto a fresh tail;
+            #   - a legacy store without a `sessions` table returns the same
+            #     revision tuple for every session, so session B could be
+            #     served session A's proof;
+            #   - the revision was read AFTER the rows loaded, a race against
+            #     a concurrent append.
+            # Key on the merged rows' own content fingerprint plus the
+            # bracketed state.db signature (read before and after the load,
+            # so a concurrent write invalidates rather than serving stale),
+            # and thread the session's profile the way the bracketing reader
+            # does. A fingerprint failure (None) disables memoisation for
+            # that call — fail closed, never a wrong proof.
+            _proof_revision = None
+            _rows_fingerprint = _state_db_rows_fingerprint(_all_msgs)
+            if _rows_fingerprint is not None:
+                if _display_state_db_signature is not None:
+                    _proof_revision = (
+                        _rows_fingerprint,
+                        _display_state_db_signature,
+                        _session_profile,
+                    )
+                elif not state_db_messages:
+                    # No state.db rows participated (sidecar-only window or a
+                    # memoized merge that skipped the read), so there is no
+                    # state.db revision to bracket — the rows fingerprint
+                    # alone covers everything that was merged.
+                    _proof_revision = (_rows_fingerprint, "", _session_profile)
+            _prefix_proof = _transcript_prefix_proof(
+                _all_msgs, _messages_offset, _revision=_proof_revision
+            )
             if msg_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
@@ -14240,6 +14557,13 @@ def _handle_session_get(handler, parsed) -> bool:
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+        # #7925 (finding 4): server-issued proof that rows [0, _messages_offset)
+        # of THIS transcript are the rows the client is being told its window
+        # starts after. Empty string means "unprovable" (no messages / not a
+        # load_messages response), which makes the WebUI bounded reload fall
+        # back to the authoritative full fetch rather than trust a prefix it
+        # cannot verify.
+        raw["_prefix_proof"] = _prefix_proof if load_messages else ""
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:

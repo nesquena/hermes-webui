@@ -429,12 +429,26 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
     # The width hint is applied only when it stays within the server msg_limit
     # ceiling; an over-ceiling hint would be clamped by the backend and could
-    # silently shrink an already-loaded transcript, so it falls back to the bare
-    # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
+    # silently shrink an already-loaded transcript, so it used to fall back to
+    # the bare full-transcript path (#6152/#6154 ceiling; Codex gate silent
+    # row-loss fix).
     # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
     # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
-    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
-    assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
+    # #7899: an over-ceiling reload no longer falls back to a bare
+    # full-transcript GET (that turned every focus/SSE reconciliation on a
+    # >500-row session into a multi-MB re-download).
+    # #7925 (finding 2): clamping the over-ceiling width to _msgLimitMax was
+    # ALSO wrong, just more quietly — a 601-row fully-loaded session reloaded
+    # by an idle poll then requested msg_limit=500 and rendered the server's
+    # window from row 101, silently dropping the 101 rows the client had
+    # already loaded. The reload width is now either satisfiable under the
+    # ceiling (bounded tail + prefix stitch) or it is not, and when it is not
+    # the request is the explicit full-transcript `msg_limit=all` — the shape
+    # the backend documents for exactly this frontend need.
+    assert "const _reloadWidthExceedsCeiling = !(reloadLimit && reloadLimit <= _msgLimitMax);" in SESSIONS_JS
+    assert "const boundedReloadLimit = _reloadWidthExceedsCeiling ? 'all' : reloadLimit;" in SESSIONS_JS
+    assert "const reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;" in SESSIONS_JS
+    # msg_limit is ALWAYS present, on every reload, whichever branch is taken.
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function loadSession(sid)")
