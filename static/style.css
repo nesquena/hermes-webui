@@ -3671,8 +3671,13 @@ body.resizing .sidebar{transition:none!important;}
 
 /* ── Tool call cards ── */
 /* Running indicator dot (pulsing) */
-@keyframes wlpulse{0%,100%{box-shadow:0 0 0 0 var(--accent-bg-strong);}50%{box-shadow:0 0 0 5px rgba(255,215,0,0);}}
+/* The dot core stays solid (full-opacity contrast in every theme); the pulse
+   lives on a ::after ring animated with transform:scale + opacity — both
+   compositor-only, so no scene repaint per frame (UX gate: an opacity-only
+   pulse on the dot itself dropped to ~1.6:1 contrast in light theme). */
+@keyframes wlring{0%{transform:scale(1);opacity:.45;}100%{transform:scale(2.4);opacity:0;}}
 .tool-card-running-dot{
+  position:relative;
   display:inline-block;
   width:7px;
   height:7px;
@@ -3681,9 +3686,20 @@ body.resizing .sidebar{transition:none!important;}
   opacity:1;
   flex-shrink:0;
   vertical-align:middle;
-  animation:wlpulse 1.3s ease-in-out infinite;
 }
-.tl-rundot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:wlpulse 1.3s ease-in-out infinite;}
+.tool-card-running-dot::after,.tl-rundot::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  border-radius:50%;
+  background:var(--accent);
+  animation:wlring 1.3s ease-out infinite;
+  pointer-events:none;
+}
+.tl-rundot{position:relative;width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+@media (prefers-reduced-motion:reduce){
+  .tool-card-running-dot::after,.tl-rundot::after{animation:none;opacity:0;}
+}
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
 .tool-card-more:hover{opacity:1;}
@@ -4390,9 +4406,14 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-progress::after{
   content:none;
 }
+/* The running segment is 60% of the track. Translate it across the clip
+   instead of changing offsets and relaying out the transcript each frame. */
 @keyframes transparent-progress-shimmer{
-  0%{left:0;right:100%;}
-  100%{left:100%;right:0;}
+  0%{transform:translateX(-100%);}
+  100%{transform:translateX(200%);}
+}
+@media (prefers-reduced-motion:reduce){
+  .transparent-event-progress[data-progress-running="1"]::before{animation:none;}
 }
 .transparent-event-row + .transparent-event-row::before{
   content:none;
