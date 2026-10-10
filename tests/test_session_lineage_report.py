@@ -24,6 +24,8 @@ def _ensure_state_db(path):
             started_at REAL NOT NULL,
             message_count INTEGER DEFAULT 0,
             parent_session_id TEXT,
+            session_key TEXT,
+            model_config TEXT,
             ended_at REAL,
             end_reason TEXT
         );
@@ -39,14 +41,37 @@ def _ensure_state_db(path):
     return conn
 
 
-def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None, source="webui", session_source=None):
+def _insert_state_row(
+    conn,
+    sid,
+    *,
+    parent=None,
+    ended_at=None,
+    end_reason=None,
+    started_at=None,
+    source="webui",
+    session_source=None,
+    session_key=None,
+    model_config=None,
+):
     conn.execute(
         """
         INSERT INTO sessions
-        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
+        (id, source, session_source, title, model, started_at, message_count, parent_session_id, session_key, model_config, ended_at, end_reason)
+        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?, ?, ?)
         """,
-        (sid, source, session_source, sid.replace("_", " "), started_at or time.time(), parent, ended_at, end_reason),
+        (
+            sid,
+            source,
+            session_source,
+            sid.replace("_", " "),
+            started_at or time.time(),
+            parent,
+            session_key,
+            json.dumps(model_config) if isinstance(model_config, dict) else model_config,
+            ended_at,
+            end_reason,
+        ),
     )
     conn.commit()
 
@@ -199,6 +224,41 @@ def test_lineage_report_surfaces_non_continuation_children_without_mutation(tmp_
             }
         ]
         assert report["mutation"] is False
+    finally:
+        conn.close()
+
+
+def test_lineage_report_excludes_user_visible_reset_successors_from_children(tmp_path):
+    conn = _ensure_state_db(tmp_path / 'state.db')
+    t0 = time.time() - 100
+    parent_sid = 'lineage_report_reset_parent'
+    child_sid = 'lineage_report_reset_child'
+    try:
+        _insert_state_row(
+            conn,
+            parent_sid,
+            source='wecom',
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason='session_reset',
+            session_key='same-messaging-identity',
+        )
+        _insert_state_row(
+            conn,
+            child_sid,
+            source='wecom',
+            parent=parent_sid,
+            started_at=t0 + 6,
+            session_key='same-messaging-identity',
+            model_config={'_reset_from': parent_sid},
+        )
+
+        parent_report = agent_sessions.read_session_lineage_report(tmp_path / 'state.db', parent_sid)
+        child_report = agent_sessions.read_session_lineage_report(tmp_path / 'state.db', child_sid)
+
+        assert parent_report['children'] == []
+        assert child_report['lineage_key'] == child_sid
+        assert [row['session_id'] for row in child_report['segments']] == [child_sid]
     finally:
         conn.close()
 

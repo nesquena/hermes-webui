@@ -7800,6 +7800,25 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         _cap = 300
     if _cap > 0 and len(sessions) > _cap:
         candidates = sessions[:_cap]
+        # Content search uses all_sessions() without the list route's uncapped
+        # source overlay. Normalize old mirrored forks before sidebar hiding,
+        # but do not expand lineage traversal or message aggregation past the cap.
+        fork_ids = {
+            str(s['session_id']) for s in sessions[_cap:]
+            if s.get('session_id') and str(s.get('session_source') or '').strip().lower() == 'fork'
+        }
+        if fork_ids:
+            try:
+                source_metadata = _read_state_db_sidebar_overrides(
+                    _active_state_db_path(), fork_ids, count_session_ids=set(),
+                )
+                # The cheap sessions-table read also returns its message_count.
+                # Keep this fallback source/title-only, including for stale rows.
+                for entry in source_metadata.values():
+                    entry.pop('_state_db_message_count', None)
+                _apply_sidebar_state_db_override_metadata(sessions, source_metadata)
+            except Exception:
+                logger.debug("Failed to normalize old sidebar fork sources")
     else:
         candidates = sessions
     try:
@@ -10099,7 +10118,7 @@ def _load_cli_sessions_uncached(
         else:
             _archived = bool(row.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
-        cli_sessions.append({
+        cli_session = {
             'session_id': sid,
             'title': _display_title,
             'workspace': _cli_workspace(),
@@ -10133,7 +10152,20 @@ def _load_cli_sessions_uncached(
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
-        })
+        }
+        # Preserve the projection's absence of child metadata. In particular,
+        # reset successors keep ``parent_session_id`` as durable lineage but
+        # must not acquire null child-only fields while adapting state.db rows
+        # to the sidebar response shape.
+        for key in (
+            'parent_title',
+            'parent_source',
+            'relationship_type',
+            '_parent_lineage_root_id',
+        ):
+            if key not in row:
+                cli_session.pop(key, None)
+        cli_sessions.append(cli_session)
 
     if source_filter is not None:
         return _result()
