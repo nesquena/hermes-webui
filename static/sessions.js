@@ -10859,7 +10859,16 @@ async function _saveProjectBindings(proj, fields){
       // unsaved controls are DOM state and are left untouched (Greptile P2
       // 2026-10-10T10:11:13Z).
       for(const _k of ['name','workspaces','default_workspace','model','model_provider','auto_assign']){
+        // The server POPS a CLEARED field instead of echoing it as false/''
+        // (``proj.pop("auto_assign", None)`` and friends in /api/projects/bind),
+        // so a key ABSENT from the response means "cleared" and must be deleted
+        // from the snapshot too. Copying only the present keys left the old
+        // value behind, and the restore paths (aaCb.onchange / Save's decline
+        // branch both read ``!!proj.auto_assign``) then put a stale ON back —
+        // a following Save silently re-enabled filing the user had just turned
+        // off (maintainer review 5478955688, 2026-10-10T12:35:21Z).
         if(Object.prototype.hasOwnProperty.call(updated,_k)) proj[_k]=updated[_k];
+        else delete proj[_k];
       }
     }
     try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
