@@ -223,6 +223,123 @@ class TestSmdHelpers:
             "_smdNewParser must guard on window.smd before using the library"
         )
 
+    def test_smd_keeps_unencoded_file_download_destination(self):
+        url = "https://gw.example/api/files/download?path=/tmp/report final.pdf"
+        script = f"""
+import * as smd from './static/vendor/smd.min.js';
+const hrefs=[];
+const renderer={{
+  data: {{}},
+  add_token() {{}},
+  end_token() {{}},
+  add_text() {{}},
+  set_attr(_data, attr, value) {{ if(attr===smd.HREF) hrefs.push(value); }},
+}};
+const parser=smd.parser(renderer);
+smd.parser_write(parser, '[Download]({url})');
+smd.parser_end(parser);
+console.log(JSON.stringify(hrefs));
+"""
+        completed = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert json.loads(completed.stdout) == [url]
+
+    def test_smd_keeps_quote_bytes_inside_labeled_destinations(self):
+        urls = [
+            "https://example.test/O'Reilly.pdf",
+            'https://example.test/O"Reilly.pdf',
+        ]
+        script = f"""
+import * as smd from './static/vendor/smd.min.js';
+const urls={json.dumps(urls)};
+const hrefs=[];
+for(const url of urls){{
+  const renderer={{
+    data: {{}},
+    add_token() {{}},
+    end_token() {{}},
+    add_text() {{}},
+    set_attr(_data, attr, value) {{ if(attr===smd.HREF) hrefs.push(value); }},
+  }};
+  const parser=smd.parser(renderer);
+  smd.parser_write(parser, `[Docs](${{url}})`);
+  smd.parser_end(parser);
+}}
+console.log(JSON.stringify(hrefs));
+"""
+        completed = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert json.loads(completed.stdout) == urls
+
+    def test_smd_renderers_strip_optional_title_without_truncating_spaced_url(self):
+        normalizer = extract_fn(UI_JS, "_normalizeMarkdownLinkDestination")
+        link_href = extract_fn(MESSAGES_JS, "_smdLinkHref")
+        image_allowed = extract_fn(MESSAGES_JS, "_smdImgSrcAllowed")
+        safe_renderer = extract_fn(MESSAGES_JS, "_safeSmdRenderer")
+        fade_renderer = extract_fn(MESSAGES_JS, "_streamFadeRenderer")
+        assert normalizer and link_href and image_allowed and safe_renderer and fade_renderer
+        raw_values = [
+            "https://gw.example/a b.pdf",
+            'https://gw.example/a b.pdf "Download"',
+            "https://gw.example/a b.pdf 'Download'",
+            "https://gw.example/a b.pdf (Download)",
+        ]
+
+        script = f"""
+const captured=[];
+globalThis.window={{
+  smd:{{
+    HREF:1,
+    SRC:2,
+    default_renderer(){{
+      return {{
+        data:{{}},
+        add_text(){{}},
+        set_attr(_data,_attr,value){{captured.push(value);}},
+      }};
+    }},
+  }},
+}};
+const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\\/|#|\\?|\\.|api|session\\/)/i;
+const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\\/|#|\\?|\\.)/i;
+const _SMD_MEDIA_TAIL=new WeakMap();
+const __SMD_PARSER_FALLBACK={{}};
+function _smdAppendPlainText(){{}}
+function _smdParserKey(){{return __SMD_PARSER_FALLBACK;}}
+function _smdMediaAwareAddText(){{}}
+function _streamFadeBindCleanup(){{}}
+{normalizer}
+{link_href}
+{image_allowed}
+{safe_renderer}
+{fade_renderer}
+const data={{nodes:[{{classList:{{add(){{}}}},setAttribute(){{}}}}],index:0}};
+const rawValues={json.dumps(raw_values)};
+for(const raw of rawValues){{
+  _safeSmdRenderer({{}}).set_attr(data,window.smd.HREF,raw);
+  _streamFadeRenderer({{}}).set_attr(data,window.smd.HREF,raw);
+}}
+console.log(JSON.stringify(captured));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert json.loads(completed.stdout) == ["https://gw.example/a b.pdf"] * 8
+
     def test_smd_end_parser_exists(self):
         fn = extract_fn(MESSAGES_JS, "_smdEndParser")
         assert fn is not None, "_smdEndParser function must be defined"
