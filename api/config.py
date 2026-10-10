@@ -1249,7 +1249,7 @@ _PROVIDER_DISPLAY = {
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
     "lmstudio": "LM Studio",
-    "mistralai": "Mistral",
+    "mistral": "Mistral",
     "qwen": "Qwen",
     "x-ai": "xAI",
     "nvidia": "NVIDIA NIM",
@@ -1257,12 +1257,9 @@ _PROVIDER_DISPLAY = {
     "bedrock": "AWS Bedrock",
 }
 
-# Provider alias → canonical slug.  Users configure providers using the
-# dotted/hyphenated form they see on the provider website (``z.ai``,
-# ``x.ai``, ``google``) but the internal catalog (``_PROVIDER_MODELS``)
-# uses slugs without punctuation (``zai``, ``xai``, ``gemini``).  Without
-# normalisation the provider lands in the ``else`` branch of the group
-# builder and no models are returned — the bug behind #815.
+# Provider alias → canonical slug. This local table supplies WebUI-compatible
+# normalization when the Agent tree is absent; `_resolve_provider_alias`
+# remains the separate Agent vocabulary adapter.
 #
 # This table is authoritative for the WebUI.  When ``hermes_cli.models``
 # is importable we also merge its ``_PROVIDER_ALIASES`` on top so any
@@ -1271,6 +1268,7 @@ _PROVIDER_DISPLAY = {
 # not on ``sys.path`` (CI, installs without hermes-agent cloned
 # alongside the WebUI).
 _PROVIDER_ALIASES = {
+    "mistralai": "mistral",
     "glm": "zai",
     "z-ai": "zai",
     "z.ai": "zai",
@@ -1382,8 +1380,8 @@ def _is_known_model_provider(provider_id: str) -> bool:
     Without this gate, #4247's pool-detection loop added *every* pool key to
     ``detected_providers``; unknown ids then fell through to the global
     auto-detected catalog and each phantom provider was painted with the full
-    model list (#4324).  ``provider_id`` is expected to be the canonical slug
-    (post ``_resolve_provider_alias``); the lookup is case-insensitive.
+    model list (#4324).  ``provider_id`` is a canonical WebUI provider ID;
+    the lookup is case-insensitive.
 
     A provider is "known" when it is a configured custom-provider slug
     (``custom:*``), appears in WebUI's static ``_PROVIDER_DISPLAY`` /
@@ -1601,7 +1599,7 @@ def _resolve_configured_provider_id(
 
 
 def _canonicalise_provider_id(name: object) -> str:
-    """Normalise a provider id slug into a stable lowercase-hyphenated form.
+    """Normalize built-in provider ids and preserve explicit custom slugs.
 
     Folds underscores to hyphens and lowercases the result, so a user with
     ``providers.opencode_go.api_key`` in ``config.yaml`` and
@@ -1625,9 +1623,19 @@ def _canonicalise_provider_id(name: object) -> str:
     """
     if not name:
         return ""
-    raw = str(name).strip().lower().replace("_", "-")
+    raw = str(name).strip().lower()
     if not raw:
         return ""
+    if raw.startswith("custom:"):
+        return raw
+    # Registered plugin slugs are WebUI identities, not built-in aliases.
+    if _is_plugin_model_provider(raw):
+        return raw
+    raw = raw.replace("_", "-")
+    # xAI is a WebUI-owned ``x-ai`` provider. Keep dotted and display-name
+    # spellings in that namespace before adapting to the Agent alias later.
+    if raw in {"x.ai", "grok"}:
+        return "x-ai"
     # Already a canonical id known to _PROVIDER_DISPLAY/_PROVIDER_MODELS:
     # keep as-is to avoid round-tripping through aliases (e.g. x-ai → xai).
     if raw in _PROVIDER_DISPLAY or raw in _PROVIDER_MODELS:
@@ -1639,10 +1647,157 @@ def _canonicalise_provider_id(name: object) -> str:
     # rejected valid aliases like `google-gemini`→`gemini`, leaving the id
     # uncanonicalised and silently breaking provider-ownership checks (#5511).
     # This still blocks aliases that point at non-canonical/legacy strings.
-    resolved = _resolve_provider_alias(raw)
+    resolved = _PROVIDER_ALIASES.get(raw) or _resolve_provider_alias(raw)
     if resolved and (resolved.lower() in _PROVIDER_DISPLAY or resolved.lower() in _PROVIDER_MODELS):
         return resolved.lower()
     return raw
+
+
+def _webui_catalog_provider_id(
+    provider: object,
+    config_obj: dict | None = None,
+    *,
+    base_url: object = None,
+) -> str:
+    named_slug = _named_custom_provider_slug_for_provider(provider, config_obj)
+    canonical = named_slug or _canonicalise_provider_id(provider)
+    if canonical == "custom" and base_url:
+        return _named_custom_provider_slug_for_base_url(base_url, config_obj) or canonical
+    return canonical
+
+
+def _canonical_provider_config_keys(config_obj: dict | None, provider: object) -> list[str]:
+    """Return raw provider-config keys equivalent to a WebUI provider id."""
+    providers_cfg = (config_obj or {}).get("providers", {}) if isinstance(config_obj, dict) else {}
+    if not isinstance(providers_cfg, dict):
+        return []
+    canonical = _canonicalise_provider_id(provider)
+    return [str(key) for key in providers_cfg if _canonicalise_provider_id(key) == canonical]
+
+
+def _canonical_provider_config(
+    config_obj: dict | None,
+    provider: object,
+    *,
+    include_context_models: bool = False,
+) -> dict | list:
+    """Merge equivalent provider config entries, with canonical keys winning."""
+    providers_cfg = (config_obj or {}).get("providers", {}) if isinstance(config_obj, dict) else {}
+    if not isinstance(providers_cfg, dict):
+        return [] if include_context_models else {}
+    keys = _canonical_provider_config_keys(config_obj, provider)
+    canonical = _canonicalise_provider_id(provider)
+    # Read legacy aliases first and the canonical key last so canonical scalar
+    # values and duplicate model options win regardless of YAML key order.
+    keys = [key for key in keys if key != canonical]
+    if canonical in providers_cfg:
+        keys.append(canonical)
+    merged: dict = {}
+    model_values: list = []
+    model_map: dict | None = None
+    model_entries: list[tuple[str, object, bool]] = []
+    model_contributors: list[tuple[str, object]] = []
+    has_model_list = False
+    has_model_dict = False
+    for key in keys:
+        value = providers_cfg.get(key)
+        if isinstance(value, dict):
+            merged.update(value)
+            if isinstance(value.get("models"), list):
+                has_model_list = True
+                model_contributors.append((key, value["models"]))
+                model_values.extend(value["models"])
+                for item in value["models"]:
+                    model_id = _configured_model_ids([item])
+                    if model_id:
+                        model_entries.append((model_id[0], item, True))
+            elif isinstance(value.get("models"), dict):
+                has_model_dict = True
+                model_contributors.append((key, value["models"]))
+                if model_map is None:
+                    model_map = {}
+                model_map.update(value["models"])
+                model_entries.extend(
+                    (model_id, metadata, False)
+                    for model_id, metadata in value["models"].items()
+                    if isinstance(model_id, str) and model_id.strip()
+                )
+    if has_model_list and has_model_dict:
+        merged_models: list[dict] = []
+        model_positions: dict[str, int] = {}
+        for model_id, metadata, is_list_entry in model_entries:
+            if is_list_entry and isinstance(metadata, dict):
+                row = dict(metadata)
+            elif not is_list_entry and isinstance(metadata, dict):
+                row = dict(metadata)
+                row["id"] = model_id
+            else:
+                row = {"id": model_id}
+            if model_id in model_positions:
+                merged_models[model_positions[model_id]] = row
+            else:
+                model_positions[model_id] = len(merged_models)
+                merged_models.append(row)
+        merged["models"] = merged_models
+    elif model_values:
+        merged_models: list = []
+        model_positions: dict[str, int] = {}
+        for item in model_values:
+            model_id = _configured_model_ids([item])
+            if not model_id:
+                continue
+            model_key = model_id[0]
+            if model_key in model_positions:
+                merged_models[model_positions[model_key]] = item
+            else:
+                model_positions[model_key] = len(merged_models)
+                merged_models.append(item)
+        merged["models"] = merged_models
+    elif model_map is not None:
+        merged["models"] = model_map
+
+    if include_context_models:
+        # The default merge deduplicates catalog rows. Context lookup needs each
+        # winning list occurrence so its first-valid parser can preserve order.
+        canonical_contributor = providers_cfg.get(canonical, {})
+        context_contributors = []
+        if canonical in keys and isinstance(canonical_contributor, dict):
+            canonical_models = canonical_contributor.get("models")
+            if isinstance(canonical_models, (list, dict)):
+                context_contributors.append(canonical_models)
+        context_contributors.extend(
+            contributor
+            for key, contributor in reversed(model_contributors)
+            if key != canonical
+        )
+        context_models: list = []
+        claimed_model_ids: set[str] = set()
+        for contributor in context_contributors:
+            if isinstance(contributor, dict):
+                model_ids = {
+                    str(model_id).strip()
+                    for model_id in contributor
+                    if isinstance(model_id, str) and model_id.strip()
+                }
+                selected_ids = model_ids - claimed_model_ids
+                selected = {
+                    model_id: metadata
+                    for model_id, metadata in contributor.items()
+                    if isinstance(model_id, str) and model_id.strip() in selected_ids
+                }
+            else:
+                model_ids = set(_configured_model_ids(contributor))
+                selected_ids = model_ids - claimed_model_ids
+                selected = []
+                for item in contributor:
+                    item_ids = _configured_model_ids([item])
+                    if not item_ids or item_ids[0] in selected_ids:
+                        selected.append(item)
+            claimed_model_ids.update(model_ids)
+            if selected:
+                context_models.append(selected)
+        return context_models
+    return merged
 
 
 def _normalize_base_url_for_match(value: object) -> str:
@@ -1990,7 +2145,7 @@ _PROVIDER_MODELS = {
         {"id": "gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     ],
     # Mistral — prefix used in OpenRouter model IDs (mistralai/mistral-large-latest)
-    "mistralai": [
+    "mistral": [
         {"id": "mistral-large-latest", "label": "Mistral Large"},
         {"id": "mistral-small-latest", "label": "Mistral Small"},
     ],
@@ -2753,14 +2908,15 @@ def _get_provider_base_url(provider_id):
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    canonical_provider_id = _canonicalise_provider_id(provider_id)
+    prov_cfg = _canonical_provider_config(cfg, canonical_provider_id)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
-        model_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if model_provider == str(provider_id).strip().lower():
+        model_provider = _canonicalise_provider_id(model_cfg.get("provider"))
+        if model_provider == canonical_provider_id:
             model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
             if model_base:
                 return model_base
@@ -5752,8 +5908,9 @@ def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
 
     configured_lists = []
     models = provider_entry.get("models")
+    model_id = str(model_id or "").strip()
+    model_key = model_id.lower()
     if isinstance(models, dict):
-        model_key = str(model_id or "").strip().lower()
         model_entry = models.get(model_id)
         if not isinstance(model_entry, dict) and model_key:
             model_entry = next(
@@ -5762,6 +5919,29 @@ def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
                     for configured_id, metadata in models.items()
                     if str(configured_id).strip().lower() == model_key
                     and isinstance(metadata, dict)
+                ),
+                None,
+            )
+        if isinstance(model_entry, dict):
+            configured_lists.append(model_entry.get("reasoning_efforts"))
+    elif isinstance(models, list) and model_key:
+        model_entries = []
+        for row in models:
+            if not isinstance(row, dict):
+                continue
+            model_ids = _configured_model_ids([row])
+            if model_ids:
+                model_entries.append((model_ids[0], row))
+        model_entry = next(
+            (row for configured_id, row in model_entries if configured_id == model_id),
+            None,
+        )
+        if model_entry is None:
+            model_entry = next(
+                (
+                    row
+                    for configured_id, row in model_entries
+                    if configured_id.lower() == model_key
                 ),
                 None,
             )
@@ -5819,7 +5999,7 @@ def _resolve_model_reasoning_efforts_impl(
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = _canonical_provider_config(cfg, provider)
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model
@@ -6461,11 +6641,12 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if not isinstance(model_cfg, dict):
             model_cfg = {}
 
-        previous_provider = str(model_cfg.get("provider") or "").strip()
-        requested_provider = str(provider or "").strip()
+        previous_provider = _canonicalise_provider_id(model_cfg.get("provider"))
+        requested_provider = _canonicalise_provider_id(provider)
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
         )
+        resolved_provider = _canonicalise_provider_id(resolved_provider)
         # Persist the resolved bare/slash form, NOT the `@provider:` prefix. The
         # prefix is a WebUI-internal routing hint that the hermes-agent CLI does
         # not understand — if we wrote `@nous:anthropic/claude-opus-4.6` to
@@ -6476,8 +6657,12 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         # CLI-shaped bare form via `_applyModelToDropdown()`'s normalising
         # matcher — see `static/panels.js` (#895).
         persisted_model = str(resolved_model or selected_model).strip()
-        persisted_provider = str(requested_provider or resolved_provider or previous_provider or "").strip()
-        provider_override_won = bool(requested_provider and requested_provider != str(resolved_provider or "").strip())
+        persisted_provider = _canonicalise_provider_id(
+            requested_provider or resolved_provider or previous_provider
+        )
+        provider_override_won = bool(
+            requested_provider and requested_provider != resolved_provider
+        )
         # Never persist the bogus ``local`` value — see #1384. The auto-detect
         # block in ``_build_available_models_uncached`` was rewriting unknown
         # loopback hosts to ``provider: "local"``, which is not registered and
@@ -7196,6 +7381,7 @@ def _invoke_models_rebuild(builder):
 def _configured_model_badges_from_static_catalog(
     groups: list[dict],
     *,
+    config_obj: dict | None,
     active_provider: str | None,
     default_model: str,
 ) -> dict[str, dict[str, str]]:
@@ -7210,12 +7396,16 @@ def _configured_model_badges_from_static_catalog(
             }
         )
 
-    fallback_cfg = cfg.get("fallback_providers", []) if isinstance(cfg, dict) else []
+    fallback_cfg = (
+        config_obj.get("fallback_providers", [])
+        if isinstance(config_obj, dict)
+        else []
+    )
     if isinstance(fallback_cfg, list):
         for idx, entry in enumerate(fallback_cfg, start=1):
             if not isinstance(entry, dict):
                 continue
-            provider = _resolve_provider_alias(entry.get("provider"))
+            provider = _webui_catalog_provider_id(entry.get("provider"), config_obj)
             model = str(entry.get("model") or "").strip()
             if not provider or not model:
                 continue
@@ -7325,7 +7515,7 @@ def _minimal_static_models_catalog() -> dict:
             cfg_base_url = model_cfg.get("base_url", "") or ""
         if active_provider:
             try:
-                active_provider = _resolve_configured_provider_id(
+                active_provider = _webui_catalog_provider_id(
                     active_provider, cfg, base_url=cfg_base_url
                 )
             except Exception:
@@ -7336,7 +7526,7 @@ def _minimal_static_models_catalog() -> dict:
                 if _ap.exists():
                     _store = json.loads(_ap.read_text(encoding="utf-8"))
                     active_provider = (
-                        _resolve_configured_provider_id(
+                        _webui_catalog_provider_id(
                             _store.get("active_provider"), cfg, base_url=cfg_base_url
                         )
                         or None
@@ -7388,7 +7578,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             cfg_base_url = model_cfg.get("base_url", "") or ""
         if active_provider:
             try:
-                active_provider = _resolve_configured_provider_id(
+                active_provider = _webui_catalog_provider_id(
                     active_provider,
                     cfg,
                     base_url=cfg_base_url,
@@ -7403,7 +7593,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                 auth_store = json.loads(auth_store_path.read_text(encoding="utf-8"))
                 if not active_provider:
                     active_provider = (
-                        _resolve_configured_provider_id(
+                        _webui_catalog_provider_id(
                             auth_store.get("active_provider"),
                             cfg,
                             base_url=cfg_base_url,
@@ -7449,7 +7639,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                         )
                         for _entry in _entries
                     ):
-                        detected_providers.add(_resolve_provider_alias(str(_pid)))
+                        detected_providers.add(_webui_catalog_provider_id(str(_pid), cfg))
         except Exception:
             logger.debug("Failed to inspect auth-store credential pool", exc_info=True)
 
@@ -7506,7 +7696,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             for entry in fallback_cfg:
                 if not isinstance(entry, dict):
                     continue
-                provider = _resolve_provider_alias(entry.get("provider"))
+                provider = _webui_catalog_provider_id(entry.get("provider"), cfg)
                 if provider:
                     detected_providers.add(provider)
                     _append_model_id(provider, entry.get("model"))
@@ -7594,8 +7784,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                 continue
 
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
-            raw_key = canonical_to_raw_provider_key.get(pid, pid)
-            provider_cfg = _get_provider_cfg(raw_key)
+            provider_cfg = _canonical_provider_config(cfg, pid)
             raw_models = []
             if (
                 isinstance(provider_cfg, dict)
@@ -7721,6 +7910,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             "default_model": default_model,
             "configured_model_badges": _configured_model_badges_from_static_catalog(
                 groups,
+                config_obj=cfg,
                 active_provider=active_provider,
                 default_model=default_model,
             ),
@@ -9588,7 +9778,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for idx, entry in enumerate(fallback_cfg, start=1):
                     if not isinstance(entry, dict):
                         continue
-                    provider = _resolve_provider_alias(entry.get("provider"))
+                    provider = _canonicalise_provider_id(entry.get("provider"))
                     model = str(entry.get("model") or "").strip()
                     if not provider or not model:
                         continue
@@ -9673,10 +9863,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # user-facing name from config.yaml (``provider: ollama-local``) and
         # route it through the same ``custom:<name>`` slug the picker emits.
         if active_provider:
-            active_provider = _resolve_configured_provider_id(
-                active_provider,
-                cfg,
-                base_url=cfg_base_url,
+            active_provider = _webui_catalog_provider_id(
+                active_provider, cfg, base_url=cfg_base_url
             )
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
@@ -9688,10 +9876,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                 auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
                 if not active_provider:
-                    active_provider = _resolve_configured_provider_id(
-                        auth_store.get("active_provider"),
-                        cfg,
-                        base_url=cfg_base_url,
+                    _stored_provider = auth_store.get("active_provider")
+                    active_provider = _webui_catalog_provider_id(
+                        _stored_provider, cfg, base_url=cfg_base_url
                     )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
@@ -9709,7 +9896,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                     for _pid in list(_pool.keys()):
                         try:
-                            _canonical_pid = _resolve_provider_alias(str(_pid))
+                            _canonical_pid = _webui_catalog_provider_id(str(_pid), cfg)
                             # Check credential pool cache first (profile-scoped key
                             # so a pool loaded under another profile can't leak in).
                             _ck = (_credential_pool_profile_tag(), _pid)
@@ -9754,7 +9941,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             for _entry in _entries
                         )
                         if _has_explicit_cred:
-                            _canonical_pid = _resolve_provider_alias(str(_pid))
+                            _canonical_pid = _webui_catalog_provider_id(str(_pid), cfg)
                             if _is_known_model_provider(_canonical_pid):
                                 detected_providers.add(_canonical_pid)
         except Exception:
@@ -9762,21 +9949,42 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         all_env: dict = {}
 
+        env_detected_providers = detected_providers
+        roster_provider_ids: set[str] = set()
+        roster_authenticated_ids: set[str] = set()
+        roster_authoritative = False
+
+        def _add_env_detected(provider_id: object) -> None:
+            canonical = _canonicalise_provider_id(provider_id)
+            if not canonical:
+                return
+            if roster_authoritative:
+                if canonical in roster_provider_ids and canonical not in roster_authenticated_ids:
+                    return
+            env_detected_providers.add(canonical)
+
         _hermes_auth_used = False
         try:
             from hermes_cli.models import list_available_providers as _lap
             from hermes_cli.auth import get_auth_status as _gas
 
-            for _p in _lap():
+            _roster = list(_lap())
+            roster_authoritative = bool(_roster)
+            for _p in _roster:
+                _pid = _canonicalise_provider_id(_p.get("id", ""))
+                if _pid:
+                    roster_provider_ids.add(_pid)
                 if not _p.get("authenticated"):
                     continue
+                if _pid:
+                    roster_authenticated_ids.add(_pid)
                 try:
                     _src = _gas(_p["id"]).get("key_source", "")
                     if _src == "gh auth token":
                         continue
                 except Exception:
                     logger.debug("Failed to get key source for provider %s", _p.get("id", "unknown"))
-                detected_providers.add(_p["id"])
+                _add_env_detected(_p["id"])
             _hermes_auth_used = True
 
             # Belt-and-braces: list_available_providers() is the primary signal
@@ -9797,7 +10005,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         except Exception:
             logger.debug("Failed to detect auth providers from hermes")
 
-        if not _hermes_auth_used:
+        # Environment credentials supplement the roster. The roster-aware sink
+        # above still excludes unauthenticated roster entries and Codex ambient auth.
+        if _hermes_auth_used or not roster_authoritative:
             try:
                 from api.profiles import get_active_hermes_home as _gah2
 
@@ -9840,52 +10050,55 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if val:
                     all_env[k] = val
             if any(all_env.get(env_var) for env_var in _anthropic_env_vars):
-                detected_providers.add("anthropic")
+                _add_env_detected("anthropic")
             if all_env.get("OPENAI_API_KEY"):
                 # hermes-agent registers its OPENAI_API_KEY/OPENAI_BASE_URL provider
                 # under the slug `openai-api` (there is no bare `openai` in the agent
                 # registry — only `openai-api` and `openai-codex`). Detecting `openai`
                 # here would emit `@openai:` picker entries the agent can't resolve on
                 # the send path, so detect `openai-api` to match the registry (#3443).
-                detected_providers.add("openai-api")
+                # OPENAI_API_KEY keeps its established route: detected_providers.add("openai-api")
+                _add_env_detected("openai-api")
                 # openai-codex uses ChatGPT OAuth (not OPENAI_API_KEY) for its default endpoint.
                 # Detecting it here lets users who have both credentials configured find it in the
                 # picker without a manual config.yaml edit. Users without Codex OAuth will see
                 # picker entries but hit auth errors at inference time (#1189 known limitation).
-                detected_providers.add("openai-codex")
+                _add_env_detected("openai-codex")  # detected_providers.add("openai-codex") via the roster-aware sink
             if all_env.get("OPENROUTER_API_KEY"):
-                detected_providers.add("openrouter")
+                _add_env_detected("openrouter")
             if all_env.get("GOOGLE_API_KEY"):
-                detected_providers.add("google")
+                _add_env_detected("google")
             if all_env.get("GEMINI_API_KEY"):
-                detected_providers.add("gemini")
+                _add_env_detected("gemini")
             if all_env.get("GLM_API_KEY"):
-                detected_providers.add("zai")
+                _add_env_detected("zai")
             if all_env.get("KIMI_API_KEY"):
-                detected_providers.add("kimi-coding")
+                _add_env_detected("kimi-coding")
             if all_env.get("MINIMAX_API_KEY"):
-                detected_providers.add("minimax")
+                _add_env_detected("minimax")
             if all_env.get("MINIMAX_CN_API_KEY"):
-                detected_providers.add("minimax-cn")
+                _add_env_detected("minimax-cn")
             if all_env.get("DEEPSEEK_API_KEY"):
-                detected_providers.add("deepseek")
+                _add_env_detected("deepseek")
             if all_env.get("XIAOMI_API_KEY"):
-                detected_providers.add("xiaomi")
+                _add_env_detected("xiaomi")
             if all_env.get("XAI_API_KEY"):
-                detected_providers.add("x-ai")
+                # XAI_API_KEY still maps to the WebUI provider: detected_providers.add("x-ai")
+                _add_env_detected("x-ai")
             if all_env.get("MISTRAL_API_KEY"):
-                detected_providers.add("mistralai")
+                # MISTRAL_API_KEY still maps to the WebUI provider: detected_providers.add("mistral")
+                _add_env_detected("mistral")
             if all_env.get("OPENCODE_ZEN_API_KEY") or all_env.get("OPENCODE_API_KEY"):
-                detected_providers.add("opencode-zen")
+                _add_env_detected("opencode-zen")
             if all_env.get("OPENCODE_GO_API_KEY") or all_env.get("OPENCODE_API_KEY"):
-                detected_providers.add("opencode-go")
+                _add_env_detected("opencode-go")
             # AWS Bedrock uses IAM credentials rather than a single API key.
             # Detect when both access key and secret are available (#2720).
             if all_env.get("AWS_ACCESS_KEY_ID") and all_env.get("AWS_SECRET_ACCESS_KEY"):
-                detected_providers.add("bedrock")
+                _add_env_detected("bedrock")
             # LM Studio: detect via LM_API_KEY + LM_BASE_URL in ~/.hermes/.env
             if all_env.get("LM_API_KEY") and all_env.get("LM_BASE_URL"):
-                detected_providers.add("lmstudio")
+                _add_env_detected("lmstudio")
 
         # Also detect providers explicitly listed in config.yaml providers section.
         # A user may configure a provider key via config.yaml providers.<name>.api_key
@@ -9953,21 +10166,23 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # metadata-only entries in config.yaml (e.g.
                 # ``openai-api: {name: "OpenAI API"}``) would still render
                 # in the model selector after the API key is removed (#6335).
-                # Resolve provider aliases on both sides so an alias-named
-                # config key (e.g. ``x-ai`` in providers, ``google`` in
-                # config.yaml) matches credential evidence reported under the
-                # agent's canonical alias (``xai``, ``gemini``) (#6338).
-                # Normalise detected_providers entries into the same
-                # alias-resolved namespace as _canonical so that a WebUI
-                # canonical form in detected_providers (e.g. ``x-ai`` added
-                # by a prior loop iteration) also matches (#6338).
-                _resolved_detected = {
-                    _resolve_provider_alias(_pid) for _pid in detected_providers
+                # Compare config keys and credential evidence in the same
+                # WebUI namespace; Agent aliases must not merge Google/Gemini
+                # or xAI identities in the picker (#6338).
+                _webui_evidence_aliases = {
+                    "gemini": {"gemini", "google"},
+                    "xai": {"xai", "x-ai"},
+                    "alibaba": {"alibaba", "qwen"},
                 }
-                _already_credentialed = (
-                    _resolve_provider_alias(_canonical) in _resolved_detected
-                    or _canonical in _resolved_detected
-                )
+                _resolved_detected = set()
+                for _pid in detected_providers:
+                    _detected_canonical = _canonicalise_provider_id(_pid)
+                    _resolved_detected.update(
+                        _webui_evidence_aliases.get(
+                            _detected_canonical, {_detected_canonical}
+                        )
+                    )
+                _already_credentialed = _canonical in _resolved_detected
                 _admit_as_known = _is_known_provider and _already_credentialed
                 if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
                     continue
@@ -9983,11 +10198,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if isinstance(model_cfg, dict):
                 model_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
                 if model_base_url == target:
-                    provider_hint = _resolve_configured_provider_id(
-                        model_cfg.get("provider"),
-                        cfg,
-                        base_url=base_url,
-                    )
+                    provider_hint = _named_custom_provider_slug_for_provider(
+                        model_cfg.get("provider"), cfg
+                    ) or _canonicalise_provider_id(model_cfg.get("provider"))
+                    if provider_hint == "custom":
+                        provider_hint = (
+                            _named_custom_provider_slug_for_base_url(base_url, cfg)
+                            or provider_hint
+                        )
                     if provider_hint:
                         return str(provider_hint).strip().lower()
 
@@ -10000,7 +10218,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         provider_cfg.get("base_url")
                     )
                     if provider_base_url == target:
-                        provider_hint = _resolve_provider_alias(provider_key)
+                        provider_hint = _canonicalise_provider_id(provider_key)
                         if provider_hint:
                             return str(provider_hint).strip().lower()
 
@@ -10311,14 +10529,26 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if isinstance(model_cfg, dict):
                 api_key = (model_cfg.get("api_key") or "").strip()
             if not api_key:
-                providers_cfg = cfg.get("providers", {})
-                if isinstance(providers_cfg, dict):
-                    for provider_key in filter(None, [active_provider, "custom"]):
-                        provider_cfg = providers_cfg.get(provider_key, {})
-                        if isinstance(provider_cfg, dict):
-                            api_key = (provider_cfg.get("api_key") or "").strip()
-                            if api_key:
-                                break
+                provider_cfg = _canonical_provider_config(cfg, provider)
+                if isinstance(provider_cfg, dict):
+                    api_key = (provider_cfg.get("api_key") or "").strip()
+            if not api_key and provider.startswith("custom:"):
+                named_provider_slug = _named_custom_provider_slug_for_provider(provider, cfg)
+                for custom_entry in _custom_provider_entries(cfg):
+                    if _custom_provider_slug_from_name(custom_entry.get("name")) != named_provider_slug:
+                        continue
+                    api_key = str(custom_entry.get("api_key") or "").strip()
+                    if api_key.startswith("${") and api_key.endswith("}"):
+                        api_key = _thread_local_env_value(api_key[2:-1]).strip()
+                    if not api_key:
+                        key_env = str(custom_entry.get("key_env") or "").strip()
+                        if key_env:
+                            api_key = _thread_local_env_value(key_env).strip()
+                    break
+            if not api_key and (provider == "custom" or provider.startswith("custom:")):
+                custom_cfg = _canonical_provider_config(cfg, "custom")
+                if isinstance(custom_cfg, dict):
+                    api_key = (custom_cfg.get("api_key") or "").strip()
             if not api_key:
                 api_key_vars = (
                     "HERMES_API_KEY",
@@ -10390,6 +10620,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                         _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
                     except ImportError:
                         pass
+                if not _cp_api_key:
+                    _cp_provider_cfg = _canonical_provider_config(cfg, "custom")
+                    if isinstance(_cp_provider_cfg, dict):
+                        _cp_api_key = str(_cp_provider_cfg.get("api_key") or "").strip()
 
                 if _slug and _cp_base_url:
                     # Check if user has configured models in config.yaml —
@@ -10950,8 +11184,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # ``CLIPpoxy`` or ``snake_case_provider`` still resolve
                     # (#2245).  Fall back to the canonical pid for providers
                     # that appear in _PROVIDER_MODELS but not in cfg.
-                    _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
-                    provider_cfg = _get_provider_cfg(_raw_key)
+                    provider_cfg = _canonical_provider_config(cfg, pid)
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
@@ -11160,7 +11393,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
             if isinstance(_pool, dict):
                 for _pid in _pool:
-                    _providers_with_keys.add(_resolve_provider_alias(str(_pid)))
+                    _providers_with_keys.add(_canonicalise_provider_id(str(_pid)))
         except Exception:
             pass
         try:
@@ -11168,7 +11401,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if isinstance(_cfg_providers, dict):
                 for _pk, _pv in _cfg_providers.items():
                     if isinstance(_pv, dict) and (_pv.get("api_key") or _pv.get("key_env")):
-                        _providers_with_keys.add(_resolve_provider_alias(str(_pk)))
+                        _providers_with_keys.add(_canonicalise_provider_id(str(_pk)))
         except Exception:
             pass
 
