@@ -274,3 +274,117 @@ def test_webui_streaming_normalizes_trailing_prefill_user_before_current_turn(mo
 
     prefill = captured.get("prefill_messages") or []
     assert prefill == [{"role": "assistant", "content": "prefill summary"}]
+
+
+def test_prefill_boundary_normalization_preserved_on_cache_hit(
+    monkeypatch, tmp_path
+):
+    from api import config, models, streaming
+    from api.models import new_session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    index_file = session_dir / "index.json"
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict(), raising=False)
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file, raising=False)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
+    config.STREAMS.clear()
+    config.CANCEL_FLAGS.clear()
+
+    captured_turns = []
+
+    class FakeAgent:
+        def __init__(self, prefill_messages=None, **kwargs):
+            msgs = prefill_messages if prefill_messages is not None else kwargs.get("prefill_messages")
+            captured_turns.append(list(msgs or []))
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+
+        def run_conversation(self, **kwargs):
+            return {
+                "completed": True,
+                "final_response": "ok",
+                "messages": [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "ok"},
+                ],
+            }
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("model:\n  default: test-model\n", encoding="utf-8")
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *args, **kwargs: ("test-model", None, None))
+    monkeypatch.setattr(streaming, "get_config", lambda: {})
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *args, **kwargs: [])
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_file)
+    streaming.clear_config_derivations_cache()
+
+    prefill_loads = []
+
+    def fake_load_webui_prefill_context(cfg):
+        prefill_loads.append(1)
+        return {
+            "status": "loaded",
+            "source": "test",
+            "label": "test",
+            "message_count": 2,
+            "messages": [
+                {"role": "assistant", "content": "prefill summary"},
+                {"role": "user", "content": "webui session context"},
+            ],
+        }
+
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", fake_load_webui_prefill_context)
+
+    # Turn 1
+    s1 = new_session(workspace=str(tmp_path))
+    s1.profile = "default"
+    stream_id_1 = "stream-turn-1"
+    s1.active_stream_id = stream_id_1
+    s1.pending_user_message = "turn 1"
+    s1.pending_started_at = 0.0
+    s1.save(touch_updated_at=False)
+    models.SESSIONS[s1.session_id] = s1
+    config.STREAMS[stream_id_1] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=s1.session_id,
+            msg_text="turn 1",
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id=stream_id_1,
+            attachments=[],
+        )
+    finally:
+        config.STREAMS.pop(stream_id_1, None)
+
+    # Turn 2 (with cache hit on profile derivations)
+    s2 = new_session(workspace=str(tmp_path))
+    s2.profile = "default"
+    stream_id_2 = "stream-turn-2"
+    s2.active_stream_id = stream_id_2
+    s2.pending_user_message = "turn 2"
+    s2.pending_started_at = 0.0
+    s2.save(touch_updated_at=False)
+    models.SESSIONS[s2.session_id] = s2
+    config.STREAMS[stream_id_2] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=s2.session_id,
+            msg_text="turn 2",
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id=stream_id_2,
+            attachments=[],
+        )
+    finally:
+        config.STREAMS.pop(stream_id_2, None)
+
+    assert len(prefill_loads) == 1, "Expected derivation cache hit on turn 2"
+    assert len(captured_turns) == 2
+    assert captured_turns[0] == [{"role": "assistant", "content": "prefill summary"}]
+    assert captured_turns[1] == [{"role": "assistant", "content": "prefill summary"}]
