@@ -1380,10 +1380,13 @@ def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = T
     if not is_safe_session_id(sid):
         return True
     try:
-        session = get_session(sid, metadata_only=True)
+        session_profile = get_session_profile_readonly(sid) or None
     except KeyError:
         return True
-    session_profile = getattr(session, "profile", None) or None
+    except (OSError, ValueError, TypeError):
+        if emit_error:
+            bad(handler, "Session not found", 404)
+        return False
     if not _session_visible_to_active_profile(session_profile, handler):
         if emit_error:
             if session_profile:
@@ -11934,6 +11937,7 @@ def _keep_latest_messaging_session_per_source(
 from api.models import (
     Session,
     get_session,
+    get_session_profile_readonly,
     get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
