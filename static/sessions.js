@@ -2913,16 +2913,29 @@ async function loadSession(sid){
             .find(m=>m&&m.role==='assistant');
           const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
           const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-          if(_fresh.length){
-            const _first=_fresh[0];
+          // Stale entries (queued before the last assistant message) must NOT be
+          // silently discarded: a steer queued during an active gateway run is
+          // almost always older than the run's later output by refresh time, so
+          // the old filter wiped exactly those. Restore them too, clearly labelled.
+          const _stale=_entries.filter(e=>_fresh.indexOf(e)===-1);
+          if(_fresh.length||_stale.length){
+            // Prefer an entry the composer can actually show (a files-only entry has no text).
+            const _first=_fresh.find(e=>e&&e.text)||_stale.find(e=>e&&e.text)||_fresh[0]||_stale[0];
             const _msg=$&&$('msg');
+            let _placed=false;
             if(_msg&&_first.text&&!_msg.value){
               _msg.value=_first.text||'';
               if(typeof autoResize==='function') autoResize();
-              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
+              _placed=true;
+              if(typeof showToast==='function') showToast(_fresh.indexOf(_first)!==-1
+                ?((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready')
+                :'Queued message restored (agent may have already moved on) — review before sending',4000);
             }
+            // Only drop the persisted queue once the entry actually reached the
+            // composer; otherwise keep it for the next restore attempt. Entries with
+            // no text can never be restored into the composer, so drop those as before.
+            if((_placed||!_first.text)&&typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
           }
-          if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
         }
       }catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}
     }
