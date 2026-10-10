@@ -35,6 +35,9 @@ CODEX_DEVICE_TOKEN_URL = f"{CODEX_ISSUER}/api/accounts/deviceauth/token"
 CODEX_TOKEN_URL = f"{CODEX_ISSUER}/oauth/token"
 CODEX_REDIRECT_URI = f"{CODEX_ISSUER}/deviceauth/callback"
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+# auth.openai.com rejects urllib's default "Python-urllib/x.y" User-Agent with
+# HTTP 530; same value the Codex usage probe sends (api/providers.py).
+CODEX_USER_AGENT = "codex_cli_rs/0.0.0 (Hermes WebUI)"
 CODEX_FLOW_MAX_WAIT_SECONDS = 15 * 60
 
 _ALLOWED_ONBOARDING_OAUTH_PROVIDERS = {"openai-codex", "anthropic", "claude", "claude-code"}
@@ -314,9 +317,13 @@ def _read_claude_code_credentials() -> dict[str, Any] | None:
     and macOS Keychain. Returns the credential dict or None.
     """
     try:
-        from agent.anthropic_adapter import (
-            is_claude_code_token_valid,
-            read_claude_code_credentials,
+        from api.agent_compat import agent_attr
+
+        is_claude_code_token_valid = agent_attr(
+            "agent.anthropic_adapter", "is_claude_code_token_valid", "agent.anthropic_credentials"
+        )
+        read_claude_code_credentials = agent_attr(
+            "agent.anthropic_adapter", "read_claude_code_credentials", "agent.anthropic_credentials"
         )
 
         creds = read_claude_code_credentials()
@@ -539,7 +546,11 @@ def _json_request(url: str, payload: dict[str, Any], *, form: bool = False) -> d
         url,
         data=data,
         method="POST",
-        headers={"Content-Type": content_type, "Accept": "application/json"},
+        headers={
+            "Content-Type": content_type,
+            "Accept": "application/json",
+            "User-Agent": CODEX_USER_AGENT,
+        },
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))

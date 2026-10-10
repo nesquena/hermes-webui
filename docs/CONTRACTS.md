@@ -23,6 +23,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/remote-workspaces.md`](remote-workspaces.md):
+  architecture contract for remote terminal workspaces (SSH/Docker), target-side
+  POSIX path preservation against macOS synthetic firmlink expansion, and
+  per-profile isolation boundaries.
 - [`docs/rfcs/webui-run-state-consistency-contract.md`](rfcs/webui-run-state-consistency-contract.md):
   proposed consistency rules for current WebUI streaming, recovery, replay,
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata
@@ -42,6 +46,13 @@ contributor guidance; it does not change runtime behavior or CI gates.
   work under #3926. Use it to distinguish shipped wiring from historical slice
   boundaries before changing live SSE, replay, settlement, `INFLIGHT`, or
   `renderMessages()` paths.
+- [`docs/architecture/transcript-auto-follow-scroll.md`](architecture/transcript-auto-follow-scroll.md):
+  implemented contract for transcript auto-follow: the pinned/unpinned state
+  model, the input-tail capture and reader-resume re-pinning rules (including
+  one-consumption-per-input and reader input outranking queued restores), and
+  the `overscroll-behavior-y: none` rationale for `.messages`. Start here
+  before changing the scroll listener, the settle writer, or the queued
+  live-render restore paths.
 - [`docs/rfcs/canonical-session-resolution.md`](rfcs/canonical-session-resolution.md):
   proposed contract for resolving URL routes, query parameters, localStorage,
   sidebar rows, and compression-lineage IDs to one canonical visible session
@@ -78,6 +89,47 @@ contributor guidance; it does not change runtime behavior or CI gates.
   proof gates. Prefer the RFC's **Authoritative emitted events** table (live
   `/api/chat/stream` wire names) over the aspirational semantic taxonomy when
   writing clients against current source.
+- [`docs/architecture/models-cache-invalidation.md`](architecture/models-cache-invalidation.md):
+  current contract for the `/api/models` catalog cache identity: the
+  `config.yaml`, `auth.json`, and catalog source-fingerprint axes, the
+  one-directional volatile-key deny-lists (auth rotation and Codex's
+  `models_cache.json` refresh timestamps), the stat-identity fallbacks, and the
+  schema/version stamps. Start here before changing model-catalog caching, the
+  `/api/models` cache keys, or the Codex catalog dependency (#2443, #7540).
+- [`docs/architecture/send-path-model-provider.md`](architecture/send-path-model-provider.md):
+  current contract for which provider the browser routes an outgoing chat turn
+  to: the `_modelProviderForSend()` precedence order (explicit `@provider:model`
+  tag → dropdown provider **with** session-scoped pick evidence → the loaded
+  session's own provider → persisted state → `null`), why a bare dropdown match
+  is not intent after a restore, and the lifecycle of the picker's explicit-pick
+  marker. Start here before changing provider precedence for outgoing turns,
+  the picker's pick evidence, or restored-session provider resolution
+  (#7860, #7865).
+- [`docs/architecture/live-models-allowlist.md`](architecture/live-models-allowlist.md):
+  current contract for how `/api/models/live` filters a custom provider's
+  upstream catalog: the four signals in evaluation order (discovered catalog
+  defers to the live probe, explicit plural `models:` allowlist filters,
+  singular `model:` never gates, no allowlist shows the full catalog), the
+  serialized-list shapes `hermes config set` persists, the deliberate
+  empty-allowlist-is-not-configured rule, and the probe-failure fallback.
+  Start here before changing custom-provider model filtering or
+  discovery-vs-allowlist semantics (#7165, #7404).
+- [`docs/architecture/profile-home-resolve-cache.md`](architecture/profile-home-resolve-cache.md):
+  current contract for the call-scoped memoization around
+  `_resolve_profile_home_param()` in `api/workspace.py`: what it caches, the
+  one-hot-loop scope (`_load_cli_sessions_uncached`) versus every other call
+  site getting fresh resolution, and the freshness guarantee that a symlink
+  retarget or transient resolve fallback is always observed on the next call.
+  Start here before widening this cache's scope or adding a similar
+  call-scoped cache elsewhere (#7636).
+- [`docs/architecture/session-channel-lifecycle.md`](architecture/session-channel-lifecycle.md):
+  current contract for the per-session SSE channel and the per-turn stream lifecycle: the state
+  layers and their authoritative writers, the writer-side subscriber-liveness signal plus the
+  channel collection rules (`GRACE`, `IDLE_TTL`, queue-stall and writer-staleness), the single
+  orphan predicate shared by `chat/start` admission, busy reporting and the reaper, the
+  launch-phase claim that covers registration-to-admission, and the lock discipline
+  (`STREAMS_LOCK → ACTIVE_RUNS_LOCK`). Start here before changing subscriber liveness, channel
+  collection, stream registration, or orphan reclaim (#7302).
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

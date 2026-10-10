@@ -191,6 +191,7 @@ let _messageVirtualDeferredMeasurement = null;
 let _messageVirtualWindowKey = 'x';
 function clearTimeout(){}
 function _clearUserRowIntrinsicHeightCache(){}
+function _resetMessageVirtualMeasurementBurst(){}
 eval(extractFunc('_recordMessageVirtualRoleMeasurement'));
 eval(extractFunc('_resetMessageVirtualRoleCalibration'));
 eval(extractFunc('_messageVirtualCalibratedRoleHeight'));

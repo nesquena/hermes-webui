@@ -71,6 +71,7 @@ function extractFunc(name) {
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+eval(extractFunc('_mediaTokenParts'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
@@ -223,6 +224,135 @@ class TestRendererSanitization:
         assert 'onerror' not in out or '&lt;img' in out
 
 
+class TestMediaTokenBoundaries:
+    @pytest.mark.parametrize(
+        "markdown, encoded_ref, preserved",
+        [
+            ("**MEDIA:/workspace/report.xlsx**", "%2Fworkspace%2Freport.xlsx", "<strong>"),
+            ("`MEDIA:/workspace/report.xlsx`", "%2Fworkspace%2Freport.xlsx", "<code>"),
+            ("_MEDIA:/workspace/report.xlsx_", "%2Fworkspace%2Freport.xlsx", "_</p>"),
+        ],
+    )
+    def test_markdown_and_sentence_suffix_stay_outside_media_ref(
+        self, driver_path, markdown, encoded_ref, preserved
+    ):
+        out = _render(driver_path, markdown)
+        assert f"path={encoded_ref}" in out
+        assert f"path={encoded_ref}%2A" not in out
+        assert f"path={encoded_ref}%60" not in out
+        assert f"path={encoded_ref}_" not in out
+        assert f"path={encoded_ref}." not in out
+        assert preserved in out
+
+    @pytest.mark.parametrize(
+        ("punctuation", "encoded"),
+        [(".", "."), (",", "%2C"), (";", "%3B"), (":", "%3A"), ("!", "!"), ("?", "%3F")],
+    )
+    def test_bare_local_ref_preserves_ambiguous_trailing_bytes(
+        self, driver_path, punctuation, encoded
+    ):
+        encoded_ref = "%2Fworkspace%2Freport.xlsx"
+        out = _render(driver_path, f"MEDIA:/workspace/report.xlsx{punctuation}")
+        assert f"path={encoded_ref}{encoded}" in out
+
+    def test_regex_excluded_closer_stays_outside_media_ref(self, driver_path):
+        encoded_ref = "%2Fworkspace%2Freport.xlsx"
+        out = _render(driver_path, "MEDIA:/workspace/report.xlsx)")
+        assert f"path={encoded_ref}" in out
+        assert ")" in out
+
+    def test_unmatched_or_internal_delimiters_remain_in_media_ref(self, driver_path):
+        unmatched = _render(driver_path, "MEDIA:/workspace/report.xlsx*")
+        internal = _render(driver_path, "MEDIA:/workspace/report_name.xlsx")
+        assert "path=%2Fworkspace%2Freport.xlsx*" in unmatched
+        assert "path=%2Fworkspace%2Freport_name.xlsx" in internal
+
+    @pytest.mark.parametrize(
+        ("markdown", "encoded_suffix"),
+        [
+            ("__MEDIA:/workspace/report.xlsx_", "_"),
+            ("**MEDIA:/workspace/report.xlsx*", "*"),
+        ],
+    )
+    def test_shorter_closer_does_not_match_longer_opener(
+        self, driver_path, markdown, encoded_suffix
+    ):
+        out = _render(driver_path, markdown)
+        assert f"path=%2Fworkspace%2Freport.xlsx{encoded_suffix}" in out
+
+    def test_query_and_fragment_remain_part_of_remote_media_ref(self, driver_path):
+        ref = "https://example.com/report.png?download=1#preview"
+        out = _render(driver_path, f"MEDIA:{ref}")
+        assert f'src="{ref}"' in out
+
+    @pytest.mark.parametrize("punctuation", [".", ",", ";", ":", "!", "?"])
+    @pytest.mark.parametrize("suffix_kind", ["query", "fragment"])
+    def test_remote_query_and_fragment_preserve_trailing_punctuation(
+        self, driver_path, punctuation, suffix_kind
+    ):
+        suffix = f"?signature=value{punctuation}"
+        if suffix_kind == "fragment":
+            suffix = f"#section{punctuation}"
+        ref = f"https://example.com/report.png{suffix}"
+        out = _render(driver_path, f"MEDIA:{ref}")
+        assert f'src="{ref}"' in out
+
+    def test_wrapped_remote_query_preserves_value_punctuation_and_detaches_markdown(self, driver_path):
+        ref = "https://example.com/report.png?signature=value."
+        out = _render(driver_path, f"**MEDIA:{ref}**.")
+        assert f'src="{ref}"' in out
+        assert "<strong>" in out
+        assert out.endswith(".</p>")
+
+    def test_wrapped_remote_path_preserves_punctuation_before_closer(self, driver_path):
+        ref = "https://example.com/report.png!"
+        out = _render(driver_path, f"**MEDIA:{ref}**")
+        assert f'src="{ref}"' in out
+        assert "<strong>" in out
+
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_balanced_prose_quotes_stay_outside_local_media_ref(self, driver_path, quote):
+        ref = "/workspace/report.xlsx"
+        out = _render(driver_path, f"{quote}MEDIA:{ref}{quote}.")
+        assert "path=%2Fworkspace%2Freport.xlsx" in out
+        assert "%22" not in out
+        assert "path=%2Fworkspace%2Freport.xlsx'" not in out
+        assert out.endswith(f"{quote}.</p>")
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "https://example.com/report.png?signature=value!",
+            "https://example.com/report.png#preview!",
+        ],
+    )
+    def test_balanced_quotes_detach_without_truncating_remote_query_or_fragment(
+        self, driver_path, ref
+    ):
+        out = _render(driver_path, f'"MEDIA:{ref}".')
+        assert f'src="{ref}"' in out
+        assert out.endswith('".</p>')
+
+    def test_multiple_tokens_and_following_prose_keep_their_boundaries(self, driver_path):
+        out = _render(
+            driver_path,
+            "MEDIA:/tmp/one.png then MEDIA:/tmp/two.pdf after",
+        )
+        assert "path=%2Ftmp%2Fone.png" in out
+        assert "path=%2Ftmp%2Ftwo.pdf" in out
+        assert " then " in out
+        assert " after" in out
+
+    def test_windows_path_is_preserved_as_the_media_ref(self, driver_path):
+        out = _render(driver_path, r"MEDIA:C:\Temp\report.xlsx")
+        assert "path=C%3A%5CTemp%5Creport.xlsx" in out
+
+    def test_bare_marker_remains_literal_text(self, driver_path):
+        out = _render(driver_path, "`MEDIA:`")
+        assert "<code>MEDIA:</code>" in out
+        assert "api/media?path=" not in out
+
+
 class TestCommonLLMShapes:
 
     def test_commonmark_table_is_not_wrapped_in_paragraph(self, driver_path):
@@ -338,10 +468,13 @@ class TestMarkdownListsWithLatex:
         assert "<li>next item</li>" in out
 
     def test_nested_indentation_stays_in_list(self, driver_path):
+        """Same-marker nesting builds a structural nested <ul> instead of a
+        styled sibling <li> — the margin-left convention was removed by the
+        single-pass mixed-marker parser (#6700)."""
         out = _render(driver_path, "- parent\n  - child")
         assert "<ul>" in out
-        assert "<li>parent</li>" in out
-        assert '<li style="margin-left:16px">child</li>' in out
+        assert "<li>parent<ul><li>child</li></ul></li>" in out
+        assert "margin-left:16px" not in out
 
     def test_display_math_line_stays_inside_list_item(self, driver_path):
         src = "- intro\n\n  $$x^2$$\n\n  continuation"
@@ -359,6 +492,98 @@ class TestMarkdownListsWithLatex:
         assert "<span class=\"katex-inline\" data-katex=\"inline\">x</span>" in out
         assert "<div class=\"katex-block\" data-katex=\"display\">y</div>" in out
         assert '<li value="3">tail</li>' in out
+
+
+class TestMixedNestedLists:
+    """#6700: mixed ul/ol nesting must build a valid structural hierarchy.
+
+    Regression for the old two-pass list renderer, where the ordered pass
+    re-parsed the <ul> HTML emitted by the unordered pass as Markdown. That
+    leaked escaped fragments like `&lt;/li&gt;&lt;li style=&quot;margin-left:
+    16px&quot;&gt;` into the chat and flattened the inverse (ol→ul) shape.
+    """
+
+    def test_ul_ol_ul_nested_then_top_level_return(self, driver_path):
+        src = (
+            "- normal item\n"
+            "  1. numbered child\n"
+            "  2. second numbered child\n"
+            "  - unordered child again\n"
+            "- next normal item"
+        )
+        out = _render(driver_path, src)
+        # No escaped renderer-generated fragments may leak into the output
+        assert "&lt;/li&gt;" not in out, out
+        assert "&lt;ul" not in out, out
+        assert "&lt;ol" not in out, out
+        assert "margin-left:16px" not in out, out
+        # Balanced containers
+        assert out.count("<ul>") == out.count("</ul>"), out
+        assert out.count("<ol>") == out.count("</ol>"), out
+        # Exact structural hierarchy: ul > li > (ol, ul) > li
+        assert (
+            '<ul><li>normal item'
+            '<ol><li value="1">numbered child</li>'
+            '<li value="2">second numbered child</li></ol>'
+            '<ul><li>unordered child again</li></ul></li>'
+            '<li>next normal item</li></ul>'
+        ) in out, out
+
+    def test_ol_ul_nested_keeps_bullets(self, driver_path):
+        src = "1. first step\n   - detail A\n   - detail B\n2. second step"
+        out = _render(driver_path, src)
+        assert "&lt;/li&gt;" not in out, out
+        assert "&lt;ul" not in out, out
+        assert "&lt;ol" not in out, out
+        assert out.count("<ol>") == out.count("</ol>"), out
+        assert out.count("<ul>") == out.count("</ul>"), out
+        assert (
+            '<ol><li value="1">first step'
+            '<ul><li>detail A</li><li>detail B</li></ul></li>'
+            '<li value="2">second step</li></ol>'
+        ) in out, out
+
+    def test_top_level_marker_switch_starts_sibling_list(self, driver_path):
+        out = _render(driver_path, "- bullet\n1. numbered")
+        assert (
+            '<ul><li>bullet</li></ul><ol><li value="1">numbered</li></ol>'
+        ) in out, out
+        assert "&lt;/li&gt;" not in out, out
+
+    def test_ordered_item_with_task_marker_keeps_literal_prefix(self, driver_path):
+        """Task-list rendering applies only to unordered items: an ordered
+        item whose text starts with [x]/[ ] must keep its literal prefix
+        (e.g. '1. [x] shipped') instead of being silently converted to a
+        ✅/☐ task icon (review fix for #6700: openItem() dropped `ordered`
+        from the item constructor, so every item looked unordered)."""
+        out = _render(driver_path, "1. [x] shipped\n2. [ ] pending")
+        assert 'class="task-done"' not in out, out
+        assert 'class="task-todo"' not in out, out
+        assert "✅" not in out, out
+        assert "☐" not in out, out
+        assert '<ol><li value="1">[x] shipped</li>' in out, out
+        assert '<li value="2">[ ] pending</li>' in out, out
+
+    def test_deeply_nested_list_does_not_overflow_the_stack(self, driver_path):
+        """The single-pass tree serializer must not recurse per nesting level.
+
+        The first serializer for the #6700 tree was mutually recursive
+        (renderList -> renderItem -> renderList ...), so a pathologically
+        deep list threw ``RangeError: Maximum call stack size exceeded`` at
+        ~2,000 nested items. renderMd() runs after the transcript container
+        is cleared and the throw is uncaught, so one hostile/degenerate
+        message blanked the whole session. The emit step is iterative, so a
+        deep chain must render balanced HTML without throwing.
+        """
+        depth = 2000
+        src = "".join(" " * (2 * k) + "- item %d\n" % k for k in range(depth))
+        out = _render(driver_path, src)
+        assert out.count("<ul>") == depth, out[-400:]
+        assert out.count("</ul>") == depth, out[-400:]
+        assert out.count("<li>") == depth, out[-400:]
+        assert out.count("</li>") == depth, out[-400:]
+        # First and last items survive at the extremes of the chain.
+        assert "item 0" in out and "item %d" % (depth - 1) in out, out[-400:]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -803,3 +1028,135 @@ class TestBareFileUrlMediaRendering:
         # Labeled anchors keep the normal link path (routed to /api/media as a link,
         # not auto-loaded as an <img>).
         assert "<img" not in out
+
+
+class TestMarkdownTableCellLineBreaks:
+    """<br> inside markdown table cells must be preserved and not split cells across lines."""
+
+    def test_table_cell_with_br_renders_intact(self, driver_path):
+        src = (
+            "| Feature | Description |\n"
+            "| :--- | :--- |\n"
+            "| Item 1 | Line one<br>Line two |\n"
+            "| Item 2 | Another row |"
+        )
+        out = _render(driver_path, src)
+        assert "<table>" in out
+        assert "Line one<br>Line two" in out or "Line one<br/>Line two" in out
+        assert "Item 2" in out
+        assert out.count("<tr>") == 3  # 1 header + 2 data rows
+
+
+class TestBulletListItalicCollision:
+    """Asterisk bullet lists followed by italic words must not collide or escape tags."""
+
+    def test_bullet_list_with_italic_does_not_swallow_tags(self, driver_path):
+        src = "* **Label:** Normal text with *italic* words."
+        out = _render(driver_path, src)
+        assert "&lt;strong&gt;" not in out
+        assert "<strong>Label:</strong>" in out
+        assert "<em>italic</em>" in out
+
+
+class TestRendererGateRegressions7618:
+    """Regressions for the two defects the release gate found in the #7618 fix.
+
+    Both were SILENT: they produced wrong output with no error, and neither was
+    covered by the PR's own tests.
+    """
+
+    def test_literal_br_sentinel_in_prose_is_not_rewritten(self, driver_path):
+        """A user typing the sentinel must not have it turned into a <br>.
+
+        The first implementation stashed table-row <br> as a fixed \\x00BR\\x00
+        token and unconditionally rewrote that token back to <br> afterwards, so
+        attacker/user-supplied text containing the literal token was corrupted.
+        """
+        out = _render(driver_path, "literal \x00BR\x00 text")
+        assert "<br>" not in out
+        assert "\x00BR\x00" in out
+
+    def test_literal_br_sentinel_inside_link_does_not_corrupt_anchor(self, driver_path):
+        """The sentinel inside a URL must not break out of the href attribute."""
+        out = _render(driver_path, '[x](https://example.test/\x00BR\x00tail)')
+        # The anchor must stay well-formed: no attribute text leaking into the body.
+        assert 'target="_blank"</a>' not in out
+        assert '>tail" target=' not in out
+
+    def test_literal_br_sentinel_in_table_cell_stays_literal(self, driver_path):
+        src = "| a | b |\n|---|---|\n| \x00BR\x00 | c |"
+        out = _render(driver_path, src)
+        assert "<table>" in out
+        assert "<br>" not in out
+
+    def test_html_em_with_boundary_whitespace_still_italicises(self, driver_path):
+        """`<em> x </em>` must stay emphasis.
+
+        The stricter italic regex (which correctly stops `a * b * c` from
+        italicising) also rejected the `* x *` that the HTML pre-pass produced
+        for `<em> x </em>`, degrading supported emphasis into literal asterisks
+        — and into a bullet list when it started a line.
+        """
+        out = _render(driver_path, "<em> italic </em>")
+        assert "<em>italic</em>" in out
+        assert "<ul>" not in out
+        assert "<li>" not in out
+
+    def test_html_i_with_boundary_whitespace_still_italicises(self, driver_path):
+        out = _render(driver_path, "<i> spaced </i>")
+        assert "<em>spaced</em>" in out
+        assert "<ul>" not in out
+
+    def test_spaced_asterisks_still_not_italicised(self, driver_path):
+        """The original #7618 fix must survive the boundary-whitespace repair."""
+        out = _render(driver_path, "2 * 3 * 4 = 24")
+        assert "<em>" not in out
+        assert "2 * 3 * 4 = 24" in out
+
+    def test_pipe_wrapped_prose_keeps_heading_rendering(self, driver_path):
+        """`| note<br># heading |` is NOT a table — it must keep heading rendering.
+
+        The table-row guard must use the same grammar as the downstream table
+        parser (a pipe-line run whose SECOND line is a separator). A naive
+        per-line "looks pipe-wrapped" test silently stripped heading/list
+        rendering from pipe-delimited prose.
+        """
+        out = _render(driver_path, "| prose<br># heading |")
+        assert "<h1>" in out
+
+    def test_pipe_wrapped_prose_keeps_list_rendering(self, driver_path):
+        out = _render(driver_path, "| prose<br>- item |")
+        assert "<ul>" in out and "<li>" in out
+
+    def test_pipe_rows_without_separator_are_not_treated_as_table(self, driver_path):
+        """Two pipe lines with no separator row are prose, so <br> still converts."""
+        out = _render(driver_path, "| a | b |\n| c | d |")
+        assert "<table>" not in out
+
+    def test_multi_row_table_preserves_br_in_every_data_row(self, driver_path):
+        src = (
+            "| Feature | Notes | Status |\n"
+            "|---|---|---|\n"
+            "| Auth | OAuth<br>API keys<br>tokens | shipped |\n"
+            "| Cache | LRU<br>60s TTL | in review |"
+        )
+        out = _render(driver_path, src)
+        assert out.count("<tr>") == 3
+        assert "OAuth<br>API keys<br>tokens" in out
+        assert "LRU<br>60s TTL" in out
+
+    def test_row_with_trailing_text_after_closing_pipe_matches_master(self, driver_path):
+        """Pins parity with master for a malformed row that has text past the last pipe.
+
+        The downstream table regex lacks an end-of-line anchor, so it accepts a
+        prefix the physical-line guard rejects. Master does NOT render this as a
+        table either, so preserving prose here is parity, not a regression. Pinned
+        so a future table-guard change has to make a deliberate decision about it.
+        """
+        out = _render(driver_path, "| h<br>x | n |\n|---|---| trailing")
+        assert "<table>" not in out
+
+    def test_indented_and_padded_table_still_preserves_br(self, driver_path):
+        out = _render(driver_path, "  | a | b |\n  |---|---|\n  | x<br>y | z |")
+        assert "<table>" in out
+        assert "x<br>y" in out
