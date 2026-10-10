@@ -467,8 +467,10 @@ def test_live_stream_terminal_paths_use_original_stream_owner_identity():
 
     start_dispatch = attach_body.index("_dispatchExtensionTurnLifecycle('turn:start',activeSid,streamId")
     dead_reconnect_return = attach_body.index("_scheduleAnchorRegistryCleanup(120000);")
-    event_source_attach = attach_body.index("_wireSSE(new EventSource", start_dispatch)
-    assert dead_reconnect_return < start_dispatch < event_source_attach
+    owner_check = attach_body.index("if(!_ownsAttach()) return null;", start_dispatch)
+    event_source_attach = attach_body.index("return new EventSource(", owner_check)
+    wire_source = attach_body.index("wireSource:_wireSSE,", event_source_attach)
+    assert dead_reconnect_return < start_dispatch < owner_check < event_source_attach < wire_source
     assert "_dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId" in done
     assert "_dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId" in application_error
     assert "_dispatchExtensionTurnLifecycle('turn:cancel',activeSid,streamId" in cancel

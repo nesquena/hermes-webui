@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _run_case(operation, transport, *, absent=False, close_after=False):
     source = (ROOT / "static/sessions.js").read_text(encoding="utf-8")
-    names = ["_isServerIdleSessionRow", "_reconcileActiveSessionIdleStateFromList", "_purgeStaleInflightEntries", "_dropStaleOptimisticSessionRow"]
+    names = ["_isServerIdleSessionRow", "_reconcileActiveSessionIdleStateFromList", "_purgeStaleInflightEntries", "_dropStaleOptimisticSessionRow", "_activeSessionSceneRestorePendingFor"]
     if "function _hasOwnedOpenLiveStream(" in source:
         names.append("_hasOwnedOpenLiveStream")
     parameters = {
@@ -26,6 +26,7 @@ def _run_case(operation, transport, *, absent=False, close_after=False):
         "_reconcileActiveSessionIdleStateFromList": "serverRows",
         "_hasOwnedOpenLiveStream": "sid",
         "_dropStaleOptimisticSessionRow": "sid",
+        "_activeSessionSceneRestorePendingFor": "sid, streamId",
     }
     functions = "\n".join(
         f"function {name}({parameters.get(name, '')}) {{"
@@ -33,6 +34,9 @@ def _run_case(operation, transport, *, absent=False, close_after=False):
         for name in names
     )
     script = """
+let _activeSessionSceneRestorePending=null;
+const _loadSessionGeneration=1;
+const _PENDING_LIVE_ATTACHES=Object.create(null);
 const S={session:{session_id:'current',active_stream_id:'turn-1'},busy:true,activeStreamId:'turn-1'};
 const INFLIGHT={current:{streamId:'turn-1',messages:[{role:'assistant',content:'work so far'}]}};
 const original=INFLIGHT.current;

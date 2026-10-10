@@ -101,6 +101,20 @@ def _extract_function(source_text, function_name):
     raise AssertionError(f"Could not extract {function_name}")
 
 
+def _extract_stale_inflight_purge_helpers(source_text):
+    return "\n".join(
+        [
+            "let _activeSessionSceneRestorePending = null;",
+            "let _loadSessionGeneration = 0;",
+            "const _PENDING_LIVE_ATTACHES=Object.create(null);",
+            _extract_function(source_text, "_isActiveSessionSceneRestoreOwner"),
+            _extract_function(source_text, "_activeSessionSceneRestorePendingFor"),
+            _extract_function(source_text, "_hasOwnedOpenLiveStream"),
+            _extract_function(source_text, "_purgeStaleInflightEntries"),
+        ]
+    )
+
+
 def _ensure_async(function_source, function_name):
     if function_source.startswith("async function "):
         return function_source
@@ -536,7 +550,7 @@ def test_source_filtered_cache_preserves_hidden_bucket_runtime_state():
     remember_source_fn = _extract_function(src, "_rememberSessionListSource")
     remember_streaming_fn = _extract_function(src, "_rememberRenderedStreamingState")
     remember_snapshot_fn = _extract_function(src, "_rememberRenderedSessionSnapshot")
-    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_stale_inflight_purge_helpers(src)
     mark_fn = _extract_function(src, "_markPollingCompletionUnreadTransitions")
     script = f"""
 global._allSessions = [{{
@@ -555,6 +569,11 @@ global._sessionListSnapshotById = new Map([['webui-live', {{ message_count: 1, l
 global._sendInProgress = false;
 global._sendInProgressSid = null;
 global.INFLIGHT = {{ 'webui-live': {{ lastAssistantText: 'working' }} }};
+global.S = {{
+  session: null,
+  activeStreamId: null,
+  busy: false,
+}};
 const cleared = [];
 global.clearInflightState = sid => cleared.push(sid);
 global._isSessionEffectivelyStreaming = s => Boolean(s.is_streaming);
@@ -606,6 +625,172 @@ console.log(JSON.stringify({{
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_purge_stale_inflight_preserves_active_session_with_coherent_ownership():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    purge_fn = _extract_stale_inflight_purge_helpers(src)
+    script = f"""
+global._allSessions = [{{ session_id: 'webui-other', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: true }}];
+global._allSessionsScope = {{}};
+global._sessionListSourceById = new Map();
+global._sendInProgress = false;
+global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
+global.INFLIGHT = {{
+  'active-1': {{ streamId: 'stream-1', lastAssistantText: 'working' }},
+}};
+global.S = {{
+  session: {{ session_id: 'active-1', active_stream_id: 'stream-1' }},
+  activeStreamId: 'stream-1',
+  busy: true,
+}};
+const cleared = [];
+global.clearInflightState = sid => cleared.push(sid);
+{purge_fn}
+_purgeStaleInflightEntries();
+console.log(JSON.stringify({{
+  inflightKeys: Object.keys(INFLIGHT),
+  cleared,
+}}));
+"""
+    body = _run_node(script)
+    assert body["inflightKeys"] == ["active-1"]
+    assert body["cleared"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_purge_stale_inflight_removes_absent_active_session_when_not_busy():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    purge_fn = _extract_stale_inflight_purge_helpers(src)
+    script = f"""
+global._allSessions = [{{ session_id: 'webui-other', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: true }}];
+global._allSessionsScope = {{}};
+global._sessionListSourceById = new Map();
+global._sendInProgress = false;
+global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
+global.INFLIGHT = {{
+  'active-1': {{ streamId: 'stream-1', lastAssistantText: 'working' }},
+}};
+global.S = {{
+  session: {{ session_id: 'active-1', active_stream_id: 'stream-1' }},
+  activeStreamId: 'stream-1',
+  busy: false,
+}};
+const cleared = [];
+global.clearInflightState = sid => cleared.push(sid);
+{purge_fn}
+_purgeStaleInflightEntries();
+console.log(JSON.stringify({{
+  inflightKeys: Object.keys(INFLIGHT),
+  cleared,
+}}));
+"""
+    body = _run_node(script)
+    assert body["inflightKeys"] == []
+    assert body["cleared"] == ["active-1"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_purge_stale_inflight_prunes_background_entry_when_row_absent():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    purge_fn = _extract_stale_inflight_purge_helpers(src)
+    script = f"""
+global._allSessions = [{{ session_id: 'webui-active', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: true }}];
+global._allSessionsScope = {{}};
+global._sessionListSourceById = new Map();
+global._sendInProgress = false;
+global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
+global.INFLIGHT = {{
+  'webui-active': {{ streamId: 'stream-active', lastAssistantText: 'active' }},
+  'webui-bg': {{ streamId: 'stream-bg', lastAssistantText: 'bg' }},
+}};
+global.S = {{
+  session: {{ session_id: 'webui-active', active_stream_id: 'stream-active' }},
+  activeStreamId: 'stream-active',
+  busy: true,
+}};
+const cleared = [];
+global.clearInflightState = sid => cleared.push(sid);
+{purge_fn}
+_purgeStaleInflightEntries();
+console.log(JSON.stringify({{
+  inflightKeys: Object.keys(INFLIGHT).sort(),
+  cleared: cleared.sort(),
+}}));
+"""
+    body = _run_node(script)
+    assert body["inflightKeys"] == ["webui-active"]
+    assert body["cleared"] == ["webui-bg"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_purge_stale_inflight_prunes_absent_active_session_when_stream_ownership_conflicts():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    purge_fn = _extract_stale_inflight_purge_helpers(src)
+    script = f"""
+global._allSessions = [{{ session_id: 'webui-other', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: true }}];
+global._allSessionsScope = {{}};
+global._sessionListSourceById = new Map();
+global._sendInProgress = false;
+global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
+global.INFLIGHT = {{
+  'active-1': {{ streamId: 'stream-1', lastAssistantText: 'working' }},
+}};
+global.S = {{
+  session: {{ session_id: 'active-1', active_stream_id: 'stream-2' }},
+  activeStreamId: 'stream-3',
+  busy: true,
+}};
+const cleared = [];
+global.clearInflightState = sid => cleared.push(sid);
+{purge_fn}
+_purgeStaleInflightEntries();
+console.log(JSON.stringify({{
+  inflightKeys: Object.keys(INFLIGHT),
+  cleared,
+}}));
+"""
+    body = _run_node(script)
+    assert body["inflightKeys"] == []
+    assert body["cleared"] == ["active-1"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_purge_stale_inflight_purges_present_idle_row_even_if_client_fields_stale():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    purge_fn = _extract_stale_inflight_purge_helpers(src)
+    script = f"""
+global._allSessions = [{{ session_id: 'active-1', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: false }}];
+global._allSessionsScope = {{}};
+global._sessionListSourceById = new Map();
+global._sendInProgress = false;
+global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
+global.INFLIGHT = {{
+  'active-1': {{ streamId: 'stream-1', lastAssistantText: 'working' }},
+}};
+global.S = {{
+  session: {{ session_id: 'active-1', active_stream_id: 'stream-1' }},
+  activeStreamId: 'stream-1',
+  busy: true,
+}};
+const cleared = [];
+global.clearInflightState = sid => cleared.push(sid);
+{purge_fn}
+_purgeStaleInflightEntries();
+console.log(JSON.stringify({{
+  inflightKeys: Object.keys(INFLIGHT),
+  cleared: cleared,
+}}));
+"""
+    body = _run_node(script)
+    assert body["inflightKeys"] == []
+    assert body["cleared"] == ["active-1"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_sid_only_source_remembering_skips_scope_fallback():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     is_cli_fn = _extract_function(src, "_isCliSession")
@@ -654,7 +839,7 @@ def test_session_list_response_omits_bucket_counts_when_missing(monkeypatch):
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_scope_mismatch_error_path_respects_sidebar_source():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_stale_inflight_purge_helpers(src)
     clear_fn = _extract_function(src, "_clearSessionSourceTabCounts")
     requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
