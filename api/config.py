@@ -672,6 +672,31 @@ _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
 
 
+def _detached_copy(value, _active=None):
+    """Deep-copy a parsed YAML tree so every mapping/list OCCURRENCE is its own
+    object. ``copy.deepcopy`` keeps YAML anchor/alias identity (its memo maps a
+    shared node to one copy), so a writer that mutates one aliased slot in a
+    raw write snapshot would silently change every other slot sharing the
+    anchor. The env-expanding reader always produced detached copies; raw
+    write transactions (#8032) must too. A genuinely self-referential node
+    (a recursive alias) keeps deepcopy semantics instead of recursing forever.
+    """
+    if not isinstance(value, (dict, list)):
+        return value
+    if _active is None:
+        _active = set()
+    key = id(value)
+    if key in _active:
+        return copy.deepcopy(value)
+    _active.add(key)
+    try:
+        if isinstance(value, dict):
+            return {k: _detached_copy(v, _active) for k, v in value.items()}
+        return [_detached_copy(v, _active) for v in value]
+    finally:
+        _active.discard(key)
+
+
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
     """Return the RAW (un-env-expanded) parsed config dict, memoized on
     (resolved path, st_mtime_ns, st_size). Shared parse core for
@@ -707,7 +732,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
             raw = cached[1]
             if not isinstance(raw, dict):
                 return {}
-            return copy.deepcopy(raw) if _copy else raw
+            return _detached_copy(raw) if _copy else raw
 
     # Cache miss / stale: parse off disk. Done outside the lock so a slow parse
     # doesn't serialize unrelated paths; a concurrent duplicate parse is harmless.
@@ -720,7 +745,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     raw = loaded if isinstance(loaded, dict) else {}
     with _yaml_file_cache_lock:
         _yaml_file_cache[cache_key] = (stat_key, raw)
-    return copy.deepcopy(raw) if _copy else raw
+    return _detached_copy(raw) if _copy else raw
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
@@ -823,16 +848,260 @@ def _config_for_yaml_save(config_data: dict) -> dict:
     return data
 
 
+# ── Config WRITE rule (#8032 / #5619) ─────────────────────────────────────────
+# A config write transaction must read config.yaml with
+# _load_yaml_config_file_raw(), mutate that RAW document and save it. Env
+# expansion (_load_yaml_config_file / get_config) is for READS only: saving an
+# expanded dict writes the resolved secret in place of its ``${VAR}``
+# reference. ``${env:VAR}`` and every other reference form must likewise be
+# saved verbatim. A writer that must COMPARE a stored value against a
+# resolved one expands a copy for the comparison and keeps the raw value.
+# _save_yaml_config_file() additionally restores unchanged references as a
+# defense in depth (see _restore_env_ref_templates).
+_ENV_REF_PATTERN = re.compile(r"\$\{[^}]+\}")
+
+
+def _has_env_ref(value) -> bool:
+    """True when *value* is a string holding at least one ``${...}`` reference."""
+    return isinstance(value, str) and _ENV_REF_PATTERN.search(value) is not None
+
+
+def _preserve_env_ref(raw_value, new_value, normalize=None):
+    """Return *raw_value* when it is a ``${VAR}`` reference that currently
+    resolves to *new_value* (after the optional ``normalize``), else *new_value*.
+
+    Lets a writer re-save a value the UI displayed from an env-backed field
+    without baking the resolved value into config.yaml, while a value the user
+    really changed is still written exactly as given (#8032).
+    """
+    if not _has_env_ref(raw_value) or not isinstance(new_value, str) or new_value == raw_value:
+        return new_value
+    if new_value == "":
+        # An explicit clear is always the user's intent, even when the
+        # reference currently expands to "" (unset variable).
+        return new_value
+    try:
+        expanded = _expand_env_vars(raw_value)
+        if normalize is not None:
+            same = normalize(expanded) == normalize(new_value)
+        else:
+            same = expanded == new_value
+    except Exception:
+        return new_value
+    return raw_value if same else new_value
+
+
+def _normalize_base_url_for_compare(value) -> str:
+    """Comparison form of a base URL (writers persist it stripped, no trailing /)."""
+    return str(value or "").strip().rstrip("/")
+
+
+def _items_by_resolved_name(items) -> dict | None:
+    """Index a list of mappings by their env-resolved ``name`` when every item
+    has a unique string name; ``None`` otherwise (fall back to positions)."""
+    if not isinstance(items, list):
+        return None
+    indexed: dict = {}
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            return None
+        try:
+            key = _expand_env_vars(item["name"])
+        except Exception:
+            return None
+        if key in indexed:
+            return None
+        indexed[key] = item
+    return indexed
+
+
+def _selected_endpoint_source(raw_cfg, provider_id):
+    """Return the RAW ``base_url`` of the config record *provider_id* routes
+    through, or ``None`` when no single record is identifiable.
+
+    ``custom:<slug>`` is the unique ``custom_providers`` entry (matched on its
+    env-resolved name), a ``providers.<id>`` key is that entry, and the unnamed
+    ``custom`` provider is the main ``model`` block. Only this record may supply
+    a ``${VAR}`` template for a derived endpoint (#8032): a global search for
+    any template with an equal expansion could bind the destination to an
+    unrelated variable.
+    """
+    pid = str(provider_id or "").strip()
+    if not isinstance(raw_cfg, dict) or not pid:
+        return None
+    if pid.startswith("custom:"):
+        entries = raw_cfg.get("custom_providers")
+        if not isinstance(entries, list):
+            return None
+        resolved = [
+            {**e, "name": _expand_env_vars(e.get("name"))} if isinstance(e, dict) else e
+            for e in entries
+        ]
+        try:
+            match = _unique_custom_provider_entry(resolved, _custom_provider_slug_key(pid))
+        except AmbiguousCustomProviderError:
+            return None
+        return match.get("base_url") if isinstance(match, dict) else None
+    if pid == "custom":
+        model_block = raw_cfg.get("model")
+        return model_block.get("base_url") if isinstance(model_block, dict) else None
+    providers = raw_cfg.get("providers")
+    if isinstance(providers, dict) and isinstance(providers.get(pid), dict):
+        return providers[pid].get("base_url")
+    return None
+
+
+def _endpoint_for_save(source_raw, resolved_url, current_raw):
+    """Value to persist for a derived ``base_url``: the selected record's own
+    ``${VAR}`` template when it resolves to *resolved_url*, the record's literal
+    when the record is literal, else the destination field's own reference when
+    that still resolves to the URL, else the URL as given."""
+    normalize = _normalize_base_url_for_compare
+    if isinstance(source_raw, str) and source_raw.strip():
+        if _has_env_ref(source_raw):
+            kept = _preserve_env_ref(source_raw, resolved_url, normalize=normalize)
+            if kept == source_raw:
+                return source_raw
+        else:
+            try:
+                if normalize(source_raw) == normalize(resolved_url):
+                    return resolved_url
+            except Exception:
+                pass
+    return _preserve_env_ref(current_raw, resolved_url, normalize=normalize)
+
+
+def _restore_env_ref_templates(new, raw, _memo=None):
+    """Restore raw ``${VAR}`` templates wherever *new* still holds exactly
+    their current expansion, so persisting a loaded (expanded) structure never
+    writes the plaintext value back. Values the caller changed, added or
+    removed are kept as given. Mirrors hermes-agent's
+    ``_preserve_env_ref_templates`` (#8032, #8115).
+
+    Cycle-safe: output containers are registered per ``(new, raw)`` pair before
+    descending, so a recursive YAML alias anywhere in the document terminates.
+    """
+    if isinstance(new, str):
+        return _preserve_env_ref(raw, new)
+    if isinstance(new, dict):
+        if not isinstance(raw, dict):
+            return new
+    elif isinstance(new, list):
+        if not isinstance(raw, list):
+            return new
+    else:
+        return new
+    if _memo is None:
+        _memo = {}
+    key = (id(new), id(raw))
+    if key in _memo:
+        return _memo[key]
+    if isinstance(new, dict):
+        out: dict = {}
+        _memo[key] = out
+        for k, value in new.items():
+            out[k] = _restore_env_ref_templates(value, raw[k], _memo) if k in raw else value
+        return out
+    out_list: list = []
+    _memo[key] = out_list
+    raw_by_name = _items_by_resolved_name(raw)
+    if raw_by_name is not None and _items_by_resolved_name(new) is not None:
+        # Named entries (custom_providers, ...) match by name, so a reordered
+        # or shortened list keeps each entry's own templates.
+        out_list.extend(
+            _restore_env_ref_templates(item, raw_by_name.get(item["name"]), _memo) for item in new
+        )
+        return out_list
+    out_list.extend(_restore_list_items(new, raw, _memo))
+    return out_list
+
+
+def _restore_list_items(new: list, raw: list, memo: dict) -> list:
+    """List half of :func:`_restore_env_ref_templates`.
+
+    Each on-disk template occurrence is restored at most once, and an on-disk
+    literal is never replaced by a template:
+    1. a template the caller passed verbatim consumes its own occurrence;
+    2. at the same index, an unused template whose expansion equals the value
+       is restored, and an equal on-disk literal is kept;
+    3. a value equal to a remaining on-disk literal is kept;
+    4. otherwise the first unused template with an equal expansion is restored
+       (a reordered list, e.g. MCP args).
+    Containers recurse positionally only when the lengths match.
+    """
+    same_len = len(new) == len(raw)
+    slots = []  # [index, template, expansion, used]
+    for idx, item in enumerate(raw):
+        if isinstance(item, str) and _has_env_ref(item):
+            try:
+                slots.append([idx, item, _expand_env_vars(item), False])
+            except Exception:
+                continue
+    literals = collections.Counter(
+        item for item in raw if isinstance(item, str) and not _has_env_ref(item)
+    )
+    out = list(new)
+    pending = []
+    for i, item in enumerate(new):
+        if isinstance(item, (dict, list)):
+            out[i] = _restore_env_ref_templates(item, raw[i], memo) if same_len else item
+        elif isinstance(item, str):
+            if _has_env_ref(item):
+                for slot in slots:
+                    if not slot[3] and slot[1] == item:
+                        slot[3] = True
+                        break
+            else:
+                pending.append(i)
+    unresolved = []
+    for i in pending:
+        item = out[i]
+        if same_len:
+            slot = next((sl for sl in slots if sl[0] == i and not sl[3] and sl[2] == item), None)
+            if slot is not None:
+                slot[3] = True
+                out[i] = slot[1]
+                continue
+            if raw[i] == item and literals[item] > 0:
+                literals[item] -= 1
+                continue
+        unresolved.append(i)
+    floating = []
+    for i in unresolved:
+        if literals[out[i]] > 0:
+            literals[out[i]] -= 1
+        else:
+            floating.append(i)
+    for i in floating:
+        slot = next((sl for sl in slots if not sl[3] and sl[2] == out[i]), None)
+        if slot is not None:
+            slot[3] = True
+            out[i] = slot[1]
+    return out
+
+
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     try:
         from api import yaml_compat as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
+    data = _config_for_yaml_save(config_data)
+    # Defense in depth for the write rule above (#8032): if a caller hands us
+    # an env-expanded structure, put back every ``${VAR}`` reference whose
+    # current expansion is the value about to be written. Writers should
+    # already pass the raw document; this only catches regressions/new paths.
+    try:
+        on_disk = _load_yaml_config_file_raw(config_path)
+    except Exception:
+        on_disk = {}
+    if on_disk:
+        data = _restore_env_ref_templates(data, on_disk)
+
     config_path.parent.mkdir(parents=True, exist_ok=True)
     _paths._atomic_write_text(
         config_path,
-        _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
+        _yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
     # Invalidate the memoized parse for this path so the next read re-parses the
@@ -6143,7 +6412,8 @@ def set_reasoning_display(show: bool) -> dict:
     """
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load: a write must never save env-expanded values (#8032 write rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         display_cfg = config_data.get("display")
         if not isinstance(display_cfg, dict):
             display_cfg = {}
@@ -6183,7 +6453,8 @@ def set_reasoning_effort(
         )
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
@@ -6403,7 +6674,11 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
     if "base_url" in advanced:
         base_url = str(advanced.get("base_url") or "").strip().rstrip("/")
         if base_url:
-            model_cfg["base_url"] = base_url
+            # model_cfg is the RAW block: re-submitting the displayed (resolved)
+            # URL keeps a ${VAR} reference instead of baking it (#8032).
+            model_cfg["base_url"] = _preserve_env_ref(
+                model_cfg.get("base_url"), base_url, normalize=_normalize_base_url_for_compare
+            )
         else:
             model_cfg.pop("base_url", None)
     for field in ("timeout", "download_timeout", "max_concurrency"):
@@ -6456,12 +6731,20 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # reload_config() acquires _cfg_lock internally (it's not reentrant) so
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): model_cfg stays raw so ${VAR} references
+        # in fields this save doesn't change are written back verbatim.
+        config_data = _load_yaml_config_file_raw(config_path)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
             model_cfg = {}
+        raw_model_cfg = dict(model_cfg)
 
-        previous_provider = str(model_cfg.get("provider") or "").strip()
+        # Compare the RESOLVED provider: ``provider: ${MODEL_PROVIDER}`` must not
+        # look like a provider switch (which would drop a valid base_url) just
+        # because the raw placeholder differs from the caller's resolved value.
+        previous_provider = str(
+            _expand_env_vars(str(model_cfg.get("provider") or "").strip()) or ""
+        ).strip()
         requested_provider = str(provider or "").strip()
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
@@ -6486,12 +6769,24 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if persisted_provider.lower() == "local":
             persisted_provider = "custom"
 
-        model_cfg["default"] = persisted_model
+        # Keep an env reference when it already resolves to the value being
+        # saved (the user re-saved what the UI displayed); a changed value is
+        # written as given.
+        model_cfg["default"] = _preserve_env_ref(
+            raw_model_cfg.get("default"), persisted_model, normalize=str.strip
+        )
         if persisted_provider:
-            model_cfg["provider"] = persisted_provider
+            model_cfg["provider"] = _preserve_env_ref(
+                raw_model_cfg.get("provider"), persisted_provider, normalize=str.strip
+            )
 
         if resolved_base_url and not provider_override_won:
-            model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+            _new_base_url = str(resolved_base_url).strip().rstrip("/")
+            model_cfg["base_url"] = _endpoint_for_save(
+                _selected_endpoint_source(config_data, resolved_provider),
+                _new_base_url,
+                raw_model_cfg.get("base_url"),
+            )
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
@@ -6668,7 +6963,9 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     model = str(model or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): untouched slots/fields keep their
+        # ${VAR} references.
+        config_data = _load_yaml_config_file_raw(config_path)
         if task != "__reset__" and task not in AUX_TASK_SLOTS:
             raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
         if task == "__reset__":
@@ -6732,8 +7029,25 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     # closed on a collision (raises AmbiguousCustomProviderError)
                     # exactly like every other path — otherwise the ambiguity
                     # would be swallowed and the wrong endpoint persisted.
+                    # config_data is RAW (#8032): match on env-RESOLVED names
+                    # (the UI's slug comes from an expanded read) using copies,
+                    # so a ``name: ${VAR}`` entry is still found while the list
+                    # we save keeps its raw references. base_url is not
+                    # resolved in the copies, so a ${VAR} endpoint stays a
+                    # reference in the slot too.
+                    _raw_cp = config_data.get("custom_providers", [])
+                    _resolved_cp = (
+                        [
+                            {**e, "name": _expand_env_vars(e.get("name"))}
+                            if isinstance(e, dict)
+                            else e
+                            for e in _raw_cp
+                        ]
+                        if isinstance(_raw_cp, list)
+                        else _raw_cp
+                    )
                     _cp_match = _unique_custom_provider_entry(
-                        config_data.get("custom_providers", []),
+                        _resolved_cp,
                         _custom_provider_slug_key(provider),
                     )
                     if _cp_match is not None:
@@ -6749,7 +7063,12 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     except Exception:
                         resolved_base_url = None
                 if resolved_base_url:
-                    slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+                    _slot_url = str(resolved_base_url).strip().rstrip("/")
+                    slot_cfg["base_url"] = _endpoint_for_save(
+                        _selected_endpoint_source(config_data, provider),
+                        _slot_url,
+                        slot_cfg.get("base_url"),
+                    )
             if advanced is not None:
                 try:
                     _apply_advanced_model_options(slot_cfg, advanced)
