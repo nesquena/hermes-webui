@@ -135,6 +135,11 @@
 
 ### Fixed
 
+- **Signing in works when another app on the same host sets a malformed cookie.** A cookie with illegal characters
+  from a different service on the same host or domain made the WebUI ignore every cookie after it, so a correct password
+  bounced back to the login page and a switched profile fell back to `default`. Cookies are now read one pair at a time,
+  for both the session and the profile cookie. Thanks @pcsokonay. (#8124, #8123)
+
 - **Starting the WebUI on a port that is already taken explains what to do.** `bootstrap.py` / `start.sh` now check the
   port before launching: if your own WebUI is already running there it says so (and opens it), otherwise it names the
   port as busy and suggests a free one instead of failing later with a bind error. Works for IPv4, IPv6 and HTTPS.
