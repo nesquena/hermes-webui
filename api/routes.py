@@ -17085,9 +17085,16 @@ def handle_post(handler, parsed) -> bool:
         # auto-assign project claims this workspace, the session is filed
         # under it automatically (multi-workspace auto-classification).
 
-        def _create_session(_project_id):
+        def _create_session(_project_id, resolved_workspace=None):
+            # ``resolved_workspace`` is the workspace the auto-assign branch has
+            # ALREADY resolved for its project lookup.  Passing it through keeps
+            # the session and its project on ONE read of the profile's last
+            # workspace: letting new_session read it again could land the chat in
+            # workspace B while it is filed under workspace A's project
+            # (Greptile P1 2026-10-10T02:58:01Z).  None keeps master's path, where
+            # new_session resolves the fallback itself.
             return new_session(
-                workspace=workspace,
+                workspace=resolved_workspace if resolved_workspace is not None else workspace,
                 model=model,
                 model_provider=model_provider,
                 profile=body.get("profile") or None,
@@ -17142,7 +17149,7 @@ def handle_post(handler, parsed) -> bool:
                     project_id = _auto_assign_project_for_workspace(
                         _effective_workspace, profile=body.get("profile") or None
                     )
-                    s = _create_session(project_id)
+                    s = _create_session(project_id, _effective_workspace)
         if worktree_info:
             publish_session_list_changed(
                 "session_new",

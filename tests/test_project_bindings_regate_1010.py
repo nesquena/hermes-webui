@@ -723,6 +723,10 @@ def test_a_missing_workspace_still_auto_assigns_the_last_workspace(
     session_new_env.drive({"profile": "default"})
     assert session_new_env.auto_calls == ["D:/last-ws"], session_new_env.auto_calls
     assert session_new_env.created[0]["project_id"] == _AUTO_PID
+    # The session is created in the SAME workspace the project was resolved
+    # from: letting new_session read the last workspace again could file a chat
+    # in workspace B under workspace A's project (Greptile P1 2026-10-10T02:58:01Z).
+    assert session_new_env.created[0]["workspace"] == "D:/last-ws", session_new_env.created[0]
     # The profile is resolved exactly like new_session resolves it.
     assert seen == ["default"], seen
 
@@ -892,13 +896,37 @@ def test_a_failed_save_keeps_the_dialog_open(tmp_path):
         "\n// Custom combobox for the bindings dialog"
     )]
     assert "return true;" in save_fn and "return false;" in save_fn, save_fn
-    # The call site captures the result and closes only when it succeeded, and
-    # the dialog's own close no longer runs before the await.
+    # The call site captures the result and bails out before closing when the
+    # save failed, and the dialog's own close no longer runs before the await.
     assert "const _saved=await _saveProjectBindings(proj,fields);" in src
-    assert "if(_saved) _closeBindingsDialog();" in src
+    assert "if(!_saved) return;" in src
     assert "\n    _closeBindingsDialog();\n    await _saveProjectBindings(proj,fields);" not in src
     assert _run_node(
         tmp_path,
         "save_bindings_probe.js",
         _SAVE_BINDINGS_PROBE.replace("__SAVE__", save_fn),
     ).strip().endswith("ok")
+
+
+def test_a_save_in_flight_ignores_a_second_press_and_newer_edits():
+    """Greptile P2 (2026-10-10T02:58:01Z): the dialog now stays EDITABLE while
+    the save is pending, so a second press must not race it and the response
+    must not close over edits made after Save was pressed.
+
+    The behaviour itself is verified in a real browser on the PR (a slow bind,
+    a second press and an edit during the flight: one POST, the dialog and the
+    new edit survive); this pins the shipped wiring so it cannot regress."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    save_start = src.index("saveBtn.onclick=async()=>{")
+    body = src[save_start:src.index("btnRow.appendChild(cancelBtn);", save_start)]
+    assert "if(_saveInFlight) return;" in body, body
+    assert "let _saveInFlight=false;" in src, "the flag must live in the dialog scope"
+    assert "_saveInFlight=true;" in body, body
+    finally_block = body.split("}finally{", 1)[1]
+    assert "_saveInFlight=false;" in finally_block, finally_block
+    # The submitted snapshot and the live controls are both serialized, and the
+    # dialog closes only when they still match.
+    assert "const _submitted=JSON.stringify([" in body, body
+    assert "const _current=JSON.stringify([" in body, body
+    assert "if(_current===_submitted) _closeBindingsDialog();" in body, body
+    assert "if(_saved) _closeBindingsDialog();" not in body, body

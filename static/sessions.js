@@ -11295,6 +11295,9 @@ function _showProjectBindingsDialog(proj){
   // exact workspace snapshot it covered, so any change to the list re-arms it.
   let _aaConfirmedKey=null;     // JSON of the snapshot (profile+project+list) the user confirmed
   let _aaConfirmInFlight=null;  // at most one confirmation at a time (toggle + Save share it)
+  // At most one save request in flight: a second press would race a competing
+  // bind with different settings (Greptile P2 2026-10-10T02:58:01Z).
+  let _saveInFlight=false;
   // The confirmation is keyed on the ACTIVE PROFILE + the project + the exact
   // workspace snapshot it covered. Keying it on the workspace paths alone let a
   // dialog left open across a profile switch keep the OTHER profile's cached
@@ -11370,6 +11373,10 @@ function _showProjectBindingsDialog(proj){
   saveBtn.className='app-dialog-btn confirm';
   saveBtn.textContent=t('pb_save');
   saveBtn.onclick=async()=>{
+    // One save at a time: while a request is pending its snapshot is what the
+    // server is applying, so a competing press with different settings must not
+    // race it (Greptile P2 2026-10-10T02:58:01Z).
+    if(_saveInFlight) return;
     // Workspaces: the EXACT snapshot Save submits (empty → unbind all), captured
     // once and never re-read after an await, so what the auto-assign
     // confirmation covers is precisely what the server sweeps.
@@ -11455,8 +11462,28 @@ function _showProjectBindingsDialog(proj){
     // model edit — reopening the dialog rebuilt it from the STORED project
     // (Greptile P2 2026-10-10T02:22:52Z).  _saveProjectBindings returns true
     // only on success; a failure keeps the dialog (and its edits) on screen.
-    const _saved=await _saveProjectBindings(proj,fields);
-    if(_saved) _closeBindingsDialog();
+    // The dialog also stays EDITABLE while the request is in flight, so a slow
+    // round-trip must not close over newer edits: snapshot what was submitted
+    // and only close when the controls still match (Greptile P2
+    // 2026-10-10T02:58:01Z).  A second press is ignored for the same reason.
+    const _submitted=JSON.stringify([
+      wsPaths, (def&&def.value)||null, modelVal, autoAssign,
+    ]);
+    _saveInFlight=true;
+    try{
+      const _saved=await _saveProjectBindings(proj,fields);
+      if(!_saved) return;
+      const _nowDefault=_wsDefault();
+      const _current=JSON.stringify([
+        wsList.map(x=>x.value).filter(Boolean),
+        (_nowDefault&&_nowDefault.value)||null,
+        modelCombo.getValue(),
+        !!aaCb.checked,
+      ]);
+      if(_current===_submitted) _closeBindingsDialog();
+    }finally{
+      _saveInFlight=false;
+    }
   };
   btnRow.appendChild(cancelBtn);
   btnRow.appendChild(saveBtn);
