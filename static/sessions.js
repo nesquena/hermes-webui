@@ -10677,6 +10677,15 @@ async function _saveProjectBindings(proj, fields){
 // option can carry a primary name AND a secondary path/subtitle. All three
 // binding fields share this component, so the dropdowns are visually
 // identical across workspace / model / effort.
+
+// Which bindings combo currently owns an open menu. The trigger's click handler
+// stops propagation, so opening a second combo could never run the first one's
+// document-level close and two menus stayed open together (both triggers
+// reporting aria-expanded="true"); _open() now closes the previous owner
+// explicitly, which is what a native <select> does (maintainer UX re-gate
+// 2026-10-10T02:01:36Z).
+let _openBindingsCombo=null;
+
 function _makeBindingsCombo(o){
   const wrap=document.createElement('div');
   wrap.className='project-bindings-combo';
@@ -10713,8 +10722,16 @@ function _makeBindingsCombo(o){
     menu.classList.remove('open');
     trigger.classList.remove('open');
     trigger.setAttribute('aria-expanded','false');
+    if(_openBindingsCombo===api) _openBindingsCombo=null;
   }
   function _open(){
+    // One popup at a time: close whichever bindings combo was open before this
+    // one. The sibling's own click handler stopPropagation()s, so its
+    // document-level close never fires when the OTHER trigger is clicked or
+    // arrowed into (maintainer UX re-gate 2026-10-10T02:01:36Z).
+    if(_openBindingsCombo&&_openBindingsCombo!==api){
+      try{ _openBindingsCombo.close(); }catch(_){ _openBindingsCombo=null; }
+    }
     // Rebuild options so freshly-fetched lists (workspace names) appear, and
     // let the caller drop entries that are only invalid NOW: the workspace add
     // list hides already-bound workspaces, and that bound list changes after
@@ -10777,6 +10794,7 @@ function _makeBindingsCombo(o){
     menu.classList.add('open');
     trigger.classList.add('open');
     trigger.setAttribute('aria-expanded','true');
+    _openBindingsCombo=api;
   }
   // Move the keyboard highlight over the CURRENTLY RENDERED rows (the filter
   // runs per open, and the add list both hides bound paths and prepends the
@@ -10859,16 +10877,34 @@ function _makeBindingsCombo(o){
   const _onDocClick=(e)=>{
     if(!wrap.contains(e.target)) _close();
   };
+  // The menu is position:fixed and placed ONCE from the trigger's viewport rect,
+  // so any ancestor scroll — the dialog hits its 80vh cap with ten workspaces
+  // and scrolls, and the page scrolls on mobile — left it floating away from its
+  // trigger (maintainer UX re-gate 2026-10-10T02:01:36Z). Close on a capture
+  // scroll like a native <select>, but ignore the menu's OWN scrolling: its list
+  // is height-capped and _setHighlight() scrollIntoView()s the highlighted row.
+  const _onDocScroll=(e)=>{
+    if(menu.classList.contains('open')&&!menu.contains(e.target)) _close();
+  };
   document.addEventListener('click',_onDocClick);
+  document.addEventListener('scroll',_onDocScroll,true);
   _renderTrigger();
-  return {
+  const api={
     el:wrap,
     getValue:()=>state.value,
     setValue:(v)=>{state.value=v||'';_renderTrigger();},
     setOptions:(opts)=>{state.options=Array.isArray(opts)?opts:[];_renderTrigger();},
     setOnChange:(fn)=>{state.onChange=typeof fn==='function'?fn:null;},
-    destroy:()=>{document.removeEventListener('click',_onDocClick);},
+    // Exposed so the sibling combo can be closed when this one opens (see
+    // _openBindingsCombo).
+    close:_close,
+    destroy:()=>{
+      document.removeEventListener('click',_onDocClick);
+      document.removeEventListener('scroll',_onDocScroll,true);
+      if(_openBindingsCombo===api) _openBindingsCombo=null;
+    },
   };
+  return api;
 }
 
 // Modal dialog for editing a project's bindings (workspace / model / effort).

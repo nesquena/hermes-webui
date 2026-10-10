@@ -469,13 +469,14 @@ globalThis.window = { innerHeight: 800, addEventListener: () => {} };
 globalThis.t = (key) => key;
 """
 
+_COMBO_SLOT_DECL = "let _openBindingsCombo=null;"
 _COMBO_FN = (
     (REPO_ROOT / "static" / "sessions.js")
     .read_text(encoding="utf-8")
-    .split("function _makeBindingsCombo(o){", 1)[1]
+    .split(_COMBO_SLOT_DECL, 1)[1]
     .split("\n// Modal dialog for editing a project's bindings", 1)[0]
 )
-_COMBO_FN = "function _makeBindingsCombo(o){" + _COMBO_FN
+_COMBO_FN = _COMBO_SLOT_DECL + _COMBO_FN
 
 
 _HIGHLIGHT_PROBE = (

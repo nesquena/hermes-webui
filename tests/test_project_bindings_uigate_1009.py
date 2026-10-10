@@ -51,7 +51,7 @@ def _slice(src: str, start_marker: str, end_marker: str) -> str:
 def _combo_fn() -> str:
     return _slice(
         _read_sessions_js(),
-        "function _makeBindingsCombo(o){",
+        "let _openBindingsCombo=null;",
         "\n// Modal dialog for editing a project's bindings",
     )
 
