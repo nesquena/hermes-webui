@@ -8078,6 +8078,30 @@ def _message_identity(msg):
     )
 
 
+def _durable_tool_row_identity(msg):
+    """Return (tool_call_id, row_id) for a tool row with a valid durable row.
+
+    Agent-side compression rewrites old tool results in model context to a
+    one-line summary while keeping the state.db row, so content-based identity
+    differs from the visible full-output row. A durable row ID proves row
+    identity (run-state contract), so backfill can match on it instead.
+    """
+    if not isinstance(msg, dict) or msg.get('role') != 'tool':
+        return None
+    # Read the row through the canonical provenance helper: messages loaded
+    # from state.db (and IDs preserved from older Agents) carry
+    # ``_state_db_row_id`` rather than ``_row_id``, and both sides of the
+    # backfill must normalize to the same identity. Contradictory aliases are
+    # invalid and fall back to content-based matching.
+    row_id, valid = _state_db_row_identity_details(msg)
+    if not valid or row_id is None or int(row_id) <= 0:
+        return None
+    tool_call_id = msg.get('tool_call_id')
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return None
+    return (tool_call_id, row_id)
+
+
 def _messages_have_prefix(messages, prefix, *, key_fn=None):
     key_fn = key_fn or _message_identity
     if len(messages or []) < len(prefix or []):
@@ -9048,27 +9072,48 @@ def _merge_display_messages_after_agent_result(
             )
         )
         _display_id_set = {_message_identity(m) for m in previous_display}
-        _context_id_set = {
-            _message_identity(m)
-            for m in previous_context
-            if not (
+        # A context tool row whose durable row is already displayed is the same
+        # row (e.g. an Agent-pruned summary of the visible full output), never
+        # a context-only turn, regardless of how its content was rewritten.
+        # Map it to its display twin's identity so it is never inserted but
+        # still anchors the backfill cursor at the visible tool result.
+        _display_identity_by_durable_tool_row = {}
+        for m in previous_display:
+            _durable = _durable_tool_row_identity(m)
+            if _durable is not None:
+                _display_identity_by_durable_tool_row.setdefault(_durable, _message_identity(m))
+
+        def _is_displayed_native_image_context_row(m):
+            return (
                 isinstance(m, dict)
                 and m.get('_active_turn_token') in _displayed_native_image_context_tokens
             )
+
+        def _displayed_durable_tool_twin_identity(m):
+            _durable = _durable_tool_row_identity(m)
+            if _durable is None:
+                return None
+            return _display_identity_by_durable_tool_row.get(_durable)
+
+        _context_id_set = {
+            _message_identity(m)
+            for m in previous_context
+            if not _is_displayed_native_image_context_row(m)
+            if _displayed_durable_tool_twin_identity(m) is None
             if not _is_context_compression_marker(m)
             and not _is_compressed_context_tool_result_summary_message(m)
         }
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
-            context_keys = [
-                None
-                if (
-                    isinstance(m, dict)
-                    and m.get('_active_turn_token') in _displayed_native_image_context_tokens
+            context_keys = []
+            for m in previous_context:
+                if _is_displayed_native_image_context_row(m):
+                    context_keys.append(None)
+                    continue
+                _twin_identity = _displayed_durable_tool_twin_identity(m)
+                context_keys.append(
+                    _twin_identity if _twin_identity is not None else _message_identity(m)
                 )
-                else _message_identity(m)
-                for m in previous_context
-            ]
             # Precompute display keys once; avoids repeated json.dumps calls inside
             # the inner any() loop (was O(D²·C) — see perf fix below).
             _display_keys = [_message_identity(m) for m in previous_display]
