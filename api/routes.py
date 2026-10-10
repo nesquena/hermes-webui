@@ -746,7 +746,12 @@ def _project_row_exists(project_id) -> bool:
             return False
 
 
-def _clear_cached_sessions_for_project(project_id) -> int:
+# Bounded wait for a session lock while /api/projects/delete clears cached
+# project ids (#3746: never block a request thread on session file I/O).
+_CLEAR_CACHED_SESSION_LOCK_TIMEOUT = 5.0
+
+
+def _clear_cached_sessions_for_project(project_id, lock_timeout=None) -> int:
     """Drop ``project_id`` from every cached session that still carries it.
 
     Returns the number of cached sessions cleared. ``/api/projects/delete``
@@ -757,18 +762,86 @@ def _clear_cached_sessions_for_project(project_id) -> int:
     persisted it on its draft-save (re-gate 2026-10-07, api/routes.py:16855).
     Callers hold ``_PROJECTS_CATALOG_LOCK`` so this scan cannot interleave with
     the implicit assignment + cache publication it competes with.
+
+    Each clear is taken under the session's OWN agent lock, and a session that
+    already has a sidecar is re-saved there. Clearing only the cache was not
+    enough: a ``save()`` that had already serialized ``project_id`` could still
+    land its file (and its index row) AFTER this scan, so the deleted project
+    stayed written on disk and the association came back on reload. Taking the
+    lock every "mutate + save" pair takes orders the two writes — either the
+    other save finished first and the re-save below overwrites it, or it starts
+    afterwards and reads the value cleared here — and the re-save leaves the
+    persisted row naming no project at all. Cache-only chats (no sidecar) are
+    still never written: a delete must not materialize an empty draft the user
+    never sent. (Greptile P1 2026-10-10T12:11:07Z.)
+
+    ``lock_timeout`` overrides the bounded wait for a session lock (tests).
     """
     if not project_id:
         return 0
-    cleared = 0
+    # Snapshot the targets BEFORE taking any session lock: every other path takes
+    # the session lock first and LOCK second, so holding LOCK across an acquire
+    # here would invert that order.
     with LOCK:
-        for cached in list(SESSIONS.values()):
-            try:
-                if getattr(cached, "project_id", None) == project_id:
-                    cached.project_id = None
+        targets = [
+            (str(getattr(cached, "session_id", "") or ""), cached)
+            for cached in list(SESSIONS.values())
+            if getattr(cached, "project_id", None) == project_id
+        ]
+    cleared = 0
+    for sid, snapshot in targets:
+        if not sid:
+            # No session id means no sidecar to rewrite either (the layout is
+            # SESSION_DIR/<session_id>.json), so the in-memory clear is all
+            # there is to do — and there is no session lock to take.
+            with LOCK:
+                if getattr(snapshot, "project_id", None) == project_id:
+                    snapshot.project_id = None
                     cleared += 1
-            except Exception:
-                continue
+            continue
+        try:
+            lock = _get_session_agent_lock(sid)
+        except Exception:
+            continue
+        # Bounded acquire, like /api/session/move: a streaming checkpoint save
+        # holds this lock and the delete request must not block on file I/O
+        # (#3746). A session we could not lock keeps the caller's index pass as
+        # its safety net.
+        timeout = (
+            _CLEAR_CACHED_SESSION_LOCK_TIMEOUT if lock_timeout is None else lock_timeout
+        )
+        if not lock.acquire(timeout=timeout):
+            logger.debug(
+                "projects/delete: session %s is busy; leaving its unlink to the "
+                "index pass", sid,
+            )
+            continue
+        try:
+            with LOCK:
+                cached = SESSIONS.get(sid)
+                if cached is None or getattr(cached, "project_id", None) != project_id:
+                    continue
+            persisted = (SESSION_DIR / f"{sid}.json").exists()
+            if persisted:
+                # A metadata-only stub refuses save() by design (#1558);
+                # upgrade it the way every other metadata mutation does.
+                cached = _ensure_full_session_before_mutation(sid, cached)
+            cached.project_id = None
+            with LOCK:
+                SESSIONS[sid] = cached
+                SESSIONS.move_to_end(sid)
+            cleared += 1
+            if persisted:
+                # Not touch_updated_at: a delete must not re-date the chat it
+                # was just un-filed from (same rule as the backfill sweep).
+                cached.save(touch_updated_at=False)
+        except Exception:
+            logger.debug(
+                "projects/delete: could not clear project_id on %s", sid,
+                exc_info=True,
+            )
+        finally:
+            lock.release()
     return cleared
 
 
@@ -1017,7 +1090,7 @@ def _auto_assign_sweep_body(proj) -> int:
     return changed
 
 
-def _auto_assign_candidate_count(workspaces, profile=None) -> int:
+def _auto_assign_candidate_count(workspaces, profile=None) -> int | None:
     """Count the sessions a workspace backfill would file for ``workspaces``.
 
     Read-only preview behind ``/api/projects/auto-assign-preview``: the bind
@@ -1039,9 +1112,17 @@ def _auto_assign_candidate_count(workspaces, profile=None) -> int:
     ``_auto_assign_target_is_view_only``, which needs the session object, so a
     preview may over-count by those rows while never under-counting.
     (re-gate 2026-10-07T22:04:16Z, [SHOULD-FIX] 3.)
+
+    Answers ``None`` — "unknown", not 0 — when the session index cannot be read
+    (missing file, torn write, unparseable JSON). A 0 is not a neutral fallback
+    here: the bind dialog treats a definite 0 as "a sweep would file nothing"
+    and CACHES it as the confirmation for that workspace snapshot, so an index
+    that was merely absent/unreadable at preview time and is rebuilt before Save
+    would let the background sweep file every existing chat with no prompt at
+    all. The client already has an unknown-count confirmation for ``null``
+    (``pb_auto_assign_confirm_unknown``), so an unreadable index fails CLOSED
+    through the same gate (Greptile P1 2026-10-10T12:11:07Z).
     """
-    if not SESSION_INDEX_FILE.exists():
-        return 0
     bound = set()
     for w in (workspaces or []):
         if w is None or str(w).strip() == "":
@@ -1068,7 +1149,8 @@ def _auto_assign_candidate_count(workspaces, profile=None) -> int:
     try:
         index = json.loads(SESSION_INDEX_FILE.read_bytes())
     except Exception:
-        return 0
+        # Unknown beats a wrong "nothing to file": see the docstring above.
+        return None
     count = 0
     for entry in index:
         if not _profiles_match(entry.get("profile") or "default", profile):
@@ -19757,7 +19839,7 @@ def handle_post(handler, parsed) -> bool:
             if cleared_cached:
                 logger.info(
                     "projects/delete: cleared project_id on %d cached session(s) "
-                    "absent from the index", cleared_cached,
+                    "(sessions with a sidecar were re-saved)", cleared_cached,
                 )
             # Unassign all sessions that belonged to this project.
             # #3746: this loop is O(N) full-JSON read+save per session, and each
