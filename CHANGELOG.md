@@ -135,6 +135,10 @@
 
 ### Fixed
 
+- **Code blocks no longer flash unhighlighted while you scroll a long conversation.** In virtualized transcripts a
+  newly mounted code block was painted plain for a frame before syntax highlighting and tree views applied; they now
+  render highlighted on first paint, including after switching back to a cached conversation. Thanks @webtecnica.
+  (#7912, #7752)
 - **Starting the WebUI on a port that is already taken explains what to do.** `bootstrap.py` / `start.sh` now check the
   port before launching: if your own WebUI is already running there it says so (and opens it), otherwise it names the
   port as busy and suggests a free one instead of failing later with a bind error. Works for IPv4, IPv6 and HTTPS.
