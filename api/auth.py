@@ -1038,17 +1038,19 @@ def invalidate_session(cookie_value) -> None:
                 _save_sessions(_sessions)
 
 
-def parse_cookie(handler) -> str | None:
-    """Extract the auth cookie from the request headers."""
+def read_cookie(handler, name: str) -> str | None:
+    """Read one named cookie from the request headers, tolerating its neighbours.
+
+    A cookie we do not own must not hide ours: SimpleCookie.load() over the WHOLE header
+    silently drops every cookie that follows a malformed one, so an unrelated app's cookie
+    on a shared host/domain (seen live: `__sec_id` carrying raw JSON with quotes) makes the
+    real cookie unreadable and the user is bounced to /login. Parse one cookie at a time so
+    a bad cookie only skips itself. ``;`` always separates cookies (RFC 6265 section 4.2.1:
+    a quoted cookie-value cannot contain one), so no quoting/unescaping layer is needed.
+    """
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
-    name = _resolve_cookie_name()
-    # A cookie we do not own must not hide ours. SimpleCookie.load() over the WHOLE
-    # header silently drops every cookie that follows a malformed one, so an unrelated
-    # app's cookie on a shared host/domain (seen live: `__sec_id` carrying raw JSON with
-    # quotes) makes the session cookie unreadable and the user is bounced to /login.
-    # Parse one cookie at a time so a bad one only skips itself.
     found = None
     for part in cookie_header.split(';'):
         cookie = http.cookies.SimpleCookie()
@@ -1060,6 +1062,11 @@ def parse_cookie(handler) -> str | None:
         if morsel is not None:
             found = morsel.value  # last match wins, as the whole-header parse did
     return found
+
+
+def parse_cookie(handler) -> str | None:
+    """Extract the auth cookie from the request headers."""
+    return read_cookie(handler, _resolve_cookie_name())
 
 
 def _safe_login_inner_next(query: str | None) -> str:

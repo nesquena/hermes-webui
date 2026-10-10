@@ -48,3 +48,11 @@ def test_duplicate_session_cookies_keep_the_last():
 
 def test_quoted_value_still_decoded():
     assert parse_cookie(_handler('hermes_session="sp ace"')) == "sp ace"
+
+
+def test_rfc6265_semicolon_splits_even_inside_quotes():
+    """RFC 6265 4.2.1: a quoted cookie-value cannot contain `;`, so `;` separates cookies
+    regardless of quotes — a token sitting inside another cookie's quotes is just another
+    pair, and the last match wins. Documents the intended semantics (no quoting layer)."""
+    header = 'hermes_session=valid.sig; other="x; hermes_session=invalid.sig; y"'
+    assert parse_cookie(_handler(header)) == "invalid.sig"
