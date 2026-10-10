@@ -7701,7 +7701,6 @@ function _attachProjectQuickCreateButton(chip, project){
 function _installSessionOpenControl(control, session){
   if(!control||!session||!session.session_id) return;
   control.onclick=async(e)=>{
-    if(e&&typeof e.stopPropagation==='function') e.stopPropagation();
     // Pointer and touch activation stay owned by the row gesture state machine.
     // Native keyboard activation and assistive-technology synthesized clicks use
     // detail=0, so handling only that path avoids opening a conversation twice.

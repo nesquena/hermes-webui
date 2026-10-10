@@ -1741,7 +1741,10 @@
     flex-shrink:0;
   }
   .session-time.is-hidden{display:none;}
-  .session-item:hover .session-time,.session-item:has(:focus-visible) .session-time,.session-item.menu-open .session-time{display:none;}
+  .session-item:has(:focus-visible) .session-time,.session-item.menu-open .session-time{display:none;}
+  @media (hover:hover){
+    .session-item:hover .session-time{display:none;}
+  }
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
   .session-item:hover .session-actions,.session-item:has(:focus-visible) .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}

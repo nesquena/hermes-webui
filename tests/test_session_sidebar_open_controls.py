@@ -219,6 +219,75 @@ def test_keyboard_activation_and_focus_restore_in_browser():
     assert removed == {"sid": "session-a", "restored": False, "activeSid": None}
 
 
+@pytest.mark.parametrize("activation", ["click", "Enter", "Space"])
+def test_title_activation_reaches_document_menu_dismissal(activation):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    ui_js = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    # Exercise the production document listeners, not substitute dismissal logic.
+    model_start = ui_js.index("document.addEventListener('click',e=>{", ui_js.index("function closeModelDropdown"))
+    model_end = ui_js.index("});", model_start) + 3
+    close_start = ui_js.index("function closeModelDropdown(){")
+    close_end = ui_js.index("function syncSettingsModelChip(){", close_start)
+    with playwright_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content("<body></body>")
+        page.add_script_tag(content=_browser_fixture_script())
+        page.evaluate("window.__setupSessionOpenControl()")
+        page.add_script_tag(content="""
+            document.body.insertAdjacentHTML('beforeend', '<div id="composerModelDropdown" class="open"></div>');
+            const PROJECT_COLORS = ['#123456'];
+        """ + _function_source('_showProjectContextMenu') + ui_js[close_start:close_end] + ui_js[model_start:model_end])
+        page.evaluate("_showProjectContextMenu({clientX:200,clientY:200}, {project_id:'test',name:'Test'}, null)")
+        page.wait_for_timeout(50)  # Production listener is installed on the next task.
+        if activation == "click":
+            # The existing row gesture opens on pointerup; click must bubble
+            # without causing a second open via the native button handler.
+            page.locator('.session-item').evaluate("row => row.onpointerup = () => _openSidebarSession()")
+            page.locator('.session-open-control').click()
+        else:
+            page.locator('.session-open-control').press(activation)
+        assert page.evaluate("window.__sessionOpenCount()") == 1
+        assert page.locator('.project-ctx-menu').count() == 0
+        assert page.locator('#composerModelDropdown').evaluate("el => !el.classList.contains('open')")
+        browser.close()
+
+
+@pytest.mark.parametrize("skin", ["default", "github"])
+def test_first_touch_tag_filters_without_hover_relayout(skin):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    render = _function_source("renderSessionListFromCache")
+    tag_start = render.index("for(const tag of tags){")
+    tag_end = render.index("titleRow.appendChild(titleGroup);", tag_start)
+    with playwright_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
+        page = context.new_page()
+        page.set_content(f'''<html data-skin="{skin}"><body>
+            <input id="sessionSearch"><div style="width:300px">
+            <div class="session-item"><div class="session-text"><div class="session-title-row">
+            <div class="session-title-group"><button class="session-title session-open-control">Long conversation title that fills the available width</button></div>
+            <span class="session-time">2 hours ago</span></div></div></div></div></body></html>''')
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_script_tag(content="""
+            const $ = id => document.getElementById(id);
+            const titleGroup = document.querySelector('.session-title-group');
+            const tags = ['#ops'];
+            let filters = 0;
+            function filterSessions(){ filters++; }
+        """ + render[tag_start:tag_end])
+        assert page.evaluate("matchMedia('(hover: hover)').matches") is False
+        tag = page.locator('.session-tag')
+        before = tag.bounding_box()
+        tag.tap()  # Real browser touch synthesis, not dispatchEvent('click').
+        assert page.locator('#sessionSearch').input_value() == '#ops'
+        assert page.evaluate('filters') == 1
+        after = tag.bounding_box()
+        assert abs(after['x'] - before['x']) < 1
+        assert page.locator('.session-time').is_visible()
+        browser.close()
+
+
 @pytest.mark.parametrize("select_mode", [False, True])
 def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser(select_mode):
     try:
@@ -405,6 +474,8 @@ def test_pointer_focus_does_not_leave_keyboard_hover_chrome_stuck_in_browser():
             page.locator("body").focus()
             page.mouse.move(500, 240)
             resting_padding_right = row.evaluate("row => getComputedStyle(row).paddingRight")
+            control.hover()
+            assert row.evaluate("row => { const s = getComputedStyle(row.querySelector('.session-time')); return s.display === 'none' || s.visibility === 'hidden'; }")
             control.click()
             page.mouse.move(500, 240)
             state = row.evaluate(

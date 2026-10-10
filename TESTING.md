@@ -1878,6 +1878,11 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Double-click a file in workspace panel to rename. Enter saves, Escape cancels.
 - Create a folder via folder icon in workspace header.
 - Add `#tag` to session title. Verify tag chip appears in sidebar. Click to filter.
+  - At 390px with touch input, the first tap filters without opening the conversation
+    or moving the chip as the timestamp changes. Verify long-press still opens actions.
+  - Open the project context menu or composer model menu, then click a conversation
+    title: the menu closes and the conversation opens once. Also check Enter/Space,
+    J/K navigation, input-field protection, desktop hover, and keyboard focus.
 - Archive a session. Verify it disappears. Toggle "Show archived" to see it.
 
 ### Sprint 15: Session Projects
