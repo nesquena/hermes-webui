@@ -1449,21 +1449,22 @@ def _prefill_config_for_home(config_data: Optional[dict], home) -> dict:
     if home is None:
         return cfg
 
-    def anchored(raw: str) -> str:
-        path = Path(raw).expanduser()
-        return raw if path.is_absolute() else str(Path(home) / path)
+    def is_relative(raw: str) -> bool:
+        return not Path(raw).expanduser().is_absolute()
 
     file_raw = cfg.get("prefill_messages_file")
-    if isinstance(file_raw, str) and file_raw.strip():
-        cfg["prefill_messages_file"] = anchored(file_raw)
+    if isinstance(file_raw, str) and file_raw.strip() and is_relative(file_raw):
+        cfg["prefill_messages_file"] = str(Path(home) / file_raw)
     script_raw = cfg.get("webui_prefill_messages_script")
     if isinstance(script_raw, str):
         try:
             parts = shlex.split(script_raw)
         except ValueError:
             parts = []
-        if len(parts) == 1:
-            cfg["webui_prefill_messages_script"] = anchored(parts[0])
+        if len(parts) == 1 and is_relative(parts[0]):
+            # As a list, which the loader takes as the exact argv: stored as
+            # text it would be split again, at any space in the home's path.
+            cfg["webui_prefill_messages_script"] = [str(Path(home) / parts[0])]
     return cfg
 
 

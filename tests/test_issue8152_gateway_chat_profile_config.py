@@ -379,9 +379,13 @@ class TestRelativePrefillPaths:
         assert self._anchor({"prefill_messages_file": raw}, tmp_path)["prefill_messages_file"] == raw
 
     def test_a_script_given_as_one_relative_path_is_put_under_the_home(self, tmp_path):
+        from api.streaming import _prefill_script_command
+
         out = self._anchor({"webui_prefill_messages_script": "recall.py"}, tmp_path)
 
-        assert out["webui_prefill_messages_script"] == str(tmp_path / "recall.py")
+        assert _prefill_script_command(out["webui_prefill_messages_script"]) == [
+            str(tmp_path / "recall.py")
+        ]
 
     @pytest.mark.parametrize(
         "raw",
@@ -400,6 +404,78 @@ class TestRelativePrefillPaths:
 
         assert not out.get("prefill_messages_file")
         assert "webui_prefill_messages_script" not in out
+
+    def test_a_home_with_a_space_in_it_still_gives_one_script_argument(self, tmp_path):
+        """The loader splits a script given as text with ``shlex``. An anchored
+        path stored as plain text would fall apart at the space."""
+        from api.streaming import _prefill_script_command
+
+        home = tmp_path / "Application Support" / "hermes"
+        out = self._anchor({"webui_prefill_messages_script": "recall.py"}, home)
+
+        assert _prefill_script_command(out["webui_prefill_messages_script"]) == [
+            str(home / "recall.py")
+        ]
+
+    def test_a_quoted_script_name_with_a_space_is_one_argument_too(self, tmp_path):
+        from api.streaming import _prefill_script_command
+
+        out = self._anchor({"webui_prefill_messages_script": '"my recall.py"'}, tmp_path)
+
+        assert _prefill_script_command(out["webui_prefill_messages_script"]) == [
+            str(tmp_path / "my recall.py")
+        ]
+
+    def test_a_quoted_absolute_script_keeps_its_quotes(self, tmp_path):
+        """Already absolute: nothing to anchor, so the text is not rewritten
+        and the loader still sees one argument."""
+        from api.streaming import _prefill_script_command
+
+        raw = '"/opt/my tools/recall.py"'
+        out = self._anchor({"webui_prefill_messages_script": raw}, tmp_path)
+
+        assert out["webui_prefill_messages_script"] == raw
+        assert _prefill_script_command(out["webui_prefill_messages_script"]) == [
+            "/opt/my tools/recall.py"
+        ]
+
+    def test_a_script_in_a_home_with_a_space_runs(self, tmp_path):
+        """End of the chain, with a real script."""
+        import os
+        import stat
+
+        from api.streaming import _load_webui_prefill_context
+
+        home = tmp_path / "Application Support"
+        home.mkdir()
+        script = home / "recall.py"
+        script.write_text(
+            "#!/usr/bin/env python3\nimport json\nprint(json.dumps("
+            + repr(PREFILL) + "))\n", encoding="utf-8",
+        )
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        if os.name == "nt":
+            pytest.skip("a script path is run directly; needs a shebang")
+
+        loaded = _load_webui_prefill_context(
+            self._anchor({"webui_prefill_messages_script": "recall.py"}, home)
+        )
+
+        assert loaded.get("status") == "loaded", loaded
+        assert loaded["message_count"] == 1
+
+    def test_a_relative_file_in_a_home_with_a_space_is_found(self, tmp_path):
+        from api.streaming import _load_webui_prefill_context
+
+        home = tmp_path / "Application Support"
+        home.mkdir()
+        (home / "prefill.json").write_text(json.dumps(PREFILL), encoding="utf-8")
+
+        loaded = _load_webui_prefill_context(
+            self._anchor({"prefill_messages_file": "prefill.json"}, home)
+        )
+
+        assert loaded["status"] == "loaded"
 
     def test_the_config_handed_in_is_not_changed(self, tmp_path):
         config = {"prefill_messages_file": "prefill.json", "agent": {"reasoning_effort": "high"}}
