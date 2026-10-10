@@ -742,6 +742,11 @@ _CHANNEL_TAG_GLOBS = {
     'stable': 'v*',
     'experimental': 'exp-v*',
 }
+# Stable release tags are pure dotted versions (``v0.21.6``, legacy
+# ``v2026.5.29.2`` with its 4th component). The ``v*`` glob also matches
+# build-metadata prereleases (``v0.21.6+canary.20261010T070026Z``) which are
+# NOT published releases — _release_tags filters them out of the stable list.
+_STABLE_RELEASE_TAG_RE = re.compile(r'^v\d+(?:\.\d+)+$')
 
 
 def _normalize_channel(channel) -> str:
@@ -806,12 +811,27 @@ def channel_version_badge(channel=None) -> str:
 
 
 def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):
-    """Return the channel's release tags newest-first, in version-sort order."""
+    """Return the channel's release tags newest-first, by tag creation date.
+
+    Creation-date order, NOT name order: the Agent repo renamed its stable
+    series from ``v2026.9.x`` to ``v0.21.x`` (Oct 2026) and name-sort ranks
+    ``v2026.9.24`` above ``v0.21.6`` (2026 > 0). The "latest" tag then resolves
+    to an ANCESTOR of HEAD, the release check bails out (HEAD contains the
+    advertised tag), and the check falls through to the branch-comparison
+    fallback — advertising hundreds of untagged master commits to an install
+    that is already on the latest stable release.
+    Build-metadata prerelease tags (``v0.21.6+canary.*``, ``rc.*``,
+    ``abandoned-*``) are excluded from the stable channel: they are not
+    published releases and would otherwise outrank the release itself.
+    """
     glob = _channel_tag_glob(channel)
-    out, ok = _run_git(['tag', '--list', glob, '--sort=-v:refname'], path)
+    out, ok = _run_git(['tag', '--list', glob, '--sort=-creatordate'], path)
     if not (ok and out):
         return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    tags = [line.strip() for line in out.splitlines() if line.strip()]
+    if channel == 'stable':
+        tags = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
+    return tags
 
 
 def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
