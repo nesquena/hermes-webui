@@ -12710,8 +12710,15 @@ function _openAuxAdvancedOptions(taskCfg,cfg){
     if(!extra||Array.isArray(extra)||typeof extra!=='object'){if(typeof showToast==='function') showToast(t('settings_aux_advanced_extra_body_object_required')||'Extra body must be a JSON object');return;}
    }
    const provSel=isMain?null:$('aux-prov-'+taskKey),modelSel=isMain?$('settingsModel'):$('aux-model-'+taskKey);
-   const provider=isMain?((cfg&&cfg.provider)||''):(provSel?provSel.value:((cfg&&cfg.provider)||'auto'));
-   const model=modelSel&&modelSel.value!=='__custom__'?(modelSel.value||''):((cfg&&cfg.model)||'');
+   let provider=isMain?((cfg&&cfg.provider)||''):(provSel?provSel.value:((cfg&&cfg.provider)||'auto'));
+   let model=modelSel&&modelSel.value!=='__custom__'?(modelSel.value||''):((cfg&&cfg.model)||'');
+   if(isMain && modelSel && typeof _captureModelDropdownSelection==='function'){
+    const captured=_captureModelDropdownSelection(modelSel);
+    if(captured){
+     if(captured.model) model=captured.model;
+     if(captured.model_provider) provider=captured.model_provider;
+    }
+   }
    const advanced={
     base_url:$('auxAdvancedBaseUrl')?.value||'',
     extra_body:extra,
@@ -12946,10 +12953,12 @@ async function _applyAuxModels(){
 }
 
 async function saveSettings(andClose){
-  const model=($('settingsModel')||{}).value;
+  const rawModel=($('settingsModel')||{}).value;
   const modelState=(typeof _captureModelDropdownSelection==='function'&&$('settingsModel'))
-    ? (_captureModelDropdownSelection($('settingsModel'))||{model:String(model||''),model_provider:null})
-    : {model:String(model||''),model_provider:null};
+    ? (_captureModelDropdownSelection($('settingsModel'))||{model:String(rawModel||''),model_provider:null})
+    : {model:String(rawModel||''),model_provider:null};
+  const model=modelState.model||'';
+  const provider=modelState.model_provider||null;
   const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null));
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
