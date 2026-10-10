@@ -5993,7 +5993,13 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
     async()=>{
       closeWsDropdown();
       try{
-        await newSession(false,{worktree:true});
+        // Pass the DISPLAYED workspace explicitly: with a project bound to a
+        // different workspace, newSession()'s active-project merge would
+        // otherwise fill `workspace` with the project's default and the
+        // worktree would be created there (a non-git default made the request
+        // 400). An explicit `workspace` option wins over any project binding —
+        // same opt-out switchToWorkspace() below uses for the same reason.
+        await newSession(false,{worktree:true,workspace:currentWs});
         await renderSessionList();
         const msg=$('msg');
         if(msg)msg.focus();
