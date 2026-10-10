@@ -10691,8 +10691,13 @@ async function _saveProjectBindings(proj, fields){
 // explicitly, which is what a native <select> does (maintainer UX re-gate
 // 2026-10-10T02:01:36Z).
 let _openBindingsCombo=null;
+// Monotonic id source for the combobox a11y wiring (list id + option ids +
+// the trigger's aria-activedescendant). Declared next to the open-combo slot so
+// the combo probes' extractor picks it up with the component.
+let _comboIdSeq=0;
 
 function _makeBindingsCombo(o){
+  const _cid='pbc-'+(++_comboIdSeq);
   const wrap=document.createElement('div');
   wrap.className='project-bindings-combo';
   const trigger=document.createElement('div');
@@ -10710,6 +10715,12 @@ function _makeBindingsCombo(o){
   const menu=document.createElement('div');
   menu.className='project-bindings-combo-menu';
   menu.setAttribute('role','listbox');
+  menu.setAttribute('id',_cid+'-list');
+  // Screen-reader wiring: the arrows never move DOM focus off the trigger, so the
+  // trigger must name the list it controls and the option currently highlighted
+  // (Greptile P2 2026-10-10T03:29:51Z). The highlight helper keeps
+  // aria-activedescendant in step with the 'active' row.
+  trigger.setAttribute('aria-controls',_cid+'-list');
   wrap.appendChild(trigger);
   wrap.appendChild(menu);
 
@@ -10724,10 +10735,27 @@ function _makeBindingsCombo(o){
     subSpan.textContent=(cur&&cur.sub)||'';
     subSpan.style.display=(cur&&cur.sub)?'':'none';
   }
+  // Keep the trigger's aria-activedescendant pointing at the highlighted row so
+  // the arrow move is announced even though focus never leaves the trigger.
+  function _clearActiveDescendant(){
+    // A real DOM drops the attribute; the probes' mini-DOM has no
+    // removeAttribute, so fall back to an empty (equally "no active option")
+    // value there.
+    if(typeof trigger.removeAttribute==='function') trigger.removeAttribute('aria-activedescendant');
+    else trigger.setAttribute('aria-activedescendant','');
+  }
+  function _syncActiveDescendant(){
+    const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+    const row=rows.find(r=>r.classList.contains('active'));
+    const id=row&&row.getAttribute('id');
+    if(id){ trigger.setAttribute('aria-activedescendant',id); return; }
+    _clearActiveDescendant();
+  }
   function _close(){
     menu.classList.remove('open');
     trigger.classList.remove('open');
     trigger.setAttribute('aria-expanded','false');
+    _clearActiveDescendant();
     if(_openBindingsCombo===api) _openBindingsCombo=null;
   }
   function _open(){
@@ -10754,10 +10782,11 @@ function _makeBindingsCombo(o){
       empty.textContent=t('pb_no_options');
       menu.appendChild(empty);
     }else{
-      items.forEach(opt=>{
+      items.forEach((opt,i)=>{
         const row=document.createElement('div');
         row.className='ws-opt'+(opt.value===state.value?' active':'');
         row.setAttribute('role','option');
+        row.setAttribute('id',_cid+'-opt-'+i);
         row.setAttribute('aria-selected',String(opt.value===state.value));
         const n=document.createElement('span');
         n.className='ws-opt-name';
@@ -10784,22 +10813,41 @@ function _makeBindingsCombo(o){
     // overflow:auto can never clip it. Flip upward when the bottom edge of
     // the viewport would be hit.
     const rect=trigger.getBoundingClientRect();
-    const menuHeight=Math.min(menu.scrollHeight||240, 320);
-    const spaceBelow=window.innerHeight-rect.bottom-8;
-    const flipUp=spaceBelow<menuHeight+8&&rect.top>spaceBelow;
+    const vh=window.innerHeight||0;
+    // The rendered box is capped by CSS at max-height:min(60vh,320px). The flip
+    // decision must use that REAL height, and reading scrollHeight while the menu
+    // is still display:none always returns 0, so the old 240px fallback opened a
+    // long list downward past the viewport edge, where its last options cannot be
+    // clicked or tapped (maintainer must-fix 2026-10-10T03:06:13Z; Greptile P2
+    // 2026-10-10T03:29:51Z). Lay the menu out FIRST — position:fixed at the
+    // trigger's width with visibility:hidden (kept in flow, so it is measurable,
+    // but invisible) — read the true height, choose up/down, cap the box to the
+    // space actually available on that side, then reveal.
+    const cssCap=vh?Math.min(vh*0.6,320):320;
+    menu.style.position='fixed';
+    menu.style.left=rect.left+'px';
+    menu.style.width=rect.width+'px';
+    menu.style.visibility='hidden';
+    menu.classList.add('open');
+    const menuHeight=Math.min(menu.scrollHeight||cssCap, cssCap);
+    const spaceBelow=vh-rect.bottom-8;
+    const spaceAbove=rect.top-8;
+    const flipUp=spaceBelow<menuHeight+8&&spaceAbove>spaceBelow;
+    const avail=Math.max(flipUp?spaceAbove:spaceBelow, 120);
+    menu.style.maxHeight=Math.min(cssCap, avail)+'px';
     if(flipUp){
       menu.style.top='auto';
-      menu.style.bottom=(window.innerHeight-rect.top+6)+'px';
+      menu.style.bottom=(vh-rect.top+6)+'px';
     }else{
       menu.style.top=(rect.bottom+4)+'px';
       menu.style.bottom='auto';
     }
-    menu.style.left=rect.left+'px';
-    menu.style.width=rect.width+'px';
-    menu.style.position='fixed';
-    menu.classList.add('open');
+    menu.style.visibility='';
     trigger.classList.add('open');
     trigger.setAttribute('aria-expanded','true');
+    // Point the trigger at the row that is highlighted on open (the current
+    // value, if it is in the list) so a screen reader announces it.
+    _syncActiveDescendant();
     _openBindingsCombo=api;
   }
   // Move the keyboard highlight over the CURRENTLY RENDERED rows (the filter
@@ -10814,6 +10862,9 @@ function _makeBindingsCombo(o){
       r.classList.toggle('active',on);
       r.setAttribute('aria-selected',String(on));
     });
+    // Announce the move: the trigger never loses focus, so it must name the
+    // highlighted option (Greptile P2 2026-10-10T03:29:51Z).
+    _syncActiveDescendant();
     // The menu is height-capped and scrolls (max-height:min(60vh,320px)), so a
     // highlight moved past the visible rows must be brought into view —
     // otherwise Enter commits an option the keyboard user cannot see (Greptile

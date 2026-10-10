@@ -29587,17 +29587,23 @@ def _handle_workspace_add(handler, body):
         p = validate_workspace_to_add(path_str, profile=active_profile)
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        wss = load_workspaces(profile=active_profile)
-    except TypeError:
-        wss = load_workspaces()
-    if any(w["path"] == str(p) for w in wss):
-        return bad(handler, "Workspace already in list")
-    wss.append({"path": str(p), "name": name or p.name})
-    try:
-        save_workspaces(wss, profile=active_profile)
-    except TypeError:
-        save_workspaces(wss)
+    # One shared lock with the bindings save path: /api/projects/bind's
+    # _resolve_ws_list reads AND rewrites this same saved workspace list under
+    # _PROJECTS_CATALOG_LOCK, so a workspace add that read it outside the lock
+    # could have its entry dropped by a bind that read the list before the add
+    # (Greptile P1 2026-10-10T03:29:51Z: "Workspace edits get overwritten").
+    with _PROJECTS_CATALOG_LOCK:
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        if any(w["path"] == str(p) for w in wss):
+            return bad(handler, "Workspace already in list")
+        wss.append({"path": str(p), "name": name or p.name})
+        try:
+            save_workspaces(wss, profile=active_profile)
+        except TypeError:
+            save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -29607,15 +29613,16 @@ def _handle_workspace_remove(handler, body):
         return bad(handler, "path is required")
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
-    try:
-        wss = load_workspaces(profile=active_profile)
-    except TypeError:
-        wss = load_workspaces()
-    wss = [w for w in wss if w["path"] != path_str]
-    try:
-        save_workspaces(wss, profile=active_profile)
-    except TypeError:
-        save_workspaces(wss)
+    with _PROJECTS_CATALOG_LOCK:
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        wss = [w for w in wss if w["path"] != path_str]
+        try:
+            save_workspaces(wss, profile=active_profile)
+        except TypeError:
+            save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -29626,20 +29633,21 @@ def _handle_workspace_rename(handler, body):
         return bad(handler, "path and name are required")
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
-    try:
-        wss = load_workspaces(profile=active_profile)
-    except TypeError:
-        wss = load_workspaces()
-    for w in wss:
-        if w["path"] == path_str:
-            w["name"] = name
-            break
-    else:
-        return bad(handler, "Workspace not found", 404)
-    try:
-        save_workspaces(wss, profile=active_profile)
-    except TypeError:
-        save_workspaces(wss)
+    with _PROJECTS_CATALOG_LOCK:
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        for w in wss:
+            if w["path"] == path_str:
+                w["name"] = name
+                break
+        else:
+            return bad(handler, "Workspace not found", 404)
+        try:
+            save_workspaces(wss, profile=active_profile)
+        except TypeError:
+            save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -29655,28 +29663,29 @@ def _handle_workspace_reorder(handler, body):
         return bad(handler, "paths is required and must be a list")
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
-    try:
-        wss = load_workspaces(profile=active_profile)
-    except TypeError:
-        wss = load_workspaces()
-    by_path = {w["path"]: w for w in wss}
-    # Build reordered list: given order first, then any omitted entries
-    reordered = []
-    seen = set()
-    for p in paths:
-        p = p.strip()
-        if p in by_path and p not in seen:
-            reordered.append(by_path[p])
-            seen.add(p)
-    # Append any workspaces not mentioned (safety net)
-    for w in wss:
-        if w["path"] not in seen:
-            reordered.append(w)
-    try:
-        save_workspaces(reordered, profile=active_profile)
-    except TypeError:
-        # Legacy signature (test doubles with single-arg lambdas, older forks).
-        save_workspaces(reordered)
+    with _PROJECTS_CATALOG_LOCK:
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        by_path = {w["path"]: w for w in wss}
+        # Build reordered list: given order first, then any omitted entries
+        reordered = []
+        seen = set()
+        for p in paths:
+            p = p.strip()
+            if p in by_path and p not in seen:
+                reordered.append(by_path[p])
+                seen.add(p)
+        # Append any workspaces not mentioned (safety net)
+        for w in wss:
+            if w["path"] not in seen:
+                reordered.append(w)
+        try:
+            save_workspaces(reordered, profile=active_profile)
+        except TypeError:
+            # Legacy signature (test doubles with single-arg lambdas, older forks).
+            save_workspaces(reordered)
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
