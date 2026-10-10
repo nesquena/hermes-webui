@@ -54,6 +54,9 @@ _REAL_FUNCTIONS = (
     # evaluated with it. The shim's createElement() returns no template `content`, so the
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
     "_insertSegmentBlock",
+    # #7361: renderMessages() classifies each row through this provenance check before
+    # choosing the process-wakeup card path; it is dependency-free, so use the real one.
+    "_isProcessWakeupMessage",
     "renderMessages",
 )
 

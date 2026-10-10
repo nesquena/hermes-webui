@@ -334,6 +334,19 @@ function _stripWorkspaceDisplayPrefix(text){
   if(stripped !== value) return stripped.trim();
   return value.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
 }
+// Formatter-owned async-delegation envelope headers, produced by the Agent's
+// `tools/process_registry._format_async_delegation` and re-injected through
+// `api/background_process.format_wakeup_prompt`. Anchored at position 0 with
+// the delegation id as the only free field, so prose that merely mentions a
+// delegation can never claim the wakeup card.
+const _ASYNC_DELEGATION_WAKEUP_HEADER_RE=/^\[ASYNC DELEGATION(?: (BATCH))? COMPLETE — ([^\n\]]+)\](?:\n|$)/;
+// `_source` is the authoritative transport stamp. Provenance belongs strictly
+// to the server-persisted source/turn boundary: unstamped historical rows or
+// user-authored text matching wakeup grammar fail closed to normal user messages
+// rather than being promoted to server-owned process UI via regex fallback.
+function _isProcessWakeupMessage(m){
+  return !!(m && m._source === 'process_wakeup');
+}
 function _renderUserFencedBlocks(text){
   const stash=[];
   const contextStash=[];
@@ -687,7 +700,7 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
-  if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
+  if(_isProcessWakeupMessage(m)) return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -929,7 +942,7 @@ function _syncMessageVirtualHeightCache(visWithIdx){
 function _messageVirtualRoleForEntry(entry){
   const m=entry&&entry.m;
   if(!m) return 'default';
-  if(m._source === 'process_wakeup') return 'process_wakeup';
+  if(_isProcessWakeupMessage(m)) return 'process_wakeup';
   if(m.role==='user') return 'user';
   if(m.role==='assistant'){
     if((Array.isArray(m.tool_calls)&&m.tool_calls.length>0)||
@@ -18252,6 +18265,114 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   return true;
 }
 
+// The unit's task count sits on the formatter-owned intro line directly under
+// the batch header, ahead of any subagent-controlled text. Two shapes ship:
+// the original "A background fan-out of N subagent(s) …" and the grouped
+// "A background fan-out unit you dispatched earlier — [group 'g' (]N
+// subagent(s)[)] — has finished; …". The group name is caller-supplied, so the
+// greedy `[^\n]*` backtracks to the LAST `' (N subagent(s)) — has finished;`
+// on the line, which is the formatter's own. Zero (a crash with no goals)
+// reads as unknown.
+const _ASYNC_DELEGATION_BATCH_UNIT_RE=/^\[ASYNC DELEGATION BATCH COMPLETE — [^\n\]]+\]\nA background fan-out (?:of (\d+) subagent\(s\) you dispatched earlier|unit you dispatched earlier — (?:group '[^\n]*' \((\d+) subagent\(s\)\)|(\d+) subagent\(s\)) — has finished;)/;
+function _asyncDelegationBatchUnitCount(body){
+  const m=String(body||'').match(_ASYNC_DELEGATION_BATCH_UNIT_RE);
+  const n=m?Number(m[1]||m[2]||m[3]):0;
+  return n>0?n:null;
+}
+// Aggregate one batch envelope's outcome from the formatter's per-task marker
+// lines ONLY. The formatter emits exactly one `--- <icon> TASK i/n …` line per
+// task in this unit, in ascending index order against a constant n (the whole
+// call's size, so a group unit's indices may skip). The outcome is accepted
+// only when that holds AND the marker count equals the unit's task count (from
+// the intro line, else n): a marker forged inside subagent-controlled
+// goal/summary prose breaks it and the outcome falls back to neutral rather
+// than being misreported. `(status=…)` fragments are never scanned: they also
+// appear verbatim inside goal text.
+// `total` is the headline task count and is independent of the outcome: the
+// intro-line count when present, else the markers' n when every marker agrees
+// on it, else null. `ok` is null whenever the sequence is unprovable so the
+// chip never shows a split it cannot back.
+function _asyncDelegationBatchOutcome(body){
+  const s=String(body||'');
+  const unitCount=_asyncDelegationBatchUnitCount(s);
+  const re=/^--- ([✓✗⚠]) TASK (\d+)\/(\d+)[:\s]/gm;
+  let m,seen=0,ok=0,err=0,n=null,last=0,nConstant=true,sequenceIntact=true;
+  while((m=re.exec(s))!==null){
+    seen++;
+    const index=Number(m[2]),count=Number(m[3]);
+    if(n===null) n=count;
+    if(count!==n) nConstant=false;
+    if(index<=last||index<1||index>count) sequenceIntact=false;
+    last=index;
+    // A ⚠ (truncated) task counts toward neither, so a batch containing one
+    // can never report all-ok or all-error and settles on 'partial'.
+    if(m[1]==='✓') ok++; else if(m[1]==='✗') err++;
+  }
+  const total=unitCount!=null?unitCount:((nConstant&&n>0)?n:null);
+  if(seen===0){
+    return {status:_asyncDelegationBatchCrashed(s)?'error':'complete',total,ok:null};
+  }
+  if(!nConstant||!sequenceIntact||total===null||seen!==total) return {status:'complete',total,ok:null};
+  const status=err===total?'error':(ok===total?'completed':'partial');
+  return {status,total,ok};
+}
+// Whole-batch crash: the formatter ends the body with its `--- ERROR ---`
+// block when the fan-out failed before any task reported. It sits directly
+// under the `Role: …` line, or — when an owner-died recovery set
+// `last_known_status` — after the recovery diagnostics, which open with
+// `Last persisted unit status:` and carry verbatim transcript tails framed by
+// `--- last lines of task i transcript ---` … `--- end ---`. Those tails are
+// subagent-controlled, so only the LAST error block counts, and one followed
+// by a tail's `--- end ---` was forged inside a tail and reads neutral.
+function _asyncDelegationBatchCrashed(s){
+  const at=s.lastIndexOf('\n--- ERROR ---\nThe batch did not complete successfully: ');
+  if(at<0||s.slice(at).includes('\n--- end ---')) return false;
+  return /\nRole: [^\n]*\n(?:Last persisted unit status: [^\n]*\n[\s\S]*)?$/.test(s.slice(0,at+1));
+}
+// The single envelope's goal sits at a fixed, formatter-owned position: the
+// header, one intro line, a blank line, the optional `Dispatched:` line, then
+// `Original goal:`. Anchoring there (not scanning for the label) keeps an
+// `Original goal:` line inside later context/result text from becoming the
+// headline. Only the first goal line headlines; the full goal stays in the
+// expanded body.
+const _ASYNC_DELEGATION_SINGLE_GOAL_RE=/^\[ASYNC DELEGATION COMPLETE — [^\n\]]+\]\n[^\n]*\n\n(?:Dispatched: [^\n]*\n)?Original goal: ([^\n]*)/;
+function _asyncDelegationSingleGoal(body){
+  const m=String(body||'').match(_ASYNC_DELEGATION_SINGLE_GOAL_RE);
+  const goal=m?m[1].trim():'';
+  return goal||null;
+}
+// The single-envelope status line is framed by the formatter as
+// `Role: …   Model: …`, `Status: <s>   API calls: …`, then the
+// `--- RESULT ---` separator. The only thing the formatter puts between Role:
+// and Status: is the optional model-rejection notice (blank line +
+// `⚠ SUBAGENT MODEL REJECTED …` and its fixed follow-up lines). The scan
+// starts at the goal's fixed position (unknown grammar reads neutral), so a
+// frame forged on the `Original goal:` line is skipped, and a `Status:` +
+// `--- RESULT ---` pair not anchored on a Role: line is ignored. The FIRST
+// anchored frame is the formatter's; everything after its `--- RESULT ---`
+// is result/summary text, so a frame quoted there (forged success in a
+// failure's error or partial output, or a failure echoed by a success
+// summary) never changes the outcome. Goal/context text on LATER lines is
+// emitted verbatim before Role: with no delimiter, so a Role:-anchored frame
+// forged there cannot be told apart from the real one by the body alone.
+// A truncated run (iteration cap) is reported `completed` with a
+// `[TRUNCATED: …]` suffix on the same line; like a ⚠ batch task it is neither
+// ok nor error, so it settles on 'partial'.
+function _asyncDelegationSingleFrameOutcome(status, rest){
+  const s=String(status).toLowerCase();
+  if(s==='completed'||s==='success') return rest.includes('[TRUNCATED:')?'partial':'completed';
+  return 'error';
+}
+function _asyncDelegationSingleStatus(body){
+  const s=String(body||'');
+  const anchor=s.match(_ASYNC_DELEGATION_SINGLE_GOAL_RE);
+  if(!anchor) return 'complete';
+  const re=/\nRole: [^\n]*   Model: [^\n]*\n(?:\n⚠ SUBAGENT MODEL REJECTED: [^\n]*\nEvery task in this batch failed for this reason before doing any work\.\nCheck Settings → [^\n]*\n(?:No fallback chain is configured, so no failover was attempted\.\n)?)?Status: (\S+)   API calls: ([^\n]*)\n--- RESULT ---(?=\n|$)/g;
+  re.lastIndex=anchor[0].length;
+  const m=re.exec(s);
+  if(!m) return 'complete';
+  return _asyncDelegationSingleFrameOutcome(m[1],m[2]);
+}
 // #6345: parse the synthetic wakeup body back into display fields. Mirrors the
 // two structured api/background_process.format_wakeup_prompt shapes (pinned by
 // tests/test_background_process_wakeup_format.py); other event kinds return
@@ -18267,6 +18388,27 @@ function _parseProcessWakeupBody(text){
   if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
   m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
   if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
+  // Async `delegate_task` envelopes. The server's wakeup_display_meta returns
+  // None for these on purpose, so this is the only structured read of them.
+  // There is no separable output section — goal, context and every task result
+  // belong to one formatter-owned block — so the body rides through verbatim
+  // and the expanded detail stays byte-for-byte the raw notice.
+  m=s.match(_ASYNC_DELEGATION_WAKEUP_HEADER_RE);
+  if(m){
+    const batch=m[1]==='BATCH'?_asyncDelegationBatchOutcome(s):null;
+    return {
+      type:'async_delegation',
+      taskId:m[2],
+      status:batch?batch.status:_asyncDelegationSingleStatus(s),
+      goal:batch?null:_asyncDelegationSingleGoal(s),
+      taskCount:batch?batch.total:null,
+      okCount:batch?batch.ok:null,
+      command:null,
+      exitCode:null,
+      pattern:null,
+      output:s,
+    };
+  }
   return null;
 }
 // Server-stamped _wakeup_meta (authoritative when present) merged over the
@@ -18286,17 +18428,41 @@ function _processWakeupInfo(m, text){
     command:String(pick('command','command')||''),
     exitCode:pick('exit_code','exitCode'),
     pattern:pick('pattern','pattern'),
+    // Aggregate delegation outcome: parse-only, because the server never
+    // stamps a meta for the async_delegation grammar.
+    status:parsed&&parsed.status?parsed.status:null,
+    goal:parsed&&parsed.goal?parsed.goal:null,
+    taskCount:parsed&&parsed.taskCount!=null?parsed.taskCount:null,
+    okCount:parsed&&parsed.okCount!=null?parsed.okCount:null,
     output:parsed?parsed.output:null,
   };
 }
+// Aggregate delegation outcomes the chip knows how to render; anything else
+// falls back to the neutral "complete" chip rather than an unlocalized key.
+const _ASYNC_DELEGATION_CHIP_CLASS={completed:'ok',error:'fail',partial:'partial',complete:'neutral'};
 function _processWakeupCardHtml(info, rawText, extras){
   const isWatch=info.type==='watch_match';
+  const isDelegation=info.type==='async_delegation';
   const exitStr=info.exitCode==null?'':String(info.exitCode);
   // Signal-killed processes report negative exit codes (subprocess returncode).
   const exitKnown=/^-?\d+$/.test(exitStr);
   const exitOk=exitStr==='0';
   let chip;
-  if(isWatch){
+  if(isDelegation){
+    const rawStatus=String(info.status||'');
+    const status=Object.prototype.hasOwnProperty.call(_ASYNC_DELEGATION_CHIP_CLASS,rawStatus)?rawStatus:'complete';
+    const cls=_ASYNC_DELEGATION_CHIP_CLASS[status];
+    const icon=status==='completed'?li('check',11):(status==='error'?li('x',11):(status==='partial'?li('alert-triangle',11):''));
+    // The neutral bucket keys off `…_unknown`, not `…_complete`: a fail-closed
+    // chip must never read like the `…_completed` success chip.
+    const labelKey='async_delegation_status_'+(status==='complete'?'unknown':status);
+    // A partial batch names its split ("1 of 2 ok") when the parser proved the
+    // counts; otherwise the bare "partial" label.
+    const label=(status==='partial'&&info.taskCount!=null&&info.okCount!=null)
+      ? t('async_delegation_status_partial_count',info.okCount,info.taskCount)
+      : t(labelKey);
+    chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>${esc(label)}</span></span>`;
+  }else if(isWatch){
     chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
   }else{
     const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
@@ -18314,7 +18480,21 @@ function _processWakeupCardHtml(info, rawText, extras){
   // wrapping value in the expanded detail so touch/keyboard users can read it
   // without relying on a hover tooltip (#6350 review finding 4).
   const patternRow=(isWatch&&info.pattern)?`<div class="process-wakeup-pattern-row"><span class="process-wakeup-detail-key">${esc(t('process_wakeup_matched'))}</span><code>${esc(String(info.pattern))}</code></div>`:'';
-  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
+  // A delegation has no command; its headline takes the same collapsed slot:
+  // the goal for a single envelope, "N tasks" for a batch. The opaque id lives
+  // in the expanded detail, and headlines the summary only when neither is
+  // knowable (goal unparsed, task count unknown), so the row still says WHICH
+  // fan-out reported.
+  const delegationId=(isDelegation&&info.taskId)?String(info.taskId):'';
+  const headline=!isDelegation?'':(info.goal?String(info.goal):(info.taskCount!=null?t('async_delegation_task_count',info.taskCount):''));
+  const delegationHtml=headline
+    ? `<span class="process-wakeup-cmd process-wakeup-headline" title="${esc(headline)}">${esc(headline)}</span>`
+    : (delegationId?`<code class="process-wakeup-cmd" title="${esc(delegationId)}">${esc(delegationId)}</code>`:'');
+  const delegationRow=delegationId?`<div class="process-wakeup-cmd-row"><span class="process-wakeup-detail-key">${esc(t('async_delegation_id'))}</span><code>${esc(delegationId)}</code></div>`:'';
+  const labelHtml=isDelegation
+    ? `${li('bot',13)}<span>${esc(t('async_delegation_label'))}</span>`
+    : `${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span>`;
+  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${labelHtml}</span>${cmdHtml}${delegationHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}${delegationRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
 }
 
 // #2051: parse into a <template> and move the nodes instead of insertAdjacentHTML —
@@ -18840,7 +19020,7 @@ function renderMessages(options){
         }
       }
     }
-    const isProcessWakeup=m&&m._source==='process_wakeup';
+    const isProcessWakeup=_isProcessWakeupMessage(m);
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
@@ -18940,6 +19120,11 @@ function renderMessages(options){
         noticeClass+=' process-wakeup-notice-card';
         const exitStr=wakeupInfo.exitCode==null?'':String(wakeupInfo.exitCode);
         if(wakeupInfo.type==='completion'&&/^-?\d+$/.test(exitStr)&&exitStr!=='0') noticeClass+=' process-wakeup-fail';
+        if(wakeupInfo.type==='async_delegation'){
+          noticeClass+=' process-wakeup-delegation';
+          if(wakeupInfo.status==='error') noticeClass+=' process-wakeup-fail';
+          else if(wakeupInfo.status==='partial') noticeClass+=' process-wakeup-partial';
+        }
         noticeInnerHtml=_processWakeupCardHtml(wakeupInfo, processText, {timeHtml, filesHtml, footHtml:`<div class="msg-foot"><span class="msg-actions">${copyBtn}</span></div>`});
       }else{
         const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
