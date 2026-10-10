@@ -1662,12 +1662,12 @@
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title-group{display:flex;align-items:center;gap:6px;flex:1 1 auto;min-width:6ch;max-width:100%;overflow:hidden;}
-  .session-title{flex:1 1 auto;min-width:6ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;border:0;background:transparent;padding:0;margin:0;text-align:left;font:inherit;line-height:inherit;}
+  .session-title{flex:1 1 auto;min-width:min(50%,14ch);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;border:0;background:transparent;padding:0;margin:0;text-align:left;font:inherit;line-height:inherit;}
   /* Conversation identity takes priority over secondary tag chips. At normal
      widths the title keeps a readable 14ch floor; at the 180px minimum it owns
      half the available group and the overflow-hidden wrapper clips tail tags. */
-  .session-open-control{cursor:pointer;min-width:min(50%,14ch);}
-  .session-open-control:focus-visible{outline:none;}
+  .session-open-control{cursor:pointer;}
+  .session-open-control:focus-visible{outline:2px solid transparent;outline-offset:-2px;}
   /* Session rows need an opaque, 3:1 keyboard indicator. The shared
      --focus-ring token is deliberately translucent for glow-style controls;
      --focus-ring-strong follows each skin's already contrast-safe text token. */

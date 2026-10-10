@@ -219,7 +219,8 @@ def test_keyboard_activation_and_focus_restore_in_browser():
     assert removed == {"sid": "session-a", "restored": False, "activeSid": None}
 
 
-def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
+@pytest.mark.parametrize("select_mode", [False, True])
+def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser(select_mode):
     try:
         from playwright.sync_api import sync_playwright
     except Exception:  # pragma: no cover - dependency missing path
@@ -259,11 +260,14 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
             """
         )
         page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        if select_mode:
+            page.locator(".session-open-control").evaluate("el => { const span = document.createElement('span'); span.className = 'session-title'; span.textContent = el.textContent; el.replaceWith(span); }")
         page.add_style_tag(content="body{margin:0}.probe{margin:8px}")
 
         page.keyboard.press("Tab")
         control = page.locator(".session-open-control")
-        assert control.evaluate("el => el.matches(':focus-visible')") is True
+        if not select_mode:
+            assert control.evaluate("el => el.matches(':focus-visible')") is True
         page.wait_for_timeout(200)
 
         metrics = []
@@ -275,7 +279,7 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
                     row => {
                       const titleRow = row.querySelector('.session-title-row');
                       const group = row.querySelector('.session-title-group');
-                      const title = row.querySelector('.session-open-control');
+                      const title = row.querySelector('.session-title');
                       const tags = Array.from(row.querySelectorAll('.session-tag'));
                       const shortTag = tags[0];
                       const rowStyle = getComputedStyle(row);
@@ -325,9 +329,10 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
         assert result["shortTagFlexShrink"] == "0"
         assert result["shortTagNotTruncated"] is True
         assert result["shortTagInsideGroup"] is True
-        assert "inset" in result["rowBoxShadow"]
-        assert re.search(r"\b2px\b", result["rowBoxShadow"])
-        assert result["buttonOutlineStyle"] == "none"
+        if not select_mode:
+            assert "inset" in result["rowBoxShadow"]
+            assert re.search(r"\b2px\b", result["rowBoxShadow"])
+            assert result["buttonOutlineStyle"] == "solid"
 
 
 def test_pointer_focus_does_not_leave_keyboard_hover_chrome_stuck_in_browser():
@@ -834,3 +839,67 @@ def test_tagged_inline_rename_preserves_input_width_in_narrow_sidebar():
         assert result["tagsHidden"] is True
         assert result["inputWidth"] >= 80
         assert result["rowScrollWidth"] <= result["rowClientWidth"] + 1
+
+
+def test_pointer_focus_releases_passive_refresh_but_keyboard_focus_defers_it():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page(viewport={"width": 800, "height": 600})
+        page.set_content("<!doctype html><html><body></body></html>")
+        page.add_script_tag(content=_browser_fixture_script())
+        page.add_script_tag(content="\n".join([
+            "let _sessionListPointerActive = false;",
+            "let _sessionListLastScrollAt = 0;",
+            "const SESSION_LIST_INTERACTION_IDLE_MS = 120;",
+            "let _pendingSessionListApplyTimer = 0;",
+            "let _pendingSessionListPayload = null;",
+            "let _renderSessionListGen = 1;",
+            "let appliedPayloads = [];",
+            "function _applySessionListPayload(data){ appliedPayloads.push(data); }",
+            _function_source("_isSessionListUserInteracting"),
+            _function_source("_schedulePendingSessionListApply"),
+            "window.__queueRefresh = value => { _pendingSessionListPayload = {gen:1, sessData:value}; _schedulePendingSessionListApply(); };",
+            "window.__applied = () => appliedPayloads;",
+        ]))
+        page.evaluate("window.__setupSessionOpenControl()")
+        page.locator("#sessionSearch").click()
+        page.locator(".session-open-control").click()
+        page.mouse.move(700, 500)
+        assert page.locator(".session-open-control").evaluate("el => el === document.activeElement && !el.matches(':focus-visible')")
+        page.evaluate("window.__focusRoundTrip(true)")
+        page.evaluate("window.__queueRefresh('pointer-update')")
+        page.wait_for_function("window.__applied().includes('pointer-update')")
+
+        page.locator("#sessionSearch").click()
+        page.keyboard.press("Tab")
+        assert page.locator(".session-open-control").evaluate("el => el.matches(':focus-visible')")
+        page.evaluate("window.__queueRefresh('keyboard-update')")
+        page.wait_for_timeout(300)
+        assert page.evaluate("window.__applied()") == ["pointer-update"]
+        page.keyboard.press("Tab")
+        page.wait_for_function("window.__applied().includes('keyboard-update')")
+        browser.close()
+
+
+def test_forced_colors_preserves_keyboard_outline_across_skins():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page(forced_colors="active")
+        page.set_content("<!doctype html><html><body><input><div class='session-item active'><button class='session-title session-open-control'>Conversation</button></div></body></html>")
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.keyboard.press("Tab")
+        page.keyboard.press("Tab")
+        for skin in _skin_values():
+            for dark in (False, True):
+                page.evaluate("([skin, dark]) => { document.documentElement.dataset.skin = skin; document.documentElement.classList.toggle('dark', dark); }", [skin, dark])
+                state = page.locator(".session-open-control").evaluate("el => { const s = getComputedStyle(el); return {focused:el.matches(':focus-visible'), style:s.outlineStyle, width:parseFloat(s.outlineWidth), color:s.outlineColor, shadow:s.boxShadow}; }")
+                assert state["focused"]
+                assert state["style"] == "solid", (skin, dark, state)
+                assert state["width"] >= 2, (skin, dark, state)
+                assert state["color"] != "rgba(0, 0, 0, 0)", (skin, dark, state)
+                assert state["shadow"] == "none"
+        browser.close()

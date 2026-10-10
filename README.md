@@ -221,7 +221,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
 - Session projects -- named groups with colors for organizing sessions
-- Session tags -- add #tag to titles for colored chips and click-to-filter
+- Session tags -- add #tag to titles for colored chips; clicking a chip filters the list without opening the conversation
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
 - Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls

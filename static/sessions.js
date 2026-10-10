@@ -5322,7 +5322,7 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
 function _isSessionListUserInteracting(){
   const now=Date.now();
   const list=$('sessionList');
-  const pointerOverList=Boolean(list&&(list.matches(':hover')||list.matches(':focus-within')));
+  const pointerOverList=Boolean(list&&(list.matches(':hover')||list.matches(':has(:focus-visible)')));
   return Boolean(
     _sessionListPointerActive ||
     pointerOverList ||
