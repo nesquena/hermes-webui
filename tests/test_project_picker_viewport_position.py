@@ -1085,7 +1085,10 @@ def test_picker_handoff_postpones_the_repaint_while_fork_release_is_pending():
 
     Rebuilding the rows during that window can move the release target out
     from under the finger, so the handoff must keep the live row (and the
-    deferred repaint) in place for the menu-close drain instead.
+    deferred repaint) in place for the menu-close drain instead. The menu
+    still binds current canonical state: the action owner resolves from the
+    caches, not the pressed row's stale closure, while the repaint stays
+    postponed.
     """
     assert NODE is not None
     script = r"""
@@ -1095,15 +1098,17 @@ const newRow = {isConnected:true, classList:classes('session-child-session')};
 let repaints = 0;
 let _projectPickerTeardown = () => {};
 let _sessionListRepaintDeferredByPicker = true;
-const _allSessions = [{session_id:'parent', _child_sessions:[{session_id:'fork-child'}]}];
+const staleChild = {session_id:'fork-child', pinned:false};
+const freshChild = {session_id:'fork-child', pinned:true};
+const _allSessions = [{session_id:'parent', _child_sessions:[freshChild]}];
 function renderSessionListFromCache() { repaints += 1; oldRow.isConnected = false; }
 function _findSessionRenameRow() { return newRow; }
 """ + _project_picker_session_action_handoff_source() + r"""
-const input = {session_id:'fork-child'};
-const result = _projectPickerSessionActionHandoff(input, oldRow);
+const result = _projectPickerSessionActionHandoff(staleChild, oldRow);
 console.log(JSON.stringify({
   repaints,
-  keptSession: result && result.session === input,
+  resolvedCurrentSession: result && result.session === freshChild,
+  staleClosureNotBound: result && result.session !== staleChild,
   keptAnchor: result && result.anchorEl === oldRow,
   keptSuppression: oldRow._skipNextChildOpen === true,
   stillDeferred: _sessionListRepaintDeferredByPicker === true,
@@ -1114,7 +1119,8 @@ console.log(JSON.stringify({
     data = json.loads(result.stdout)
     assert data == {
         "repaints": 0,
-        "keptSession": True,
+        "resolvedCurrentSession": True,
+        "staleClosureNotBound": True,
         "keptAnchor": True,
         "keptSuppression": True,
         "stillDeferred": True,

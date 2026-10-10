@@ -5308,6 +5308,7 @@ function _focusSessionActionMenuRestoreTarget(target){
 function closeSessionActionMenu({restoreFocus=false}={}){
   const focusTarget=restoreFocus?_sessionActionAnchor:null;
   const fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;
+  const restoreSessionId=_sessionActionSessionId;
   if(_sessionActionMenu){
     _sessionActionMenu.remove();
     _sessionActionMenu = null;
@@ -5334,6 +5335,24 @@ function closeSessionActionMenu({restoreFocus=false}={}){
       if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null) return;
       _sessionListRepaintDeferredByPicker=false;
       if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      // The repaint replaces the rows this menu was anchored on, so a focus
+      // this close just restored into one of them is gone with it and would
+      // fall to the page. Hand it to the row now showing the session: its
+      // trigger, else the fork row's own button, else the row itself, so
+      // keyboard users keep their place in the sidebar.
+      if(!restoreFocus) return;
+      const active=document.activeElement;
+      if(active&&active!==document.body&&active.isConnected) return;
+      const row=typeof _findSessionRenameRow==='function'?_findSessionRenameRow(restoreSessionId):null;
+      if(!row) return;
+      const candidates=[
+        row.querySelector(':scope > .session-actions-trigger, :scope > .session-actions > .session-actions-trigger'),
+        row.querySelector('.session-child-session-main'),
+        row,
+      ];
+      for(const candidate of candidates){
+        if(candidate&&_focusSessionActionMenuRestoreTarget(candidate)) break;
+      }
     },0);
   }
 }
@@ -5797,6 +5816,34 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
   retireProjectPicker();
   if(!_sessionListRepaintDeferredByPicker) return {session,anchorEl};
 
+  const sid=session&&session.session_id;
+  // A refresh accepted while the picker held the old layout updates the list
+  // cache but skips its repaint, so the row closures can carry stale canonical
+  // fields. Resolve the action owner from the current caches.
+  const currentFromCaches=()=>{
+    let found=(_allSessions||[]).find(item=>item&&item.session_id===sid)||null;
+    if(!found){
+      for(const parent of (_allSessions||[])){
+        found=parent&&Array.isArray(parent._child_sessions)
+          ? parent._child_sessions.find(child=>child&&child.session_id===sid)||null
+          : null;
+        if(found) break;
+      }
+    }
+    // A visible New Chat with no messages is rendered from S.session but is
+    // not in that cache yet; resolve it there after the cache lookups. The
+    // typeof guard keeps the extracted-function Node harness self-contained.
+    if(!found&&typeof S!=='undefined'&&S.session&&S.session.session_id===sid) found=S.session;
+    // Content-search-only results render in the sidebar from _contentSearchResults
+    // (see _sessionSearchMergeMatches) even though they are absent from the list
+    // cache, so the action owner resolves there too, after every cache-level
+    // lookup and with the same exact-id test.
+    if(!found&&typeof _contentSearchResults!=='undefined'&&Array.isArray(_contentSearchResults)){
+      found=_contentSearchResults.find(item=>item&&item.session_id===sid)||null;
+    }
+    return found;
+  };
+
   // A fork long-press opens its menu while the finger is still down and arms
   // its one-click open-suppression on the pressed row. Chromium dispatches the
   // release click at the physical release point, so replacing the rows now can
@@ -5807,7 +5854,11 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
   // this menu are finished: closing the menu drains the deferral like any
   // other blocked render, and the menu stays anchored on the live row the
   // suppression is armed on.
-  if(anchorEl&&anchorEl._skipNextChildOpen) return {session,anchorEl};
+  if(anchorEl&&anchorEl._skipNextChildOpen){
+    // The replacement stays postponed, but the menu must not bind the stale
+    // row closure: resolve the owner from the caches without repainting.
+    return {session:currentFromCaches()||session,anchorEl};
+  }
 
   // A list refresh may have already replaced this session's canonical fields
   // while the picker kept the old row DOM alive. Paint that state before the
@@ -5819,27 +5870,7 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
     _sessionListRepaintDeferredByPicker=true;
     return null;
   }
-  const sid=session&&session.session_id;
-  let currentSession=(_allSessions||[]).find(item=>item&&item.session_id===sid)||null;
-  if(!currentSession){
-    for(const parent of (_allSessions||[])){
-      currentSession=parent&&Array.isArray(parent._child_sessions)
-        ? parent._child_sessions.find(child=>child&&child.session_id===sid)||null
-        : null;
-      if(currentSession) break;
-    }
-  }
-  // A visible New Chat with no messages is rendered from S.session but is not
-  // in that cache yet; resolve it there after the cache lookups. The typeof
-  // guard keeps the extracted-function Node harness self-contained.
-  if(!currentSession&&typeof S!=='undefined'&&S.session&&S.session.session_id===sid) currentSession=S.session;
-  // Content-search-only results render in the sidebar from _contentSearchResults
-  // (see _sessionSearchMergeMatches) even though they are absent from the list
-  // cache, so the action owner resolves there too, after every cache-level
-  // lookup and with the same exact-id test.
-  if(!currentSession&&typeof _contentSearchResults!=='undefined'&&Array.isArray(_contentSearchResults)){
-    currentSession=_contentSearchResults.find(item=>item&&item.session_id===sid)||null;
-  }
+  let currentSession=currentFromCaches();
   const currentRow=_findSessionRenameRow(sid);
   // Keep the opener's kind: expanded rows contain child triggers before their
   // own, and touch long-press must stay on the visible row, not hidden dots.

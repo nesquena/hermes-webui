@@ -442,7 +442,7 @@ def _picker_deferred_fork_release_script() -> str:
         _picker_handoff_common_stubs()
         + [
             "const S = {session: {session_id: 'parent'}};",
-            "const _allSessions = [{session_id: 'parent', _child_sessions: [{session_id: 'fork-child', session_source: 'fork'}]}, {session_id: 'other-row', pinned: true}];",
+            "const _allSessions = [{session_id: 'parent', _child_sessions: [{session_id: 'fork-child', session_source: 'fork', pinned: true}]}, {session_id: 'other-row', pinned: true}];",
             "const openedChildren = [];",
             "const openChildSession = async (child) => { openedChildren.push(child.session_id); };",
             "const _consumeSessionNewTabClick = () => false;",
@@ -511,10 +511,12 @@ def _picker_deferred_fork_release_script() -> str:
               const current = document.querySelector('.session-child-session[data-sid="fork-child"]');
               const btn = current.querySelector('.session-child-session-main');
               const tap = window.__pickerForkTap;
+              const menu = document.querySelector('.session-action-menu');
               return {
                 repaintDuringGesture: repaintCount,
                 rowNotReplaced: current === pressedRow && pressedRow.isConnected,
-                menuOpened: Boolean(document.querySelector('.session-action-menu')),
+                menuOpened: Boolean(menu),
+                menuShowsCurrentPinState: Boolean(menu) && menu.textContent.includes('Unpin conversation'),
                 anchorIsPressedRow: _sessionActionAnchor === pressedRow,
                 suppressionArmedThroughRelease: pressedRow._skipNextChildOpen === true,
                 releaseTargetIsRow: document.elementFromPoint(tap.tapX, tap.tapY) === btn,
@@ -528,6 +530,28 @@ def _picker_deferred_fork_release_script() -> str:
             window.__pickerForkAfterSecondTap = () => ({
               nextTapOpensFork: openedChildren.length === 1 && openedChildren[0] === 'fork-child',
             });
+            window.__pickerForkEscapeClose = () => {
+              // Keyboard close with focus on the fork row's own button: the
+              // drain repaint replaces the row, so focus must re-home to the
+              // replacement control instead of falling to the page.
+              const current = document.querySelector('.session-child-session[data-sid="fork-child"]');
+              const btn = current.querySelector('.session-child-session-main');
+              btn.focus();
+              const menu = document.querySelector('.session-action-menu');
+              if(menu) menu.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+              return {focusBeforeClose: document.activeElement === btn};
+            };
+            window.__pickerForkEscapeSettled = () => {
+              const current = document.querySelector('.session-child-session[data-sid="fork-child"]');
+              const trigger = current && current.querySelector('.session-actions-trigger');
+              return {
+                menuRemoved: !document.querySelector('.session-action-menu'),
+                drainRan: repaintCount === 1,
+                flagCleared: _sessionListRepaintDeferredByPicker === false,
+                focusOnReplacement: Boolean(trigger) && document.activeElement === trigger,
+                focusEscapedToPage: document.activeElement === document.body || document.activeElement === null,
+              };
+            };
             window.__pickerForkCloseMenu = () => {
               closeSessionActionMenu();
             };
@@ -614,6 +638,7 @@ def test_picker_deferred_fork_release_survives_a_moving_row_in_browser(width, he
         "repaintDuringGesture": 0,
         "rowNotReplaced": True,
         "menuOpened": True,
+        "menuShowsCurrentPinState": True,
         "anchorIsPressedRow": True,
         "suppressionArmedThroughRelease": True,
         "releaseTargetIsRow": True,
@@ -628,6 +653,55 @@ def test_picker_deferred_fork_release_survives_a_moving_row_in_browser(width, he
         "repaintsAfterMenuClose": 1,
         "flagCleared": True,
         "rowPaintedAtRefreshedPosition": True,
+    }
+
+
+@pytest.mark.parametrize("width,height", [(390, 844), (768, 1024)])
+def test_picker_deferred_fork_escape_rehomes_focus_after_drain_in_browser(width, height):
+    """Escape on the fork menu keeps keyboard focus in the sidebar.
+
+    The menu-close drain repaints the rows the menu was anchored on; a focus
+    this close restored into the old row (the fork's own button) is removed
+    with it and would fall to the page. The drain re-homes focus to the
+    row's replacement control instead.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": width, "height": height}, has_touch=True)
+        page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
+        page.add_script_tag(content=_picker_deferred_fork_release_script())
+        press = page.evaluate("window.__pickerForkPaint()")
+        refresh = page.evaluate("window.__pickerForkPeerRefresh()")
+        cdp = page.context.new_cdp_session(page)
+        cdp.send(
+            "Input.dispatchTouchEvent",
+            {"type": "touchStart", "touchPoints": [{"x": press["tapX"], "y": press["tapY"]}]},
+        )
+        setup = page.evaluate("window.__pickerForkLongPress()")
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        page.wait_for_timeout(50)
+        escape = page.evaluate("window.__pickerForkEscapeClose()")
+        page.wait_for_timeout(50)
+        settled = page.evaluate("window.__pickerForkEscapeSettled()")
+        browser.close()
+
+    assert refresh == {"deferred": True, "repaintCount": 0}
+    assert setup["menuOpened"] is True
+    assert escape == {"focusBeforeClose": True}
+    assert settled == {
+        "menuRemoved": True,
+        "drainRan": True,
+        "flagCleared": True,
+        "focusOnReplacement": True,
+        "focusEscapedToPage": False,
     }
 
 
