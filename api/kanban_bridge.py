@@ -9,6 +9,12 @@ Supported operations:
 - Task dependency links (create, delete)
 - SSE live event stream for real-time updates
 - Comments and worker dispatch integration
+
+Status transitions are routed through the Agent's own verbs (``complete_task``,
+``block_task``, ``archive_task``, ``schedule_task``, ``unblock_task``). The
+full column/status flow — including how tasks enter and leave ``scheduled``
+and the parent re-gating on the way back to ``ready`` — is documented in
+``docs/kanban.md``.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from api.agent_compat import agent_attr
 from api.helpers import bad, j
 from api.workspace import resolve_trusted_workspace
 
-BOARD_COLUMNS = ["triage", "todo", "ready", "running", "blocked", "done"]
+BOARD_COLUMNS = ["triage", "todo", "scheduled", "ready", "running", "blocked", "done"]
 _TASK_PREFIX = "/api/kanban/tasks/"
 
 
@@ -435,20 +441,29 @@ def _patch_task(conn, task_id: str, body: dict):
             "Cannot set status to 'running' directly; use the dispatcher/claim path"
         )
     elif status == "ready":
-        # If the task is currently 'blocked', use the structured unblock
-        # verb so the unblocked event fires. Otherwise it's a legitimate
+        # If the task is currently 'blocked' or 'scheduled', use the structured unblock
+        # verb so parent re-gating and events fire correctly. Otherwise it's a legitimate
         # drag-drop or click move (e.g. todo → ready, running → ready when
         # the user yanks a stuck worker back to the queue) and we use the
         # claim-aware direct status write.
         current = kb.get_task(conn, task_id)
         if not current:
             raise LookupError("task not found")
-        if current.status == "blocked":
+        if current.status in ("blocked", "scheduled"):
             if not kb.unblock_task(conn, task_id):
                 raise LookupError("task not found")
         else:
             if not _set_status_direct(conn, task_id, "ready"):
                 raise LookupError("task not found")
+    elif status == "scheduled":
+        current = kb.get_task(conn, task_id)
+        if not current:
+            raise LookupError("task not found")
+        if not hasattr(kb, "schedule_task"):
+            raise RuntimeError("scheduling requires a newer Hermes Agent")
+        reason = body.get("reason") or None
+        if not kb.schedule_task(conn, task_id, reason=reason):
+            raise ValueError(f"cannot schedule task from status: {current.status}")
     elif status in ("triage", "todo"):
         # Direct status write for drag-drop moves between non-running,
         # non-terminal columns. Uses the claim-aware helper that nulls out

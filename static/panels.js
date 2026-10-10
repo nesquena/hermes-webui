@@ -3860,7 +3860,12 @@ function _kanbanRenderTaskDetail(data){
   // bridge rejects PATCH status='running' with HTTP 400 to match the agent
   // dashboard plugin's contract. UI users want to claim/promote a ready task
   // via the dispatcher Nudge button, not flip it to running by hand.
-  const statusButtons = ['triage', 'todo', 'ready', 'blocked', 'done', 'archived'].map(status =>
+  // 'scheduled' mirrors the board's column order (right after 'todo'): the
+  // cards are HTML5-draggable only, so this button is the only way a
+  // touch/tablet user can move a task INTO the Scheduled column. It reuses
+  // _kanbanColumnLabel + the same PATCH path, which the bridge routes through
+  // the Agent's schedule_task() verb.
+  const statusButtons = ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'done', 'archived'].map(status =>
     `<button class="btn secondary" onclick="updateKanbanTask(${jsArg(task.id)},{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
   ).join('') + `<button class="btn secondary" onclick="blockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_unblock'))}</button>`;
   return `<div class="kanban-task-preview-header">
