@@ -8,10 +8,11 @@ import threading
 import time
 import urllib.error
 
+import pytest
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
-from api.config import PENDING_GOAL_CONTINUATION, STREAMS, create_stream_channel
+from api.config import PENDING_GOAL_CONTINUATION, STREAM_LIVE_TOOL_CALLS, STREAMS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
     _gateway_http_error_event,
@@ -120,6 +121,7 @@ def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
             "preview": "terminal: pytest",
             "args": {},
             "is_error": False,
+            "display_command": "terminal: pytest",
             "tid": "call-1",
         },
     )
@@ -131,7 +133,6 @@ def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
             "event_type": "tool.completed",
             "name": "terminal",
             "preview": None,
-            "args": {},
             "is_error": False,
             "tid": "call-1",
         },
@@ -153,6 +154,63 @@ def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
         },
     )
     assert _gateway_tool_progress_event({"tool": "_thinking", "status": "running"}) is None
+
+
+def test_gateway_tool_started_preview_only_payload_is_display_only():
+    # Runs API tool.started wire shape: {"tool", "preview"} with no args.
+    _, started = _gateway_tool_progress_event(
+        {"event": "tool.started", "tool": "terminal", "preview": "git status"}
+    )
+    assert started["args"] == {}
+    assert started["display_command"] == "git status"
+    _, other = _gateway_tool_progress_event(
+        {"event": "tool.started", "tool": "my_plugin_tool", "preview": "x"}
+    )
+    assert other["args"] == {} and "display_command" not in other
+    _, completed = _gateway_tool_progress_event(
+        {"event": "tool.completed", "tool": "terminal", "preview": "output text", "duration": 0.1}
+    )
+    assert "args" not in completed and "display_command" not in completed
+
+
+def test_gateway_compound_terminal_preview_is_not_claimed_as_command():
+    # Producer: build_tool_preview("terminal", {"command": "cd /repo && npm ci && npm test"}) == "npm ci + 1 command".
+    _, started = _gateway_tool_progress_event(
+        {"event": "tool.started", "tool": "terminal", "preview": "npm ci + 1 command"}
+    )
+    assert started["args"] == {}
+    assert started["display_command"] == "npm ci + 1 command"
+
+
+@pytest.mark.parametrize("preview", ["2 tasks: fix a | fix b", "3 parallel tasks", "list", "steer sub-1", "stop sub-1"])
+def test_gateway_delegate_task_preview_never_fabricates_goal(preview):
+    _, started = _gateway_tool_progress_event(
+        {"event": "tool.started", "tool": "delegate_task", "preview": preview}
+    )
+    assert started["args"] == {}
+    assert "goal" not in json.dumps(started)
+    assert "display_command" not in started
+    assert started["preview"] == preview
+
+
+@pytest.mark.parametrize("tool", ["web_extract", "web_search", "search_files", "clarify", "vision_analyze"])
+def test_gateway_non_shell_preview_stays_preview_only(tool):
+    _, started = _gateway_tool_progress_event({"event": "tool.started", "tool": tool, "preview": "https://a.example"})
+    assert started["args"] == {} and "display_command" not in started
+
+
+def test_gateway_tool_started_preview_only_payload_bounds_huge_preview():
+    huge = "echo " + "x" * (4 * 1024 * 1024)
+    _, started = _gateway_tool_progress_event(
+        {"event": "tool.started", "tool": "terminal", "preview": huge}
+    )
+    command = started["display_command"]
+    assert isinstance(command, str) and command.startswith("echo ")
+    assert len(command) < 100_000
+    _, completed = _gateway_tool_progress_event(
+        {"event": "tool.completed", "tool": "terminal", "preview": huge}
+    )
+    assert "args" not in completed
 
 
 def test_gateway_tool_progress_event_bounds_pathological_args():
@@ -364,6 +422,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert isinstance(saved.messages[0]["timestamp"], float)
     assert isinstance(saved.messages[1]["timestamp"], float)
     assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]
+    # The live command preview is saved with the settled turn so reload keeps it.
+    assert [(tc["name"], tc["tid"], tc["assistant_msg_idx"], tc.get("display_command"), tc["done"])
+            for tc in saved.tool_calls] == [("terminal", "call-1", 1, "terminal: pytest", True)]
     assert saved.active_stream_id is None
     assert saved.model == "alias-target-model"
     assert saved.model_provider == "model-alias-profile-bound-lane"
@@ -405,6 +466,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "name": "terminal",
         "preview": "terminal: pytest",
         "args": {},
+        "display_command": "terminal: pytest",
         "is_error": False,
         "tid": "call-1",
     }) in event_pairs
@@ -414,7 +476,6 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "event_type": "tool.completed",
         "name": "terminal",
         "preview": None,
-        "args": {},
         "is_error": False,
         "tid": "call-1",
     }) in event_pairs
@@ -748,6 +809,7 @@ def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error
     assert partial_message["_partial_tool_calls"] == [{
         "name": "terminal",
         "args": {},
+        "display_command": "terminal: pytest",
         "done": True,
         "tid": "call-1",
         "_sealed_by_terminal_error": True,
@@ -1790,3 +1852,56 @@ def test_gateway_worker_skips_runs_api_when_opt_in_absent():
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+
+
+def test_gateway_tool_full_args_and_result_supersede_preview():
+    _, started = _gateway_tool_progress_event({
+        "event": "tool.started", "tool": "terminal", "preview": "npm ci + 1 command",
+        "args": {"command": "cd /repo && npm ci && npm test"},
+    })
+    assert started["args"] == {"command": "cd /repo && npm ci && npm test"}
+    assert "display_command" not in started
+    long_out = "x" * 3000
+    _, completed = _gateway_tool_progress_event({
+        "event": "tool.completed", "tool": "terminal", "preview": long_out[:497] + "...",
+        "result": {"output": long_out, "exit_code": 0},
+    })
+    assert completed["snippet"] == long_out
+
+
+def test_gateway_tool_completed_without_result_persists_preview_as_snippet():
+    _, completed = _gateway_tool_progress_event(
+        {"event": "tool.completed", "tool": "terminal", "preview": "short"}
+    )
+    assert completed["snippet"] == "short" and completed["preview"] == "short"
+    stream_id = "snap-preview-only"
+    STREAM_LIVE_TOOL_CALLS[stream_id] = []
+    try:
+        gateway_chat._note_live_gateway_event(stream_id, *_gateway_tool_progress_event(
+            {"event": "tool.started", "tool": "terminal", "preview": "ls", "tool_call_id": "c1"}))
+        gateway_chat._note_live_gateway_event(stream_id, *_gateway_tool_progress_event(
+            {"event": "tool.completed", "tool": "terminal", "preview": "a.txt", "tool_call_id": "c1"}))
+        answer = {"role": "assistant", "content": "done", "timestamp": 1}
+        session = type("S", (), {"messages": [{"role": "user", "content": "q"}, dict(answer)], "tool_calls": []})()
+        gateway_chat._persist_gateway_turn_tool_calls(session, answer, STREAM_LIVE_TOOL_CALLS[stream_id])
+        assert [tc["snippet"] for tc in session.tool_calls] == ["a.txt"]
+    finally:
+        STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+
+
+def test_runs_api_live_snapshot_keeps_completed_result_snippet():
+    stream_id = "snap-snippet"
+    STREAM_LIVE_TOOL_CALLS[stream_id] = []
+    try:
+        name, started = _gateway_tool_progress_event(
+            {"event": "tool.started", "tool": "terminal", "preview": "pytest", "tool_call_id": "c1"})
+        gateway_chat._note_live_gateway_event(stream_id, name, started)
+        name, completed = _gateway_tool_progress_event(
+            {"event": "tool.completed", "tool": "terminal", "tool_call_id": "c1", "error": True,
+             "result": {"output": "boom " * 200, "exit_code": 1}})
+        gateway_chat._note_live_gateway_event(stream_id, name, completed)
+        [tc] = STREAM_LIVE_TOOL_CALLS[stream_id]
+        assert tc["done"] and tc["is_error"] and tc["display_command"] == "pytest"
+        assert tc["snippet"] == completed["snippet"] and "boom" in tc["snippet"]
+    finally:
+        STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)

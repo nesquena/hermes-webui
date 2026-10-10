@@ -3090,7 +3090,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       args:part.args,
       input:part.input,
       function:part.function,
-      command:part.command||part.raw_command||part.original_command||part.display_command,
+      command:part.command||part.raw_command||part.original_command,
+      display_command:part.display_command,
       preview:part.preview||part.summary,
       snippet:part.snippet||part.result||part.output,
       result:part.result,
@@ -3167,7 +3168,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const tid=_anchorSceneToolId(tool);
     const name=_anchorSceneToolName(tool);
     const args=_anchorSceneToolArgs(tool);
-    const command=_anchorSceneStringPayload(tool&&(tool.command||tool.raw_command||tool.original_command||tool.display_command))||_anchorSceneStringPayload(args&&(args.cmd||args.command));
+    const command=_anchorSceneStringPayload(tool&&(tool.command||tool.raw_command||tool.original_command))||_anchorSceneStringPayload(args&&(args.cmd||args.command));
+    const displayCommand=_anchorSceneStringPayload(tool&&tool.display_command);
     const preview=_anchorSceneStringPayload(tool&&(tool.preview||tool.summary));
     const snippet=_anchorSceneStringPayload(tool&&(tool.snippet||tool.result||tool.output));
     const isError=!!(tool&&(tool.is_error||tool.error));
@@ -3178,6 +3180,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       name,
       args,
       command,
+      display_command:displayCommand,
       preview,
       snippet,
       result:_anchorSceneSafePayload(tool&&tool.result)??null,
@@ -3195,6 +3198,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       name,
       args,
       command,
+      display_command:displayCommand,
       preview,
       snippet,
       is_error:isError,
@@ -3447,6 +3451,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const liveCommand=_anchorSceneStringPayload(live.command||live.raw_command);
     if(liveCommand&&_empty(tool.command)&&_empty(payload.command)){
       tool.command=liveCommand; payload.command=liveCommand; enriched=true;
+    }
+    const liveDisplay=_anchorSceneStringPayload(live.display_command);
+    if(liveDisplay&&_empty(tool.display_command)&&_empty(payload.display_command)){
+      tool.display_command=liveDisplay; payload.display_command=liveDisplay; enriched=true;
     }
     if(!_empty(live.started_at)&&_empty(tool.started_at)&&_empty(payload.started_at)){
       tool.started_at=live.started_at; payload.started_at=live.started_at; enriched=true;
@@ -5755,6 +5763,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       tc.preview=String(d.preview||tc.preview||'');
     }
     if(d.args!==undefined) tc.args=d.args;
+    if(d.display_command) tc.display_command=String(d.display_command);
     if(d.snippet!==undefined) tc.snippet=d.snippet;
     tc._liveToolCallSignature = _toolCallSignature(tc,tc.activityBurstId,tc.activitySegmentSeq);
     tc.activityBurstId = Number.isFinite(Number(tc.activityBurstId))
