@@ -1,6 +1,7 @@
 import io
 import json
 import pathlib
+import re
 import sys
 import time
 from types import SimpleNamespace
@@ -518,6 +519,45 @@ def test_insights_cache_hit_rate_is_none_without_cache_reads(monkeypatch, tmp_pa
 
 
 
+def _pins_zero_min_width(text: str) -> bool:
+    """True when ``text`` declares a ZERO ``min-width`` in any spelling.
+
+    A base ``min-width:0`` (or the equivalent ``min-width: 0`` / ``min-width:0px``)
+    on ``.insights-card`` removes the intrinsic minimum that lets the Models card
+    claim the width it needs, collapsing the two-column usage grid on
+    desktop/tablet. The spelling must not decide whether the guard fires:
+    a plain ``"min-width:0" not in line`` check is bypassed by a single space
+    (Greptile P2 2026-10-10T08:06:14Z: "Spaces bypass the regression check"), so
+    the declaration is normalised with a regex instead.
+    """
+    return re.search(
+        r"min-width\s*:\s*0(?:\.0+)?(?:px|%|em|rem|ch|ex|vw|vh)?\s*(?:[;}]|$)", text
+    ) is not None
+
+
+def test_zero_min_width_guard_is_whitespace_proof():
+    """The regression guard itself must catch every CSS spelling of zero.
+
+    Guards the base-card check in
+    ``test_skill_usage_table_overflow_trio_stays_together``: on the pre-fix
+    tree ``assert "min-width:0" not in card_line`` stayed GREEN for
+    ``min-width: 0``, which is the same CSS as the bug it is meant to catch.
+    """
+    assert _pins_zero_min_width(".insights-card{min-width:0}")
+    assert _pins_zero_min_width(".insights-card{min-width: 0}")
+    assert _pins_zero_min_width(".insights-card{min-width :0}")
+    assert _pins_zero_min_width(".insights-card{min-width:0px}")
+    assert _pins_zero_min_width(".insights-card{min-width: 0.0}")
+    # Real values must NOT trip the guard (the mobile cascade owns 352/402px
+    # floors and the shipped base card rule has no floor at all).
+    assert not _pins_zero_min_width(".insights-card{min-width:120px}")
+    assert not _pins_zero_min_width(".insights-card{min-width: 0.5px}")
+    assert not _pins_zero_min_width(
+        ".insights-card{background:var(--surface-2);border-radius:8px;padding:14px;}"
+    )
+    assert not _pins_zero_min_width(".insights-table-head{min-width:352px;}")
+
+
 def test_skill_usage_table_overflow_trio_stays_together():
     """PR #6775 regression: the skill-usage table must keep its 3-piece
     narrow-screen overflow contract. A future CSS cleanup that removes one
@@ -533,7 +573,7 @@ def test_skill_usage_table_overflow_trio_stays_together():
     #    the <=640px single-column cascade only, where the table owns the
     #    scroll. See maintainer re-gate on PR #6775 (desktop/tablet regression).
     card_line = [l for l in STYLE_CSS.splitlines() if l.startswith(".insights-card{")][0]
-    assert "min-width:0" not in card_line, (
+    assert not _pins_zero_min_width(card_line), (
         f"base .insights-card must NOT pin min-width:0 (desktop/tablet column "
         f"collapse); got: {card_line}"
     )
