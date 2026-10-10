@@ -160,6 +160,36 @@ the first message typed with no conversation open must be sent; each reads the
 session list once before that, and shows the new row once the list is released
 (#7936, #7996, #8004). Run it locally with `python tests/browser_new_chat_focus.py`.
 
+It also runs `tests/browser_project_picker_keyboard.py`, which imports two
+conversations and creates three projects through the API and then drives both
+"Move to project" pickers. The single-conversation picker is opened from the ⋮
+menu with the keyboard: its rows must be buttons in a named menu, focus must
+open on the conversation's current project, ArrowDown/ArrowUp must wrap and
+Home/End jump, Tab must close it, Escape must close it and return focus to the
+conversation's ⋮ trigger (also after a sidebar repaint replaced that trigger,
+after a right-click open, and for a parent row whose expanded fork has a
+trigger of its own), and Enter, Space and a click must each send the move. The
+batch picker must open on its first row and return focus to the selection
+bar's Move button. "No project" and "+ New project" must follow the interface
+language; in a touch context, with the drawer open, every row must be at least
+44px tall; and in a long list the focused row must be inside the picker's box,
+or, in the batch picker, scrolled onto the screen by the conversation list.
+With forty more conversations and fifteen projects, a mouse wheel over the open
+batch picker must still scroll the conversation list, and on four phone sizes
+every row of the single picker must be tappable wherever in the list it was
+opened, with the batch picker scrolling inside its cap; on the two landscape
+sizes the same must hold from a parent conversation whose open forks make its
+row taller than the room beside it. A list the screen has room for must show
+whole without scrolling: below its anchor, else above it, else slid up over it
+from the bottom of the screen; and an open picker must follow a shorter window
+or a turned tablet, also after a sidebar repaint, keep the row the keyboard is
+on inside its box when the resize caps its height, and close, without handing
+focus back, when the resize hides the sidebar it was opened from: a phone
+turned either way, or a window narrowed until the sidebar collapses or becomes
+a closed drawer (#8044). Run it locally with
+`python tests/browser_project_picker_keyboard.py`; add `--screenshots DIR` to
+write the open picker at 390x844, 820x1180, 844x390 and 1440x900.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
