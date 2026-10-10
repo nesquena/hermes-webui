@@ -135,6 +135,13 @@
 
 ### Fixed
 
+- **Asking another profile's conversation to change no longer rewrites it before the refusal.** When a request
+  targeted a conversation owned by another profile (such as archive or pin), the ownership check loaded the
+  conversation through the full repair path first, so a refused request could still collapse duplicate partial files
+  and write a shrink backup of the other profile's transcript. The check now reads only who owns the conversation,
+  without repairing, saving or touching the session cache, and refusals answer exactly as before. Thanks @Tivonsico.
+  (#8142, fixes #8094)
+
 - **Long conversations no longer show tool results twice after compression.** When the agent compressed old tool
   output into a one-line summary, the WebUI kept the full result and also spliced the summary in next to it, so repeated
   tool cards built up over many compressions. A tool row already on screen is now recognised by its durable row identity
