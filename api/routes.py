@@ -19423,6 +19423,16 @@ def handle_post(handler, parsed) -> bool:
                             "reasoning_effort must be one of "
                             f"{', '.join(_VALID_EFFORTS)}",
                         )
+            if "auto_assign" in body:
+                _aa_pre = body.get("auto_assign")
+                # A JSON BOOLEAN only: `bool("false")` is True, so a stringly-typed
+                # client value turned auto-filing ON — and started filing existing
+                # chats, which clearing the flag afterwards does not undo — instead
+                # of being rejected (Greptile P2 2026-10-10T06:00:25Z). Checked in
+                # the pre-flight so the rejected request cannot leave the paths
+                # validated above registered on the saved workspace list either.
+                if _aa_pre is not None and not isinstance(_aa_pre, bool):
+                    return bad(handler, "auto_assign must be a boolean")
 
             # ── Workspaces (multi-value) ──
             if "workspaces" in body:
@@ -19518,8 +19528,10 @@ def handle_post(handler, parsed) -> bool:
                             proj["workspace"] = ws_list[0]
 
             # ── auto_assign flag ──
+            # The value's TYPE was validated in the pre-flight above, so a plain
+            # truthiness test is safe here (a string "false" can no longer reach it).
             if "auto_assign" in body:
-                if bool(body.get("auto_assign")):
+                if body.get("auto_assign"):
                     proj["auto_assign"] = True
                 else:
                     proj.pop("auto_assign", None)

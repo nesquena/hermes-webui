@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -198,3 +199,152 @@ def test_both_accessible_name_keys_exist_in_every_locale():
     i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
     for key in ("pb_add_workspace_title", "pb_field_model"):
         assert len(re.findall(rf"^\s*{key}:", i18n, flags=re.M)) == 15, key
+
+
+# --- finding 3 (Greptile P2 2026-10-10T06:00:25Z): auto_assign must be a real
+#     JSON boolean; `bool("false")` is True, so a stringly-typed value started
+#     filing existing chats instead of being rejected. --------------------------
+@pytest.fixture
+def bind_env(monkeypatch, tmp_path):
+    """A fake home plus an in-memory workspace registry with the real trust helpers
+    (mirrors the harness in tests/test_project_bindings_regate_1010.py)."""
+    import api.routes as routes
+    import api.workspace as workspace
+
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    registry: list[dict] = []
+
+    def _load_ws(profile=None):  # noqa: ARG001
+        return [dict(w) for w in registry]
+
+    def _save_ws(items, profile=None):  # noqa: ARG001
+        registry[:] = [dict(w) for w in items]
+
+    monkeypatch.setattr(routes, "load_workspaces", _load_ws)
+    monkeypatch.setattr(routes, "save_workspaces", _save_ws)
+    monkeypatch.setattr(workspace, "load_workspaces", _load_ws)
+    monkeypatch.setattr(workspace, "save_workspaces", _save_ws)
+    monkeypatch.setattr(workspace, "_home_path", lambda: home)
+    monkeypatch.setattr(
+        workspace, "_BOOT_DEFAULT_WORKSPACE", str(tmp_path / "no-boot-default")
+    )
+    return SimpleNamespace(home=home, registry=registry)
+
+
+def _drive_bind(monkeypatch, project, body):
+    """POST /api/projects/bind in-process; returns (handled, responses, project)."""
+    import api.routes as routes
+
+    projects = [project]
+    monkeypatch.setattr(routes, "load_projects", lambda: projects)
+    monkeypatch.setattr(
+        routes, "save_projects", lambda ps: projects.__setitem__(slice(None), ps)
+    )
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: dict(body))
+    responses: list[dict] = []
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None, **kw: responses.append(
+            {"payload": payload, "status": status}
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: responses.append({"error": msg, "status": status})
+        or True,
+    )
+    handled = routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/projects/bind"),
+    )
+    return handled, responses, projects[0]
+
+
+def _project(**extra):
+    proj = {"project_id": "proj_round6", "name": "round6", "profile": "default"}
+    proj.update(extra)
+    return proj
+
+
+def test_auto_assign_string_false_is_rejected_and_does_not_start_filing(
+    bind_env, monkeypatch
+):
+    """The reported repro: `"auto_assign": "false"` used to turn filing ON."""
+    import api.routes as routes
+
+    swept: list = []
+    monkeypatch.setattr(
+        routes, "_apply_project_auto_assign", lambda proj: swept.append(proj) or 0
+    )
+
+    _handled, responses, proj = _drive_bind(
+        monkeypatch, _project(), {"project_id": "proj_round6", "auto_assign": "false"}
+    )
+
+    assert responses and responses[0]["status"] == 400, responses
+    assert "boolean" in responses[0]["error"], responses
+    assert "auto_assign" not in proj, proj
+    assert swept == [], "no sweep may be started for a rejected value"
+
+
+def test_other_non_boolean_auto_assign_shapes_are_rejected(bind_env, monkeypatch):
+    """A number/string is not the documented `bool` contract either."""
+    for value in (0, 1, "true", "yes", [True]):
+        _handled, responses, proj = _drive_bind(
+            monkeypatch,
+            _project(),
+            {"project_id": "proj_round6", "auto_assign": value},
+        )
+        assert responses and responses[0]["status"] == 400, (value, responses)
+        assert "auto_assign" not in proj, (value, proj)
+
+
+def test_a_rejected_auto_assign_registers_no_workspace(bind_env, monkeypatch):
+    """The rejection runs in the pre-flight, BEFORE the workspaces block can
+    auto-register a fresh path on the saved workspace list. The path is a REAL
+    directory, so the ONLY reason for the 400 is the auto_assign type."""
+    fresh = bind_env.home / "fresh-ws"
+    fresh.mkdir()
+
+    _handled, responses, proj = _drive_bind(
+        monkeypatch,
+        _project(),
+        {
+            "project_id": "proj_round6",
+            "workspaces": [str(fresh)],
+            "auto_assign": "false",
+        },
+    )
+
+    assert responses and responses[0]["status"] == 400, responses
+    assert "boolean" in responses[0]["error"], responses
+    assert bind_env.registry == [], bind_env.registry
+    assert proj.get("workspaces") is None, proj
+
+
+def test_a_real_boolean_still_sets_and_clears_the_flag(bind_env, monkeypatch):
+    """Control: booleans keep working (True sets, False clears)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_apply_project_auto_assign", lambda proj: 0)
+
+    _handled, responses, proj = _drive_bind(
+        monkeypatch, _project(), {"project_id": "proj_round6", "auto_assign": True}
+    )
+    assert responses and responses[0]["status"] == 200, responses
+    assert proj["auto_assign"] is True, proj
+
+    _handled, responses, proj = _drive_bind(
+        monkeypatch,
+        _project(auto_assign=True),
+        {"project_id": "proj_round6", "auto_assign": False},
+    )
+    assert responses and responses[0]["status"] == 200, responses
+    assert "auto_assign" not in proj, proj
