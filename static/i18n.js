@@ -1136,6 +1136,8 @@ const LOCALES = {
     close_menu: 'Close menu',
     new_conversation: 'New conversation',
     filter_conversations: 'Filter conversations...',
+    show_unread_only: 'Show unread only',
+    no_unread_conversations: 'No unread conversations.',
     markdown_table_filter: 'Filter table',
     markdown_table_sort_column: 'Sort column',
     session_time_unknown: 'Unknown',
