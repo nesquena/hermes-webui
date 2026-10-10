@@ -2362,3 +2362,19 @@ def test_the_awaiting_node_harness_declares_module_input():
     assert '"--input-type=module"' in src[call:call + 300], (
         "the harness that awaits at module scope must run with --input-type=module"
     )
+
+
+def test_architecture_doc_states_cli_rows_are_independent_of_sync_to_insights():
+    """Greptile P2 (2026-10-10T10:07:45Z): the ARCHITECTURE 4.12 section said the
+    CLI ``state.db`` rows are mirrored in BY the optional ``sync_to_insights``
+    setting, which reads as if the switch controls whether ``/api/insights``
+    includes CLI activity.  It does not: ``_handle_insights`` reads non-WebUI rows
+    whenever the active profile's ``state.db`` exists, and the setting only
+    mirrors WebUI usage INTO ``state.db``."""
+    doc = (REPO_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    start = doc.index("### 4.12 Insights Period Endpoint")
+    body = " ".join(doc[start : doc.index("Window selection:", start)].split())
+    assert "non-WebUI rows in the active profile's `state.db`" in body, body
+    assert "it does not control whether this endpoint includes CLI rows" in body, body
+    # The old, misleading phrasing must not come back.
+    assert "CLI `state.db` rows the optional `sync_to_insights` setting mirrors in" not in body, body

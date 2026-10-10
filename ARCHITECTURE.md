@@ -728,8 +728,9 @@ commits directly, which is correct because it holds no catalog lock by then.
 selected by query parameters, and the response echoes the window it actually
 served through `mode` (`"trailing"` or `"custom"`). Totals and the daily series
 are always computed over the same resolved interval. Data comes from the WebUI
-session index plus the CLI `state.db` rows the optional `sync_to_insights`
-setting mirrors in.
+session index plus non-WebUI rows in the active profile's `state.db`, when that
+database exists. The optional `sync_to_insights` setting mirrors WebUI usage
+into `state.db`; it does not control whether this endpoint includes CLI rows.
 
 Window selection:
 
