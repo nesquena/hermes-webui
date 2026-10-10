@@ -3814,6 +3814,17 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // but virtualization remains opt-in until battle-tested further.
     // Users can explicitly enable it via Settings → virtualize_transcript.
     window._virtualizeTranscript=s.virtualize_transcript===true;
+    // Desktop CSS lazy-render (content-visibility on off-screen user rows) —
+    // the SillyTavern-style "don't render the whole transcript" lever WITHOUT
+    // the #4343 JS-height-estimation oscillation: pure browser layout skip,
+    // full DOM preserved. Opt-in, OFF by default, toggled at runtime via
+    // window._setLazyRender(true|false) or persisted as settings.lazy_render.
+    window._lazyRender=s.lazy_render===true;
+    document.documentElement.dataset.lazyRender=window._lazyRender?'enabled':'';
+    window._setLazyRender=function(on){
+      window._lazyRender=!!on;
+      document.documentElement.dataset.lazyRender=window._lazyRender?'enabled':'';
+    };
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=s.show_cli_sessions!==false;
