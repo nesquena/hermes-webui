@@ -10790,6 +10790,13 @@ function _makeBindingsCombo(o){
       r.classList.toggle('active',on);
       r.setAttribute('aria-selected',String(on));
     });
+    // The menu is height-capped and scrolls (max-height:min(60vh,320px)), so a
+    // highlight moved past the visible rows must be brought into view —
+    // otherwise Enter commits an option the keyboard user cannot see (Greptile
+    // P2 2026-10-10T00:24:37Z). Guarded: the probes' mini-DOM has no layout.
+    if(row&&typeof row.scrollIntoView==='function'){
+      try{ row.scrollIntoView({block:'nearest'}); }catch(_){ row.scrollIntoView(false); }
+    }
   }
   function _moveHighlight(delta){
     const rows=Array.from(menu.querySelectorAll('.ws-opt'));

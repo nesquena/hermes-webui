@@ -566,3 +566,19 @@ def test_arrows_move_the_highlight_and_enter_commits(tmp_path):
     assert _run_node(tmp_path, "combo_highlight.js", _HIGHLIGHT_PROBE).strip().endswith(
         "ok"
     )
+
+
+def test_the_moved_highlight_is_scrolled_into_view():
+    """Greptile P2 (2026-10-10T00:24:37Z): a highlight moved past the visible
+    rows must scroll into view, or Enter commits an option the keyboard user
+    cannot see (the menu is height-capped and scrolls)."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    fn = src[
+        src.index("function _setHighlight(row){") : src.index(
+            "function _moveHighlight(delta){"
+        )
+    ]
+    assert "scrollIntoView" in fn, fn
+    # Guarded so the layout-less mini-DOM probes keep working.
+    assert "typeof row.scrollIntoView==='function'" in fn, fn
+    assert "block:'nearest'" in fn, fn
