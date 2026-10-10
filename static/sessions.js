@@ -10848,6 +10848,20 @@ async function _saveProjectBindings(proj, fields){
       const idx=_allProjects.findIndex(p=>p.project_id===proj.project_id);
       if(idx>=0) _allProjects[idx]=updated;
     }
+    if(updated){
+      // Keep the OPEN dialog's snapshot in step with what the server just
+      // accepted. The "restore the stored value" paths (declining a later
+      // auto-assign confirmation, in aaCb.onchange and Save) read `proj`, so a
+      // stale `proj` put the box back to the PRE-save value and a following Save
+      // silently undid the setting that had just succeeded. Copy the persisted
+      // fields IN PLACE: the dialog closure holds THIS object, so replacing the
+      // reference would detach the dialog from `_allProjects`. The dialog's
+      // unsaved controls are DOM state and are left untouched (Greptile P2
+      // 2026-10-10T10:11:13Z).
+      for(const _k of ['name','workspaces','default_workspace','model','model_provider','auto_assign']){
+        if(Object.prototype.hasOwnProperty.call(updated,_k)) proj[_k]=updated[_k];
+      }
+    }
     try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
     try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
     if(typeof showToast==='function') showToast(t('pb_updated'));
