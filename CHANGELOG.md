@@ -135,6 +135,11 @@
 
 ### Fixed
 
+- **Long conversations no longer show tool results twice after compression.** When the agent compressed old tool
+  output into a one-line summary, the WebUI kept the full result and also spliced the summary in next to it, so repeated
+  tool cards built up over many compressions. A tool row already on screen is now recognised by its durable row identity
+  and not added again. Thanks @psanger. (#7990)
+
 - **Code blocks no longer flash unhighlighted while you scroll a long conversation.** In virtualized transcripts a
   newly mounted code block was painted plain for a frame before syntax highlighting and tree views applied; they now
   render highlighted on first paint, including after switching back to a cached conversation. Thanks @webtecnica.
