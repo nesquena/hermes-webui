@@ -135,6 +135,8 @@
 
 ### Fixed
 
+- **The sidebar "regenerate title" failure no longer shows the raw internal status code `llm_language_mismatch_aux` to users.** When title generation failed (e.g. the model kept answering in the wrong language), the `/api/session/title/regenerate` 422 body interpolated the internal status string, and the sidebar toast renders that body verbatim — so users saw an unexplained diagnostic like "Could not generate a better title (llm_language_mismatch_aux)". Internal title statuses now map through a human-readable reason (e.g. "the generated title did not match the conversation language"), unknown statuses still pass through for debuggability, and the existing title is preserved unchanged. Completes the second half of the #7693 report (the borrowed-Latin CJK title-guard fix landed earlier as part of #7727). (#7693, closes #7693)
+
 - **A conversation no longer gets stuck on "session already has an active stream".** A tab that went away without a
   clean disconnect (a half-open connection) kept its session channel alive for the life of the server, and a stream left
   behind by a worker that exited without cleaning up blocked every new message in that conversation, sometimes for hours.
