@@ -11575,6 +11575,36 @@ function _attachBudgetControls(wrap,history,card,paceNum){
   });
 }
 
+function _buildCodexOAuthLogin(p){
+  const wrap=document.createElement('div');
+  wrap.className='provider-card-field';
+  wrap.dataset.codexOauthLogin='1';
+  const label=p.has_key?t('providers_codex_reconnect'):t('oauth_login_codex');
+  const row=document.createElement('div');
+  row.className='provider-card-row';
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.className='provider-card-btn';
+  btn.textContent=label;
+  row.appendChild(btn);
+  wrap.appendChild(row);
+  // The backend writes to the profile active when the flow starts.
+  const profileNote=document.createElement('div');
+  profileNote.className='provider-card-hint';
+  profileNote.textContent=t('providers_codex_profile_note',(typeof S!=='undefined'&&S.activeProfile)||'default');
+  wrap.appendChild(profileNote);
+  const flow=document.createElement('div');
+  flow.style.display='none';
+  wrap.appendChild(flow);
+  btn.addEventListener('click',()=>startCodexOAuth({
+    flow:()=>flow,
+    btn:()=>btn,
+    label:()=>label,
+    onSuccess:()=>loadProvidersPanel(),
+  }));
+  return wrap;
+}
+
 function _buildProviderCard(p){
   const card=document.createElement('div');
   card.className='provider-card';
@@ -11631,6 +11661,11 @@ function _buildProviderCard(p){
       hint.style.color='var(--muted)';
     }
     body.appendChild(hint);
+    // Codex has an in-app device-code flow (onboarding.js). A config.yaml token
+    // is managed by editing config.yaml, so no login action there.
+    if(p.id==='openai-codex'&&p.key_source!=='config_yaml'){
+      body.appendChild(_buildCodexOAuthLogin(p));
+    }
     card.appendChild(body);
     header.addEventListener('click',()=>card.classList.toggle('open'));
     return card;

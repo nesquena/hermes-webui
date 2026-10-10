@@ -604,14 +604,32 @@ async function nextOnboardingStep(){
 /* ── Codex OAuth device-code flow ── */
 let _codexOAuthPollTimer=null;
 let _codexOAuthFlowId=null;
+// Where the running flow renders: the first-run wizard by default, or a
+// caller-supplied surface (Settings -> Providers). Getters, not elements, so the
+// wizard keeps resolving its nodes by id the way it always has.
+let _codexOAuthUi=null;
+
+function _codexOAuthWizardUi(){
+  return {
+    flow:()=>$('codexOAuthFlow'),
+    btn:()=>$('codexOAuthBtn'),
+    label:()=>t('oauth_login_codex'),
+    onSuccess:()=>loadOnboardingWizard(),
+  };
+}
+
+function _codexOAuthCurrentUi(){
+  return _codexOAuthUi||_codexOAuthWizardUi();
+}
 
 function _clearCodexOAuthPoll(){
   if(_codexOAuthPollTimer){clearTimeout(_codexOAuthPollTimer);_codexOAuthPollTimer=null;}
 }
 
 function _setCodexOAuthButton(enabled){
-  const btn=$('codexOAuthBtn');
-  if(btn){btn.disabled=!enabled;btn.textContent=enabled?t('oauth_login_codex'):'...';}
+  const ui=_codexOAuthCurrentUi();
+  const btn=ui.btn();
+  if(btn){btn.disabled=!enabled;btn.textContent=enabled?ui.label():'...';}
 }
 
 async function copyCodexOAuthCode(code){
@@ -624,7 +642,7 @@ async function copyCodexOAuthCode(code){
 }
 
 async function cancelCodexOAuth(){
-  const flowDiv=$('codexOAuthFlow');
+  const flowDiv=_codexOAuthCurrentUi().flow();
   const flowId=_codexOAuthFlowId;
   _clearCodexOAuthPoll();
   _codexOAuthFlowId=null;
@@ -638,7 +656,7 @@ async function cancelCodexOAuth(){
 }
 
 function _renderCodexOAuthTerminal(status,message){
-  const flowDiv=$('codexOAuthFlow');
+  const flowDiv=_codexOAuthCurrentUi().flow();
   if(!flowDiv)return;
   const ok=status==='success';
   const icon=ok?'✅':status==='expired'?'⌛':status==='cancelled'?'⏹':'❌';
@@ -666,7 +684,7 @@ async function _pollCodexOAuth(){
     if(status==='success'){
       _renderCodexOAuthTerminal('success','Credentials saved to the Hermes credential pool. Refreshing provider status…');
       showToast(t('oauth_codex_success'));
-      try{await loadOnboardingWizard();}catch(e){}
+      try{await _codexOAuthCurrentUi().onSuccess();}catch(e){}
     }else if(status==='expired'){
       _renderCodexOAuthTerminal('expired','The code expired. Start a new login flow to try again.');
     }else if(status==='cancelled'){
@@ -682,8 +700,9 @@ async function _pollCodexOAuth(){
   }
 }
 
-async function startCodexOAuth(){
-  const flowDiv=$('codexOAuthFlow');
+async function startCodexOAuth(ui){
+  _codexOAuthUi=ui||null;
+  const flowDiv=_codexOAuthCurrentUi().flow();
   if(!flowDiv)return;
   _clearCodexOAuthPoll();
   _codexOAuthFlowId=null;

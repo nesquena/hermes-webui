@@ -145,6 +145,12 @@ the onboarding flow when your Hermes config selects the corresponding provider.
 If the wizard points you back to `hermes model`, use that CLI flow first, then
 refresh WebUI.
 
+The wizard is skipped once `config.yaml` already names a provider and model, so
+OpenAI Codex can also be connected later from Settings → Providers → OpenAI
+Codex ("Login with Codex (ChatGPT)", or "Reconnect" when a credential exists).
+It runs the same device-code flow and saves the credential to the profile that
+is active when you start it.
+
 ## Base URL rules for local model servers
 
 For self-hosted providers, the Base URL should point to the OpenAI-compatible
