@@ -604,14 +604,35 @@ async function nextOnboardingStep(){
 /* ── Codex OAuth device-code flow ── */
 let _codexOAuthPollTimer=null;
 let _codexOAuthFlowId=null;
+// Where the running flow renders: the first-run wizard by default, or a
+// caller-supplied surface (Settings -> Providers). Getters, not elements, so the
+// wizard keeps resolving its nodes by id the way it always has.
+let _codexOAuthUi=null;
+// Bumped on every start: a response that arrives after a newer start (another
+// profile, another surface) belongs to an abandoned flow and must not touch it.
+let _codexOAuthStartSeq=0;
+
+function _codexOAuthWizardUi(){
+  return {
+    flow:()=>$('codexOAuthFlow'),
+    btn:()=>$('codexOAuthBtn'),
+    label:()=>t('oauth_login_codex'),
+    onSuccess:()=>loadOnboardingWizard(),
+  };
+}
+
+function _codexOAuthCurrentUi(){
+  return _codexOAuthUi||_codexOAuthWizardUi();
+}
 
 function _clearCodexOAuthPoll(){
   if(_codexOAuthPollTimer){clearTimeout(_codexOAuthPollTimer);_codexOAuthPollTimer=null;}
 }
 
 function _setCodexOAuthButton(enabled){
-  const btn=$('codexOAuthBtn');
-  if(btn){btn.disabled=!enabled;btn.textContent=enabled?t('oauth_login_codex'):'...';}
+  const ui=_codexOAuthCurrentUi();
+  const btn=ui.btn();
+  if(btn){btn.disabled=!enabled;btn.textContent=enabled?ui.label():'...';}
 }
 
 async function copyCodexOAuthCode(code){
@@ -624,13 +645,16 @@ async function copyCodexOAuthCode(code){
 }
 
 async function cancelCodexOAuth(){
-  const flowDiv=$('codexOAuthFlow');
+  const flowDiv=_codexOAuthCurrentUi().flow();
   const flowId=_codexOAuthFlowId;
+  const seq=_codexOAuthStartSeq;
   _clearCodexOAuthPoll();
   _codexOAuthFlowId=null;
   if(flowId){
     try{await api('/api/onboarding/oauth/cancel',{method:'POST',body:JSON.stringify({flow_id:flowId})});}catch(e){}
   }
+  // A newer start owns the button and surface now; leave them alone.
+  if(seq!==_codexOAuthStartSeq)return;
   _setCodexOAuthButton(true);
   if(flowDiv){
     flowDiv.innerHTML=`<div class="onboarding-oauth-card"><div class="onboarding-oauth-icon">⏹</div><div><strong>OAuth login cancelled</strong><p style="margin-top:6px;color:var(--muted);font-size:13px">Start again whenever you're ready.</p></div></div>`;
@@ -638,7 +662,7 @@ async function cancelCodexOAuth(){
 }
 
 function _renderCodexOAuthTerminal(status,message){
-  const flowDiv=$('codexOAuthFlow');
+  const flowDiv=_codexOAuthCurrentUi().flow();
   if(!flowDiv)return;
   const ok=status==='success';
   const icon=ok?'✅':status==='expired'?'⌛':status==='cancelled'?'⏹':'❌';
@@ -650,14 +674,18 @@ function _renderCodexOAuthTerminal(status,message){
     </div>`;
 }
 
-async function _pollCodexOAuth(){
+async function _pollCodexOAuth(seq){
   const flowId=_codexOAuthFlowId;
   if(!flowId)return;
+  // A restart in the same profile gets the same pending flow_id back, so the
+  // flow id alone cannot tell this poll from the newer start's.
+  const stale=()=>seq!==_codexOAuthStartSeq||_codexOAuthFlowId!==flowId;
   try{
     const resp=await api('/api/onboarding/oauth/poll?flow_id='+encodeURIComponent(flowId));
+    if(stale())return;
     const status=(resp&&resp.status)||'error';
     if(status==='pending'){
-      _codexOAuthPollTimer=setTimeout(_pollCodexOAuth,3000);
+      _codexOAuthPollTimer=setTimeout(()=>_pollCodexOAuth(seq),3000);
       return;
     }
     _clearCodexOAuthPoll();
@@ -666,7 +694,7 @@ async function _pollCodexOAuth(){
     if(status==='success'){
       _renderCodexOAuthTerminal('success','Credentials saved to the Hermes credential pool. Refreshing provider status…');
       showToast(t('oauth_codex_success'));
-      try{await loadOnboardingWizard();}catch(e){}
+      try{await _codexOAuthCurrentUi().onSuccess();}catch(e){}
     }else if(status==='expired'){
       _renderCodexOAuthTerminal('expired','The code expired. Start a new login flow to try again.');
     }else if(status==='cancelled'){
@@ -675,6 +703,7 @@ async function _pollCodexOAuth(){
       _renderCodexOAuthTerminal('error',(resp&&resp.error)||'OAuth login failed. Please try again.');
     }
   }catch(e){
+    if(stale())return;
     _clearCodexOAuthPoll();
     _codexOAuthFlowId=null;
     _setCodexOAuthButton(true);
@@ -682,9 +711,11 @@ async function _pollCodexOAuth(){
   }
 }
 
-async function startCodexOAuth(){
-  const flowDiv=$('codexOAuthFlow');
+async function startCodexOAuth(ui){
+  _codexOAuthUi=ui||null;
+  const flowDiv=_codexOAuthCurrentUi().flow();
   if(!flowDiv)return;
+  const seq=++_codexOAuthStartSeq;
   _clearCodexOAuthPoll();
   _codexOAuthFlowId=null;
   _setCodexOAuthButton(false);
@@ -692,6 +723,7 @@ async function startCodexOAuth(){
   flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>${t('oauth_codex_polling')}</strong><p>Starting device-code flow…</p></div></div>`;
   try{
     const resp=await api('/api/onboarding/oauth/start',{method:'POST',body:JSON.stringify({provider:'openai-codex'})});
+    if(seq!==_codexOAuthStartSeq)return;
     if(resp.error) throw new Error(resp.error);
     const{flow_id,user_code,verification_uri}=resp;
     if(!flow_id||!user_code||!verification_uri) throw new Error('Invalid OAuth response');
@@ -711,8 +743,9 @@ async function startCodexOAuth(){
           <p style="margin-top:8px;color:var(--muted);font-size:13px">${t('oauth_codex_polling')}</p>
         </div>
       </div>`;
-    _codexOAuthPollTimer=setTimeout(_pollCodexOAuth,Math.max(1000,Number(resp.poll_interval_seconds||3)*1000));
+    _codexOAuthPollTimer=setTimeout(()=>_pollCodexOAuth(seq),Math.max(1000,Number(resp.poll_interval_seconds||3)*1000));
   }catch(e){
+    if(seq!==_codexOAuthStartSeq)return;
     _clearCodexOAuthPoll();
     _codexOAuthFlowId=null;
     _renderCodexOAuthTerminal('error',(e&&e.message)||String(e));
