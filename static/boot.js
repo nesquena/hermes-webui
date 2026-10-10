@@ -2479,6 +2479,9 @@ window.renderTranscript=function(container, messages, opts){
 })();
 function _currentSessionIsReusableEmptyChat(){
   if(!S.session) return false;
+  // A session made empty by /clear had prior turns and must remain distinct
+  // from a never-used scratch chat when the user explicitly selects New Chat.
+  if(S.session.clear_generation) return false;
   const hasVisibleMessages=Array.isArray(S.messages)
     && S.messages.some(m=>m&&m.role&&m.role!=='tool');
   return (S.session.message_count||0)===0
@@ -4366,8 +4369,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       // Otherwise the chip can display the static default (e.g. GPT-5.4 Mini)
       // even though S.session already points at the Codex/current model.
       if(S.session) await _startBootModelDropdown();
-      // If the restored session has no messages it is an ephemeral scratch pad —
-      // treat the page as a fresh start rather than resuming a blank conversation.
+      // An unpinned restored session with no messages is an ephemeral scratch
+      // pad — treat the page as a fresh start rather than resuming a blank conversation.
       // loadSession() already ran, so loadDir() has populated the workspace file tree.
       // Do NOT remove the session ID from localStorage — keeping it means every
       // subsequent refresh will also run loadSession() → loadDir() → files stay visible.
@@ -4383,7 +4386,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         ? _restoredDraft.files.filter(Boolean)
         : [];
       const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);
-      if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){
+      // A clear-marked empty session is deliberate: /clear preserves its identity
+      // whether the user keeps the chat pinned or not. Only a genuinely unstarted
+      // scratch session should become the fresh-composer state on reload.
+      const _restoredCleared = !!(S.session && S.session.clear_generation);
+      if(S.session && (S.session.message_count||0) === 0 && !_restoredCleared && !_restoredInFlight && !_restoredHasDraft){
         S.session=null; S.messages=[];
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible

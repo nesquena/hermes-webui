@@ -13952,15 +13952,31 @@ def _handle_session_get(handler, parsed) -> bool:
         _t3 = _time.monotonic()
         if _diag: _diag.stage("t3_after_model_resolve")
         if load_messages:
-            if is_messaging_session and cli_messages:
-                # Recovery/aggregate sidecars can intentionally contain a
-                # longer visible conversation than the single state.db
-                # segment for this messaging session id. Prefer the longer
-                # sidecar so repaired WebUI history is not hidden behind the
-                # canonical per-segment transcript. When both sources carry
-                # different slices of the same stitched conversation, merge
-                # them chronologically and dedupe exact repeats.
-                _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+            # A /clear-stamped session with no sidecar rows is intentionally
+            # empty. State-db rows can be an older append-only transcript, and
+            # merging them here would resurrect cleared history on the first
+            # refresh. Once a new turn starts the sidecar is non-empty, so its
+            # normal reconciliation path remains available.
+            _cleared_empty_session = bool(
+                getattr(s, "clear_generation", None)
+                and not getattr(s, "messages", None)
+            )
+            if _cleared_empty_session and not is_messaging_session:
+                _all_msgs = []
+            elif is_messaging_session and cli_messages:
+                # A cleared messaging sidecar must still show the authoritative
+                # state-db transcript. Do not merge its pre-clear sidecar rows.
+                if _cleared_empty_session:
+                    _all_msgs = cli_messages
+                else:
+                    # Recovery/aggregate sidecars can intentionally contain a
+                    # longer visible conversation than the single state.db
+                    # segment for this messaging session id. Prefer the longer
+                    # sidecar so repaired WebUI history is not hidden behind the
+                    # canonical per-segment transcript. When both sources carry
+                    # different slices of the same stitched conversation, merge
+                    # them chronologically and dedupe exact repeats.
+                    _all_msgs = _merged_session_messages_for_display(s, cli_messages)
             elif msg_limit is not None:
                 if _display_cache_hit is not None:
                     _all_msgs = _display_cache_hit
@@ -17034,14 +17050,30 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
-        old_ws = getattr(s, "workspace", "")
-        old_model = getattr(s, "model", None)
-        old_provider = getattr(s, "model_provider", None)
         try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace), profile=getattr(s, "profile", None)))
+            new_ws = str(resolve_trusted_workspace(
+                body.get("workspace", s.workspace),
+                profile=getattr(s, "profile", None),
+            ))
         except ValueError as e:
             return bad(handler, str(e))
         with _get_session_agent_lock(body["session_id"]):
+            # A delayed request may have loaded ``s`` before /clear acquired
+            # the same lock. Only then rebase on the durable object: normal
+            # updates can legitimately target an unsaved in-memory session,
+            # whose sidecar has not been written yet. Comparing the durable
+            # clear marker keeps that normal path intact while ensuring save()
+            # cannot restore a pre-clear lifecycle, title, or compression field.
+            persisted = Session.load(body["session_id"])
+            if (
+                persisted is not None
+                and getattr(persisted, "clear_generation", None)
+                != getattr(s, "clear_generation", None)
+            ):
+                s = persisted
+            old_ws = getattr(s, "workspace", "")
+            old_model = getattr(s, "model", None)
+            old_provider = getattr(s, "model_provider", None)
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
                 model, provider = _session_model_state_from_request(
@@ -17066,6 +17098,15 @@ def handle_post(handler, parsed) -> bool:
 
                     _evict_session_agent(body["session_id"])
             s.save()
+            # ``get_session()`` intentionally does not replace a cache entry
+            # merely because disk has fewer messages: normally that can discard
+            # an unsaved in-memory tail. This update held the session lock while
+            # reconciling any clear marker, so publish the saved instance before
+            # a following GET can serve a stale resident object.
+            with LOCK:
+                SESSIONS[s.session_id] = s
+                SESSIONS.move_to_end(s.session_id)
+                _evict_sessions_over_cap()
         if str(old_ws or "") != str(new_ws or ""):
             try:
                 from api.terminal import close_terminal
@@ -17240,11 +17281,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         if _session_is_subagent_view_only(body["session_id"]):
             return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        sid = body["session_id"]
         try:
-            s = get_session(body["session_id"])
+            s = get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        sid = body["session_id"]
         with _get_session_agent_lock(sid):
             had_sidecar_messages = bool(s.messages or [])
             # Clear is a full truncate-to-empty: route through the SAME helper the
@@ -17288,7 +17329,12 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
-            s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
+            # A never-started empty scratch session remains unmarked. Every
+            # clear of a session that has ever been cleared advances the marker,
+            # even when no transcript remains, so stale objects loaded before a
+            # repeated clear cannot save reset metadata back over it.
+            if had_sidecar_messages or s.clear_generation:
+                s.clear_generation = uuid.uuid4().hex
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
@@ -17296,6 +17342,14 @@ def handle_post(handler, parsed) -> bool:
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, "Untitled")
             s.save()
+            # Full clear is an authoritative shrink. Publish this exact object
+            # to the cache so the normal cache guard (which intentionally does
+            # not reload merely because disk has fewer messages) cannot serve a
+            # pre-clear resident instance to the next GET.
+            with LOCK:
+                SESSIONS[s.session_id] = s
+                SESSIONS.move_to_end(s.session_id)
+                _evict_sessions_over_cap()
             persisted_clear = False
             try:
                 persisted = json.loads(s.path.read_text(encoding="utf-8"))

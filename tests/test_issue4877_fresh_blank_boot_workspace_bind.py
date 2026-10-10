@@ -166,7 +166,7 @@ def test_no_saved_session_branch_restores_panel_pref_before_bind_attempt():
 
 def test_ephemeral_blank_session_branch_restores_panel_pref_before_bind_attempt():
     src = BOOT_JS.read_text(encoding="utf-8")
-    marker = "if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){"
+    marker = "if(S.session && (S.session.message_count||0) === 0 && !_restoredCleared && !_restoredInFlight && !_restoredHasDraft){"
     marker_idx = src.find(marker)
     assert marker_idx >= 0, "ephemeral blank-session path not found"
     return_idx = src.find("return;", marker_idx)
