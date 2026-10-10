@@ -5719,6 +5719,9 @@ function _normalizeReasoningEffort(eff){
 }
 
 function _formatReasoningEffortLabel(effort){
+  const _n=String(effort||'').trim().toLowerCase();
+  const _k=_n?'reasoning_effort_'+_n:'reasoning_effort_default';
+  if(typeof t==='function'){const _v=t(_k);if(_v&&_v!==_k)return _v;}
   if(effort==='none') return 'None';
   if(!effort) return 'Default';
   if(effort==='minimal') return 'Minimal';
@@ -5830,7 +5833,11 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText='Reasoning effort: '+text;
+    // The visible effort text above is localized; the accessible name has to
+    // follow it or a non-English locale still announces an English prefix
+    // (#7697 review). reasoning_effort_title exists in every bundle.
+    const _lbl=(typeof t==='function')?t('reasoning_effort_title',text):null;
+    const labelText=(_lbl&&_lbl!=='reasoning_effort_title')?_lbl:('Reasoning effort: '+text);
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
@@ -7626,7 +7633,32 @@ function _mergeUsageForCtxIndicator(latest, fallback){
 }
 
 // Context usage indicator in composer footer
+// The resolved input the meter was last painted from, scoped to the profile and
+// session it belongs to. A locale repaint reuses this snapshot instead of
+// S.lastUsage: the latter can be incomplete or stale (a restored session, or a
+// context-window change in settings) and re-feeding it rewrites the meter — and
+// the compression threshold — with older numbers (#7697 review).
+let _ctxIndicatorSnapshot=null;
+let _ctxIndicatorSnapshotScope='';
+
+function _ctxIndicatorScopeKey(){
+  const profile=(typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
+  const sid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+  return profile+'|'+sid;
+}
+
+function _repaintCtxIndicatorFromSnapshot(){
+  if(!_ctxIndicatorSnapshot) return false;
+  if(_ctxIndicatorScopeKey()!==_ctxIndicatorSnapshotScope) return false;
+  _syncCtxIndicator(_ctxIndicatorSnapshot);
+  return true;
+}
+
 function _syncCtxIndicator(usage){
+  if(usage&&typeof usage==='object'){
+    _ctxIndicatorSnapshot={...usage};
+    _ctxIndicatorSnapshotScope=_ctxIndicatorScopeKey();
+  }
   const wrap=$('ctxIndicatorWrap');
   const el=$('ctxIndicator');
   if(!el)return;
@@ -7695,21 +7727,21 @@ function _syncCtxIndicator(usage){
   _setCtxCompressButton(compressBtn,compressText);
   const cacheHitPct=usage.cache_hit_percent;
   const cacheText=cacheHitPct!=null?t('usage_cache_hit_detail',cacheHitPct,_fmtTokens(cacheReadTok),_fmtTokens(cacheWriteTok)):'';
-  const contextLabel=hasPostCompressionEstimate?'Estimated next model context':'Context window';
-  let label=hasPromptTok?`${contextLabel} ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
-  if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
+  const contextLabel=hasPostCompressionEstimate?t('ctx_est_next'):t('ctx_tooltip_title');
+  let label=hasPromptTok?t('ctx_pct_used',contextLabel,pct,100-pct):t('ctx_tokens_used_short',_fmtTokens(totalTok));
+  if(!hasExplicitCtx&&hasPromptTok) label+=' '+t('ctx_est_128k');
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   if(cacheText) label+=` \u00b7 ${cacheText}`;
   el.setAttribute('aria-label',label);
-  const usageText=hasPromptTok?(overflowed?`${contextLabel}: ${rawPct}% used (context exceeded)`:`${contextLabel}: ${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
-  const tokensText=hasPromptTok?`${contextLabel}: ${_fmtTokens(contextPromptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  const usageText=hasPromptTok?(overflowed?t('ctx_pct_exceeded',contextLabel,rawPct):t('ctx_pct_used',contextLabel,pct,100-pct)):t('ctx_tokens_used_short',_fmtTokens(totalTok));
+  const tokensText=hasPromptTok?t('ctx_tokens_detail',contextLabel,_fmtTokens(contextPromptTok),_fmtTokens(ctxWindow)):t('ctx_in_out',_fmtTokens(usage.input_tokens||0),_fmtTokens(usage.output_tokens||0));
   if(usageLine) usageLine.textContent=usageText;
   if(tokensLine) tokensLine.textContent=tokensText;
   const threshold=usage.threshold_tokens||0;
   let thresholdText='';
   if(thresholdLine){
     if(threshold&&ctxWindow){
-      thresholdText=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
+      thresholdText=t('ctx_autocompress',_fmtTokens(threshold),Math.round(threshold/ctxWindow*100));
       thresholdLine.style.display='';
       thresholdLine.textContent=thresholdText;
     }else{
@@ -7720,7 +7752,7 @@ function _syncCtxIndicator(usage){
   let costText='';
   if(costLine){
     if(cost){
-      costText=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+      costText=t('ctx_cost_est',(cost<0.01?cost.toFixed(4):cost.toFixed(2)));
       if(cacheText) costText+=` \u00b7 ${cacheText}`;
       costLine.style.display='';
       costLine.textContent=costText;
@@ -9129,6 +9161,10 @@ function setComposerStatus(t,timeoutMs){
 
 let _composerLockState=null;
 let _compressionPlaceholderSaved=null;
+// What _compressionPlaceholderSaved was: 'idle'/'busy' means it came from a
+// locale-dependent hint (so restoring it verbatim would bring back the OLD
+// language), 'literal' means custom text that must come back unchanged.
+let _compressionPlaceholderSavedKind='literal';
 
 function lockComposerForClarify(placeholderText){
   const input=$('msg');
@@ -9144,7 +9180,13 @@ function lockComposerForClarify(placeholderText){
     _composerLockState={
       disabled: input.disabled,
       placeholder: input.placeholder,
+      text: placeholderText || null,
     };
+  }else{
+    // A second clarify can replace the prompt without unlocking first; the
+    // locale repaint restores _composerLockState.text, so it must track the
+    // CURRENT question or the composer describes the previous one.
+    _composerLockState.text=placeholderText||null;
   }
   input.disabled=true;
   if(placeholderText) input.placeholder=placeholderText;
@@ -9217,13 +9259,73 @@ function getComposerPrimaryAction(){
   return 'queue';
 }
 
+// The localized auto-compression guidance. Single source so the hint shown when
+// compression starts and the one re-shown after a live locale switch cannot
+// drift apart (#7697 review).
+function _compressionPlaceholderText(){
+  const fallback='Type a message — it will queue and send after compression';
+  return (typeof t==='function')?(t('composer_compression_will_queue')||fallback):fallback;
+}
+
+// Classify a placeholder so a restore can tell a locale-derived string (idle or
+// busy hint — must be re-rendered in the CURRENT locale) from custom text that
+// has to come back verbatim (#7697 review).
+function _composerPlaceholderKind(text){
+  if(typeof text!=='string'||!text) return 'literal';
+  const idleFallback='Message '+assistantDisplayName()+'\u2026';
+  const idle=(typeof t==='function')?t('composer_placeholder_idle',assistantDisplayName()):idleFallback;
+  if(text===idle||text===idleFallback) return 'idle';
+  if(typeof t!=='function') return 'literal';
+  for(const key of ['composer_placeholder_busy_interrupt','composer_placeholder_busy_steer','composer_placeholder_busy_queue']){
+    const val=t(key);
+    if(val&&val!==key&&text===val) return 'busy';
+  }
+  return 'literal';
+}
+
+// Single owner of the composer placeholder. Precedence:
+//   1. clarify-style lock  (_composerLockState.text — a live user prompt)
+//   2. auto-compression guidance (while _compressionPlaceholderSaved!==null)
+//   3. busy hint / idle placeholder (delegated to _applyBusyComposerPlaceholder)
+// Every locale repaint goes through here, so switching language while an
+// instruction is active repaints THAT instruction instead of replacing it with
+// the idle text (#7697 review).
+function _refreshComposerPlaceholder(){
+  const input=$('msg');
+  if(!input) return;
+  if(_composerLockState){
+    const lockedText=typeof _composerLockState.text==='string'?_composerLockState.text:_composerLockState.placeholder;
+    if(typeof lockedText==='string'){ input.placeholder=lockedText; return; }
+  }
+  if(_compressionPlaceholderSaved!==null){
+    input.placeholder=_compressionPlaceholderText();
+    return;
+  }
+  // The declarative pass stamps the static index.html placeholder first, and
+  // the busy pass below declines while the composer "has content" (which counts
+  // staged attachments). Write the localized, profile-aware idle text here so a
+  // repaint in that state cannot drop the assistant-name personalization
+  // (#7697 review).
+  input.placeholder=(typeof t==='function')?t('composer_placeholder_idle',assistantDisplayName()):('Message '+assistantDisplayName()+'\u2026');
+  _applyBusyComposerPlaceholder();
+}
+
 function _applyBusyComposerPlaceholder(){
   const input=$('msg');
   if(!input) return;
   if(_compressionPlaceholderSaved!==null) return;
+  if(_composerLockState){
+    // A clarify-style lock owns the placeholder (e.g. a question prompt).
+    // Re-assert the lock's own text (not the pre-lock placeholder) so the
+    // locale repaint pass (applyBotName inside applyLocaleToDOM) cannot
+    // stomp it and the clarify prompt survives a language switch.
+    const lockedText=typeof _composerLockState.text==='string'?_composerLockState.text:_composerLockState.placeholder;
+    if(typeof lockedText==='string') input.placeholder=lockedText;
+    return;
+  }
   if(input.disabled) return;
   if(_composerHasContent()) return;
-  const idlePlaceholder='Message '+assistantDisplayName()+'\u2026';
+  const idlePlaceholder=(typeof t==='function')?t('composer_placeholder_idle',assistantDisplayName()):('Message '+assistantDisplayName()+'\u2026');
   if(!window._showBusyPlaceholderHint||!S.busy){
     input.placeholder=idlePlaceholder;
     return;
@@ -16287,11 +16389,27 @@ function isCompressionUiRunning(){
 // non-running setCompressionUi, or a direct window._compressionUi=null in the
 // SSE handler) — it no-ops when nothing was saved. (#3512)
 function _restoreCompressionPlaceholder(){
-  const _input=$('msg');
-  if(_input&&typeof _compressionPlaceholderSaved==='string'){
-    _input.placeholder=_compressionPlaceholderSaved;
-  }
+  if(_compressionPlaceholderSaved===null) return;
+  const saved=_compressionPlaceholderSaved;
+  const savedKind=_compressionPlaceholderSavedKind;
   _compressionPlaceholderSaved=null;
+  _compressionPlaceholderSavedKind='literal';
+  const _input=$('msg');
+  if(!_input) return;
+  if(savedKind==='literal'){
+    // Custom text (or a clarify prompt) — restore exactly what was there.
+    _input.placeholder=saved;
+    return;
+  }
+  // A locale-derived placeholder (idle / busy hint) must come back in the
+  // CURRENT locale: restoring the saved string verbatim would resurrect the
+  // language the user has since switched away from. Write the current-locale
+  // idle text first: the canonical pass below declines while an attachment or
+  // draft is staged (#5144 guard), and without this the compression guidance
+  // would outlive compression as a stale, visible instruction. The pass then
+  // upgrades it to the clarify prompt / busy hint when one applies.
+  _input.placeholder=(typeof t==='function')?t('composer_placeholder_idle',assistantDisplayName()):('Message '+assistantDisplayName()+'\u2026');
+  _applyBusyComposerPlaceholder();
 }
 function clearCompressionUi(){
   window._compressionUi=null;
@@ -16316,7 +16434,8 @@ function setCompressionUi(state){
     const _input=$('msg');
     if(_input&&_compressionPlaceholderSaved===null){
       _compressionPlaceholderSaved=_input.placeholder;
-      _input.placeholder=typeof t==='function'?t('composer_compression_will_queue')||'Type a message — it will queue and send after compression':'Type a message — it will queue and send after compression';
+      _compressionPlaceholderSavedKind=_composerPlaceholderKind(_input.placeholder);
+      _input.placeholder=_compressionPlaceholderText();
     }
   } else {
     _clearCompressionElapsedTimer();

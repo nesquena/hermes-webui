@@ -3565,8 +3565,18 @@ function applyBotName(){
   const topbarTitle=$('topbarTitle');
   if(topbarTitle && (!S.session)) topbarTitle.textContent=name;
   const msg=$('msg');
-  if(msg) msg.placeholder='Message '+name+'\u2026';
-  if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+  if(msg){
+    // The placeholder is owned by whichever state is active right now (clarify
+    // lock, auto-compression guidance, busy hint, or idle). Delegating keeps a
+    // locale repaint from stomping an active instruction with the idle text
+    // (#7697 review).
+    if(typeof _refreshComposerPlaceholder==='function'){
+      _refreshComposerPlaceholder();
+    }else{
+      msg.placeholder=(typeof t==='function')?t('composer_placeholder_idle',name):('Message '+name+'\u2026');
+      if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    }
+  }
 }
 
 const _COMPOSER_CONTROL_TOGGLE_DEFS=[
