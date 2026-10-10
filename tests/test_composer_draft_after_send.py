@@ -1,5 +1,9 @@
 """Regression coverage for stale composer_draft restoration after send."""
 from pathlib import Path
+import json
+import shutil
+import subprocess
+import textwrap
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
@@ -19,16 +23,16 @@ def test_clear_composer_draft_suppresses_same_session_stale_restore():
     assert "function _composerDraftPayloadSignature(text, files)" in SESSIONS_JS
     assert "function _suppressComposerDraftRestoreAfterSubmit(sid, text, files)" in SESSIONS_JS
     clear_body = _block(SESSIONS_JS, "function _clearComposerDraft(sid, text, files)", "const SESSION_VIEWED_COUNTS_KEY")
-    suppress_idx = clear_body.index("_suppressComposerDraftRestoreAfterSubmit(sid, text, files);")
-    post_idx = clear_body.index("api('/api/session/draft'")
-    assert suppress_idx < post_idx, "restore suppression must be local and immediate before async POST"
+    suppress_idx = clear_body.index("_suppressComposerDraftRestoreAfterSubmit")
+    queue_idx = clear_body.index("_queueComposerDraftWrite")
+    assert suppress_idx < queue_idx, "restore suppression must be local and immediate before queued POST"
 
 
 def test_non_empty_draft_save_clears_submit_restore_suppression():
     save_body = _block(SESSIONS_JS, "function _saveComposerDraft(sid, text, files)", "function _composerDraftHasPayload")
-    assert "_clearComposerDraftRestoreSuppression(sid);" in save_body
+    assert "_clearComposerDraftRestoreSuppression(sid, ownerProfile);" in save_body
     now_body = _block(SESSIONS_JS, "function _saveComposerDraftNow(sid, text, files)", "// Restore composer draft")
-    assert "_clearComposerDraftRestoreSuppression(sid);" in now_body
+    assert "_clearComposerDraftRestoreSuppression(sid, ownerProfile);" in now_body
 
 
 def test_restore_skips_suppressed_non_empty_server_draft_only():
@@ -137,3 +141,103 @@ def test_file_signature_survives_server_draft_round_trip():
     assert out["differsFromOther"] is True, (
         "a genuinely different draft must NOT collide with the sent signature"
     )
+
+
+def test_started_draft_save_finishes_before_submitted_clear_is_sent():
+    """A save POST already in flight must finish before the clear POST starts."""
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    draft_block = _block(
+        SESSIONS_JS,
+        "const _draftSaveTimersByOwner = new Map();",
+        "// Command results are persisted by /api/commands/exec in the owning session.",
+    )
+    harness = textwrap.dedent(
+        """
+        const scheduled = new Map();
+        let nextTimer = 1;
+        function setTimeout(fn){ const id=nextTimer++; scheduled.set(id,fn); return id; }
+        function clearTimeout(id){ scheduled.delete(id); }
+        const localStorage = {getItem(){return null;},setItem(){},removeItem(){}};
+        const S = {activeProfile:'default',session:{session_id:'sid-A',composer_draft:{text:'',files:[]}}};
+        const requests=[];
+        const resolvers=[];
+        function api(_path, opts){
+          requests.push(JSON.parse(opts.body));
+          return new Promise((resolve)=>resolvers.push(resolve));
+        }
+        %(draft_block)s
+
+        (async()=>{
+          _saveComposerDraft('sid-A','/memory pending',[]);
+          const timer=[...scheduled.values()][0];
+          scheduled.clear();
+          timer();
+          await Promise.resolve();
+          _clearComposerDraft('sid-A','/memory pending',[]);
+          await Promise.resolve();
+          const beforeFirstSettles=requests.map(x=>x.text);
+          resolvers.shift()({ok:true});
+          await new Promise((resolve)=>setImmediate(resolve));
+          const afterFirstSettles=requests.map(x=>x.text);
+          const clearPayload=requests[1];
+          if(resolvers.length) resolvers.shift()({ok:true});
+          await Promise.resolve(); await Promise.resolve();
+          console.log(JSON.stringify({beforeFirstSettles,afterFirstSettles,clearPayload}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"draft_block": draft_block}
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["beforeFirstSettles"] == ["/memory pending"]
+    assert out["afterFirstSettles"] == ["/memory pending", ""]
+    assert out["clearPayload"]["files"] == []
+    assert out["clearPayload"]["profile"] == "default"
+
+
+def test_queued_draft_write_fails_closed_after_profile_switch():
+    """A delayed profile-A draft must never be sent using profile B's cookie."""
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    draft_block = _block(
+        SESSIONS_JS,
+        "const _draftSaveTimersByOwner = new Map();",
+        "// Command results are persisted by /api/commands/exec in the owning session.",
+    )
+    harness = textwrap.dedent(
+        """
+        const scheduled=[];
+        function setTimeout(fn){scheduled.push(fn);return scheduled.length;}
+        function clearTimeout(){}
+        const localStorage={getItem(){return null;},setItem(){},removeItem(){}};
+        const S={activeProfile:'profile-A',session:{session_id:'same-id',profile:'profile-A',composer_draft:{}}};
+        let calls=0;
+        function api(){calls++;return Promise.resolve({ok:true});}
+        %(draft_block)s
+        (async()=>{
+          _saveComposerDraft('same-id','private A draft',[],'profile-A');
+          S.activeProfile='profile-B';
+          scheduled.shift()();
+          await new Promise((resolve)=>setImmediate(resolve));
+          console.log(JSON.stringify({calls}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"draft_block": draft_block}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["calls"] == 0
+
+
+def test_draft_route_rejects_stale_or_wrong_profile_owner():
+    routes = ROOT.joinpath("api", "routes.py").read_text(encoding="utf-8")
+    block = _block(routes, 'if parsed.path == "/api/session/draft":', 'if parsed.path == "/api/session/update":')
+    assert 'body.get("profile")' in block
+    assert 'not _profiles_match(requested_profile, _get_active_profile_name())' in block
+    assert 'not _profiles_match(getattr(s, "profile", None), requested_profile)' in block
