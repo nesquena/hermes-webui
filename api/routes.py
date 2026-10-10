@@ -16976,10 +16976,19 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
+        # Optional compare-and-clear: only write when the stored draft still equals
+        # if_text (and if_files when given), so a stale retire keeps newer drafts.
+        if_text = body.get("if_text")
+        if_files = body.get("if_files")
         unchanged = False
         with _get_session_agent_lock(sid):
             _draft_mark("acquired_lock")
             current_draft = dict(getattr(s, "composer_draft", {}) or {})
+            if isinstance(if_text, str) and (
+                str(current_draft.get("text") or "") != if_text
+                or (isinstance(if_files, list) and list(current_draft.get("files") or []) != if_files)
+            ):
+                return j(handler, {"ok": True, "draft": current_draft, "unchanged": True, "mismatch": True})
             next_draft = dict(current_draft)
             if text is not None:
                 next_draft["text"] = text

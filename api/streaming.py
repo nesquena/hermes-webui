@@ -15984,6 +15984,31 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
         return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
 
 
+def _deliver_gateway_steer(sid: str, result: dict, text: str) -> dict:
+    """Forward a Gateway-owned steer to its run; keep the queue fallback on refusal.
+
+    Called outside registry locks: the Gateway HTTP write must never hold them.
+    """
+    if not isinstance(result, dict) or result.get("fallback") != "gateway_steer_queued":
+        return result
+    stream_id = result.get("stream_id")
+    try:
+        from api.gateway_chat import (
+            GATEWAY_STEER_ACCEPTED, GATEWAY_STEER_UNCERTAIN, steer_gateway_run, wait_for_gateway_run_id,
+        )
+
+        _, run_id = wait_for_gateway_run_id(str(stream_id or ""), 0)
+        outcome = steer_gateway_run(run_id, text) if run_id else None
+        if outcome == GATEWAY_STEER_ACCEPTED:
+            return {"accepted": True, "fallback": None, "stream_id": stream_id}
+        if outcome == GATEWAY_STEER_UNCERTAIN:
+            # Sent but unanswered: queueing could deliver it twice; the browser keeps the draft.
+            return {"accepted": False, "fallback": "gateway_steer_uncertain", "stream_id": stream_id}
+    except Exception:
+        logger.debug("Gateway steer forwarding failed for session %s", sid, exc_info=True)
+    return result
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
@@ -16031,7 +16056,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if stream_id:
         result = _steer_bound_stream(sid, stream_id, text)
         if result is not None:
-            return j(handler, result)
+            return j(handler, _deliver_gateway_steer(sid, result, text))
 
     with _cfg.SESSION_AGENT_CACHE_LOCK:
         cached = _cfg.SESSION_AGENT_CACHE.get(sid)
@@ -16051,8 +16076,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                     with _cfg.ACTIVE_RUNS_LOCK:
                         active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
                     if active_run.get("backend") == "gateway":
-                        return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
-                                           "stream_id": active_stream_id})
+                        return j(handler, _deliver_gateway_steer(sid, {
+                            "accepted": False, "fallback": "gateway_steer_queued",
+                            "stream_id": active_stream_id}, text))
                 except Exception:
                     logger.warning(
                         "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
@@ -16129,7 +16155,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                         result = {"accepted": accepted, "fallback": None,
                                   "stream_id": active_stream_id}
 
-    return j(handler, result)
+    return j(handler, _deliver_gateway_steer(sid, result, text))
 
 
 def cancel_stream(stream_id: str) -> bool:

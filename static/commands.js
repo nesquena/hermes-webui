@@ -1699,6 +1699,145 @@ async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, 
 // Keyed by ownerSid; invalidated when the staged file set changes or on accepted
 // steer (see _steerUploadCacheMatches / clearing below).
 let _steerUploadCache = null; // { sid, sig, paths }
+// Gateway steers whose outcome is unknown, by owner session, so a later
+// pending_steer_leftover carrying this submission can mark them delivered.
+// owned = the exact draft {text, files} this steer restored for its owner.
+// Several may be outstanding per session: each keeps its own record.
+const _steerUncertainBySid = new Map(); // sid -> Set<{ text, delivered, settled, ended, owned, rev }>
+// Steers the Gateway accepted for the owner's current run. A leftover joins
+// pending submissions with "\n", so these claim their lines before an uncertain
+// steer may match (an accepted steer's lines are not proof for another one).
+const _steerAcceptedBySid = new Map(); // sid -> [text]
+// Owned drafts whose compare-and-clear is still in flight; never restore them.
+const _steerRetiringBySid = new Map(); // sid -> { text, files }
+
+function _steerOwnedPayloadMatches(owned, text, files){
+  if(!owned)return false;
+  if(typeof _composerDraftPayloadSignature!=='function')return false;
+  return _composerDraftPayloadSignature(text,files)===_composerDraftPayloadSignature(owned.text,owned.files);
+}
+
+// True only for the exact retiring payload (text AND files): a newer draft with
+// the same text but other attachments is not owned by the retiring steer.
+// A draft saved after retirement began (revision bump) is newer, never retiring.
+function _steerDraftIsRetiring(sid, text, files){
+  const owned=_steerRetiringBySid.get(sid);
+  return !!owned&&owned.rev===_steerDraftRevision(sid)&&_steerOwnedPayloadMatches(owned,text,files);
+}
+
+function _steerUncertainDrop(sid, entry){
+  const set=_steerUncertainBySid.get(sid);
+  if(!set||!set.delete(entry))return false;
+  if(!set.size)_steerUncertainBySid.delete(sid);
+  return true;
+}
+
+function _steerLines(text){
+  return String(text||'').trim().split('\n').map(x=>x.trim());
+}
+
+// The Agent joins its unconsumed steers with "\n", so a leftover is a sequence
+// of whole submitted bodies (each at most once; accepted ones may already have
+// been consumed) plus text this tab never sent. Explain the leftover with the
+// fewest unexplained lines over every such split: text was delivered only if
+// every best split uses it. Any equally good split without it (an interior or
+// prefix of an accepted body, two accepted steers spelling it) keeps recovery.
+const _STEER_MATCH_MAX_BODIES = 12;
+function _steerLeftoverContains(leftover, text, others){
+  const lines=_steerLines(leftover);
+  const want=_steerLines(text);
+  const bodies=[want].concat((Array.isArray(others)?others:[]).slice(-_STEER_MATCH_MAX_BODIES).map(_steerLines));
+  const memo=new Map();
+  const best=(pos,used,withWant)=>{
+    if(pos>=lines.length)return 0;
+    const key=withWant+'|'+pos+'|'+used;
+    if(memo.has(key))return memo.get(key);
+    let m=1+best(pos+1,used,withWant);
+    for(let i=withWant?0:1;i<bodies.length;i++){
+      const b=bodies[i];
+      if(used&(1<<i)||pos+b.length>lines.length)continue;
+      if(b.every((w,j)=>lines[pos+j]===w))m=Math.min(m,best(pos+b.length,used|(1<<i),withWant));
+    }
+    memo.set(key,m);
+    return m;
+  };
+  return best(0,0,1)<best(0,0,0);
+}
+
+function _steerDraftRevision(sid){
+  return typeof _composerDraftRevision==='function'?_composerDraftRevision(sid):0;
+}
+
+// The owner's run ended (done/cancel/apperror): any leftover was emitted before
+// this, so an undelivered settled record can never reconcile. Drop it.
+function _steerSettleTerminal(sid){
+  _steerAcceptedBySid.delete(sid);
+  for(const entry of [...(_steerUncertainBySid.get(sid)||[])]){
+    if(entry.settled)_steerUncertainDrop(sid,entry);
+    else entry.ended=true;
+  }
+}
+
+// Retire only the draft this steer restored: the visible composer when it still
+// shows exactly that payload (text and staged files), and the owner's saved
+// draft via compare-and-clear. Newer text/files and other sessions' composers
+// are left alone.
+function _steerClearVisibleOwned(sid, owned){
+  if(!_steerOwnerIsCurrent(sid))return;
+  const inp=$('msg');
+  const staged=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?S.pendingFiles:[];
+  if(inp&&owned.rev===_steerDraftRevision(sid)&&_steerOwnedPayloadMatches(owned,inp.value,staged)){
+    inp.value='';
+    if(typeof _noteComposerDraftPayload==='function')_noteComposerDraftPayload(sid,'',[]);
+    if(typeof autoResize==='function')autoResize();
+    if(staged.length){
+      S.pendingFiles=[];
+      if(typeof renderTray==='function')renderTray();
+    }
+  }
+  const bar=document.getElementById('msgInner');
+  const rec=bar&&bar.querySelector('.steer-recovery');
+  if(rec)rec.remove();
+}
+
+// owned.rev is the draft revision the recovery restored; a draft saved since
+// then (even an identical retype) is newer and is never cleared or cancelled.
+function _steerRetireOwnedDraft(sid, owned){
+  if(!owned)return Promise.resolve();
+  const retiring={text:owned.text,files:owned.files,rev:owned.rev};
+  if(retiring.rev!==_steerDraftRevision(sid)){
+    _steerClearVisibleOwned(sid,retiring);  // removes only the recovery chip
+    return Promise.resolve();
+  }
+  _steerRetiringBySid.set(sid,retiring);
+  _steerClearVisibleOwned(sid,retiring);
+  const settle=cleared=>{
+    if(_steerRetiringBySid.get(sid)!==retiring)return;
+    _steerRetiringBySid.delete(sid);
+    // Server removed exactly this payload: drop it from view if it was shown
+    // meanwhile; a mismatch means a newer draft won and stays visible.
+    if(cleared===true&&retiring.rev===_steerDraftRevision(sid))_steerClearVisibleOwned(sid,retiring);
+  };
+  const clear=typeof _clearComposerDraftIfUnchanged==='function'?_clearComposerDraftIfUnchanged(sid,owned.text,owned.files,retiring.rev):null;
+  return Promise.resolve(clear).then(settle,()=>settle(false));
+}
+
+// Called by the pending_steer_leftover handler. A leftover matching an in-flight
+// or uncertain steer means it was delivered. Before the response: mark it so the
+// response settles. After the response: retire the restored draft and settle.
+function _steerReconcileLeftover(sid, text){
+  const entries=[...(_steerUncertainBySid.get(sid)||[])];
+  const accepted=_steerAcceptedBySid.get(sid)||[];
+  const proven=entries.filter(entry=>_steerLeftoverContains(text,entry.text,
+    accepted.concat(entries.filter(o=>o!==entry).map(o=>o.text))));
+  for(const entry of proven){
+    entry.delivered=true;
+    if(!entry.settled)continue;
+    _steerUncertainDrop(sid,entry);
+    _steerRetireOwnedDraft(sid,entry.owned);
+  }
+  return proven.length>0;
+}
 function _steerFilesSignature(files){
   try{
     return (Array.isArray(files)?files:[]).map(f=>f&&(f.name+':'+(f.size||0)+':'+(f.lastModified||0))).join('|');
@@ -1777,6 +1916,9 @@ async function _trySteer(msg, explicitSteer){
     showToast(t('cmd_steer_no_msg'));
     return false;
   }
+  const inflight={text:steerText,delivered:false,settled:false,ended:false,owned:null,rev:_steerDraftRevision(ownerSid)};
+  if(!_steerUncertainBySid.has(ownerSid))_steerUncertainBySid.set(ownerSid,new Set());
+  _steerUncertainBySid.get(ownerSid).add(inflight);
   try{
     result=await api('/api/chat/steer',{
       method:'POST',
@@ -1786,11 +1928,33 @@ async function _trySteer(msg, explicitSteer){
     // Network or server error — keep the active stream running and restore the draft.
     result={accepted:false, fallback:'network_error'};
   }
+  const uncertain=!!(result&&result.fallback==='gateway_steer_uncertain');
+  if(!uncertain)_steerUncertainDrop(ownerSid,inflight);
+  if(uncertain&&inflight.delivered){
+    // The Gateway already handed this text back as a queued leftover: it was
+    // delivered. Nothing was restored; clear the saved draft only if it is still
+    // the submitted text, so a draft typed during the await survives.
+    _steerUncertainDrop(ownerSid,inflight);
+    _steerUploadCache=null;
+    if(_steerDraftRevision(ownerSid)===inflight.rev){
+      // No draft saved since submit: clear like an accepted steer (also drops a
+      // debounced prefix of the submitted text).
+      if(typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+    }else{
+      _steerRetireOwnedDraft(ownerSid,{text:_steerRestoreText(originalMsg,explicitSteer),files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)});
+    }
+    return true;
+  }
   if(result&&result.accepted){
     // The captured files+text were delivered to ownerSid — clear that session's
     // draft (it may not be the live session anymore if the user switched during
     // the upload/API await, which is fine: we're clearing the OWNER's draft).
     _steerUploadCache=null; // delivered — invalidate the retry cache
+    if(ownerSid){
+      const acc=_steerAcceptedBySid.get(ownerSid)||[];
+      acc.push(steerText);
+      _steerAcceptedBySid.set(ownerSid,acc);
+    }
     if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
     // Show a transient steer indicator in the chat (NOT in S.messages — it must
     // survive the done event's S.messages=d.session.messages replacement).
@@ -1835,15 +1999,29 @@ async function _trySteer(msg, explicitSteer){
   const fallbackCode = result && result.fallback;
   const deadRunFallback = _steerFallbackIsDeadRun(fallbackCode);
   const applyCurrentFailure = !deadRunFallback||_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId);
+  const restoreText=_steerRestoreText(originalMsg,explicitSteer);
+  // A draft saved or typed during the request is newer than the steer: keep it.
+  let restored=_steerDraftRevision(ownerSid)===inflight.rev;
   if(_steerOwnerIsCurrent(ownerSid)&&applyCurrentFailure){
     const inp=$('msg');
-    if(inp){
-      inp.value=_steerRestoreText(originalMsg,explicitSteer);
+    if(inp&&inp.value&&inp.value!==restoreText)restored=false;
+    if(inp&&restored){
+      inp.value=restoreText;
+      if(typeof _noteComposerDraftPayload==='function')_noteComposerDraftPayload(ownerSid,restoreText,pendingFilesSnapshot);
       if(typeof autoResize==='function')autoResize();
     }
     if(typeof renderTray==='function')renderTray();
-  }else{
+  }else if(restored){
     await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+  }
+  if(uncertain){
+    // rev identifies the restored draft itself; later saves are newer drafts.
+    inflight.owned=restored?{text:restoreText,files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)}:null;
+    inflight.settled=true;
+    // A leftover or run end may have arrived during the draft persist above.
+    if((inflight.delivered||inflight.ended)&&_steerUncertainDrop(ownerSid,inflight)){
+      if(inflight.delivered)_steerRetireOwnedDraft(ownerSid,inflight.owned);
+    }
   }
   const clearedDeadRun=deadRunFallback&&_steerClearCurrentOwnerDeadRun(ownerSid,ownerStreamId);
   if(!deadRunFallback||applyCurrentFailure)showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
