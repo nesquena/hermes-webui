@@ -1936,18 +1936,12 @@ def get_profile_cookie(handler) -> str | None:
     impersonate another profile. In no-auth deployments, keep the historical
     plain profile-name cookie behavior.
     """
-    cookie_header = handler.headers.get('Cookie', '')
-    if not cookie_header:
-        return None
-    import http.cookies as _hc
-    cookie = _hc.SimpleCookie()
-    try:
-        cookie.load(cookie_header)
-    except _hc.CookieError:
-        return None
-    cookie_name = get_profile_cookie_name()
-    morsel = cookie.get(cookie_name)
-    if not (morsel and morsel.value):
+    # Same tolerant read as the auth cookie: a foreign cookie on a shared host/domain must
+    # not hide this one, or a profile switch silently does not stick (see read_cookie).
+    from api.auth import read_cookie
+
+    raw_val = read_cookie(handler, get_profile_cookie_name())
+    if not raw_val:
         return None
 
     from api.profiles import _PROFILE_ID_RE
@@ -1955,7 +1949,6 @@ def get_profile_cookie(handler) -> str | None:
     def _valid_profile_name(val: str) -> bool:
         return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
 
-    raw_val = morsel.value
     try:
         from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
         if is_auth_enabled():
