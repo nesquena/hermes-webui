@@ -135,6 +135,13 @@
 
 ### Fixed
 
+- **New chats answer faster: the session ID no longer breaks the model's prompt cache.** Every new chat put its own
+  session ID near the end of the system prompt, so no two chats ever shared a cacheable prompt and the model had to
+  re-read it from that line on each time (on a local backend the reporter saw 15-18 s first responses drop to 2-3 s).
+  The ID is now left out by default, matching hermes-agent's own `pass_session_id`. Set `webui.pass_session_id: true`
+  in config.yaml to include it again; it is then added last, so everything before it stays shareable. Thanks @ybai08,
+  and @apakuts for the report. (#8150, fixes #8148)
+
 - **Asking another profile's conversation to change no longer rewrites it before the refusal.** When a request
   targeted a conversation owned by another profile (such as archive or pin), the ownership check loaded the
   conversation through the full repair path first, so a refused request could still collapse duplicate partial files
