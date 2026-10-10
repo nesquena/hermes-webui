@@ -354,6 +354,16 @@ _CHAT_NOUNS = {
 
 _I18N_LOCALES = tuple(_CHAT_NOUNS)
 
+# The default-workspace TOOLTIP is a full sentence, so a locale can need the
+# inflected form of its chat noun (ru genitive "чатов", tr plural "sohbetler",
+# pl genitive "czatów"). This pins the exact form the shipped title must carry;
+# every other locale uses its chat noun unchanged.
+_TITLE_CHAT_NOUNS = {
+    "ru": "чатов",
+    "tr": "sohbetler",
+    "pl": "czatów",
+}
+
 
 def _locale_chunks(src: str):
     out = {}
@@ -382,10 +392,13 @@ def test_the_dialog_uses_one_noun_for_chats():
     en = _locale_chunks(_read_static("i18n.js"))["en"]
     label = _locale_value(en, "pb_auto_assign_label")
     hint = _locale_value(en, "pb_auto_assign_hint")
+    title = _locale_value(en, "pb_set_default_title")
     assert "sessions" not in label, label
     assert "sessions" not in hint, hint
+    assert "sessions" not in title, title
     assert "chats" in label, label
     assert "chats" in hint, hint
+    assert "chats" in title, title
     assert "chats" in _locale_value(en, "pb_auto_assign_confirm")
     assert "chats" in _locale_value(en, "pb_auto_assign_confirm_btn")
 
@@ -396,11 +409,21 @@ def test_every_locale_speaks_the_sidebar_noun():
         chunk = chunks[loc]
         label = _locale_value(chunk, "pb_auto_assign_label")
         hint = _locale_value(chunk, "pb_auto_assign_hint")
-        for value, key in ((label, "pb_auto_assign_label"), (hint, "pb_auto_assign_hint")):
+        # The default-workspace tooltip is user-visible text too: it kept saying
+        # the locale's "sessions" word in 12 locales (maintainer LOW,
+        # 2026-10-09T23:55:01Z), so it is asserted with the label and the hint.
+        title = _locale_value(chunk, "pb_set_default_title")
+        title_noun = _TITLE_CHAT_NOUNS.get(loc, chat_word)
+        for value, key in (
+            (label, "pb_auto_assign_label"),
+            (hint, "pb_auto_assign_hint"),
+            (title, "pb_set_default_title"),
+        ):
             if session_word is not None:
                 assert session_word.lower() not in value.lower(), (
                     f"locale {loc!r} {key} still uses {session_word!r}: {value}"
                 )
-            assert chat_word.lower() in value.lower(), (
-                f"locale {loc!r} {key} must use {chat_word!r}: {value}"
+            noun = title_noun if key == "pb_set_default_title" else chat_word
+            assert noun.lower() in value.lower(), (
+                f"locale {loc!r} {key} must use {noun!r}: {value}"
             )

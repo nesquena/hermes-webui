@@ -368,44 +368,48 @@ assert(menu.classList.contains('open'), 'ArrowDown on a closed combo must open t
 
 // The reported bug: with the menu OPEN, the first branch ate ArrowDown and the
 // later "menu is open" branch never ran, so the highlight could not move.
+// Flipped by the maintainer SHOULD-FIX of 2026-10-09T23:55:01Z: an arrow moves
+// the HIGHLIGHT and must not commit — committing is Enter/Space's job.
 key('ArrowDown');
-assert(combo.getValue() === 'c',
-  'ArrowDown with the menu open must move to the next option, got ' + combo.getValue());
-assert(!menu.classList.contains('open'), 'choosing an option closes the menu');
+assert(combo.getValue() === 'b',
+  'ArrowDown with the menu open must not commit, got ' + combo.getValue());
+assert(menu.classList.contains('open'), 'ArrowDown must leave the menu open');
+assert(menu.querySelectorAll('.ws-opt').find((r) => r.classList.contains('active'))
+  .children[0].textContent === 'C', 'ArrowDown must highlight the next option');
 
-// Ensure the move wraps rather than dead-ending.
-key('ArrowDown');            // reopen (value 'c')
-key('ArrowDown');            // c -> a (wraps)
-assert(combo.getValue() === 'a', 'ArrowDown must wrap around the option list, got ' + combo.getValue());
-
-key('ArrowDown');            // reopen (value 'a')
-key('ArrowUp');
-assert(combo.getValue() === 'c', 'ArrowUp must wrap backwards, got ' + combo.getValue());
-
-// Enter/Space must CONFIRM the highlighted row instead of being swallowed.
-key('ArrowDown');            // reopen
-assert(menu.classList.contains('open'), 'the menu reopened');
+// A move wraps rather than dead-ending; Enter then commits the highlight.
+key('ArrowDown');            // C -> A (wraps)
 const prevented = key('Enter');
 assert(prevented === true, 'Enter must be consumed by the combobox');
-assert(!menu.classList.contains('open'),
-  'Enter must confirm the highlighted option and close the menu');
-assert(combo.getValue() === 'c', 'Enter keeps the highlighted value, got ' + combo.getValue());
+assert(combo.getValue() === 'a', 'Enter must commit the highlighted option, got ' + combo.getValue());
+assert(!menu.classList.contains('open'), 'committing closes the menu');
 
-key('ArrowDown');            // reopen
+// ArrowUp wraps backwards too.
+key('ArrowDown');            // reopen (value 'a')
+key('ArrowUp');
+assert(combo.getValue() === 'a', 'ArrowUp must not commit either');
+key('Enter');
+assert(combo.getValue() === 'c', 'ArrowUp must wrap backwards, got ' + combo.getValue());
+
+// Space confirms like Enter.
+key('ArrowDown');            // reopen (value 'c')
+key('ArrowUp');              // c -> b
 key(' ');
 assert(!menu.classList.contains('open'), 'Space must confirm like Enter');
+assert(combo.getValue() === 'b', 'Space keeps the highlighted value, got ' + combo.getValue());
 
 // Escape still closes without choosing.
-key('ArrowDown');
+key('ArrowDown');            // reopen (value 'b')
 key('Escape');
 assert(!menu.classList.contains('open'), 'Escape closes the dropdown');
+assert(combo.getValue() === 'b', 'Escape must not commit, got ' + combo.getValue());
 console.log('ok');
 """
 )
 
 
-def test_combobox_keyboard_navigation_moves_and_confirms(tmp_path):
-    """Greptile P2: ArrowDown/Enter must work while the dropdown is open."""
+def test_combobox_keyboard_navigation_moves_the_highlight_and_commits(tmp_path):
+    """Greptile P2 + maintainer SHOULD-FIX: arrows highlight, Enter commits."""
     assert _run_node(tmp_path, "combo_keys.js", _KEYBOARD_PROBE).strip().endswith("ok")
 
 

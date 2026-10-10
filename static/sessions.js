@@ -2057,7 +2057,14 @@ async function newSession(flash, options={}){
     if(options&&Object.prototype.hasOwnProperty.call(options,'worktree')) reqBody.worktree=!!options.worktree;
     if(Object.prototype.hasOwnProperty.call(options,'project_id')){
       reqBody.project_id=options.project_id;
-    } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
+    } else if(_activeProject===NO_PROJECT_FILTER){
+      // The sidebar's "No project" view: send an EXPLICIT null. The server
+      // treats an absent field as "opt into auto-assignment", so omitting it
+      // filed the new chat under an auto-assigned project and then hid it from
+      // the unassigned-only list that created it (maintainer re-gate
+      // 2026-10-09T23:55:01Z). null is the "no project" the server preserves.
+      reqBody.project_id=null;
+    } else if(_activeProject){
       reqBody.project_id=_activeProject;
     }
     // Forward a pre-session toolset override only from the empty composer (#4490).
@@ -10771,6 +10778,30 @@ function _makeBindingsCombo(o){
     trigger.classList.add('open');
     trigger.setAttribute('aria-expanded','true');
   }
+  // Move the keyboard highlight over the CURRENTLY RENDERED rows (the filter
+  // runs per open, and the add list both hides bound paths and prepends the
+  // "Type a path…" entry, so the highlight is tracked on the DOM — the same
+  // place the rendered 'active' class lives). Nothing is committed here:
+  // committing is Enter/Space's job.
+  function _setHighlight(row){
+    const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+    rows.forEach(r=>{
+      const on=(r===row);
+      r.classList.toggle('active',on);
+      r.setAttribute('aria-selected',String(on));
+    });
+  }
+  function _moveHighlight(delta){
+    const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+    if(!rows.length) return null;
+    const idx=rows.findIndex(r=>r.classList.contains('active'));
+    const next=delta>0
+      ?(idx<0?0:(idx+1)%rows.length)
+      :(idx<=0?rows.length-1:idx-1);
+    const row=rows[next]||null;
+    if(row){_setHighlight(row);}
+    return row;
+  }
   trigger.onclick=(e)=>{
     e.stopPropagation();
     if(menu.classList.contains('open')){_close();}else{_open();}
@@ -10782,7 +10813,9 @@ function _makeBindingsCombo(o){
     // preventDefault()ed without ever choosing the highlighted row, so the
     // usual open -> arrow -> Enter flow could not pick a model or workspace
     // (Greptile P2 2026-10-09T21:47:48Z). Opening the menu and moving/choosing
-    // inside it are now separate branches.
+    // inside it are now separate branches; inside the open menu the arrows move
+    // the highlight only and Enter/Space commits it (maintainer SHOULD-FIX
+    // 2026-10-09T23:55:01Z).
     if(!menu.classList.contains('open')){
       if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
         e.preventDefault();
@@ -10792,21 +10825,19 @@ function _makeBindingsCombo(o){
     }
     if(e.key==='Escape'){e.preventDefault();_close();return;}
     if(e.key==='ArrowDown'||e.key==='ArrowUp'){
-      // Move through the rendered options: the current value carries 'active',
-      // so the first press lands on the next/previous real row.
+      // Move the HIGHLIGHT only — never the value. Committing on the arrow
+      // press closed the menu on the first keystroke, which on the add list
+      // (whose first row is "Type a path…") meant open -> ArrowDown opened the
+      // path prompt, and a saved workspace was reachable only by wrapping
+      // ArrowUp from the end. Enter/Space is what commits now
+      // (maintainer SHOULD-FIX 2026-10-09T23:55:01Z).
       e.preventDefault();
-      const rows=Array.from(menu.querySelectorAll('.ws-opt'));
-      if(!rows.length) return;
-      const idx=rows.findIndex(r=>r.classList.contains('active'));
-      const next=e.key==='ArrowDown'
-        ?(idx<0?0:(idx+1)%rows.length)
-        :(idx<=0?rows.length-1:idx-1);
-      if(rows[next]){rows[next].click();}
+      _moveHighlight(e.key==='ArrowDown'?1:-1);
       return;
     }
     if(e.key==='Enter'||e.key===' '){
-      // Confirm the highlighted row (falling back to the first one) instead of
-      // swallowing the key.
+      // Confirm the row the arrows highlighted (falling back to the first one)
+      // instead of swallowing the key.
       e.preventDefault();
       const rows=Array.from(menu.querySelectorAll('.ws-opt'));
       const idx=rows.findIndex(r=>r.classList.contains('active'));

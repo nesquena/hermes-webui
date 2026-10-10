@@ -17022,8 +17022,19 @@ def handle_post(handler, parsed) -> bool:
                 enabled_toolsets=enabled_toolsets,
             )
 
+        # Explicit ``project_id: null`` means "no project" and must round-trip:
+        # only an ABSENT field opts into auto-assignment. Master's handler
+        # preserves null, so null-with-a-workspace already means "unassigned"
+        # everywhere else; treating null like an omission filed a New Chat
+        # started from the "No project" sidebar view into an auto-assigned
+        # project, which then hid it from the very view that created it
+        # (maintainer re-gate 2026-10-09T23:55:01Z). '' keeps master's meaning
+        # (falsy → unassigned) rather than becoming an auto-assign trigger.
+        _project_id_supplied = "project_id" in body
         project_id = body.get("project_id") or None
-        if not project_id and workspace:
+        if _project_id_supplied:
+            s = _create_session(project_id)
+        elif workspace:
             # Serialize the implicit assignment WITH the session's publication
             # into the cache, under the same lock /api/projects/delete takes to
             # remove the catalog row and to clear the cached sessions that
@@ -19254,6 +19265,43 @@ def handle_post(handler, parsed) -> bool:
                     continue
                 if _field in body:
                     _preflight.append(body.get(_field))
+            # The default-only path (``default_workspace`` without
+            # ``workspaces``) re-resolves the project's STORED workspace list,
+            # because the default is auto-added to it. Those stored paths are
+            # validated AFTER the field blocks are allowed to run — and the
+            # candidate's own resolve has by then already registered it — so a
+            # stored path that has since been removed from disk made the second
+            # resolve raise on a binding that was never saved. That is exactly
+            # the partial write this pre-flight exists to prevent, and it made
+            # the "the field blocks cannot fail after this pass" comment above
+            # false on this path (maintainer SHOULD-FIX 2026-10-09T23:55:01Z).
+            # Pre-flight those stored paths too, but ONLY when the second
+            # resolve can actually run: an already-bound default short-circuits
+            # before it, so extending the list there would reject a request that
+            # is saved successfully today.
+            if "default_workspace" in body and "workspaces" not in body:
+                _dw_pre = body.get("default_workspace")
+                if _dw_pre is not None and str(_dw_pre).strip() != "":
+                    _dw_pre_str = str(_dw_pre).strip()
+                    _stored_ws = _project_workspaces(proj)
+                    # "Already stored" is judged on the path itself, not through
+                    # the strict trust gate: an outside-home default that the
+                    # field block will re-register is trusted only AFTER that
+                    # registration, so resolving it here can raise even though
+                    # the stored list already carries it. The lenient validator
+                    # (same one _resolve_ws_list runs first) plus the strict form
+                    # when it is available cover both shapes.
+                    _dw_forms = set()
+                    for _probe in (
+                        lambda: validate_workspace_to_add(_dw_pre_str),
+                        lambda: resolve_trusted_workspace(_dw_pre_str),
+                    ):
+                        try:
+                            _dw_forms.add(str(_probe()))
+                        except (TypeError, ValueError):
+                            pass
+                    if not (_dw_forms & set(_stored_ws)):
+                        _preflight.extend(_stored_ws)
             for _cand in _preflight:
                 if _cand is None or str(_cand).strip() == "":
                     continue
