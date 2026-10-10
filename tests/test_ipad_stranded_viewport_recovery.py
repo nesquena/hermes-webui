@@ -599,3 +599,164 @@ console.log(JSON.stringify(verdict));
     result = json.loads(_run_node_vm(source))
     assert result["stranded"] is False, \
         f"Rows visible in the viewport must NOT strand, got {result}"
+
+
+@_node_tests
+def test_append_setup_re_arms_stranded_recovery_after_background_repaint():
+    """Re-gate CORE finding 1: a background repaint (session-updated SSE,
+    focus refresh, poll apply) between a stranding scroll and its recovery
+    timer runs through _setupTouchSentinel, whose _invalidateTouchRender
+    CANCELS the armed repair while preserving the deep window [140,200) —
+    and _scheduleContinuousBatch schedules nothing because the stranded
+    viewport is near neither batch boundary. The setup path must re-assess
+    stranding so the repaint cannot leave the sidebar permanently blank.
+    Reproduced in Chromium: 200 sessions, jump to scrollTop=0, repaint 1.2s
+    later → zero rows visible forever without this hook."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + """
+function extractFunc(name) {
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = SESSIONS_JS.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = SESSIONS_JS.indexOf('{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < SESSIONS_JS.length) {
+    if (SESSIONS_JS[i] === '{') depth++;
+    else if (SESSIONS_JS[i] === '}') depth--;
+    i++;
+  }
+  return SESSIONS_JS.slice(start, i);
+}
+
+const timers = [];
+const sandboxSetTimeout = function(fn, ms) {
+  timers.push({fn, cancelled: false});
+  return timers.length;
+};
+const sandboxClearTimeout = function(id) {
+  if (timers[id - 1]) timers[id - 1].cancelled = true;
+};
+
+const SESSION_LIST_TOUCH_INTERACTION_IDLE_MS = 1200;
+const SESSION_TOUCH_INITIAL_BATCH = 60;
+const SESSION_TOUCH_BATCH_SIZE = 40;
+const SESSION_VIRTUAL_ROW_HEIGHT = 52;
+const SESSION_VIRTUAL_BUFFER_ROWS = 8;
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+let _sessionTouchGen = 1;
+let _sessionTouchStartIndex = 140;   // deep-active window preserved by repaint
+let _sessionTouchLoadedCount = 200;
+let _sessionTouchTotalCount = 200;
+let _sessionTouchListEl = null;
+let _touchRenderState = null;
+let _touchBatchPending = false;
+let _touchContinuousBatchOwner = null;
+let _strandedTouchRecoveryTimer = 0;
+let _touchSentinelObserver = null;
+let _sessionListLastScrollAt = 0;
+let _pointerActive = false;
+let renderCalls = [];
+let renderOptsLog = [];
+
+function _isTouchPrimary() { return true; }
+function _isSessionListTouchScrolling() { return false; }
+
+function makeSentinel(display) {
+  return {style: {display: display}, getBoundingClientRect() {
+    return {top: 1200, bottom: 1240, left: 0, right: 300, width: 300, height: 40};
+  }};
+}
+// Repaint-outcome list: the deep window survived, so the rendered rows sit
+// FAR below the viewport (scrollTop=0 shows nothing).
+const list = {
+  scrollTop: 0,
+  clientHeight: 600,
+  getBoundingClientRect() {
+    return {top: 0, bottom: 600, left: 0, right: 300, width: 300, height: 600};
+  },
+  querySelector(sel) {
+    if (sel === '[data-touch-sentinel-top]') return makeSentinel('none');
+    if (sel === '[data-touch-sentinel]') return makeSentinel('none');
+    return null;
+  },
+  querySelectorAll(sel) {
+    if (sel === '.session-item[data-sid]') {
+      return Array.from({length: 60}, (_, i) => ({getBoundingClientRect() {
+        return {top: 1106 + i*40, bottom: 1106 + i*40 + 40, left: 0, right: 300, width: 300, height: 40};
+      }}));
+    }
+    if (sel === '.session-date-group') return [];
+    return [];
+  },
+  addEventListener() {},
+  removeEventListener() {},
+  appendChild() {},
+  insertBefore() {},
+};
+
+const setupFn = extractFunc('_setupTouchSentinel')
+  // Neuter the touch-exit block ENTIRELY (guard AND its return): replacing
+  // only the guard with an always-true condition would leave the block's
+  // `return;` executing on every call — the function would exit at line 2.
+  .replace("if(!list||!_isTouchPrimary()){", "if(false){")
+  .replace('_invalidateTouchRender();', '_invalidateTouchRender && _invalidateTouchRender();')
+  .replace('if(_touchSentinelObserver||_touchRenderState||_touchScrollOwner||_touchBatchPending||_sessionTouchListEl){', 'if(false){');
+eval(setupFn);
+const bndStart = extractFunc('_touchStartBoundaryNearViewport');
+const bndLoaded = extractFunc('_touchLoadedBoundaryNearViewport');
+eval(bndStart);
+eval(bndLoaded);
+eval(extractFunc('_touchNextBatchDirection'));
+eval(extractFunc('_sentinelIntersectsViewport'));
+eval(extractFunc('_touchViewportStranding'));
+const _origSetTimeout = globalThis.setTimeout;
+const _origClearTimeout = globalThis.clearTimeout;
+globalThis.setTimeout = sandboxSetTimeout;
+globalThis.clearTimeout = sandboxClearTimeout;
+eval(extractFunc('_recoverStrandedTouchViewport').replace(
+  'renderSessionListFromCache({force:true});',
+  'renderCalls.push({start:_sessionTouchStartIndex, loaded:_sessionTouchLoadedCount}); renderOptsLog.push("force");'
+));
+function _invalidateTouchRender() {}
+function _ensureTouchSentinelObserver() {}
+function _scheduleContinuousBatch() {}
+function _touchIntervalState(total, startIndex, endIndex) {
+  const tt=Math.max(0, Number(total)||0);
+  const st=Math.min(tt, Math.max(0, Number(startIndex)||0));
+  const en=Math.min(tt, Math.max(st, Number(endIndex)||0));
+  return {start:st, end:en, total:tt, complete:st===0&&en===tt};
+}
+const _touchBatchToken = 0;
+const requestAnimationFrame = function() { return 0; };
+function t(key) { return key; }
+const document = {createElement: () => ({
+  style: {}, className: '', setAttribute() {},
+  querySelector: () => null, appendChild() {},
+})};
+
+_sessionTouchListEl = list;
+_touchRenderState = {gen: _sessionTouchGen, list: list, flatRows: new Array(200), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
+list.scrollTop = 0;
+
+// The background repaint: setup runs with the stranded deep window live.
+_setupTouchSentinel(list, 200, new Array(200), () => null, null, 200, 140);
+
+const armedCount = timers.filter(t => !t.cancelled).length;
+// Fire the re-armed repair synchronously.
+_sessionListLastScrollAt = 0;
+for (const tm of timers) {
+  if (!tm.cancelled) { tm.cancelled = true; tm.fn(); }
+}
+
+console.log(JSON.stringify({armedCount, renderCalls, renderOptsLog}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["armedCount"] == 1, \
+        (f"Background repaint over a stranded viewport must re-arm recovery, "
+         f"got {result}")
+    assert len(result["renderCalls"]) == 1, \
+        f"Re-armed repair must render exactly once, got {result}"
+    window = result["renderCalls"][0]
+    assert window["start"] == 0, \
+        f"Re-armed repair must re-anchor the window to the top, got {window}"

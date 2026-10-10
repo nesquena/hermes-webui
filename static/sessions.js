@@ -5730,7 +5730,7 @@ function _appendTouchBatch(){
         return; // abort without advancing state
       }
       const g=row.group;
-      const label=g.label;
+      const label=g.key||g.label;
       if(!fragmentsByGroup[label]){
         fragmentsByGroup[label]=document.createDocumentFragment();
         groupOrder.push(label);
@@ -5773,7 +5773,7 @@ function _appendTouchBatch(){
       // Carry the real group metadata (isPinned etc.) from the canonical
       // flatRows, not a hard-coded isPinned:false — the prior version
       // discarded the row group's pinned metadata.
-      const rowForMeta=state.flatRows.find(r=>r&&r.group&&r.group.label===label);
+      const rowForMeta=state.flatRows.find(r=>r&&r.group&&(r.group.key||r.group.label)===label);
       const groupMeta=rowForMeta?rowForMeta.group:{label:label};
       wrapper=_createTouchGroupWrapper(groupMeta, state);
       isNew=true;
@@ -5893,7 +5893,7 @@ function _prependTouchBatch(){
       const row=state.flatRows[i];
       if(!row||!row.session||!row.group) return;
       const g=row.group;
-      const label=g.label;
+      const label=g.key||g.label;
       if(!fragmentsByGroup[label]){
         fragmentsByGroup[label]=document.createDocumentFragment();
         groupOrder.push(label);
@@ -5917,7 +5917,7 @@ function _prependTouchBatch(){
       // whose rows are all in [targetStart, oldStart) need new wrappers.
       // Without this, the prepend silently returns and the user scrolling
       // upward sees a permanent blank gap instead of canonical rows.
-      const rowForMeta=state.flatRows.find(r=>r&&r.group&&r.group.label===label);
+      const rowForMeta=state.flatRows.find(r=>r&&r.group&&(r.group.key||r.group.label)===label);
       const groupMeta=rowForMeta?rowForMeta.group:{label:label};
       wrapper=_createTouchGroupWrapper(groupMeta, state);
       isNew=true;
@@ -5961,7 +5961,9 @@ function _prependTouchBatch(){
   if(newWrappers.length>0){
     const successorRow=state.flatRows[oldStart];
     if(successorRow&&successorRow.group){
-      const successorLabel=successorRow.group.label;
+      // #6426 re-gate CORE 2: instance-key identity, consistent with the
+      // commitTargets' `label` fields below.
+      const successorLabel=successorRow.group.key||successorRow.group.label;
       // Only treat it as a successor if it is NOT itself in the prepend
       // interval (i.e. its wrapper was not just created).
       const inPrependInterval=commitTargets.some(function(t){return t.label===successorLabel;});
@@ -6043,7 +6045,9 @@ function _updateTouchGroupSpacers(list, state, startIndex, endIndex){
   for(let i=0;i<total;i++){
     const row=state.flatRows[i];
     if(!row||!row.group) continue;
-    const label=row.group.label;
+    // #6426 re-gate CORE 2: match by group INSTANCE key — repeated date
+    // labels each own their spacer arithmetic separately.
+    const label=row.group.key||row.group.label;
     if(i<start) groupBefore[label]=(groupBefore[label]||0)+1;
     else if(i>=end) groupAfter[label]=(groupAfter[label]||0)+1;
   }
@@ -6184,7 +6188,10 @@ function _scheduleContinuousBatch(){
 function _createTouchGroupWrapper(g, state){
   const wrapper=document.createElement('div');
   wrapper.className='session-date-group';
-  wrapper.setAttribute('data-group-label',g.label);
+  // #6426 re-gate CORE 2: the DOM identity is the group INSTANCE key, not the
+  // label — repeated date labels (Yesterday/Today/Yesterday) each need their
+  // own wrapper so append/prepend/spacers land in the right instance.
+  wrapper.setAttribute('data-group-label',g.key||g.label);
   const hdr=document.createElement('div');
   hdr.className='session-date-header'+(g.isPinned?' pinned':'');
   const caret=document.createElement('span');
@@ -6382,6 +6389,17 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
   // near-boundary position, arm exactly one owner-qualified frame now. Ordinary
   // idle setup still schedules nothing because _touchNextBatchDirection() is empty.
   _scheduleContinuousBatch();
+  // #6426 re-gate CORE: a background repaint that lands between a stranding
+  // scroll and its recovery timer (session-updated SSE, focus refresh, poll
+  // apply) runs through THIS setup — _invalidateTouchRender() cancelled the
+  // armed repair, the preserved deep window [140,200) survives, and
+  // _scheduleContinuousBatch() schedules nothing (the stranded viewport is
+  // near neither batch boundary). Re-assess here so a stranding that survives
+  // the repaint re-arms recovery instead of leaving a permanently blank list.
+  // No-op when the viewport is fine: _touchViewportStranding gates every path.
+  // typeof guard: Node sandboxes extract _setupTouchSentinel without the
+  // recovery helper (same contract as every other cross-helper call here).
+  if(typeof _recoverStrandedTouchViewport==='function') _recoverStrandedTouchViewport(list);
 }
 
 function _schedulePendingSessionListApply(){
@@ -8630,7 +8648,17 @@ function _touchViewportStranding(list){
       // side means stranded.
       const prefixMissing=start>0;
       const suffixMissing=loaded<listTotal;
-      const strandedAbove=prefixMissing&&firstRect.top>=listRect.bottom;
+      // Stranded-above uses the same 200px lookahead the scroll-driven
+      // prepend checks (_touchNextBatchDirection / _touchStartBoundaryNear
+      // Viewport): a first rendered row more than one lookahead below the
+      // list top means the scroll machinery will never fire for the missing
+      // prefix — the dead band. The old no-row-touching-viewport test
+      // (firstRect.top>=listRect.bottom) missed the mostly-blank case:
+      // 65 rows at scrollTop=0 left 431px blank over 4 visible rows with no
+      // recovery (#6426 re-gate senior review, validated one-line fix).
+      // Literal 200 on purpose: the PR's Node sandboxes declare only the
+      // constants they know, so a new global would make them throw.
+      const strandedAbove=prefixMissing&&(firstRect.top-listRect.top)>200;
       const strandedBelow=suffixMissing&&lastRect.bottom<=listRect.top;
       if(strandedAbove||strandedBelow){
         // Recovery re-anchors around the projected first visible row; keep
@@ -9236,6 +9264,26 @@ function renderSessionListFromCache(){
     } else { curItems.push(s); }
   }
   if(curItems.length) groups.push({label:curLabel,items:curItems});
+  // #6426 re-gate CORE 2: repeated date labels create DISTINCT canonical group
+  // instances (e.g. "Yesterday / Today / Yesterday" when one running
+  // conversation from yesterday sorts ahead of today's rows). Every
+  // append/prepend/wrapper-lookup/spacer keyed on `label` then mutated the
+  // FIRST matching wrapper — rows landed in an earlier group, order corrupted,
+  // and SID validation reset the window (blank sidebar on master, too). The
+  // group INSTANCE key (label + occurrence index) is the identity for all
+  // incremental-DOM operations; the visible header keeps the plain label.
+  const _groupInstanceKey=(g)=>{
+    if(!g.key){
+      let occurrences=0;
+      for(const prior of groups){
+        if(prior===g) break;
+        if(prior.label===g.label) occurrences++;
+      }
+      g.key=occurrences===0?g.label:(g.label+' #'+(occurrences+1));
+    }
+    return g.key;
+  };
+  for(const g of groups){ _groupInstanceKey(g); }
   const flatSessionRows=[];
   for(const g of groups){
     if(_groupCollapsed[g.label]) continue;
@@ -9348,7 +9396,8 @@ function renderSessionListFromCache(){
   for(const g of groups){
     const wrapper=document.createElement('div');
     wrapper.className='session-date-group';
-    wrapper.setAttribute('data-group-label',g.label);
+    // #6426 re-gate CORE 2: instance-key identity (see _groupInstanceKey).
+    wrapper.setAttribute('data-group-label',g.key||g.label);
     const hdr=document.createElement('div');
     hdr.className='session-date-header'+(g.isPinned?' pinned':'');
     const caret=document.createElement('span');

@@ -35,7 +35,7 @@ def test_repeated_prepend_preserves_real_viewport_anchor(width, height):
                 function t(key) { return key; }
                 const labels=['Pre','Pre-2','Today','Later'];
                 const flatRows=Array.from({length:160}, (_, i) => ({
-                    group:{label:labels[Math.floor(i/40)]}, session:{session_id:'s'+i}
+                    group:{label:labels[Math.floor(i/40)], key:labels[Math.floor(i/40)]}, session:{session_id:'s'+i}
                 }));
                 function renderOneSession(s) {
                     const el=document.createElement('div');
