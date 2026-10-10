@@ -3805,8 +3805,16 @@ def _append_journaled_partial_output(
                     tool_call['duration'] = payload.get('duration')
                 tool_call['is_error'] = bool(payload.get('is_error', False))
             continue
+        # Terminal lifecycle rows (done/cancel/apperror/error/stream_end) are
+        # markers, not content. A durable cancel row can sit BEFORE the turn's
+        # tokens — cancel_stream() journals the terminal row eagerly while the
+        # worker is still unwinding (#7188) — so a terminal row must not split
+        # the recovered assistant part. Master journals carry their terminal
+        # row last, where nothing is pending and the unconditional flush below
+        # already committed the part; skipping the in-loop flush is a no-op
+        # for that layout.
         if event_name in {'done', 'stream_end', 'cancel', 'apperror', 'error'}:
-            flush_assistant()
+            continue
 
     flush_assistant()
     if recovered_tool_calls:

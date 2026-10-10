@@ -409,7 +409,20 @@ def test_cancel_lazy_recovery_waits_for_old_worker_to_retire():
     writer = RunJournalWriter(sid, stream_id)
     writer.append_sse_event("token", {"text": text})
 
-    assert cancel_stream(stream_id) is True
+    # #7188: cancel_stream() journals a durable terminal cancel row, and a
+    # terminal row legitimately closes the same-process ambiguity. This test
+    # exercises the NONTERMINAL half of the contract — the hook must stay
+    # armed while the journal has no terminal row — so simulate a cancel whose
+    # journal write failed (the fallback publish path) by suppressing the
+    # durable terminal append before cancelling.
+    import unittest.mock as _mock
+    from api import run_journal as _run_journal
+    with _mock.patch.object(
+        _run_journal.RunJournalWriter,
+        "close_acceptance_fence_and_publish_terminal",
+        side_effect=OSError("journal write failed"),
+    ):
+        assert cancel_stream(stream_id) is True
     cached = models.get_session(sid)
     _, marker = _cancel_marker(cached)
     assert marker.get("_pending_journal_recovery") is True
@@ -2281,16 +2294,22 @@ def test_cancel_restart_rejects_invalid_entire_journal_before_recovery(
     writer.append_sse_event("cancel", {"message": "Terminal"})
     path = _run_path(sid, stream)
     rows = [json.loads(line) for line in path.read_text().splitlines()]
-    bad = rows[1]
+    # #7188: cancel_stream() journals a durable terminal cancel row first, so
+    # the fixture journal is [cancel(T), token, token, cancel(T)] — 4 rows, not
+    # 3. Anchor the corruption targets semantically: first/last token rows and
+    # the final (test-authored) terminal row instead of fixed indices.
+    token_rows = [row for row in rows if row["event"] == "token"]
+    test_terminal = rows[-1]
+    bad = token_rows[1]
     if corruption == "foreign-session":
         bad["session_id"] = "different-session"
     elif corruption == "foreign-session-run-seq77":
         bad.update(session_id="different-session", run_id="different-run",
                    seq=77, event_id="different-run:77")
     elif corruption == "foreign-terminal-session":
-        rows[2]["session_id"] = "different-session"
+        test_terminal["session_id"] = "different-session"
     elif corruption == "foreign-terminal-run":
-        rows[2].update(run_id="different-run", event_id="different-run:3")
+        test_terminal.update(run_id="different-run", event_id="different-run:3")
     elif corruption == "foreign-run":
         bad["run_id"] = "different-run"
     elif corruption == "foreign-event":
@@ -2298,7 +2317,7 @@ def test_cancel_restart_rejects_invalid_entire_journal_before_recovery(
     elif corruption == "seq77":
         bad.update(seq=77, event_id=f"{stream}:77")
     elif corruption == "duplicate-seq":
-        bad.update(seq=1, event_id=f"{stream}:1")
+        bad.update(seq=token_rows[0]["seq"], event_id=f"{stream}:{token_rows[0]['seq']}")
     elif corruption == "bool-seq":
         rows[0].update(seq=True, event_id=f"{stream}:1")
     elif corruption == "string-seq":
@@ -2306,16 +2325,16 @@ def test_cancel_restart_rejects_invalid_entire_journal_before_recovery(
     elif corruption == "float-seq":
         bad.update(seq=2.0)
     elif corruption == "array-row":
-        rows[1] = [bad]
+        rows[rows.index(token_rows[1])] = [bad]
     elif corruption == "forged-terminal":
         bad.update(terminal=True, terminal_state="completed")
     elif corruption == "hidden-terminal":
-        rows[2].update(terminal=False)
+        test_terminal.update(terminal=False)
     elif corruption == "wrong-terminal-state":
-        rows[2].update(terminal_state="completed")
+        test_terminal.update(terminal_state="completed")
     lines = [json.dumps(row) for row in rows]
     if corruption == "malformed-json":
-        lines[1] = "{unfinished"
+        lines[rows.index(token_rows[1])] = "{unfinished"
     path.write_text("\n".join(lines) + "\n")
     if same_process:
         config.ACTIVE_RUNS.clear()
@@ -2342,7 +2361,9 @@ def test_cancel_recovery_journal_boundaries_are_explicit(limit, oversized, monke
     writer.append_sse_event("cancel", {"message": "Terminal"})
     path = run_journal._run_path(sid, stream)
     if limit == "rows":
-        monkeypatch.setattr(run_journal, "_SESSION_REPLAY_MAX_ROWS", 1 if oversized else 2)
+        # #7188: cancel_stream() already journaled a durable terminal cancel
+        # row, so the journal holds 3 rows (cancel, token, cancel), not 2.
+        monkeypatch.setattr(run_journal, "_SESSION_REPLAY_MAX_ROWS", 1 if oversized else 3)
     else:
         size = path.stat().st_size
         monkeypatch.setattr(run_journal, "_SESSION_REPLAY_MAX_BYTES", size - 1 if oversized else size)
@@ -2388,7 +2409,13 @@ def _assert_boundary_output_recovered(sid, stream, answer, *, completed, lifecyc
             assert "partial output above was recovered" in markers[0]["content"]
             assert "no agent output was recovered" not in markers[0]["content"]
         assert models._run_journal_terminal_state(recovered, stream) == (
-            "completed" if completed else None
+            "completed" if completed else (
+                # #7188: cancel_stream() journals a durable terminal
+                # cancel row, so a stop lifecycle settles the run as
+                # interrupted-by-user instead of leaving the journal
+                # nonterminal. A crash lifecycle still has no terminal row.
+                "interrupted-by-user" if lifecycle == "stop" else None
+            )
         )
         assert run_journal.read_run_events(sid, stream, validated_recovery=True)["events"]
         models.SESSIONS.clear()
@@ -2407,7 +2434,9 @@ def test_authoritative_recovery_keeps_long_journal(lifecycle, completed, token_r
         writer.append_sse_event("token", {"text": "x"})
     if completed:
         writer.append_sse_event("done", {"session": public_session_projection(session.__dict__)})
-    rows = token_rows + int(completed)
+    # #7188: cancel_stream() journals a durable terminal cancel row before
+    # these appends, so the journal carries token_rows + int(completed) + 1.
+    rows = token_rows + int(completed) + (1 if lifecycle == "stop" else 0)
     replay = run_journal.read_session_run_events(sid, after_event_id=f"{stream}:1")
     assert replay["status"] == ("replay_limit_rows" if rows > 4096 else "ok")
     _assert_boundary_output_recovered(
@@ -2471,6 +2500,20 @@ def test_torn_tail_cannot_bypass_identity_or_terminal_admission(same_process, ta
     writer = RunJournalWriter(sid, stream)
     writer.append_sse_event("token", {"text": "Verified prefix"})
     path = run_journal._run_path(sid, stream)
+    # #7188: cancel_stream() journals a durable terminal cancel row, so the
+    # fixture journal already opens with [cancel(T), token]. For the torn-cancel
+    # same-process case the original contract ("a nonterminal journal keeps the
+    # lazy hook armed in the same process") must hold, so suppress the durable
+    # terminal row by rebuilding the journal from a cancel whose terminal write
+    # failed: keep the token row, drop the terminal row, then append the torn
+    # cancel tail bytes.
+    if tail_kind == "torn-cancel" and same_process:
+        keep = [
+            line
+            for line in path.read_bytes().splitlines(keepends=True)
+            if b'"event":"cancel"' not in line
+        ]
+        path.write_bytes(b"".join(keep))
     if tail_kind == "torn-cancel":
         with path.open("ab") as fh:
             fh.write(b'{"event":"cancel","terminal":true')
