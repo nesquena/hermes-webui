@@ -1043,13 +1043,23 @@ def parse_cookie(handler) -> str | None:
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
-    cookie = http.cookies.SimpleCookie()
-    try:
-        cookie.load(cookie_header)
-    except http.cookies.CookieError:
-        return None
-    morsel = cookie.get(_resolve_cookie_name())
-    return morsel.value if morsel else None
+    name = _resolve_cookie_name()
+    # A cookie we do not own must not hide ours. SimpleCookie.load() over the WHOLE
+    # header silently drops every cookie that follows a malformed one, so an unrelated
+    # app's cookie on a shared host/domain (seen live: `__sec_id` carrying raw JSON with
+    # quotes) makes the session cookie unreadable and the user is bounced to /login.
+    # Parse one cookie at a time so a bad one only skips itself.
+    found = None
+    for part in cookie_header.split(';'):
+        cookie = http.cookies.SimpleCookie()
+        try:
+            cookie.load(part)
+        except http.cookies.CookieError:
+            continue
+        morsel = cookie.get(name)
+        if morsel is not None:
+            found = morsel.value  # last match wins, as the whole-header parse did
+    return found
 
 
 def _safe_login_inner_next(query: str | None) -> str:
