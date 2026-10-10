@@ -3090,6 +3090,39 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(_EXCALIDRAW_EXTS.test(ref)) return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('excalidraw_loading'):'Loading')} ${fname}...</div>`;
   return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
 }
+// Agent/CLI history can retain image paths only as text markers, with native
+// image parts projected to [screenshot]. Recover a display-only attachment list;
+// these references never grant access: /api/media still enforces its own roots,
+// authentication and hard-deny rules. Keep session/model content untouched.
+function _userImageMarkerPresentation(text){
+  const paths=[];
+  let placeholders=0;
+  let fence=null;
+  const lines=String(text||'').split('\n').filter(line=>{
+    const delimiter=line.match(/^ {0,3}(`{3,}|~{3,})(.*)\r?$/);
+    if(delimiter){
+      if(!fence) fence=delimiter[1];
+      else if(!delimiter[2].trim()&&delimiter[1][0]===fence[0]&&delimiter[1].length>=fence.length) fence=null;
+      return true;
+    }
+    if(fence) return true;
+    const marker=line.match(/^\s*\[Image attached at: (\/[^\r\n\]]+\.(?:png|jpe?g|gif|webp|bmp|ico))\]\s*$/i);
+    if(marker){
+      if(!paths.includes(marker[1])) paths.push(marker[1]);
+      placeholders++;
+      return false;
+    }
+    if(placeholders&&/^\s*\[screenshot\]\s*$/.test(line)){
+      placeholders--;
+      return false;
+    }
+    return true;
+  });
+  return {text:lines.join('\n').trim(),paths};
+}
+function _userImageMarkerMediaUrl(path, sessionId){
+  return 'api/media?path='+encodeURIComponent(path)+'&session_id='+encodeURIComponent(sessionId||'');
+}
 function _renderAttachmentHtml(fname, url){
   const kind=_mediaKindForName(fname);
   if(kind==='image') return `<img class="msg-media-img" src="${esc(url)}" alt="${esc(fname)}" loading="lazy">`;
@@ -18845,7 +18878,9 @@ function renderMessages(options){
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
-    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
+    const strippedContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
+    const userImagePresentation=isUser&&!isProcessWakeup&&typeof _userImageMarkerPresentation==='function'?_userImageMarkerPresentation(strippedContent):null;
+    const displayContent=userImagePresentation?userImagePresentation.text:strippedContent;
     const rowDisplayContent=displayContent;
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
@@ -18869,6 +18904,13 @@ function renderMessages(options){
         const fileUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
+    }
+    if(userImagePresentation&&userImagePresentation.paths.length){
+      const imageSid=(S.session&&S.session.session_id)||'';
+      const imageHtml=userImagePresentation.paths.map(path=>{
+        return _renderAttachmentHtml(path.split('/').pop(),_userImageMarkerMediaUrl(path,imageSid));
+      }).join('');
+      filesHtml+=`<div class="msg-files">${imageHtml}</div>`;
     }
     let bodyHtml = _getCachedRender(displayContent, isUser);
     // Message-level media snapshots: settled assistant messages carry a
@@ -19025,6 +19067,8 @@ function renderMessages(options){
       // content-length estimate; the measure pass refines it exactly next frame. The
       // typeof guard keeps renderMessages runnable in the node test harnesses that
       // extract it without this helper (they stub every collaborator by name).
+      if(userImagePresentation&&userImagePresentation.paths.length) row.dataset.editText=String(strippedContent).trim();
+      else delete row.dataset.editText;
       if(typeof _applyUserRowIntrinsicHeight==='function') _applyUserRowIntrinsicHeight(row, newRawText);
       inner.appendChild(row);
       userRows.set(rawIdx, row);
@@ -21168,7 +21212,7 @@ function editMessage(btn) {
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const msgIdx = parseInt(row.dataset.msgIdx, 10);
-  const originalText = row.dataset.rawText || '';
+  const originalText = row.dataset.editText || row.dataset.rawText || '';
   const body = row.querySelector('.msg-body');
   if(!body || row.dataset.editing) return;
   row.dataset.editing = '1';
