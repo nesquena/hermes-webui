@@ -268,6 +268,59 @@ def plan_pressure_evictions(
     return plan
 
 
+def _agent_has_resident_transcript(agent: Any) -> bool:
+    """True when the cached agent still pins transcript memory.
+
+    A soft-released entry keeps ``_session_messages == []`` and
+    ``_db_flush_scan_prefix is None``; it pins nothing worth re-dropping.
+    Re-selecting it would waste the pass's eviction budget on work that
+    frees nothing while the entries that still hold memory are never reached
+    (see the two-pass regression).  This is the "not evictable" branch the
+    maintainer asked for: an entry with no resident transcript and no scan
+    prefix is excluded until the next turn rebuilds the transcript.
+    """
+    if agent is None:
+        return False
+    try:
+        messages = getattr(agent, "_session_messages", None)
+        prefix = getattr(agent, "_db_flush_scan_prefix", None)
+        return bool(messages) or bool(prefix)
+    except Exception:
+        return False
+
+
+def _commit_pending_memory(session_id: str, agent: Any) -> bool:
+    """Commit pending lifecycle memory work BEFORE a pressure release.
+
+    soft_release_transcript() empties the agent's transcript; a later
+    shutdown/commit boundary then sees [] and batch-extraction providers
+    with empty-input guards skip fact extraction, losing the session's
+    memories.  Committing here — with the captured transcript still
+    resident — lets the provider extract from the real messages.
+
+    Returns True when the release may proceed (nothing pending, or the
+    commit succeeded); False when pending work could not be committed
+    (in-flight commit elsewhere or provider failure) — the caller must
+    skip the release so the transcript survives for a later commit.
+    """
+    try:
+        from api.streaming import (
+            _lifecycle_commit_session_memory,
+            _lifecycle_has_uncommitted_work,
+        )
+
+        if not _lifecycle_has_uncommitted_work(session_id):
+            return True
+        return _lifecycle_commit_session_memory(session_id, agent=agent, wait=False)
+    except Exception:
+        logger.debug(
+            "pending-memory commit before release failed for %s",
+            session_id,
+            exc_info=True,
+        )
+        return False
+
+
 def soft_release_transcript(agent: Any) -> None:
     """Drop the live transcript from a cached agent without tearing it down.
 
@@ -502,6 +555,8 @@ class AgentCacheGovernor:
                 return False
             if key in active:
                 return False
+            if not _agent_has_resident_transcript(agent):
+                return False  # already released — exclude from this pass
             if not transcript_persistence_caught_up(agent):
                 return False
             return True
@@ -519,11 +574,31 @@ class AgentCacheGovernor:
                 # mid-turn check here uses the per-entry lease (newest state),
                 # NOT the plan-time snapshot — a turn that started after the
                 # snapshot must stop the release.
+                #
+                # Three-stage release: the pending-memory commit performs
+                # provider I/O and must NOT run while holding the cache lock
+                # (it would stall every cache user).  The cache-lock hold is
+                # only the cheap revalidation; the commit runs outside the
+                # lock; the release itself re-locks and re-validates, so a
+                # turn that started during the commit is still protected.
                 with self._lock:
                     entry = self._cache.get(key)
                     current = entry[0] if isinstance(entry, tuple) and entry else entry
                     if current is not agent:
                         continue  # entry replaced since planning — leave it
+                    if self._entry_turn_active(key, agent) or not transcript_persistence_caught_up(agent):
+                        continue  # went active / not persisted — skip
+                # Commit pending memory work with the captured transcript
+                # BEFORE the release empties it; skip the release when the
+                # commit could not run (a skipped release costs memory, a
+                # wrong release costs the user's memories).
+                if not _commit_pending_memory(key, agent):
+                    continue
+                with self._lock:
+                    entry = self._cache.get(key)
+                    current = entry[0] if isinstance(entry, tuple) and entry else entry
+                    if current is not agent:
+                        continue  # entry replaced during the commit — leave it
                     if self._entry_turn_active(key, agent) or not transcript_persistence_caught_up(agent):
                         continue  # went active / not persisted — skip
                     soft_release_transcript(agent)

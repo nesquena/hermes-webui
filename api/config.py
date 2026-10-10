@@ -11237,13 +11237,16 @@ def register_active_run(stream_id: str, **metadata) -> None:
     # False, and could idle-evict an agent that has just started its next turn
     # (the request then misses the cache and rebuilds the agent, losing
     # cache-resident state such as _user_turn_count).  Lease-first inverts that
-    # window into the safe direction: a lease that reads True a moment early
-    # only delays an eviction by one pass.  Outside ACTIVE_RUNS_LOCK on purpose
-    # — the cache lock is taken briefly here and never at the same time as
-    # ACTIVE_RUNS_LOCK, so no reverse nesting exists (streaming.py deliberately
-    # snapshots ACTIVE_RUNS before taking the cache lock).  The agent may not be
-    # in the cache yet (it is inserted later in the turn); insertion initializes
-    # the lease, see streaming.py.
+    #    window into the safe direction: a lease that reads True a moment early
+    #    only delays an eviction by one pass.  Written outside ACTIVE_RUNS_LOCK —
+    #    this function needs no registry view, and the brief cache-lock hold
+    #    never nests with the runs lock here.  unregister_active_run DOES take
+    #    the cache lock inside ACTIVE_RUNS_LOCK so its lease write is atomic
+    #    with the still_active recompute; that runs→cache nesting is the safe
+    #    direction (streaming.py deliberately snapshots ACTIVE_RUNS before
+    #    taking the cache lock, so nothing nests the reverse).  The agent may
+    #    not be in the cache yet (it is inserted later in the turn); insertion
+    #    initializes the lease, see streaming.py.
     _set_agent_cache_turn_lease(entry.get("session_id"), True)
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS[stream_id] = entry
@@ -11264,8 +11267,6 @@ def unregister_active_run(stream_id: str) -> None:
     if not stream_id:
         return
     global LAST_RUN_FINISHED_AT
-    session_id = None
-    still_active = False
     with ACTIVE_RUNS_LOCK:
         entry = ACTIVE_RUNS.pop(stream_id, None)
         session_id = (entry or {}).get("session_id")
@@ -11277,7 +11278,16 @@ def unregister_active_run(stream_id: str) -> None:
                 isinstance(e, dict) and e.get("session_id") == session_id
                 for e in ACTIVE_RUNS.values()
             )
-    _set_agent_cache_turn_lease(session_id, still_active)
+            # Write the lease INSIDE the registry lock so the recompute and
+            # the write are atomic.  Writing it after releasing the lock
+            # opens a race: a successor stream can register between the pop
+            # and the write, and this finishing stream's late False would
+            # overwrite the successor's True — the governor then reads a
+            # live turn as idle and can evict the agent mid-turn.  The
+            # runs→cache lock nesting here is the safe direction (the
+            # governor snapshots ACTIVE_RUNS before taking the cache lock,
+            # and no path nests the reverse).
+            _set_agent_cache_turn_lease(session_id, still_active)
     unregister_stream_owner(stream_id)
 
 

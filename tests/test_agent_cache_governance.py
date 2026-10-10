@@ -464,3 +464,256 @@ def test_register_active_run_publishes_lease_before_registry(monkeypatch):
     )
     assert runs["stream-1"]["session_id"] == "s1"
     assert agent._turn_active is True
+
+
+# ── lease lifecycle (finish-race / compression-rotation) ─────────────────────
+def test_finishing_stream_does_not_overwrite_successor_lease(monkeypatch):
+    """A finishing stream's teardown must not overwrite a successor's lease.
+
+    unregister_active_run() pops the row under ACTIVE_RUNS_LOCK and then
+    writes the lease after releasing the lock.  If a successor stream
+    registers in that gap, the finishing stream's late ``False`` overwrites
+    the successor's ``True`` — the governor then reads a live turn as idle
+    and can evict the agent mid-turn.
+
+    Deterministic interleaving: hook the ACTIVE_RUNS_LOCK release so that the
+    successor registers exactly between the finishing stream's row pop and
+    its lease write.
+    """
+    import api.config as config
+    import threading
+    from collections import OrderedDict
+
+    agent = _FakeAgent(turn_active=True)
+    monkeypatch.setattr(config, "SESSION_AGENT_CACHE", OrderedDict({"s1": (agent, "sig")}))
+
+    real_lock = config.ACTIVE_RUNS_LOCK
+    releases = {"n": 0}
+
+    class _ReleaseHookLock:
+        def __init__(self):
+            self._lock = real_lock
+
+        def acquire(self, *a, **k):
+            return self._lock.acquire(*a, **k)
+
+        def release(self):
+            self._lock.release()
+            releases["n"] += 1
+            if releases["n"] == 2:
+                # Second release = the finishing stream's unregister just
+                # popped its row.  A successor registers before that stream
+                # writes its lease.
+                config.register_active_run("stream-B", session_id="s1")
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *a):
+            self.release()
+
+    monkeypatch.setattr(config, "ACTIVE_RUNS_LOCK", _ReleaseHookLock())
+
+    config.register_active_run("stream-A", session_id="s1")
+    assert agent._turn_active is True
+    config.unregister_active_run("stream-A")
+
+    assert agent._turn_active is True, (
+        "finishing stream A overwrote live successor B's lease with False"
+    )
+    assert "stream-B" in config.ACTIVE_RUNS
+    # The successor finishing last clears the lease.
+    config.unregister_active_run("stream-B")
+    assert agent._turn_active is False
+
+
+def test_compression_rotation_updates_run_row_session_id(monkeypatch):
+    """When compression rotates the session id, the ACTIVE_RUNS row must
+    follow so the final unregister clears the lease under the NEW id.
+
+    The cache key moves from old_sid to new_sid mid-turn (streaming.py
+    moves the entry).  If the registry row keeps old_sid, the final
+    unregister_active_run clears the lease under old_sid — which no longer
+    holds a cache entry — and the agent under new_sid keeps ``_turn_active``
+    True forever, so both governor passes skip it permanently.
+
+    Two halves:
+    1. config-layer contract: update_active_run rewrites the row's session
+       id (the row is keyed by stream id, so the update is unconditional).
+    2. wiring contract: the rotation site in streaming.py carries the
+       ``update_active_run(stream_id, session_id=new_sid)`` call (static
+       AST check — the codebase has no runtime harness for this private
+       worker block, so the assertion pins the exact wiring to prevent it
+       being dropped in a future refactor).
+    """
+    import api.config as config
+    import ast
+    import os
+    from collections import OrderedDict
+
+    agent = _FakeAgent(turn_active=True)
+    monkeypatch.setattr(
+        config, "SESSION_AGENT_CACHE", OrderedDict({"new-sid": (agent, "sig")})
+    )
+
+    config.register_active_run("stream-1", session_id="old-sid")
+    assert agent._turn_active is True
+
+    # Rotation: update the row's session id to the new cache key.
+    config.update_active_run("stream-1", session_id="new-sid")
+
+    assert agent._turn_active is True
+    # Final unregister finds the row under new-sid and clears the lease.
+    config.unregister_active_run("stream-1")
+    assert agent._turn_active is False
+
+    # Wiring: the rotation block in streaming.py must follow the registry row.
+    _streaming_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "api", "streaming.py",
+    )
+    with open(_streaming_path, encoding="utf-8") as _fh:
+        _tree = ast.parse(_fh.read())
+    _rotation_wired = False
+    for _node in ast.walk(_tree):
+        if not isinstance(_node, ast.If):
+            continue
+        _test_src = ast.unparse(_node.test)
+        if "_agent_sid" in _test_src and "session_id" in _test_src:
+            # Inside the rotation block: look for the update call.
+            for _call in ast.walk(_node):
+                if (
+                    isinstance(_call, ast.Call)
+                    and isinstance(_call.func, ast.Name)
+                    and _call.func.id == "update_active_run"
+                ):
+                    _kw = {k.arg: ast.unparse(k.value) for k in _call.keywords}
+                    if _kw.get("session_id") == "new_sid":
+                        _rotation_wired = True
+    assert _rotation_wired, (
+        "streaming.py rotation block must call "
+        "update_active_run(stream_id, session_id=new_sid)"
+    )
+
+
+def test_pressure_sweep_does_not_replan_released_entries():
+    """Released (empty) entries must not be re-selected on later passes.
+
+    soft_release_transcript() empties _session_messages, and
+    transcript_persistence_caught_up() then reads ``flushed >= 0`` == True
+    forever, so the same 16 empty entries stay at the LRU front and every
+    subsequent pass re-drops them while the entries that still hold memory
+    are never reached.  An entry with no resident transcript (and no scan
+    prefix) must be excluded from eviction planning until the transcript is
+    rebuilt on the next turn.
+
+    Regression: two consecutive passes with >16 evictable entries.  Pass 1
+    releases the first 16; pass 2 must advance to the next entries instead of
+    re-releasing the same 16.
+    """
+    from collections import OrderedDict
+
+    agents = [(f"k{i}", _FakeAgent(flushed=True)) for i in range(24)]
+    cache = OrderedDict((k, (a, "sig")) for k, a in agents)
+    g = _governor(
+        cache,
+        memory_high_mb=100,
+        protect_recent=0,
+        running_check=lambda k: False,
+    )
+    # Pass 1: first 16 released (LRU front).
+    dropped_1 = g.sweep_pressure(rss_mb=500)
+    assert dropped_1 == 16
+    # Pass 2: must advance past the released 16 and drop the remaining 8,
+    # NOT re-drop the same 16 (which would report 16 and free nothing).
+    dropped_2 = g.sweep_pressure(rss_mb=500)
+    assert dropped_2 == 8, f"pass 2 dropped {dropped_2}: released entries were re-planned"
+    # All 24 transcripts released exactly once; the cache still holds all agents.
+    for k, (a, _sig) in cache.items():
+        assert a._session_messages == [], f"{k} still holds a transcript"
+
+
+def test_pressure_release_commits_pending_memory_before_drop(monkeypatch):
+    """Pending lifecycle work must be committed with the captured transcript
+    BEFORE the release empties _session_messages.
+
+    The pressure release clears the agent's transcript; a later
+    shutdown_memory_provider / commit_memory_session boundary then sees [] and
+    providers with empty-input guards skip fact extraction, losing the
+    session's memories.  The governor must commit pending lifecycle work
+    first (so the provider sees the captured transcript).
+    """
+    import api.agent_cache_governance as gmod
+    from api.session_lifecycle import register_agent, _reset_for_tests
+
+    _reset_for_tests()
+    agent = _FakeAgent(flushed=True)
+    cache = _cache_with([("k0", agent)])
+    register_agent("k0", agent)
+
+    committed = {}
+
+    def _fake_commit(session_id, agent=None, wait=False):
+        committed["sid"] = session_id
+        committed["messages"] = list(getattr(agent, "_session_messages", []))
+        return True
+
+    monkeypatch.setattr(gmod, "_commit_pending_memory", _fake_commit)
+
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+    dropped = g.sweep_pressure(rss_mb=500)
+
+    assert dropped == 1
+    assert committed.get("sid") == "k0"
+    assert committed.get("messages"), "commit must see the captured transcript"
+    assert agent._session_messages == []
+
+
+def test_pressure_release_skipped_when_commit_fails(monkeypatch):
+    """When the pending-memory commit does not happen (in-flight elsewhere or
+    provider failure), the release must be skipped — a skipped release costs
+    memory, a wrong release costs the user's memories."""
+    import api.agent_cache_governance as gmod
+
+    agent = _FakeAgent(flushed=True)
+    cache = _cache_with([("k0", agent)])
+
+    monkeypatch.setattr(gmod, "_commit_pending_memory", lambda sid, agent=None, wait=False: False)
+
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+    dropped = g.sweep_pressure(rss_mb=500)
+
+    assert dropped == 0
+    assert agent._session_messages  # transcript intact — retry next pass
+
+
+def test_commit_pending_memory_wiring(monkeypatch):
+    """_commit_pending_memory consults the lifecycle registry: no pending
+    work → True (release proceeds); pending work → delegates to the streaming
+    lifecycle commit with the captured agent."""
+    import api.agent_cache_governance as gmod
+    import api.streaming as streaming
+
+    agent = _FakeAgent(flushed=True)
+    seen = {}
+
+    monkeypatch.setattr(streaming, "_lifecycle_has_uncommitted_work", lambda sid: True)
+
+    def _fake_commit(session_id, agent=None, wait=False):
+        seen["sid"] = session_id
+        seen["agent"] = agent
+        seen["wait"] = wait
+        return True
+
+    monkeypatch.setattr(streaming, "_lifecycle_commit_session_memory", _fake_commit)
+
+    assert gmod._commit_pending_memory("s1", agent) is True
+    assert seen == {"sid": "s1", "agent": agent, "wait": False}
+
+    monkeypatch.setattr(streaming, "_lifecycle_has_uncommitted_work", lambda sid: False)
+    seen.clear()
+    assert gmod._commit_pending_memory("s1", agent) is True
+    assert seen == {}  # nothing pending — no commit call needed

@@ -11513,6 +11513,18 @@ def _run_agent_streaming(
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
                     s.session_id = new_sid
+                    # Follow the rotation in the active-run registry: the row
+                    # is keyed by stream id and the final
+                    # unregister_active_run clears the turn lease under the
+                    # row's session id.  Keeping old_sid would make that
+                    # unregister clear a lease under a key that no longer
+                    # holds a cache entry (the entry was moved to new_sid
+                    # below), leaving the agent under new_sid with
+                    # _turn_active True forever — both governor passes would
+                    # skip it permanently.  The update is unconditional: the
+                    # row is keyed by stream id, so updating the session id
+                    # cannot disturb any other stream's row.
+                    update_active_run(stream_id, session_id=new_sid)
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
                     # session. On the next request, _run_agent_streaming calls
