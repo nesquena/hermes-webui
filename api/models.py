@@ -149,6 +149,14 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
+# When the rows behind each cache key were READ (monotonic), not when they were
+# published. The choose-and-publish fallback in _load_and_cache_cli_sessions
+# orders concurrent rebuilds by this (#4966) instead of by expiry/publication
+# time. Stored BESIDE the entry, never inside it: the entry keeps the
+# (expires_at, stamp, sessions) positional contract that the read path in
+# get_cli_sessions() and the cache tests unpack. Always mutated under
+# _CLI_SESSIONS_CACHE_LOCK, alongside its cache entry.
+_CLI_SESSIONS_CACHE_READ_STARTED: dict = {}
 # Complete projections retained under an identity that excludes the volatile
 # state.db fingerprint. This store is independently bounded because the stable
 # identity still contains external Claude/session-index stat revisions.
@@ -157,6 +165,8 @@ _CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES = 8
 _CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
+# Hard cap on singleflight re-claim loop iterations before falling back to own rebuild (#4966).
+_CLI_SESSIONS_CACHE_MAX_RECLAIMS = 5
 
 # Per-file parse cache for Claude Code JSONL transcripts (#4718/#4662 phase 4).
 # ``~/.claude/projects`` is a GLOBAL, profile-independent directory, but the
@@ -8717,6 +8727,7 @@ def clear_cli_sessions_cache() -> None:
         global _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
         _CLI_SESSIONS_CACHE_INVALIDATION_VERSION += 1
         _CLI_SESSIONS_CACHE.clear()
+        _CLI_SESSIONS_CACHE_READ_STARTED.clear()
         _CLI_SESSIONS_LAST_KNOWN_GOOD.clear()
     # The sidecar-metadata projection cache is stat-keyed (self-invalidating on
     # any file change), but clear it alongside the CLI cache so an explicit
@@ -8777,15 +8788,20 @@ def _cache_cli_sessions_if_current(
     ttl: float,
     invalidation_stamp: int,
     sessions: list,
+    read_started_at: float | None = None,
 ) -> bool:
     with _CLI_SESSIONS_CACHE_LOCK:
         if _CLI_SESSIONS_CACHE_INVALIDATION_VERSION != invalidation_stamp:
             return False
+        now = time.monotonic()
         copied_sessions = _copy_cli_sessions(sessions)
         _CLI_SESSIONS_CACHE[cache_key] = (
-            time.monotonic() + ttl,
+            now + ttl,
             invalidation_stamp,
             copied_sessions,
+        )
+        _CLI_SESSIONS_CACHE_READ_STARTED[cache_key] = (
+            read_started_at if read_started_at is not None else now
         )
         stable_key = _cli_sessions_stable_cache_identity(cache_key)
         _CLI_SESSIONS_LAST_KNOWN_GOOD[stable_key] = (
@@ -8797,7 +8813,8 @@ def _cache_cli_sessions_if_current(
             _CLI_SESSIONS_LAST_KNOWN_GOOD.popitem(last=False)
         _CLI_SESSIONS_CACHE.move_to_end(cache_key)
         while len(_CLI_SESSIONS_CACHE) > _CLI_SESSIONS_CACHE_MAX_ENTRIES:
-            _CLI_SESSIONS_CACHE.popitem(last=False)
+            evicted_key, _ = _CLI_SESSIONS_CACHE.popitem(last=False)
+            _CLI_SESSIONS_CACHE_READ_STARTED.pop(evicted_key, None)
     return True
 
 
@@ -8813,6 +8830,7 @@ def _copy_fresh_cli_sessions_cache_entry(cache_key: tuple):
             cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
         if cached_stamp != _CLI_SESSIONS_CACHE_INVALIDATION_VERSION:
             _CLI_SESSIONS_CACHE.pop(cache_key, None)
+            _CLI_SESSIONS_CACHE_READ_STARTED.pop(cache_key, None)
             return None
         if cached_expires_at <= time.monotonic():
             return None
@@ -8839,6 +8857,7 @@ def _load_and_cache_cli_sessions(
     all_profiles: bool,
     db_path,
 ) -> list:
+    loaded_at = time.monotonic()
     stable_cache_key = _cli_sessions_stable_cache_identity(cache_key)
     try:
         loaded = load_sessions()
@@ -8877,13 +8896,56 @@ def _load_and_cache_cli_sessions(
             return stable_sessions
         # Expose a first partial attempt, but never publish it as authoritative.
         return _copy_cli_sessions(sessions)
-    _cache_cli_sessions_if_current(
-        cache_key,
-        ttl,
-        invalidation_stamp,
-        sessions,
-    )
+    # Atomic choose-and-publish under _CLI_SESSIONS_CACHE_LOCK: if a fresh entry
+    # for cache_key was published DURING our load (unexpired, same invalidation
+    # stamp, and whose read started AFTER our load started) — e.g. a concurrent
+    # rebuilder read fresher rows — prefer that entry and do not clobber it
+    # with our older snapshot (#4966).
+    now = time.monotonic()
+    with _CLI_SESSIONS_CACHE_LOCK:
+        if _CLI_SESSIONS_CACHE_INVALIDATION_VERSION != invalidation_stamp:
+            # Stamp changed mid-load: don't cache, but still return what we read.
+            return _copy_cli_sessions(sessions)
+        cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
+        if cached_entry is not None:
+            if len(cached_entry) == 3:
+                cached_expires_at, cached_stamp, cached_sessions = cached_entry
+            else:
+                cached_expires_at, cached_sessions = cached_entry
+                cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+            # Entries written before this key had a recorded read start behave
+            # like a read that started at the epoch: never preferred.
+            cached_read_started_at = _CLI_SESSIONS_CACHE_READ_STARTED.get(cache_key, 0.0)
+            # A same-stamp, unexpired entry whose read started after our load started
+            # represents strictly newer data. Prefer it over our older read.
+            if (
+                cached_stamp == invalidation_stamp
+                and cached_expires_at > now
+                and cached_read_started_at > loaded_at
+            ):
+                _CLI_SESSIONS_CACHE.move_to_end(cache_key)
+                return _copy_cli_sessions(cached_sessions)
+        copied_sessions = _copy_cli_sessions(sessions)
+        _CLI_SESSIONS_CACHE[cache_key] = (
+            now + ttl,
+            invalidation_stamp,
+            copied_sessions,
+        )
+        _CLI_SESSIONS_CACHE_READ_STARTED[cache_key] = loaded_at
+        stable_key = _cli_sessions_stable_cache_identity(cache_key)
+        _CLI_SESSIONS_LAST_KNOWN_GOOD[stable_key] = (
+            invalidation_stamp,
+            _copy_cli_sessions(copied_sessions),
+        )
+        _CLI_SESSIONS_LAST_KNOWN_GOOD.move_to_end(stable_key)
+        while len(_CLI_SESSIONS_LAST_KNOWN_GOOD) > _CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES:
+            _CLI_SESSIONS_LAST_KNOWN_GOOD.popitem(last=False)
+        _CLI_SESSIONS_CACHE.move_to_end(cache_key)
+        while len(_CLI_SESSIONS_CACHE) > _CLI_SESSIONS_CACHE_MAX_ENTRIES:
+            evicted_key, _ = _CLI_SESSIONS_CACHE.popitem(last=False)
+            _CLI_SESSIONS_CACHE_READ_STARTED.pop(evicted_key, None)
     return _copy_cli_sessions(sessions)
+
 
 
 def _reload_cli_sessions_after_inflight(
@@ -8895,7 +8957,18 @@ def _reload_cli_sessions_after_inflight(
     load_sessions,
     all_profiles: bool,
     db_path: str,
+    max_reclaims=None,
 ) -> list:
+    """Wait for an in-flight CLI session cache rebuild and return the fresh or stale result.
+
+    If multiple callers wait and detect an invalidation/clear storm before a cached entry
+    is published, the waiter re-attempts the claim loop up to ``max_reclaims`` times
+    (defaulting to ``_CLI_SESSIONS_CACHE_MAX_RECLAIMS`` = 5) before falling back to
+    rebuilding the sessions directly to prevent unbounded contention (#4966).
+    """
+    if max_reclaims is None:
+        max_reclaims = _CLI_SESSIONS_CACHE_MAX_RECLAIMS
+    reclaims = 0
     while True:
         event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
         if is_owner:
@@ -8916,7 +8989,8 @@ def _reload_cli_sessions_after_inflight(
             return cached_sessions
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
-        if not wait_finished:
+        reclaims += 1
+        if not wait_finished or (max_reclaims is not None and reclaims >= max_reclaims):
             fallback_invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
             return _load_and_cache_cli_sessions(
                 cache_key=cache_key,
@@ -10530,6 +10604,7 @@ def get_cli_sessions(
                     cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
                 if cached_stamp != _CLI_SESSIONS_CACHE_INVALIDATION_VERSION:
                     _CLI_SESSIONS_CACHE.pop(cache_key, None)
+                    _CLI_SESSIONS_CACHE_READ_STARTED.pop(cache_key, None)
                 elif cached_expires_at > now:
                     # LRU: a fresh hit is the most-recently-used entry.
                     _CLI_SESSIONS_CACHE.move_to_end(cache_key)
