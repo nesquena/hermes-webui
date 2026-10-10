@@ -394,6 +394,7 @@ def _health_ok(
     url: str,
     verify: bool = True,
     markers: tuple[bytes, ...] = (_STATUS_OK_MARKER,),
+    accept_degraded: bool = False,
 ) -> bool:
     """Single /health request. True iff the body carries every marker.
 
@@ -401,6 +402,12 @@ def _health_ok(
     has. Callers that must not mistake a foreign listener for the WebUI pass
     ``markers=_HERMES_HEALTH_MARKERS``: a generic ok without the Hermes
     fields is then rejected.
+
+    ``accept_degraded=True`` (the occupied-port probe) also reads the body of
+    a non-2xx answer: an own WebUI that is up but degraded replies 503 with the
+    same payload, and it is still OUR instance - the one that must not be
+    advised against as "another service". Callers waiting for a server to
+    become healthy leave it False, so a degraded answer never counts as ready.
 
     ``verify=False`` disables TLS certificate verification (self-signed certs).
     """
@@ -417,20 +424,35 @@ def _health_ok(
     try:
         with urllib.request.urlopen(url, timeout=2, context=context) as response:  # nosec B310
             body = response.read()
+    except urllib.error.HTTPError as exc:
+        # 503 is how an own WebUI answers while degraded
+        # (api/routes.py::_handle_health) - the markers still tell it apart
+        # from a foreign listener, so the occupied-port probe accepts it.
+        if not accept_degraded:
+            return False
+        try:
+            body = exc.read()
+        except Exception:
+            return False
     except Exception:
         return False
     return all(marker in body for marker in markers)
 
 
 def wait_for_health(
-    url: str, timeout: float = 25.0, markers: tuple[bytes, ...] = ()
+    url: str,
+    timeout: float = 25.0,
+    markers: tuple[bytes, ...] = (),
+    accept_degraded: bool = False,
 ) -> str:
     """Poll /health until the server answers ok or the timeout elapses.
 
     ``markers`` overrides which fields the body must carry (the default is
     the ``"status": "ok"`` field alone). Bootstrap's own probe of an
     occupied port passes ``_HERMES_HEALTH_MARKERS`` so a foreign
-    ok-answering service is never mistaken for the WebUI.
+    ok-answering service is never mistaken for the WebUI, plus
+    ``accept_degraded=True`` so a degraded own instance is not mistaken for a
+    foreign one either.
 
     Returns the scheme that actually answered ("https" or "http") on success,
     or "" on timeout. The scheme string is truthy on success, so existing
@@ -455,7 +477,12 @@ def wait_for_health(
     required = markers or (_STATUS_OK_MARKER,)
 
     def probe(url_: str, verify: bool = True) -> bool:
-        return _health_ok(url_, verify=verify, markers=required)
+        return _health_ok(
+            url_,
+            verify=verify,
+            markers=required,
+            accept_degraded=accept_degraded,
+        )
 
     deadline = time.time() + timeout
     https = _tls_probe_enabled()
@@ -710,13 +737,16 @@ def _already_serving_scheme(host: str, port: int) -> str:
     Only the WebUI's own payload counts (``_HERMES_HEALTH_MARKERS``): any
     other service that happens to answer a generic ``{"status": "ok"}`` on
     that port is a foreign listener, so bootstrap keeps reporting the
-    conflict.
+    conflict. A degraded own WebUI answers 503 with the same payload and is
+    still that instance, so the probe accepts any status here
+    (``accept_degraded=True``).
     """
     probe_host = "localhost" if host in ("", "0.0.0.0", "::", "[::]") else host
     return wait_for_health(
         f"http://{probe_host}:{port}/health",
         timeout=1.0,
         markers=_HERMES_HEALTH_MARKERS,
+        accept_degraded=True,
     )
 
 
@@ -730,21 +760,28 @@ def main() -> int:
         _check_port_available(args.host, args.port)
     except PortInUseError:
         # 10.10 (review #8112, fix 1): an occupied port is not automatically a
-        # foreign service. If a healthy WebUI already answers there, take the
-        # already-running path - report it ready and leave it untouched. A
-        # foreground/supervisor launch would be a second server on the same
-        # port, so it keeps the duplicate-start error. Only a port conflict is
-        # recovered here (review #8112, fix 2): a bind-address error stays a
-        # hard error, otherwise a remote --host would be reported as running
-        # while nothing local ever started.
+        # foreign service. If an own WebUI already answers there, take the
+        # already-running path - report it ready and leave it untouched. Only a
+        # port conflict is recovered here (review #8112, fix 2): a bind-address
+        # error stays a hard error, otherwise a remote --host would be reported
+        # as running while nothing local ever started.
         _scheme = _already_serving_scheme(args.host, args.port)
-        if not _scheme or args.foreground or _detect_supervisor():
+        if not _scheme:
             raise
         _url = (
             f"{_scheme}://localhost:{args.port}"
             if args.host in ("127.0.0.1", "localhost")
             else f"{_scheme}://{args.host}:{args.port}"
         )
+        # A foreground/supervisor launch would be a second server on the same
+        # port, so it still fails - with advice about its OWN instance
+        # (review #8112, should-fix): the port-conflict text ("try
+        # ./start.sh <other port>") starts a second WebUI on the same state
+        # dir, the outcome #8111 exists to prevent.
+        if args.foreground or _detect_supervisor():
+            raise PortInUseError(
+                f"Hermes WebUI is already running at {_url}. Stop that instance first."
+            ) from None
         info(f"Web UI is already running: {_url}")
         if not args.no_browser:
             open_browser(_url)

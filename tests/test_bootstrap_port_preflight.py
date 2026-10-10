@@ -266,12 +266,53 @@ def test_occupied_port_by_foreign_listener_still_errors(
         bootstrap.main()
 
 
-def test_occupied_port_in_foreground_keeps_duplicate_start_error(
+def test_occupied_port_in_foreground_reports_our_own_instance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A foreground launch against OUR WebUI must not advise a second one.
+
+    "./start.sh <other port>" would start a second WebUI on the same state
+    dir - the outcome #8111 exists to prevent (review #8112, should-fix).
+    """
     _stub_main_up_to_preflight(monkeypatch, ["--foreground"])
     monkeypatch.setattr(bootstrap, "_check_port_available", _raise_in_use)
     monkeypatch.setattr(bootstrap, "_already_serving_scheme", lambda host, port: "http")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bootstrap.main()
+    message = str(excinfo.value)
+    assert (
+        f"Hermes WebUI is already running at http://localhost:{bootstrap.DEFAULT_PORT}"
+        in message
+    )
+    assert "Stop that instance first" in message
+    assert "start.sh" not in message
+
+
+def test_occupied_port_under_supervisor_reports_our_own_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A systemd launch (INVOCATION_ID) gets the same own-instance message."""
+    _stub_main_up_to_preflight(monkeypatch, ["--no-browser"])
+    monkeypatch.setenv("INVOCATION_ID", "3f5b1c0e2a4d4f7e9c8b1a2d3e4f5061")
+    monkeypatch.setattr(bootstrap, "_check_port_available", _raise_in_use)
+    monkeypatch.setattr(bootstrap, "_already_serving_scheme", lambda host, port: "http")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bootstrap.main()
+    message = str(excinfo.value)
+    assert "Hermes WebUI is already running at" in message
+    assert "Stop that instance first" in message
+    assert "start.sh" not in message
+
+
+def test_occupied_port_in_foreground_by_foreign_listener_keeps_port_advice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign listener under a foreground launch keeps the conflict text."""
+    _stub_main_up_to_preflight(monkeypatch, ["--foreground"])
+    monkeypatch.setattr(bootstrap, "_check_port_available", _raise_in_use)
+    monkeypatch.setattr(bootstrap, "_already_serving_scheme", lambda host, port: "")
 
     with pytest.raises(RuntimeError, match="already in use"):
         bootstrap.main()
@@ -288,15 +329,15 @@ def test_port_conflict_raises_the_dedicated_error(
 
 
 @contextlib.contextmanager
-def _serve(body: bytes) -> Iterator[int]:
-    """A /health listener that answers 200 with exactly ``body``.
+def _serve(body: bytes, status: int = 200) -> Iterator[int]:
+    """A /health listener that answers ``status`` with exactly ``body``.
 
     Yields the port; the server runs on a background thread.
     """
 
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(body)
@@ -346,3 +387,29 @@ def test_invalid_bind_address_is_not_recovered_as_running(
 
     with pytest.raises(RuntimeError, match="Cannot bind"):
         bootstrap.main()
+
+
+_DEGRADED_WEBUI_BODY = (
+    b'{"status": "degraded", "sessions": 1, "server_started_at": 1.0}'
+)
+
+
+def test_degraded_webui_payload_is_still_our_instance() -> None:
+    """A degraded own WebUI answers 503 with its own payload (#8112, low)."""
+    with _serve(_DEGRADED_WEBUI_BODY, status=503) as port:
+        assert bootstrap._already_serving_scheme("127.0.0.1", port) == "http"
+
+
+def test_degraded_foreign_answer_is_not_our_instance() -> None:
+    with _serve(b'{"status": "degraded"}', status=503) as port:
+        assert bootstrap._already_serving_scheme("127.0.0.1", port) == ""
+
+
+def test_degraded_answer_is_not_ready_for_the_health_wait() -> None:
+    """The readiness wait keeps treating 503 as not-ready."""
+    with _serve(_DEGRADED_WEBUI_BODY, status=503) as port:
+        url = f"http://127.0.0.1:{port}/health"
+        assert not bootstrap._health_ok(url, markers=bootstrap._HERMES_HEALTH_MARKERS)
+        assert bootstrap._health_ok(
+            url, markers=bootstrap._HERMES_HEALTH_MARKERS, accept_degraded=True
+        )
