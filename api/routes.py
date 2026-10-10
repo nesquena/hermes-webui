@@ -56,6 +56,22 @@ from api.compression_recovery import (
     compression_recovery_payload_for_session,
     is_generic_continuation_intent,
 )
+from api.idempotency import (
+    IDEM_KEY_ABSENT,
+    IdempotencyConflict,
+    IdempotencyInFlight,
+    IdempotencyKeyExpired,
+    IdempotencyKeyMalformed,
+    IdempotencyKeyMissing,
+    IdempotencyOutcomeUnknown,
+    IdempotencyStoreUnavailable,
+    build_response_payload as _idem_build_response_payload,
+    compute_request_fingerprint as _idem_compute_fingerprint,
+    extract_key as _idem_extract_key,
+    get_idempotency_store,
+    resolve_active_profile as _idem_resolve_active_profile,
+    validate_key as _idem_validate_key,
+)
 from api.session_events import (
     add_session_list_changed_listener,
     publish_session_list_changed,
@@ -26472,6 +26488,237 @@ def _save_chat_start_compression_recovery(session):
 
 
 def _handle_chat_start(handler, body, diag=None):
+    # ── Idempotency claim (issue #7435) ────────────────────────────────────
+    # A caller-supplied key (header ``Idempotency-Key`` or body field
+    # ``idempotency_key``) lets external automation retry after a lost
+    # connection without re-admitting the same logical turn. The claim
+    # MUST happen before any state-mutating work (session materialization,
+    # pending-state writes, the worker thread) and BEFORE the agent
+    # execution that ``_start_run`` triggers. Without a key the route keeps
+    # its current behavior.
+    idem_key = _idem_extract_key(handler, body)
+    idem_claim_record = None  # filled in only if a key was supplied
+    idem_validated_key: str | None = None
+    idem_completed = False  # flipped True only after a successful start
+    idem_profile: str | None = None  # resolved once per request (Finding 3)
+    idem_turn_admitted = False  # True once _start_run admits a real turn
+    # ``_idem_extract_key`` returns ``IDEM_KEY_ABSENT`` when the
+    # key is truly absent on both transports; any other value
+    # means the caller explicitly supplied something and we must
+    # route it through validation (which rejects empty /
+    # non-string / oversize with 400, per the #7435 review).
+    if idem_key is not IDEM_KEY_ABSENT:
+        try:
+            idem_validated_key = _idem_validate_key(idem_key)
+        except IdempotencyKeyMalformed as exc:
+            # The caller explicitly supplied a key (header or body
+            # field) that is empty / whitespace / non-string /
+            # over-length / has disallowed chars. Per #7435 review:
+            # never silently downgrade to legacy behavior — return
+            # 400 so the client can fix its request and retry.
+            return bad(handler, str(exc), 400)
+        except IdempotencyKeyMissing as exc:
+            return bad(handler, str(exc), 400)
+        # Resolve the profile namespace ONCE, then thread that value
+        # through fingerprint, claim, complete, reconcile and release so
+        # a mid-request profile switch cannot claim in one namespace and
+        # complete/release in another (#7435 review Finding 3).
+        try:
+            idem_profile = _idem_resolve_active_profile()
+        except IdempotencyStoreUnavailable as exc:
+            # The active profile could not be resolved, so the key has
+            # no provable namespace. Fail closed (503) rather than
+            # filing the claim under a namespace we never verified.
+            logger.warning(
+                "idempotency: cannot resolve profile scope for key %r: %s",
+                idem_validated_key, exc,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
+        except Exception as exc:
+            logger.warning(
+                "idempotency: profile resolution failed for key %r: %s",
+                idem_validated_key, exc,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
+        try:
+            fingerprint = _idem_compute_fingerprint(body, profile=idem_profile)
+        except IdempotencyStoreUnavailable as exc:
+            logger.warning(
+                "idempotency: cannot compute fingerprint for key %r: %s",
+                idem_validated_key, exc,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
+        except Exception as exc:
+            # An unhashable / unserializable body still must not let the
+            # request through with an empty fingerprint: an empty
+            # fingerprint matches every later retry, which would turn a
+            # legitimate 409 conflict into a replay. Refuse instead.
+            logger.warning(
+                "idempotency: could not fingerprint request for key %r: %s",
+                idem_validated_key, exc,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
+        # Finding 1 (#7435 review): a keyed request must NEVER fall through
+        # to the keyless legacy path just because the store could not be
+        # acquired. Failure to acquire the store is the same fail-closed 503
+        # used for claim/store errors — silently continuing to _start_run
+        # with no claim defeats the one-turn guarantee.
+        try:
+            store = get_idempotency_store()
+        except Exception as exc:
+            logger.warning(
+                "idempotency: store acquisition failed for key %r: %s",
+                idem_validated_key, exc,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
+        if store is None:
+            # Defensive: treat a None store the same as acquisition failure.
+            logger.warning(
+                "idempotency: store unavailable (None) for key %r",
+                idem_validated_key,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
+        try:
+            # Mint the turn identity HERE and persist it with the claim
+            # (#7782 finding 1). A crash between the claim and the moment
+            # ``_start_run`` returns its real stream_id used to leave a
+            # pending record with NO identity on disk; a restarted process
+            # then answered every retry for that key with
+            # ``409 idempotency_in_flight`` + ``retry_after_seconds: 1``
+            # for the remaining TTL. Carrying the minted identity means a
+            # restarted process finds a pending record WITH a stream_id,
+            # which ``claim`` replays as the original turn.
+            _idem_provisional_stream = f"stream-{uuid.uuid4().hex}"
+            idem_claim_record = store.claim_with_identity(
+                idem_validated_key,
+                fingerprint,
+                profile=idem_profile,
+                session_id=str(body.get("session_id") or ""),
+                stream_id=_idem_provisional_stream,
+                turn_id=f"turn-{uuid.uuid4().hex}",
+            )
+        except IdempotencyConflict as exc:
+            return j(handler, {
+                "error": str(exc),
+                "code": "idempotency_conflict",
+                "idempotency_key": idem_validated_key,
+            }, status=409)
+        except IdempotencyOutcomeUnknown as exc:
+            # Recovered from a crash between the claim and the identity
+            # binding. Distinct from in-flight: NO retry hint, because a
+            # blind retry is exactly what could double-execute the turn.
+            return j(handler, {
+                "error": str(exc),
+                "code": "idempotency_outcome_unknown",
+                "idempotency_key": idem_validated_key,
+            }, status=409)
+        except IdempotencyInFlight as exc:
+            return j(handler, {
+                "error": str(exc),
+                "code": "idempotency_in_flight",
+                "idempotency_key": idem_validated_key,
+                "retry_after_seconds": 1,
+            }, status=409)
+        except IdempotencyKeyExpired as exc:
+            return j(handler, {
+                "error": str(exc),
+                "code": "idempotency_key_expired",
+                "idempotency_key": idem_validated_key,
+            }, status=410)
+        except IdempotencyStoreUnavailable as exc:
+            # Persistent store couldn't durably commit the new
+            # claim; the in-memory state has been rolled back.
+            # Surface 503 so the caller retries with the same
+            # key — a fresh claim will be admitted on the next
+            # attempt (no phantom record survives).
+            logger.warning(
+                "idempotency: claim persist failed for key %r: %s",
+                idem_validated_key, exc,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
+        except Exception as exc:  # corrupt store / disk error
+            # Don't admit silently; refuse explicitly so the caller
+            # can retry rather than risk a duplicate turn.
+            logger.warning(
+                "idempotency: claim failed for key %r: %s",
+                idem_validated_key, exc,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
+        if idem_claim_record.status == "complete" or (
+            idem_claim_record.status == "pending"
+            and idem_claim_record.stream_id
+        ):
+            # Replay the original acceptance. This short-circuits
+            # BEFORE any session lookup, pending-state write, or
+            # worker thread start — a lost-response retry does not
+            # even touch disk.
+            if idem_claim_record.status == "pending":
+                # A turn was admitted earlier but its completion never
+                # became durable; its identity was reconciled onto the
+                # pending claim (see ``reconcile``). The turn is real,
+                # so mark it admitted — the finally clause must NOT
+                # release this guard as if it were a refused start.
+                idem_turn_admitted = True
+            payload = _idem_build_response_payload(idem_claim_record)
+            status = int(idem_claim_record.response_status or 200)
+            if diag is not None:
+                diag.stage("idempotency_replay")
+                diag.finish()
+            if status < 200 or status >= 400:
+                # Treat any non-2xx stored result as a stale failure;
+                # release so the caller can retry with the same key
+                # and (presumably) a different network.
+                try:
+                    store.release(idem_validated_key, profile=idem_profile)
+                except Exception as exc:
+                    # A stale (non-2xx) completion could not be
+                    # durably dropped. Keep the stored result: it is
+                    # already durable, so replaying it is fail-closed
+                    # — the caller cannot silently re-admit a turn the
+                    # durable store still remembers as attempted.
+                    logger.warning(
+                        "idempotency: could not release stale completion "
+                        "for key %r: %s",
+                        idem_validated_key, exc,
+                    )
+                return j(handler, {
+                    "error": "previous attempt did not complete; retry",
+                    "code": "idempotency_replay_unavailable",
+                    "idempotency_key": idem_validated_key,
+                }, status=503)
+            return j(handler, payload, status=status)
     try:
         diag.stage("validate_session_id") if diag else None
         try:
@@ -26813,10 +27060,142 @@ def _handle_chat_start(handler, body, diag=None):
             if restore_err is not None:
                 return bad(handler, f"failed to restore compression recovery: {_sanitize_error(restore_err)}", 500)
         diag.stage("response_write") if diag else None
+        # Idempotency: a 2xx with a stream_id is a real started turn. Mark
+        # the claim complete so a retry after a lost response replays the
+        # original identity instead of admitting a second turn. Anything
+        # else (4xx/5xx) is a refused start; the finally block below
+        # releases the claim so the caller can retry.
+        #
+        # CRITICAL: ``idem_completed`` is only flipped True AFTER
+        # ``complete()`` returns successfully. If the durable write
+        # fails, complete() rolls back the in-memory mutation and
+        # raises IdempotencyStoreUnavailable; we surface 503 to the
+        # caller so they know the durability guarantee was broken.
+        # The turn itself is already admitted and cannot be undone, so
+        # we reconcile the admitted identity onto the pending claim
+        # (``reconcile``) rather than releasing it: a retry must replay
+        # the original turn, not admit a second one. ``idem_turn_admitted``
+        # is set so the finally clause never releases a guard that
+        # represents a real, already-started turn.
+        if (
+            idem_claim_record is not None
+            and idem_validated_key is not None
+            and status < 400
+            and response.get("stream_id")
+        ):
+            idem_turn_admitted = True
+            _idem_session_id = response.get("session_id") or body.get("session_id", "")
+            _idem_stream_id = response.get("stream_id") or ""
+            _idem_turn_id = response.get("turn_id") or ""
+            try:
+                get_idempotency_store().complete(
+                    idem_validated_key,
+                    profile=idem_profile,
+                    session_id=_idem_session_id,
+                    stream_id=_idem_stream_id,
+                    turn_id=_idem_turn_id,
+                    response_status=status,
+                    response_payload=response,
+                )
+                idem_completed = True
+            except IdempotencyStoreUnavailable as exc:
+                # Durable write failed AFTER the agent turn was admitted.
+                # The in-memory state is rolled back to the prior pending
+                # record. We MUST NOT drop the guard: the turn is real, so
+                # we durably bind its identity onto the pending claim so a
+                # retry replays it (recorder stays at one) instead of
+                # starting a second turn — the duplicate-execution barrier
+                # the review demanded. ``idem_turn_admitted`` stays True so
+                # the finally clause does not release this claim.
+                logger.warning(
+                    "idempotency: complete() persist failed for key %r: %s; "
+                    "reconciling the admitted identity onto the pending claim",
+                    idem_validated_key, exc,
+                )
+                try:
+                    get_idempotency_store().reconcile(
+                        idem_validated_key,
+                        profile=idem_profile,
+                        session_id=_idem_session_id,
+                        stream_id=_idem_stream_id,
+                        turn_id=_idem_turn_id,
+                    )
+                except Exception as _rec_exc:
+                    # Even reconcile failed: the identity could not be made
+                    # durable. The pending guard is still retained (only its
+                    # identity rollback happened), so a retry is refused
+                    # rather than re-admitting a second turn. Surface 503 so
+                    # the caller can reconcile externally.
+                    logger.warning(
+                        "idempotency: reconcile() failed for key %r: %s",
+                        idem_validated_key, _rec_exc,
+                    )
+                return j(handler, {
+                    "error": "idempotency store unavailable; turn started but could not be recorded for replay",
+                    "code": "idempotency_store_unavailable",
+                    "idempotency_key": idem_validated_key,
+                }, status=503)
+            except Exception as exc:
+                # Finding 4 (#7435 review): do NOT swallow an unexpected
+                # exception from complete(). Treat it as unavailable and
+                # retain the claim. The bug this fixes is the generic
+                # ``return j(handler, response)`` that reused to answer 200
+                # with the claim released — a state in which the only
+                # durable guard was deleted.
+                logger.warning(
+                    "idempotency: complete() raised unexpectedly for key %r: %s",
+                    idem_validated_key, exc,
+                )
+                return j(handler, {
+                    "error": "idempotency store unavailable; turn started but could not be recorded for replay",
+                    "code": "idempotency_store_unavailable",
+                    "idempotency_key": idem_validated_key,
+                }, status=503)
         return j(handler, response, status=status)
     finally:
         if diag:
             diag.finish()
+        # Release a still-pending claim if the request didn't make it to
+        # acceptance (validation rejection, exception, or non-2xx from
+        # _start_run). The contract says "fail explicitly; no stale claim"
+        # so a follow-up with the SAME key + same fingerprint can be
+        # retried without an IdempotencyInFlight error.
+        #
+        # ``idem_turn_admitted`` guards the release: once _start_run has
+        # admitted a real turn (2xx + stream_id reached the completion
+        # step, or a pending-with-identity replay was seen), the pending
+        # claim is the ONLY record of that turn — even if its completion
+        # or reconcile write failed — and must never be dropped on this
+        # cleanup path. Dropping it would delete the duplicate-execution
+        # barrier and let a retry re-admit the same logical turn.
+        if (
+            idem_claim_record is not None
+            and not idem_completed
+            and not idem_turn_admitted
+            and idem_claim_record.status == "pending"
+            and idem_validated_key is not None
+        ):
+            try:
+                get_idempotency_store().release(
+                    idem_validated_key, profile=idem_profile
+                )
+            except Exception as exc:
+                # release() is fail-closed: it restores the pending claim
+                # when its own durable write fails, so the claim survives
+                # and a retry sees idempotency_in_flight (or 503) instead
+                # of a fresh claim that would admit a second turn. The
+                # in-flight guard must not be dropped just because we are
+                # on a cleanup path — that is precisely the duplicate-turn
+                # window this store exists to close. We cannot turn this
+                # into a 503 here (the response is already in flight on
+                # the success path), so the durable pending claim stands
+                # and the caller retries against it.
+                logger.warning(
+                    "idempotency: release() could not durably drop the claim "
+                    "for key %r: %s; the pending claim is retained so a retry "
+                    "is refused rather than re-admitted",
+                    idem_validated_key, exc,
+                )
 
 
 
