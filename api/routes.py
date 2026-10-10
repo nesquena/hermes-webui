@@ -6659,15 +6659,15 @@ def _raw_peer_is_trusted_proxy(handler) -> bool:
     return _ip_in_networks(addr, _trusted_proxy_networks())
 
 
-def _forwarded_client_ip_from_trusted_proxy(handler):
+def _forwarded_client_ip_from_trusted_proxy(handler, allow_real_ip: bool = True):
     """Resolve the real client IP from a chain fronted by a trusted proxy.
 
     Precondition: the caller has verified the raw socket peer is a trusted proxy.
     Consumes ALL X-Forwarded-For values (across repeated headers), preserves wire
     order, walks RIGHT-TO-LEFT skipping hops that are themselves trusted-proxy
     addresses, and returns the first non-trusted (i.e. real-client) hop. Falls
-    back to X-Real-IP, then the raw socket peer. Returns None when the chain is
-    present-but-empty / malformed so the caller fails closed.
+    back to X-Real-IP (if allow_real_ip is True), then the raw socket peer. Returns None when
+    the chain is present-but-empty / malformed so the caller fails closed.
     """
     import ipaddress
 
@@ -6712,11 +6712,42 @@ def _forwarded_client_ip_from_trusted_proxy(handler):
         # tier itself (loopback/private), i.e. resolve to the raw peer below.
         return _request_client_ip(handler)
 
-    real_ip = handler.headers.get("X-Real-IP", "").strip()
-    if real_ip:
-        return real_ip
+    if allow_real_ip:
+        real_ip = handler.headers.get("X-Real-IP", "").strip()
+        if real_ip:
+            return real_ip
     # No forwarded header at all → the trusted proxy is speaking for itself.
     return _request_client_ip(handler)
+
+
+def _extract_log_ips(handler) -> tuple[str, str, str | None]:
+    """Extract (remote, client_ip, forwarded_for) for structured request logging.
+    
+    Forwarded headers are resolved to client_ip only when raw socket peer is a trusted proxy.
+    X-Real-IP is ignored for log identity to avoid relaying attacker-selected values.
+    """
+    remote = '-'
+    try:
+        if getattr(handler, 'client_address', None):
+            remote = str(handler.client_address[0])
+    except Exception:
+        remote = '-'
+    forwarded_for = None
+    try:
+        raw_xff = handler.headers.get('X-Forwarded-For') or ''
+        forwarded_for = raw_xff.split(',')[0].strip() or None
+        if forwarded_for and len(forwarded_for) > 128:
+            forwarded_for = forwarded_for[:128]
+    except Exception:
+        forwarded_for = None
+    client_ip = remote
+    try:
+        if remote != '-' and _raw_peer_is_trusted_proxy(handler):
+            resolved = _forwarded_client_ip_from_trusted_proxy(handler, allow_real_ip=False)
+            client_ip = resolved if resolved else '-'
+    except Exception:
+        client_ip = remote
+    return remote, client_ip, forwarded_for
 
 
 def _onboarding_request_is_local(handler) -> bool:

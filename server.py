@@ -118,7 +118,10 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
+from api.routes import (
+    handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers,
+    _extract_log_ips,
+)
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
@@ -356,20 +359,11 @@ class Handler(BaseHTTPRequestHandler):
         """Structured JSON logs for each request."""
         import json as _json
         duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
-        remote = '-'
-        try:
-            if getattr(self, 'client_address', None):
-                remote = str(self.client_address[0])
-        except Exception:
-            remote = '-'
-        forwarded_for = None
-        try:
-            forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
-        except Exception:
-            forwarded_for = None
+        remote, client_ip, forwarded_for = _extract_log_ips(self)
         record_data = {
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'remote': remote,
+            'client_ip': client_ip,
             'method': getattr(self, 'command', None) or '-',
             'path': getattr(self, 'path', None) or '-',
             'status': int(code) if str(code).isdigit() else code,
