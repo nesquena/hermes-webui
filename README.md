@@ -296,6 +296,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Send-key on touch devices: plain Enter inserts a newline on phones (iPhone/iPod, Android phones) and on tablets / iPadOS / touch-capable Macs that only expose a coarse pointer (no attached hardware keyboard), matching the software keyboard's return key. Devices that report a fine pointer (for example, a tablet with a hardware keyboard) keep the configured physical-keyboard send-key behavior. The configured shortcut and the Send button remain available for sending.
 - Show/hide CLI sessions toggle (enabled by default)
 - Token usage display toggle (off by default, also via `/usage` command)
+- Task list in chat toggle (off by default) -- a collapsible task strip pinned at the top of the chat area, summarising the current session's todos. While it is on, the sidebar **Todos** panel is hidden and the workspace-panel Todos toggle is disabled with an explanation, so the same list is never shown twice; switch it back off in Settings -> Preferences to restore the sidebar panel and re-enable the workspace toggle.
 - Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
@@ -376,7 +377,7 @@ before the session's named-profile Gateway ownership is known.
 - **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
-- **Todos** -- live task list from the current session
+- **Todos** -- live task list from the current session; hidden while the in-chat task list toggle is on, which also disables the workspace-panel Todos tab
 - **Spaces** -- add, rename, remove workspaces; quick-switch from topbar
 
 ### Mobile responsive

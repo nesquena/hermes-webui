@@ -10845,22 +10845,33 @@ function renderTodoEmptyState(options={}){
 }
 
 function renderTodoRow(todo,options={}){
+  // ONE shared row renderer for all three Todos surfaces (sidebar panel,
+  // workspace-panel tab, in-chat tray). The tray used to hand-roll its own
+  // markup with tray-only class hooks, which duplicated this function and left
+  // dead CSS behind; it now calls this with {compact:true, rowClass:'...'}
+  // (reviewer re-gate 2026-10-08T03:10:50Z, "tidy the shared-row renderer").
   const td=todo||{};
+  const opts=options||{};
   const status=todoStatusKey(td.status);
   const visual=todoStatusVisual(status);
-  const showMetadata=!(options&&options.metadata===false);
+  const showMetadata=!(opts.metadata===false);
+  const compact=!!opts.compact;
+  const rowClass=opts.rowClass?(' '+String(opts.rowClass)):'';
   const isCompleted=status==='completed';
   const isCancelled=status==='cancelled';
   const contentColor=(isCompleted||isCancelled)?'var(--muted)':'var(--text)';
   const completedStyle=(isCompleted||isCancelled)?'text-decoration:line-through;opacity:.5':'';
   const metadata=showMetadata
-    ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(status)}</div>`
+    ? `<div class="todos-meta" style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(status)}</div>`
     : '';
+  const gap=compact?8:10;
+  const padY=compact?5:6;
+  const contentSize=compact?'12.5px':'13px';
   return `
-    <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${visual.color}">${renderTodoStatusIcon(status,14)}</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;color:${contentColor};${completedStyle};line-height:1.4">${esc(todoContent(td))}</div>
+    <div class="todos-row${rowClass}" style="display:flex;align-items:flex-start;gap:${gap}px;padding:${padY}px 0;border-bottom:1px solid var(--border);">
+      <span class="todos-status" style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${visual.color}">${renderTodoStatusIcon(status,14)}</span>
+      <div class="todos-body" style="flex:1;min-width:0">
+        <div class="todos-content" style="font-size:${contentSize};color:${contentColor};${completedStyle};line-height:1.4;overflow-wrap:anywhere">${esc(todoContent(td))}</div>
         ${metadata}
       </div>
     </div>`;
@@ -10877,6 +10888,373 @@ function _todosPanelIsActive(){
   return !!(panel&&panel.classList&&panel.classList.contains('active'));
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Chat todos: embedded collapsible task list at the top of the chat area.
+// Opt-in via the "Show task list in chat" checkbox (localStorage-backed,
+// frontend-only preference — no server settings round-trip needed).
+// When enabled, the sidebar Todos panel is hidden to avoid duplication.
+// ────────────────────────────────────────────────────────────────────────
+const CHAT_TODOS_LS_KEY='hermes-webui-chat-todos';
+let _chatTodosEnabled=null;             // null = uninitialised; true/false once known
+let _chatTodosInitialised=false;
+
+function _chatTodosReadPref(){
+  try{
+    const v=localStorage.getItem(CHAT_TODOS_LS_KEY);
+    // Default OFF (opt-in): the tray hides the sidebar Todos tab and paints a
+    // floating overlay in the transcript, so it must never appear for existing
+    // users who never asked for it. Only an explicit '1' turns it on.
+    if(v===null) return false;
+    return v==='1';
+  }catch(_){return false;}
+}
+function _chatTodosWritePref(v){
+  try{
+    // Persist both states explicitly ('1' enabled / '0' disabled). Removing the
+    // key on false would re-collide with the opt-in default and make a user's
+    // choice to enable the tray vanish on reload.
+    localStorage.setItem(CHAT_TODOS_LS_KEY,v?'1':'0');
+  }catch(_){}
+}
+function chatTodosEnabled(){
+  if(_chatTodosEnabled===null) _chatTodosEnabled=_chatTodosReadPref();
+  return _chatTodosEnabled;
+}
+function _setChatTodosEnabled(v){
+  _chatTodosEnabled=!!v;
+  _chatTodosWritePref(_chatTodosEnabled);
+  if(typeof _syncChatTodosRailVisibility==='function') _syncChatTodosRailVisibility();
+}
+function _syncChatTodosRailVisibility(){
+  // When the in-chat tray is active, hide the sidebar Todos panel so the
+  // user never has two competing todo surfaces.
+  const enabled=chatTodosEnabled();
+  if(enabled){
+    document.querySelectorAll('[data-panel="todos"]').forEach(function(el){
+      el.classList.add('nav-tab-hidden');
+    });
+  }else if(typeof _applyTabVisibility==='function'&&typeof _getHiddenTabs==='function'){
+    // Tray OFF: hand visibility back to its canonical owner. Unconditionally
+    // REMOVING nav-tab-hidden here also revealed a Todos entry the user had
+    // hidden independently through hidden_tabs, so an explicitly hidden tab
+    // reappeared immediately (or after reload). Deferring to
+    // _applyTabVisibility re-derives the tab's own preference instead.
+    //
+    // …but only once the mirror IS that preference. While a profile switch's
+    // /api/settings reconciliation is still in flight, localStorage still holds
+    // the PREVIOUS profile's hidden_tabs/tab_order, so re-deriving here would
+    // reimpose the old profile's tab visibility on the profile now in effect: a
+    // Todos entry the current profile hides pops back, or one it shows stays
+    // hidden, until settings refresh (greptile P1, 2026-10-08T20:06:51Z). Skip
+    // the window — the pending reconciliation re-runs _applyTabVisibility with
+    // the profile's own snapshot and already honours the tray's new state.
+    if(typeof _tabVisibilitySnapshotStale!=='function'||!_tabVisibilitySnapshotStale()){
+      _applyTabVisibility(_getHiddenTabs());
+    }
+  }
+  // If the sidebar Todos panel is currently open, bounce back to chat.
+  if(enabled){
+    const panel=document.getElementById('panelTodos');
+    if(panel&&panel.classList&&panel.classList.contains('active')&&typeof switchPanel==='function'){
+      switchPanel('chat',{fromRailClick:false});
+    }
+  }
+  // The workspace-panel Todos tab (Settings ▸ "Show Todos tab in workspace
+  // panel") is a third Todos surface: it must follow the tray too, otherwise
+  // the two settings contradict each other (reviewer re-gate 2026-10-07T18:08:02Z).
+  if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
+}
+// The tray is an in-flow strip, so the shell carries a marker class while it is
+// visible. CSS uses it to drop the floating Start jump pill below the strip
+// instead of letting it paint over the tray (reviewer re-gate 2026-10-07T18:08:02Z).
+let _chatTodosResizeObserver=null;
+// Last measured height of the strip's real box. The transcript is only re-pinned
+// when that box actually GREW (reviewer re-gate 2026-10-08T03:10:50Z).
+let _chatTodosRepinH=0;
+function _measureChatTodosTrayHeight(){
+  const tray=(typeof $==='function')?$('chatTodosPanel'):null;
+  if(!tray||tray.hidden) return 0;
+  try{ return (tray.getBoundingClientRect?tray.getBoundingClientRect().height:0)||0; }catch(_){ return 0; }
+}
+function _publishChatTodosHeight(){
+  // Measure the tray's ACTUAL box and publish it on the shell: CSS offsets the
+  // Start jump pill by it instead of the fixed 43px that only cleared the
+  // collapsed band and let the pill paint inside the expanded rows
+  // (re-gate 2026-10-07T20:13:25Z, [SHOULD-FIX] 2).
+  //
+  // Guarded on purpose: a hidden tray measures 0 and must never clobber a real
+  // height with 0. The observer below republishes as soon as the box is real
+  // again, so the guard no longer strands a stale value (re-gate
+  // 2026-10-07T23:49:23Z).
+  if(typeof document==='undefined'||!document.querySelector) return 0;
+  const shell=document.querySelector('.messages-shell');
+  if(!shell||!shell.style) return 0;
+  // The measured box is CEILed: the whole-tray cap below can leave a fractional
+  // height, and rounding DOWN shaved the Start pill's >=7px clearance
+  // (reviewer re-gate 2026-10-08T09:54:47Z, must-fix 1).
+  const h=Math.ceil(_measureChatTodosTrayHeight());
+  if(h>0&&shell.style.setProperty) shell.style.setProperty('--chat-todos-h',h+'px');
+  return h;
+}
+function _syncChatTodosShellClass(visible){
+  if(typeof document==='undefined'||!document.querySelector) return;
+  const shell=document.querySelector('.messages-shell');
+  if(shell&&shell.classList){
+    shell.classList.toggle('chat-todos-visible',!!visible);
+    if(!visible){
+      if(shell.style&&shell.style.removeProperty) shell.style.removeProperty('--chat-todos-h');
+      return;
+    }
+    _publishChatTodosHeight();
+  }
+}
+function _ensureChatTodosResizeObserver(){
+  // Lifecycle-owned tray observer. The strip's box changes on schedules that
+  // never call renderChatTodos()/toggleChatTodos(): resizing ACROSS the tray
+  // breakpoint (the strip grows 236px -> 276px at 393 -> 1440) and a hidden
+  // tray becoming visible again after Settings edits hydrate the list while
+  // chat is hidden (0 -> 276px, which kept the stale 77px and painted the
+  // whole Start pill inside the task rows). Observing the real box covers both,
+  // so the pill follows the tray's actual box instead of the last render's
+  // measurement (re-gate 2026-10-07T23:49:23Z).
+  if(typeof ResizeObserver!=='function') return;
+  if(typeof document==='undefined'||!document.querySelector) return;
+  const tray=(typeof $==='function')?$('chatTodosPanel'):null;
+  if(!tray) return;
+  if(_chatTodosResizeObserver&&_chatTodosResizeObserver._tray===tray) return;
+  if(_chatTodosResizeObserver&&_chatTodosResizeObserver.disconnect) _chatTodosResizeObserver.disconnect();
+  _chatTodosResizeObserver=null;
+  try{
+    const ro=new ResizeObserver(function(){
+      // Only a visible strip owns the pill offset: while chat is hidden the box
+      // measures 0 and publishing that would leave the pill un-offset. The
+      // hidden -> visible flip re-fires this observer with the real box.
+      const shell=document.querySelector('.messages-shell');
+      if(!(shell&&shell.classList&&shell.classList.contains('chat-todos-visible'))) return;
+      _publishChatTodosHeight();
+      // The bottom fade is a function of the tray's box too: a list that fit
+      // when it was rendered starts scrolling after a shorter viewport or a
+      // taller composer, and with scrollTop still 0 the cue stayed hidden, so
+      // the clipped list read as the complete list until something else
+      // refreshed it (Greptile P2 2026-10-09T21:45:10Z).
+      _updateChatTodosScrollCue();
+      // The repin's own growth gate decides whether the reader moves: a 0px
+      // hidden box records "nothing on screen", so the visible flip still counts
+      // as a real growth (reviewer re-gate 2026-10-08T03:10:50Z).
+      _repinChatTodosTranscript();
+    });
+    ro._tray=tray;
+    ro.observe(tray);
+    _chatTodosResizeObserver=ro;
+  }catch(_){ _chatTodosResizeObserver=null; }
+}
+function _syncChatTodosExpanded(open){
+  const tray=$('chatTodosPanel');
+  if(tray){
+    if(open) tray.classList.add('open');
+    else tray.classList.remove('open');
+  }
+  const head=$('chatTodosHead');
+  if(head&&head.setAttribute) head.setAttribute('aria-expanded',open?'true':'false');
+}
+function _chatTodosToggleEnabled(checked){
+  _setChatTodosEnabled(checked);
+  // The tray force-hides the sidebar Todos entry, so its visibility chip must be
+  // repainted here: toggling the tray from Settings changed nothing on screen
+  // while the chip kept reporting ON (re-gate 2026-10-07, static/ui.js:10503).
+  if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
+  // Keep the settings checkbox in sync for callers that toggle the tray from
+  // elsewhere (e.g. the tab-visibility chip that owns the same hide).
+  const prefCb=$('settingsChatTodosInChat');
+  if(prefCb) prefCb.checked=!!checked;
+  const tray=$('chatTodosPanel');
+  if(tray) tray.hidden=!checked;
+  // Enabling always (re)starts collapsed, and collapsing must drop the
+  // header's aria-expanded too — otherwise a tray expanded, turned off and
+  // turned back on is announced as expanded while its body is hidden.
+  _syncChatTodosExpanded(false);
+  renderChatTodos();
+  // Deliberately no whole-transcript rebuild here: the tray is an absolutely
+  // positioned overlay outside the message scroller, so toggling it changes no
+  // transcript layout (a full re-render cost ~256 ms at 300 messages).
+  //
+  // Deliberately NO appearance autosave either (reviewer re-gate
+  // 2026-10-08T23:19:27Z, static/ui.js:11074): the tray preference is persisted
+  // in localStorage by _setChatTodosEnabled above, whereas an appearance save
+  // would POST hidden_tabs/_getHiddenTabs() — a mirror that can still hold a
+  // stale server snapshot. Toggling the tray from Settings then clobbered a
+  // newer hidden_tabs a sibling client had written (verified over real HTTP:
+  // server []; toggling the tray saved ["todos","memory"] back). Explicit
+  // visibility-chip edits keep their own autosave.
+}
+
+// ── Chat todos summary ──────────────────────────────────────────────────
+function _currentTodos(){
+  // `todoStateMeta` is the sentinel for an explicit snapshot (live todo_state
+  // SSE or session cold-load). Without it, S.todos may hold the empty array
+  // hydration installs for an imported/legacy session whose tasks only exist
+  // as role:"tool" messages — returning that array would bypass the legacy
+  // renderer and hide a list that renders today. Explicit empty snapshots
+  // (meta present) still win.
+  if(S.todoStateMeta) return Array.isArray(S.todos)?S.todos:[];
+  if(typeof _legacyTodosFromMessages==='function'){
+    const legacy=_legacyTodosFromMessages();
+    if(Array.isArray(legacy)) return legacy;
+  }
+  return [];
+}
+function _chatTodosSummary(todos){
+  const active=todos.filter(t=>t&&t.status!=='completed'&&t.status!=='cancelled').length;
+  const total=todos.length;
+  if(!total) return {text:t('todos_no_active')||'No active tasks',active:0,total:0};
+  const text=active===0
+    ?t('todos_tray_summary_done',total)
+    :t('todos_tray_summary_active',active,total);
+  return {text,active,total};
+}
+function _repinChatTodosTranscript(){
+  // The tray is IN FLOW, so showing/growing it shrinks the transcript viewport.
+  // The earlier fix re-pinned on EVERY render path — including the feature-OFF
+  // default where the tray is hidden and nothing resized at all — which yanked a
+  // reader who had scrolled up with Auto-follow OFF back to the bottom
+  // (reviewer re-gate 2026-10-08T03:10:50Z, [SHOULD-FIX] 1). Two gates now:
+  //   1. Auto-follow OFF => never touch the scroll position (the setting only
+  //      suppresses AUTOMATIC following; a deliberate jump is explicit).
+  //   2. Re-pin only when the strip's measured box actually GREW. A shrink
+  //      cannot strand a pinned reader: a growing viewport only lowers
+  //      scrollHeight - clientHeight, which the browser clamps for us.
+  // The helper below is a no-op anyway when the reader scrolled away.
+  //
+  // The box must be measured BEFORE the Auto-follow gate (reviewer re-gate
+  // 2026-10-08T06:40:51Z, [SHOULD-FIX]): when the gate returned first, a hide
+  // with Auto-follow OFF never recorded the zero height, so a later re-show
+  // with follow ON compared against the stale pre-hide height, read "not
+  // grown", and skipped the re-pin — stranding a pinned reader. Tracking the
+  // box unconditionally (follow OUT of the measurement) keeps the baseline
+  // honest; only the ACTUAL re-pin stays gated. The measurement is CEILed here
+  // too, so the growth test compares against the SAME number the pill offset
+  // publishes (reviewer re-gate 2026-10-08T09:54:47Z, must-fix 1).
+  const h=Math.ceil(_measureChatTodosTrayHeight());
+  const grew=h>_chatTodosRepinH;
+  _chatTodosRepinH=h;
+  if(typeof window!=='undefined'&&window._autoScrollFollow===false) return;
+  if(!grew) return;
+  if(typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
+}
+function renderChatTodos(){
+  if(typeof $!=='function'||typeof document==='undefined') return;
+  const tray=$('chatTodosPanel');
+  if(!tray) return;
+  // Keep the lifecycle-owned box observer alive across every path that can
+  // (re)create or re-show the tray (re-gate 2026-10-07T23:49:23Z).
+  _ensureChatTodosResizeObserver();
+  if(!chatTodosEnabled()){
+    tray.hidden=true;
+    _syncChatTodosShellClass(false);
+    _repinChatTodosTranscript();
+    return;
+  }
+  const todos=_currentTodos();
+  if(!todos.length){
+    tray.hidden=true;
+    _syncChatTodosShellClass(false);
+    _repinChatTodosTranscript();
+    return;
+  }
+  tray.hidden=false;
+  _syncChatTodosShellClass(true);
+  _repinChatTodosTranscript();
+  // ONE progress label (reviewer re-gate 2026-10-07T18:08:02Z): the header
+  // used to print the active count twice (summary + counter). The summary span
+  // is generated text, so it also no longer carries data-i18n and is filled
+  // here for every locale.
+  const summary=_chatTodosSummary(todos);
+  const summaryEl=$('chatTodosSummary');
+  if(summaryEl) summaryEl.textContent=summary.text;
+  if(!tray.classList.contains('open')){
+    // Collapsed: header only. Render body lazily when expanded.
+    return;
+  }
+  const body=$('chatTodosBody');
+  if(!body) return;
+  // ONE shared row renderer (sidebar panel / workspace Todos tab / this tray), so
+  // the tray can never drift from the other Todos surfaces (reviewer re-gate
+  // 2026-10-08T03:10:50Z, "tidy the shared-row renderer").
+  const rows=renderTodoRows(todos,{metadata:false,compact:true,rowClass:'chat-todos-row'});
+  // The rows live in their own centred column so they line up with the
+  // transcript's reading column instead of spanning the full shell width
+  // (reviewer re-gate 2026-10-08T03:10:50Z).
+  body.innerHTML=`<div class="chat-todos-rows">${rows||`<div class="chat-todos-empty">${esc(t('todos_no_active'))}</div>`}</div>`;
+  _wireChatTodosScrollCue();
+  _updateChatTodosScrollCue();
+  // The expanded body's height depends on the row count (and growing a list is
+  // the case the reviewer measured a 199px gap on), so re-publish the strip
+  // height for the Start pill and re-pin the transcript to its new bottom.
+  _syncChatTodosShellClass(true);
+  _repinChatTodosTranscript();
+}
+function toggleChatTodos(){
+  const tray=$('chatTodosPanel');
+  if(!tray) return;
+  const isOpen=!tray.classList.contains('open');
+  _syncChatTodosExpanded(isOpen);
+  if(isOpen) renderChatTodos();
+  // Expanding/collapsing resizes the in-flow strip, so refresh the published
+  // height (Start pill offset) and re-pin the transcript on BOTH transitions —
+  // collapsing must not leave the scroller short either (re-gate
+  // 2026-10-07T20:13:25Z).
+  _syncChatTodosShellClass(!tray.hidden);
+  _repinChatTodosTranscript();
+  // Opening/closing the disclosure changes which rows are visible, so the
+  // "more below" cue is re-derived on both transitions (re-gate 2026-10-08).
+  _updateChatTodosScrollCue();
+}
+function _initChatTodos(){
+  if(_chatTodosInitialised) return;
+  _chatTodosInitialised=true;
+  if(typeof document==='undefined') return;
+  _chatTodosEnabled=chatTodosEnabled();
+  _syncChatTodosRailVisibility();
+  const tray=$('chatTodosPanel');
+  if(tray){
+    if(!chatTodosEnabled()){
+      tray.hidden=true;
+      _syncChatTodosShellClass(false);
+      return;
+    }
+    tray.hidden=false;
+    // In-flow strip: start collapsed so it costs only the ~35px header band.
+    _syncChatTodosShellClass(true);
+    _wireChatTodosScrollCue();
+    renderChatTodos();
+  }
+}
+
+// ── Overflow cue for the capped expanded body ──────────────────────────────
+// Below ~768px the body is capped (200px) and its scrollbar is an overlay that
+// mobile browsers only reveal while scrolling, so a capped list looked like a
+// complete one (reviewer re-gate 2026-10-08T03:10:50Z, "a mobile overflow cue
+// when the capped body scrolls"). The cue is a bottom fade published on the
+// wrapper, shown only while there is still content below the fold.
+let _chatTodosCueWired=false;
+function _wireChatTodosScrollCue(){
+  if(_chatTodosCueWired) return;
+  const body=$('chatTodosBody');
+  if(!body||!body.addEventListener) return;
+  _chatTodosCueWired=true;
+  body.addEventListener('scroll',_updateChatTodosScrollCue,{passive:true});
+}
+function _updateChatTodosScrollCue(){
+  const body=$('chatTodosBody');
+  const wrap=$('chatTodosBodyWrap');
+  if(!body||!wrap||!wrap.classList) return;
+  let moreBelow=false;
+  try{
+    moreBelow=(body.scrollHeight-body.clientHeight)>2&&(body.scrollHeight-body.scrollTop-body.clientHeight)>2;
+  }catch(_){ moreBelow=false; }
+  wrap.classList.toggle('chat-todos-overflowing',moreBelow);
+}
+
 function scheduleTodosRefresh(){
   // Idempotent: many `todo_state` events fire on each tool result, but
   // only the latest snapshot needs to paint.  RAF lets us coalesce
@@ -10885,6 +11263,7 @@ function scheduleTodosRefresh(){
   if(typeof requestAnimationFrame!=='function'){
     if(typeof loadTodos==='function') loadTodos();
     if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
+    if(typeof renderChatTodos==='function') renderChatTodos();
     return;
   }
   _todosRenderRafId=requestAnimationFrame(()=>{
@@ -10892,6 +11271,7 @@ function scheduleTodosRefresh(){
     const sidebarActive=_todosPanelIsActive();
     if(sidebarActive&&typeof loadTodos==='function') loadTodos();
     if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
+    if(typeof renderChatTodos==='function') renderChatTodos();
   });
 }
 
@@ -11307,6 +11687,8 @@ function _syncSystemHealthMonitorVisibility(){
 document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility);
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
 else startSystemHealthMonitor();
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initChatTodos);
+  else _initChatTodos();
 
 // ── Hermes agent/gateway heartbeat alert (#716) ──
 const AGENT_HEALTH_INTERVAL_MS=30000;

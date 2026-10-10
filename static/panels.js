@@ -4948,6 +4948,21 @@ async function clearConversation() {
     S.session = data.session;
     S.messages = [];
     S.toolCalls = [];
+    // The in-chat todos tray renders from S.todos + the INFLIGHT snapshot
+    // (ui.js), so clearing the transcript must drop BOTH: otherwise the tray
+    // keeps painting the cleared conversation's tasks and _currentTodos() hands
+    // the stale list back even after the tray is re-expanded (Greptile P1
+    // 2026-10-10T02:22:20Z).  Purge the in-flight TODO payload FIRST —
+    // _hydrateTodosFromSession() treats a present INFLIGHT[sid] as
+    // authoritative, so hydrating alone would install the very list we are
+    // clearing.  The stream payload (messages/uploads) is deliberately left
+    // alone.
+    if(typeof INFLIGHT==='object'&&INFLIGHT&&S.session&&S.session.session_id
+       &&INFLIGHT[S.session.session_id]){
+      delete INFLIGHT[S.session.session_id].todos;
+      delete INFLIGHT[S.session.session_id].todoStateMeta;
+    }
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     syncTopbar();
     renderMessages();
     showToast(t('conversation_cleared'));
@@ -6709,6 +6724,43 @@ async function _profileSwitchPanelLoad(){
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 }
 
+// ── Tab-visibility reconciliation guard ────────────────────────────────────
+// hidden_tabs / tab_order are per-profile settings mirrored into localStorage.
+// From the moment a profile switch's settings reconciliation is in flight, that
+// mirror still holds the PREVIOUS profile's snapshot. Anything that re-derives
+// tab visibility from the mirror inside that window — the in-chat todos tray
+// hands the Todos rail entry back with _applyTabVisibility(_getHiddenTabs()) —
+// would reimpose the old profile's tab visibility on the profile now in effect:
+// a Todos entry the current profile hides pops back, or one it shows stays
+// hidden, until settings refresh (greptile P1, static/ui.js:10501,
+// 2026-10-08T20:06:51Z). Callers use this to skip the stale window; the pending
+// reconciliation applies that profile's own snapshot itself.
+let _tabVisReconcilePending = 0;
+// Profile switches currently in flight: bumped the instant a switch takes a new
+// generation and dropped in its finally. A switch is the ONLY other thing that
+// arms nothing here but will still rewrite the mirror later, so the replay
+// below needs to tell "a NEWER switch is still running and will reconcile"
+// apart from "the switch that superseded this reconciliation already failed"
+// (a failed switch runs no reconciliation of its own, so the last release to
+// see a zero counter is then the SUPERSEDED one). greptile P1,
+// static/panels.js:6783, 2026-10-09T00:15:45Z.
+let _profileSwitchInFlight = 0;
+function _tabVisibilitySnapshotStale(){ return _tabVisReconcilePending > 0; }
+
+// Replay the tray's rail release once the localStorage hidden_tabs mirror is
+// authoritative again for the profile now in effect: no /api/settings
+// reconciliation is in flight and no switch is running that would rewrite it
+// afterwards. Skipped for a superseded reconciliation whose newer switch is
+// still in flight (greptile P1, 2026-10-08T23:51:52Z) — but NOT for one whose
+// newer switch already FAILED: that switch ran no reconciliation of its own, so
+// without the replay a tray disabled during the window leaves the Todos rail
+// entry stale until the next settings refresh (greptile P1, 2026-10-09T00:15:45Z).
+function _maybeReplayChatTodosRailSync(){
+  if (_tabVisReconcilePending > 0) return;
+  if (_profileSwitchInFlight > 0) return;
+  if (typeof _syncChatTodosRailVisibility === 'function') _syncChatTodosRailVisibility();
+}
+
 function _refreshProfileSwitchBackground(gen){
   window._modelDropdownReady=null;
   if (typeof window._ensureModelDropdownReady === 'function') {
@@ -6722,6 +6774,9 @@ function _refreshProfileSwitchBackground(gen){
   // appearance setting; without this fetch, Profile A's hidden-tabs choice
   // would remain in effect under Profile B until the user opens Settings.
   // Stage-394 follow-up to #2636 deep review.
+  // The mirror is about to be re-derived from the new profile's settings, so it
+  // is stale from here until the fetch below settles (see the guard above).
+  _tabVisReconcilePending++;
   Promise.resolve(api('/api/settings')).then(function(s){
     if (gen !== _profileSwitchGeneration) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
@@ -6742,7 +6797,28 @@ function _refreshProfileSwitchBackground(gen){
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
     window._showTitlebarProfile=!!(s&&s.show_titlebar_profile);
     if(typeof _applyTitlebarProfileVisibility==='function') _applyTitlebarProfileVisibility();
-  }).catch(function(){});
+  }).catch(function(){}).then(function(){
+    // Release on BOTH settle paths (the catch above swallows rejections), so a
+    // superseded or failed reconciliation can never strand tab visibility
+    // behind the stale-snapshot guard.
+    _tabVisReconcilePending--;
+    // Replay the tray's rail release once the mirror is authoritative again
+    // (reviewer re-gate 2026-10-08T23:19:27Z, static/panels.js:6766). Every
+    // release path cleared the guard by skipping _syncChatTodosRailVisibility
+    // while the mirror still held the PREVIOUS profile's snapshot, but nothing
+    // re-ran it afterwards: disabling the tray during a failed reconciliation
+    // left the Todos entry hidden although the guard was already clear.
+    //
+    // The decision lives in _maybeReplayChatTodosRailSync(): a SUPERSEDED
+    // reconciliation must NOT replay while its newer switch is still in flight
+    // (it can be the last release to see a zero counter there, and re-deriving
+    // from the then-stale mirror would reimpose the previous profile's
+    // hidden_tabs — greptile P1, 2026-10-08T23:51:52Z), but it MUST replay once
+    // that switch has FAILED: a failed switch runs no reconciliation of its own,
+    // so nothing else would ever re-run the sync and a tray disabled during the
+    // window left the Todos rail entry stale (greptile P1, 2026-10-09T00:15:45Z).
+    _maybeReplayChatTodosRailSync();
+  });
 }
 
 async function loadProfilesPanel() {
@@ -7110,6 +7186,14 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  // Hold a switch-in-flight marker for the whole run: the stale-snapshot arm
+  // below only lands once this POST resolves, and the gap before it is exactly
+  // where a superseded reconciliation's release must NOT replay the previous
+  // profile's mirror (greptile P1, 2026-10-08T22:06:59Z). Dropped in the finally,
+  // where a FAILED switch then lets that release replay (see
+  // _maybeReplayChatTodosRailSync). typeof-tolerant like the other counter ops
+  // because the frontend test harnesses eval these statements in isolation.
+  if (typeof _profileSwitchInFlight === 'number') _profileSwitchInFlight++;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
@@ -7148,6 +7232,12 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  // Stale-snapshot guard ownership for THIS switch: armed the instant
+  // S.activeProfile changes (see below), handed to the settings reconciliation
+  // on success, released in `finally` on every other exit. The counter arms are
+  // `typeof`-tolerant because the frontend test harnesses eval this function in
+  // isolation, without panels.js's module scope (where the counter lives).
+  let _tabVisGuardHeld = false;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
@@ -7179,6 +7269,19 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // The switch's optimistic chip already claims the new profile, but the
+    // localStorage hidden_tabs / tab_order mirror still holds the PREVIOUS
+    // profile's snapshot until _refreshProfileSwitchBackground()'s
+    // /api/settings reconciliation settles. Arm the stale-snapshot guard at
+    // THIS instant rather than inside that reconciliation: everything between
+    // here and the call at the bottom of this function is async, and a tray-off
+    // release landing in the gap would re-derive tab visibility from the
+    // previous profile's mirror — revealing a Todos entry the new profile hides
+    // or keeping a visible one hidden until settings refresh (greptile P1,
+    // static/panels.js:6741, 2026-10-08T22:06:59Z). Ownership is handed to the
+    // reconciliation below; every other exit releases it in `finally`.
+    _tabVisGuardHeld = true;
+    if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7367,6 +7470,13 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
+    // Hand the stale-snapshot guard over to the /api/settings reconciliation
+    // (it releases on both settle paths). The decrement here and the
+    // synchronous re-arm at the top of _refreshProfileSwitchBackground are
+    // neighbours in the same task, so no handler can observe a zero counter
+    // between them.
+    if (_tabVisGuardHeld && typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending--;
+    _tabVisGuardHeld = false;
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 
@@ -7407,6 +7517,22 @@ async function switchToProfile(name) {
     if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
+    // Release the stale-snapshot guard on every exit that did NOT hand it to the
+    // settings reconciliation (switch failure, superseded switch, early return).
+    // The count is a plain counter and this arm is ours, so the release is
+    // unconditional; a stranded arm would pin tab visibility to the stale window
+    // for the rest of the session (greptile P1, static/panels.js:6741).
+    if (_tabVisGuardHeld) { _tabVisGuardHeld = false; if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending--; }
+    // This switch is no longer in flight. A switch that FAILED (or was
+    // superseded) never runs a /api/settings reconciliation of its own, so the
+    // release that brought the counter to zero can be a SUPERSEDED
+    // reconciliation's, which must still replay the tray rail sync — otherwise a
+    // tray disabled during the window leaves the Todos rail entry stale until
+    // the next settings refresh (greptile P1, static/panels.js:6783,
+    // 2026-10-09T00:15:45Z). A successful switch hands the mirror to its own
+    // reconciliation, so the counter is still > 0 here and that one replays.
+    if (typeof _profileSwitchInFlight === 'number' && _profileSwitchInFlight > 0) _profileSwitchInFlight--;
+    if (typeof _maybeReplayChatTodosRailSync === 'function') _maybeReplayChatTodosRailSync();
   }
 }
 
@@ -7768,11 +7894,17 @@ function _applyTabOrder(order){
 function _applyTabVisibility(hidden){
   hidden=_sanitizeTabPanelList(hidden);
   _applyTabOrder(_getTabOrder());
+  // Chat-todos: when the in-chat tray is enabled, the sidebar Todos entry
+  // must remain hidden regardless of hidden_tabs content (avoid duplication).
+  // We re-apply this preference after every hidden_tabs change so profile
+  // switches or settings saves cannot overwrite it.
+  var chatTodosOn=(typeof chatTodosEnabled==='function'?chatTodosEnabled():false);
   // Hide/unhide all [data-panel] elements (sidebar-nav buttons + rail buttons)
   document.querySelectorAll('[data-panel]').forEach(function(el){
     var panel=el.dataset.panel;
     if(!panel)return;
     var shouldHide=hidden.indexOf(panel)!==-1;
+    if(panel==='todos'&&chatTodosOn) shouldHide=true;
     // Never hide always-visible panels (chat, settings) even if present in hidden_tabs
     if(_ALWAYS_VISIBLE_TABS.has(panel)) shouldHide=false;
     el.classList.toggle('nav-tab-hidden',shouldHide);
@@ -7784,6 +7916,13 @@ function _applyTabVisibility(hidden){
   if(activeEl&&activeEl.classList.contains('nav-tab-hidden')){
     if(typeof switchPanel==='function') switchPanel('chat');
   }
+}
+
+function _tabVisibilityChipForcedOff(panel){
+  // The in-chat tray force-hides the sidebar Todos entry, so that panel's own
+  // chip must render OFF and its click must resolve the tray, not flip a
+  // hidden_tabs bit that cannot change what is on screen.
+  return panel==='todos'&&typeof chatTodosEnabled==='function'&&chatTodosEnabled();
 }
 
 function _renderTabVisibilityChips(){
@@ -7801,7 +7940,7 @@ function _renderTabVisibilityChips(){
     var chip=document.createElement('button');
     chip.type='button';
     chip.className='tab-visibility-chip';
-    var isOff=hidden.indexOf(panel)!==-1;
+    var isOff=hidden.indexOf(panel)!==-1||_tabVisibilityChipForcedOff(panel);
     if(isOff)chip.classList.add('chip-off');
     chip.textContent=label;
     chip.setAttribute('data-tab-panel',panel);
@@ -7862,6 +8001,28 @@ function _handleTabVisibilityChipDrop(e,targetPanel){
 
 function _toggleTabVisibilityChip(panel){
   if(_ALWAYS_VISIBLE_TABS.has(panel))return;
+  // A tray-forced chip cannot be turned on by editing hidden_tabs: the tray
+  // re-hides the tab on every pass, so two clicks left the chip ON with the
+  // tab still hidden. Turn the tray off instead — it is what owns the hide —
+  // so the click actually restores the sidebar Todos tab.
+  if(_tabVisibilityChipForcedOff(panel)){
+    // The tray owns the hide — turn it off. But the user may ALSO have hidden
+    // this tab independently (hidden_tabs), and that bit survives the tray
+    // being disabled: the click then left the tab hidden and the chip still
+    // OFF, i.e. it took a second click to reveal a tab the user had just
+    // switched on (re-gate 2026-10-07, static/panels.js:7878). Drop the
+    // independent hide in the same explicit chip-enable branch.
+    var forced=_getHiddenTabs();
+    var forcedIdx=forced.indexOf(panel);
+    if(forcedIdx!==-1){
+      forced.splice(forcedIdx,1);
+      _setHiddenTabs(forced);
+    }
+    if(typeof _chatTodosToggleEnabled==='function') _chatTodosToggleEnabled(false);
+    _renderTabVisibilityChips();
+    _scheduleAppearanceAutosave();
+    return;
+  }
   var hidden=_getHiddenTabs();
   var idx=hidden.indexOf(panel);
   if(idx!==-1){
@@ -8985,10 +9146,26 @@ function _rememberPreferencesSaved(payload){
 }
 
 function _applyWorkspaceTodosTabVisibility(){
+  // The in-chat task-list tray replaces every other Todos surface, so while it
+  // is on it also owns the workspace-panel Todos tab. The setting row stays
+  // VISIBLE but disabled, with an explanation, instead of vanishing: hiding it
+  // left the user staring at a tab that refused to appear with no way to see
+  // why (reviewer re-gate 2026-10-08T03:10:50Z).
+  const trayOn=(typeof chatTodosEnabled==='function')&&chatTodosEnabled();
+  const want=!!window._workspaceTodosTab&&!trayOn;
   const tab=$('workspaceTodosTab');
-  if(tab) tab.hidden=!window._workspaceTodosTab;
+  if(tab) tab.hidden=!want;
+  const field=$('settingsWorkspaceTodosTabField');
+  const box=$('settingsWorkspaceTodosTab');
+  if(box) box.disabled=!!trayOn;
+  if(field){
+    if(field.classList) field.classList.toggle('is-disabled',!!trayOn);
+    field.hidden=false;
+  }
+  const note=$('settingsWorkspaceTodosTabNote');
+  if(note) note.hidden=!trayOn;
   const rp=document.querySelector('.rightpanel');
-  if(!window._workspaceTodosTab && rp && rp.dataset.activeTab==='todos'){
+  if(!want && rp && rp.dataset.activeTab==='todos'){
     if(typeof switchWorkspacePanelTab==='function') switchWorkspacePanelTab('files');
   }
 }
@@ -9272,6 +9449,18 @@ async function loadSettingsPanel(){
       endlessScrollCb.onchange=function(){
         window._sessionEndlessScrollEnabled=this.checked;
         _scheduleAppearanceAutosave();
+      };
+    }
+    const chatTodosCb=$('settingsChatTodosInChat');
+    if(chatTodosCb){
+      chatTodosCb.checked=!!(typeof chatTodosEnabled==='function'&&chatTodosEnabled());
+      // No appearance autosave here (reviewer re-gate 2026-10-08T23:19:27Z,
+      // static/panels.js:9355): the checkbox only drives the tray preference
+      // (localStorage), and an appearance save would POST this client's stale
+      // hidden_tabs mirror, overwriting a newer server snapshot written by
+      // another client. Explicit visibility-chip edits still autosave.
+      chatTodosCb.onchange=function(){
+        if(typeof _chatTodosToggleEnabled==='function') _chatTodosToggleEnabled(this.checked);
       };
     }
     const autoScrollFollowCb=$('settingsAutoScrollFollow');

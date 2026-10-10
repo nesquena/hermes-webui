@@ -2270,6 +2270,80 @@
   .workspace-toggle-btn:disabled{opacity:.38;cursor:not-allowed;}
   .chip.model{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
   .messages-shell{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;}
+    /* Chat todos tray — an in-flow strip pinned at the top of .messages-shell.
+       The tray participates in the shell's flex column, so a collapsed ~35px
+       strip pushes the transcript down instead of floating over its first
+       lines (reviewer re-gate 2026-10-07T18:08:02Z). Expanded it grows in
+       place and the scroller shrinks; the phone layout only tightens padding. */
+    /* Whole-tray cap (reviewer re-gate 2026-10-08T09:54:47Z, must-fix 1): the
+       body's 40vh cap ignored the header + composer, so 12 rows plus a five-line
+       draft drove the transcript to 0px at 844x390 and 1440x420. Own the tray's
+       height against .messages-shell and let the body shrink + scroll; the body
+       caps below stay as its inner limit. */
+    .chat-todos{flex:0 0 auto;width:100%;background:var(--surface);border-bottom:1px solid var(--border);max-height:calc(50% - 1px);min-height:0;display:flex;flex-direction:column;overflow:hidden;}
+    /* The author `display:flex` just added outranks the UA [hidden] rule, so the
+       collapsed strip has to opt out explicitly. */
+    .chat-todos[hidden]{display:none;}
+    .chat-todos-head{display:flex;align-items:center;gap:8px;width:100%;min-height:35px;padding:0;background:transparent;border:none;cursor:pointer;color:var(--text);font-size:13px;font-weight:600;text-align:left;transition:background .12s;flex-shrink:0;}
+    .chat-todos-head:hover{background:var(--hover-bg);}
+    /* The header CONTENT sits on the rows' reading column (the same --msg-max
+       contract as .chat-todos-rows below); the BUTTON stays full width with zero
+       padding, so the whole band is still the hit target and the hover surface,
+       and the chevron lines up with the rows' right edge at every width
+       (re-gate 2026-10-08T09:54:47Z, must-fix 2). */
+    .chat-todos-head-inner{display:flex;align-items:center;gap:8px;width:100%;min-height:35px;margin:0 auto;padding:0 24px;max-width:var(--msg-max);}
+    @media(min-width:1400px){.chat-todos-head-inner{max-width:calc(var(--msg-max) + 40px);}}
+    @media(min-width:1800px){.chat-todos-head-inner{max-width:calc(var(--msg-max) + 80px);}}
+    .chat-todos-title{display:inline-flex;align-items:center;gap:7px;min-width:0;flex:1;}
+    .chat-todos-title svg{flex-shrink:0;color:var(--accent);}
+    .chat-todos-chevron{flex-shrink:0;display:inline-flex;align-items:center;color:var(--muted);transition:transform .18s ease;}
+    .chat-todos.open .chat-todos-chevron{transform:rotate(180deg);}
+    .chat-todos-body{max-height:min(240px,40vh);overflow-y:auto;border-top:1px solid var(--border);padding:4px 0 8px;}
+    .chat-todos:not(.open) .chat-todos-body{display:none;}
+    /* The rows come from the ONE shared row renderer (renderTodoRow), so the tray
+       owns no row styling any more — it only centres that renderer on the
+       transcript's reading column (re-gate 2026-10-08T03:10:50Z). That column is
+       .messages-inner's, so these rules repeat its --msg-max contract (its
+       <=640px mobile override lives next to .messages-inner's own, where that
+       block's containment rules are asserted): the row text lines up with the
+       message text at every width. */
+    .chat-todos-rows{margin:0 auto;width:100%;padding:0 24px;max-width:var(--msg-max);}
+    @media(min-width:1400px){.chat-todos-rows{max-width:calc(var(--msg-max) + 40px);}}
+    @media(min-width:1800px){.chat-todos-rows{max-width:calc(var(--msg-max) + 80px);}}
+    .chat-todos-row:last-child{border-bottom:none;}
+    .chat-todos-empty{font-size:12px;color:var(--muted);padding:8px 2px;}
+    /* Overflow cue: the capped body scrolls with an overlay scrollbar that mobile
+       browsers only reveal mid-scroll, so a truncated list read as a complete one.
+       This bottom fade sits on the WRAPPER (outside the scroller, so it does not
+       scroll away) and appears only while content remains below the fold
+       (re-gate 2026-10-08T03:10:50Z). */
+    /* The tray is a column (above): the head keeps its band and this wrapper
+       takes the remainder, shrinking below its content (min-height:0 on both it
+       and the body) so the capped body scrolls instead of shoving the transcript
+       off-screen (re-gate 2026-10-08T09:54:47Z, must-fix 1). */
+    .chat-todos-body-wrap{min-height:0;display:flex;flex-direction:column;}
+    .chat-todos-body{min-height:0;}
+    .chat-todos-body-wrap{position:relative;}
+    .chat-todos-scroll-cue{position:absolute;left:0;right:0;bottom:0;height:40px;pointer-events:none;opacity:0;transition:opacity .15s ease;background:linear-gradient(to bottom,rgba(0,0,0,0),var(--surface));}
+    .chat-todos:not(.open) .chat-todos-scroll-cue{display:none;}
+    .chat-todos-body-wrap.chat-todos-overflowing .chat-todos-scroll-cue{opacity:1;}
+    /* The floating Start jump pill is anchored to the shell's top-right; when
+       the tray strip occupies that band, drop the pill below it. The strip's
+       LIVE height is published on the shell by _syncChatTodosShellClass, so the
+       pill also clears the EXPANDED tray — a fixed 43px assumed the collapsed
+       band and painted the pill inside the task rows (re-gate
+       2026-10-07T20:13:25Z, [SHOULD-FIX] 2). */
+    .messages-shell.chat-todos-visible #jumpToSessionStartBtn{top:calc(var(--chat-todos-h,36px) + 7px);}
+    @media(prefers-reduced-motion:reduce){.chat-todos-head{transition:none;}.chat-todos-chevron{transition:none;}.chat-todos-scroll-cue{transition:none;}}
+    /* The header takes the rows' 24px inset so its icon lines up with the row /
+       transcript columns; below 640px both fall to the 10px safe-area mirror
+       (see the <=640px block further down), which is why the narrow header rule
+       lives there and not here (re-gate 2026-10-08T08:44:28Z, item 1). The body
+       cap also gets a height term so a short / landscape phone viewport cannot
+       let the expanded tray swallow the transcript (item 3). */
+    @media(max-width:768px){
+      .chat-todos-body{max-height:min(200px,40vh);}
+    }
   .messages{flex:1;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;min-height:0;position:relative;z-index:0;-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior-y:none;overflow-anchor:auto;}
 @media (hover:hover) and (pointer:fine){.messages{overflow-anchor:none;}}
   /* Overlay scroll controls so they do not affect the transcript's native scroll geometry. */
@@ -3167,6 +3241,23 @@
        intent) WITHOUT coercing overflow-y or creating a scroll container, so
        min-height:auto stays min-content and the inner grows normally. */
     .messages-inner{padding:12px 10px 20px;max-width:100%;overflow-x:clip;word-break:break-word;min-width:0;padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
+    /* The in-chat task tray centres its rows on that same reading column, so it
+       takes the same <=640px override as its neighbour above (re-gate
+       2026-10-08T03:10:50Z). Kept in THIS block — not a second @media — so the
+       mobile containment rules asserted for .messages-inner stay together. */
+    .chat-todos-rows{max-width:100%;padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
+    /* ...and the header CONTENT follows that same 10px mirror, so the header icon
+       keeps sitting on the row column at phone widths (re-gate
+       2026-10-08T09:54:47Z, must-fix 2: the mirror moved from the button onto the
+       inner span, which is what carries the rows' column contract). */
+    .chat-todos-head-inner{max-width:100%;padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
+    /* Phone tap target (#6978 greptile re-review on 6b718057): the disclosure
+       button's 35px band is below the 44px minimum this repo requires for
+       interactive elements, and no mobile rule grew it — the button stayed a
+       harder-than-required target on every phone width. The BUTTON grows here
+       (its inner span keeps the 35px content band and the reading column), so
+       only the hit surface changes and the collapsed strip gains 9px. */
+    .chat-todos-head{min-height:44px;}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
     .composer-wrap{padding:8px 10px calc(12px + var(--keyboard-bottom-inset, 0px))!important;padding-left:max(10px,env(safe-area-inset-left,0))!important;padding-right:max(10px,env(safe-area-inset-right,0))!important;}
@@ -5048,6 +5139,11 @@ main.main > #mainPlugin{display:none;}
 /* Each logical form row is a card surface. Stack with comfortable gap. */
 #mainSettings .settings-field{margin-bottom:12px;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--sidebar);}
 #mainSettings .settings-field:last-of-type{margin-bottom:16px;}
+/* A field the tray has taken ownership of stays in place, visibly disabled, with
+   an explanation underneath (reviewer re-gate 2026-10-08T03:10:50Z). */
+#mainSettings .settings-field.is-disabled{opacity:.55;}
+#mainSettings .settings-field.is-disabled label{cursor:default;}
+#mainSettings .settings-field.is-disabled input{cursor:default;}
 #mainSettings .settings-field > label{display:block;font-size:12px;font-weight:500;letter-spacing:.01em;color:var(--muted);margin-bottom:6px;}
 /* Checkbox rows use inline flex labels — don't turn them into stacked caps */
 #mainSettings .settings-field > label[style*="display:flex"]{color:var(--text);font-size:13px;font-weight:500;margin-bottom:0;}
