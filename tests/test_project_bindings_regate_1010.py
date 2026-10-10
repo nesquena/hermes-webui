@@ -607,3 +607,92 @@ def test_the_moved_highlight_is_scrolled_into_view():
     # Guarded so the layout-less mini-DOM probes keep working.
     assert "typeof row.scrollIntoView==='function'" in fn, fn
     assert "block:'nearest'" in fn, fn
+
+
+# ---------------------------------------------------------------------------
+# 4 — the sweep must fail CLOSED when it cannot confirm who owns a row
+# ---------------------------------------------------------------------------
+
+
+def _row(**extra):
+    row = SimpleNamespace(
+        session_id="s_failclosed",
+        read_only=False,
+        source_tag="",
+        raw_source="",
+        session_source="",
+    )
+    for key, value in extra.items():
+        setattr(row, key, value)
+    return row
+
+
+def _broken_state_db(monkeypatch, tmp_path, name="broken-state.db"):
+    """Point state.db at an unreadable sqlite file (exists, cannot be queried)."""
+    import api.models as models
+
+    path = tmp_path / name
+    path.write_bytes(b"this is not a sqlite database\n" * 8)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: path)
+    return path
+
+
+def test_an_unreadable_state_db_makes_the_sweep_skip_the_row(monkeypatch, tmp_path):
+    """Greptile P2 (2026-10-10T00:47:29Z): an ownership that cannot be confirmed
+    must not authorise a write — AGENTS.md: unknown is not allowed.
+
+    Pre-fix the guard returned False on a failed lookup, so the sweep filed a row
+    it could not prove was not a delegated child.
+    """
+    import api.routes as routes
+
+    _broken_state_db(monkeypatch, tmp_path)
+    assert routes._state_db_session_source_strict("s_failclosed") is None
+    # ...while the historical seam still collapses it to "" for every other caller.
+    assert routes._state_db_session_source("s_failclosed") == ""
+    assert routes._auto_assign_target_is_view_only(_row(), "s_failclosed") is True
+
+
+def test_a_missing_state_db_also_fails_closed(monkeypatch, tmp_path):
+    """No state.db at all is "cannot confirm" too, not "nothing recorded"."""
+    import api.models as models
+    import api.routes as routes
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "nope.db")
+    assert routes._state_db_session_source_strict("s_failclosed") is None
+    assert routes._auto_assign_target_is_view_only(_row(), "s_failclosed") is True
+
+
+def test_a_readable_state_db_keeps_the_previous_decisions(monkeypatch, tmp_path):
+    """Control: a real state.db still files ordinary rows and skips children."""
+    import sqlite3
+
+    import api.models as models
+    import api.routes as routes
+
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
+    conn.execute("INSERT INTO sessions (id, source) VALUES ('s_child', 'subagent')")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: path)
+
+    assert routes._state_db_session_source_strict("s_child") == "subagent"
+    assert routes._state_db_session_source_strict("s_absent") == ""
+    assert routes._auto_assign_target_is_view_only(_row(), "s_child") is True
+    assert routes._auto_assign_target_is_view_only(_row(), "s_absent") is False
+    # The source tag / read-only short-circuits still win before any lookup.
+    assert routes._auto_assign_target_is_view_only(_row(read_only=True), "s_absent") is True
+    assert routes._auto_assign_target_is_view_only(_row(source_tag="Subagent"), "s_absent") is True
+
+
+def test_a_lookup_that_raises_is_skipped_too(monkeypatch):
+    """Even an exception escaping the strict probe must not file the row."""
+    import api.routes as routes
+
+    def _boom(sid):
+        raise RuntimeError("state.db exploded")
+
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", _boom)
+    assert routes._auto_assign_target_is_view_only(_row(), "s_failclosed") is True

@@ -781,6 +781,13 @@ def _auto_assign_target_is_view_only(session, sid: str) -> bool:
     subagent children are view-only and owned by their origin (the CLI importer
     / the delegate runner). Stamping ``project_id`` on such a row would rewrite
     state WebUI does not own (re-gate 2026-10-07T17:06Z, [SHOULD-FIX]).
+
+    Fails CLOSED: when the state.db ownership lookup cannot be performed at all,
+    the row is treated as view-only and skipped, because "unknown is not
+    allowed" (AGENTS.md) — an unconfirmable row may be a delegated child, and
+    filing it would rewrite state the delegate runner owns (Greptile P2
+    2026-10-10T00:47:29Z). Only a readable state.db that simply has no such row
+    (a genuinely deleted/legacy WebUI session) is filed.
     """
     if getattr(session, "read_only", False):
         return True
@@ -793,9 +800,12 @@ def _auto_assign_target_is_view_only(session, sid: str) -> bool:
     if source == "subagent":
         return True
     try:
-        return _is_subagent_child_session_id(sid)
+        db_source = _state_db_session_source_strict(sid)
     except Exception:
-        return False
+        return True
+    if db_source is None:
+        return True
+    return db_source == "subagent"
 
 
 def _apply_project_auto_assign(proj) -> int:
@@ -9231,31 +9241,49 @@ def _session_deleted_tombstone_marks_was_webui(sid: str) -> bool:
         return False
 
 
+def _state_db_session_source_strict(sid: str) -> str | None:
+    """Like ``_state_db_session_source``, but keeps "unavailable" distinct.
+
+    Returns the lowercased ``sessions.source``, ``""`` when state.db is readable
+    but holds no such row, and ``None`` when state.db could not be consulted at
+    all (no configured path, missing file, unreadable/corrupt database). The
+    auto-assign sweep needs that difference to fail CLOSED — an ownership it
+    cannot confirm must not authorise a write (AGENTS.md: unknown is not
+    allowed) — while every other caller keeps the historical
+    "unknown -> ''" behaviour through ``_state_db_session_source``
+    (Greptile P2 2026-10-10T00:47:29Z).
+    """
+    try:
+        if not sid or not is_safe_session_id(sid):
+            return ""
+        from api.models import _active_state_db_path
+
+        db_path = _active_state_db_path()
+        if not db_path or not Path(db_path).exists():
+            return None
+        import sqlite3 as _sqlite
+
+        with closing(_sqlite.connect(str(db_path))) as _conn:
+            row = _conn.execute(
+                "SELECT source FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return ""
+    return str(row[0] or "").strip().lower()
+
+
 def _state_db_session_source(sid: str) -> str:
     """Return the lowercased ``sessions.source`` for ``sid`` from state.db.
 
     Cheap single-row lookup used to distinguish delegated ``subagent`` children
     (which have a recoverable state.db transcript) from genuinely-deleted WebUI
     sessions.  Returns "" on any error / missing row so callers fall back to
-    their existing behaviour.
+    their existing behaviour; ``_state_db_session_source_strict`` is the variant
+    that keeps "could not look it up" distinct from "no such row".
     """
-    if not sid or not is_safe_session_id(sid):
-        return ""
-    try:
-        from api.models import _active_state_db_path
-        db_path = _active_state_db_path()
-        if not db_path or not Path(db_path).exists():
-            return ""
-        import sqlite3 as _sqlite
-        with closing(_sqlite.connect(str(db_path))) as _conn:
-            row = _conn.execute(
-                "SELECT source FROM sessions WHERE id = ?", (sid,)
-            ).fetchone()
-    except Exception:
-        return ""
-    if not row:
-        return ""
-    return str(row[0] or "").strip().lower()
+    return _state_db_session_source_strict(sid) or ""
 
 
 def _is_subagent_child_session_id(sid: str) -> bool:

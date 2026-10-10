@@ -1142,7 +1142,9 @@ def test_auto_assign_sweep_skips_read_only_imported_sessions(tmp_path, monkeypat
         {"session_id": "s_ok", "workspace": ws_str, "profile": "default", "project_id": None},
     ]))
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-    monkeypatch.setattr(routes, "_state_db_session_source", lambda sid: "")
+    # The sweep's ownership probe is the strict (tri-state) lookup: "" here
+    # means "state.db is readable and has no such row".
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
 
     saved = []
 
@@ -1186,7 +1188,7 @@ def test_auto_assign_sweep_skips_subagent_sidecars_by_source_tag(tmp_path, monke
         {"session_id": "s_sub_tag", "workspace": ws_str, "profile": "default", "project_id": None},
     ]))
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-    monkeypatch.setattr(routes, "_state_db_session_source", lambda sid: "")
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
 
     class _Row:
         session_id = "s_sub_tag"
@@ -1227,7 +1229,7 @@ def test_auto_assign_sweep_skips_subagent_children_known_only_to_state_db(tmp_pa
     ]))
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
     monkeypatch.setattr(
-        routes, "_state_db_session_source",
+        routes, "_state_db_session_source_strict",
         lambda sid: "subagent" if sid == "s_sub_db" else "",
     )
 
