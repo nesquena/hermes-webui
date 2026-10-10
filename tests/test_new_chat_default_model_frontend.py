@@ -87,7 +87,10 @@ def test_hard_refresh_injects_missing_active_session_model_option():
     marker = "if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function')"
     assert marker in boot_js
     branch = boot_js[boot_js.index(marker) : boot_js.index("else if(!applied&&!sessionModelState", boot_js.index(marker))]
-    assert "_ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)" in branch
+    assert (
+        "_ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null,{allowExcludedForActiveSession:true})"
+        in branch
+    )
 
 
 def test_sync_topbar_preserves_missing_session_model_as_dropdown_option():
@@ -96,9 +99,10 @@ def test_sync_topbar_preserves_missing_session_model_as_dropdown_option():
     sync_topbar = _extract_function(ui_js, "function syncTopbar")
     branch_start = sync_topbar.index("const applied=_applyModelToDropdown(currentModel,modelSel,S.session.model_provider||null);")
     session_model_branch = sync_topbar[branch_start:]
-    assert "_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)" in session_model_branch
+    ensure_call = "_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null,{allowExcludedForActiveSession:true})"
+    assert ensure_call in session_model_branch
     assert "const fallback=_applySessionModelFallback(modelSel);" in session_model_branch
-    assert session_model_branch.index("_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)") < session_model_branch.index("const fallback=_applySessionModelFallback(modelSel);"), (
+    assert session_model_branch.index(ensure_call) < session_model_branch.index("const fallback=_applySessionModelFallback(modelSel);"), (
         "active session models missing from the current catalog must be injected before fallback can select the static/default model"
     )
 
@@ -183,7 +187,9 @@ def test_save_settings_syncs_default_model_provider_with_saved_model():
     # qualified option and persisted null, clearing the active provider (#7865).
     assert "body.default_model_provider=modelState.model_provider||null;" in save_block
     assert "modelState.model===model" not in save_block
-    assert "const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null));" in save_block
+    # #7777 wraps the comparison in its `_suppressDefaultModelSave` guard; the
+    # provider axis below is unchanged and is what this assertion protects.
+    assert "const modelChanged=!_suppressDefaultModelSave&&((model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null)));" in save_block
     assert "if(Object.prototype.hasOwnProperty.call(body,'default_model_provider')) window._activeProvider=body.default_model_provider||null;" in apply_saved_block
     assert "_settingsHermesDefaultModelProviderOnOpen=(models&&models.active_provider)||null;" in panels_js
     assert "if(Object.prototype.hasOwnProperty.call(body,'default_model_provider')) _settingsHermesDefaultModelProviderOnOpen=body.default_model_provider||null;" in apply_saved_block

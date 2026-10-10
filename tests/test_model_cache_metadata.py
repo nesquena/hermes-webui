@@ -50,8 +50,10 @@ def test_save_models_cache_to_disk_preserves_response_metadata(tmp_path, monkeyp
     # which the loader reconstructs from current config because the save path
     # does not persist aliases on disk (keeps /model <alias> resolution working
     # on a disk-cache hit). No config aliases here, so it reconstructs to {}.
+    # #7777 also restores the picker-exclude policy from the same settings
+    # store; none configured in this fixture, so it is the empty map.
     loaded = config._load_models_cache_from_disk()
-    assert loaded == {**payload, "aliases": {}}
+    assert loaded == {**payload, "aliases": {}, "picker_excludes": {}}
 
 
 def test_load_models_cache_from_disk_rejects_legacy_groups_only_cache(tmp_path, monkeypatch):

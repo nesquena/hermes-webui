@@ -518,6 +518,41 @@ Interpret the two together:
 
 ---
 
+## Model picker exclude policy
+
+**What it is.** Settings → Model picker lets you hide individual models. The
+hide list is persisted per provider in the WebUI settings store under
+`picker_excludes` — a map of canonical provider id to a list of **exact,
+case-preserving** model ids — and is enforced on the server when the catalog is
+built, so a hidden model cannot be selected by the boot default, a previous
+selection, a synthesized fallback row, or the Settings picker.
+
+**Matching rules** (identical on the server and in the browser):
+
+| Form | Behaviour |
+|---|---|
+| `gpt-5.6-luna` | Exact, case-preserving. A lowercase hide does **not** hide `GPT-5.6-LUNA`. |
+| `@openrouter:gpt-5.6-luna` | The complete `@provider:` prefix is stripped before comparing, so a bare-id hide still matches the cross-provider rendering. |
+| `@opencode-zen:vendor/model:1` | Provider ids can contain colons, so the prefix boundary is the **longest** prefix naming a real provider — a colon inside the model id is preserved. |
+| `openrouter/gpt-5` | The slash is a provider separator **only** when its prefix names a provider WebUI can render. Hiding the bare id `bar` does not hide the distinct model `vendor/bar`. |
+
+**Aliases.** Provider slugs have aliases (`glm` → `zai`, `z.ai` → `zai`). A hide
+saved under any spelling applies to the canonical provider, and several keys that
+resolve to the same provider are unioned rather than the first one winning — so a
+settings.json that carries both `glm` and `zai` hides everything either list
+names. The API payload publishes the map with canonical keys for the same reason.
+
+**Invalidation.** Saving the policy invalidates the models cache, the live-model
+cache, and the browser's own live-model cache, and the caches are keyed by the
+policy content, so an in-flight rebuild that started before the save discards its
+result instead of repopulating the excluded model. If a hidden model still appears
+after a reload, the save did not take effect — check the browser console for a
+failed `/api/settings` POST before filing a bug.
+
+**When the configured default is hidden**, the picker substitutes the first
+eligible model so the selection is never blank. That substitution is not a user
+edit: saving an unrelated preference does **not** rewrite the configured default.
+
 ## MCP panel shows another profile's servers, or "Live status for this profile is unavailable"
 
 **Symptom.** With several profiles, the MCP settings panel of profile A shows a server as *Active* with a tool count while the tool inventory is empty (or lists profile B's tools); `/reload-mcp` on one profile stops the other profile's servers; or the MCP panel and the external Notes drawer show the notice *"Live status for this profile is unavailable right now"* and `/reload-mcp` answers *"MCP runtime scope could not be confirmed"*.

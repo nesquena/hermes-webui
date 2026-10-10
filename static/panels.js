@@ -9103,7 +9103,7 @@ async function _autosavePreferencesSettings(payload){
       ||capturedModelValue===savedModelOnOpen
       ||prefixStrippedValue===savedModelOnOpen;
     const modelDirty=!!(
-      modelSel&&(
+      modelSel&&!modelSel._suppressDefaultModelSave&&(
         !modelUnchanged||
         ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null))
       )
@@ -9439,6 +9439,13 @@ async function loadSettingsPanel(){
       let models=null;
       try{
         models=await api('/api/models');
+        // #7507: keep the browser-side exclude policy in sync with the
+        // server so the settings picker default-model apply below (and
+        // the shared _ensureModelOptionInDropdown path) honours the
+        // same excludes the server already filtered out.
+        if(models&&typeof models.picker_excludes==='object'&&models.picker_excludes!==null){
+          window._pickerExcludes=models.picker_excludes;
+        }
         for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
@@ -9457,25 +9464,68 @@ async function loadSettingsPanel(){
         }
         // Append live-fetched models for the active provider, same as the
         // chat-header dropdown does via _fetchLiveModels() (#872).
+        // #7507: capture the epoch BEFORE the fetch and drop a response
+        // that lands after a policy change, so a slow in-flight fetch
+        // cannot re-fill the settings picker with an excluded id.
         if(models.active_provider && typeof _fetchLiveModels==='function'){
+          const _settingsFetchEpoch=(typeof _liveModelFetchEpoch!=='undefined')?_liveModelFetchEpoch:0;
           _fetchLiveModels(models.active_provider, modelSel);
+          // Deferred re-validation: the fetch above is fire-and-forget, so
+          // re-check after a macrotask turn. A response appended while the
+          // epoch still matches belongs to the current policy.
+          try{
+            const _guard=()=>{
+              if((typeof _liveModelFetchEpoch!=='undefined')&&_liveModelFetchEpoch!==_settingsFetchEpoch){
+                if(typeof _invalidateLiveModelCache==='function'){
+                  _invalidateLiveModelCache();
+                }
+              }
+            };
+            if(typeof setTimeout==='function') setTimeout(_guard,0);
+            else Promise.resolve().then(_guard);
+          }catch(_e){}
         }
       }catch(e){}
       _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';
       _settingsHermesDefaultModelProviderOnOpen=(models&&models.active_provider)||null;
       // Use the smart matcher so a saved bare form like "anthropic/claude-opus-4.6"
       // (what the CLI's `hermes model` command writes) still selects the matching
-      // `@nous:anthropic/claude-opus-4.6` option on a Nous setup. Without this, the
-      // picker renders blank for any user whose default was persisted without the
-      // @-prefix — CLI-first users, legacy installs, etc.
-      if(typeof _applyModelToDropdown==='function'){
+      // `@nous:anthropic/claude-opus-4.6` option on a Nous setup. Without this,
+      // the picker renders blank for any user whose default was persisted without
+      // the @-prefix — CLI-first users, legacy installs, etc.
+      // #7507: this applies the SAVED default (a non-session selection), so an
+      // excluded id must not be re-injected. When the saved default is
+      // excluded, fall through to the first eligible option rather than
+      // leaving the select showing a hidden model.
+      const _savedDefaultExcluded=_settingsHermesDefaultModelOnOpen
+        && typeof _modelIsPickerExcluded==='function'
+        && _modelIsPickerExcluded(_settingsHermesDefaultModelOnOpen,(models&&models.active_provider)||window._activeProvider||null);
+      if(typeof _applyModelToDropdown==='function'&&!_savedDefaultExcluded){
         _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel, (models&&models.active_provider)||window._activeProvider||null);
+      }else if(_savedDefaultExcluded){
+        const _firstEligible=Array.from(modelSel.options||[]).find(o=>
+          !(typeof _modelIsPickerExcluded==='function'&&_modelIsPickerExcluded(String(o.value||''),(models&&models.active_provider)||window._activeProvider||null)));
+        if(_firstEligible) modelSel.value=_firstEligible.value;
+        // #7777 P1 ("Unrelated save changes default model"): the selection
+        // above is a POLICY consequence, not a user edit — the saved default
+        // is hidden, so the picker must show something else. `saveSettings()`
+        // derives `modelChanged` by comparing the live select value against
+        // the value captured on open, so without this marker the next save of
+        // ANY preference (theme, send key, notifications) would POST the
+        // substituted row to /api/default-model and silently replace the
+        // user configured default. Mark the field as untouched; the marker
+        // is cleared as soon as the user actually changes the selection.
+        modelSel._suppressDefaultModelSave=true;
       }else{
         modelSel.value=_settingsHermesDefaultModelOnOpen;
       }
       if(typeof closeSettingsModelDropdown==='function') closeSettingsModelDropdown();
       if(typeof mountSettingsModelPicker==='function') mountSettingsModelPicker();
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
+      modelSel.addEventListener('change',()=>{
+        // Any real user edit re-arms the default-model write.
+        modelSel._suppressDefaultModelSave=false;
+      },{once:false});
       if(!modelSel._settingsChipSyncBound){
         modelSel._settingsChipSyncBound=true;
         modelSel.addEventListener('change',()=>{if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();},{once:false});
@@ -12950,7 +13000,14 @@ async function saveSettings(andClose){
   const modelState=(typeof _captureModelDropdownSelection==='function'&&$('settingsModel'))
     ? (_captureModelDropdownSelection($('settingsModel'))||{model:String(model||''),model_provider:null})
     : {model:String(model||''),model_provider:null};
-  const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null));
+  const _modelSelForDefault=$('settingsModel');
+  const _suppressDefaultModelSave=!!(_modelSelForDefault&&_modelSelForDefault._suppressDefaultModelSave);
+  // #7777 P1: when the saved default is excluded by the picker policy the
+  // Settings open handler substitutes the first eligible row purely so the
+  // select is not blank, and flags the field. That substitution is not a user
+  // edit, so it must not count as a model change — otherwise saving an
+  // unrelated preference would silently overwrite the configured default.
+  const modelChanged=!_suppressDefaultModelSave&&((model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null)));
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
   const showQuotaChip=!!($('settingsShowQuotaChip')||{}).checked;
@@ -13113,6 +13170,17 @@ async function saveSettings(andClose){
         }
     }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    // #7507: when the server signals the picker exclude policy changed,
+    // drop the browser-side live-model cache and refetch the picker.
+    // The server already cleared its memory + disk catalog cache and
+    // the /api/models/live cache; without this, a stale
+    // _liveModelCache would re-introduce just-excluded ids via the
+    // background _fetchLiveModels() pass.
+    try{
+      if(saved && saved._invalidate_models && typeof _invalidateLiveModelCache==='function'){
+        _invalidateLiveModelCache({freshness:'session_visit'});
+      }
+    }catch(_e){}
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();

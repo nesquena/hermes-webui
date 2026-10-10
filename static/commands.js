@@ -875,10 +875,23 @@ async function cmdModel(args){
   // provider before selecting so onchange() persists the correct model+provider
   // end-to-end. _ensureModelOptionInDropdown reuses the existing option when one
   // is already rendered. (#3368)
+  //
+  // #7777 round-3 SHOULD-FIX 3: an EXPLICIT `/model <name>` pick is a user
+  // instruction, not a picker re-injection, so the per-provider picker exclude
+  // policy must not veto it. Without the opt-out below an excluded model made
+  // `_ensureModelOptionInDropdown` return null, and:
+  //   * the model was not injected, so the picker snapped back to the previous
+  //     row and `onchange` persisted THAT model — a switch that never happened;
+  //   * an alias target got the same treatment and then reported
+  //     "switched to @openai:gpt-x" while the session silently stayed on
+  //     `gpt-keep`.
+  // The backend still resolves an excluded model when it is requested
+  // explicitly, so honouring the request here is consistent with the server.
   const hasOption=Array.from(sel.options||[]).some(o=>o.value===match);
   const matchProvider=(aliasRoute&&aliasRoute.provider)||providerMap[match]||null;
   if((aliasRoute||!hasOption) && typeof _ensureModelOptionInDropdown==='function'){
-    _ensureModelOptionInDropdown(match,sel,matchProvider);
+    _ensureModelOptionInDropdown(match,sel,matchProvider,
+      {allowExcludedForActiveSession:true,explicitModelCommand:true});
   }else{
     sel.value=match;
   }
