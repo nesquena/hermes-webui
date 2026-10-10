@@ -1846,8 +1846,27 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
-_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float, str | None]] = {}
+# Cache entry: (enabled, compat, mtime_ns, hard_expiry, org, validated_at).
+# mtime_ns/org are the change-detection snapshot taken before the compute;
+# validated_at is when the entry was last confirmed (or written).
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float, str | None, float]] = {}
 _SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because .clear() handles programmatic changes
+
+# Stale-while-revalidate window (#7940). The stat-only probe still walks the
+# whole skill tree (thousands of stat() calls on a large library), so running
+# it on EVERY call made the probe itself the dominant /api/profiles cost —
+# that was the remaining half of #7940 after the cache-survives-switch and
+# no-list_profiles_api pieces landed. Inside the window a hit serves purely
+# from memory (zero I/O); past it a hit returns the stale counts immediately
+# and revalidates on a background thread. Bound on out-of-band (CLI/git)
+# staleness: REVALIDATE_AFTER + one probe/compute (~seconds), versus the old
+# per-call guarantee. Programmatic changes stay immediate via
+# _SKILLS_STATS_CACHE.clear(). Sized >> _LIST_PROFILES_CACHE_TTL (4s) so a
+# steady poll costs ~1 probe per 30s per profile instead of one per rebuild,
+# and << TTL (300s) so the hard safety net is unaffected.
+_SKILLS_STATS_REVALIDATE_AFTER = 30.0
+_SKILLS_STATS_REVALIDATE_INFLIGHT: set[Path] = set()
+_SKILLS_STATS_REVALIDATE_GUARD = threading.Lock()
 
 # Per-profile compute locks (#5364). Without these, concurrent cold-startup
 # requests (ThreadingHTTPServer runs one OS thread per request) all miss the
@@ -2008,14 +2027,77 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     return (enabled_count, compatible_count)
 
 
-def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
-    """Calculate (enabled_count, compatible_count) with two-tier mtime cache.
+def _maybe_trigger_skills_stats_revalidate(profile_dir: Path) -> None:
+    """Start a single-flight background revalidate for a stale cache entry."""
+    with _SKILLS_STATS_REVALIDATE_GUARD:
+        if profile_dir in _SKILLS_STATS_REVALIDATE_INFLIGHT:
+            return
+        _SKILLS_STATS_REVALIDATE_INFLIGHT.add(profile_dir)
+    _start_skills_stats_revalidate_thread(profile_dir)
 
-    A cheap stat-only mtime probe runs on EVERY call so out-of-band (CLI/git)
-    skill changes are reflected promptly — the expensive part (reading + parsing
-    every SKILL.md) is what the cache avoids, not the change detection. The TTL
-    is only a safety-net upper bound that forces an occasional full recompute
-    even when the mtime probe sees no change.
+
+def _start_skills_stats_revalidate_thread(profile_dir: Path) -> None:
+    """Spawn the daemon worker (seam for tests: patch to run synchronously)."""
+    threading.Thread(
+        target=_revalidate_skills_stats_worker, args=(profile_dir,), daemon=True
+    ).start()
+
+
+def _revalidate_skills_stats_worker(profile_dir: Path) -> None:
+    """Re-probe one stale entry off the request thread and republish it.
+
+    Runs under the per-profile compute lock so it can never duplicate a
+    concurrent synchronous miss; skips silently when one is already in flight
+    (the sync path will publish fresh data anyway). Never extends the hard
+    expiry on a no-change probe — the TTL safety net must still fire.
+    """
+    import time
+    try:
+        lock = _skills_stats_lock_for(profile_dir)
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            cached = _SKILLS_STATS_CACHE.get(profile_dir)
+            if cached is None:
+                return  # .clear()ed since the trigger — next request sync-misses
+            enabled, compat, old_mtime_ns, expiry, old_org, _ = cached
+            skills_dir = profile_dir / "skills"
+            config_path = profile_dir / "config.yaml"
+            # Snapshot BEFORE compute (same TOCTOU rule as the sync path).
+            new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+            new_org = _active_org_marker(skills_dir)
+            now = time.time()
+            if new_mtime_ns == old_mtime_ns and new_org == old_org and now < expiry:
+                # No change: refresh only validated_at; keep the original hard
+                # expiry so the TTL safety net still fires on schedule.
+                _SKILLS_STATS_CACHE[profile_dir] = (
+                    enabled, compat, old_mtime_ns, expiry, old_org, now
+                )
+            else:
+                res = _compute_profile_skills_stats(profile_dir)
+                _SKILLS_STATS_CACHE[profile_dir] = (
+                    res[0], res[1], new_mtime_ns,
+                    time.time() + _SKILLS_STATS_CACHE_TTL, new_org, time.time(),
+                )
+        finally:
+            lock.release()
+    except Exception:
+        logger.debug("skills-stats background revalidate failed for %s", profile_dir, exc_info=True)
+    finally:
+        with _SKILLS_STATS_REVALIDATE_GUARD:
+            _SKILLS_STATS_REVALIDATE_INFLIGHT.discard(profile_dir)
+
+
+def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Calculate (enabled_count, compatible_count) with a revalidating mtime cache.
+
+    Stale-while-revalidate (#7940): a fresh-window hit serves with zero I/O; a
+    stale hit returns immediately and re-probes on a background thread. The
+    probe + full compute still run — just off the request path — so out-of-band
+    (CLI/git) changes surface within ~REVALIDATE_AFTER + one probe, while
+    programmatic changes stay immediate via _SKILLS_STATS_CACHE.clear(). The
+    TTL remains the hard upper bound that forces a synchronous recompute even
+    when the probe can't see a change (mtime-preserving git checkout).
     """
     import time
     profile_dir = Path(profile_dir).resolve()
@@ -2023,33 +2105,29 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     skills_dir = profile_dir / "skills"
     config_path = profile_dir / "config.yaml"
 
-    # Always run the cheap stat-only probe first — this is what catches an
-    # out-of-band create/edit/delete within the same request (not after the TTL).
-    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
-    current_org = _active_org_marker(skills_dir)
-
     # Read via .get() (not membership-check + index) so a concurrent
     # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
     # between the `in` test and the lookup.
     cached = _SKILLS_STATS_CACHE.get(profile_dir)
     if cached is not None:
-        enabled, compat, cached_mtime_ns, expiry, cached_org = cached
-        # Fast path: files unchanged (by the cheap probe above) AND still within
-        # the TTL → serve cached without re-reading any SKILL.md. The mtime probe
-        # already ran, so an out-of-band change is caught immediately regardless
-        # of the TTL. On TTL expiry we deliberately fall through to a full
-        # recompute (the TTL is a safety net for mtime-preserving changes that
-        # the probe can't see — e.g. a git checkout that restores the old mtime).
-        # The active-org marker is carried IN the same tuple, so a reader never
-        # sees a new org beside stale counts (single atomic publish below).
-        if (
-            current_mtime_ns == cached_mtime_ns
-            and now < expiry
-            and cached_org == current_org
-        ):
+        enabled, compat, _, expiry, _, validated_at = cached
+        # SWR fast path: entry inside its hard TTL serves straight from memory.
+        # Within the revalidate window it is still fresh → zero I/O. Past it the
+        # stale counts still answer now while a background worker re-probes —
+        # the whole point is that the tree walk never runs on the request path.
+        if now < expiry:
+            if now - validated_at < _SKILLS_STATS_REVALIDATE_AFTER:
+                return enabled, compat
+            _maybe_trigger_skills_stats_revalidate(profile_dir)
             return enabled, compat
 
-    # Cache miss, mtime changed, active org changed, or TTL expired — serialize per-profile so a
+    # Cache miss or hard-TTL expiry — the probe runs here (and only here) so the
+    # synchronous path keeps its immediate out-of-band detection on a cold or
+    # expired entry. Falls through to the serialized compute below.
+    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    current_org = _active_org_marker(skills_dir)
+
+    # Cache miss or hard-TTL expiry — serialize per-profile so a
     # burst of concurrent misses (cold startup) collapses to ONE compute instead
     # of a thundering herd of simultaneous os.walk + SKILL.md parses (#5364).
     lock = _skills_stats_lock_for(profile_dir)
@@ -2059,7 +2137,7 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # still matches and the entry is within its TTL — no second compute.
         cached = _SKILLS_STATS_CACHE.get(profile_dir)
         if cached is not None:
-            enabled, compat, cached_mtime_ns, expiry, cached_org = cached
+            enabled, compat, cached_mtime_ns, expiry, cached_org, _ = cached
             if (
                 current_mtime_ns == cached_mtime_ns
                 and time.time() < expiry
@@ -2073,11 +2151,11 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
         new_org = _active_org_marker(skills_dir)
         res = _compute_profile_skills_stats(profile_dir)
-        # Publish counts + mtime + org in ONE tuple assignment: a lock-free
-        # fast-path reader sees either the whole old entry or the whole new one,
-        # never a new org tag beside pre-rewrite counts.
+        # Publish counts + mtime + org + validation time in ONE tuple assignment:
+        # a lock-free fast-path reader sees either the whole old entry or the
+        # whole new one, never a new org tag beside pre-rewrite counts.
         _SKILLS_STATS_CACHE[profile_dir] = (
-            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL, new_org
+            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL, new_org, time.time()
         )
         return res
 
