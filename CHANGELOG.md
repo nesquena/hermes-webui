@@ -135,6 +135,10 @@
 
 ### Fixed
 
+- **Passkey enrollment works with security keys that send extensions.** Registering a YubiKey or another
+  authenticator that includes CBOR extension data no longer fails with "Trailing CBOR data"; malformed extension bytes
+  are rejected cleanly instead of causing a server error. Existing passkeys keep working. Thanks @Dandandad. (#8093, #8092)
+
 - **Codex sign-in sends an explicit User-Agent on its device-code requests**, so the OAuth endpoint no longer
   sees a bare library default. Thanks @angelusbr. (#8118)
 
