@@ -1330,9 +1330,13 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         "- Write to external notes or durable memory only for explicit captures, durable user preferences, decisions, blockers/open issues, runbook-worthy workflows, or other clearly reusable signals; otherwise leave notes unchanged.",
         "- When you do write or update a durable note, briefly tell the user what note/section changed so the write is reviewable.",
     ]
+    # #8148: no per-session value here. This block sits above the progress and
+    # delivery prompts, and the agent appends the whole ephemeral prompt to the
+    # end of the system text, so a session id on this list made every new chat's
+    # system text differ from that line on and no provider prefix cache could
+    # be reused across chats. See _webui_session_id_prompt().
     fields = (
         ("source", "Source"),
-        ("session_id", "Session ID"),
         ("profile", "Profile"),
         ("workspace", "Workspace"),
     )
@@ -1342,6 +1346,31 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         if value:
             lines.append(f"- {label}: {value}")
     return "\n".join(lines)
+
+
+def _webui_session_id_prompt(
+    surface_context: Optional[dict], config_data: Optional[dict] = None
+) -> str:
+    """Return the session id line, only when ``webui.pass_session_id`` asks for it.
+
+    Off by default, like hermes-agent's own ``pass_session_id``: the id is
+    different for every chat, so it is the one line that two new chats cannot
+    share (#8148). When it is asked for, the caller emits it last, so everything
+    before it stays a shared prefix.
+    """
+    if not isinstance(surface_context, dict):
+        return ""
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    webui_cfg = cfg.get("webui") if isinstance(cfg, dict) else None
+    if not isinstance(webui_cfg, dict):
+        return ""
+    if str(webui_cfg.get("pass_session_id") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return ""
+    raw = surface_context.get("session_id")
+    value = str(raw).strip() if raw is not None else ""
+    if not value:
+        return ""
+    return f"WebUI session:\n- Session ID: {value}"
 
 
 def _webui_ephemeral_system_prompt(
@@ -1360,6 +1389,10 @@ def _webui_ephemeral_system_prompt(
     delivery_prompt = _webui_delivery_context_prompt(config_data)
     if delivery_prompt:
         parts.append(delivery_prompt)
+    # Last on purpose (#8148): the only per-session text in this prompt.
+    session_id_prompt = _webui_session_id_prompt(surface_context, config_data)
+    if session_id_prompt:
+        parts.append(session_id_prompt)
     return "\n\n".join(part for part in parts if part)
 
 
@@ -1613,7 +1646,7 @@ def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
     Gemma) reject.
 
     NOTE: This function only covers platform/delivery info.  The session
-    framing (\"Source: WebUI\", \"Session ID\", \"Profile\", \"Workspace\") is
+    framing (\"Source: WebUI\", \"Profile\", \"Workspace\") is
     emitted by ``_webui_surface_context_prompt()``, which is called from
     ``_webui_ephemeral_system_prompt()`` before this helper.  If you
     refactor this area, keep that surface call in place — the two helpers
