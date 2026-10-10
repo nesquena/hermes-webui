@@ -50,11 +50,18 @@ def _b64u(data: bytes) -> str:
 
 
 def _b64u_decode(value: str | bytes) -> bytes:
-    if isinstance(value, bytes):
-        value = value.decode("ascii")
-    value = str(value).strip()
-    value += "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode(value.encode("ascii"))
+    # Every caller passes a field of the client's response. Anything that is not
+    # base64url text is that client's malformed input, not a server fault.
+    if not isinstance(value, (str, bytes)):
+        raise PasskeyError("Malformed passkey response")
+    try:
+        if isinstance(value, bytes):
+            value = value.decode("ascii")
+        value = value.strip()
+        value += "=" * (-len(value) % 4)
+        return base64.urlsafe_b64decode(value.encode("ascii"))
+    except ValueError as exc:  # UnicodeError and binascii.Error are both ValueErrors
+        raise PasskeyError("Malformed passkey response") from exc
 
 
 def _json_load(path: Path, default: Any) -> Any:
@@ -260,6 +267,12 @@ def authentication_options(handler) -> dict[str, Any]:
     }
 
 
+# An attestation object is a few levels deep (attStmt.x5c is the deepest thing a
+# registration carries). The limit keeps hostile nesting away from Python's
+# recursion limit instead of catching RecursionError after the fact.
+_CBOR_MAX_DEPTH = 16
+
+
 @dataclass
 class _Cbor:
     data: bytes
@@ -272,7 +285,11 @@ class _Cbor:
         self.pos += n
         return out
 
-    def item(self) -> Any:
+    def item(self, depth: int = 0) -> Any:
+        # Every way out of this reader for bytes it cannot decode is a
+        # PasskeyError: the callers hand it a client's bytes (#8126).
+        if depth > _CBOR_MAX_DEPTH:
+            raise PasskeyError("Malformed CBOR data")
         initial = self.read(1)[0]
         major, addl = initial >> 5, initial & 0x1F
         val = self._val(addl)
@@ -283,11 +300,20 @@ class _Cbor:
         if major == 2:
             return self.read(val)
         if major == 3:
-            return self.read(val).decode("utf-8")
+            try:
+                return self.read(val).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise PasskeyError("Malformed CBOR data") from exc
         if major == 4:
-            return [self.item() for _ in range(val)]
+            return [self.item(depth + 1) for _ in range(val)]
         if major == 5:
-            return {self.item(): self.item() for _ in range(val)}
+            out = {}
+            for _ in range(val):
+                key = self.item(depth + 1)
+                if isinstance(key, (list, dict)):
+                    raise PasskeyError("Unsupported CBOR data")
+                out[key] = self.item(depth + 1)
+            return out
         if major == 7:
             if val == 20:
                 return False
@@ -325,6 +351,8 @@ def _client_data(encoded: str, expected_type: str, challenge_kind: str) -> tuple
         data = json.loads(raw.decode("utf-8"))
     except Exception as exc:
         raise PasskeyError("Malformed client data") from exc
+    if not isinstance(data, dict):
+        raise PasskeyError("Malformed client data")
     if data.get("type") != expected_type:
         raise PasskeyError("Unexpected passkey response type")
     challenge = data.get("challenge")
@@ -340,7 +368,13 @@ def _parse_auth_data(auth_data: bytes, rp_id: str) -> dict[str, Any]:
     if len(auth_data) < 37:
         raise PasskeyError("Malformed authenticator data")
     rp_hash = auth_data[:32]
-    expected = hashlib.sha256(rp_id.encode("idna")).digest()
+    try:
+        expected = hashlib.sha256(rp_id.encode("idna")).digest()
+    except UnicodeError as exc:
+        # The RP ID came from the request's Origin or Host when the challenge was
+        # issued. A name IDNA cannot encode (an empty or over-long label) is no
+        # authenticator's RP ID.
+        raise PasskeyError("Passkey RP ID mismatch") from exc
     if not hmac.compare_digest(rp_hash, expected):
         raise PasskeyError("Passkey RP ID mismatch")
     flags = auth_data[32]
@@ -361,11 +395,21 @@ def _public_key_from_cose(cose: dict[Any, Any]):
     if alg != -7 or kty != 2 or crv != 1 or not isinstance(x, bytes) or not isinstance(y, bytes):
         raise PasskeyError("Only ES256 passkeys are supported")
     numbers = ec.EllipticCurvePublicNumbers(int.from_bytes(x, "big"), int.from_bytes(y, "big"), ec.SECP256R1())
-    return numbers.public_key()
+    try:
+        return numbers.public_key()
+    except ValueError as exc:  # the point is not on the curve
+        raise PasskeyError("Malformed credential public key") from exc
+
+
+def _response_of(payload: dict[str, Any]) -> dict[str, Any]:
+    response = payload.get("response") or {}
+    if not isinstance(response, dict):
+        raise PasskeyError("Malformed passkey response")
+    return response
 
 
 def finish_registration(payload: dict[str, Any], handler) -> dict[str, Any]:
-    response = payload.get("response") or {}
+    response = _response_of(payload)
     _client, entry, _client_raw = _client_data(response.get("clientDataJSON", ""), "webauthn.create", "register")
     att_obj = _cbor_loads(_b64u_decode(response.get("attestationObject", "")))
     if not isinstance(att_obj, dict) or not isinstance(att_obj.get("authData"), bytes):
@@ -414,7 +458,7 @@ def finish_registration(payload: dict[str, Any], handler) -> dict[str, Any]:
 def finish_login(payload: dict[str, Any], handler) -> dict[str, Any]:
     if serialization is None or hashes is None:
         raise PasskeyError("Passkey support requires the cryptography package")
-    response = payload.get("response") or {}
+    response = _response_of(payload)
     cred_id = payload.get("id") or payload.get("rawId")
     if not isinstance(cred_id, str):
         raise PasskeyError("Missing passkey credential id")
