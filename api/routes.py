@@ -1166,6 +1166,17 @@ def _auto_assign_sweep_body(proj) -> int:
                     with LOCK:
                         cached = SESSIONS.get(sid)
                     if cached is not None:
+                        # A resident metadata-only stub refuses save() by design
+                        # (#1558), so a project id assigned to it would live in
+                        # the cache only and be lost on restart (Greptile P1
+                        # 2026-10-10T22:39:21Z). Upgrade to the full session
+                        # before mutating — the same rule the projects/delete
+                        # unlink path follows. No-op for a full session.
+                        try:
+                            cached = _ensure_full_session_before_mutation(sid, cached)
+                        except KeyError:
+                            cached = None
+                    if cached is not None:
                         if _auto_assign_target_is_view_only(cached, sid):
                             # View-only row (read-only imported / subagent
                             # child) sitting in the live cache: never file it,
@@ -1223,6 +1234,22 @@ def _auto_assign_sweep_body(proj) -> int:
                     continue
                 s_ws = getattr(s, "workspace", None)  # noqa: B009
                 if not s_ws or str(s_ws) not in bound:
+                    continue
+                # `get_session` may hand back a resident metadata-only stub
+                # (messages=[] by design), and save() refuses those (#1558), so
+                # the assignment below would be swallowed and live in the cache
+                # only — lost on restart (Greptile P1 2026-10-10T22:39:21Z).
+                # Upgrade to the full session before mutating, the same rule the
+                # projects/delete unlink path and _rename_session follow. No-op
+                # for a full session.
+                try:
+                    s = _ensure_full_session_before_mutation(sid, s)
+                except KeyError:
+                    # Sidecar vanished between the two loads — nothing to file.
+                    continue
+                if getattr(s, "project_id", None):  # noqa: B009
+                    # Another writer filed it while we were upgrading: never
+                    # steal an id (same rule as the already-filed guard above).
                     continue
                 # Same stale-answer hole as the cached path above: the live
                 # binding was read before this session lock was acquired, so
