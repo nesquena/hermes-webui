@@ -109,6 +109,7 @@ eval(extract('_auxProvidersFromModelGroups'));
 eval(extract('_buildAuxProviderOptions'));
 eval(extract('_buildAuxModelOptions'));
 eval(extract('_onAuxProviderChange'));
+eval(extract('_loadVisionCapabilityFirst'));
 eval(extract('_loadAuxiliaryModels'));
 
 let _auxTasks = [];
