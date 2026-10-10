@@ -200,6 +200,42 @@ assistant replies in, and it has no effect when
 `auxiliary.title_generation.enabled` is `false`, since no LLM title is
 generated at all in that case.
 
+### Invalid model output and title recovery
+
+A title model occasionally replies with an options menu instead of one title
+(for example `Good title options: "A", "B"`). WebUI rejects structurally
+multi-candidate replies — a menu preamble followed by two or more list
+entries, semicolon/newline-separated candidates, explicitly quoted or
+bulleted alternatives, or at least three short standalone comma-separated
+alternatives — instead of persisting the raw menu as the title. A plain
+two-part comma phrase such as `Title Suggestions: OAuth Tokens, Explained`
+is ambiguous, so it stays valid. A comma joining grammatical clauses or a
+comparison within one title (for example
+`Title Suggestions: Compare REST, GraphQL and gRPC`) does not
+prove a menu; neither do delimiters inside quoted terms.
+`Title Suggestions: Comparing "REST" and "GraphQL"` stays valid.
+A preamble with a single remaining phrase (for example
+`Title Suggestions: Migration Strategy`) is kept, since that is a legitimate
+title.
+
+While a rejected reply leaves the automatic title unresolved, the provisional
+title stays in place and the next completed exchange is used as the source for
+a retry, so a session that opens with a warm-up message can still get a real
+title from the substantive request that follows. The same recovery applies to
+sessions that already persisted a menu-style title before this behavior
+existed: they re-enter self-heal on the next turn. Manual renames always win;
+recovery never overrides a user-set title. An unfinished latest turn is never
+paired with an older assistant response, including during adaptive refresh.
+
+After compression rotates a session ID (A→B), background title events target
+the continuation directly — `session_id` and `target_session_id` carry B, and
+`stream_owner_session_id` carries the original SSE owner A. The browser
+listener accepts either identifier: a reattached B tab and an A tab that
+rotates to B both apply the title, fencing on `expectedCurrent` so a manual
+rename is kept. A title model that keeps returning unusable output is capped
+at 3 recovery exchanges per session before it stops retrying. `stream_end`
+still closes the original stream.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced
@@ -227,6 +263,10 @@ HERMES_WEBUI_GATEWAY_USE_RUNS_API=true \
 Use this when the connected gateway advertises approval support and you want tool approval cards to appear in WebUI. Without `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`, gateway chat stays on the legacy chat-completions transport and approval-capable commands can remain pending in the agent without a WebUI approval card.
 
 On the runs API path the turn is executed by the Gateway, so restarting WebUI does not stop it. WebUI stores the Gateway `run_id` on the pending turn (and submits it with an `Idempotency-Key` so the Gateway keeps a durable run record). On startup, WebUI reattaches to every such run by polling `GET /v1/runs/{run_id}` until it settles, then writes the real final answer into the session instead of a "Response interrupted" marker. Stop still cancels a reattached run, and a pending approval is shown again. Token-by-token output from before the restart is not replayed; the reattached turn shows only the final answer. If the Gateway no longer knows the run (for example, it restarted too and the run was interrupted), the turn ends with an error message instead. The legacy chat-completions transport cannot reattach: its turn ends when the WebUI process that holds the HTTP stream exits.
+
+On the runs API path WebUI sends the session's earlier user and assistant turns to the Gateway as the run's `conversation_history`. Some transcript rows are shown in the conversation but not sent; they are the kinds of row the in-process backend also leaves out: error messages (a provider error, or the "Task cancelled." marker); a turn that left no visible text, such as one stopped while the model was still reasoning or calling a tool, or a reply that carried only reasoning; and a prompt that WebUI restored into the transcript after its turn was interrupted, unless the next row sent is its answer and it follows an assistant turn or opens the history, where it is the question that answer replies to. Where a stopped turn left a partial answer in the transcript, that text is sent, so the model can continue from it. A run that the Gateway reports as cancelled before WebUI's own Stop has settled the turn is saved with only the cancellation marker, so none of its streamed text is sent.
+
+Live runs-API turns are also guarded while they stream. Each events connection carries a ~120s watchdog budget: a stream that delivers nothing but keepalives for that long is treated as stalled (keepalives are liveness, not progress), and the same budget bounds the per-read wait so a byte-silent connection surfaces within roughly one interval instead of pinning the configured 600s read timeout. When the watchdog trips, or the stream drops, the durable run status (`GET /v1/runs/{run_id}`) is the success arbiter: terminal status finalizes the turn (a non-empty durable output wins over the streamed text; with an empty output the already-streamed partial is kept), a still-running status reconnects the events stream from the last seen event, and `waiting_for_approval` surfaces the pending approval card from the status payload. A durable-status 404 gets a small immediate re-probe grace and then fails the turn closed rather than spinning. When the durable status resolves cancelled or interrupted, the streamed partial answer is persisted into the session before the browser-facing cancel event is emitted.
 
 When YOLO is enabled for a gateway-backed browser session, WebUI approves every
 approval already parked for that session: Runs API prompts are relayed by their

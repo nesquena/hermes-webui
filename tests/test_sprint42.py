@@ -504,6 +504,29 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         self.assertEqual(result["payloads"][1]["choices_offered"], [])
         self.assertEqual(result["payloads"][0]["timeout_seconds"], 300)
 
+    def test_clarify_callback_accepts_questions_keyword_contract(self):
+        """Current Agent compatibility calls the batch callback through the
+        legacy positional slots plus ``questions=``; preserve the normalized
+        questions instead of publishing an empty single-question prompt."""
+        questions = [
+            {"qid": "q0", "question": "Pick a database",
+             "choices": ["Postgres (Recommended)", "SQLite"],
+             "choices_offered": ["Postgres", "SQLite"], "multi_select": False},
+        ]
+        result = self._capture_clarify_timeout(
+            {"clarify": {"timeout": 300}},
+            invoke=lambda callback: callback("", None, questions=questions),
+        )
+        self.assertEqual(
+            result["clarify_result"],
+            {"answers": {"q0": "selected"}, "outcome": "submitted"},
+        )
+        self.assertEqual(len(result["payloads"]), 1)
+        self.assertEqual(result["payloads"][0]["question"], "Pick a database")
+        self.assertEqual(
+            result["payloads"][0]["choices_offered"], ["Postgres (Recommended)", "SQLite"]
+        )
+
     def test_clarify_batch_reply_timeout_and_cancel_outcomes(self):
         """#7922: a question left unanswered stops the batch and reports why."""
         import api.streaming as streaming

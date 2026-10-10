@@ -363,6 +363,12 @@ function _markMessageTouchScrollIntent(active) {{
 }}
 const document = {{ getElementById(id) {{ return id === 'messages' ? el : null; }} }};
 const performance = {{ now() {{ return 1234; }} }};
+// #7494: the inlined handler consults the targeting gate; these harnesses have
+// no layout engine and no nested surfaces, so provide pass-through stubs.
+const getComputedStyle = () => ({{ overflowY: 'visible' }});
+const _isTranscriptScrollTarget = () => true;
+const _captureMessageScrollInputTail = () => {{}};
+const _freshProgrammaticScrollActive = () => false;
 {_function_body(UI_JS, "_recordNonMessageScrollIntent")}
 _recordNonMessageScrollIntent({{ target: child, type: 'wheel', deltaY: 24 }});
 assert.strictEqual(_lastMessageScrollIntentMs, 1234);
@@ -418,6 +424,12 @@ function _markMessageTouchScrollIntent(active) {{
 }}
 const document = {{ getElementById(id) {{ return id === 'messages' ? el : null; }} }};
 const performance = {{ now() {{ return 1234; }} }};
+// #7494: the inlined handler consults the targeting gate; these harnesses have
+// no layout engine and no nested surfaces, so provide pass-through stubs.
+const getComputedStyle = () => ({{ overflowY: 'visible' }});
+const _isTranscriptScrollTarget = () => true;
+const _captureMessageScrollInputTail = () => {{}};
+const _freshProgrammaticScrollActive = () => false;
 {_function_body(UI_JS, "_recordNonMessageScrollIntent")}
 _recordNonMessageScrollIntent({{ target: child, type: 'touchmove' }});
 assert.strictEqual(_lastMessageScrollIntentMs, 1234);

@@ -30,7 +30,7 @@
      641-900px compact band. If the helper's logic changes, update this too. -->
 <script>(function(){try{var p=localStorage.getItem('hermes-webui-sidebar-collapsed');var compact=(window.matchMedia('(max-width: 900px)').matches&&window.matchMedia('(min-width: 641px)').matches);if(p==='1'||(p==null&&compact))document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
-<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
+<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__,imgSrcExtra:__CSP_IMG_EXTRA_JSON__};</script>
 <script>window.__HERMES_WEBUI_BUNDLE_VERSION__='__WEBUI_VERSION__';</script>
 <script>(function(){
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
@@ -169,7 +169,7 @@
     <button class="rail-btn nav-tab has-tooltip" data-panel="settings" onclick="switchPanel('settings',{fromRailClick:true})" data-tooltip="Settings" data-i18n-title="tab_settings" aria-label="Settings"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="auth-warning-badge" id="authWarningBadgeDesktop" style="display:none;position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;background:#e05"></span></button>
   </nav>
   <aside class="sidebar">
-    <button class="panel-head-btn mobile-sidebar-close has-tooltip has-tooltip--bottom-right" type="button" onclick="closeMobileSidebar()" data-tooltip="Close menu" data-i18n-title="close_menu" aria-label="Close menu" data-i18n-aria-label="close_menu">
+    <button class="panel-head-btn mobile-sidebar-close has-tooltip has-tooltip--bottom-right" type="button" onclick="dismissMobileSidebar()" data-tooltip="Close menu" data-i18n-title="close_menu" aria-label="Close menu" data-i18n-aria-label="close_menu">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
     <div class="sidebar-nav">
@@ -1073,12 +1073,12 @@
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_transparent_stream_event_timestamps">Keeps the response footer time visible while hiding the per-event timestamp chips.</div>
             </div>
-            <div class="settings-field" style="margin-top:8px">
+            <div class="settings-field" style="margin-top:8px" data-settings-search="autoscroll auto-follow follow sticky bottom streaming">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsAutoScrollFollow" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span data-i18n="settings_label_auto_scroll_follow">Auto-follow new content</span>
+                <span data-i18n="settings_label_auto_scroll_follow">Auto-scroll to new content</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_auto_scroll_follow">When enabled, the view scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_auto_scroll_follow">When enabled, the view auto-scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.</div>
             </div>
             <div class="settings-field" style="margin-top:8px">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1696,7 +1696,12 @@
         <button class="panel-icon-btn close-preview has-tooltip has-tooltip--bottom" id="btnClearPreview" data-tooltip="Close preview" data-i18n-title="workspace_close_preview" data-i18n-aria-label="workspace_close_preview" aria-label="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
     </div>
-    <input type="file" id="workspaceFileInput" class="file-input-visually-hidden" multiple accept="image/*,text/*,.pdf,.json,.csv,.md,.py,.js,.ts,.yaml,.yml,.toml,.zip,.tar,.gz,.tgz,.bz2,.xz">
+    <!-- tabindex="-1" (#7713 follow-up): this input is the programmatic target of
+         triggerWorkspaceUpload() and is styled off-screen; the visible
+         #btnUploadWorkspace button is what a user should tab to. Left focusable
+         it was a tab stop inside the drawer that moved focus off-screen and
+         vanished for one Tab press. -->
+    <input type="file" id="workspaceFileInput" class="file-input-visually-hidden" tabindex="-1" multiple accept="image/*,text/*,.pdf,.json,.csv,.md,.py,.js,.ts,.yaml,.yml,.toml,.zip,.tar,.gz,.tgz,.bz2,.xz">
     <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views" data-i18n-aria-label="workspace_panel_views">
       <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true" data-i18n="workspace_files_tab">Files</button>
       <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false"><span data-i18n="workspace_artifacts_tab">Artifacts</span> <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
@@ -1752,7 +1757,7 @@
     </div>
   </div>
 </div>
-<div class="mobile-overlay" id="mobileOverlay" onclick="closeMobileSidebar()"></div>
+<div class="mobile-overlay" id="mobileOverlay" onclick="dismissMobileSidebar()"></div>
 <div class="pwa-sidebar-edge-guard" id="pwaSidebarEdgeGuard" aria-hidden="true"></div>
 <div class="app-dialog-overlay" id="appDialogOverlay" style="display:none" aria-hidden="true">
   <div class="app-dialog" id="appDialog" role="dialog" aria-modal="true" aria-labelledby="appDialogTitle" aria-describedby="appDialogDesc">

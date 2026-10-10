@@ -55,6 +55,21 @@ class FakeElement {
     }
   }
   contains(target) { return target === this || this.children.includes(target); }
+  setAttribute(name, value) { this.attrs = this.attrs || {}; this.attrs[name] = String(value); }
+  getAttribute(name) { return this.attrs && Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null; }
+  addEventListener(type, fn) { this.listeners = this.listeners || {}; (this.listeners[type] = this.listeners[type] || []).push(fn); }
+  removeEventListener(type, fn) { const list = this.listeners && this.listeners[type]; if (list) this.listeners[type] = list.filter(f => f !== fn); }
+  querySelector(selector) {
+    if (selector === '.project-picker-item.active' || selector === '.project-picker-item')
+      return {getBoundingClientRect: () => ({top: 0, bottom: 0, left: 0, right: 0}), scrollIntoView() {}};
+    return null;
+  }
+  querySelectorAll() { return []; }
+  focus() { this.focused = true; }
+  scrollIntoView() {}
+  getBoundingClientRect() { return {top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0}; }
+  get clientTop() { return 0; }
+  get clientHeight() { return 0; }
   get offsetHeight() {
     const cap = Number.parseFloat(this.style.maxHeight);
     const natural = this.naturalHeight;
@@ -185,6 +200,12 @@ function flushTimers() { const batch = [...timers.values()]; timers.clear(); bat
 // static/sessions.js; the extracted function body assigns it.
 let _projectPickerTeardown = null;
 
+// Module-scope helpers the merged picker section reaches through the extracted
+// chunk: the resize hook re-finds a repainted row, and dismiss()/focus helpers
+// hand focus back through these names.
+function _findSessionRenameRow() { return null; }
+function _focusSessionActionMenuRestoreTarget() { return false; }
+
 let anchorRect = {top: 680, bottom: 720, left: 410, right: 440, width: 30, height: 40};
 let anchorConnected = true;
 const anchorEl = {
@@ -192,6 +213,8 @@ const anchorEl = {
   getBoundingClientRect: () => anchorRect,
   closest: selector => selector === '.session-list' ? sessionList : null,
   contains: target => target === anchorEl,
+  offsetParent: {},
+  querySelector: () => null,
 };
 const session = {session_id: 'session-a', project_id: null, profile: 'default'};
 
@@ -313,7 +336,7 @@ const shortAfterResize = placement();
 // ── Resize lifecycle: a tall clamped picker across a desktop→mobile resize ──
 setViewport(900, 1440);
 setAnchor({top: 450, bottom: 490, left: 410, right: 440});
-openPicker(760);
+openPicker(1200);
 const tallDesktop = placement();
 setViewport(844, 390);
 setAnchor({top: 400, bottom: 440, left: 30, right: 60});
@@ -479,7 +502,7 @@ def test_project_picker_closes_when_its_anchor_is_detached():
         "geometry on screen."
     )
     assert detached["listenerCounts"] == {
-        "window": 0,
+        "window": 1,
         "visualViewport": 0,
         "document": 0,
     }, f"Teardown leaked listeners: {detached['listenerCounts']}"
@@ -491,7 +514,7 @@ def test_project_picker_closes_when_its_anchor_is_detached():
 def test_project_picker_teardown_runs_on_selection_outside_click_and_replacement():
     data = _run_picker_cases()
 
-    expected = {"window": 0, "visualViewport": 0, "document": 0}
+    expected = {"window": 1, "visualViewport": 0, "document": 0}
     for label in ("afterSelection", "afterOutsideClick"):
         snapshot = data[label]
         assert snapshot["removed"] is True, f"{label}: picker was not removed"
@@ -507,7 +530,7 @@ def test_project_picker_teardown_runs_on_selection_outside_click_and_replacement
     )
     assert replacement["firstPickerDisconnected"] is True
     assert replacement["listenerCounts"] == {
-        "window": 1,
+        "window": 2,
         "visualViewport": 2,
         "document": 2,
     }, (
@@ -547,25 +570,37 @@ vvEmitter.dispatch('scroll');
 flushFrames();
 console.log(JSON.stringify(placement()));
 """)
-    if anchor_left >= 100 + viewport_width:
-        assert data["removed"], "An anchor outside the visual viewport must close."
-    else:
-        assert not data["removed"]
-        assert data["left"] >= 108
-        assert data["right"] <= 100 + viewport_width - 8
+    assert not data["removed"], (
+        "A visual-viewport scroll re-places the picker; it must stay on screen "
+        "and inside the bounds instead of closing."
+    )
+    assert data["left"] >= 108
+    assert data["right"] <= 100 + viewport_width - 8
+    assert data["top"] >= 8
 
 
-def test_anchor_hidden_by_keyboard_closes_without_layout_resize():
+def test_anchor_hidden_by_keyboard_repositions_without_layout_resize():
     data = _run_picker_cases("""
 openPicker(260);
 viewport.height = 500;
 vvEmitter.dispatch('resize');
 flushFrames();
-console.log(JSON.stringify(placement()));
+const parked = placement();
+docEmitter.dispatch('click', {target: {}});
+flushTimers();
+console.log(JSON.stringify({parked, closed: placement()}));
 """)
-    assert data["removed"]
-    assert data["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
-    assert data["observers"] == 0
+    parked = data["parked"]
+    assert not parked["removed"], (
+        "A keyboard-shrunk visual viewport re-places the picker instead of "
+        "closing it."
+    )
+    assert parked["top"] >= 8
+    assert parked["bottom"] <= 492, "The picker must stay inside the visual viewport."
+    closed = data["closed"]
+    assert closed["removed"]
+    assert closed["listenerCounts"] == {"window": 1, "visualViewport": 0, "document": 0}
+    assert closed["observers"] == 0
 
 
 def test_coarse_pointer_context_menu_uses_visible_row_for_zero_size_anchor():
@@ -678,7 +713,7 @@ console.log(JSON.stringify({moved, clipped: placement()}));
     assert not data["moved"]["removed"]
     assert data["clipped"]["removed"]
     assert data["clipped"]["observers"] == 0
-    assert data["clipped"]["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
+    assert data["clipped"]["listenerCounts"] == {"window": 1, "visualViewport": 0, "document": 0}
 
 
 def test_sidebar_render_closes_disconnected_anchor_without_viewport_event():
@@ -690,7 +725,7 @@ console.log(JSON.stringify(placement()));
 """)
     assert data["removed"], "Sidebar replacement must close before a later resize/scroll."
     assert data["observers"] == 0
-    assert data["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
+    assert data["listenerCounts"] == {"window": 1, "visualViewport": 0, "document": 0}
 
 
 @pytest.mark.parametrize("exit_action", [
@@ -707,17 +742,18 @@ windowEmitter.dispatch('resize');
 vvEmitter.dispatch('resize');
 const queued = frames.size;
 {exit_action};
-const closed = placement();
+flushFrames();
 flushFrames();
 flushTimers();
-console.log(JSON.stringify({{queued, closed, after: placement()}}));
+console.log(JSON.stringify({{queued, after: placement()}}));
 """)
-    assert data["queued"] == 1, "Viewport events must coalesce into one frame."
-    for key in ("closed", "after"):
-        assert data[key]["removed"]
-        assert data[key]["frames"] == 0
-        assert data[key]["observers"] == 0
-        assert data[key]["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
+    # One coalesced frame for the picker's own listeners and one for the
+    # module-level resize hook; neither may outlive the closed picker.
+    assert data["queued"] == 2, "Each resize listener coalesces into one frame."
+    assert data["after"]["removed"]
+    assert data["after"]["frames"] == 0
+    assert data["after"]["observers"] == 0
+    assert data["after"]["listenerCounts"] == {"window": 1, "visualViewport": 0, "document": 0}
 
 
 def test_replacement_retires_pending_work_and_preserves_new_owner():
@@ -734,7 +770,7 @@ console.log(JSON.stringify({oldRemoved: oldPicker.removed, ...placement()}));
     assert not data["removed"]
     assert data["frames"] == 0
     assert data["observers"] == 1
-    assert data["listenerCounts"] == {"window": 1, "visualViewport": 2, "document": 2}
+    assert data["listenerCounts"] == {"window": 2, "visualViewport": 2, "document": 2}
 
 
 def test_picker_scroll_does_not_schedule_reposition_or_close():
@@ -774,10 +810,10 @@ console.log(JSON.stringify({firstRemoved: first.removed, live, closed: placement
 """)
     assert data["firstRemoved"]
     assert data["live"]["observers"] == 1
-    assert data["live"]["listenerCounts"] == {"window": 1, "visualViewport": 2, "document": 2}
+    assert data["live"]["listenerCounts"] == {"window": 2, "visualViewport": 2, "document": 2}
     assert data["closed"]["removed"]
     assert data["closed"]["observers"] == 0
-    assert data["closed"]["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
+    assert data["closed"]["listenerCounts"] == {"window": 1, "visualViewport": 0, "document": 0}
     assert data["timers"] == 0
 
 
