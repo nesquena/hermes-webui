@@ -1245,6 +1245,10 @@ function showPreview(mode){
   // Show "Open in browser" button for iframe-backed document previews
   const openBtn=$('btnOpenInBrowser');
   if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
+  // Show the fullscreen toggle for every preview kind (image, pdf, html, media, md/csv/code)
+  const fsBtn=$('btnFullscreenPreview');
+  if(fsBtn) fsBtn.style.display='inline-flex';
+  if(typeof _previewFsSync==='function') _previewFsSync();
   setLargeMarkdownForceRenderVisible(false);
 }
 
@@ -1604,6 +1608,196 @@ function openInBrowser(){
 }
 // openInBrowser keeps the helper-based raw path, which expands to an explicit &inline=1 URL.
 
+// ── Fullscreen mode for file previews (#6675) ─────────────────────────────────
+// Two paths: the native Fullscreen API when available (best for iframes and
+// media), otherwise a CSS fixed-overlay fallback (reliable on mobile browsers
+// that restrict requestFullscreen to <video> elements). Both share the same
+// toggle button in the preview header; the overlay also exits on Escape.
+let _previewFsMode=null; // null | 'api' | 'overlay'
+// Intenção pendente: requestFullscreen() só assenta depois, e enquanto isso o
+// modo continua null — exit, clear e close não alcançam nada por conta própria.
+// O token é possuído ANTES do pedido e invalidado em exit, clear, fechar o
+// painel, substituição e cliques repetidos; sem isso os dois settlements
+// (sucesso e rejeição) reativam estado que já foi desmontado.
+let _previewFsPending=null; // {el} | null
+// Elemento DESTE preview dono do fullscreen nativo: é o que este preview pediu
+// (possuído antes do pedido) e o único que adopção e saída podem tocar.
+let _previewFsOwnedEl=null;
+
+function _previewFsInvalidatePending(){
+  _previewFsPending=null;
+}
+
+function _previewFsOwned(){
+  return _previewFsOwnedEl||_previewFsEl();
+}
+
+function _previewFsEl(){
+  return $('previewArea');
+}
+
+function _previewFsBtn(){
+  return $('btnFullscreenPreview');
+}
+
+function _previewFsSync(){
+  const btn=_previewFsBtn();
+  if(!btn) return;
+  const active=_previewFsMode!==null;
+  const expand=btn.querySelector('.preview-fs-icon-expand');
+  const compress=btn.querySelector('.preview-fs-icon-compress');
+  if(expand) expand.style.display=active?'none':'';
+  if(compress) compress.style.display=active?'':'none';
+  const activeText=t('preview_fullscreen_exit');
+  const idleText=t('preview_fullscreen');
+  const label=btn.querySelector('.preview-btn-label');
+  if(label) label.textContent=active?activeText:idleText;
+  btn.title=active?activeText:idleText;
+  btn.setAttribute('aria-label',active?activeText:idleText);
+  btn.setAttribute('data-tooltip',active?activeText:idleText);
+}
+
+function _previewFsApiSupported(){
+  return !!(document.fullscreenEnabled||document.webkitFullscreenEnabled);
+}
+
+function _previewFsRequest(el){
+  if(el.requestFullscreen) return el.requestFullscreen();
+  if(el.webkitRequestFullscreen) return el.webkitRequestFullscreen();
+  return Promise.reject(new Error('Fullscreen API unavailable'));
+}
+
+// Libera o elemento nativo APENAS quando ele é o que este preview pediu — o
+// fullscreen é document-wide, então nunca se mexe no dono de outra superfície.
+function _previewFsReleaseOwned(el){
+  try{
+    const active=document.fullscreenElement||document.webkitFullscreenElement;
+    if(!el||active!==el) return;
+    if(document.fullscreenElement) document.exitFullscreen();
+    else if(document.webkitFullscreenElement&&document.webkitExitFullscreen) document.webkitExitFullscreen();
+  }catch(_){}
+}
+
+function _previewFsExitApi(){
+  // O fullscreen nativo é document-wide: só sai se o elemento ativo for o
+  // deste preview — limpar o preview não pode derrubar o fullscreen de um
+  // vídeo ou de outra superfície.
+  _previewFsReleaseOwned(_previewFsOwned());
+}
+
+// O transform de .rightpanel (translateX(0)) vira containing block de
+// position:fixed, então o fallback encheria só os ~300px do painel. Antes de
+// fixar, o preview sai para <body> (overlay de topo) e a posição original fica
+// guardada; todo exit devolve o elemento ao mesmo slot do DOM.
+let _previewFsHome=null; // {parent,next} | null
+
+function _previewFsReparentOverlay(){
+  const el=_previewFsEl();
+  const parent=el&&el.parentNode;
+  if(!el||!parent||parent===document.body) return;
+  _previewFsHome={parent:parent,next:el.nextSibling};
+  parent.removeChild(el);
+  document.body.appendChild(el);
+}
+
+function _previewFsRestoreHome(){
+  const home=_previewFsHome;
+  _previewFsHome=null;
+  const el=_previewFsEl();
+  if(!el||!home||!home.parent) return;
+  if(el.parentNode) el.parentNode.removeChild(el);
+  // Só devolve ao container original se ele ainda está no documento.
+  if(home.parent.isConnected===false) return;
+  if(home.next&&home.next.parentNode===home.parent) home.parent.insertBefore(el,home.next);
+  else home.parent.appendChild(el);
+}
+
+function _previewFsEnterOverlay(){
+  _previewFsMode='overlay';
+  const el=_previewFsEl();
+  if(el){
+    _previewFsReparentOverlay();
+    el.classList.add('preview-fullscreen');
+  }
+  _previewFsSync();
+}
+
+function _previewFsExitOverlay(){
+  _previewFsMode=null;
+  const el=_previewFsEl();
+  if(el){
+    _previewFsRestoreHome();
+    el.classList.remove('preview-fullscreen');
+  }
+  _previewFsSync();
+}
+
+function _previewFsOnChange(){
+  const active=document.fullscreenElement||document.webkitFullscreenElement||null;
+  // Só adota o elemento DESTE preview: um vídeo ou outra superfície em
+  // fullscreen não pode virar "modo api" do preview nem ser derrubado no exit.
+  const ours=!!active&&active===_previewFsOwned();
+  if(_previewFsMode==='api'&&!ours){
+    // User pressed Escape (or the browser exited) inside native fullscreen,
+    // ou um dono externo assumiu o lugar: desiste sem tocar no fullscreen alheio.
+    _previewFsInvalidatePending();
+    _previewFsMode=null;
+    _previewFsSync();
+  }else if(ours){
+    _previewFsMode='api';
+    _previewFsSync();
+  }
+}
+
+function togglePreviewFullscreen(){
+  const el=_previewFsEl();
+  if(!el||!el.classList.contains('visible')) return;
+  // Sair: modo ativo ou elemento já em fullscreen — nos dois casos a intenção
+  // pendente é invalidada antes de qualquer coisa.
+  if(_previewFsMode==='overlay'||document.fullscreenElement===el||document.webkitFullscreenElement===el){
+    _exitPreviewFullscreen();
+    return;
+  }
+  if(_previewFsPending){
+    // Clique repetido com o pedido nativo ainda em voo: cancela a intenção em
+    // vez de empilhar um segundo pedido (single-flight).
+    _previewFsInvalidatePending();
+    return;
+  }
+  if(_previewFsApiSupported()){
+    const token={el}; // possui a intenção ANTES de pedir
+    _previewFsPending=token;
+    _previewFsOwnedEl=el;
+    _previewFsRequest(el).then(()=>{
+      if(_previewFsPending!==token){
+        // Sucesso atrasado de um pedido já cancelado: só libera o elemento
+        // nativo deste preview; o resto do estado continua desmontado.
+        _previewFsReleaseOwned(token.el);
+        return;
+      }
+      _previewFsPending=null;
+      _previewFsMode='api';
+      _previewFsSync();
+    }).catch(()=>{
+      if(_previewFsPending!==token) return; // já desmontado: não reativa overlay
+      _previewFsPending=null;
+      // Native fullscreen rejected (or restricted to <video> on some mobile
+      // browsers) → the fixed-overlay fallback covers every preview kind.
+      _previewFsEnterOverlay();
+    });
+  }else{
+    _previewFsEnterOverlay();
+  }
+}
+
+function _exitPreviewFullscreen(){
+  // Cancela a intenção em voo primeiro: exit, clear e fechar o painel podem
+  // acontecer com requestFullscreen() ainda pendente.
+  _previewFsInvalidatePending();
+  if(_previewFsMode==='overlay') _previewFsExitOverlay();
+  else if(_previewFsMode==='api') _previewFsExitApi();
+}
+
 async function copyPreviewRelativePath(){
   if(!_previewCurrentPath) return;
   const btn=$('btnCopyPreviewRelPath');
@@ -1863,5 +2057,26 @@ if (typeof document !== 'undefined') {
     document.addEventListener('DOMContentLoaded', _wsUploadInit, {once: true});
   } else {
     _wsUploadInit();
+  }
+}
+
+// Fullscreen preview wiring (#6675): keep state in sync with the native
+// Fullscreen API (Escape/exit handled by the browser) and support Escape to
+// dismiss the fixed-overlay fallback.
+if (typeof document !== 'undefined') {
+  const _wsFullscreenInit = () => {
+    document.addEventListener('fullscreenchange', _previewFsOnChange);
+    document.addEventListener('webkitfullscreenchange', _previewFsOnChange);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && _previewFsMode === 'overlay') {
+        e.preventDefault();
+        _previewFsExitOverlay();
+      }
+    });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _wsFullscreenInit, {once: true});
+  } else {
+    _wsFullscreenInit();
   }
 }
