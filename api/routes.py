@@ -11473,6 +11473,7 @@ from api.streaming import (
     _sse_keepalive,
     _sse_set_write_deadline,
     _run_agent_streaming,
+    _producer_committed_compression,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
@@ -27019,6 +27020,13 @@ def _handle_chat_sync(handler, body):
             _provider = _bundle["provider"]
             _api_key = _bundle["api_key"]
             _base_url = _bundle["base_url"]
+            # #7237 review round-N+2 finding 2 (nesquena-hermes 2026-10-05):
+            # the sync path must derive wholesale-replacement authority from
+            # the PRODUCER, exactly like the streaming path. Capture the
+            # session id this turn opened with so a post-run compression
+            # rotation (agent.session_id advancing to a fresh continuation) is
+            # visible to the settle below.
+            _sync_session_id = s.session_id
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
@@ -27037,6 +27045,7 @@ def _handle_chat_sync(handler, body):
                 _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
+                _deduplicate_context_messages,
                 _find_active_turn_checkpoint_index,
                 _merge_display_messages_after_agent_result,
                 _resolve_active_turn_authority,
@@ -27070,17 +27079,47 @@ def _handle_chat_sync(handler, body):
 
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
-
-            result = agent.run_conversation(
-                user_message=workspace_ctx + msg,
-                system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_agent(
+            # The EXACT projection handed to the Agent, threaded to the settle's
+            # replay dedupe. ``result["messages"]`` is the full conversation
+            # (this projection + the current turn), so without it the dedupe
+            # cannot prove which rows the current turn owns and could append
+            # sanitizer-rewritten historical rows beside the raw history
+            # (#7237 review data-regression finding, nesquena-hermes
+            # 2026-09-23).
+            # #7237 review round 3 finding 2 (nesquena-hermes 2026-10-06): the
+            # projection used to be passed BY REFERENCE and then reused for the
+            # prefix proof. The real Agent shallow-copies the list and performs
+            # its consecutive-user repair on the tail dict, so the same object
+            # the settle compares against had already been mutated. An
+            # unanswered-tail follow-up therefore lost its current user row.
+            #
+            # Take an INDEPENDENT deep snapshot here: the value handed to the
+            # Agent and the value compared at settle time must be two objects,
+            # or "what we sent" is a moving target.
+            _run_conversation_projected_history = copy.deepcopy(
+                _sanitize_messages_for_agent(
                     _previous_context_messages,
                     cfg=get_config(),
                     effective_model=_model,
                     effective_provider=_provider,
                     effective_base_url=_base_url,
-                ),
+                    # #7237 review round 3 finding 5 (nesquena-hermes
+                    # 2026-10-06): same Agent-replay adjacency normalization the
+                    # streaming path applies, so the sync settle models the
+                    # Agent's merge of bare assistant rows instead of rejecting
+                    # the changed prefix and dropping the exchange.
+                    normalize_bare_assistant_adjacency=True,
+                )
+            )
+
+            result = agent.run_conversation(
+                user_message=workspace_ctx + msg,
+                system_message=workspace_system_msg,
+                # Threaded to the settle's replay dedupe so only rows the
+                # current turn owns are appended when the replayed prefix
+                # diverges from the raw context (#7237 review
+                # data-regression finding).
+                conversation_history=_run_conversation_projected_history,
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
@@ -27108,6 +27147,23 @@ def _handle_chat_sync(handler, body):
                 os.environ.pop("HERMES_SESSION_KEY", None)
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
+    # #7237 review round-N+2 finding 2 (nesquena-hermes 2026-10-05): the sync
+    # path previously never passed ``compression_authorized`` to
+    # ``_dedupe_replayed_context_messages``, so every genuine compression was
+    # refused there and the persisted context kept only the old history. The
+    # producer signal is the same as the streaming path: the Agent rotating
+    # its own session_id inside this call proves the context layer really ran
+    # a compression turn.
+    # #7237 review round 3 (nesquena-hermes 2026-10-06): the installed Agent
+    # compresses IN PLACE by default — it keeps its session id and commits
+    # ``_last_compaction_in_place``. The previous proxy
+    # (``agent.session_id != _sync_session_id``) could only see a rotation, so
+    # the default case was treated as "no compression", the settle refused the
+    # compacted result, and the route kept the 24 old context rows without the
+    # current answer. Derive the authority from actual producer commitment via
+    # the shared predicate the streaming settle uses, so the two paths cannot
+    # drift apart again.
+    _compression_authorized = _producer_committed_compression(agent, _sync_session_id)
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         # Active-turn boundary is fixed BEFORE any restoration (same as streaming),
@@ -27157,11 +27213,42 @@ def _handle_chat_sync(handler, body):
         _assign_stable_message_ids(
             _result_messages, _previous_messages, _previous_context_messages
         )
-        _next_context_messages = _dedupe_replayed_context_messages(
-            _previous_context_messages,
-            _next_context_messages,
-            msg,
-        )
+        if result.get("messages"):
+            # Call-scoped protection (#7237 review blocker 1,
+            # nesquena-hermes 2026-09-28): the dedupe RETURNS the protected
+            # rows it proved; the sync route consumes them in THIS call by
+            # passing them into the identity dedupe — the old module global
+            # was never read here, so a settle that proved current-turn rows
+            # could have them collapsed as duplicates on the sync path.
+            _next_context_messages, _proven_rows = _dedupe_replayed_context_messages(
+                _previous_context_messages,
+                _next_context_messages,
+                msg,
+                projected_history=_run_conversation_projected_history,
+                # #7237 review round-N+2 finding 2 (nesquena-hermes
+                # 2026-10-05): the sync path must grant wholesale-replacement
+                # authority when the producer actually rotated the session
+                # id, exactly like the streaming path — a genuine compression
+                # must persist the compacted list, not the old history.
+                compression_authorized=_compression_authorized,
+            )
+            s.context_messages = _deduplicate_context_messages(
+                _next_context_messages,
+                protected_rows=_proven_rows,
+            )
+        else:
+            # The Agent produced NO rows for this turn. The previous fallback
+            # (``result.get("messages") or _previous_context_messages``) left
+            # the raw pre-turn context substituted as the settle input; with
+            # the exact sent projection ``[]`` that whole substituted raw
+            # history was then treated as the current-turn output and the
+            # settle returned ``previous_context + previous_context``
+            # (#7237 review residual 2, nesquena-hermes 2026-09-27). Settle
+            # an empty Agent result as a no-op for model context — the same
+            # contract the streaming ``_settle_result_messages`` applies —
+            # keeping exactly one raw-history copy with no loss or
+            # duplication.
+            _next_context_messages = list(_previous_context_messages)
         if _active_turn_identity.get("token"):
             _next_context_messages = _settle_current_turn_boundary(
                 _previous_context_messages,
