@@ -10656,6 +10656,10 @@ async function _saveProjectBindings(proj, fields){
   // Persist one or more binding fields via /api/projects/bind (null clears a
   // field), then refresh the in-memory project cache + sidebar so chips and
   // future quick-creates see the new bindings immediately.
+  //
+  // Returns true only when the server ACCEPTED the bind: the dialog stays open
+  // on a failure so the user's unsaved edits survive (Greptile P2
+  // 2026-10-10T02:22:52Z).
   const body=Object.assign({project_id:proj.project_id}, fields||{});
   try{
     const res=await api('/api/projects/bind',{method:'POST',body:JSON.stringify(body)});
@@ -10667,8 +10671,10 @@ async function _saveProjectBindings(proj, fields){
     try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
     try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
     if(typeof showToast==='function') showToast(t('pb_updated'));
+    return true;
   }catch(e){
     if(typeof showToast==='function') showToast(t('pb_update_failed')+(e&&e.message||e));
+    return false;
   }
 }
 
@@ -11443,8 +11449,14 @@ function _showProjectBindingsDialog(proj){
       fields.model=null;
       fields.model_provider=null;
     }
-    _closeBindingsDialog();
-    await _saveProjectBindings(proj,fields);
+    // Close only AFTER the server accepts the bind. The dialog used to close
+    // before the request settled, so a mistyped workspace path (or any failed
+    // request) showed only a toast and threw away every unsaved workspace and
+    // model edit — reopening the dialog rebuilt it from the STORED project
+    // (Greptile P2 2026-10-10T02:22:52Z).  _saveProjectBindings returns true
+    // only on success; a failure keeps the dialog (and its edits) on screen.
+    const _saved=await _saveProjectBindings(proj,fields);
+    if(_saved) _closeBindingsDialog();
   };
   btnRow.appendChild(cancelBtn);
   btnRow.appendChild(saveBtn);

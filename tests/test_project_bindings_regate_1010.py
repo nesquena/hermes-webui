@@ -697,3 +697,208 @@ def test_a_lookup_that_raises_is_skipped_too(monkeypatch):
 
     monkeypatch.setattr(routes, "_state_db_session_source_strict", _boom)
     assert routes._auto_assign_target_is_view_only(_row(), "s_failclosed") is True
+
+
+# ---------------------------------------------------------------------------
+# 5 — Greptile 2026-10-10T02:20-02:22Z (three findings on this head)
+# ---------------------------------------------------------------------------
+
+
+def test_a_missing_workspace_still_auto_assigns_the_last_workspace(
+    session_new_env, monkeypatch
+):
+    """Greptile P1 (2026-10-10T02:22:52Z): /api/session/new hands new_session
+    `workspace or get_last_workspace(profile)`, so a body that omits `workspace`
+    still lands in the profile's last workspace — and that workspace must be
+    auto-assigned like any other.  The old branch tested the RAW body field and
+    skipped the lookup entirely."""
+    routes = session_new_env.routes
+    # The request has no `workspace`, so the resolver answers None (master's
+    # contract) and the effective workspace comes from the profile.
+    monkeypatch.setattr(routes, "_resolve_new_session_workspace", lambda *a, **k: None)
+    seen = []
+    monkeypatch.setattr(
+        routes, "get_last_workspace", lambda profile=None: seen.append(profile) or "D:/last-ws"
+    )
+    session_new_env.drive({"profile": "default"})
+    assert session_new_env.auto_calls == ["D:/last-ws"], session_new_env.auto_calls
+    assert session_new_env.created[0]["project_id"] == _AUTO_PID
+    # The profile is resolved exactly like new_session resolves it.
+    assert seen == ["default"], seen
+
+
+def test_a_missing_workspace_with_an_explicit_null_project_stays_unassigned(
+    session_new_env, monkeypatch
+):
+    """The "No project" view still wins: an explicit `project_id: null` never
+    auto-assigns, even when the effective workspace is the profile's last one."""
+    routes = session_new_env.routes
+    monkeypatch.setattr(routes, "_resolve_new_session_workspace", lambda *a, **k: None)
+    monkeypatch.setattr(routes, "get_last_workspace", lambda profile=None: "D:/last-ws")
+    session_new_env.drive({"profile": "default", "project_id": None})
+    assert session_new_env.auto_calls == [], session_new_env.auto_calls
+    assert session_new_env.created[0]["project_id"] is None
+
+
+def test_a_missing_workspace_and_no_last_workspace_skips_the_lookup(
+    session_new_env, monkeypatch
+):
+    """Control: nothing to resolve means no auto-assign lookup at all."""
+    routes = session_new_env.routes
+    monkeypatch.setattr(routes, "_resolve_new_session_workspace", lambda *a, **k: None)
+    monkeypatch.setattr(routes, "get_last_workspace", lambda profile=None: "")
+    session_new_env.drive({"profile": "default"})
+    assert session_new_env.auto_calls == [], session_new_env.auto_calls
+    assert session_new_env.created[0]["project_id"] is None
+
+
+def _sweep_env(tmp_path, monkeypatch, live_projects):
+    """An index with two unfiled sessions in two workspaces + live rows."""
+    import json
+
+    import api.routes as routes
+
+    gone_dir = tmp_path / "ws-gone"
+    gone_dir.mkdir()
+    live_dir = tmp_path / "ws-live"
+    live_dir.mkdir()
+    gone, live = str(gone_dir), str(live_dir)
+    index_file = tmp_path / "_index.json"
+    index_file.write_text(
+        json.dumps(
+            [
+                {"session_id": "s_gone", "workspace": gone, "profile": "default", "project_id": None},
+                {"session_id": "s_live", "workspace": live, "profile": "default", "project_id": None},
+            ]
+        )
+    )
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    class _Row:
+        def __init__(self, sid, workspace):
+            self.session_id = sid
+            self.workspace = workspace
+            self.profile = "default"
+            self.project_id = None
+
+        def save(self, touch_updated_at=True):  # noqa: ARG002
+            pass
+
+    rows = {"s_gone": _Row("s_gone", gone), "s_live": _Row("s_live", live)}
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid, metadata_only=False: None if metadata_only else rows.get(sid),
+    )
+    monkeypatch.setattr(routes, "load_projects", live_projects)
+    return routes, rows, gone, live
+
+
+def test_a_mid_sweep_workspace_removal_stops_that_row_being_filed(tmp_path, monkeypatch):
+    """Greptile P1 (2026-10-10T02:22:51Z): /api/projects/bind hands the snapshot
+    to a BACKGROUND sweep, so a workspace removed while it runs must not keep
+    filing chats — the live bindings are re-read before each assignment.  A
+    workspace that is STILL bound keeps filing."""
+    pid = "proj_mid_sweep_remove"
+    routes, rows, gone, live = _sweep_env(
+        tmp_path,
+        monkeypatch,
+        lambda *a, **k: [
+            {"project_id": pid, "profile": "default", "auto_assign": True, "workspaces": [live]}
+        ],
+    )
+    # The stale snapshot the worker was handed still lists BOTH workspaces.
+    stale = {"project_id": pid, "profile": "default", "workspaces": [gone, live]}
+    try:
+        filed = routes._apply_project_auto_assign(stale)
+    finally:
+        routes._auto_assign_finish_deleting(pid)
+    assert filed == 1, filed
+    assert rows["s_live"].project_id == pid, "a still-bound workspace must keep filing"
+    assert rows["s_gone"].project_id is None, "the detached workspace must not be filed"
+
+
+def test_a_mid_sweep_auto_assign_toggle_off_and_an_unreadable_catalog_fail_closed(
+    tmp_path, monkeypatch
+):
+    """The sweep stops when `auto_assign` was switched off mid-run, and when the
+    catalog cannot be read at all (AGENTS.md: unknown must not file a chat)."""
+    pid = "proj_mid_sweep_off"
+    routes, rows, gone, live = _sweep_env(
+        tmp_path,
+        monkeypatch,
+        lambda *a, **k: [
+            {"project_id": pid, "profile": "default", "auto_assign": False, "workspaces": [gone, live]}
+        ],
+    )
+    stale = {"project_id": pid, "profile": "default", "workspaces": [gone, live]}
+    try:
+        assert routes._apply_project_auto_assign(stale) == 0
+    finally:
+        routes._auto_assign_finish_deleting(pid)
+    assert rows["s_live"].project_id is None and rows["s_gone"].project_id is None
+
+    def _boom(*a, **k):
+        raise OSError("catalog unreadable")
+
+    monkeypatch.setattr(routes, "load_projects", _boom)
+    try:
+        assert routes._apply_project_auto_assign(stale) == 0
+    finally:
+        routes._auto_assign_finish_deleting(pid)
+    assert rows["s_live"].project_id is None and rows["s_gone"].project_id is None
+
+
+# --- the dialog stays open until the server accepts the save -----------------
+
+_SAVE_BINDINGS_PROBE = r"""
+let apiMode = 'fail';
+async function api(){
+  if(apiMode === 'fail') throw new Error('boom');
+  return {project: {project_id: 'p1', name: 'new'}};
+}
+const _allProjects = [{project_id: 'p1', name: 'old'}];
+const toasts = [];
+function showToast(m){ toasts.push(String(m)); }
+function t(k){ return 'T:' + k; }
+__SAVE__
+function assert(cond, msg){ if(!cond) throw new Error(msg); }
+(async () => {
+  let ok = await _saveProjectBindings({project_id: 'p1'}, {workspaces: null});
+  assert(ok === false, 'a rejected bind must report false, got ' + ok);
+  assert(toasts[toasts.length - 1].indexOf('T:pb_update_failed') === 0,
+    'failure toast: ' + toasts[toasts.length - 1]);
+  assert(_allProjects[0].name === 'old', 'the cache must not be touched on failure');
+
+  apiMode = 'ok';
+  ok = await _saveProjectBindings({project_id: 'p1'}, {workspaces: null});
+  assert(ok === true, 'an accepted bind must report true');
+  assert(_allProjects[0].name === 'new', 'the cache must be refreshed on success');
+  assert(toasts[toasts.length - 1] === 'T:pb_updated', 'success toast');
+  console.log('ok');
+})().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def test_a_failed_save_keeps_the_dialog_open(tmp_path):
+    """Greptile P2 (2026-10-10T02:22:52Z): Save closed the dialog before the
+    server accepted the bind, so a failed request discarded every unsaved
+    workspace/model edit.  _saveProjectBindings now reports success and the
+    dialog closes only on true."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    save_fn = src[src.index("async function _saveProjectBindings(proj, fields){"):src.index(
+        "\n// Custom combobox for the bindings dialog"
+    )]
+    assert "return true;" in save_fn and "return false;" in save_fn, save_fn
+    # The call site captures the result and closes only when it succeeded, and
+    # the dialog's own close no longer runs before the await.
+    assert "const _saved=await _saveProjectBindings(proj,fields);" in src
+    assert "if(_saved) _closeBindingsDialog();" in src
+    assert "\n    _closeBindingsDialog();\n    await _saveProjectBindings(proj,fields);" not in src
+    assert _run_node(
+        tmp_path,
+        "save_bindings_probe.js",
+        _SAVE_BINDINGS_PROBE.replace("__SAVE__", save_fn),
+    ).strip().endswith("ok")

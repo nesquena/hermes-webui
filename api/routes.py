@@ -821,6 +821,33 @@ def _apply_project_auto_assign(proj) -> int:
         _auto_assign_sweep_end(pid)
 
 
+def _auto_assign_live_binding(project_id):
+    """The CURRENT (auto_assign, bound workspaces) for ``project_id``.
+
+    ``_auto_assign_sweep_body`` runs in a background thread started by
+    /api/projects/bind, so the project snapshot it was handed can go stale
+    while it runs: removing a bound workspace (or switching ``auto_assign``
+    off) mid-sweep must stop it filing chats into a workspace the user has just
+    detached (Greptile P1 2026-10-10T02:22:51Z).  Re-read the on-disk row and
+    answer:
+
+      * ``(True, {...})``  — still auto-assigning, these are the live bindings;
+      * ``(False, {...})`` — the row exists but auto_assign is off;
+      * ``None``           — the row is GONE, or the catalog could not be read.
+
+    ``None`` is deliberately shared by both "gone" and "unknown": the caller
+    fails CLOSED (AGENTS.md - unknown is not allowed to file a chat).
+    """
+    try:
+        projects = load_projects()
+    except Exception:
+        return None
+    for p in projects:
+        if isinstance(p, dict) and p.get("project_id") == project_id:
+            return bool(p.get("auto_assign")), set(_project_workspaces(p))
+    return None
+
+
 def _auto_assign_sweep_body(proj) -> int:
     """File every existing session whose workspace is bound to ``proj`` under it.
 
@@ -873,6 +900,25 @@ def _auto_assign_sweep_body(proj) -> int:
             # Already filed somewhere (this project or another) — never steal
             # a session the user (or another auto-assign) has placed. Auto-
             # assign only sweeps up unowned sessions in the bound workspace.
+            continue
+        # Re-read the LIVE bindings before filing anything: the snapshot this
+        # sweep started with was handed to a background thread, so a workspace
+        # removed (or auto_assign switched off, or the project deleted) while
+        # the sweep runs must stop it filing chats the user has just detached
+        # (Greptile P1 2026-10-10T02:22:51Z).  The loop only reaches this point
+        # for rows it would otherwise file, so the read is bounded by the work
+        # actually done.  `None` means gone/unknown -> fail CLOSED and stop.
+        _live = _auto_assign_live_binding(pid)
+        if _live is None or not _live[0]:
+            logger.info(
+                "auto-assign %s: stopping sweep - %s",
+                pid,
+                "bindings unknown or project gone" if _live is None else "auto_assign switched off",
+            )
+            break
+        if str(ws) not in _live[1]:
+            # This workspace is no longer bound (others may still be) - skip it
+            # rather than stopping the sweep.
             continue
         # Stale snapshot check above is necessary but not sufficient: a
         # concurrent /api/session/move or a parallel auto-assign may have
@@ -17062,26 +17108,41 @@ def handle_post(handler, parsed) -> bool:
         project_id = body.get("project_id") or None
         if _project_id_supplied:
             s = _create_session(project_id)
-        elif workspace:
-            # Serialize the implicit assignment WITH the session's publication
-            # into the cache, under the same lock /api/projects/delete takes to
-            # remove the catalog row and to clear the cached sessions that
-            # referenced it. A new chat is cache-only until its first save
-            # (new_session writes nothing to disk), so if the delete's row
-            # removal landed between this assignment and the publication, the
-            # session kept the dead project_id in the cache and persisted it on
-            # the draft-save — the index-only unlink never saw it. Holding the
-            # lock across both makes the two orderings the only ones possible:
-            # either the session is already published when deletion clears the
-            # cache, or the row is already gone so the session is created
-            # unassigned (re-gate 2026-10-07, api/routes.py:16855).
-            with _PROJECTS_CATALOG_LOCK:
-                project_id = _auto_assign_project_for_workspace(
-                    workspace, profile=body.get("profile") or None
-                )
-                s = _create_session(project_id)
         else:
-            s = _create_session(project_id)
+            # Auto-assignment keys off the session's EFFECTIVE workspace, which
+            # new_session resolves as `workspace or get_last_workspace(profile)`.
+            # Testing the RAW body field instead skipped auto-assignment for a
+            # request that omits `workspace` even though the chat still lands in
+            # the profile's last workspace, so a workspace an auto-assign
+            # project already owns produced an unassigned chat (Greptile P1
+            # 2026-10-10T02:22:52Z).  The profile is resolved exactly like
+            # new_session resolves it (active profile when the body omits it).
+            # An explicit ``project_id: null`` still short-circuits above, so
+            # the "No project" view keeps meaning unassigned.
+            _auto_profile = body.get("profile") or _get_active_profile_name()
+            _effective_workspace = workspace or get_last_workspace(
+                profile=_auto_profile
+            )
+            if not _effective_workspace:
+                s = _create_session(project_id)
+            else:
+                # Serialize the implicit assignment WITH the session's publication
+                # into the cache, under the same lock /api/projects/delete takes to
+                # remove the catalog row and to clear the cached sessions that
+                # referenced it. A new chat is cache-only until its first save
+                # (new_session writes nothing to disk), so if the delete's row
+                # removal landed between this assignment and the publication, the
+                # session kept the dead project_id in the cache and persisted it on
+                # the draft-save — the index-only unlink never saw it. Holding the
+                # lock across both makes the two orderings the only ones possible:
+                # either the session is already published when deletion clears the
+                # cache, or the row is already gone so the session is created
+                # unassigned (re-gate 2026-10-07, api/routes.py:16855).
+                with _PROJECTS_CATALOG_LOCK:
+                    project_id = _auto_assign_project_for_workspace(
+                        _effective_workspace, profile=body.get("profile") or None
+                    )
+                    s = _create_session(project_id)
         if worktree_info:
             publish_session_list_changed(
                 "session_new",

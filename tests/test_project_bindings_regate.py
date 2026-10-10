@@ -40,6 +40,28 @@ def _read_sessions_js() -> str:
     return _read_static("sessions.js")
 
 
+class _AnyWorkspace(set):
+    """A set that claims to contain every workspace path."""
+
+    def __contains__(self, item):  # noqa: D105
+        return True
+
+
+@pytest.fixture(autouse=True)
+def _live_bindings_unchanged(monkeypatch):
+    """Assume the project's bindings did NOT change mid-sweep.
+
+    ``_auto_assign_sweep_body`` re-reads the live project row before filing
+    anything (Greptile P1 2026-10-10T02:22:51Z), but these tests drive the sweep
+    with an in-memory snapshot and no projects catalog, so the live row would
+    read as "unknown" and the sweep would stop.  Pin the unchanged case: still
+    auto-assigning, with every snapshot workspace still bound.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_auto_assign_live_binding", lambda pid: (True, _AnyWorkspace()))
+
+
 def _read_routes_py() -> str:
     return (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
 
