@@ -764,8 +764,15 @@ def _clear_cached_sessions_for_project(project_id, lock_timeout=None, cleared_id
     ``new_session`` writes nothing to disk — so an unsaved chat whose workspace
     was claimed by the removed project kept the dead id in the LRU cache and
     persisted it on its draft-save (re-gate 2026-10-07, api/routes.py:16855).
-    Callers hold ``_PROJECTS_CATALOG_LOCK`` so this scan cannot interleave with
-    the implicit assignment + cache publication it competes with.
+    The caller must NOT hold ``_PROJECTS_CATALOG_LOCK``: this scan takes every
+    target session's own agent lock with a bounded wait, and doing that behind
+    the catalog lock stalled New Chat and every workspace edit for the whole
+    wait budget (maintainer re-gate 2026-10-10T15:11:33Z — seven busy sessions
+    made New Chat time out after 30.03 s). The ordering against the create
+    path's implicit assignment + cache publication is provided by the delete
+    handler's ROW REMOVAL, which stays under that lock: a session either already
+    published its ``project_id`` when this scan runs (and is cleared here) or it
+    reads the catalog after the row is gone and is created unassigned.
 
     Each clear is taken under the session's OWN agent lock: clearing outside it
     let a ``save()`` that had already serialized ``project_id`` land its file
@@ -841,12 +848,13 @@ def _clear_cached_sessions_for_project(project_id, lock_timeout=None, cleared_id
 def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
     """Write a cleared ``project_id`` through to each session's sidecar.
 
-    Split from ``_clear_cached_sessions_for_project`` on purpose: the clear runs
-    under ``_PROJECTS_CATALOG_LOCK`` (atomic against the implicit assignment and
-    the cache publication it competes with), while these are FULL-HISTORY
-    writes. Doing them there stalled New Chat and every workspace edit behind a
-    delete of a project with large cached chats (Greptile P1 2026-10-10T12:41:25Z),
-    so the handler calls this after releasing that lock.
+    Split from ``_clear_cached_sessions_for_project`` on purpose: these are
+    FULL-HISTORY writes, and nothing here may run while the delete handler holds
+    ``_PROJECTS_CATALOG_LOCK``. Doing them there — like doing the clear's
+    per-session lock waits there — stalled New Chat and every workspace edit
+    behind a delete of a project with large cached chats (Greptile P1
+    2026-10-10T12:41:25Z; maintainer re-gate 2026-10-10T15:11:33Z), so the
+    handler calls this with that lock released.
 
     Each write still holds the session's own agent lock — that is what makes the
     ordering safe: a concurrent save either finished before it (and this
@@ -19883,8 +19891,10 @@ def handle_post(handler, parsed) -> bool:
             )
         try:
             # Ids the in-memory clear unlinked from the cache; their SIDECARS are
-            # written through below, OUTSIDE the catalog lock (full-history
-            # writes must not stall New Chat / workspace edits behind a delete).
+            # written through below. Both the clear itself and that write-through
+            # run OUTSIDE the catalog lock: a per-session lock wait (clear) or a
+            # full-history write (persist) must not stall New Chat / workspace
+            # edits behind a delete (maintainer re-gate 2026-10-10T15:11:33Z).
             cleared_ids: list = []
             with _PROJECTS_CATALOG_LOCK:
                 # Reload AFTER the drain: `projects` was read before the (up to
@@ -19897,19 +19907,29 @@ def handle_post(handler, parsed) -> bool:
                     if p["project_id"] != body["project_id"]
                 ]
                 save_projects(projects)
-                # Clear the CACHED sessions that still carry this project_id
-                # while the catalog lock is held. An unsaved new chat lives only
-                # in the LRU cache (new_session writes nothing to disk), so the
-                # index-only unlink below never saw it and its draft-save
-                # persisted the dead id. Running this under the same lock the
-                # create path takes for its implicit assignment + publication
-                # makes the pair mutually exclusive: either that session is
-                # already published (and cleared here) or the row was already
-                # gone (so it is created unassigned) — never an orphan
-                # (re-gate 2026-10-07, api/routes.py:16855).
-                cleared_cached = _clear_cached_sessions_for_project(
-                    body["project_id"], cleared_ids=cleared_ids
-                )
+            # Clear the CACHED sessions that still carry this project_id. An
+            # unsaved new chat lives only in the LRU cache (new_session writes
+            # nothing to disk), so the index-only unlink below never saw it and
+            # its draft-save persisted the dead id.
+            #
+            # This runs AFTER the catalog lock is released, on purpose: the clear
+            # takes each session's own agent lock with a bounded wait (up to 5 s
+            # each), so holding the catalog lock across it stalled every New Chat
+            # and workspace edit behind a delete of a project with busy cached
+            # chats (maintainer re-gate 2026-10-10T15:11:33Z: seven held session
+            # locks made New Chat time out after 30.03 s; with the call moved
+            # here it finished in 0.037 s and the transcript was preserved).
+            #
+            # The mutual exclusion the old placement provided is unchanged: the
+            # ROW REMOVAL above stays serialized (under the catalog lock) with
+            # the create path's implicit assignment + cache publication
+            # (api/routes.py:17307), so either that session already published its
+            # project_id — and this scan sees and clears it — or it reads the
+            # catalog after the removal and is created unassigned. Never an
+            # orphan (re-gate 2026-10-07, api/routes.py:16855).
+            cleared_cached = _clear_cached_sessions_for_project(
+                body["project_id"], cleared_ids=cleared_ids
+            )
             if cleared_cached:
                 logger.info(
                     "projects/delete: cleared project_id on %d cached session(s)",
