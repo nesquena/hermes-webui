@@ -26,8 +26,9 @@ def test_set_reasoning_effort_returns_status_for_explicit_model(tmp_path, monkey
 
     seen = {}
 
-    def fake_resolve(model_id, provider_id=None, base_url=None):
+    def fake_resolve(model_id, provider_id=None, base_url=None, *, config_data=None):
         seen["args"] = (model_id, provider_id, base_url)
+        seen["config_data"] = config_data
         if model_id == "claude-opus-4-7":
             return ["minimal", "low", "medium", "high", "xhigh", "max"]
         return []
@@ -41,6 +42,7 @@ def test_set_reasoning_effort_returns_status_for_explicit_model(tmp_path, monkey
     )
 
     assert seen["args"] == ("claude-opus-4-7", "anthropic", None)
+    assert seen["config_data"]["model"]["default"] == "gpt-4o"
     assert status["reasoning_effort"] == "high"
     assert status["supported_efforts"] == [
         "minimal",
