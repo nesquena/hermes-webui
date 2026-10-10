@@ -608,25 +608,35 @@ let _messageVirtualRoleHeightSamples=Object.create(null);
 function _resetMessageVirtualRoleCalibration(){
   _messageVirtualRoleHeightSamples=Object.create(null);
 }
-function _recordMessageVirtualRoleMeasurement(role,height){
+function _recordMessageVirtualRoleMeasurement(role,rawIdx,height){
   const h=Number(height);
-  if(!(h>0)) return;
+  const idx=Number(rawIdx);
+  if(!(h>0)||!Number.isFinite(idx)) return;
   const key=(role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role))?role:'default';
   if(!(Number(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[key])>0)) return;
   let slot=_messageVirtualRoleHeightSamples[key];
-  if(!slot){ slot={sum:0,count:0,frozen:0}; _messageVirtualRoleHeightSamples[key]=slot; }
+  // Rows, not render passes: the measure pass runs on every render over the SAME
+  // handful of mounted rows, so counting passes would freeze a role's mean on a
+  // couple of rows before the rest of the transcript was ever seen (#7591 P2).
+  if(!slot){ slot={rows:new Map(),frozen:0}; _messageVirtualRoleHeightSamples[key]=slot; }
   if(slot.frozen>0) return;
-  slot.sum+=h;
-  slot.count++;
-  if(slot.count>=MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES) slot.frozen=slot.sum/slot.count;
+  if(slot.rows.get(idx)===h) return;
+  slot.rows.set(idx,h);
+  if(slot.rows.size>=MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES){
+    let sum=0;
+    for(const value of slot.rows.values()) sum+=value;
+    slot.frozen=sum/slot.rows.size;
+  }
 }
 function _messageVirtualCalibratedRoleHeight(role){
   const key=(role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role))?role:'default';
   const prior=Number(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[key])||MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS.default;
   const slot=_messageVirtualRoleHeightSamples[key];
-  if(!slot||slot.count<=0) return Math.max(1,Math.round(prior));
+  if(!slot||!slot.rows.size) return Math.max(1,Math.round(prior));
   if(slot.frozen>0) return Math.max(1,Math.round(slot.frozen));
-  const blended=(slot.sum+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES*prior)/(slot.count+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES);
+  let sum=0;
+  for(const value of slot.rows.values()) sum+=value;
+  const blended=(sum+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES*prior)/(slot.rows.size+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES);
   return Math.max(1,Math.round(blended));
 }
 let _messageRenderWindowSid=null;
@@ -673,6 +683,10 @@ let _scrollbarDragActive=false;
 // _clampVirtualizedBlankViewportToRenderedEdge); reset when a render lands on
 // rendered rows and on session switch (_clearMessageVirtualHeightCache).
 let _messageVirtualBlankClampAttempts=0;
+// Depth of an in-progress renderMessages() scroll restore (#7591): the restore
+// re-arms _programmaticScroll just before blank recovery runs, so recovery must
+// not read that flag as a foreign in-flight scroll write and skip its clamp.
+let _messageRenderScrollRestoreDepth=0;
 function _markMessageVirtualScrollActive(){
   _messageVirtualScrollActive=true;
   clearTimeout(_messageVirtualScrollSettleTimer);
@@ -1616,7 +1630,7 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     // #7591: publish what this row really rendered so unmeasured rows of the
     // same role estimate from the measured mean instead of the flat constant.
     if(typeof _recordMessageVirtualRoleMeasurement==='function'){
-      _recordMessageVirtualRoleMeasurement(_messageVirtualRoleForEntry(entry), totalHeight);
+      _recordMessageVirtualRoleMeasurement(_messageVirtualRoleForEntry(entry), entry&&entry.rawIdx, totalHeight);
     }
     measuredTotal+=totalHeight;
     measuredCount++;
@@ -19724,42 +19738,47 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
 // escalates to the full render after exactly one geometry clamp instead of recursing.
 function _clampVirtualizedBlankViewportToRenderedEdge(){
   if(_messageVirtualBlankClampAttempts>=1) return false;
-  if(typeof _freshProgrammaticScrollActive==='function'&&_freshProgrammaticScrollActive()) return false;
+  // A foreign programmatic scroll write may still be settling, and clamping
+  // would fight it. The current render's OWN restore re-arms that flag too (it
+  // runs immediately before recovery), so it is exempt — see
+  // _messageRenderScrollRestoreDepth in renderMessages.
+  const renderRestoreDepth=(typeof _messageRenderScrollRestoreDepth==='number')?_messageRenderScrollRestoreDepth:0;
+  if(typeof _freshProgrammaticScrollActive==='function'&&_freshProgrammaticScrollActive()&&!renderRestoreDepth) return false;
   const container=(typeof $==='function')?$('messages'):null;
   if(!container||!container.querySelectorAll) return false;
   const rows=container.querySelectorAll('[data-msg-idx]');
   if(!rows||!rows.length) return false;
   const containerRect=container.getBoundingClientRect();
   if(!containerRect) return false;
-  let top=Infinity;
-  let bottom=-Infinity;
+  const scrollTop=Math.max(0,Number(container.scrollTop)||0);
+  const clientHeight=Math.max(0,Number(container.clientHeight)||0);
+  if(!(clientHeight>0)) return false;
+  const viewBottom=scrollTop+clientHeight;
+  // Nearest ROW edge, not the union block: the render window is head rows plus
+  // the retained tail with a bottomPad gap between them, so the viewport can sit
+  // inside that gap — a position that is neither above the union top nor below
+  // the union bottom, and which the single-block clamp above could never fix.
+  let bestDistance=Infinity;
+  let bestEdge=null;
   for(const row of rows){
     if(!row||typeof row.getBoundingClientRect!=='function') continue;
     const rect=row.getBoundingClientRect();
     if(!rect||!Number.isFinite(rect.top)||!Number.isFinite(rect.bottom)) continue;
-    if(rect.top<top) top=rect.top;
-    if(rect.bottom>bottom) bottom=rect.bottom;
+    // Rows are measured in viewport space; lift them into document space.
+    const rowTop=rect.top-containerRect.top+scrollTop;
+    const rowBottom=rect.bottom-containerRect.top+scrollTop;
+    let distance=null;
+    let edge=null;
+    if(rowBottom<=scrollTop){ distance=scrollTop-rowBottom; edge=rowBottom; }
+    else if(rowTop>=viewBottom){ distance=rowTop-viewBottom; edge=rowTop; }
+    else continue; // straddles the viewport: not a blank-region edge
+    if(distance<bestDistance){ bestDistance=distance; bestEdge=edge; }
   }
-  if(!Number.isFinite(top)||!Number.isFinite(bottom)) return false;
-  const scrollTop=Math.max(0,Number(container.scrollTop)||0);
-  const clientHeight=Math.max(0,Number(container.clientHeight)||0);
-  if(!(clientHeight>0)) return false;
-  // Rendered rows are measured in viewport space; lift them into document space
-  // so the clamp compares like with like.
-  const renderedTop=top-containerRect.top+scrollTop;
-  const renderedBottom=bottom-containerRect.top+scrollTop;
-  let next=null;
-  if(scrollTop+clientHeight<=renderedTop){
-    // Reader sits entirely inside the (over-estimated) top spacer: pull them
-    // down until the nearest rendered edge is half a viewport away.
-    next=renderedTop-clientHeight*0.5;
-  }else if(scrollTop>=renderedBottom){
-    // Reader sits entirely below the rendered block, inside the bottom spacer.
-    const maxScroll=Math.max(0,(Number(container.scrollHeight)||scrollTop+clientHeight)-clientHeight);
-    next=Math.min(maxScroll, renderedBottom-clientHeight*0.5);
-  }
-  if(next===null||!Number.isFinite(next)) return false;
-  next=Math.max(0,Math.round(next));
+  if(bestEdge===null) return false;
+  // Put the nearest edge at the middle of the viewport so the closest rendered
+  // row is unambiguously on screen after the clamp.
+  const maxScroll=Math.max(0,(Number(container.scrollHeight)||viewBottom)-clientHeight);
+  const next=Math.max(0,Math.min(maxScroll,Math.round(bestEdge-clientHeight*0.5)));
   if(Math.abs(next-scrollTop)<2) return false;
   _messageVirtualBlankClampAttempts++;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
@@ -19926,9 +19945,11 @@ function renderMessages(options){
       if(typeof addCopyButtons==='function') addCopyButtons(inner);
       if(typeof initTreeViews==='function') initTreeViews(inner);
       }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
-      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
-      _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
+      _messageRenderScrollRestoreDepth++;
+      try{
+        _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+        if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+      }finally{ _messageRenderScrollRestoreDepth--; }      _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
@@ -21634,9 +21655,11 @@ function renderMessages(options){
   if(typeof addCopyButtons==='function') addCopyButtons(inner);
   if(typeof initTreeViews==='function') initTreeViews(inner);
   }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
-  _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
-  // Apply syntax highlighting after DOM is built
+  _messageRenderScrollRestoreDepth++;
+  try{
+    _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+    if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+  }finally{ _messageRenderScrollRestoreDepth--; }  // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
