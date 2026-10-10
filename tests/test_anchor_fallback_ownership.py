@@ -575,6 +575,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         let _messageUserUnpinned = false;
         let _programmaticScroll = false;
         let _programmaticScrollSetAt = 0;
+        let _messageRenderScrollRestoreDepth = 0;
         let _sessionHtmlCacheSid = null;
         let _messagesTruncated = false;
         let _oldestIdx = 0;

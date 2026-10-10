@@ -660,8 +660,10 @@ const _sessionHtmlCache = {
 };
 let _sessionHtmlCacheSid = 'sid-123';
 const S = { session: { session_id: 'sid-123' } };
+let _messageVirtualBlankClampAttempts = 0;
 function _messageViewportIntersectsRenderedRow(){ return false; }
 function renderMessages(options){ renderCalls.push(options); }
+eval(extractFunc('_clampVirtualizedBlankViewportToRenderedEdge'));
 eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
 const recovered = _maybeRecoverVirtualizedBlankViewport({preserveScroll:false, someFlag:true}, true, {virtualized:true});
 console.log(JSON.stringify({recovered, deletes, renderCalls}));

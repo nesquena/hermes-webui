@@ -574,6 +574,53 @@ function _messageVirtualDefaultHeightForRole(role){
     role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
   ];
 }
+// #7591: the flat per-role constants above are only a PRIOR. On long sessions
+// with tall tool outputs, tables and inline images they ran 3.6x the measured
+// row height (#7591) — and 34% short on a 2,000-message session (#7283) — so
+// every virtual pad built from them was wrong by tens of thousands of px, which
+// is the error that flings the viewport on each mid-gesture re-window. Seed
+// unmeasured rows with what THIS transcript actually renders: per-role samples
+// shrink toward that role's flat prior until they carry the estimate alone, and
+// a role's mean freezes once it has MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES
+// samples so a live running mean cannot wobble the pads while the restore layer
+// chases the wobble. Measured rows never use this path (the height cache wins).
+const MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES=5;
+const MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES=20;
+let _messageVirtualRoleHeightSamples=Object.create(null);
+function _resetMessageVirtualRoleCalibration(){
+  _messageVirtualRoleHeightSamples=Object.create(null);
+}
+function _recordMessageVirtualRoleMeasurement(role,rawIdx,height){
+  const h=Number(height);
+  const idx=Number(rawIdx);
+  if(!(h>0)||!Number.isFinite(idx)) return;
+  const key=(role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role))?role:'default';
+  if(!(Number(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[key])>0)) return;
+  let slot=_messageVirtualRoleHeightSamples[key];
+  // Rows, not render passes: the measure pass runs on every render over the SAME
+  // handful of mounted rows, so counting passes would freeze a role's mean on a
+  // couple of rows before the rest of the transcript was ever seen (#7591 P2).
+  if(!slot){ slot={rows:new Map(),frozen:0}; _messageVirtualRoleHeightSamples[key]=slot; }
+  if(slot.frozen>0) return;
+  if(slot.rows.get(idx)===h) return;
+  slot.rows.set(idx,h);
+  if(slot.rows.size>=MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES){
+    let sum=0;
+    for(const value of slot.rows.values()) sum+=value;
+    slot.frozen=sum/slot.rows.size;
+  }
+}
+function _messageVirtualCalibratedRoleHeight(role){
+  const key=(role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role))?role:'default';
+  const prior=Number(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[key])||MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS.default;
+  const slot=_messageVirtualRoleHeightSamples[key];
+  if(!slot||!slot.rows.size) return Math.max(1,Math.round(prior));
+  if(slot.frozen>0) return Math.max(1,Math.round(slot.frozen));
+  let sum=0;
+  for(const value of slot.rows.values()) sum+=value;
+  const blended=(sum+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES*prior)/(slot.rows.size+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES);
+  return Math.max(1,Math.round(blended));
+}
 // Cycle-aware measurement burst tracking (#6654/#6717): instead of a flat
 // render cap, the burst remembers every window cycle key it has already seen.
 // An UNSEEN key means the window is still converging forward (A->B->C->settled
@@ -632,6 +679,14 @@ const _recycleResetAttrs=[
   'data-live-assistant-turn',
 ];
 let _scrollbarDragActive=false;
+// #7591: blank-viewport recovery clamps at most once per detection cycle (see
+// _clampVirtualizedBlankViewportToRenderedEdge); reset when a render lands on
+// rendered rows and on session switch (_clearMessageVirtualHeightCache).
+let _messageVirtualBlankClampAttempts=0;
+// Depth of an in-progress renderMessages() scroll restore (#7591): the restore
+// re-arms _programmaticScroll just before blank recovery runs, so recovery must
+// not read that flag as a foreign in-flight scroll write and skip its clamp.
+let _messageRenderScrollRestoreDepth=0;
 function _markMessageVirtualScrollActive(){
   _messageVirtualScrollActive=true;
   clearTimeout(_messageVirtualScrollSettleTimer);
@@ -658,6 +713,10 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheEntries=[];
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
+  // Per-session geometry state: the role calibration (#7591) and the blank-viewport
+  // clamp budget both describe THIS transcript and must not leak into the next one.
+  if(typeof _resetMessageVirtualRoleCalibration==='function') _resetMessageVirtualRoleCalibration();
+  _messageVirtualBlankClampAttempts=0;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
@@ -721,10 +780,17 @@ function _messageVirtualWindow(opts){
   const tailStart=Math.max(0, total-keepTailCount);
   const heights=Array.isArray(opts&&opts.heights)?opts.heights:[];
   const roleForIdx=typeof (opts&&opts.roleForIdx)==='function'?opts.roleForIdx:null;
+  // #7591: callers may hand in a calibrated per-role height (measured mean for
+  // this transcript) so unmeasured rows estimate reality instead of the flat
+  // prior; absent that hook the flat role constants remain the fallback.
+  const roleDefaultFor=typeof (opts&&opts.defaultHeightForRole)==='function'?opts.defaultHeightForRole:null;
   const rowHeightFor=(idx)=>{
     const cached=Number(heights[idx]);
     if(Number.isFinite(cached)&&cached>0) return cached;
-    return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
+    if(!roleForIdx) return defaultHeight;
+    const role=roleForIdx(idx);
+    if(roleDefaultFor) return Math.max(1,roleDefaultFor(role));
+    return Math.max(1,_messageVirtualDefaultHeightForRole(role));
   };
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
@@ -959,6 +1025,7 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     heights:_messageVirtualHeightCache,
     defaultHeight:_messageVirtualEstimatedRowHeight,
     roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
+    defaultHeightForRole:(typeof _messageVirtualCalibratedRoleHeight==='function')?_messageVirtualCalibratedRoleHeight:null,
     keepTailCount,
   });
 }
@@ -972,7 +1039,11 @@ function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   let total=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    if(Number.isFinite(cached)&&cached>0){ total+=cached; continue; }
+    const role=_messageVirtualRoleForEntry(visWithIdx[i]);
+    total+=(typeof _messageVirtualCalibratedRoleHeight==='function')
+      ? _messageVirtualCalibratedRoleHeight(role)
+      : _messageVirtualDefaultHeightForRole(role);
   }
   return Math.max(0,Math.round(total));
 }
@@ -1043,7 +1114,11 @@ function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container
   let offset=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    if(Number.isFinite(cached)&&cached>0){ offset+=cached; continue; }
+    const role=_messageVirtualRoleForEntry(visWithIdx[i]);
+    offset+=(typeof _messageVirtualCalibratedRoleHeight==='function')
+      ? _messageVirtualCalibratedRoleHeight(role)
+      : _messageVirtualDefaultHeightForRole(role);
   }
   const viewport=container?Math.max(0,Number(container.clientHeight)||0):0;
   return Math.max(0,Math.round(offset-(viewport*0.35)));
@@ -1491,6 +1566,11 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
+    }
+    // #7591: publish what this row really rendered so unmeasured rows of the
+    // same role estimate from the measured mean instead of the flat constant.
+    if(typeof _recordMessageVirtualRoleMeasurement==='function'){
+      _recordMessageVirtualRoleMeasurement(_messageVirtualRoleForEntry(entry), entry&&entry.rawIdx, totalHeight);
     }
     measuredTotal+=totalHeight;
     measuredCount++;
@@ -18238,12 +18318,83 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
 
 function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
   if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
-  if(_messageViewportIntersectsRenderedRow()) return false;
+  if(_messageViewportIntersectsRenderedRow()){
+    _messageVirtualBlankClampAttempts=0;
+    return false;
+  }
   if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
     _sessionHtmlCache.delete(_sessionHtmlCacheSid);
   }
   _messageVirtualWindowKey='';
+  // #7591: the full-render fallback below re-mounts the WHOLE transcript, which
+  // collapses scrollHeight to its real height; the browser then clamps scrollTop
+  // into the tail, the window re-derives from the clamped position, and the next
+  // blank detection repeats it — the measured windowed<->full-render oscillation
+  // (29 flips / 90s) that reads as "scrolling is stuck". While rows exist, clamp
+  // the viewport to the nearest rendered edge and refresh the WINDOW instead:
+  // that never changes scrollHeight, so nothing fights the input direction. The
+  // full render stays as the bounded escalation when the clamp cannot help (no
+  // rows, an in-flight programmatic write, or a clamp that did not take).
+  if(_clampVirtualizedBlankViewportToRenderedEdge()){
+    renderMessages({preserveScroll:true});
+    return true;
+  }
   renderMessages({preserveScroll:true,_virtualFallback:true});
+  return true;
+}
+// One clamp per blank detection: the attempt counter is cleared as soon as a
+// render intersects a rendered row again (in _maybeRecoverVirtualizedBlankViewport),
+// so a healthy transcript never accumulates budget and a still-blank viewport
+// escalates to the full render after exactly one geometry clamp instead of recursing.
+function _clampVirtualizedBlankViewportToRenderedEdge(){
+  if(_messageVirtualBlankClampAttempts>=1) return false;
+  // A foreign programmatic scroll write may still be settling, and clamping
+  // would fight it. The current render's OWN restore re-arms that flag too (it
+  // runs immediately before recovery), so it is exempt — see
+  // _messageRenderScrollRestoreDepth in renderMessages.
+  const renderRestoreDepth=(typeof _messageRenderScrollRestoreDepth==='number')?_messageRenderScrollRestoreDepth:0;
+  if(typeof _freshProgrammaticScrollActive==='function'&&_freshProgrammaticScrollActive()&&!renderRestoreDepth) return false;
+  const container=(typeof $==='function')?$('messages'):null;
+  if(!container||!container.querySelectorAll) return false;
+  const rows=container.querySelectorAll('[data-msg-idx]');
+  if(!rows||!rows.length) return false;
+  const containerRect=container.getBoundingClientRect();
+  if(!containerRect) return false;
+  const scrollTop=Math.max(0,Number(container.scrollTop)||0);
+  const clientHeight=Math.max(0,Number(container.clientHeight)||0);
+  if(!(clientHeight>0)) return false;
+  const viewBottom=scrollTop+clientHeight;
+  // Nearest ROW edge, not the union block: the render window is head rows plus
+  // the retained tail with a bottomPad gap between them, so the viewport can sit
+  // inside that gap — a position that is neither above the union top nor below
+  // the union bottom, and which the single-block clamp above could never fix.
+  let bestDistance=Infinity;
+  let bestEdge=null;
+  for(const row of rows){
+    if(!row||typeof row.getBoundingClientRect!=='function') continue;
+    const rect=row.getBoundingClientRect();
+    if(!rect||!Number.isFinite(rect.top)||!Number.isFinite(rect.bottom)) continue;
+    // Rows are measured in viewport space; lift them into document space.
+    const rowTop=rect.top-containerRect.top+scrollTop;
+    const rowBottom=rect.bottom-containerRect.top+scrollTop;
+    let distance=null;
+    let edge=null;
+    if(rowBottom<=scrollTop){ distance=scrollTop-rowBottom; edge=rowBottom; }
+    else if(rowTop>=viewBottom){ distance=rowTop-viewBottom; edge=rowTop; }
+    else continue; // straddles the viewport: not a blank-region edge
+    if(distance<bestDistance){ bestDistance=distance; bestEdge=edge; }
+  }
+  if(bestEdge===null) return false;
+  // Put the nearest edge at the middle of the viewport so the closest rendered
+  // row is unambiguously on screen after the clamp.
+  const maxScroll=Math.max(0,(Number(container.scrollHeight)||viewBottom)-clientHeight);
+  const next=Math.max(0,Math.min(maxScroll,Math.round(bestEdge-clientHeight*0.5)));
+  if(Math.abs(next-scrollTop)<2) return false;
+  _messageVirtualBlankClampAttempts++;
+  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  container.scrollTop=next;
+  _lastScrollTop=container.scrollTop;
+  if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
   return true;
 }
 
@@ -18399,8 +18550,11 @@ function renderMessages(options){
       if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+      _messageRenderScrollRestoreDepth++;
+      try{
+        _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+        if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+      }finally{ _messageRenderScrollRestoreDepth--; }
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
@@ -20054,8 +20208,11 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
-  _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+  _messageRenderScrollRestoreDepth++;
+  try{
+    _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+    if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+  }finally{ _messageRenderScrollRestoreDepth--; }
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
