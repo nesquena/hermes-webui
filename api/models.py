@@ -3055,7 +3055,23 @@ def _interrupted_recovery_marker(
         'interruption_cause': interruption_cause,
     }
     if stream_id:
-        marker['_recovered_stream_id'] = str(stream_id)
+        # #7167 MUST-FIX (2026-10-10 re-gate): the marker's stream identity is
+        # carried as ``_journal_retry_stream_id``, NOT as
+        # ``_recovered_stream_id``. That field is the provenance tag a
+        # RECOVERED ROW wears, so consumers that select recovered output by it
+        # ("which rows came from stream X?") picked up the marker itself —
+        # the carrier was counted as its own payload, a plain repair produced
+        # two rows where master produces one, and the crash stale-pending
+        # repairs wrote ``_journal_retry_kind='cancelled'`` on top of it.
+        #
+        # Only a marker that still ARMS a retry hook may carry the identity:
+        # a resolved marker (``recovered_output=True``, or ``pending_retry``
+        # suppressed) has no hook to key on, so writing it would leave a
+        # resolved carrier looking like a pending one to every consumer that
+        # selects hooks by this field (tests/
+        # test_cancel_restart_journal_recovery.py::_pending_stream_hook).
+        if pending_retry and not recovered_output:
+            marker['_journal_retry_stream_id'] = str(stream_id)
     if pending_retry and not recovered_output:
         marker['_pending_journal_recovery'] = True
     return marker
@@ -4738,18 +4754,6 @@ def _append_journaled_partial_output(
                 # was appended, so session_mutated stays False.
                 current_assistant_idx = anchor_idx
                 output_accounted_for = True
-                # Claim the matched card so a later identical journal event
-                # cannot dedupe against the very same card again.
-                consumed_tool_card_indexes.add(tool_match_idx)
-                continue
-                # The card was reused via dedupe, so the journal's tool
-                # output IS represented in the transcript — but no FRESH row
-                # was appended, so session_mutated stays False.
-                current_assistant_idx = anchor_idx
-                output_accounted_for = True
-                # Claim the matched card so a later identical journal event
-                # cannot dedupe against the very same card again.
-                consumed_tool_card_indexes.add(tool_match_idx)
                 # Remember the reused card so a later ``tool_complete`` for the
                 # same event updates IT (not only freshly built cards): a card
                 # reused while ``done=False`` used to stay incomplete and
@@ -4764,7 +4768,11 @@ def _append_journaled_partial_output(
                 'name': name,
                 'preview': preview,
                 'snippet': preview,
-                'tid': f"journal-{_event_seq or len(recovered_tool_calls) + 1}",
+                'tid': (
+                    tool_id
+                    or f"journal-{_event_seq or len(recovered_tool_calls) + 1}"
+                ),
+                '_journal_synthetic_tid': not bool(tool_id),
                 'assistant_msg_idx': anchor_idx,
                 'args': _truncate_journal_tool_args(payload.get('args') or {}),
                 'done': False,
@@ -4784,23 +4792,46 @@ def _append_journaled_partial_output(
             # by identity while ``done=False`` was skipped by the completion
             # handler (which only walked ``recovered_tool_calls``) and stayed
             # permanently incomplete with no result.
-            _completables = list(recovered_tool_calls)
+            completion_tool_id = str(
+                payload.get('tid') or payload.get('tool_call_id') or ''
+            ).strip()
+            # Walk the pool in journal start order (reused cards first: they
+            # were started on an earlier pass), matching by tool id first.
             if isinstance(session.tool_calls, list):
-                for _reused_idx in reused_tool_cards:
-                    if 0 <= _reused_idx < len(session.tool_calls):
-                        _completables.append(session.tool_calls[_reused_idx])
-            for tool_call in reversed(_completables):
-                if tool_call.get('done'):
-                    continue
-                if not name or tool_call.get('name') == name:
-                    tool_call['done'] = True
-                    if payload.get('preview'):
-                        tool_call['preview'] = str(payload.get('preview') or '')
-                        tool_call['snippet'] = str(payload.get('preview') or '')
-                    if payload.get('duration') is not None:
-                        tool_call['duration'] = payload.get('duration')
-                    tool_call['is_error'] = bool(payload.get('is_error', False))
-                    break
+                _pool = [
+                    session.tool_calls[_i] for _i in reused_tool_cards
+                    if 0 <= _i < len(session.tool_calls)
+                ] + list(recovered_tool_calls)
+            else:
+                _pool = list(recovered_tool_calls)
+            unfinished = [call for call in _pool if not call.get('done')]
+            matched_tool = None
+            if completion_tool_id:
+                matched_tool = next((
+                    call for call in unfinished
+                    if str(call.get('tid') or '') == completion_tool_id
+                ), None)
+                if matched_tool is None:
+                    matched_tool = next((
+                        call for call in unfinished
+                        if (call.get('_journal_synthetic_tid')
+                            or str(call.get('tid') or '').startswith('journal-'))
+                        and name and call.get('name') == name
+                    ), None)
+            else:
+                matched_tool = next((
+                    call for call in unfinished
+                    if not name or call.get('name') == name
+                ), None)
+            if matched_tool is not None:
+                tool_call = matched_tool
+                tool_call['done'] = True
+                if payload.get('preview'):
+                    tool_call['preview'] = str(payload.get('preview') or '')
+                    tool_call['snippet'] = str(payload.get('preview') or '')
+                if payload.get('duration') is not None:
+                    tool_call['duration'] = payload.get('duration')
+                tool_call['is_error'] = bool(payload.get('is_error', False))
             continue
         if event_name in {'done', 'stream_end', 'cancel', 'apperror', 'error'}:
             flush_assistant()
@@ -5551,23 +5582,34 @@ def _retry_journal_recovery_in_place(
                 owner_index = _cancel_journal_retry_owner_index(session, idx, msg)
                 if owner_index is None:
                     continue
+                # #7167 MUST-FIX (2026-10-09 re-gate): ONE display-only hop,
+                # exactly as master runs it. The previous head ran the
+                # display-only hop HERE *and* a second windowed hop further
+                # down (the ``if cancel_hook:`` block after the verdict
+                # binding), so the cancellation journal was replayed twice —
+                # the retry arms were inverted relative to master, and the
+                # distinct-turn test saw four identical replies instead of
+                # three. The windowed hop below now belongs to the no-hook
+                # arm only; it is the arm that actually needs context
+                # placement, and running it for a cancel hook re-consumed an
+                # already-replayed journal.
                 recovered_output, terminal_error_recovered, output_accounted_for = (
                     _recover_journaled_output_and_terminal_error(
-                    session,
-                    stream_id,
-                    dedupe_existing=True,
-                    dedupe_min_index=owner_index + 1,
-                    dedupe_max_index=idx,
-                    # append_context=False is what makes the cancel-marker
-                    # replay REPRESENT the journal's visible output without
-                    # appending a second copy into session.messages:
-                    # _recover_journaled_output_and_terminal_error forwards
-                    # ``display_only=not append_context`` to
-                    # _append_journaled_partial_output. Do NOT pass
-                    # display_only here — this wrapper does not accept it.
-                    append_context=False,
+                        session,
+                        stream_id,
+                        dedupe_existing=True,
+                        dedupe_min_index=owner_index + 1,
+                        dedupe_max_index=idx,
+                        # append_context=False is what makes the cancel-marker
+                        # replay REPRESENT the journal's visible output without
+                        # appending a second copy into session.messages:
+                        # _recover_journaled_output_and_terminal_error forwards
+                        # ``display_only=not append_context`` to
+                        # _append_journaled_partial_output. Do NOT pass
+                        # display_only here — this wrapper does not accept it.
+                        append_context=False,
+                    )
                 )
-            )
             else:
                 # No cancel hook on this marker. Bind the three verdicts first —
                 # an unbound name raised UnboundLocalError, which the outer
@@ -5593,20 +5635,32 @@ def _retry_journal_recovery_in_place(
                 recovered_output = False
                 terminal_error_recovered = False
                 output_accounted_for = False
-                if not give_up:
-                    # Plain recovery hop (no cancel-specific dedupe window).
-                    # Skipped when give_up is already true: an expired marker
-                    # must demote to neutral wording, not spend a recovery pass
-                    # that would mark it resolved instead
-                    # (tests/test_session_sidecar_repair.py::
-                    #  test_demotes_to_neutral_after_giveup_seconds).
-                    recovered_output, terminal_error_recovered, output_accounted_for = (
-                        _recover_journaled_output_and_terminal_error(
-                            session,
-                            stream_id,
-                            dedupe_existing=True,
+                # #7167 MUST-FIX (2026-10-10 re-gate): the no-hook arm runs ONE
+                # windowed hop, exactly as master does. The previous head ran
+                # an unwindowed plain hop HERE and then a second windowed hop
+                # further down (after the owner/successor proof), so the same
+                # journal was replayed twice in a single pass and the recovered
+                # rows landed in the transcript twice — which is what
+                # test_newer_cancel_hook_does_not_block_older_interrupted_recovery
+                # and 250 other cases saw. Everything the second hop adds (the
+                # owner/successor proof, the snapshot, append_context) is taken
+                # BEFORE this single replay below, in the arm that owns it.
+                if give_up:
+                    # Expired and no cancel hook: retire the marker to neutral
+                    # wording now. Keep this INSIDE the no-hook arm — moving the
+                    # generic give_up demote above the success check made the
+                    # WSL race tests shorten their retry budget and fail.
+                    msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+                    _strip_journal_retry_meta(msg)
+                    try:
+                        session.save(touch_updated_at=False)
+                    except Exception:
+                        logger.debug(
+                            "save() failed while demoting marker for session %s",
+                            getattr(session, 'session_id', '?'),
+                            exc_info=True,
                         )
-                    )
+                    return False
             # A dedupe hit (no fresh row appended this pass) still means the
             # journal's visible output is represented in the transcript, so
             # the marker is resolved: keeping "reload to retry" visible would
@@ -5623,87 +5677,60 @@ def _retry_journal_recovery_in_place(
             # survived into the merged transcript and the durable saved
             # successors lost their admission (tests/
             # test_cancelled_journal_owner_occurrences.py).
-            if recovered_output or terminal_error_recovered or output_accounted_for:
-                if not terminal_error_recovered and not output_accounted_for:
-                    msg['content'] = _INTERRUPTED_RECOVERED_WORDING
-                    _strip_journal_retry_meta(msg)
-                    # #7167: the rows this pass just recovered were APPENDED at
-                    # the tail, i.e. AFTER this carrier. Tag them as belonging
-                    # to THIS cancelled stream and rehome them above the
-                    # carrier — otherwise the carrier's segment is empty (or
-                    # carries only untagged rows),
-                    # ``_cancelled_journal_turn_owner`` cannot prove the Stop,
-                    # the merge never bounds the cancel turn, and the state.db
-                    # replay row survives into the merged transcript while the
-                    # durable saved successors lose their admission
-                    # (tests/test_cancelled_journal_owner_occurrences.py).
-                    # master does the same tag + rehome on this branch.
-                    for row in session.messages:
-                        if (
-                            isinstance(row, dict)
-                            and row.get('role') == 'assistant'
-                            and not row.get('_error')
-                            and row.get('_recovered_from_run_journal') is True
-                            and str(row.get('_recovered_stream_id') or '') == str(stream_id)
-                        ):
-                            row['_recovered_from_cancel_journal'] = True
-                    _rehome_cancel_journal_rows(session, idx, str(stream_id))
-                    try:
-                        session.save(touch_updated_at=False)
-                    except Exception:
-                        logger.debug(
-                            "save() failed while demoting marker for session %s",
-                            getattr(session, 'session_id', '?'),
-                            exc_info=True,
-                        )
-                if give_up:
-                    msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
-                    _strip_journal_retry_meta(msg)
-                    try:
-                        session.save(touch_updated_at=False)
-                    except Exception:
-                        logger.debug(
-                            "save() failed while demoting marker for session %s",
-                            getattr(session, 'session_id', '?'),
-                            exc_info=True,
-                        )
-                    return False
-                # Display successors alone do not establish context placement.
-                # The context hop is ONLY meaningful for a cancel hook: for a
-                # plain interrupted marker the plain recovery above already
-                # produced the verdicts, and re-running it here with a
-                # cancel-scoped window re-consumed an already-empty journal and
-                # overwrote the True verdict with False.
-                has_successor = any(
-                    isinstance(row, dict) and row.get('role') == 'user'
-                    for row in messages[idx + 1:]
+            # #7167 MUST-FIX (2026-10-09 re-gate): ONE verdict block, exactly
+            # as master has it. The previous head ran this tag+rehome+save
+            # sequence here AND again in the block below, so a single pass
+            # rehomed the same recovered rows twice and the second save
+            # re-persisted them: the cancellation journal was effectively
+            # replayed twice before its rows moved into the dedupe window
+            # (the distinct-turn test saw four identical replies instead of
+            # three, and master's own file lost 270 tests). Everything this
+            # block did is done once, below, by the arm that owns it.
+            has_successor = any(
+                isinstance(row, dict) and row.get('role') == 'user'
+                for row in messages[idx + 1:]
+            )
+            # Defaults for the no-cancel-hook arm: the context hop below is
+            # gated on cancel_hook, but its results are consumed
+            # unconditionally, so they must always be bound.
+            context_owner = None
+            interrupted_snapshot = None
+            # #7167 MUST-FIX (2026-10-09 re-gate): the windowed hop runs for
+            # the NO-HOOK arm only. A cancel hook already replayed this
+            # journal above with its exact window, and replaying it again
+            # here re-consumed an already-empty journal and overwrote the
+            # True verdict with False. The owner/successor proof is taken
+            # BEFORE the replay so an interrupted turn cannot reorder the
+            # next send's history (plain recovery used to append context
+            # before checking for a successor: [old user, old answer, new
+            # user] became [old user, new user, old answer]).
+            if not cancel_hook:
+                owner_index = next((
+                    index for index in range(idx - 1, -1, -1)
+                    if isinstance(messages[index], dict)
+                    and messages[index].get('role') == 'user'
+                ), None)
+                context_owner = (
+                    _interrupted_journal_context_owner(session, idx, owner_index)
+                    if has_successor else None
                 )
-                # Defaults for the no-cancel-hook arm: the context hop below is
-                # gated on cancel_hook, but its results are consumed
-                # unconditionally, so they must always be bound.
-                context_owner = None
-                interrupted_snapshot = None
-                if cancel_hook:
-                    owner_index = next((
-                        index for index in range(idx - 1, -1, -1)
-                        if isinstance(messages[index], dict)
-                        and messages[index].get('role') == 'user'
-                    ), None)
-                    context_owner = (
-                        _interrupted_journal_context_owner(session, idx, owner_index)
-                        if has_successor else None
+                interrupted_snapshot = snapshot_cancel_projection() if context_owner is not None else None
+                # The single replay for this arm: windowed by the owner/marker
+                # pair, with append_context decided by the successor proof
+                # taken just above. ``output_accounted_for`` is deliberately
+                # dropped on the floor here — the fail-closed verdict block
+                # below accepts only a FRESH append or a real terminal error,
+                # so an "already represented" hit cannot consume this marker.
+                recovered_output, terminal_error_recovered, _ = (
+                    _recover_journaled_output_and_terminal_error(
+                        session,
+                        stream_id,
+                        dedupe_existing=True,
+                        append_context=not has_successor,
+                        dedupe_min_index=owner_index + 1 if owner_index is not None else idx,
+                        dedupe_max_index=idx,
                     )
-                    interrupted_snapshot = snapshot_cancel_projection() if context_owner is not None else None
-                    recovered_output, terminal_error_recovered, _ = (
-                        _recover_journaled_output_and_terminal_error(
-                            session,
-                            stream_id,
-                            dedupe_existing=True,
-                            append_context=not has_successor,
-                            dedupe_min_index=owner_index + 1 if owner_index is not None else idx,
-                            dedupe_max_index=idx,
-                        )
-                    )
+                )
 
             if recovered_output or terminal_error_recovered or output_accounted_for:
                 if cancel_hook:
@@ -14598,9 +14625,29 @@ def _cancelled_journal_turn_owner(
         segment_recovers_run_journal = any(
             row.get('_recovered_from_run_journal') is True for row in segment
         )
+        # #7167 MUST-FIX (2026-10-10 re-gate): the exemption must NOT let a
+        # typed crash/provider interruption through. The previous head exempted
+        # any segment whose rows recover a run journal, so a carrier typed
+        # 'interrupted' with ``_recovered_from_run_journal`` rows was admitted
+        # as a user Stop and the state.db successors were merged over it
+        # (tests/test_run_journal_process_and_sqlite_recovery.py::
+        #  test_real_sqlite_new_turn_after_recovered_journal[live-partial-control]).
+        # The exemption exists only for the interrupted-recovery path that
+        # RE-WORDS a user-Stop carrier in place and strips its retry meta: that
+        # carrier's ``type`` is 'interrupted' but it is not a crash, and its
+        # segment proves it with recovered rows AND no live partial. A live
+        # ``_partial`` row is the opposite signal — the stream was still
+        # writing — so the two shapes must be told apart, not merged into one
+        # rule.
+        carrier_is_typed_crash = carrier.get('type') not in (None, '', 'cancelled')
+        segment_has_live_partial = has_partial
+        rewrote_cancel_carrier = (
+            carrier_is_typed_crash
+            and segment_recovers_run_journal
+            and not segment_has_live_partial
+        )
         if has_partial and (not include_live_partial
-                            or (carrier.get('type') not in (None, '', 'cancelled')
-                                and not segment_recovers_run_journal)):
+                            or (carrier_is_typed_crash and not rewrote_cancel_carrier)):
             continue  # A typed crash/provider interruption is not a user Stop.
         if (has_partial or any(row.get('_recovered_from_cancel_journal') is True for row in segment)):
             return messages[owner_idx], carrier
