@@ -1552,6 +1552,29 @@ def _custom_provider_identity_owners(
     return owners
 
 
+def _custom_record_declares_credential_source(record: object) -> bool:
+    """True when ``record`` carries a credential-source field of its own.
+
+    Used to tell a picker-WRITTEN mirror of a fallback entry from an INDEPENDENT
+    model route at the same endpoint. Two credentialed authorities at one URL are
+    ambiguous — they can be two accounts, and URL equality cannot say which the
+    request should use — so equality is evidence of a copy only when at least one
+    side declares no credential of its own (#8026 r11). Declaration only: a
+    literal key, ``${ENV}``, ``key_env``, ``key_cmd`` or a configured pool all
+    count, resolved or not.
+    """
+    if not isinstance(record, dict):
+        return False
+    for field in CUSTOM_CREDENTIAL_SOURCE_FIELDS:
+        if field == "credential_pool":
+            if record.get(field) is not None:
+                return True
+            continue
+        if str(record.get(field) or "").strip():
+            return True
+    return False
+
+
 def _model_block_mirrors_fallback_entry(
     model_cfg: object,
     model_provider: object,
@@ -1566,6 +1589,12 @@ def _model_block_mirrors_fallback_entry(
     the picker and drops its credential. Count it as mirrored (not an owner) only
     when the endpoint matches a same-slug fallback-derived entry's own endpoint;
     a different or absent endpoint stays a genuine owner.
+
+    Matching endpoints alone do not prove a copy: two credentialed authorities at
+    one URL are two accounts, and the request cannot say which to use. The match
+    counts only when at least one side declares no credential of its own — a
+    picker-written mirror is credentialless on the side the click did not serve,
+    while an independent ``model:`` route keeps its own key (#8026 r11).
     """
     if not isinstance(model_cfg, dict) or not isinstance(custom_providers, list):
         return False
@@ -1584,7 +1613,10 @@ def _model_block_mirrors_fallback_entry(
         if _custom_provider_slug_key(name) != key:
             continue
         entry_url = _normalize_base_url_for_match(entry.get("base_url"))
-        if entry_url == model_url:
+        if entry_url == model_url and not (
+            _custom_record_declares_credential_source(model_cfg)
+            and _custom_record_declares_credential_source(entry)
+        ):
             return True
         if not entry_url:
             # No endpoint of its own: the entry inherits the model connection (see
@@ -1949,6 +1981,7 @@ def _api_key_env_name(provider_id: object) -> str:
 def _custom_provider_record_may_take_convention_key(
     record: object,
     source: object = None,
+    cfg_data: object = None,
 ) -> bool:
     """May this custom-provider RECORD read the ``CUSTOM_<SLUG>_API_KEY`` name?
 
@@ -1958,11 +1991,31 @@ def _custom_provider_record_may_take_convention_key(
     shared constant ``CUSTOM``, so two of them would read one variable and the
     key of the first would travel to the second's endpoint.
 
+    The ``model:`` source is refused on the same terms when its block MIRRORS a
+    fallback entry (see :func:`_model_block_mirrors_fallback_entry`). The picker
+    rewrites ``model.provider`` to the entry's id on selection, so the block reads
+    the shared name that the entry itself is denied, and a variable belonging to
+    another provider would travel to the newly selected endpoint (#8026 r11).
+
     Every other record keeps master's lookup: a ``custom:``-prefixed name and a
-    name with ASCII identifier characters both pre-date #8026, and a record from
-    ``providers:``/``model:`` is an already-keyed route. Suppressing the lookup
-    for those would send ``dummy-key`` to an endpoint that authenticates today.
+    name with ASCII identifier characters both pre-date #8026, and a ``providers:``
+    record or an ordinary ``model:`` route is an already-keyed authority.
+    Suppressing the lookup for those would send ``dummy-key`` to an endpoint that
+    authenticates today.
     """
+    if str(source or "") == "model":
+        # Only a MIRROR is refused: the block is that fallback entry's route rather
+        # than a separate authority. A ``model:`` route at its own endpoint, or
+        # one naming an ASCII/prefixed provider, keeps master's lookup.
+        if (
+            isinstance(cfg_data, dict)
+            and isinstance(record, dict)
+            and _model_block_mirrors_fallback_entry(
+                record, record.get("provider"), cfg_data.get("custom_providers")
+            )
+        ):
+            return False
+        return True
     if str(source or "") != "custom_providers":
         return True
     if not isinstance(record, dict):
@@ -4383,7 +4436,8 @@ def resolve_custom_provider_connection(
 
     # Read the live config snapshot to avoid stale module-level cache edge
     # cases after profile switches or runtime config edits.
-    record, source, is_exact, _status = _select_custom_provider_record(pid, slug, get_config())
+    cfg_data = get_config()
+    record, source, is_exact, _status = _select_custom_provider_record(pid, slug, cfg_data)
     if record is None:
         # Nothing owns this slug. Returning ``(None, None)`` is the whole point:
         # an unknown named route must not inherit an unrelated row's endpoint or
@@ -4397,7 +4451,7 @@ def resolve_custom_provider_connection(
         record.get("api_key"),
         record.get("key_env"),
         pid,
-        allow_convention_key=_custom_provider_record_may_take_convention_key(record, source),
+        allow_convention_key=_custom_provider_record_may_take_convention_key(record, source, cfg_data),
     )
     if return_provenance:
         return api_key, base_url, is_exact
@@ -4721,7 +4775,8 @@ def resolve_custom_provider_bundle(
             "owned": {},
         }
 
-    record, source, is_exact, status = _select_custom_provider_record(pid, slug, get_config())
+    cfg_data = get_config()
+    record, source, is_exact, status = _select_custom_provider_record(pid, slug, cfg_data)
     if record is None:
         return _unowned_custom_provider_bundle(pid, slug, status)
 
@@ -4747,7 +4802,7 @@ def resolve_custom_provider_bundle(
             record.get("api_key"),
             record.get("key_env"),
             pid,
-            allow_convention_key=_custom_provider_record_may_take_convention_key(record, source),
+            allow_convention_key=_custom_provider_record_may_take_convention_key(record, source, cfg_data),
         )
     if not api_key:
         api_key = _host_gated_env_key(base_url)

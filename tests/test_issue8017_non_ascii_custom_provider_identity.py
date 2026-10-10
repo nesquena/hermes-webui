@@ -1322,3 +1322,70 @@ def test_endpointless_entry_with_a_key_inherits_the_model_connection(monkeypatch
 
     connection = config.resolve_custom_provider_connection("custom:晨光鑫遇专用")
     assert connection[1] == U, f"the endpoint-less entry must inherit the model endpoint: {connection}"
+
+
+# ---------------------------------------------------------------------------
+# Round eleven: two accounts at one endpoint, and the picker's rewrite must not
+# re-open the shared convention variable (#8026 r11)
+# ---------------------------------------------------------------------------
+
+
+def test_a_model_block_with_its_own_key_is_not_demoted_by_a_keyed_same_endpoint_entry(monkeypatch):
+    """URL equality is not proof the block was saved from the entry (#8026 r11).
+
+    Greptile's finding: with ``model.provider: custom:晨光`` carrying its OWN key A
+    and a list entry named ``晨光`` carrying a different key B at the SAME endpoint,
+    the mirror test demoted the block (matching URLs) and the newly admitted entry
+    won, so requests went out with key B instead of A and could change accounts.
+    The ambiguity only exists when BOTH sides carry a credential; when either side
+    is credentialless there is no second account to confuse, so URL equality stays
+    sufficient evidence (see the keyless-mirror case).
+    """
+    u = "http://shared-endpoint.example/v1"
+    cfg_shape = {
+        "model": {
+            "provider": "custom:晨光",
+            "default": "chat-model",
+            "base_url": u,
+            "api_key": "sk-model",
+        },
+        "custom_providers": [{"name": "晨光", "base_url": u, "api_key": "sk-list"}],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    assert "晨光" in config._custom_provider_identity_owners(
+        cfg_shape["custom_providers"], None, cfg_shape["model"]
+    ), "a model block with its own key still owns the slug when the entry is keyed too"
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光")
+    assert (api_key, base_url) == ("sk-model", u), (
+        "the existing model connection keeps its own key when two accounts share an endpoint"
+    )
+
+
+def test_a_model_block_serving_a_keyless_fallback_entry_does_not_read_the_shared_key(monkeypatch):
+    """The picker's rewrite must not re-open the shared variable (#8026 r11).
+
+    Greptile's finding: after selecting a keyless non-ASCII entry the picker writes
+    the entry's id and URL into ``model``; ``_select_custom_provider_record`` then
+    returns that block with source ``"model"``, and the convention-key gate permitted
+    the shared ``CUSTOM_CUSTOM_API_KEY`` because the source was not
+    ``custom_providers``. A variable belonging to another provider then travelled to
+    the newly selected endpoint. The block is that entry's route, so the fallback
+    restriction applies to the model source too and the route fails closed.
+    """
+    monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "sk-SHARED")
+    u = "http://new-endpoint.example/v1"
+    cfg_shape = {
+        "model": {"provider": "custom:晨光", "default": "chat-model", "base_url": u},
+        "custom_providers": [{"name": "晨光", "base_url": u, "model": "chat-model"}],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    api_key, base_url = config.resolve_custom_provider_connection("custom:晨光")
+    assert base_url == u
+    assert api_key is None, (
+        "a fallback route served by the model block must not read the shared convention key"
+    )
