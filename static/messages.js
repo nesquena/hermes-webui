@@ -3451,6 +3451,68 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_empty(live.started_at)&&_empty(tool.started_at)&&_empty(payload.started_at)){
       tool.started_at=live.started_at; payload.started_at=live.started_at; enriched=true;
     }
+    // #7358 round 4: the live tool mirror carries the authoritative
+    // ``is_error`` (set by the structured ``tool_complete`` callback
+    // at SSE emit time) but the persisted ``tool`` row and the
+    // ``payload`` object both lack the field. The compact /
+    // transparent render paths downstream default to ``false`` when
+    // ``is_error`` is missing, so a failed tool that was correctly
+    // shown red live reverts to "Completed" on cold reload. Carry
+    // the live value through to both rows so the cold-reload render
+    // matches the live card.
+    // #7358 round 5 (re-gate 9/22): also honour the
+    // ``S._settledToolIsErrorByTid`` map populated by
+    // ``_syncToolCallsForLoadedMessages`` so a true cold reload with
+    // no browser-persisted live mirror still carries the persisted
+    // failure through. The live value still wins when both are set
+    // (defensive — the live can only ever be true here after the
+    // round-4 guard, and the persisted map is also gated to ``true``
+    // only, so the union is exactly the set of failed tools).
+    // #7358 (re-gate 9/24): the live verdict may only be copied when the
+    // row/live pair matched through the tool id. This helper is reached
+    // either from the per-id dedup path or from
+    // ``_anchorSceneMatchingContentToolRow``, whose name / invocation
+    // fallback can pair an older *successful* settled row with a newer
+    // *failed* live call; copying the verdict there would settle the older
+    // row as Failed. The per-tid persisted map lookup below is already
+    // id-keyed and is unchanged.
+    const _rowTid=String(
+      (row&&(row.tool_call_id||(row.tool&&(row.tool.id||row.tool.tid)))) || ''
+    ).trim();
+    const _liveTid=String((live&&(live.tid||live.id||live.tool_call_id||live.tool_use_id||live.call_id))||'').trim();
+    const _matchedById=!!_rowTid&&!!_liveTid&&_rowTid===_liveTid;
+    const _persistedEntry=S&&S._settledToolIsErrorByTid&&_rowTid?S._settledToolIsErrorByTid[_rowTid]:null;
+    // #7358 round 9 (re-gate 10/01 finding 2): a reused id (``call_0``) must
+    // not let one failed occurrence repaint an earlier successful row red.
+    // Flat ``true`` (genuinely unique id) still applies tid-wide; a reused-id
+    // object is honoured only when the row can name its owning assistant
+    // message index and that index matches the recorded failure.
+    let _persistedIsError=false;
+    if(_persistedEntry===true) _persistedIsError=true;
+    else if(_persistedEntry&&typeof _persistedEntry==='object'&&_persistedEntry.is_error===true){
+      // #7358 round 10 (re-gate finding 3): a cold-reloaded scene row stores
+      // its owning assistant message index on ``row.group.assistant_msg_idx``
+      // and ``row.payload.assistant_msg_idx`` — the top level has no
+      // ``assistant_msg_idx`` field (see ``_anchorSceneRowBase``), so a
+      // reused-id failure never matched its row and the card reverted to
+      // "Completed". Resolve the owner through the same fallback chain the
+      // ``sessions.js`` producer and the ``ui.js`` consumer use.
+      const _rowAIdx=(row&&row.assistant_msg_idx!=null&&row.assistant_msg_idx!=='')?row.assistant_msg_idx
+        :(row&&row.group&&row.group.assistant_msg_idx!=null&&row.group.assistant_msg_idx!=='')?row.group.assistant_msg_idx
+        :(row&&row.payload&&row.payload.assistant_msg_idx!=null&&row.payload.assistant_msg_idx!=='')?row.payload.assistant_msg_idx
+        :null;
+      const _rowIdx=(_rowAIdx!=null&&_rowAIdx!==''&&Number.isFinite(Number(_rowAIdx)))?Number(_rowAIdx):null;
+      if(_rowIdx!=null){
+        _persistedIsError=(_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||
+          (!!_persistedEntry.occurrences&&_persistedEntry.occurrences[_rowIdx]===true);
+      }
+    }
+    const _liveIsError=_matchedById&&Boolean(live&&live.is_error===true);
+    if((_liveIsError||_persistedIsError)&&tool.is_error!==true&&payload.is_error!==true){
+      tool.is_error = true;
+      payload.is_error = true;
+      enriched = true;
+    }
     const liveArgs=_anchorSceneToolArgs(live);
     if(liveArgs&&typeof liveArgs==='object'&&Object.keys(liveArgs).length){
       const mergeMissingArgs=(existing)=>{
@@ -4497,17 +4559,45 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+    // #7358/#7653 (re-gate 10/06, reviewer Finding 2, SILENT): a reused
+    // tool id owns several live rows (the server's re-arm branch appends a
+    // second ``call_0`` row for the second occurrence) and they do not
+    // share a verdict. A one-entry-per-tid map gave the FIRST row to
+    // every occurrence, so the one-way upgrade below painted both cards
+    // with the first occurrence's ``is_error``. Keep an ARRAY per tid and
+    // hand each persisted row the next unused entry (``used``).
     const byTid=new Map();
     liveCalls.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
       const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
-      if(tid&&!byTid.has(tid)) byTid.set(tid,{tc,idx});
+      if(!tid) return;
+      let rows=byTid.get(tid);
+      if(!rows){ rows=[]; byTid.set(tid,rows); }
+      rows.push({tc,idx});
     });
     const used=new Set();
     return (rawCalls||[]).map((raw,idx)=>{
       const next={...(raw||{}),done:true};
       const tid=next.tid||next.id||next.tool_call_id||next.tool_use_id||next.call_id||'';
-      let matchEntry=tid?byTid.get(tid):null;
+      // #7358 (re-gate 9/24): keep the id-map hit and the name fallback
+      // distinguishable. The one-way ``is_error`` upgrade below may only
+      // run off the id map: the name fallback can pair an older
+      // *successful* terminal call with a newer *failed* one, and the
+      // upgrade would then settle the older row as Failed. The name
+      // fallback stays name-matchable for the presentation-only keys
+      // (burst / duration / started_at).
+      //
+      // #7358/#7653 (re-gate 10/06, Finding 2, SILENT): resolve a reused
+      // id per occurrence — the next unused live row of that tid. When
+      // they are all consumed the ownership is ambiguous, so skip the
+      // transfer instead of guessing.
+      const idRows=tid?byTid.get(tid):null;
+      let idMatchEntry=null;
+      if(idRows&&idRows.length){
+        const nextRow=idRows.find(entry=>!used.has(entry.idx));
+        if(nextRow) idMatchEntry=nextRow;
+      }
+      let matchEntry=idMatchEntry;
       if(!matchEntry){
         const name=next.name||((next.function||{}).name)||'';
         const matchIdx=liveCalls.findIndex((tc,i)=>tc&&!used.has(i)&&(!name||tc.name===name));
@@ -4518,6 +4608,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const live=matchEntry.tc||{};
         for(const key of ['activityBurstId','duration','started_at']){
           if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
+        }
+        // #7358 round 5 (re-gate 9/22): preserve the live mirror's
+        // ``is_error`` when the persisted summary doesn't carry it. The
+        // merge is one-way: live can only upgrade the row to a failure,
+        // never downgrade a persisted failure back to success. A
+        // session.tool_calls entry that already has ``is_error: true`` is
+        // preserved (the spread above already copied it), so the only case
+        // the live write matters is the missing-or-false summary.
+        // #7358 (re-gate 9/24): the upgrade is gated on the id-map hit —
+        // a name-fallback match must not inherit another call's failure.
+        if(idMatchEntry&&live.is_error===true&&next.is_error!==true){
+          next.is_error=true;
         }
       }
       return next;

@@ -3663,6 +3663,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
         if not name or name == "clarify":
             return
+        # #7358 round-3 (reviewer Finding 3, SILENT): a tool_complete
+        # event that arrives with no matching start event still has to
+        # carry the payload's is_error into the synthesized call. The
+        # running-call loop above copies it when it finds a match; this
+        # fall-through branch previously dropped it, so a completion-only
+        # replay rendered as a completed, non-error row.
         call = {
             "name": name,
             "preview": str(payload.get("preview") or ""),
@@ -3673,6 +3679,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "_journal_snapshot": True,
             "_journal_stream_id": stream_id,
         }
+        if payload.get("is_error") is not None:
+            call["is_error"] = bool(payload.get("is_error"))
         tool_id = _run_journal_snapshot_tool_id(payload)
         if tool_id:
             call["tid"] = tool_id
@@ -4763,6 +4771,15 @@ def _anchor_scene_tool_row(tool, order_index, message_index, stream_id=""):
     args = _anchor_scene_tool_args(tool)
     preview = str((tool or {}).get("preview") or (tool or {}).get("summary") or "")
     snippet = str((tool or {}).get("snippet") or (tool or {}).get("result") or (tool or {}).get("output") or "")
+    # #7358 round-3 (reviewer Finding 2, SILENT): the settled summary's
+    # is_error must project into the row's visible status. The base row
+    # hardcodes ``status: completed`` and this builder previously only
+    # copied the flag into ``row["tool"]["is_error"]``, so a hydrated
+    # failed tool rendered as a Completed card even though its tool
+    # payload said is_error — the "red live, green after reload" defect.
+    is_error = bool((tool or {}).get("is_error") or (tool or {}).get("error"))
+    if is_error:
+        row["status"] = "error"
     row["row_id"] = f"hydrated:{stream_id or 'stream'}:tool:{tid}" if tid else row["row_id"]
     row["tool_call_id"] = tid or None
     row["tool"] = {
@@ -4774,7 +4791,7 @@ def _anchor_scene_tool_row(tool, order_index, message_index, stream_id=""):
         "result": copy.deepcopy((tool or {}).get("result")) if isinstance(tool, dict) else None,
         "output": copy.deepcopy((tool or {}).get("output")) if isinstance(tool, dict) else None,
         "done": True,
-        "is_error": bool((tool or {}).get("is_error") or (tool or {}).get("error")),
+        "is_error": is_error,
         "duration": (tool or {}).get("duration") if isinstance(tool, dict) else None,
         "started_at": (tool or {}).get("started_at") if isinstance(tool, dict) else None,
         "signature": f"{name}|{tid}|{json.dumps(args, sort_keys=True, default=str)}",
@@ -5335,6 +5352,35 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         )
         if payload_args_changed:
             merged_payload["args"] = merged_payload_args
+        # #7358 round-3 (reviewer Finding 2, SILENT): the persisted scene
+        # row is the authoritative owner of the tool's error status once
+        # the live mirror has settled. Without this merge, an incoming
+        # row that carries ``is_error: true`` (built from the settled
+        # ``s.tool_calls`` summary, which now preserves the flag — see
+        # ``_extract_tool_calls_from_messages``) is absorbed by a
+        # completed non-error row and the card renders Completed after
+        # settlement + reload.
+        #
+        # Only ever *upgrade* to error: an incoming ``False`` never
+        # downgrades an already-error row, so the merge cannot flip a
+        # failure back to success.
+        # #7358 round 9 (reviewer Finding 3, SILENT): the name+invocation
+        # fallback can pair two rows that carry DIFFERENT explicit ids
+        # (e.g. two turns both emitting ``call_0`` — llama.cpp constant
+        # id / per-turn reuse). Copying the incoming failure onto the
+        # existing row there would flip an older success into error. The
+        # error upgrade is therefore gated on the two rows NOT carrying
+        # different explicit ids; the presentation keys above still merge
+        # regardless, but the verdict only crosses a same-id (or
+        # id-absent) seam.
+        if not _anchor_scene_tool_rows_have_different_explicit_ids(existing, incoming):
+            if incoming_tool.get("is_error"):
+                merged_tool["is_error"] = True
+            if incoming_payload.get("is_error"):
+                merged_payload["is_error"] = True
+            if incoming_tool.get("is_error") or incoming_payload.get("is_error"):
+                merged["status"] = "error"
+                merged_payload["status"] = "error"
         merged["tool"] = merged_tool
         merged["payload"] = merged_payload
         return merged

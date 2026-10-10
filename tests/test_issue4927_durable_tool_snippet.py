@@ -23,6 +23,26 @@ UI_JS = (Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="
 SESSIONS_JS = (Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
+def _function_region(src: str, header: str) -> str:
+    """Return the whole ``{...}`` function body starting at ``header``.
+
+    Byte windows break whenever unrelated changes above the pinned line
+    shift text past the bound (#7358 round 9 did exactly that to the
+    ``S.session.tool_calls`` copy below), so bound on the braces.
+    """
+    start = src.index(header)
+    brace = src.index("{", start)
+    depth = 0
+    for idx in range(brace, len(src)):
+        if src[idx] == "{":
+            depth += 1
+        elif src[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:idx + 1]
+    raise AssertionError(f"{header!r} did not close")
+
+
 def _slice_derived_rebuild() -> str:
     """Return the renderMessages fallback-rebuild region (resultsByTid block).
 
@@ -31,9 +51,14 @@ def _slice_derived_rebuild() -> str:
     longer unique (the transparent-stream ordered path added its own at #4932).
     """
     start = UI_JS.index("const fallbackToolSources=[];")
-    # The region runs through the _partial_tool_calls derived push; bound it
-    # generously so all derived-push sites are included.
-    return UI_JS[start:start + 7000]
+    # The region runs through the _partial_tool_calls derived push. Bound on
+    # the last derived push rather than a fixed byte window: #7358's
+    # id-only-is_error upgrade added comments inside this block, and a byte
+    # window silently started excluding the last derived push whenever the
+    # comments shifted text past the bound.
+    end_anchor = "if(derived.length) S.toolCalls=derived;"
+    end = UI_JS.index(end_anchor, start)
+    return UI_JS[start:end]
 
 
 def test_persisted_snippet_lookup_is_built_from_session_tool_calls():
@@ -89,8 +114,7 @@ def test_loaded_session_tool_calls_persisted_onto_session():
     summary onto S.session.tool_calls, or the renderMessages fallback source is
     empty on exactly the cold-load path it repairs (loadSession keeps the
     messages=0 object whose tool_calls is [])."""
-    start = SESSIONS_JS.index("function _syncToolCallsForLoadedMessages(")
-    region = SESSIONS_JS[start:start + 1500]
+    region = _function_region(SESSIONS_JS, "function _syncToolCallsForLoadedMessages(")
     assert "S.session.tool_calls=sessionToolCalls" in region.replace(" ", ""), (
         "_syncToolCallsForLoadedMessages must copy the loaded sessionToolCalls "
         "onto S.session.tool_calls so the derived-rebuild fallback has a source"
