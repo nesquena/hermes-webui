@@ -211,6 +211,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Message timestamps (HH:MM next to each message, full date on hover)
 - Code block copy button with "Copied!" feedback
 - Syntax highlighting via Prism.js (Python, JS, bash, JSON, SQL, and more)
+- Highlighted code blocks survive session switches and page reloads: tokenized HTML is cached per block, and a cache hit reproduces Prism's element setup (normalized `language-*` class on `<code>`/`<pre>`, keyboard-focusable `<pre>`) so a restored block is indistinguishable from a freshly highlighted one
 - Safe HTML rendering in AI responses (bold, italic, code converted to markdown)
 - Bare HTTP(S) URLs are auto-linked without absorbing adjacent CJK prose; Unicode IDN host separators and raw-CJK IRI paths remain linkable
 - rAF-throttled token streaming for smoother rendering during long responses
@@ -218,6 +219,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 ### Sessions
 - Create, rename, duplicate, delete, search by title and message content
+- Middle-click (or Ctrl/Cmd+click) a sidebar session row to open that session's deep link (`/session/<id>`) in a new browser tab; the new tab boots directly on the session while the current tab keeps its place. Rows owned by a profile other than the active one are refused, because a new tab would switch the shared `hermes_profile` cookie and break the issuing tab's next chat/approval calls
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Pinned-conversation limits apply separately to each session's owning profile; root/default aliases share a limit. Unpin an empty session before switching its profile through chat or `/goal`.
