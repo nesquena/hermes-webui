@@ -199,6 +199,7 @@ _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
+_WEBUI_GATEWAY_ASYNC_DELIVERY_ENV = "HERMES_WEBUI_GATEWAY_ASYNC_DELIVERY"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 # Backend tag of the in-process WebUI runtime. Local workers register their
 # active run with it; cache-only Steer only enqueues on this explicit value.
@@ -356,6 +357,26 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
     raw = str(
         source.get(_WEBUI_GATEWAY_USE_RUNS_API_ENV)
         or cfg.get("webui_gateway_use_runs_api")
+        or ""
+    ).strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _gateway_async_delivery_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
+    """Whether gateway chat may omit caller-supplied conversation history.
+
+    The runs API rejects async delegation delivery (background subagents,
+    server-persisted detached results) whenever the caller supplies its own
+    conversation_history, because caller-supplied history is authoritative and
+    never consumes the SessionDB delivery row. When this opt-in is set, the
+    WebUI sends only the explicit session_id and the gateway loads the
+    authoritative history itself, re-enabling async subagent delivery for
+    browser chat sessions."""
+    source = os.environ if environ is None else environ
+    cfg = config_data if isinstance(config_data, dict) else {}
+    raw = str(
+        source.get(_WEBUI_GATEWAY_ASYNC_DELIVERY_ENV)
+        or cfg.get("webui_gateway_async_delivery")
         or ""
     ).strip().lower()
     return raw in ("1", "true", "yes", "on")
@@ -1049,6 +1070,14 @@ def _run_gateway_runs_api_streaming(
         run_input = message_content
         if isinstance(run_input, list):
             run_input = [{"role": "user", "content": run_input}]
+        # Async delegation delivery (background subagents with server-persisted
+        # results) requires the run to declare a server-history consumer. The
+        # runs API denies that whenever the caller supplies conversation_history
+        # (caller-supplied history is authoritative and never reads the
+        # SessionDB delivery row). With the opt-in set and an explicit session
+        # id, omit the history and let the gateway load the authoritative one.
+        if session_id and _gateway_async_delivery_enabled(cfg):
+            conversation_history = []
         run_body = {
             "model": _gateway_model_field(model) or "default",
             "input": run_input,
