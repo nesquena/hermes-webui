@@ -1,6 +1,5 @@
-from types import SimpleNamespace
-
-import server
+import api.agent_cache_governance as govmod
+from api import config as api_config
 
 
 class _FakeThread:
@@ -20,27 +19,21 @@ class _FakeThread:
 def test_governor_interval_zero_does_not_start_thread(monkeypatch):
     """Zero disables governance instead of creating a time.sleep(0) loop."""
     _FakeThread.instances.clear()
-    monkeypatch.setattr(server.threading, "Thread", _FakeThread)
-    calls = {"passes": 0}
+    monkeypatch.setattr(govmod.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(api_config, "SESSION_AGENT_CACHE_GOVERN_INTERVAL", 0)
 
-    def _run_pass():
-        calls["passes"] += 1
-
-    governor = SimpleNamespace(run_pass=_run_pass)
-
-    thread = server._start_agent_cache_governor_thread(governor, 0)
+    thread = govmod.start_server_governor()
 
     assert thread is None
     assert _FakeThread.instances == []
-    assert calls["passes"] == 0
 
 
 def test_positive_governor_interval_starts_named_daemon(monkeypatch):
     _FakeThread.instances.clear()
-    monkeypatch.setattr(server.threading, "Thread", _FakeThread)
-    governor = SimpleNamespace(run_pass=lambda: None)
+    monkeypatch.setattr(govmod.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(api_config, "SESSION_AGENT_CACHE_GOVERN_INTERVAL", 60)
 
-    thread = server._start_agent_cache_governor_thread(governor, 60)
+    thread = govmod.start_server_governor()
 
     assert thread is _FakeThread.instances[0]
     assert thread.started is True
