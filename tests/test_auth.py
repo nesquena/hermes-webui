@@ -13,6 +13,8 @@ Covers:
 import http.cookies
 import io
 
+import pytest
+
 from api.auth import _is_loopback, _is_secure_context, set_auth_cookie, COOKIE_NAME
 
 
@@ -151,6 +153,34 @@ def test_trust_forwarded_proto_opt_in(monkeypatch):
         headers={'X-Forwarded-Proto': 'https'},
     )
     assert _is_secure_context(handler) is True
+
+
+@pytest.mark.parametrize(('trust', 'proto'), [('on', 'https'), ('1', 'HTTPS'), ('1', ' https ')])
+def test_trusted_forwarded_https_normalization_sets_secure_cookie(monkeypatch, trust, proto):
+    """The shared HTTPS detector honors documented proxy trust and normalization."""
+    monkeypatch.delenv('HERMES_WEBUI_SECURE', raising=False)
+    monkeypatch.setenv('HERMES_WEBUI_TRUST_FORWARDED_PROTO', trust)
+    handler = _MockHandler(headers={'X-Forwarded-Proto': proto})
+
+    assert _is_secure_context(handler) is True
+    set_auth_cookie(handler, 'test-token-value')
+    cookie = http.cookies.SimpleCookie()
+    cookie.load(handler._set_cookie_header())
+    assert cookie[COOKIE_NAME]['secure']
+
+
+@pytest.mark.parametrize(('trust', 'proto'), [('', 'HTTPS'), ('on', 'http'), ('on', 'https, http')])
+def test_untrusted_or_non_https_proxy_does_not_set_secure_cookie(monkeypatch, trust, proto):
+    """Normalization never treats untrusted metadata or a protocol list as HTTPS."""
+    monkeypatch.delenv('HERMES_WEBUI_SECURE', raising=False)
+    monkeypatch.setenv('HERMES_WEBUI_TRUST_FORWARDED_PROTO', trust)
+    handler = _MockHandler(headers={'X-Forwarded-Proto': proto})
+
+    assert _is_secure_context(handler) is False
+    set_auth_cookie(handler, 'test-token-value')
+    cookie = http.cookies.SimpleCookie()
+    cookie.load(handler._set_cookie_header())
+    assert not cookie[COOKIE_NAME]['secure']
 
 
 def test_forwarded_proto_ignored_without_opt_in(monkeypatch):
