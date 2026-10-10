@@ -135,6 +135,11 @@
 
 ### Fixed
 
+- **Starting the WebUI on a port that is already taken explains what to do.** `bootstrap.py` / `start.sh` now check the
+  port before launching: if your own WebUI is already running there it says so (and opens it), otherwise it names the
+  port as busy and suggests a free one instead of failing later with a bind error. Works for IPv4, IPv6 and HTTPS.
+  Thanks @mercael91. (#8112, #8111)
+
 - **A Git "terminal prompts disabled" answer from Git Credential Manager is reported as an authentication failure.**
   Workspace Git status and fetch now show the sign-in message instead of a generic Git error when GCM refuses to prompt
   because interactivity is disabled. Thanks @PeterPunk1320. (#8127)
