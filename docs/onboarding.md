@@ -71,6 +71,32 @@ entries there before using the isolated command above.
 For managed hosting or fully preconfigured images, set
 `HERMES_WEBUI_SKIP_ONBOARDING=1` to bypass the wizard.
 
+## If the port is already in use
+
+The bootstrap checks the resolved host and port before it installs the agent,
+sets up dependencies, or creates state. When another service already holds
+the port, it stops there and reports the address it could not bind together
+with a free alternative it verified, for example:
+
+```text
+Port 8787 on 127.0.0.1 is already in use by another service. Try an available port instead: ./start.sh 8789 Or set HERMES_WEBUI_PORT=8789 in /path/to/hermes-webui/.env. The existing service was left untouched; no configuration was changed.
+```
+
+Nothing is reconfigured for you: the running service is untouched and `.env`
+is not rewritten. Re-run with the suggested port as the argument
+(`./start.sh 8789`) or put `HERMES_WEBUI_PORT=8789` in `.env`.
+
+A port held by a healthy WebUI is not a conflict: re-running bootstrap (or
+`start.sh` falling back to it without curl/wget) reports the already-running
+instance ready and exits 0. Only a foreground/supervisor launch, which
+would be a second server on the same port, reports the duplicate start.
+
+Only the WebUI's own `/health` payload counts as that running instance: any
+other service, including one answering a generic `{"status": "ok"}`, is
+reported as the conflict above. A bind address that cannot be used at all
+(`--host` naming another machine, for example) stays a hard error, so a
+bootstrap that started nothing never claims to be running.
+
 ## What the wizard checks
 
 The first screen reports the runtime state WebUI can see:
