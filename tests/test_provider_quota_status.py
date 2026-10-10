@@ -178,6 +178,71 @@ def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
     assert "follow-up" in result["message"]
 
 
+def test_venice_balance_fetches_billing_endpoint_and_sanitizes(monkeypatch, tmp_path):
+    """Venice /billing/balance should be fetched with the admin key and sanitized."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("VENICE_ADMIN_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("VENICE_ADMIN_API_KEY=test-venice-admin-private\n", encoding="utf-8")
+    old_cfg, old_mtime = _with_config(
+        model={"provider": "venice"},
+        providers={"venice": {"base_url": "https://api.venice.ai/api/v1"}},
+    )
+
+    import api.providers as providers
+
+    seen: dict[str, str] = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = str(req.full_url)
+        payload = json.dumps(
+            {
+                "canConsume": True,
+                "consumptionCurrency": "USD",
+                "balances": {"usd": 12.34, "diem": 567.89},
+                "diemEpochAllocation": {"total": "1000", "remaining": "900"},
+            }
+        ).encode()
+        return _FakeResponse(payload)
+
+    try:
+        monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+        result = providers.get_provider_quota("venice")
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["ok"] is True
+    assert result["status"] == "available"
+    assert result["supported"] is True
+    assert result["label"] == "Venice balance"
+    assert result["quota"]["balances"]["usd"] == 12.34
+    assert result["quota"]["balances"]["diem"] == 567.89
+    assert result["quota"]["can_consume"] is True
+    assert result["quota"]["currency"] == "USD"
+    assert "test-venice-admin-private" not in repr(result)
+    assert seen.get("url", "").endswith("/billing/balance")
+
+
+def test_venice_balance_missing_admin_key_reports_no_key(monkeypatch, tmp_path):
+    """Without VENICE_ADMIN_API_KEY the Venice quota state is a clear no_key."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("VENICE_ADMIN_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    old_cfg, old_mtime = _with_config(model={"provider": "venice"})
+
+    import api.providers as providers
+
+    try:
+        result = providers.get_provider_quota("venice")
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["ok"] is False
+    assert result["status"] == "no_key"
+    assert result["supported"] is True
+    assert result["quota"] is None
+    assert "VENICE_ADMIN_API_KEY" in result["message"]
+
+
 def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, tmp_path):
     """Codex account limits must use the selected WebUI profile's HERMES_HOME."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
