@@ -492,6 +492,11 @@ def test_session_route_blocks_hidden_sessions_before_replay_or_live_attach(monke
         "get_session",
         lambda sid, metadata_only=False: SimpleNamespace(session_id=sid, profile="other"),
     )
+    monkeypatch.setattr(
+        routes,
+        "get_session_profile_readonly",
+        lambda sid: routes.get_session(sid, metadata_only=True).profile,
+    )
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(
         routes,
