@@ -793,6 +793,52 @@ def test_insights_absolute_range_valid_start_with_invalid_end_falls_back(monkeyp
     assert len(data["daily_tokens"]) == 30
 
 
+def test_insights_absolute_range_blank_bounds_fall_back(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "today", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+    ]
+    # Regression for Greptile P1 2026-10-10T03:29:18Z "Blank bounds change the
+    # range": parse_qs() drops empty values, so `start=2026-05-01&end=` looked
+    # like an OMITTED end and the server served a custom [start, now] window
+    # (the documented end-default) instead of falling back to the trailing
+    # window.  A blank bound is a supplied-but-invalid bound: it must fail
+    # closed exactly like `end=2026-02-31`.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query="start=2026-05-01&end=", now=now)
+    assert data["mode"] == "trailing"
+    assert data["effective_start"] is None
+    assert data["effective_end"] is None
+    assert len(data["daily_tokens"]) == 30
+    assert data["period_days"] == len(data["daily_tokens"])
+    assert data["total_sessions"] == 1
+
+    # Control: the SAME request with the end genuinely omitted keeps the
+    # documented behaviour (a valid start, end defaults to now -> custom).
+    control = _call_insights(monkeypatch, tmp_path, entries,
+                             query="start=2026-05-01", now=now)
+    assert control["mode"] == "custom"
+    assert control["effective_start"] == "2026-05-01"
+
+    # Symmetric: a blank start beside a valid end must fall back too.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query="start=&end=2026-05-04", now=now)
+    assert data["mode"] == "trailing"
+    assert len(data["daily_tokens"]) == 30
+
+    # Both blank: still the trailing window, never a zero-width custom range.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query="start=&end=", now=now)
+    assert data["mode"] == "trailing"
+    assert data["effective_start"] is None
+    assert data["effective_end"] is None
+    assert len(data["daily_tokens"]) == 30
+
+
 def test_insights_absolute_range_nonfinite_timestamps_do_not_500(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [

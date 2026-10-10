@@ -12562,7 +12562,15 @@ def _handle_insights(handler, parsed) -> bool:
 
     from api.usage import prompt_cache_hit_percent
 
-    query = parse_qs(parsed.query)
+    # keep_blank_values: parse_qs() DROPS empty values by default, so a blank
+    # bound (`start=2026-05-01&end=`) looked ABSENT here and the documented
+    # fail-closed check below never saw it - the request was then served as a
+    # custom [start, now] window (the blank `end` silently defaulted to "now")
+    # instead of the trailing window a malformed input must fall back to.  With
+    # blanks preserved, `_window_ts` rejects them the same way it rejects an
+    # unparseable value, so BOTH bounds fall back together (Greptile P1
+    # 2026-10-10T03:29:18Z: "Blank bounds change the range").
+    query = parse_qs(parsed.query, keep_blank_values=True)
 
     def _window_ts(vals):
         # Parse one time-window endpoint.  Returns (kind, ts) where kind is
