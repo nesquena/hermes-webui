@@ -69,7 +69,7 @@ def _isolated_registries(monkeypatch):
     config.LAST_RUN_FINISHED_AT = None
     # Endpoint resolution touches profiles/config; irrelevant to the invariant.
     monkeypatch.setattr(
-        gateway_chat, "_gateway_endpoint_for_profile", lambda profile: ("http://gw", "k")
+        gateway_chat, "_gateway_endpoint_for_profile", lambda profile, **_kw: ("http://gw", "k")
     )
     yield
     _reset_registries()
@@ -150,7 +150,7 @@ def test_restarted_run_with_a_stale_pending_timestamp_is_not_orphaned(monkeypatc
 
 def test_reattach_releases_its_claim_when_the_thread_cannot_be_started(monkeypatch):
     """A real ``Thread.start()`` failure must leave no ownership behind."""
-    monkeypatch.setattr(gateway_chat, "_gateway_endpoint_for_profile", lambda profile: ("http://gw", "k"))
+    monkeypatch.setattr(gateway_chat, "_gateway_endpoint_for_profile", lambda profile, **_kw: ("http://gw", "k"))
     session = _FakeSession(pending_started_at=time.time() - 3600)
 
     class _ExplodingStartThread:

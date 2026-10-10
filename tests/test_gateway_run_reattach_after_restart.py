@@ -113,6 +113,7 @@ def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessi
     # Only ids and flags are persisted, never a credential.
     assert captured["persisted_at_events"] == {
         "run_id": "run_live", "stream_id": stream_id, "regeneration": False, "goal_related": False,
+        "endpoint_routing": "profile-v1", "base_url": "http://gateway.local",
     }
     saved = _saved(s.session_id)
     assert saved["gateway_run"] is None
