@@ -5905,6 +5905,9 @@ main.main > #mainPlugin{display:none;}
 .project-create-input{font-size:10px;padding:3px 8px;border-radius:12px;border:1px solid var(--accent-bg);background:var(--surface);color:var(--text);outline:none;min-width:40px;max-width:180px;width:auto;font-family:inherit;box-shadow:0 0 0 2px var(--accent-bg);}
 .project-picker{position:absolute;right:0;top:100%;background:var(--sidebar);border:1px solid var(--border2);border-radius:8px;padding:4px;z-index:30;min-width:160px;max-width:220px;width:max-content;box-shadow:0 4px 16px rgba(0,0,0,.3);}
 .batch-action-bar .batch-project-picker{position:static;right:auto;top:auto;min-width:100%;max-width:none;width:100%;box-shadow:none;margin-top:2px;background:var(--input-bg);}
+/* #8044: a picker row is a <button>. A zero-specificity reset of the button's own border, background,
+   font and centring, so every row rule below still applies as it did to the <div>. */
+:where(button.project-picker-item){width:100%;background:none;border:none;font:inherit;text-align:left;}
 .project-picker-item{padding:5px 10px;font-size:11px;border-radius:6px;cursor:pointer;color:var(--muted);transition:all .1s;display:flex;align-items:center;gap:6px;}
 .project-picker-item:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .project-picker-item.active{color:var(--blue);}
@@ -5913,6 +5916,16 @@ main.main > #mainPlugin{display:none;}
 /* Lives as a flex sibling in .session-title-row (between title and time);
    the row's gap:6px handles spacing, no margin/vertical-align needed. */
 .session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;}
+/* #8044: a visible keyboard focus on a picker row (the current project stays blue, as on hover), a
+   finger-sized row on a touch screen, and a picker that scrolls inside itself instead of growing
+   past the viewport's height now that its rows are taller there. */
+.project-picker-item:focus-visible{background:rgba(255,255,255,.08);color:var(--text);outline:2px solid var(--focus-ring);outline-offset:-2px;}
+.project-picker-item.active:focus-visible{color:var(--blue);}
+@media (pointer:coarse){.project-picker-item{min-height:44px;padding-top:8px;padding-bottom:8px;font-size:13px;}}
+.project-picker:not(.batch-project-picker){max-height:calc(100dvh - 16px);overflow-y:auto;overscroll-behavior:contain;}
+/* The batch picker renders inline in the selection bar, so on touch its 44px rows would push the
+   checked conversations off screen while you choose a project: cap it at about five and a half rows. */
+@media (pointer:coarse){.batch-action-bar .batch-project-picker{max-height:250px;overflow-y:auto;}}
 
 /* ── Saved prompts popup ── */
 .saved-prompts-popup{position:absolute;bottom:calc(100% + 8px);left:0;min-width:280px;max-width:380px;max-height:320px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:200;flex-direction:column;gap:2px;padding:6px;}
