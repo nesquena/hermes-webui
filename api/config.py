@@ -13144,6 +13144,7 @@ _SETTINGS_DEFAULTS = {
     ),  # display name for the assistant
     "sound_enabled": False,  # play notification sound when assistant finishes
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
+    "rtl_mode": "auto",  # right-to-left chat layout mode: auto | on | off
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # legacy compatibility; Worklog renderer remains enabled
@@ -13346,6 +13347,12 @@ def load_settings() -> dict:
         # Honor a stored True only when that marker is present.
         if not bool(stored.get("virtualize_transcript_optin")):
             settings["virtualize_transcript"] = False
+        # Legacy RTL preference migration (#7699).
+        # When rtl_mode is absent, a raw server rtl=True indicates explicit intent
+        # to enable RTL. Migrate it to "on". An ambiguous legacy server False
+        # remains eligible for default "auto".
+        if "rtl_mode" not in stored and stored.get("rtl") is True:
+            settings["rtl_mode"] = "on" 
     # Fall back to the DEFAULTS, not to None, when nothing is stored.
     #
     # `_read_raw_settings_file()` returns {} for a MISSING settings.json, and {}
@@ -13414,6 +13421,7 @@ _SETTINGS_ENUM_VALUES = {
     "default_message_mode": {"queue", "interrupt", "steer"},
     "chat_activity_display_mode": {"compact_worklog", "transparent_stream", "hide_all_activity"},
     "structured_code_default_view": {"auto", "on", "off"},
+    "rtl_mode": {"auto", "on", "off"},
 }
 _SETTINGS_INT_RANGES = {
     "pinned_sessions_limit": (1, 99),
@@ -13588,6 +13596,8 @@ def save_settings(settings: dict) -> dict:
         settings["default_message_mode"] = settings.get("busy_input_mode")
     settings.pop("busy_input_mode", None)
     settings.pop("simplified_tool_calling", None)
+    if "rtl" in settings and "rtl_mode" not in settings:
+        settings["rtl_mode"] = "on" if bool(settings["rtl"]) else "off"
     pending_theme = current.get("theme")
     pending_skin = current.get("skin")
     theme_was_explicit = False

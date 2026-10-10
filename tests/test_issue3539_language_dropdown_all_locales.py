@@ -14,10 +14,10 @@ PANELS_JS = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_
 
 
 def _language_dropdown_block() -> str:
-    # Anchor on the dropdown-population site (langSel.innerHTML='' precedes the
-    # LOCALES enumeration); there is an earlier settingsLanguage reference for
-    # the apply-on-load path, so don't anchor on the first match.
-    i = PANELS_JS.index("langSel.innerHTML=''")
+    # Anchor on the dropdown-wiring site in loadSettingsPanel.
+    # Anchoring on the change-listener captures both the live setLocale apply
+    # and the full enumeration of LOCALES options.
+    i = PANELS_JS.index("langSel.addEventListener('change'")
     return PANELS_JS[i:i + 700]
 
 

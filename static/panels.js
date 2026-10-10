@@ -8882,7 +8882,10 @@ function _preferencesPayloadFromUi(){
   const soundCb=$('settingsSoundEnabled');
   if(soundCb) payload.sound_enabled=soundCb.checked;
   const rtlCb=$('settingsRtl');
-  if(rtlCb) payload.rtl=rtlCb.checked;
+  if(rtlCb){
+    payload.rtl=rtlCb.checked;
+    payload.rtl_mode=window._rtlMode||(localStorage.getItem('hermes-rtl-mode')||'auto');
+  }
   const notifCb=$('settingsNotificationsEnabled');
   if(notifCb) payload.notifications_enabled=notifCb.checked;
   const sidebarDensitySel=$('settingsSidebarDensity');
@@ -8980,8 +8983,10 @@ function _setPreferencesAutosaveStatus(state,owner){
 
 function _rememberPreferencesSaved(payload){
   if(!payload) return;
-  if(payload.send_key!==undefined) localStorage.setItem('hermes-pref-send_key',payload.send_key);
-  if(payload.language!==undefined) localStorage.setItem('hermes-pref-language',payload.language);
+  try{
+    if(payload.send_key!==undefined) localStorage.setItem('hermes-pref-send_key',payload.send_key);
+    if(payload.language!==undefined) localStorage.setItem('hermes-pref-language',payload.language);
+  }catch(_){}
 }
 
 function _applyWorkspaceTodosTabVisibility(){
@@ -9045,6 +9050,9 @@ async function _autosavePreferencesSettings(payload){
     }
     if(payload&&payload.new_chat_on_workspace_switch!==undefined){
       window._newChatOnWorkspaceSwitch=!!(saved&&saved.new_chat_on_workspace_switch);  // #5473
+    }
+    if(saved && typeof saved.rtl_mode === 'string' && ['auto','on','off'].includes(saved.rtl_mode)){
+      window._serverRtlMode = saved.rtl_mode;
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -9490,6 +9498,14 @@ async function loadSettingsPanel(){
     // Language preference — populate from LOCALES bundle
     const langSel=$('settingsLanguage');
     if(langSel){
+      langSel.addEventListener('change',function(){
+        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
+        const b=$('settingsRtl');
+        if(b&&(window._rtlMode||'auto')==='auto'){
+          const a=this.value==='fa';b.checked=a;document.documentElement.classList.toggle('chat-content-rtl',a);
+        }
+        _schedulePreferencesAutosave();
+      },{once:false});
       langSel.innerHTML='';
       if(typeof LOCALES!=='undefined'){
         for(const [code,bundle] of Object.entries(LOCALES)){
@@ -9499,10 +9515,6 @@ async function loadSettingsPanel(){
         }
       }
       langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',function(){
-        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
-        _schedulePreferencesAutosave();
-      },{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -9674,14 +9686,39 @@ async function loadSettingsPanel(){
     // Right-to-left chat layout (#1721 salvage) — Settings-only, no composer button.
     const rtlCb=$('settingsRtl');
     if(rtlCb){
-      const saved=!!settings.rtl || localStorage.getItem('hermes-rtl')==='true';
-      rtlCb.checked=saved;
-      try{localStorage.setItem('hermes-rtl',saved?'true':'false');}catch(_){}
-      document.documentElement.classList.toggle('chat-content-rtl',saved);
+      const currentLocale = (typeof _locale !== 'undefined' && _locale && _locale._lang) || (typeof resolvePreferredLocale === 'function' ? resolvePreferredLocale() : localStorage.getItem('hermes-lang'));
+      const isFaLocale = currentLocale === 'fa';
+      let localRtlMode = localStorage.getItem('hermes-rtl-mode');
+      const legacyLocalRtl = localStorage.getItem('hermes-rtl');
+      if (!localRtlMode && legacyLocalRtl !== null && (legacyLocalRtl === 'true' || legacyLocalRtl === 'false')) {
+        localRtlMode = legacyLocalRtl === 'true' ? 'on' : 'off';
+        try { localStorage.setItem('hermes-rtl-mode', localRtlMode); } catch (_) {}
+      }
+      const serverRtlMode = (settings && typeof settings.rtl_mode === 'string' && ['auto','on','off'].includes(settings.rtl_mode))
+        ? settings.rtl_mode
+        : (settings && settings.rtl === true && !settings.rtl_mode ? 'on' : null);
+      let effectiveMode;
+      if (localRtlMode && ['auto','on','off'].includes(localRtlMode)) {
+        effectiveMode = localRtlMode;
+      } else if (serverRtlMode) {
+        effectiveMode = serverRtlMode;
+      } else {
+        effectiveMode = 'auto';
+      }
+      window._rtlMode = effectiveMode;
+      if (serverRtlMode) window._serverRtlMode = serverRtlMode;
+      const saved = effectiveMode === 'on' ? true : (effectiveMode === 'off' ? false : isFaLocale);
+      rtlCb.checked = saved;
+      document.documentElement.classList.toggle('chat-content-rtl', saved);
       rtlCb.addEventListener('change',()=>{
-        const on=rtlCb.checked;
-        try{localStorage.setItem('hermes-rtl',on?'true':'false');}catch(_){}
-        document.documentElement.classList.toggle('chat-content-rtl',on);
+        const on = rtlCb.checked;
+        const newMode = on ? 'on' : 'off';
+        window._rtlMode = newMode;
+        try{
+          localStorage.setItem('hermes-rtl-mode', newMode);
+          localStorage.setItem('hermes-rtl', on ? 'true' : 'false');
+        }catch(_){}
+        document.documentElement.classList.toggle('chat-content-rtl', on);
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -12307,6 +12344,13 @@ function _applySavedSettingsUi(saved, body, opts){
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+  const _savedMode = (saved && typeof saved.rtl_mode === 'string' && ['auto','on','off'].includes(saved.rtl_mode))
+    ? saved.rtl_mode
+    : ((body && typeof body.rtl_mode === 'string' && ['auto','on','off'].includes(body.rtl_mode)) ? body.rtl_mode : null);
+  if (_savedMode) {
+    window._serverRtlMode = _savedMode;
+    if (!window._rtlMode) window._rtlMode = _savedMode;
+  }
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
   _ensureComposerControlVisibilityState(saved||body||{});
@@ -13027,6 +13071,7 @@ async function saveSettings(andClose){
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.rtl=!!($('settingsRtl')||{}).checked;
+  body.rtl_mode=window._rtlMode||(localStorage.getItem('hermes-rtl-mode')||'auto');
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
   body.show_thinking=window._showThinking!==false;
   body.sidebar_density=sidebarDensity;
