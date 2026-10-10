@@ -32,6 +32,79 @@ const _BG_TASK_COMPLETE_TTL_MS = 60000;
 const _BG_TASK_COMPLETE_CAP = 256;
 const _bgTaskCompleteSeenIds = new Map();
 
+// #7855 (round 5): the continuation ID is a per-invocation parameter of
+// send(), NOT a shared module slot.
+//
+// Round 4 used one module-level string that the drain wrote and send() read.
+// Any other send() that was mid-`await` (e.g. a genuine user turn waiting on
+// its upload) read the value the drain had just published and posted it — so
+// the wrong turn consumed the goal. A slot cannot express "this ID belongs to
+// THIS send"; a parameter can. The drain passes it in, send() snapshots it
+// synchronously before its first `await`, and it dies with the call frame.
+function _normalizeGoalContinuationId(id){return String(id||'').trim();}
+
+// #7855 (round 5): a continuation restored into the composer after a refresh
+// is an IDENTIFIABLE DRAFT, not a global. The ID lives on the composer element
+// together with the exact text it was restored for; it is handed to a send only
+// while that text is still what is being sent, and is dropped the moment the
+// user replaces or abandons it. A global slot could not express that condition,
+// which is how a refreshed continuation used to end up on a user-authored turn.
+function _takeRestoredDraftGoalContinuationId(text){
+  try{
+    const _msg=(typeof $==='function')?$('msg'):null;
+    if(!_msg) return '';
+    const _draftId=_normalizeGoalContinuationId(_msg.dataset&&_msg.dataset.goalContinuationId);
+    const _draftText=String((_msg.dataset&&_msg.dataset.goalContinuationText)||'');
+    // Always clear: the draft is one-shot, and an abandoned/replaced draft must
+    // not leave a live token behind for a later unrelated send.
+    if(_msg.dataset){delete _msg.dataset.goalContinuationId;delete _msg.dataset.goalContinuationText;}
+    if(!_draftId) return '';
+    // The user replaced the restored text → this is their message, not the
+    // continuation. Fail closed: no token.
+    if(!text||String(text).trim()!==_draftText) return '';
+    return _draftId;
+  }catch(_){ return ''; }
+}
+
+// #7855: the writer side of the restored-continuation draft. Module scope for
+// the same reason the ID itself had to be: the restore path (static/sessions.js)
+// and send() are sibling top-level scopes.
+function _setRestoredGoalContinuationDraft(id,text){
+  try{
+    const _msg=(typeof $==='function')?$('msg'):null;
+    if(!_msg||!_msg.dataset) return;
+    const _id=_normalizeGoalContinuationId(id);
+    if(!_id){ delete _msg.dataset.goalContinuationId; delete _msg.dataset.goalContinuationText; return; }
+    _msg.dataset.goalContinuationId=_id;
+    _msg.dataset.goalContinuationText=String(text||'').trim();
+  }catch(_){ }
+}
+function _clearRestoredGoalContinuationDraft(){
+  try{
+    const _msg=(typeof $==='function')?$('msg'):null;
+    if(!_msg||!_msg.dataset) return;
+    delete _msg.dataset.goalContinuationId;
+    delete _msg.dataset.goalContinuationText;
+  }catch(_){ }
+}
+// #7855 CORE (round 7): the NON-CONSUMING read of the same binding. The
+// session-switch save needs to persist the departing session's continuation
+// token, but consuming it here would disarm the one-shot marker before the
+// user's resend could claim it. Returns {id, text} or null, and never mutates
+// the dataset — callers compare text themselves and decide what to persist.
+function _peekRestoredGoalContinuationDraft(){
+  try{
+    const _msg=(typeof $==='function')?$('msg'):null;
+    if(!_msg||!_msg.dataset) return null;
+    const _draftId=_normalizeGoalContinuationId(_msg.dataset.goalContinuationId);
+    if(!_draftId) return null;
+    return {
+      id:_draftId,
+      text:String(_msg.dataset.goalContinuationText||'').trim(),
+    };
+  }catch(_){ return null; }
+}
+
 function _bgTaskCompleteRingBufferAdd(sid, evt_id) {
   // Missing key → treat as "seen/skip" (return true). The sole caller already
   // guards with `if (!evt_id) return;` before invoking this, so this branch is
@@ -1189,6 +1262,14 @@ if(typeof document!=='undefined'){
 // setBusy(true) is only called after the first await inside send().
 let _sendInProgress = false;
 let _sendInProgressSid = null;  // session_id of the in-flight send
+// #7855 (round 6): there is deliberately NO shared continuation-ID slot here.
+// Round 5 kept one for the lock holder so a concurrent requeue could carry the
+// goal forward, and that is exactly how a genuine user turn stole the goal: it
+// re-entered while a continuation was parked in uploadPendingFiles, queued
+// FIRST with the parked send's 32-hex ID, and consumed the server's pending
+// record before the real continuation drained. The token now lives only in the
+// send() invocation it was handed to (its argument, or the composer draft it
+// resolved), so no other invocation can ever read it as its own.
 const _sessionTitleProvisionalBySid = new Map();
 // Agent commands that are safe to execute directly in the WebUI even though
 // their canonical command is registered on the backend (for example
@@ -1296,7 +1377,7 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 // BEFORE slash rewrites (/moa, bundles) mutate the payload and BEFORE
 // uploadPendingFiles() drains S.pendingFiles — so we restore what the user
 // actually typed, not the transformed send payload.
-async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPromise){
+async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPromise,goalContinuationId){
   let payload;
   try{ payload=JSON.parse(error&&error.body||'{}'); }catch(_){ return false; }
   const target=payload&&payload.continuation_session_id;
@@ -1313,7 +1394,10 @@ async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPro
     if(!S.session||S.session.session_id===sid) return false;
     // loadSession can lose its navigation race to another tab selection. Never
     // place the rejected message into that unrelated session's composer.
-    _restoreComposerDraftAfterFailedSend(draftText,filesSnapshot,target,clearPromise);
+    // #7855: the draft's continuation ID rides along with its text — restoring
+    // the text but not the token turned the resend into an ordinary turn and
+    // silently ended the goal loop.
+    _restoreComposerDraftAfterFailedSend(draftText,filesSnapshot,target,clearPromise,_normalizeGoalContinuationId(goalContinuationId));
     if(S.session.session_id!==target) return true;
     setComposerStatus('Session resumed. Your message is preserved; send it when ready.');
     showToast('Session resumed after compression. Your draft is preserved.',4000);
@@ -1321,10 +1405,17 @@ async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPro
   }catch(_){ return false; }
 }
 
-function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
+function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId){
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   if(!restore&&!files.length) return false;
+  // #7855 (round 6): the draft's continuation ID is restored TOGETHER with the
+  // text. A failed POST never admitted the turn, so the token is still valid;
+  // restoring the text without it made the retry post an empty ID and the goal
+  // loop ended silently. Recorded as a text-bound restored draft so the token
+  // applies only while the user still sends exactly this text, and dies with a
+  // replaced/abandoned draft (#788).
+  const _restoreContId=_normalizeGoalContinuationId(goalContinuationId);
 
   // Only mutate the VISIBLE composer / staged tray when the failed send belongs
   // to the session the user is currently looking at — otherwise a background
@@ -1337,6 +1428,13 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     // Do not clobber a new message the user began typing during the async window.
     if(inp && !String(inp.value||'').trim()){
       inp.value=restore;
+      // Mark the restored text as an identifiable continuation draft BEFORE the
+      // user can act on it, so a one-key resend still carries the token.
+      if(_restoreContId&&typeof _setRestoredGoalContinuationDraft==='function'){
+        _setRestoredGoalContinuationDraft(_restoreContId,restore);
+      } else if(typeof _clearRestoredGoalContinuationDraft==='function'){
+        _clearRestoredGoalContinuationDraft();
+      }
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
       // Re-stage the originally attached files so a one-key resend keeps them.
@@ -1357,6 +1455,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // captured rather than clobbered by the original snapshot; if we restored the
   // visible session but the user has since switched away, skip entirely (the
   // session-switch save path already persisted this session's composer).
+  // #7855: the draft ID must survive that reload too, or a refresh between the
+  // failure and the retry restores the text and loses the token. Re-mark the
+  // draft synchronously with the persist so both halves agree.
   if(sid&&typeof _saveComposerDraftNow==='function'){
     const _persist=()=>{
       try{
@@ -1364,11 +1465,26 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
         if(stillVisible){
           const inp=$('msg');
           const liveText=inp?String(inp.value||''):restore;
-          _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[]);
+          // #7855 CORE (round 6): the token survives the reload only if it is
+          // persisted WITH this text. Pass it through; the save helper drops it
+          // when the text is gone, so an abandoned draft cannot orphan a token.
+          if(_restoreContId&&typeof _setRestoredGoalContinuationDraft==='function'
+             && String(liveText||'').trim()===String(restore||'').trim()){
+            // Unchanged restore: keep the one-shot binding so a one-key resend
+            // still carries the token in-page as well as across a reload.
+            _setRestoredGoalContinuationDraft(_restoreContId,restore);
+          }
+          _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[],
+            String(liveText||'').trim()===String(restore||'').trim()?_restoreContId:'');
         } else if(!restoredVisible){
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, files);
+          // #7855 CORE (round 7): the token must travel with that snapshot.
+          // The background restore saves only text/files, so a return to this
+          // session and a retry posted no id and start admission scored it
+          // goal_related=false (master scores true). Pass the restored
+          // continuation id alongside the exact text it belongs to.
+          _saveComposerDraftNow(sid, restore, files, _restoreContId);
         }
         // else: restored the visible composer, then the user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.
@@ -1385,6 +1501,13 @@ async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
+  // #7855 (round 5): bind this invocation's continuation ID before ANY await.
+  // A shared module slot let a concurrent drain publish an ID that this send
+  // would then read mid-await, so a genuine user turn could consume the goal.
+  // Snapshotting the argument synchronously makes the binding call-scoped: the
+  // ID is posted by exactly the send it was handed to, and no other.
+  const _sendOptions=arguments[0]||{};
+  let _goalContinuationId=_normalizeGoalContinuationId(_sendOptions.goalContinuationId);
   // Reject concurrent invocations early — before any await yields control.
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
@@ -1395,7 +1518,27 @@ async function send(){
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
     if(_text && _targetSid){
       const _modelState=_chatPayloadModelState();
-      queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+      // #7855 (round 6, CORE): this re-entrant branch is a GENUINE user turn by
+      // construction — it is a send() whose composer text the in-flight send has
+      // not touched, while the in-flight send is the continuation. It may carry
+      // its OWN token (its argument, or a restored draft it resolved), but it
+      // must never inherit the parked send's: doing so queued the genuine turn
+      // FIRST with the continuation's ID and let it consume the server's
+      // pending record before the real continuation drained. So the only ID
+      // this entry may carry is one this invocation owns.
+      const _requeueEntry={text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'};
+      // #7855 SHOULD-FIX (round 6): the re-entrant guard runs BEFORE the
+      // restored-draft resolution below, so a restored continuation that is
+      // re-entered while a send is in flight was queued WITHOUT its token and
+      // left the dataset marker on the composer. Resolve the token here too —
+      // only when this invocation does not already own one from its argument,
+      // so a genuine turn can never inherit another invocation's ID.
+      let _requeueContId=_goalContinuationId;
+      if(!_requeueContId&&typeof _takeRestoredDraftGoalContinuationId==='function'){
+        _requeueContId=_takeRestoredDraftGoalContinuationId(_text);
+      }
+      if(_requeueContId) _requeueEntry.goal_continuation_id=_requeueContId;
+      queueSessionMessage(_targetSid,_requeueEntry);
       _clearComposerAfterQueuedSelectionSend();
       if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
       S.pendingFiles=[];renderTray();
@@ -1415,8 +1558,20 @@ async function send(){
   _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  // #7855: a refresh-restored continuation contributes its token only when the
+  // user still sends the exact restored text; replaced/abandoned drafts fail
+  // closed. Resolved here — still before the first await.
+  if(!_goalContinuationId){
+    const _restoredDraftGoalContinuationId=_takeRestoredDraftGoalContinuationId(text);
+    if(_restoredDraftGoalContinuationId) _goalContinuationId=_restoredDraftGoalContinuationId;
+  }
+  // #7855 (round 6): the resolved token lives in THIS invocation only. There is
+  // no shared slot to publish it to, because a slot is what let a genuine
+  // re-entrant turn steal the in-flight continuation's ID in round 5.
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
     if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
+    // Release the lock only — there is no cross-invocation token to clear, the
+    // binding dies with this call frame.
     _sendInProgress=false;_sendInProgressSid=null;
     return;
   }
@@ -1462,12 +1617,19 @@ async function send(){
         }
       }
     const defaultMessageMode=window._defaultMessageMode||'steer';
-      if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
+      if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'&&!_goalContinuationId){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
         // _trySteer captures the owner session/files before awaiting uploads,
         // restores/persists the draft on failure, and clears the owner draft
         // only after /api/chat/steer accepts.
+        //
+        // #7855 SHOULD-FIX (round 6): a tokenized continuation must NOT be
+        // steered. Steering injects it into the live run, nothing is queued or
+        // posted, and the server's pending continuation record is orphaned (no
+        // TTL) — on master the loop continued on the next turn, so steering it
+        // here is a step back. A continuation falls through to the queue
+        // branches, which carry the token.
         $('msg').value='';autoResize();
         // Do NOT clear pendingFiles yet — _trySteer uploads with clearPending=false,
         // and a failed steer must keep staged files available for the user's next explicit action.
@@ -1477,7 +1639,12 @@ async function send(){
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        // #7855 (round 6): this invocation may itself BE the continuation drain
+        // arriving while the session is busy. Its queue entry must carry the
+        // token, or the drained turn posts an empty ID and the goal loop ends.
+        const _interruptEntry={text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'};
+        if(_goalContinuationId) _interruptEntry.goal_continuation_id=_goalContinuationId;
+        queueSessionMessage(S.session.session_id,_interruptEntry);
         updateQueueBadge(S.session.session_id);
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
@@ -1491,7 +1658,12 @@ async function send(){
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        // #7855 (round 6): same contract as the interrupt branch — a
+        // continuation that arrives while the session is busy must keep its
+        // token on the queue entry so the drain re-posts it.
+        const _busyEntry={text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'};
+        if(_goalContinuationId) _busyEntry.goal_continuation_id=_goalContinuationId;
+        queueSessionMessage(S.session.session_id,_busyEntry);
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
         updateQueueBadge(S.session.session_id);
@@ -1842,7 +2014,12 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      // #7855: the admission token for a continuation being drained from the
+      // queue (kept through edits/combines/late sends). Bound to THIS send
+      // invocation, so it is absent on a genuine user turn — which is exactly
+      // the #6885 distinction — and a concurrent drain can never supply it.
+      goal_continuation_id:_goalContinuationId||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;
@@ -1875,7 +2052,7 @@ async function send(){
       if(typeof renderSessionList==='function') void renderSessionList();
       return;
     }
-    if(await _recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise)) return;
+    if(await _recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise,_goalContinuationId)) return;
     const conflictActiveStream=/session already has an active stream/i.test(errMsg);
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];
@@ -1884,7 +2061,14 @@ async function send(){
       stopClarifyPolling();
       // Keep the user's attempted turn by queueing it for after the current run.
       const _retryModelState=_chatPayloadModelState();
-      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'});
+      // #7855: a rejected continuation must keep its admission token. Dropping
+      // it here turned the retry into an ordinary turn and silently ended the
+      // goal loop. Re-read the token from THIS invocation (the rejected POST
+      // already consumed the server side), never from a shared slot.
+      const _retryContId=_normalizeGoalContinuationId(_goalContinuationId);
+      const _retryEntry={text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'};
+      if(_retryContId) _retryEntry.goal_continuation_id=_retryContId;
+      queueSessionMessage(activeSid,_retryEntry);
       updateQueueBadge(activeSid);
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
@@ -1908,7 +2092,11 @@ async function send(){
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
     // payload) and re-stage files so the user can re-send without retyping.
-    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
+    // #7855: a rejected START also never consumed the server's record, so the
+    // draft's continuation ID must come back with its text. Restoring only the
+    // text made the retry post an empty ID and the continuation became an
+    // ordinary turn.
+    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
@@ -6359,9 +6547,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(!continuation_prompt||sid!==activeSid)return;
         _applyToAnchor('goal_continue',d,e);
         const _modelState=_chatPayloadModelState();
+        // #7855: the server continuation ID — not the prompt text — is what
+        // admits this turn later, so carry it on the queued entry through
+        // inline edits and combines. An edited/combined/late continuation
+        // keeps its ID and keeps the goal; a genuine user message has none.
         _pendingGoalContinuation={
           sid,
           text:continuation_prompt,
+          goal_continuation_id:String(d.continuation_id||'').trim(),
           model:_modelState.model,
           model_provider:_modelState.model_provider,
           profile:S.activeProfile||'default',
@@ -6685,6 +6878,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             model:_goalNext.model,
             model_provider:_goalNext.model_provider,
             profile:_goalNext.profile,
+            // #7855: the admission token survives into the queue entry.
+            goal_continuation_id:_goalNext.goal_continuation_id||'',
           });
           if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
         }

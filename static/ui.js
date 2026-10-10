@@ -9354,7 +9354,11 @@ function setBusy(v){
         }
         autoResize();
         renderTray();
-        send();
+        // #7855 (round 5): pass the queued entry's continuation ID straight
+        // into THIS send() invocation. Round 4 published it to a shared module
+        // slot that any concurrent send could read, letting a genuine user
+        // turn consume the goal. An argument cannot leak across calls.
+        send({goalContinuationId:next.goal_continuation_id||''});
       },120);
     }
   }
@@ -9458,7 +9462,12 @@ function _renderQueueChips(sid){
         const liveQ=_getSessionQueue(sid,false);
         const first=snapshot.find(e=>e)||{};
         const firstFiles=(snapshot.find(e=>e&&Array.isArray(e.files)&&e.files.length)||{files:[]}).files;
-        liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,_queued_at:Date.now()});
+        // #7855: the combined entry keeps the FIRST continuation ID among the
+        // merged items. Combining a continuation with later user text still
+        // admits it (its ID is intact) — and a combine of pure user messages
+        // carries no ID, so it stays an ordinary turn.
+        const _contId=(snapshot.find(e=>e&&String(e.goal_continuation_id||'').trim())||{}).goal_continuation_id||'';
+        liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,goal_continuation_id:_contId,_queued_at:Date.now()});
         SESSION_QUEUES[sid]=liveQ;
         _persistSessionQueueStorage(sid,liveQ);
         delete _queueRenderKeys[sid];
@@ -9539,7 +9548,11 @@ function _renderQueueChips(sid){
         const liveQ=_getSessionQueue(sid,false);
         const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
         if(idx!==-1){
+          // #7855: keep the continuation ID when the user edits the text — the
+          // queue may rewrite the message, but the admission token stays with
+          // the entry (spread preserves it explicitly).
           liveQ[idx]={...liveQ[idx],text:newText};
+          if(liveQ[idx].goal_continuation_id==null) liveQ[idx].goal_continuation_id='';
           _persistSessionQueueStorage(sid,liveQ);
           delete _queueRenderKeys[sid];
           updateQueueBadge(sid);

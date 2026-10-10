@@ -46,9 +46,9 @@ def _helper_body() -> str:
     return MESSAGES_JS[start:end]
 
 
-def test_helper_has_new_three_arg_signature_and_guards():
+def test_helper_has_new_signature_and_guards():
     body = _helper_body()
-    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise)" in body
+    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId)" in body
     # No-op when there is nothing to restore (no text AND no staged files).
     assert "if(!restore&&!files.length) return false;" in body
     # Session-aware: never mutate a different session's visible composer.
@@ -87,9 +87,10 @@ def test_error_branch_restores_original_snapshot_not_mutated_payload():
     assert start != -1, "the /api/chat/start error branch must still push an Error turn"
     window = MESSAGES_JS[start:start + 1100]
     assert (
-        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
+        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);"
         in window
-    ), "the send-error path must restore the ORIGINAL captured snapshot (not `text`)"
+    ), ("the send-error path must restore the ORIGINAL captured snapshot (not `text`) "
+        "together with the invocation-bound continuation ID (#7855 round 6)")
 
 
 def test_send_still_clears_composer_on_the_happy_path():
@@ -152,7 +153,7 @@ def test_restore_persist_chains_after_the_clear_promise():
     assert "let _composerDraftClearPromise=null;" in MESSAGES_JS
     call = (
         "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, "
-        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
+        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);"
     )
     assert call in MESSAGES_JS, "send() must pass the clear promise into the restore helper"
 
@@ -161,6 +162,25 @@ def test_restore_persist_chains_after_the_clear_promise():
 # Behavioral test — actually execute the helper in a JS sandbox
 # ---------------------------------------------------------------------------
 
+def _messages_slice(start_marker: str, end_marker: str) -> str:
+    """Return a top-level function (or slice) from static/messages.js, inclusive."""
+    start = MESSAGES_JS.index(start_marker)
+    return MESSAGES_JS[start:MESSAGES_JS.index(end_marker, start)]
+
+
+# #7855 (round 6): the restore helper re-marks the composer as an identifiable
+# continuation draft, so every harness that runs it must also run the REAL
+# normalizer + draft accessors from static/messages.js (its module-scope
+# siblings) — a stubbed-out set would mask a regression in the wiring.
+_GUARD = (
+    _messages_slice("function _normalizeGoalContinuationId(", "\n// #7855")
+    + _messages_slice("function _setRestoredGoalContinuationDraft(",
+                      "function _clearRestoredGoalContinuationDraft(")
+    + _messages_slice("function _clearRestoredGoalContinuationDraft(",
+                      "\nfunction _bgTaskCompleteRingBufferAdd(")
+)
+
+
 def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, sid="sid-1"):
     """Execute _restoreComposerDraftAfterFailedSend in a node vm sandbox."""
     node = shutil.which("node")
@@ -168,6 +188,13 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         pytest.skip("node not available")
 
     body = _helper_body()
+    # #7855 (round 6): the restore helper re-marks the composer as an
+    # identifiable continuation draft, so the harness must run the REAL
+    # normalizer + draft accessors alongside it (module-scope siblings in
+    # static/messages.js) — a stubbed-out set would mask a wiring regression.
+    for _name in ("_normalizeGoalContinuationId", "_setRestoredGoalContinuationDraft",
+                  "_clearRestoredGoalContinuationDraft"):
+        assert f"function {_name}(" in MESSAGES_JS, f"{_name} must exist in static/messages.js"
     harness = textwrap.dedent(
         """
         const state = {
@@ -184,6 +211,8 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         function renderTray(){ state.trayRendered = true; }
         function _saveComposerDraftNow(sid, text, files){ state.saved = {sid, text, files}; }
 
+        %(guard)s
+        %(guard)s
         %(helper)s
 
         const ret = _restoreComposerDraftAfterFailedSend(%(draft_text)s, %(files)s, %(sid)s);
@@ -200,6 +229,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
     ) % {
         "initial_input": json.dumps(initial_input),
         "session": json.dumps({"session_id": visible_sid} if visible_sid else None),
+        "guard": _GUARD,
         "helper": body,
         "draft_text": json.dumps(draft_text),
         "files": json.dumps(files_snapshot),
@@ -285,6 +315,7 @@ def test_persist_is_ordered_after_the_clear_promise():
         function renderTray(){}
         function _saveComposerDraftNow(sid, text, files){ order.push('persist:' + text); }
 
+        %(guard)s
         %(helper)s
 
         // Clear POST resolves on a microtask; record its completion first.
@@ -295,7 +326,7 @@ def test_persist_is_ordered_after_the_clear_promise():
           console.log(JSON.stringify({order}));
         });
         """
-    ) % {"helper": body}
+    ) % {"guard": _GUARD, "helper": body}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip())
@@ -330,6 +361,7 @@ def test_deferred_persist_captures_a_post_restore_edit_not_the_stale_snapshot():
         function renderTray(){}
         function _saveComposerDraftNow(sid, text, files){ saved = {sid, text}; }
 
+        %(guard)s
         %(helper)s
 
         // Clear POST settles on a microtask; the deferred persist runs after it.
@@ -343,7 +375,7 @@ def test_deferred_persist_captures_a_post_restore_edit_not_the_stale_snapshot():
           console.log(JSON.stringify({afterRestore, saved}));
         });
         """
-    ) % {"helper": body}
+    ) % {"guard": _GUARD, "helper": body}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip())
@@ -372,6 +404,7 @@ def test_deferred_persist_skips_when_user_switched_away_after_restore():
         function renderTray(){}
         function _saveComposerDraftNow(sid, text, files){ saveCalls.push({sid, text}); }
 
+        %(guard)s
         %(helper)s
 
         const clearPromise = Promise.resolve();
@@ -383,7 +416,7 @@ def test_deferred_persist_skips_when_user_switched_away_after_restore():
           console.log(JSON.stringify({saveCalls}));
         });
         """
-    ) % {"helper": body}
+    ) % {"guard": _GUARD, "helper": body}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip())
@@ -413,6 +446,7 @@ def test_background_failure_persists_snapshot_since_no_live_composer():
         function renderTray(){}
         function _saveComposerDraftNow(sid, text, files){ saveCalls.push({sid, text}); }
 
+        %(guard)s
         %(helper)s
 
         const ret = _restoreComposerDraftAfterFailedSend('bg failed msg', [], 'sid-1', null);
@@ -420,7 +454,7 @@ def test_background_failure_persists_snapshot_since_no_live_composer():
           console.log(JSON.stringify({ret, saveCalls, visibleUntouched: state.input.value}));
         });
         """
-    ) % {"helper": body}
+    ) % {"guard": _GUARD, "helper": body}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip())
