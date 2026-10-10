@@ -344,6 +344,31 @@ def test_a_default_only_bind_whose_default_is_already_bound_still_saves(
     assert proj["workspaces"] == [stored, dead], proj
 
 
+def test_a_legacy_workspace_replacement_of_a_dead_binding_still_saves(
+    bind_env, monkeypatch
+):
+    """Greptile P2 (2026-10-10T00:24:37Z): the legacy alias REPLACES the stored
+    set before the default block runs, so replacing a deleted binding with a
+    live one is valid and must not be rejected by the stored-path pre-flight."""
+    good = str(bind_env.outside)
+    dead = str(bind_env.outside.parent / "removed-workspace")
+    handled, responses, proj = _drive_bind(
+        monkeypatch,
+        _project(workspaces=[dead], default_workspace=dead, workspace=dead),
+        {
+            "project_id": "proj_regate_1010",
+            "workspace": good,
+            "default_workspace": good,
+        },
+    )
+
+    assert handled is True, "the route must answer, not raise"
+    assert responses[-1].get("status", 200) == 200, responses
+    assert proj["workspaces"] == [good], proj
+    assert proj["workspace"] == good, proj
+    assert proj["default_workspace"] == good, proj
+
+
 # ---------------------------------------------------------------------------
 # 3 — frontend: arrows move the highlight, Enter/Space commits
 # ---------------------------------------------------------------------------

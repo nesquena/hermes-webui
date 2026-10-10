@@ -19278,8 +19278,15 @@ def handle_post(handler, parsed) -> bool:
             # Pre-flight those stored paths too, but ONLY when the second
             # resolve can actually run: an already-bound default short-circuits
             # before it, so extending the list there would reject a request that
-            # is saved successfully today.
-            if "default_workspace" in body and "workspaces" not in body:
+            # is saved successfully today. A legacy ``workspace`` alias is
+            # excluded for the same reason — it REPLACES the stored set before
+            # the default block runs, so a replacement of a deleted binding
+            # never touches the deleted path (Greptile P2 2026-10-10T00:24:37Z).
+            if (
+                "default_workspace" in body
+                and "workspaces" not in body
+                and "workspace" not in body
+            ):
                 _dw_pre = body.get("default_workspace")
                 if _dw_pre is not None and str(_dw_pre).strip() != "":
                     _dw_pre_str = str(_dw_pre).strip()
