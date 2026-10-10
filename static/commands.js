@@ -215,6 +215,23 @@ function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
   const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
   const seen=new Set(matches.map(c=>c.name));
+  // Notion prompt library triggers (/cr, /triage, ...). Loaded async elsewhere
+  // and consulted synchronously here: the palette is warmed on first composer
+  // focus alongside agent command metadata, so by the time a user types "/"
+  // the cache is populated. Builtin/agent/plugin commands always win on name
+  // collisions — a Notion trigger never shadows a real command.
+  for(const p of (_notionPromptCache||[])){
+    const name=String(p&&p.trigger||'').replace(/^\//,'').toLowerCase();
+    if(!name||!name.startsWith(q)||seen.has(name))continue;
+    matches.push({
+      name,
+      desc:String(p&&p.use_when||p&&p.label||'Notion prompt'),
+      arg:(Array.isArray(p.variables)&&p.variables.length)?p.variables.join(' '):undefined,
+      source:'notion',
+      notionId:p.id,
+    });
+    seen.add(name);
+  }
   const reserved=_getReservedSlashCommandSlugs();
   const bundleSlugs=new Set(_bundleCommandCache.map(bundle=>bundle.name));
   for(const [name, spec] of Object.entries(SLASH_SUBARG_SOURCES)){
@@ -295,6 +312,40 @@ let _slashSkillCachePromise=null;
 let _slashSkillCacheGen=0;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
+
+// ── Notion prompt library (slash-ready) ──────────────────────────────────────
+// Rows from the "Prompt Library — slash-ready" Notion database, published per
+// its contract: Status Ready/Tested AND Surfaces contains "Toolbelt". Loaded
+// lazily from /api/prompts/notion/palette; failures degrade to an empty list
+// so autocomplete never breaks when Notion is unreachable.
+let _notionPromptCache=null;
+let _notionPromptCachePromise=null;
+
+async function loadNotionPromptPalette(force=false){
+  if(_notionPromptCache&&!force)return _notionPromptCache;
+  if(_notionPromptCachePromise&&!force)return _notionPromptCachePromise;
+  _notionPromptCachePromise=(async()=>{
+    try{
+      const data=await api('/api/prompts/notion/palette');
+      _notionPromptCache=(data&&data.ok&&Array.isArray(data.prompts))?data.prompts:[];
+    }catch(_){
+      _notionPromptCache=[];
+    }finally{
+      _notionPromptCachePromise=null;
+    }
+    return _notionPromptCache;
+  })();
+  return _notionPromptCachePromise;
+}
+
+function invalidateNotionPromptPalette(){
+  _notionPromptCache=null;
+  _notionPromptCachePromise=null;
+}
+if(typeof window!=='undefined'){
+  window.loadNotionPromptPalette=loadNotionPromptPalette;
+  window.invalidateNotionPromptPalette=invalidateNotionPromptPalette;
+}
 
 // Invalidate the /api/models slash-suggestion cache. Called by panels.js
 // after a provider is added or removed so the next /model autocomplete
@@ -2351,6 +2402,11 @@ function ensureSkillCommandsLoadedForAutocomplete(){
   if(!_agentCommandCacheReady&&!_agentCommandCachePromise){
     loadAgentCommandMetadata().then(()=>{refreshSlashCommandDropdown();});
   }
+  // Notion prompt library palette warms alongside the other caches; a failed
+  // load degrades to an empty palette without touching the dropdown.
+  if(_notionPromptCache==null&&!_notionPromptCachePromise){
+    loadNotionPromptPalette().then(()=>{refreshSlashCommandDropdown();}).catch(()=>{});
+  }
 }
 
 // ── Autocomplete dropdown ───────────────────────────────────────────────────
@@ -2375,6 +2431,8 @@ function showCmdDropdown(matches){
       ? ` <span class="cmd-item-badge cmd-item-badge-skill">${esc(t('slash_skill_badge'))}</span>`
       : c.source==='bundle'
       ? ' <span class="cmd-item-badge">Bundle</span>'
+      : c.source==='notion'
+      ? ` <span class="cmd-item-badge cmd-item-badge-notion">Notion</span>`
       : '';
     if(c.source==='skill') el.classList.add('cmd-item-skill');
     if(isPath) el.classList.add('cmd-item-path');
