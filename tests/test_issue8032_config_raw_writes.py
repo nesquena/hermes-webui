@@ -575,3 +575,142 @@ def test_skill_toggle_preserves_nested_env_refs_in_platform_list(cfg_path, skill
     assert skills["platform_disabled"]["webui"] == ["${HERMES_TEST_DISABLED_ONE}", "demo"]
     assert skills["platform_disabled"]["telegram"] == [REF]
     _assert_refs_survive(cfg_path, "skills toggle (platform list)")
+
+
+# ── Gate findings on #8129 (adversarial Codex, 2026-10-10) ─────────────
+
+
+def test_raw_write_does_not_propagate_through_a_shared_yaml_anchor(cfg_path):
+    """A raw write snapshot must detach YAML aliases: editing the vision slot
+    must not also change a compression slot that shares its anchor (the
+    env-expanding reader always produced detached copies)."""
+    from api import config
+
+    text = cfg_path.read_text(encoding="utf-8") + (
+        "auxiliary:\n"
+        "  vision: &shared\n"
+        "    provider: openai\n"
+        "    model: gpt-4o\n"
+        "  compression: *shared\n"
+    )
+    cfg_path.write_text(text, encoding="utf-8")
+    _reset_config_caches()
+
+    config.set_auxiliary_model("vision", "openai", "gpt-4o-mini")
+    raw = _raw(cfg_path)
+    assert raw["auxiliary"]["vision"]["model"] == "gpt-4o-mini"
+    assert raw["auxiliary"]["compression"]["model"] == "gpt-4o"
+    _assert_refs_survive(cfg_path, "set_auxiliary_model (shared anchor)")
+
+
+def test_explicit_clear_survives_when_the_reference_expands_to_empty(cfg_path, monkeypatch):
+    """Clearing a field whose ${VAR} currently expands to "" must clear it, not
+    put the reference back."""
+    from api import config, dashboard_probe
+
+    assert config._preserve_env_ref("${HERMES_TEST_EMPTY_URL}", "") == ""
+    monkeypatch.setenv("HERMES_TEST_EMPTY_URL", "")
+    raw = _raw(cfg_path)
+    raw["webui"]["dashboard"]["url"] = "${HERMES_TEST_EMPTY_URL}"
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    _reset_config_caches()
+
+    dashboard_probe.save_dashboard_config({"enabled": "auto", "url": ""})
+    assert "url" not in _raw(cfg_path)["webui"]["dashboard"]
+    _assert_refs_survive(cfg_path, "save_dashboard_config (clear empty-expanding ref)")
+
+
+CP_URL_REF = "${HERMES_TEST_CP_URL}"
+CP_URL = "https://llm.example.test/v1?key=" + SECRET
+
+
+def test_named_custom_provider_url_is_written_as_its_template(cfg_path, monkeypatch):
+    """Selecting a named custom provider whose base_url is an env reference to a
+    secret-bearing URL must write that ${VAR} template into model.base_url,
+    never the expanded URL (gate repro: POST /api/default-model)."""
+    monkeypatch.setenv("HERMES_TEST_CP_URL", CP_URL)
+    raw = _raw(cfg_path)
+    raw["custom_providers"][0]["base_url"] = CP_URL_REF
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    _reset_config_caches()
+    # The provider resolver reads the in-memory config, so reload it from the
+    # file (as the server does on its next stat check).
+    from api import config as _config
+
+    _config.reload_config()
+
+    handler = _post(
+        "/api/default-model",
+        {"model": "@custom:synthetic:synthetic-model", "provider": "custom:synthetic"},
+    )
+    assert handler.status == 200, handler.json_body()
+    raw = _raw(cfg_path)
+    assert raw["model"].get("base_url") in (None, CP_URL_REF)
+    assert raw["custom_providers"][0]["base_url"] == CP_URL_REF
+    _assert_no_secret(cfg_path, "POST /api/default-model (named custom provider url)")
+
+
+def test_unnamed_custom_auxiliary_url_is_written_as_its_template(cfg_path, monkeypatch):
+    """An unnamed ``custom`` auxiliary slot derives its URL from the main model
+    block; an env reference to a secret-bearing URL there must not be expanded
+    into the slot (gate repro: POST /api/model/set auxiliary)."""
+    monkeypatch.setenv("HERMES_TEST_CP_URL", CP_URL)
+    raw = _raw(cfg_path)
+    raw["model"]["provider"] = "custom"
+    raw["model"]["base_url"] = CP_URL_REF
+    raw["custom_providers"] = []
+    raw.pop("auxiliary", None)
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    _reset_config_caches()
+    # The provider resolver reads the in-memory config, so reload it from the
+    # file (as the server does on its next stat check).
+    from api import config as _config
+
+    _config.reload_config()
+
+    handler = _post(
+        "/api/model/set",
+        {"scope": "auxiliary", "task": "vision", "provider": "custom", "model": "synthetic-model"},
+    )
+    assert handler.status == 200, handler.json_body()
+    raw = _raw(cfg_path)
+    assert raw["auxiliary"]["vision"].get("base_url") in (None, CP_URL_REF)
+    _assert_no_secret(cfg_path, "POST /api/model/set (unnamed custom auxiliary url)")
+
+
+TOKEN_REF = "${HERMES_TEST_TOKEN}"
+
+
+def test_reordered_same_length_scalar_list_keeps_its_template(cfg_path):
+    """Same-length scalar lists match by value, not position: moving an
+    env-backed arg must not bake the token (senior gate repro)."""
+    from api import config
+
+    out = config._restore_env_ref_templates({"args": [TOKEN, "--token"]}, {"args": ["--token", TOKEN_REF]})
+    assert out == {"args": [TOKEN_REF, "--token"]}
+    out3 = config._restore_env_ref_templates(
+        {"args": ["--a", "--b", TOKEN]}, {"args": ["--a", TOKEN_REF, "--b"]}
+    )
+    assert out3 == {"args": ["--a", "--b", TOKEN_REF]}
+    # A literal the user typed on disk is never swapped for a template.
+    assert config._restore_env_ref_templates(
+        {"args": ["plain-value", "--token"]}, {"args": ["--token", "plain-value"]}
+    ) == {"args": ["plain-value", "--token"]}
+
+
+def test_mcp_update_reordering_an_env_backed_arg_keeps_the_reference(cfg_path):
+    """Through the real MCP update handler: reordering args that contain the
+    expanded token keeps ``${HERMES_TEST_TOKEN}`` on disk."""
+    import api.routes as routes
+
+    raw = _raw(cfg_path)
+    raw.setdefault("mcp_servers", {})["reorder"] = {"command": "synthetic-mcp", "args": ["--token", TOKEN_REF]}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    _reset_config_caches()
+
+    handler = _FakeHandler()
+    routes._handle_mcp_server_update(handler, "reorder", {"command": "synthetic-mcp", "args": [TOKEN, "--token"]})
+    assert handler.status == 200, handler.json_body()
+    assert _raw(cfg_path)["mcp_servers"]["reorder"]["args"] == [TOKEN_REF, "--token"]
+    _assert_no_secret(cfg_path, "MCP update (reordered args)")
+

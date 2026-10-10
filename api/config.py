@@ -672,6 +672,31 @@ _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
 
 
+def _detached_copy(value, _active=None):
+    """Deep-copy a parsed YAML tree so every mapping/list OCCURRENCE is its own
+    object. ``copy.deepcopy`` keeps YAML anchor/alias identity (its memo maps a
+    shared node to one copy), so a writer that mutates one aliased slot in a
+    raw write snapshot would silently change every other slot sharing the
+    anchor. The env-expanding reader always produced detached copies; raw
+    write transactions (#8032) must too. A genuinely self-referential node
+    (a recursive alias) keeps deepcopy semantics instead of recursing forever.
+    """
+    if not isinstance(value, (dict, list)):
+        return value
+    if _active is None:
+        _active = set()
+    key = id(value)
+    if key in _active:
+        return copy.deepcopy(value)
+    _active.add(key)
+    try:
+        if isinstance(value, dict):
+            return {k: _detached_copy(v, _active) for k, v in value.items()}
+        return [_detached_copy(v, _active) for v in value]
+    finally:
+        _active.discard(key)
+
+
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
     """Return the RAW (un-env-expanded) parsed config dict, memoized on
     (resolved path, st_mtime_ns, st_size). Shared parse core for
@@ -707,7 +732,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
             raw = cached[1]
             if not isinstance(raw, dict):
                 return {}
-            return copy.deepcopy(raw) if _copy else raw
+            return _detached_copy(raw) if _copy else raw
 
     # Cache miss / stale: parse off disk. Done outside the lock so a slow parse
     # doesn't serialize unrelated paths; a concurrent duplicate parse is harmless.
@@ -720,7 +745,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     raw = loaded if isinstance(loaded, dict) else {}
     with _yaml_file_cache_lock:
         _yaml_file_cache[cache_key] = (stat_key, raw)
-    return copy.deepcopy(raw) if _copy else raw
+    return _detached_copy(raw) if _copy else raw
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
@@ -851,6 +876,10 @@ def _preserve_env_ref(raw_value, new_value, normalize=None):
     """
     if not _has_env_ref(raw_value) or not isinstance(new_value, str) or new_value == raw_value:
         return new_value
+    if new_value == "":
+        # An explicit clear is always the user's intent, even when the
+        # reference currently expands to "" (unset variable).
+        return new_value
     try:
         expanded = _expand_env_vars(raw_value)
         if normalize is not None:
@@ -886,6 +915,37 @@ def _items_by_resolved_name(items) -> dict | None:
     return indexed
 
 
+def _raw_endpoint_template(raw_cfg, resolved_url):
+    """Return the raw ``${VAR}`` base_url template from the config's own
+    endpoint sources (``custom_providers[*].base_url`` and ``model.base_url``)
+    whose current expansion equals *resolved_url*, or ``None``.
+
+    Selecting a named custom provider (or an unnamed custom auxiliary slot)
+    derives the destination URL from an env-EXPANDED provider entry; writing
+    that value would bake a secret-bearing URL into config.yaml (#8032). The
+    template from the authoritative source is written instead.
+    """
+    if not isinstance(raw_cfg, dict) or not isinstance(resolved_url, str) or not resolved_url:
+        return None
+    target = _normalize_base_url_for_compare(resolved_url)
+    candidates = []
+    providers = raw_cfg.get("custom_providers")
+    if isinstance(providers, list):
+        candidates.extend(cp.get("base_url") for cp in providers if isinstance(cp, dict))
+    model_block = raw_cfg.get("model")
+    if isinstance(model_block, dict):
+        candidates.append(model_block.get("base_url"))
+    for candidate in candidates:
+        if not _has_env_ref(candidate):
+            continue
+        try:
+            if _normalize_base_url_for_compare(_expand_env_vars(candidate)) == target:
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
 def _restore_env_ref_templates(new, raw):
     """Restore raw ``${VAR}`` templates wherever *new* still holds exactly
     their current expansion, so persisting a loaded (expanded) structure never
@@ -912,10 +972,10 @@ def _restore_env_ref_templates(new, raw):
                 _restore_env_ref_templates(item, raw_by_name.get(item["name"]))
                 for item in new
             ]
-        if len(new) == len(raw):
-            return [_restore_env_ref_templates(a, b) for a, b in zip(new, raw, strict=True)]
-        # Different length: only a scalar entry that is not a literal on disk
-        # and equals exactly one template's expansion can be restored.
+        # Scalar entries also match by VALUE: a reordered list (e.g. MCP args
+        # ``[--token, ${TOKEN}]`` saved as ``[<token>, --token]``) must still
+        # get its template back. Only a scalar that is not a literal on disk
+        # and equals a template's expansion is restored.
         templates: dict = {}
         for item in raw:
             if _has_env_ref(item):
@@ -924,12 +984,21 @@ def _restore_env_ref_templates(new, raw):
                 except Exception:
                     continue
         literals = {item for item in raw if isinstance(item, str) and not _has_env_ref(item)}
-        return [
-            templates[item]
-            if isinstance(item, str) and item not in literals and item in templates
-            else item
-            for item in new
-        ]
+
+        def _by_value(item):
+            if isinstance(item, str) and item not in literals and item in templates:
+                return templates[item]
+            return item
+
+        if len(new) == len(raw):
+            restored = []
+            for item, raw_item in zip(new, raw, strict=True):
+                value = _restore_env_ref_templates(item, raw_item)
+                if value is item and isinstance(item, str):
+                    value = _by_value(item)
+                restored.append(value)
+            return restored
+        return [_by_value(item) for item in new]
     return new
 
 
@@ -6634,9 +6703,10 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             )
 
         if resolved_base_url and not provider_override_won:
-            model_cfg["base_url"] = _preserve_env_ref(
+            _new_base_url = str(resolved_base_url).strip().rstrip("/")
+            model_cfg["base_url"] = _raw_endpoint_template(config_data, _new_base_url) or _preserve_env_ref(
                 raw_model_cfg.get("base_url"),
-                str(resolved_base_url).strip().rstrip("/"),
+                _new_base_url,
                 normalize=_normalize_base_url_for_compare,
             )
         elif persisted_provider != previous_provider:
@@ -6915,9 +6985,10 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     except Exception:
                         resolved_base_url = None
                 if resolved_base_url:
-                    slot_cfg["base_url"] = _preserve_env_ref(
+                    _slot_url = str(resolved_base_url).strip().rstrip("/")
+                    slot_cfg["base_url"] = _raw_endpoint_template(config_data, _slot_url) or _preserve_env_ref(
                         slot_cfg.get("base_url"),
-                        str(resolved_base_url).strip().rstrip("/"),
+                        _slot_url,
                         normalize=_normalize_base_url_for_compare,
                     )
             if advanced is not None:
