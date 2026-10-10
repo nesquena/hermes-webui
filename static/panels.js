@@ -4948,6 +4948,21 @@ async function clearConversation() {
     S.session = data.session;
     S.messages = [];
     S.toolCalls = [];
+    // The in-chat todos tray renders from S.todos + the INFLIGHT snapshot
+    // (ui.js), so clearing the transcript must drop BOTH: otherwise the tray
+    // keeps painting the cleared conversation's tasks and _currentTodos() hands
+    // the stale list back even after the tray is re-expanded (Greptile P1
+    // 2026-10-10T02:22:20Z).  Purge the in-flight TODO payload FIRST —
+    // _hydrateTodosFromSession() treats a present INFLIGHT[sid] as
+    // authoritative, so hydrating alone would install the very list we are
+    // clearing.  The stream payload (messages/uploads) is deliberately left
+    // alone.
+    if(typeof INFLIGHT==='object'&&INFLIGHT&&S.session&&S.session.session_id
+       &&INFLIGHT[S.session.session_id]){
+      delete INFLIGHT[S.session.session_id].todos;
+      delete INFLIGHT[S.session.session_id].todoStateMeta;
+    }
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     syncTopbar();
     renderMessages();
     showToast(t('conversation_cleared'));

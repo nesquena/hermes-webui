@@ -1961,3 +1961,63 @@ def test_profile_switch_arms_the_tab_mirror_guard_at_active_profile_change(tmp_p
     assert _run_node(tmp_path, "switch_guard_probe.js", script).strip() == "ok"
 
 
+# ---------------------------------------------------------------------------
+# Greptile P1 (2026-10-10T02:22:20Z) — clearing a conversation must also clear
+# the tray's tasks
+# ---------------------------------------------------------------------------
+
+_CLEAR_TODOS_PROBE = """
+const S = {todos: [], todoStateMeta: null, messages: [], session: null};
+const INFLIGHT = {};
+let _refreshCalls = 0;
+function _resetTodosRenderCache() {}
+function scheduleTodosRefresh() { _refreshCalls += 1; }
+__HYDRATE__
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+
+const SID = 's_clear';
+S.session = {session_id: SID};
+S.todos = [{id: 'old', content: 'stale task', status: 'pending'}];
+S.todoStateMeta = {ts: 5, source: 'sse', version: 1};
+INFLIGHT[SID] = {todos: S.todos.slice(), todoStateMeta: S.todoStateMeta};
+
+// (1) Hydrating WITHOUT purging INFLIGHT reinstalls the stale list — which is
+// exactly why the clear path has to drop the in-flight TODO payload first.
+_hydrateTodosFromSession(S.session);
+assert(S.todos.length === 1 && S.todos[0].id === 'old',
+  'INFLIGHT is authoritative: hydrating alone cannot clear the tray');
+
+// (2) The clear path's purge, then hydration: the tray ends up empty.
+delete INFLIGHT[SID].todos;
+delete INFLIGHT[SID].todoStateMeta;
+S.session = {session_id: SID};          // server-cleared session, no todo_state
+_hydrateTodosFromSession(S.session);
+assert(S.todos.length === 0, 'after the purge the tray must be empty, got ' + S.todos.length);
+assert(S.todoStateMeta === null, 'the snapshot sentinel must reset to null');
+assert(_refreshCalls >= 1, 'a tray refresh must be scheduled');
+console.log('ok');
+"""
+
+
+def test_clear_conversation_drops_the_tray_tasks(tmp_path):
+    """Greptile P1 (2026-10-10T02:22:20Z): clearConversation() cleared the
+    messages but left S.todos + the INFLIGHT snapshot, so the tray kept showing
+    the cleared conversation's tasks even after it was re-expanded."""
+    panels = _read_static("static/panels.js")
+    ui = _read_static("static/ui.js")
+    clear = _extract(
+        panels, "async function clearConversation() {", "\n// ── Skills panel ──"
+    )
+    # The clear path must purge the in-flight TODO payload and re-hydrate.
+    assert "delete INFLIGHT[S.session.session_id].todos;" in clear, clear
+    assert "delete INFLIGHT[S.session.session_id].todoStateMeta;" in clear, clear
+    assert "_hydrateTodosFromSession(S.session)" in clear, clear
+    hydrate = _extract(
+        ui,
+        "function _hydrateTodosFromSession(session){",
+        "function snapshotLiveTurnHtmlForSession(sid){",
+    )
+    script = _CLEAR_TODOS_PROBE.replace("__HYDRATE__", hydrate)
+    assert _run_node(tmp_path, "clear_todos_probe.js", script).strip() == "ok"
+
+
