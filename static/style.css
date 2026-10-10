@@ -3251,6 +3251,13 @@
        2026-10-08T09:54:47Z, must-fix 2: the mirror moved from the button onto the
        inner span, which is what carries the rows' column contract). */
     .chat-todos-head-inner{max-width:100%;padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
+    /* Phone tap target (#6978 greptile re-review on 6b718057): the disclosure
+       button's 35px band is below the 44px minimum this repo requires for
+       interactive elements, and no mobile rule grew it — the button stayed a
+       harder-than-required target on every phone width. The BUTTON grows here
+       (its inner span keeps the 35px content band and the reading column), so
+       only the hit surface changes and the collapsed strip gains 9px. */
+    .chat-todos-head{min-height:44px;}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
     .composer-wrap{padding:8px 10px calc(12px + var(--keyboard-bottom-inset, 0px))!important;padding-left:max(10px,env(safe-area-inset-left,0))!important;padding-right:max(10px,env(safe-area-inset-right,0))!important;}

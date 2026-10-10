@@ -1394,6 +1394,43 @@ def test_chat_todos_tray_is_capped_against_the_messages_shell():
     assert ".chat-todos-body{max-height:min(200px,40vh);}" in css
 
 
+def test_chat_todos_head_meets_the_44px_touch_target_on_phones():
+    """#6978 greptile re-review on 6b718057, P2 "Phone tap target is
+    undersized": the disclosure button's 35px band is below the 44px minimum the
+    repo requires for interactive elements, and no mobile rule grew it. The
+    <=640px block that already mirrors the header CONTENT onto the reading column
+    must also grow the BUTTON itself, without moving the 35px content band."""
+    css = _read_static("static/style.css")
+    at640 = css.index("@media(max-width:640px){")
+    inner = css.index(".chat-todos-head-inner{max-width:100%;", at640)
+    window = css[inner : inner + 1200]
+    assert ".chat-todos-head{min-height:44px;}" in window
+    # The base band stays 35px: only the hit surface grows on phones.
+    assert (
+        ".chat-todos-head{display:flex;align-items:center;gap:8px;width:100%;"
+        "min-height:35px;padding:0;" in css
+    )
+    # ...and the >=44px rule is NOT a global override that would change desktop.
+    assert ".chat-todos-head{min-height:44px;}" not in css[:at640]
+
+
+def test_readme_documents_the_in_chat_task_list_and_its_todos_panel_effect():
+    """#6978 greptile re-review on 6b718057, P2 "Task-list choice is
+    undocumented": AGENTS.md requires docs updates for user-facing workflow
+    changes, so README has to explain the opt-in default, where the setting
+    lives, and how the other Todos views come back."""
+    readme = _read_static("README.md")
+    assert "Task list in chat toggle (off by default)" in readme
+    assert "Settings -> Preferences" in readme
+    assert "sidebar **Todos** panel is hidden" in readme
+    # The Panels index names the same effect, so the choice is discoverable from
+    # the panel it hides.
+    assert (
+        "- **Todos** -- live task list from the current session; hidden while "
+        "the in-chat task list toggle is on" in readme
+    )
+
+
 def test_chat_todos_overflow_cue_is_strong_enough():
     """Ask 2: the 22px fade landed on a cancelled row that is already
     half-opacity and struck through, so it read as row styling; ~40px."""
