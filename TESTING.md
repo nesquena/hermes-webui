@@ -468,6 +468,45 @@ EXPECT:
   - The model dropdown remains usable without overlapping the send button or pushing controls out of view
 FAIL: Linear meter still shown, tooltip missing/incomplete, controls overlap, or footer wraps in a broken way.
 
+### T3.4: Context Window Follows the Selected Session Model
+SETUP: Use isolated test state and a configured pair of models with different
+context windows. Complete a response on the first model to populate usage data.
+STEPS:
+  1. Switch the session to the second model in the composer model selector.
+  2. Inspect the context badge tooltip, then trigger another usage-indicator refresh.
+  3. Repeat with `/model <provider>/<model>` for a cross-provider model not in the dropdown.
+  4. Start a new conversation with the second model selected; inspect the
+     `/api/session/new` response's `session.context_length`.
+  5. Reopen a conversation whose initial metadata uses deferred model resolution;
+     inspect the `resolve_model=1` response and the subsequent badge refresh.
+EXPECT:
+  - A positive resolved context window belongs to the selected session model,
+    not the previous model's usage snapshot (for example, 500k rather than 272k).
+  - `S.session` and an existing `S.lastUsage` agree on the resolved window and
+    threshold; cumulative input/output token counts and cost are retained.
+  - A deferred, model-selector, or cross-provider `/model` response for a session
+    that is no longer active does not change the active session's model, provider,
+    context metadata, usage snapshot, token/cost counters, or response-driven UI.
+    Hold the update response (and separately its JSON decoding for `/model`),
+    switch from session A to B, then release it. Repeat after closing A.
+  - `/model` captures its session before fetching the catalog, not just before
+    posting the model update. Hold `/api/models` response and JSON decoding
+    separately, then switch/close the session: no update POST, dropdown mutation,
+    persistence, or command feedback may follow. Repeat for a dropdown match and
+    no-match fallback, and for an empty composer that gains a session while waiting.
+    Same-session and still-empty composer commands retain their normal behavior.
+  - Explicit foreign `session_id` payloads are rejected. Legacy responses without
+    that field still work for the captured active request target, but cannot be
+    applied after that target is replaced.
+  - New plain conversations remain ephemeral until normal persistence; this
+    check does not require a new empty session file to be written.
+FAIL: The badge snaps back to the previous model's window after refresh, the new
+session response has no resolved window when one is known, or late hydration
+changes another conversation.
+Automated coverage: `./scripts/test.sh -q tests/test_issue_grok46_context_window_mismatch.py tests/test_grok_context_window_runtime.py tests/test_model_response_session_ownership.py tests/test_slash_model_catalog_ownership.py`.
+The runtime tests execute real frontend functions in Node.js with isolated API
+boundaries and explicitly deferred response/JSON promises (no timing sleeps); they do not certify browser layout or a provider's current catalog.
+
 ---
 
 ## Section 4: File Upload
