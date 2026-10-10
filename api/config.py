@@ -7493,7 +7493,18 @@ def _static_models_catalog_without_live_probes() -> dict:
         # group when the live-rebuild cache is cold.
         try:
             for _plugin_pid in list(_plugin_model_provider_profiles().keys()):
-                if not _plugin_pid or not _provider_has_key(_plugin_pid):
+                if not _plugin_pid:
+                    continue
+                _plugin_authenticated = _provider_has_key(_plugin_pid)
+                if not _plugin_authenticated:
+                    try:
+                        from hermes_cli.auth import get_auth_status as _plugin_auth_status
+                        _plugin_authenticated = bool(
+                            _plugin_auth_status(_plugin_pid).get("logged_in")
+                        )
+                    except Exception:
+                        logger.debug("Plugin provider auth check failed for %s", _plugin_pid)
+                if not _plugin_authenticated:
                     continue
                 _canonical = _canonicalise_provider_id(_plugin_pid) or _plugin_pid
                 if _canonical:
