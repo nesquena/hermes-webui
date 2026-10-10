@@ -19,6 +19,7 @@ WHAT IT CHECKS, with the approval card visible and respondApproval recorded
   - Enter in the composer approves nothing;
   - Enter in an editor that blurs itself, or on a control that removes itself,
     approves nothing (the shortcut judges the key's target, not where focus ended);
+  - Enter on a roleless widget that consumes it (preventDefault) approves nothing;
   - Space on "Deny" denies (control: Space was never intercepted);
   - with the card hidden, Enter approves nothing.
 
@@ -38,6 +39,7 @@ EXIT CODES
   2 — environment/setup failure (server didn't boot, playwright missing, etc.)
 """
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -77,6 +79,17 @@ SETUP_JS = """() => {
     editor.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); editor.blur(); } });
     document.body.appendChild(editor);
   }
+  // A roleless custom widget (no control tag, role or contenteditable) that handles
+  // Enter itself: only e.defaultPrevented tells the shortcut to stay out (Greptile
+  // on #8134). Rebuilt for every case like the pill below.
+  const oldWidget = document.getElementById('approvalEnterConsumingWidget');
+  if (oldWidget) oldWidget.remove();
+  const widget = document.createElement('div');
+  widget.id = 'approvalEnterConsumingWidget';
+  widget.tabIndex = 0;
+  widget.textContent = 'custom widget';
+  widget.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); window.__probeClicks += 1; } });
+  document.body.appendChild(widget);
   // Like "Show earlier steps": Enter activates the control and it removes itself.
   // Rebuilt for every case so each run starts with a fresh control.
   const old = document.getElementById('approvalEnterSelfRemoving');
@@ -130,6 +143,7 @@ CASES = [
     ("Enter in the composer", "#msg", "Enter", True, [], 0),
     ("Enter in an editor that blurs itself on Enter", "#approvalEnterSelfBlurEditor", "Enter", True, [], 0),
     ("Enter on a control that removes itself on Enter", "#approvalEnterSelfRemoving", "Enter", True, [], 1),
+    ("Enter on a roleless widget that consumes Enter", "#approvalEnterConsumingWidget", "Enter", True, [], 1),
     ("Space on Deny", "#approvalBtnDeny", "Space", True, ["deny"], 0),
     ("Enter with the card hidden", None, "Enter", False, [], 0),
 ]
@@ -208,6 +222,14 @@ def main():
         "HERMES_WEBUI_SKIP_ONBOARDING": "1",
         "HERMES_WEBUI_AGENT_DIR": os.path.join(state_dir, "no-agent"),
     })
+
+    # A server already listening on PORT would answer /health and the checks would
+    # silently run against ITS code, not this checkout's. Refuse instead.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        if probe.connect_ex(("127.0.0.1", PORT)) == 0:
+            print(f"SETUP FAIL: port {PORT} is already in use; set APPROVAL_ENTER_PORT", file=sys.stderr)
+            return 2
 
     log = open(os.path.join(state_dir, "server.log"), "w")
     proc = subprocess.Popen(
