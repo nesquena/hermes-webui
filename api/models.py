@@ -1459,6 +1459,116 @@ def _validated_webui_pending_user_timestamp_identity(session, value):
     return (stream_id, pending_timestamp)
 
 
+_OOB_ANY_OPEN_RE = re.compile(
+    r'\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)\s*.*?)?\]',
+    re.IGNORECASE,
+)
+_OOB_ANY_CLOSE_RE = re.compile(
+    r'\[/OUT-OF-BAND\s+USER\s+MESSAGE\]',
+    re.IGNORECASE,
+)
+
+
+def _unwrap_single_oob_frame(content: str) -> str | None:
+    """Unwrap exactly one fully-validated [OUT-OF-BAND USER MESSAGE] frame.
+
+    Moved here from ``api/streaming.py`` (#7834 / #7910 SHOULD-FIX) so the
+    sidecar, state.db projection and streaming scrub share ONE linear
+    ``finditer`` implementation. The PR's own anchored regex re-scanned a long
+    body once per candidate split and backtracked quadratically (32k-space
+    body: 1.4s vs 0.07ms here).
+
+    Returns the extracted inner user text if and only if ``content`` consists
+    of exactly one valid opening tag and one valid closing tag wrapping the
+    user content. If markers are multiple, nested, incomplete, or ambiguous,
+    returns None so callers preserve the row byte-for-byte.
+    """
+    if not isinstance(content, str):
+        return None
+    stripped = content.strip()
+    if not stripped:
+        return None
+
+    open_matches = list(_OOB_ANY_OPEN_RE.finditer(stripped))
+    close_matches = list(_OOB_ANY_CLOSE_RE.finditer(stripped))
+
+    # Must have exactly one opening marker and one closing marker
+    if len(open_matches) != 1 or len(close_matches) != 1:
+        return None
+
+    open_m = open_matches[0]
+    close_m = close_matches[0]
+
+    # Opening marker must be at the very start of stripped content
+    if open_m.start() != 0:
+        return None
+
+    # Closing marker must be at the very end of stripped content
+    if close_m.end() != len(stripped):
+        return None
+
+    # Opening marker must end before closing marker starts
+    if open_m.end() > close_m.start():
+        return None
+
+    inner = stripped[open_m.end():close_m.start()]
+    # Strip surrounding whitespace/newlines from the extracted user text
+    return inner.strip('\r\n').strip()
+
+
+def _unwrap_steer_frame_text(content):
+    """Unwrap a single complete [OUT-OF-BAND USER MESSAGE] frame (#7834).
+
+    When Hermes Agent persists a steer turn, it wraps the user instruction in
+    an out-of-band delivery frame so the runtime and replay loop can treat it
+    as an out-of-band injection.  In WebUI transcript queries and visible keys,
+    we project the clean user text while preserving the raw transport envelope
+    in ``api_content``.
+
+    Legacy tool rows, untyped user messages, and rows where markers are
+    multiple, nested, incomplete, or contain ambiguous delimiters are preserved
+    byte-for-byte.  Deliberately NOT named ``_unwrap_steer_row_oob_marker``:
+    that name belongs to the dict-shaped scrubber in ``api/streaming.py`` and
+    two different signatures under one name was how the two unwraps drifted.
+    """
+    if not isinstance(content, str):
+        return content
+    unwrapped = _unwrap_single_oob_frame(content)
+    return content if unwrapped is None else unwrapped
+
+
+def _normalize_sidecar_steer_row(message):
+    """Normalize complete typed steer frames in a sidecar message row (#7834)."""
+    if not isinstance(message, dict):
+        return
+    if message.get('role') == 'user' and message.get('display_kind') == 'steer':
+        raw_content = message.get('content')
+        if isinstance(raw_content, str):
+            unwrapped = _unwrap_steer_frame_text(raw_content)
+            if unwrapped != raw_content:
+                if 'api_content' not in message or not message.get('api_content'):
+                    message['api_content'] = raw_content
+                message['content'] = unwrapped
+        elif isinstance(raw_content, list) and len(raw_content) == 1 and isinstance(raw_content[0], dict):
+            part = raw_content[0]
+            if part.get('type') == 'text' and isinstance(part.get('text'), str):
+                raw_text = part['text']
+                unwrapped = _unwrap_steer_frame_text(raw_text)
+                if unwrapped != raw_text:
+                    if 'api_content' not in message or not message.get('api_content'):
+                        message['api_content'] = raw_text
+                    part['text'] = unwrapped
+
+
+def _normalize_sidecar_steer_messages(messages):
+    """Normalize complete typed steer frames in sidecar messages (#7834)."""
+    if not isinstance(messages, list):
+        return messages
+    for msg in messages:
+        _normalize_sidecar_steer_row(msg)
+    return messages
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1548,6 +1658,7 @@ class Session:
         # Preserve malformed persisted containers so save() can fail closed
         # instead of silently normalizing a dict/string to an empty transcript.
         self.messages = messages if messages is not None else []
+        _normalize_sidecar_steer_messages(self.messages)
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
@@ -1572,6 +1683,7 @@ class Session:
             )
         )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
+        _normalize_sidecar_steer_messages(self.context_messages)
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
         self.compression_anchor_summary = compression_anchor_summary
@@ -1986,6 +2098,10 @@ class Session:
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        if isinstance(data.get('messages'), list):
+            _normalize_sidecar_steer_messages(data['messages'])
+        if isinstance(data.get('context_messages'), list):
+            _normalize_sidecar_steer_messages(data['context_messages'])
         session = cls(**data)
         if _collapsed_partials:
             try:
@@ -10784,6 +10900,12 @@ def _project_state_db_message(row, available, id_col, optional, *, include_row_i
         msg['_state_db_row_id'] = row['id']
     if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
         msg['name'] = msg['tool_name']
+    # CORE 1 (#7910): the projected row goes through the SAME normalization the
+    # sidecar already gets, so a legacy steer stored as a single-text-part list
+    # (the Agent's \x00json: storage form) unwraps here too instead of keeping
+    # the raw frame while its sidecar twin is already clean -- which keyed the
+    # pair differently and duplicated the steer on reload and next-send.
+    _normalize_sidecar_steer_row(msg)
     return msg
 
 
@@ -10901,6 +11023,7 @@ def get_state_db_session_messages(
                 # sidecar in the WebUI's internal history; the provider-safe
                 # projection strips it before any direct API request.
                 'api_content',
+                'display_kind',
             ]
             id_col = ['id'] if 'id' in available else []
             revision_cols = []
@@ -11178,34 +11301,43 @@ def get_state_db_session_message_keys_before_timestamp(
             if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
                 return None
             api_content_select = ", api_content" if "api_content" in available else ""
+            display_kind_select = ", display_kind" if "display_kind" in available else ""
             cur.execute(
                 f"""
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
-                    tool_calls{api_content_select}
+                    tool_calls{api_content_select}{display_kind_select}
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
                 ORDER BY timestamp ASC, id ASC
                 """,
                 (str(sid), before_ts),
             )
-            return [
-                _session_message_visible_key(
-                    {
-                        "role": row["role"],
-                        # Same guarded decode as the projected tail: prefix and
-                        # tail keys must share one representation or the
-                        # prefix/tail collision proof can miss a genuine
-                        # repeated recovered turn.
-                        "content": _decode_state_db_content(row["content"]),
-                        "tool_calls": _json_loads_if_string(row["tool_calls"]),
-                        "api_content": row["api_content"] if "api_content" in available else None,
-                    },
-                    normalize_workspace_prefix=True,
+            rows = []
+            for row in cur.fetchall():
+                # CORE 1 (#7910): the prefix keys must apply the IDENTICAL
+                # normalization the sidecar and the canonical projection use,
+                # including the list-based (single-text-part) legacy steer.
+                entry = {
+                    "role": row["role"],
+                    # Same guarded decode as the projected tail: prefix and
+                    # tail keys must share one representation or the
+                    # prefix/tail collision proof can miss a genuine
+                    # repeated recovered turn.
+                    "content": _decode_state_db_content(row["content"]),
+                    "tool_calls": _json_loads_if_string(row["tool_calls"]),
+                    "api_content": row["api_content"] if "api_content" in available else None,
+                    "display_kind": row["display_kind"] if "display_kind" in available else None,
+                }
+                _normalize_sidecar_steer_row(entry)
+                rows.append(
+                    _session_message_visible_key(
+                        entry,
+                        normalize_workspace_prefix=True,
+                    )
                 )
-                for row in cur.fetchall()
-            ]
+            return rows
     except Exception:
         return None
 
@@ -11293,6 +11425,8 @@ def get_state_db_regeneration_tail_snapshot(
                 prefix_key_cols += ", tool_calls"
             if 'api_content' in available:
                 prefix_key_cols += ", api_content"
+            if 'display_kind' in available:
+                prefix_key_cols += ", display_kind"
             prefix_key_sql = (
                 f"SELECT {prefix_key_cols} FROM messages "
                 "WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ? "
@@ -11303,20 +11437,29 @@ def get_state_db_regeneration_tail_snapshot(
             except Exception:
                 cur.execute("ROLLBACK")
                 return None
-            prefix_keys = [
-                _session_message_visible_key({
+            prefix_keys = []
+            for r in cur.fetchall():
+                # CORE 1 (#7910): same normalization as the canonical
+                # projection and the sidecar, list-shaped steers included.
+                entry = {
                     "role": r["role"],
                     "content": _decode_state_db_content(r["content"]),
                     "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
                     "api_content": r["api_content"] if "api_content" in r.keys() else None,
-                }, normalize_workspace_prefix=True)
-                for r in cur.fetchall()
-            ]
+                    "display_kind": r["display_kind"] if "display_kind" in r.keys() else None,
+                }
+                _normalize_sidecar_steer_row(entry)
+                prefix_keys.append(
+                    _session_message_visible_key(
+                        entry,
+                        normalize_workspace_prefix=True,
+                    )
+                )
             # 3) bounded tail (rows >= floor) with the canonical projection
             optional = [
                 'tool_call_id', 'tool_calls', 'tool_name', 'reasoning',
                 'reasoning_details', 'codex_reasoning_items', 'reasoning_content',
-                'codex_message_items', 'api_content',
+                'codex_message_items', 'api_content', 'display_kind',
             ]
             tail_select = ['id', 'role', 'content', 'timestamp'] if 'id' in available else ['role', 'content', 'timestamp']
             for col in optional + (['active'] if 'active' in available else []):
@@ -11447,14 +11590,47 @@ def _session_message_api_content_key(msg: dict | None):
     return value if isinstance(value, str) and value else None
 
 
-def _session_message_key_with_sidecar(base_key: tuple, msg: dict) -> tuple:
+def _steer_frame_identity(message):
+    """``(clean_text, raw_frame)`` when a user row is exactly one steer frame.
+
+    Master's state.db projection emitted typed steer rows as
+    ``{role, content(raw), timestamp}`` with no ``display_kind``, and
+    ``import_cli_session`` persists exactly that into sidecars.  The same
+    steer therefore reaches reconciliation from two shapes: an untyped
+    sidecar row still holding the raw transport frame, and a typed state.db
+    row keyed as ``(user, clean, ..., api=raw)``.  Returning both
+    representations lets the two key builders agree on one identity -- key on
+    the clean text and carry the raw frame in the sidecar slot -- without
+    touching the stored content.  A user who typed the marker text into a
+    normal message keys identically on both sides, so it stays untouched.
+    """
+    if not isinstance(message, dict):
+        return None
+    if str(message.get("role") or "").lower() != "user":
+        return None
+    content = message.get("content")
+    if not isinstance(content, str):
+        return None
+    clean = _unwrap_single_oob_frame(content)
+    if clean is None:
+        return None
+    return (clean, content)
+
+
+def _session_message_key_with_sidecar(base_key: tuple, msg: dict, sidecar=None) -> tuple:
     """Append provider sidecar identity only when one is actually present.
 
     The no-sidecar key shape is an internal compatibility surface used by
     reconciliation tests and callers.  A present sidecar must extend that
     identity so different provider bytes cannot collapse into one duplicate.
+
+    ``sidecar`` lets the caller supply the slot when the row does not store
+    it: a legacy steer row keys with its raw transport frame as the slot even
+    though it has no ``api_content`` (#7834), so it matches the typed state.db
+    twin that does.
     """
-    sidecar = _session_message_api_content_key(msg)
+    if sidecar is None:
+        sidecar = _session_message_api_content_key(msg)
     return base_key if sidecar is None else (*base_key, sidecar)
 
 
@@ -12534,7 +12710,17 @@ def _session_message_content_key(
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
     role = str(msg.get("role") or "")
-    content = _normalized_session_message_content(msg)
+    # MUST-FIX (#7910): an untyped sidecar steer still holds the raw frame
+    # while its typed state.db twin keys as (clean, api=raw). Keying on the
+    # clean text and carrying the raw frame in the sidecar slot collapses the
+    # pair instead of doubling the steer.
+    steer_frame = _steer_frame_identity(msg)
+    if steer_frame is not None:
+        content = " ".join(steer_frame[0].split())
+        sidecar = _session_message_api_content_key(msg) or steer_frame[1]
+    else:
+        content = _normalized_session_message_content(msg)
+        sidecar = None
     if role == "user" and normalize_workspace_prefix and isinstance(content, str):
         # WebUI sends the model a workspace-prefixed user_message
         # ("[Workspace::v1: /path]\n<text>") while the visible/optimistic
@@ -12560,7 +12746,7 @@ def _session_message_content_key(
         content,
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
-    ), msg)
+    ), msg, sidecar)
 
 
 def _session_message_visible_key(
@@ -12577,7 +12763,16 @@ def _session_message_visible_key(
     _tc = msg.get("tool_calls")
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
     role = str(msg.get("role") or "")
-    content = _normalized_session_message_content(msg)
+    # MUST-FIX (#7910): same frame-aware identity as the content key, so the
+    # regeneration prefix check sees one key per steer no matter which of the
+    # six sidecar/state.db shapes produced the row.
+    steer_frame = _steer_frame_identity(msg)
+    if steer_frame is not None:
+        content = " ".join(steer_frame[0].split())
+        sidecar = _session_message_api_content_key(msg) or steer_frame[1]
+    else:
+        content = _normalized_session_message_content(msg)
+        sidecar = None
     if role == "user" and normalize_workspace_prefix and isinstance(content, str):
         # state.db stores the model-facing workspace-prefixed prompt while the
         # WebUI sidecar owns the bare visible text. Fold that protocol wrapper
@@ -12592,7 +12787,7 @@ def _session_message_visible_key(
         role,
         content,
         _tc_key,
-    ), msg)
+    ), msg, sidecar)
 
 
 def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
@@ -13290,6 +13485,36 @@ def _context_messages_include_compression_marker(messages: list) -> bool:
     return False
 
 
+def _compression_anchor_text_variants(message) -> set:
+    """Alternate normalized texts a typed steer row can legitimately present.
+
+    CORE 2 (#7910): ``_project_state_db_message`` exposes the clean steer text
+    while the raw transport frame survives in ``api_content``, but a
+    compression anchor persisted before the #7600 scrub (or by the streaming
+    builder, which truncates before collapsing whitespace) still carries the
+    raw frame. Matching only the projected text made the anchor unverifiable,
+    so the context-only fallback silently dropped every later SQLite row from
+    next-send. Only representations of the SAME frame are offered -- role,
+    timestamp and attachment checks still gate the match.
+    """
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "user":
+        return set()
+    variants = set()
+    for value in (message.get("content"), message.get("api_content")):
+        if not isinstance(value, str) or not value:
+            continue
+        clean = _unwrap_single_oob_frame(value)
+        if clean is None:
+            continue
+        variants.add(_normalized_compression_anchor_text(clean))
+        variants.add(_normalized_compression_anchor_text(value))
+        if len(value) > 160:
+            # Streaming's builder truncates to the anchor budget first, so a
+            # frame cut mid-text normalizes differently than one cut after.
+            variants.add(_normalized_compression_anchor_text(value[:160]))
+    return variants
+
+
 def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
     if not isinstance(anchor_key, dict):
         return None
@@ -13330,7 +13555,14 @@ def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
         # In that shape the timestamp + role + attachment count is the boundary;
         # apply text comparison only when the anchor actually captured text.
         message_text = _normalized_compression_anchor_text(_message_content_text(message))
-        if anchor_text and message_text != anchor_text:
+        if (
+            anchor_text
+            and message_text != anchor_text
+            # CORE 2 (#7910): a typed steer row may present either the clean
+            # text or the preserved raw frame; the persisted anchor holds
+            # whichever of the two was current when compression ran.
+            and anchor_text not in _compression_anchor_text_variants(message)
+        ):
             continue
 
         message_ts = _compression_anchor_timestamp_as_float(
@@ -14501,6 +14733,11 @@ def reconciled_state_db_messages_for_session(
             using_context_messages = True
     if not local_messages:
         local_messages = getattr(session, 'messages', None) or []
+    if session is not None:
+        _normalize_sidecar_steer_messages(getattr(session, 'messages', None))
+        _normalize_sidecar_steer_messages(getattr(session, 'context_messages', None))
+    if local_messages:
+        _normalize_sidecar_steer_messages(local_messages)
     if state_messages is None:
         session_id = getattr(session, 'session_id', None)
         session_profile = getattr(session, 'profile', None)
