@@ -135,6 +135,10 @@
 
 ### Fixed
 
+- **Signing in works when another app on the same host sets a malformed cookie.** A cookie with illegal characters
+  from a different service on the same host or domain made the WebUI ignore every cookie after it, so a correct password
+  bounced back to the login page and a switched profile fell back to `default`. Cookies are now read one pair at a time,
+  for both the session and the profile cookie. Thanks @pcsokonay. (#8124, #8123)
 - **A Git "terminal prompts disabled" answer from Git Credential Manager is reported as an authentication failure.**
   Workspace Git status and fetch now show the sign-in message instead of a generic Git error when GCM refuses to prompt
   because interactivity is disabled. Thanks @PeterPunk1320. (#8127)
