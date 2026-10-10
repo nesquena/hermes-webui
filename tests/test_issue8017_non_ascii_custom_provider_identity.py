@@ -1105,6 +1105,26 @@ def _load(cfg_path):
     return loaded
 
 
+@pytest.fixture(autouse=True)
+def _restore_shared_config():
+    """Undo the picker tests' in-place mutation of the shared ``config.cfg``.
+
+    ``_load`` clears and refills the module-global config dict, which is the same
+    object as ``config._cfg_cache`` (``cfg`` is an alias). Nothing restored it, so a
+    later test could inherit this file's fake provider config and its result would
+    depend on test order. Snapshot the dict and the mtime/path guards and put them
+    back, so the fake config never escapes this module.
+    """
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    old_path = getattr(config, "_cfg_path", None)
+    yield
+    config.cfg.clear()
+    config.cfg.update(old_cfg)
+    config._cfg_mtime = old_mtime
+    config._cfg_path = old_path
+
+
 def test_set_default_model_keeps_the_model_key_after_picker_click(monkeypatch, tmp_path):
     """The picker's own write must not strip the model connection (r6 MUST-FIX a)."""
     monkeypatch.setenv("MODEL_KEY", "sk-modelenv")
@@ -1218,6 +1238,51 @@ def test_set_default_model_drops_the_previous_routes_key_for_a_keyless_entry(mon
         "the stranded previous-route key must be absent from the block on disk"
     )
     assert not on_disk["model"].get("key_env"), "and so must any key_env form of it"
+
+
+def test_set_default_model_drops_the_previous_routes_key_cmd_for_a_keyless_entry(monkeypatch, tmp_path):
+    """The block's ``key_cmd``/``credential_pool`` must not follow the pick either.
+
+    The cleanup that drops the previous route's credential covered only ``api_key``
+    and ``key_env``, so a block whose credential was a ``key_cmd`` (a command that
+    prints a fresh bearer) or a ``credential_pool`` still handed the old token to the
+    newly selected entry's host. Every credential source the block can carry must be
+    dropped together, so the route fails closed exactly as an ASCII keyless entry does.
+    """
+    U0 = "http://127.0.0.1:8317/v1"
+    U = "http://127.0.0.1:9000/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        f"  base_url: {U0}\n"
+        "  key_cmd: printf sk-old\n"
+        "  credential_pool:\n"
+        "    - name: poolA\n"
+        "custom_providers:\n"
+        "  - name: 晨光鑫遇专用\n"
+        f"    base_url: {U}\n"
+        "    model: chat-model\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    result = config.set_hermes_default_model("chat-model", provider="custom:晨光鑫遇专用")
+    assert result["ok"] is True
+
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert not on_disk["model"].get("key_cmd"), (
+        "the previous route's key_cmd must not stay on the block for the new host"
+    )
+    assert not on_disk["model"].get("credential_pool"), (
+        "and neither must its credential_pool"
+    )
+    assert config.resolve_custom_provider_connection("custom:晨光鑫遇专用") == (None, U), (
+        "the route must fail closed exactly as an ASCII keyless entry does"
+    )
 
 
 def test_endpointless_entry_with_a_key_inherits_the_model_connection(monkeypatch, tmp_path):

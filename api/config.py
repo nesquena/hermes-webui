@@ -4414,6 +4414,14 @@ def resolve_custom_provider_connection(
 # into a 401.
 KEYLESS_CUSTOM_API_KEY = "dummy-key"
 
+# Credential-source fields a record, or the ``model:`` block once the picker
+# rewrites ``model.provider`` to name a fallback entry's slug, can carry. When
+# that block did NOT already serve the selected entry, every one of these still
+# belongs to the previous route and must be dropped together; dropping only
+# ``api_key``/``key_env`` left a ``key_cmd``'s minted bearer and a rotating pool
+# pointed at the new host (#8017 review).
+CUSTOM_CREDENTIAL_SOURCE_FIELDS = ("api_key", "key_env", "key_cmd", "credential_pool")
+
 # The constructor-routing fields AIAgent takes beside provider/base_url/api_key.
 # They travel with the connection: a bundle that replaces the endpoint and the
 # credential but leaves these behind builds an agent whose wire protocol
@@ -6884,7 +6892,7 @@ def _selected_fallback_entry_declares_no_credential(provider: object, config_dat
 
     Such an entry is served by the ``model:`` block after the picker names its slug
     (``_select_custom_provider_record``'s preference block). When the block did NOT
-    serve that entry before the click, the block's ``api_key``/``key_env`` belong to
+    serve that entry before the click, the block's credential sources belong to
     the previous route, and leaving them in place would send that credential to
     this entry's endpoint. The caller then drops them so the route fails closed
     exactly as an ASCII keyless entry does.
@@ -6987,13 +6995,15 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             and _selected_fallback_entry_declares_no_credential(persisted_provider, config_data)
         ):
             # The block now names a keyless fallback entry it did not serve before
-            # the click, so its credential is the PREVIOUS route's. The resolver
-            # treats the block as that entry's connection; keeping the key here
-            # would send it to the new endpoint. Drop it so the route fails closed
-            # like an ASCII keyless entry (an explicit key in ``advanced`` below
-            # still wins).
-            model_cfg.pop("api_key", None)
-            model_cfg.pop("key_env", None)
+            # the click, so its credentials are the PREVIOUS route's. The resolver
+            # treats the block as that entry's connection; keeping ANY credential
+            # source here would send it to the new endpoint. Drop them all: a
+            # ``key_cmd`` mints a live bearer and a pool rotates one, so dropping
+            # only ``api_key``/``key_env`` left the old route's token reachable on
+            # the new host. The route then fails closed like an ASCII keyless
+            # entry (an explicit key in ``advanced`` below still wins).
+            for _cred_field in CUSTOM_CREDENTIAL_SOURCE_FIELDS:
+                model_cfg.pop(_cred_field, None)
 
         _apply_advanced_model_options(model_cfg, advanced)
         if not _main_model_supports_service_tier(persisted_model, persisted_provider):
