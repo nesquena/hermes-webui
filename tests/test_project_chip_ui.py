@@ -159,7 +159,10 @@ class TestResizeProjectInputHelper:
         """Same for `_startProjectCreate` (new-project entry field)."""
         idx = SESSIONS_JS.find("function _startProjectCreate(")
         assert idx >= 0
-        body = SESSIONS_JS[idx: idx + 1200]
+        # Slice to the next helper so the window tracks the function itself.
+        end = SESSIONS_JS.find("function _startProjectRename(", idx)
+        assert end > idx
+        body = SESSIONS_JS[idx:end]
         assert "_resizeProjectInput(inp)" in body, (
             "_startProjectCreate must call _resizeProjectInput on focus"
         )

@@ -95,10 +95,20 @@ def test_nested_fork_mobile_menu_uses_long_press_fallback():
     assert ".session-child-session-fork.long-pressing{" in STYLE_CSS
 
 
+def test_nested_fork_mouse_context_menu_preserves_picker_point():
+    start = SESSIONS_JS.find("row.oncontextmenu=(e)=>{")
+    end = SESSIONS_JS.find("childList.appendChild(row);", start)
+    assert start >= 0 and end > start
+    handler = SESSIONS_JS[start:end]
+    assert "_recordProjectPickerContextPoint(actions,e);" in handler
+    assert "_openSessionActionMenu(child, actions||row);" in handler
+
+
 def test_open_session_menu_consumes_next_row_activation():
     context_menu = _sessions_block("el.oncontextmenu=(e)=>{", "// Use release events")
     assert SESSIONS_JS.count("el.oncontextmenu=(e)=>{") == 1
     assert "if(e.pointerType==='touch'||e.pointerType==='pen') return;" in context_menu
+    assert "_recordProjectPickerContextPoint(actions,e);" in context_menu
     assert "_openSessionActionMenu(s, actions||el);" in context_menu
     assert "if(_sessionActionMenu&&!_sessionActionMenu.contains(target)){" in SESSIONS_JS
     assert "closeSessionActionMenu();" in SESSIONS_JS

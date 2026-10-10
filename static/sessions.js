@@ -5308,6 +5308,7 @@ function _focusSessionActionMenuRestoreTarget(target){
 function closeSessionActionMenu({restoreFocus=false}={}){
   const focusTarget=restoreFocus?_sessionActionAnchor:null;
   const fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;
+  const restoreSessionId=_sessionActionSessionId;
   if(_sessionActionMenu){
     _sessionActionMenu.remove();
     _sessionActionMenu = null;
@@ -5325,6 +5326,35 @@ function closeSessionActionMenu({restoreFocus=false}={}){
   _sessionActionSessionId = null;
   _sessionActionPreviousFocus = null;
   if(!_focusSessionActionMenuRestoreTarget(focusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
+  // Drain a sidebar repaint the project picker deferred while this menu was
+  // blocking renders (picker dismissed by opening another row's ⋮ menu). Next
+  // tick, so a menu action that opens the picker re-arms the guard first.
+  if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+    setTimeout(()=>{
+      if(!_sessionListRepaintDeferredByPicker||_sessionActionMenu) return;
+      if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null) return;
+      _sessionListRepaintDeferredByPicker=false;
+      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      // The repaint replaces the rows this menu was anchored on, so a focus
+      // this close just restored into one of them is gone with it and would
+      // fall to the page. Hand it to the row now showing the session: its
+      // trigger, else the fork row's own button, else the row itself, so
+      // keyboard users keep their place in the sidebar.
+      if(!restoreFocus) return;
+      const active=document.activeElement;
+      if(active&&active!==document.body&&active.isConnected) return;
+      const row=typeof _findSessionRenameRow==='function'?_findSessionRenameRow(restoreSessionId):null;
+      if(!row) return;
+      const candidates=[
+        row.querySelector(':scope > .session-actions-trigger, :scope > .session-actions > .session-actions-trigger'),
+        row.querySelector('.session-child-session-main'),
+        row,
+      ];
+      for(const candidate of candidates){
+        if(candidate&&_focusSessionActionMenuRestoreTarget(candidate)) break;
+      }
+    },0);
+  }
 }
 
 function _sessionActionMenuShouldIgnoreScrollTarget(target){
@@ -5778,7 +5808,91 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
 }
 
+function _projectPickerSessionActionHandoff(session, anchorEl){
+  if(!_projectPickerTeardown) return {session,anchorEl};
+  const contextPoint=anchorEl&&anchorEl._projectPickerContextPoint;
+  const retireProjectPicker=_projectPickerTeardown;
+  _projectPickerTeardown=null;
+  retireProjectPicker();
+  if(!_sessionListRepaintDeferredByPicker) return {session,anchorEl};
+
+  const sid=session&&session.session_id;
+  // A refresh accepted while the picker held the old layout updates the list
+  // cache but skips its repaint, so the row closures can carry stale canonical
+  // fields. Resolve the action owner from the current caches.
+  const currentFromCaches=()=>{
+    let found=(_allSessions||[]).find(item=>item&&item.session_id===sid)||null;
+    if(!found){
+      for(const parent of (_allSessions||[])){
+        found=parent&&Array.isArray(parent._child_sessions)
+          ? parent._child_sessions.find(child=>child&&child.session_id===sid)||null
+          : null;
+        if(found) break;
+      }
+    }
+    // A visible New Chat with no messages is rendered from S.session but is
+    // not in that cache yet; resolve it there after the cache lookups. The
+    // typeof guard keeps the extracted-function Node harness self-contained.
+    if(!found&&typeof S!=='undefined'&&S.session&&S.session.session_id===sid) found=S.session;
+    // Content-search-only results render in the sidebar from _contentSearchResults
+    // (see _sessionSearchMergeMatches) even though they are absent from the list
+    // cache, so the action owner resolves there too, after every cache-level
+    // lookup and with the same exact-id test.
+    if(!found&&typeof _contentSearchResults!=='undefined'&&Array.isArray(_contentSearchResults)){
+      found=_contentSearchResults.find(item=>item&&item.session_id===sid)||null;
+    }
+    return found;
+  };
+
+  // A fork long-press opens its menu while the finger is still down and arms
+  // its one-click open-suppression on the pressed row. Chromium dispatches the
+  // release click at the physical release point, so replacing the rows now can
+  // move that point off the suppressed row (a peer message plus the refresh it
+  // triggered were accepted while the picker held the old layout), strand the
+  // suppression and let the stray click close the menu. Postpone the
+  // destructive replacement until the gesture, its compatibility click and
+  // this menu are finished: closing the menu drains the deferral like any
+  // other blocked render, and the menu stays anchored on the live row the
+  // suppression is armed on.
+  if(anchorEl&&anchorEl._skipNextChildOpen){
+    // The replacement stays postponed, but the menu must not bind the stale
+    // row closure: resolve the owner from the caches without repainting.
+    return {session:currentFromCaches()||session,anchorEl};
+  }
+
+  // A list refresh may have already replaced this session's canonical fields
+  // while the picker kept the old row DOM alive. Paint that state before the
+  // action menu captures either the row closure or its focus-return anchor.
+  _sessionListRepaintDeferredByPicker=false;
+  try{
+    renderSessionListFromCache();
+  }catch(_){
+    _sessionListRepaintDeferredByPicker=true;
+    return null;
+  }
+  let currentSession=currentFromCaches();
+  const currentRow=_findSessionRenameRow(sid);
+  // Keep the opener's kind: expanded rows contain child triggers before their
+  // own, and touch long-press must stay on the visible row, not hidden dots.
+  const anchorClasses=anchorEl&&anchorEl.classList;
+  let currentAnchor=anchorEl&&anchorEl.isConnected?anchorEl:null;
+  if(anchorClasses&&anchorClasses.contains('session-actions-trigger')){
+    currentAnchor=currentRow&&currentRow.querySelector(':scope > .session-actions > .session-actions-trigger');
+  }else if(anchorClasses&&anchorClasses.contains('session-actions')){
+    currentAnchor=currentRow&&currentRow.querySelector(':scope > .session-actions');
+  }else if(anchorClasses&&(anchorClasses.contains('session-item')||anchorClasses.contains('session-child-session'))){
+    currentAnchor=currentRow;
+  }
+  if(!currentSession||!currentAnchor||!currentAnchor.isConnected) return null;
+  if(contextPoint) currentAnchor._projectPickerContextPoint=contextPoint;
+  return {session:currentSession,anchorEl:currentAnchor};
+}
+
 function _openSessionActionMenu(session, anchorEl){
+  const handoff=_projectPickerSessionActionHandoff(session,anchorEl);
+  if(!handoff) return;
+  session=handoff.session;
+  anchorEl=handoff.anchorEl;
   const isReadOnly = _isReadOnlySession(session);
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
     closeSessionActionMenu();
@@ -6424,7 +6538,7 @@ function _applySessionListPayload(sessData, projData, opts){
   // NEVER skip when recovering from a skeleton or error-banner DOM state: those
   // are rendered outside the signature path, so an identical-signature match
   // would leave the skeleton/error on screen instead of the real list. (Codex #5467)
-  const _canRenderNow = !_renamingSid && !_sessionActionMenu;
+  const _canRenderNow = !_renamingSid && !_sessionActionMenu && !(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null);
   const _mustForceRender = _hadSessionListSkeleton || _hadSessionListLoadError;
   const _renderSig = _sessionListRenderSignature();
   if(_canRenderNow && !_mustForceRender && !_sessionListRefreshAnimationPending && _renderSig && _renderSig===_lastSessionListRenderSig){
@@ -8733,6 +8847,10 @@ function renderSessionListFromCache(){
   // all call this while the fixed-position menu is open; rebuilding the row DOM
   // here removes the anchor and makes the menu feel unclickable.
   if(_sessionActionMenu) return;
+  // Same for the "Move to project" picker opened from that menu: rebuilding the
+  // rows removes its anchor, and the picker closes itself when its row goes away.
+  // Remember the skipped repaint so closing the picker replays it.
+  if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null){ if(typeof _sessionListRepaintDeferredByPicker!=='undefined') _sessionListRepaintDeferredByPicker=true; return; }
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
@@ -9348,6 +9466,9 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click'].forEach(ev=>childCountEl.addEventListener(ev,e=>e.stopPropagation()));
       childCountEl.onclick=(e)=>{
         e.stopPropagation();
+        // Explicit user intent: the toggle must paint now, not be swallowed by
+        // the picker's background-repaint deferral.
+        _retireProjectPickerForExplicitRepaint();
         const key=_sidebarLineageKeyForRow(s);
         if(_expandedChildSessionKeys.has(key)) _expandedChildSessionKeys.delete(key);
         else _expandedChildSessionKeys.add(key);
@@ -9709,6 +9830,10 @@ function renderSessionListFromCache(){
             e.preventDefault();
             if(e.pointerType==='touch'||e.pointerType==='pen') return;
             e.stopPropagation();
+            // Coarse-pointer CSS hides the semantic actions anchor. Preserve
+            // the trusted mouse point so an expanded parent's oversized rect
+            // cannot swallow the fork child's project picker placement.
+            _recordProjectPickerContextPoint(actions,e);
             _openSessionActionMenu(child, actions||row);
           };
           _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
@@ -9738,6 +9863,9 @@ function renderSessionListFromCache(){
       chip.title='Click to filter by '+tag;
       chip.onclick=(e)=>{
         e.stopPropagation();
+        // Explicit user intent: the filter must paint now, not be swallowed by
+        // the picker's background-repaint deferral.
+        _retireProjectPickerForExplicitRepaint();
         const searchBox=$('sessionSearch');
         if(searchBox){searchBox.value=tag;filterSessions();}
       };
@@ -9810,6 +9938,11 @@ function renderSessionListFromCache(){
       _tapTimer=null;
       _lastTapTime=0;
       _clearPointerDragState();
+      // Coarse-pointer CSS hides the actions element used as the semantic menu
+      // anchor. Remember the real mouse point so a project picker opened from
+      // this menu is not positioned from the expanded parent row's full rect.
+      // That rect can be taller than the session list when children are open.
+      _recordProjectPickerContextPoint(actions,e);
       _openSessionActionMenu(s, actions||el);
     };
 
@@ -10361,8 +10494,33 @@ async function deleteSession(sid, beforeDelete=null){
 
 const PROJECT_COLORS=['#7cb9ff','#f5c542','#e94560','#50c878','#c084fc','#fb923c','#67e8f9','#f472b6'];
 
+// Teardown hook for the currently mounted project picker (see
+// _showProjectPicker). Kept at module scope so opening a second picker — and
+// any later viewport change — can retire the previous one's listeners instead
+// of leaking a handler that repositions a detached element.
+let _projectPickerTeardown=null;
+// Set when a sidebar repaint was skipped because the project picker was open, so the
+// picker's teardown can replay it (same contract as the ⋮ menu guard, minus the lost repaint).
+let _sessionListRepaintDeferredByPicker=false;
+
+// Retire the picker ahead of an explicit repaint the user just asked for
+// (child-count toggle, tag filter, inline project create). The deferral guard
+// in renderSessionListFromCache exists for background churn; an explicit
+// transition must complete instead. Callers repaint immediately after, so a
+// pending deferral folds into that repaint instead of replaying later.
+function _retireProjectPickerForExplicitRepaint(){
+  if(typeof _projectPickerTeardown==='undefined'||!_projectPickerTeardown) return false;
+  const retire=_projectPickerTeardown;
+  _projectPickerTeardown=null;
+  if(typeof _sessionListRepaintDeferredByPicker!=='undefined') _sessionListRepaintDeferredByPicker=false;
+  try{ retire(); }catch(_){}
+  return true;
+}
+
 function _showProjectPicker(session, anchorEl){
-  // Close any existing picker
+  // Close any existing picker. Its teardown, not just element removal, has to
+  // run so no resize/click listener outlives the element it was bound for.
+  if(_projectPickerTeardown){const stale=_projectPickerTeardown;_projectPickerTeardown=null;stale();}
   document.querySelectorAll('.project-picker').forEach(p=>p.remove());
   const picker=document.createElement('div');
   picker.className='project-picker';
@@ -10370,8 +10528,7 @@ function _showProjectPicker(session, anchorEl){
   const none=_projectPickerItem('',!session.project_id);
   none.textContent=t('project_picker_none');
   none.onclick=async()=>{
-    picker.remove();
-    document.removeEventListener('click',close);
+    teardown();
     try {
       await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
       // Sidebar rows are shallow copies of _allSessions entries (see
@@ -10415,8 +10572,7 @@ function _showProjectPicker(session, anchorEl){
     name.textContent=p.name;
     item.appendChild(name);
     item.onclick=async()=>{
-      picker.remove();
-      document.removeEventListener('click',close);
+      teardown();
       try{
         await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
         // See #2551 — write to _allSessions, not the shallow sidebar copy.
@@ -10432,8 +10588,7 @@ function _showProjectPicker(session, anchorEl){
   const createItem=_projectPickerItem('project-picker-create');
   createItem.textContent=t('project_picker_new');
   createItem.onclick=async()=>{
-    picker.remove();
-    document.removeEventListener('click',close);
+    teardown();
     const name=await showPromptDialog({
       message:t('project_name_prompt'),
       confirmLabel:t('create'),
@@ -10464,16 +10619,134 @@ function _showProjectPicker(session, anchorEl){
   document.body.appendChild(picker);
   picker.style.position='fixed';
   picker.style.zIndex='999';
+  picker.style.right='auto';
+  const visualViewport=window.visualViewport;
+  let repositionFrame=null;
+  let pendingCloseWhenAway=false;
+  let closeTimer=null;
+  let anchorObserver=null;
+
+  // Re-place from the current anchor. The placement itself lives in
+  // _positionProjectPicker so the module-level resize hook can share it; this
+  // wrapper folds in the ownership rules that close the picker: a retired
+  // element, a repainted-away anchor, or — on scroll — a row that left the
+  // list. Viewport changes re-place instead, even when the row is briefly out
+  // of sight behind the keyboard or a resized window.
+  const reposition=(closeWhenAway)=>{
+    if(picker.isConnected===false){teardown();return;}
+    if(anchorEl.isConnected===false){teardown();return;}
+    if(closeWhenAway){
+      const bounds=_projectPickerVisibleBounds();
+      if(_projectPickerAnchorAway(anchorEl,_projectPickerAnchorRect(anchorEl,bounds),bounds)){teardown();return;}
+    }
+    _positionProjectPicker(picker,anchorEl);
+  };
+  // visualViewport resize/scroll fire on mobile when the on-screen keyboard or
+  // the URL bar changes the usable height; window resize covers desktop and
+  // orientation changes. Coalesce with rAF so a burst of events costs one
+  // reposition per frame.
+  const scheduleReposition=(closeWhenAway)=>{
+    pendingCloseWhenAway=pendingCloseWhenAway||closeWhenAway;
+    if(repositionFrame!==null) return;
+    repositionFrame=requestAnimationFrame(()=>{
+      repositionFrame=null;
+      const shouldClose=pendingCloseWhenAway;
+      pendingCloseWhenAway=false;
+      reposition(shouldClose);
+    });
+  };
+  const onViewportChange=()=>scheduleReposition(false);
+  // Element scroll does not bubble. Capture it from the session list and any
+  // other ancestor that moves the anchor, but ignore the picker's own scroll.
+  const onScroll=(e)=>{
+    if(e.target===document||e.target?.contains?.(anchorEl)) scheduleReposition(true);
+  };
+  const close=(e)=>{
+    if(!picker.contains(e.target)&&e.target!==anchorEl) teardown();
+  };
+  // Single exit path: item selection, outside click, replacement by a newer
+  // picker and an unmounted anchor all run this, so no listener outlives the
+  // element it was bound for.
+  const teardown=()=>{
+    if(_projectPickerTeardown===teardown) _projectPickerTeardown=null;
+    if(_openProjectPicker&&_openProjectPicker.picker===picker) _openProjectPicker=null;
+    if(repositionFrame!==null){cancelAnimationFrame(repositionFrame);repositionFrame=null;}
+    pendingCloseWhenAway=false;
+    if(closeTimer!==null){clearTimeout(closeTimer);closeTimer=null;}
+    if(anchorObserver){anchorObserver.disconnect();anchorObserver=null;}
+    window.removeEventListener('resize',onViewportChange);
+    if(visualViewport){
+      visualViewport.removeEventListener('resize',onViewportChange);
+      visualViewport.removeEventListener('scroll',onViewportChange);
+    }
+    document.removeEventListener('scroll',onScroll,true);
+    document.removeEventListener('click',close);
+    picker.remove();
+    // Replay a sidebar repaint that was skipped while this picker was open, once
+    // no other picker has taken over (next tick, after any selection handler has
+    // written its cache update). typeof-guarded so the function stays
+    // self-contained for the extracted-function Node harness.
+    if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+      setTimeout(()=>{
+        // A replacement picker opened in the meantime inherits the deferral and
+        // replays it when it closes; keep the flag set until someone replays it.
+        // The ⋮ action menu blocks renders too, so if one is open now (e.g. the
+        // picker was dismissed by opening another row's menu), leave the flag
+        // for closeSessionActionMenu() to drain.
+        if(_projectPickerTeardown!==null||!_sessionListRepaintDeferredByPicker) return;
+        if(typeof _sessionActionMenu!=='undefined'&&_sessionActionMenu) return;
+        _sessionListRepaintDeferredByPicker=false;
+        if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      },0);
+    }
+  };
+  window.addEventListener('resize',onViewportChange);
+  if(visualViewport){
+    visualViewport.addEventListener('resize',onViewportChange);
+    visualViewport.addEventListener('scroll',onViewportChange);
+  }
+  document.addEventListener('scroll',onScroll,true);
+  // A sidebar render can remove the row without any viewport event. Observe
+  // only child-list mutations while this picker is open, and avoid layout
+  // reads for unrelated transcript updates.
+  anchorObserver=new MutationObserver(()=>{
+    if(!anchorEl?.isConnected||!picker.isConnected) teardown();
+  });
+  anchorObserver.observe(document.body,{childList:true,subtree:true});
+  _projectPickerTeardown=teardown;
+  // Open even when the anchor is already stale, clipped or replaced by an
+  // earlier sidebar render: callers may open first and repaint their rows
+  // afterwards, and a picker anchored on a disconnected row is still fine to
+  // show. Its lifecycle stays owned by the observer and the scroll/resize
+  // listeners above, which retire it on the next repaint or sighting change.
   _positionProjectPicker(picker,anchorEl);
-  // Close on outside click
-  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
-  setTimeout(()=>document.addEventListener('click',close),0);
+  // Registered on the next tick so the click that opened the picker cannot close
+  // it; skip if the picker was already retired by then.
+  if(_projectPickerTeardown===teardown){
+    closeTimer=setTimeout(()=>{
+      closeTimer=null;
+      if(_projectPickerTeardown===teardown) document.addEventListener('click',close);
+    },0);
+  }
   // Keyboard (#8044): arrows move between the rows, Escape closes the picker
   // and hands focus back to the conversation's ⋮ trigger.
   picker.setAttribute('aria-label',t('session_move_project'));
   const dismiss=(opts)=>{
-    picker.remove();
     document.removeEventListener('click',close);
+    teardown();
+    // Paint a sidebar repaint that was skipped while this picker was open now,
+    // before focus returns: the repaint replaces the row and its trigger, so
+    // restoring first would hand focus to the element the repaint is about to
+    // remove. Same guards as the deferred replay: no other picker may own the
+    // deferral, and an open ⋮ menu blocks renders (closeSessionActionMenu
+    // drains it instead).
+    if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker
+       &&_projectPickerTeardown===null
+       &&!(typeof _sessionActionMenu!=='undefined'&&_sessionActionMenu)
+       &&typeof renderSessionListFromCache==='function'){
+      _sessionListRepaintDeferredByPicker=false;
+      try{ renderSessionListFromCache(); }catch(_){ _sessionListRepaintDeferredByPicker=true; }
+    }
     // Not to a row that is going out of sight with its sidebar.
     if(opts&&opts.restoreFocus===false) return;
     _focusSessionActionMenuRestoreTarget(_projectPickerFocusReturnTarget(session,anchorEl));
@@ -10488,32 +10761,95 @@ function _showProjectPicker(session, anchorEl){
 let _openProjectPicker=null;
 
 function _positionProjectPicker(picker, anchorEl){
-  const rect=anchorEl.getBoundingClientRect();
-  // Placed as _positionSessionActionMenu places the ⋮ menu: below the anchor,
-  // above it when that fits whole, else slid up over the anchor until it fits.
-  // Natural height first (the CSS already caps it at 100dvh - 16px).
-  picker.style.maxHeight='';
-  const pickerH=picker.offsetHeight||0;
   const margin=8;
-  const maxAvail=window.innerHeight-margin*2;
-  let top=rect.bottom+4;
-  if(top+pickerH>window.innerHeight-margin && rect.top>pickerH+12){
-    top=rect.top-pickerH-4;            // flip above when there is room
-  }
-  if(pickerH>maxAvail){
-    picker.style.maxHeight=maxAvail+'px'; // taller than the screen: pin and scroll
-    top=margin;
+  const gap=4;
+  const bounds=_projectPickerVisibleBounds();
+  const rect=_projectPickerAnchorRect(anchorEl, bounds);
+  picker.style.maxHeight='';
+  picker.style.overflowY='';
+  // Width affects wrapping and therefore height, so both the visual-viewport
+  // path and the older window-dimensions fallback size it before measuring.
+  const availableWidth=Math.max(0,bounds.right-bounds.left-margin*2);
+  picker.style.minWidth=Math.min(160,availableWidth)+'px';
+  picker.style.maxWidth=Math.min(220,availableWidth)+'px';
+  if(!window.visualViewport){
+    // No visual viewport (older browsers): place from the layout window.
+    const pickerH=picker.offsetHeight||0;
+    const maxAvail=window.innerHeight-margin*2;
+    let top=rect.bottom+4;
+    if(top+pickerH>window.innerHeight-margin && rect.top>pickerH+12){
+      top=rect.top-pickerH-4;            // flip above when there is room
+    }
+    if(pickerH>maxAvail){
+      picker.style.maxHeight=maxAvail+'px'; // taller than the screen: pin and scroll
+      picker.style.overflowY='auto';
+      top=margin;
+    }else{
+      if(top+pickerH>window.innerHeight-margin) top=window.innerHeight-margin-pickerH;
+      if(top<margin) top=margin;         // slide to fit, overlapping the anchor
+    }
+    picker.style.top=top+'px';
+    picker.style.bottom='auto';
   }else{
-    if(top+pickerH>window.innerHeight-margin) top=window.innerHeight-margin-pickerH;
-    if(top<margin) top=margin;         // slide to fit, overlapping the anchor
+    // The visible viewport can be smaller AND offset from the layout window
+    // (the on-screen keyboard, browser chrome, zoom). Place from its bounds.
+    const belowTop=Math.max(bounds.top+margin,rect.bottom+gap);
+    const aboveBottom=Math.min(bounds.bottom-margin,rect.top-gap);
+    const spaceBelow=Math.max(0,bounds.bottom-margin-belowTop);
+    const spaceAbove=Math.max(0,aboveBottom-(bounds.top+margin));
+    // Measure the rendered picker instead of guessing its height. A fixed
+    // threshold fails as soon as the user has enough projects to make the menu
+    // taller, and a cap left over from the previous viewport would keep a
+    // desktop clamp on a phone-sized screen.
+    const pickerHeight=picker.offsetHeight||0;
+    picker.style.top='auto';
+    picker.style.bottom='auto';
+    if(pickerHeight<=spaceBelow){
+      // Preferred placement: directly below the session action button.
+      picker.style.top=belowTop+'px';
+    }else if(pickerHeight<=spaceAbove){
+      // Keep above-positioned pickers bottom-anchored so they stay attached to
+      // the row they belong to across resizes.
+      picker.style.bottom=(window.innerHeight-aboveBottom)+'px';
+    }else if(pickerHeight<=bounds.bottom-bounds.top-margin*2){
+      // The full list fits the visible viewport: slide it up from the bottom as
+      // far as it must, overlapping the anchor rather than clipping it.
+      picker.style.top=Math.max(bounds.top+margin,bounds.bottom-margin-pickerHeight)+'px';
+      picker.style.maxHeight=pickerHeight+'px';
+      picker.style.overflowY='auto';
+    }else{
+      // Taller than the visible viewport: cap to the roomier side and keep
+      // every row reachable by scrolling inside; keep at least a few rows
+      // visible when both sides are cramped.
+      let cap=Math.max(spaceAbove,spaceBelow);
+      let capTop=spaceAbove>spaceBelow?bounds.top+margin:belowTop;
+      if(cap<132){
+        cap=Math.max(0,bounds.bottom-bounds.top-margin*2);
+        capTop=bounds.top+margin;
+      }
+      picker.style.maxHeight=cap+'px';
+      picker.style.overflowY='auto';
+      picker.style.top=capTop+'px';
+    }
   }
-  picker.style.top=top+'px';
-  picker.style.bottom='auto';
   // Align right edge of picker with right edge of button; keep within viewport
-  const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
-  let left=rect.right-pickerW;
-  if(left<8) left=8;
+  const pickerW=picker.offsetWidth;
+  const left=Math.max(bounds.left+margin,Math.min(rect.right-pickerW,bounds.right-margin-pickerW));
   picker.style.left=left+'px';
+}
+
+function _recordProjectPickerContextPoint(anchorEl,event){
+  if(!anchorEl||!Number.isFinite(event&&event.clientX)||!Number.isFinite(event&&event.clientY)) return;
+  const point={clientX:event.clientX,clientY:event.clientY};
+  const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
+  if(row&&row.isConnected!==false){
+    const rowRect=row.getBoundingClientRect();
+    if(Number.isFinite(rowRect&&rowRect.left)&&Number.isFinite(rowRect&&rowRect.top)){
+      point.rowOffsetX=event.clientX-rowRect.left;
+      point.rowOffsetY=event.clientY-rowRect.top;
+    }
+  }
+  anchorEl._projectPickerContextPoint=point;
 }
 
 // An open picker follows a resize or a rotation, as the ⋮ menu does. A sidebar
@@ -10562,6 +10898,66 @@ function _projectPickerSidebarHidden(el){
   if(!sidebar||sidebar.classList.contains('mobile-open')) return false;
   if(sidebar.closest('.layout.sidebar-collapsed')) return true;
   return typeof _isDesktopWidth==='function'&&!_isDesktopWidth();
+}
+
+// The anchor geometry the picker owns: a zero-sized anchor (a hidden
+// .session-actions on a touch-primary layout, or a repainted trigger) borrows
+// the visible row it belongs to, or the context-menu point recorded on it.
+function _projectPickerAnchorRect(anchorEl, bounds){
+  let rect=anchorEl?.getBoundingClientRect();
+  if(rect&&(!rect.width||!rect.height)){
+    // Fork children are independently actionable rows nested inside a
+    // potentially viewport-spanning parent. Prefer the nearest visible child
+    // owner before falling back to the ancestor session item.
+    const row=anchorEl?.closest?.('.session-child-session-fork,.session-item');
+    if(row&&row.isConnected!==false){
+      const rowRect=row.getBoundingClientRect();
+      const point=anchorEl._projectPickerContextPoint;
+      // A context-menu click inside an expanded child list belongs to the
+      // parent row, whose aggregate rect may span both viewport edges. Use
+      // the actual click point while the owning row still intersects the
+      // list; once the row leaves, fall back to its rect so teardown wins.
+      if(point&&Number.isFinite(point.clientX)&&Number.isFinite(point.clientY)&&!_projectPickerAnchorAway(anchorEl,rowRect,bounds)){
+        const pointX=Number.isFinite(point.rowOffsetX)?rowRect.left+point.rowOffsetX:point.clientX;
+        const pointY=Number.isFinite(point.rowOffsetY)?rowRect.top+point.rowOffsetY:point.clientY;
+        rect={
+          top:pointY,bottom:pointY+1,
+          left:pointX,right:pointX+1,
+          width:1,height:1,
+        };
+      }else{
+        rect=rowRect;
+      }
+    }
+  }
+  return rect;
+}
+
+// Fixed coordinates and getBoundingClientRect use the layout viewport. The
+// visible part can be smaller AND offset (keyboard, browser chrome, zoom).
+function _projectPickerVisibleBounds(){
+  const vv=window.visualViewport;
+  const top=vv?vv.offsetTop:0;
+  const left=vv?vv.offsetLeft:0;
+  return {
+    top,left,
+    bottom:top+(vv?vv.height:window.innerHeight),
+    right:left+(vv?vv.width:window.innerWidth),
+  };
+}
+
+// Whether the anchor has left the visible picture: detached, zero-sized, or
+// fully clipped by the session list / the visual viewport.
+function _projectPickerAnchorAway(anchorEl, rect, bounds){
+  if(!anchorEl||anchorEl.isConnected===false) return true;
+  if(!rect||!rect.width||!rect.height) return true;
+  const scrollContainer=anchorEl.closest?anchorEl.closest('.session-list'):null;
+  const clip=scrollContainer?scrollContainer.getBoundingClientRect():bounds;
+  const top=Math.max(bounds.top,clip.top);
+  const bottom=Math.min(bounds.bottom,clip.bottom);
+  const left=Math.max(bounds.left,clip.left);
+  const right=Math.min(bounds.right,clip.right);
+  return bottom<=top||right<=left||rect.bottom<=top||rect.top>=bottom||rect.right<=left||rect.left>=right;
 }
 
 // ── Project picker rows and keyboard (#8044) ────────────────────────────
@@ -10695,6 +11091,9 @@ function _startProjectCreate(bar, addBtn){
         showToast('Project create failed: '+(e.message||e));
         return;
       }
+      // The API-success transition (editor -> chip) must paint now: retire the
+      // picker first so this repaint is not swallowed by its deferral.
+      _retireProjectPickerForExplicitRepaint();
       await renderSessionList();
       showToast('Project created');
     }else{
