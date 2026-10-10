@@ -16710,7 +16710,9 @@ def handle_post(handler, parsed) -> bool:
         if not provider_id:
             return bad(handler, "provider is required")
         from api.config import invalidate_provider_models_cache
+        from api.providers import invalidate_providers_cache
         invalidate_provider_models_cache(provider_id)
+        invalidate_providers_cache()
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":

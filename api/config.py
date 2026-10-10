@@ -10241,7 +10241,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not (entry.get("name") or "").strip():
                         continue
                     configured_models = entry.get("models")
-                    if isinstance(configured_models, (dict, list)) and len(configured_models) > 0:
+                    if (
+                        isinstance(configured_models, (dict, list))
+                        and len(configured_models) > 0
+                        and not _provider_models_are_discovered_catalog(entry)
+                    ):
                         continue
                     count += 1
             # The LM Studio provider-group branch re-probes the same
@@ -10367,6 +10371,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
+                _cp_has_live_discovered_catalog = False
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
                 _cp_api_key = str(_cp.get("api_key") or "").strip()
                 if not _cp_api_key:
@@ -10402,6 +10407,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cp_has_configured_models = (
                         isinstance(_cp_configured_models, (dict, list))
                         and len(_cp_configured_models) > 0
+                        and not _provider_models_are_discovered_catalog(_cp)
                     )
                     _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
@@ -10422,6 +10428,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             trusted_base_urls=(_cp_base_url,),
                             timeout_seconds=custom_probe_schedule.next_timeout(),
                         )
+                    _cp_has_live_discovered_catalog = (
+                        _provider_models_are_discovered_catalog(_cp) and bool(_live_models)
+                    )
                     if _live_error:
                         _named_custom_errors[_slug] = _live_error
                         detected_providers.add(_slug)
@@ -10446,9 +10455,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _cp_model = _cp.get("model", "")
                 if _cp_model:
                     _cp_model_ids.append(_cp_model)
-                for _cp_model_id in _configured_model_ids(_cp.get("models")):
-                    if _cp_model_id not in _cp_model_ids:
-                        _cp_model_ids.append(_cp_model_id)
+                # A successful discovery supersedes the saved snapshot. Keep
+                # it only for curated pins or an unavailable live catalog.
+                if not _cp_has_live_discovered_catalog:
+                    for _cp_model_id in _configured_model_ids(_cp.get("models")):
+                        if _cp_model_id not in _cp_model_ids:
+                            _cp_model_ids.append(_cp_model_id)
 
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model

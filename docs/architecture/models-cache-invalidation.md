@@ -111,6 +111,14 @@ invalidation, before rebuild admission reopens. Full invalidation clears all
 profile pools; provider invalidation removes the original and canonical provider
 keys for the active profile. Both retain disk-commit → catalog lock order.
 
+`POST /api/models/refresh` additionally clears the independent, profile-keyed
+provider-card cache via `invalidate_providers_cache()`. A following
+`/api/providers` read must rebuild discovered cards from the refreshed model
+catalog rather than retain their previous IDs/counts for the card cache TTL.
+This endpoint-level invalidation does not change the catalog's fingerprint,
+generation fences, or disk ownership. It supplies fresh data to subsequent
+reads; repainting already-rendered frontend cards is a separate UI concern.
+
 Custom endpoint scheduling is work-conserving: a fair-share slice bounds the
 serial wait, while its HTTP attempt can continue against the same caller deadline
 (with publication headroom and the endpoint cap). Later endpoints still get
@@ -161,6 +169,10 @@ visibility change, any catalog field, any unknown field — still invalidate.
 snapshot survives it and is served without a live rebuild, each source-axis
 change or a delete/recreate forces a fresh rebuild, and a same-path config
 edit still deletes the snapshot.
+
+`tests/test_issue8080_custom_discovered_catalog.py` exercises the production
+refresh dispatch after warming a discovered custom-provider card, then verifies
+that both its count and the picker reflect a smaller upstream catalog.
 
 ## References
 
