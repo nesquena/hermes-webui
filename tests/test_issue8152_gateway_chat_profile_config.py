@@ -67,8 +67,6 @@ def profiles_on_disk(tmp_path, monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
 
-    prefill_file = tmp_path / "work-prefill.json"
-    prefill_file.write_text(json.dumps(PREFILL), encoding="utf-8")
     homes = {}
     work = profiles.get_hermes_home_for_profile(PROFILE)
     play = profiles.get_hermes_home_for_profile(OTHER_PROFILE)
@@ -78,12 +76,14 @@ def profiles_on_disk(tmp_path, monkeypatch):
         (work / "config.yaml").write_text(
             f"webui_gateway_base_url: {WORK_GATEWAY}\n"
             "webui_gateway_use_runs_api: true\n"
-            f"prefill_messages_file: {prefill_file.as_posix()}\n"
+            # relative on purpose: it has to be found in this profile's home
+            "prefill_messages_file: work-prefill.json\n"
             "agent:\n  reasoning_effort: high\n"
             "webui:\n  pass_session_id: true\n",
             encoding="utf-8",
         )
         (work / ".env").write_text("API_SERVER_KEY=work-key\n", encoding="utf-8")
+        (work / "work-prefill.json").write_text(json.dumps(PREFILL), encoding="utf-8")
         (work / "gateway_state.json").write_text(
             json.dumps({"platforms": {"discord": {"state": "connected"}}}), encoding="utf-8"
         )
@@ -191,11 +191,15 @@ class TestANamedProfile:
         assert line == "**Connected Platforms:** local (files on this machine), discord: Connected ✓"
 
     def test_and_the_profiles_prefill(self, profiles_on_disk, tmp_path, monkeypatch):
-        _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+        """``prefill_messages_file`` is a relative path in the named profile's
+        config: it is that profile's file, in that profile's home."""
+        _, requests, events = _send(PROFILE, tmp_path, monkeypatch)
 
         messages = _chat(requests)["body"]["messages"]
         assert [m["role"] for m in messages] == ["system", "assistant", "user"]
         assert messages[1]["content"] == PREFILL[0]["content"]
+        status = [item[1]["prefill"] for item in events if item[0] == "context_status"]
+        assert status and status[-1]["status"] == "loaded"
 
     def test_and_the_profiles_runs_api_switch(self, profiles_on_disk, tmp_path, monkeypatch):
         """The switch is read from the profile's config; whether the runs API
@@ -293,8 +297,8 @@ class TestTheOthersAreNotTouched:
         self, profiles_on_disk, tmp_path, monkeypatch
     ):
         """``HERMES_WEBUI_GATEWAY_BASE_URL`` and ``HERMES_WEBUI_GATEWAY_API_KEY``
-        set for the WebUI process are an operator's override for every profile,
-        as they are for a resumed run."""
+        set for the WebUI process win over a profile's ``config.yaml`` URL and
+        its ``API_SERVER_KEY``, as they do for a resumed run."""
         monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://operator-gateway.test")
         monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "operator-key")
 
@@ -304,6 +308,29 @@ class TestTheOthersAreNotTouched:
         assert chat["url"] == "http://operator-gateway.test/v1/chat/completions"
         assert chat["authorization"] == "Bearer operator-key"
         assert chat["body"]["reasoning_effort"] == "high"  # the rest is still the profile's
+
+    def test_a_profiles_own_env_file_wins_over_the_process_environment_as_on_resume(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """When a profile's ``.env`` sets the same two variables, the profile's
+        values are used. That is ``_gateway_endpoint_for_profile``'s order, which
+        a resumed run has always had; a new run must not differ from it, or one
+        session would talk to two Gateways across a restart."""
+        (profiles_on_disk[PROFILE] / ".env").write_text(
+            "HERMES_WEBUI_GATEWAY_BASE_URL=http://profile-env-gateway.test\n"
+            "HERMES_WEBUI_GATEWAY_API_KEY=profile-env-key\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://operator-gateway.test")
+        monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "operator-key")
+
+        _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+
+        chat = _chat(requests)
+        on_resume = gateway_chat._gateway_endpoint_for_profile(PROFILE)
+        assert on_resume == ("http://profile-env-gateway.test", "profile-env-key")
+        assert chat["url"] == f"{on_resume[0]}/v1/chat/completions"
+        assert chat["authorization"] == f"Bearer {on_resume[1]}"
 
 
 class TestTheDeliveryPromptsHome:
@@ -317,18 +344,87 @@ class TestTheDeliveryPromptsHome:
         assert "discord" not in other
 
     def test_without_a_home_the_ambient_one_is_used_as_before(self, profiles_on_disk, monkeypatch):
-        import hermes_constants
+        import sys
+        import types
 
         from api.streaming import _webui_delivery_context_prompt
 
-        monkeypatch.setattr(
-            hermes_constants, "get_hermes_home", lambda: profiles_on_disk[PROFILE]
-        )
+        # A stand-in module: hermes-agent is not installed where CI runs this.
+        monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(
+            get_hermes_home=lambda: profiles_on_disk[PROFILE],
+            display_hermes_home=lambda: "~/.hermes",
+        ))
 
         assert "discord: Connected ✓" in _webui_delivery_context_prompt({})
         assert "discord: Connected ✓" in _webui_delivery_context_prompt({}, None)
         # and a named home wins over the ambient one
         assert "discord" not in _webui_delivery_context_prompt({}, profiles_on_disk[OTHER_PROFILE])
+
+
+class TestRelativePrefillPaths:
+    """``_prefill_config_for_home``: what the worker hands the prefill loader."""
+
+    def _anchor(self, config, home):
+        from api.streaming import _prefill_config_for_home
+
+        return _prefill_config_for_home(config, home)
+
+    def test_a_relative_file_is_put_under_the_home(self, tmp_path):
+        out = self._anchor({"prefill_messages_file": "notes/prefill.json"}, tmp_path)
+
+        assert out["prefill_messages_file"] == str(tmp_path / "notes" / "prefill.json")
+
+    @pytest.mark.parametrize("raw", ["/abs/prefill.json", "~/prefill.json"])
+    def test_an_absolute_or_home_relative_file_is_left_alone(self, tmp_path, raw):
+        assert self._anchor({"prefill_messages_file": raw}, tmp_path)["prefill_messages_file"] == raw
+
+    def test_a_script_given_as_one_relative_path_is_put_under_the_home(self, tmp_path):
+        out = self._anchor({"webui_prefill_messages_script": "recall.py"}, tmp_path)
+
+        assert out["webui_prefill_messages_script"] == str(tmp_path / "recall.py")
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["python3 recall.py", "/abs/recall.py", ["python3", "recall.py"], "", 'unbalanced "quote'],
+    )
+    def test_any_other_script_is_left_alone(self, tmp_path, raw):
+        """A command with arguments keeps its argv, as in
+        ``_prefill_script_command``; a list is the admin's exact argv."""
+        out = self._anchor({"webui_prefill_messages_script": raw}, tmp_path)
+
+        assert out["webui_prefill_messages_script"] == raw
+
+    @pytest.mark.parametrize("config", [{}, {"prefill_messages_file": ""}, {"prefill_messages_file": None}, None])
+    def test_nothing_configured_stays_that_way(self, tmp_path, config):
+        out = self._anchor(config, tmp_path)
+
+        assert not out.get("prefill_messages_file")
+        assert "webui_prefill_messages_script" not in out
+
+    def test_the_config_handed_in_is_not_changed(self, tmp_path):
+        config = {"prefill_messages_file": "prefill.json", "agent": {"reasoning_effort": "high"}}
+
+        out = self._anchor(config, tmp_path)
+
+        assert config["prefill_messages_file"] == "prefill.json"
+        assert out is not config and out["agent"] is config["agent"]
+
+    def test_without_a_home_nothing_is_anchored(self):
+        assert self._anchor({"prefill_messages_file": "prefill.json"}, None) == {
+            "prefill_messages_file": "prefill.json"
+        }
+
+    def test_the_loader_then_finds_the_file(self, tmp_path):
+        """End of the chain: the loader reads the anchored path."""
+        from api.streaming import _load_webui_prefill_context
+
+        (tmp_path / "prefill.json").write_text(json.dumps(PREFILL), encoding="utf-8")
+
+        loaded = _load_webui_prefill_context(
+            self._anchor({"prefill_messages_file": "prefill.json"}, tmp_path)
+        )
+
+        assert loaded["status"] == "loaded" and loaded["message_count"] == 1
 
 
 class TestTheProfileConfigHelper:

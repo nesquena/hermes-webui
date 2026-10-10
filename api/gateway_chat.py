@@ -2115,13 +2115,16 @@ def _run_gateway_chat_streaming(
         try:
             from api.streaming import (
                 _load_webui_prefill_context,
+                _prefill_config_for_home,
                 _prefill_messages_with_webui_context,
                 _normalize_prefill_messages_before_user_turn,
                 _public_prefill_context_status,
                 _webui_ephemeral_system_prompt,
             )
 
-            prefill_context = _load_webui_prefill_context(cfg)
+            prefill_context = _load_webui_prefill_context(
+                _prefill_config_for_home(cfg, _gateway_home_for_profile(_session_profile))
+            )
             # #3324: the WebUI session/delivery context (connected platforms,
             # home channels, delivery hints, session framing) is now carried in
             # the ephemeral system prompt rather than a prefill `user` message.

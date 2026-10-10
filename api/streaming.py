@@ -1436,6 +1436,37 @@ def _resolve_prefill_path(raw: str) -> Path:
     return path
 
 
+def _prefill_config_for_home(config_data: Optional[dict], home) -> dict:
+    """Copy of ``config_data`` whose relative prefill paths are anchored at ``home``.
+
+    ``_resolve_prefill_path`` anchors a relative ``prefill_messages_file`` (and a
+    single-path prefill script) at the ambient config's directory. A worker
+    thread with no profile context has the process profile's there, so a
+    session of another profile hands in its own home first (#8152). Absolute
+    paths, ``~`` paths and script commands with arguments are left as they are.
+    """
+    cfg = dict(config_data) if isinstance(config_data, dict) else {}
+    if home is None:
+        return cfg
+
+    def anchored(raw: str) -> str:
+        path = Path(raw).expanduser()
+        return raw if path.is_absolute() else str(Path(home) / path)
+
+    file_raw = cfg.get("prefill_messages_file")
+    if isinstance(file_raw, str) and file_raw.strip():
+        cfg["prefill_messages_file"] = anchored(file_raw)
+    script_raw = cfg.get("webui_prefill_messages_script")
+    if isinstance(script_raw, str):
+        try:
+            parts = shlex.split(script_raw)
+        except ValueError:
+            parts = []
+        if len(parts) == 1:
+            cfg["webui_prefill_messages_script"] = anchored(parts[0])
+    return cfg
+
+
 _PREFILL_SCRIPT_OUTPUT_LIMIT = 262_144
 _PREFILL_CONTEXT_DEFAULT_MAX_CHARS = 12_000
 

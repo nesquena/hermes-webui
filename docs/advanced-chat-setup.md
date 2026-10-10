@@ -323,10 +323,13 @@ With more than one profile, a Gateway-routed chat uses its own profile's
 settings: the Gateway URL (`webui_gateway_base_url` in that profile's
 `config.yaml`), the key (`API_SERVER_KEY` in that profile's `.env`), and that
 profile's reasoning effort, runs-API switch, prefill and prompt settings. A
+relative `prefill_messages_file` is looked up in that profile's home. A
 profile does not inherit another profile's `config.yaml` or `.env`.
 `HERMES_WEBUI_GATEWAY_BASE_URL` and `HERMES_WEBUI_GATEWAY_API_KEY` set in the
-WebUI process's environment apply to every profile, so use those to send every
-profile's chats to one Gateway.
+WebUI process's environment win over a profile's `webui_gateway_base_url` and
+`API_SERVER_KEY`, so they send every profile's chats to one Gateway, unless a
+profile's own `.env` sets the same two variables: a profile's `.env` is
+applied on top of the process environment for that profile's chats.
 
 The bridge is best used by operators who already run Hermes Gateway/API Server
 locally and want browser-originated chat to use the same runtime/tool path as
