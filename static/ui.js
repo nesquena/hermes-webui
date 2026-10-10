@@ -5613,6 +5613,44 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  // #1804 re-gate 9/24: the busy-mode send button renders a Stop/Queue/
+  // Interrupt/Steer label that widens it from a 34px round button to a
+  // 74-108px pill (see .send-btn[data-action=...]: width:auto). That
+  // extra width steals room from .composer-left, so measuring overflow
+  // with the pill in place resolves a tighter stage than with the
+  // icon-only (idle) button — the footer would otherwise flicker between
+  // stages the moment a turn starts (the #4968 chip-label flicker) and
+  // clip the mobile config burger under the pill at narrow widths.
+  // Pin the label hidden so the button is at its idle width during the
+  // measurement, the same shape as the existing height/visibility
+  // freeze: commit nothing to the screen, restore both in `finally`.
+  const sendBtn=document.getElementById('btnSend');
+  const sendBtnLabel=sendBtn&&sendBtn.querySelector('.send-btn-label');
+  // #7686 finding 1 (must fix): reserve the WIDEST busy footprint during BOTH
+  // idle and busy fitting. The old code hid the label while measuring, so the
+  // stage was sized for the 34px idle button; restoring the wider Stop/Interrupt
+  // pill in `finally` then shrank .composer-left (overflow-x:auto, scrollbar
+  // hidden) and clipped its chips with no cue. Measuring with the label VISIBLE
+  // makes overflows() see the worst case, so the committed stage has room for
+  // the pill that is actually about to be painted.
+  const prevLabelDisplay=sendBtnLabel?sendBtnLabel.style.display:'';
+  const _btnStyle=sendBtn&&sendBtn.style?sendBtn.style:null;
+  const prevBtnWidth=_btnStyle?_btnStyle.width:'';
+  const prevBtnMinWidth=_btnStyle?_btnStyle.minWidth:'';
+  if(sendBtnLabel) sendBtnLabel.style.display='';
+  if(_btnStyle){
+    // width:auto + a min-width that survives the burger stage's width:34px, so
+    // the measured footprint is the pill's own, never the circle's.
+    _btnStyle.width='auto';
+    // #7686 [SILENT]: the idle measurement must keep the button's real
+    // minimum. `width:auto; min-width:0` measures the bare 16px SVG, so the
+    // stage was sized for an icon smaller than the button that is actually
+    // painted — at 1102px with the workspace open that clipped 16px of the
+    // Reasoning control at idle (master and the rejected head clip 0px).
+    // Reserve 34px desktop / 44px phone during the measurement; `finally`
+    // still restores the previous value afterwards.
+    _btnStyle.minWidth=(window.innerWidth<=640?'44px':'34px');
+  }
   // Measure without ever PAINTING the expanded state. Stripping the stage
   // classes makes the footer briefly full-width, which grows the composer and
   // shrinks #messages by a few px; restoring them a moment later shrinks it
@@ -5646,6 +5684,11 @@ function _fitComposerFooter(){
     if(frozenHeight>0){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
+    }
+    if(sendBtnLabel) sendBtnLabel.style.display=prevLabelDisplay;
+    if(_btnStyle){
+      _btnStyle.width=prevBtnWidth;
+      _btnStyle.minWidth=prevBtnMinWidth;
     }
   }
 }
@@ -9255,8 +9298,31 @@ function _setComposerPrimaryButtonIcon(btn,action){
     stop:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>',
     disabled:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>'
   };
-  const next=icons[action]||icons.send;
-  if(btn.innerHTML!==next) btn.innerHTML=next;
+  // #1804 re-gate 9/24: surface a short text label next to the icon for
+  // busy-mode actions so the user can see the current mode without
+  // relying on the hover tooltip. The label is a real <span
+  // class="send-btn-label"> child (not a ::after pseudo-element) so it
+  // does not collide with the .has-tooltip::after rule that owns the
+  // hover tooltip. The text is resolved through t() so non-English
+  // locales get the translated name.
+  const _labelKeys={stop:'composer_action_stop',queue:'composer_action_queue',interrupt:'composer_action_interrupt',steer:'composer_action_steer'};
+  // #7686 finding 5 (should fix): the composer_action_* keys live only in the
+  // English block of static/i18n.js, so t() returns the KEY for every other
+  // locale and Chinese users saw the English word "Stop". Resolve through the
+  // English string explicitly instead of falling back to the key name.
+  const _labelFallback={stop:'Stop',queue:'Queue',interrupt:'Interrupt',steer:'Steer'};
+  let _fullInner=icons[action]||icons.send;
+  if(_labelKeys[action]){
+    const _key=_labelKeys[action];
+    const _val=(typeof t==='function')?t(_key):'';
+    // t() echoes the key when the locale has no entry; that is not a
+    // translation, so fall through to the English word.
+    const _text=(_val&&_val!==_key)?_val:(_labelFallback[action]||_key);
+    // Escape for safe innerHTML injection of translator-controlled text.
+    const _esc=String(_text).replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+    _fullInner+='<span class="send-btn-label">'+_esc+'</span>';
+  }
+  if(btn.innerHTML!==_fullInner) btn.innerHTML=_fullInner;
 }
 
 function updateSendBtn(){
@@ -9285,6 +9351,14 @@ function updateSendBtn(){
   }
   btn.title=_btnTitle;
   btn.setAttribute('aria-label',_btnTitle);
+  // #1804 re-gate 9/24: #btnSend is .has-tooltip and its hover tooltip
+  // is driven by the [data-tooltip] attribute (see .has-tooltip::after at
+  // static/style.css:2110). The static markup ships data-tooltip="Send
+  // message" (composer_send), so every busy mode showed "Send message"
+  // on hover even though title/aria-label carried the correct mode name.
+  // Mirror the same string into [data-tooltip] so the hover tooltip and
+  // the screen-reader label stay in sync with the action.
+  btn.setAttribute('data-tooltip',_btnTitle);
   _setComposerPrimaryButtonIcon(btn,action);
   if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   // Single primary action button: while busy/no-draft it becomes the red Stop
