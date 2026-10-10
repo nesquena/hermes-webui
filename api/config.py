@@ -915,91 +915,169 @@ def _items_by_resolved_name(items) -> dict | None:
     return indexed
 
 
-def _raw_endpoint_template(raw_cfg, resolved_url):
-    """Return the raw ``${VAR}`` base_url template from the config's own
-    endpoint sources (``custom_providers[*].base_url`` and ``model.base_url``)
-    whose current expansion equals *resolved_url*, or ``None``.
+def _selected_endpoint_source(raw_cfg, provider_id):
+    """Return the RAW ``base_url`` of the config record *provider_id* routes
+    through, or ``None`` when no single record is identifiable.
 
-    Selecting a named custom provider (or an unnamed custom auxiliary slot)
-    derives the destination URL from an env-EXPANDED provider entry; writing
-    that value would bake a secret-bearing URL into config.yaml (#8032). The
-    template from the authoritative source is written instead.
+    ``custom:<slug>`` is the unique ``custom_providers`` entry (matched on its
+    env-resolved name), a ``providers.<id>`` key is that entry, and the unnamed
+    ``custom`` provider is the main ``model`` block. Only this record may supply
+    a ``${VAR}`` template for a derived endpoint (#8032): a global search for
+    any template with an equal expansion could bind the destination to an
+    unrelated variable.
     """
-    if not isinstance(raw_cfg, dict) or not isinstance(resolved_url, str) or not resolved_url:
+    pid = str(provider_id or "").strip()
+    if not isinstance(raw_cfg, dict) or not pid:
         return None
-    target = _normalize_base_url_for_compare(resolved_url)
-    candidates = []
-    providers = raw_cfg.get("custom_providers")
-    if isinstance(providers, list):
-        candidates.extend(cp.get("base_url") for cp in providers if isinstance(cp, dict))
-    model_block = raw_cfg.get("model")
-    if isinstance(model_block, dict):
-        candidates.append(model_block.get("base_url"))
-    for candidate in candidates:
-        if not _has_env_ref(candidate):
-            continue
+    if pid.startswith("custom:"):
+        entries = raw_cfg.get("custom_providers")
+        if not isinstance(entries, list):
+            return None
+        resolved = [
+            {**e, "name": _expand_env_vars(e.get("name"))} if isinstance(e, dict) else e
+            for e in entries
+        ]
         try:
-            if _normalize_base_url_for_compare(_expand_env_vars(candidate)) == target:
-                return candidate
-        except Exception:
-            continue
+            match = _unique_custom_provider_entry(resolved, _custom_provider_slug_key(pid))
+        except AmbiguousCustomProviderError:
+            return None
+        return match.get("base_url") if isinstance(match, dict) else None
+    if pid == "custom":
+        model_block = raw_cfg.get("model")
+        return model_block.get("base_url") if isinstance(model_block, dict) else None
+    providers = raw_cfg.get("providers")
+    if isinstance(providers, dict) and isinstance(providers.get(pid), dict):
+        return providers[pid].get("base_url")
     return None
 
 
-def _restore_env_ref_templates(new, raw):
+def _endpoint_for_save(source_raw, resolved_url, current_raw):
+    """Value to persist for a derived ``base_url``: the selected record's own
+    ``${VAR}`` template when it resolves to *resolved_url*, the record's literal
+    when the record is literal, else the destination field's own reference when
+    that still resolves to the URL, else the URL as given."""
+    normalize = _normalize_base_url_for_compare
+    if isinstance(source_raw, str) and source_raw.strip():
+        if _has_env_ref(source_raw):
+            kept = _preserve_env_ref(source_raw, resolved_url, normalize=normalize)
+            if kept == source_raw:
+                return source_raw
+        else:
+            try:
+                if normalize(source_raw) == normalize(resolved_url):
+                    return resolved_url
+            except Exception:
+                pass
+    return _preserve_env_ref(current_raw, resolved_url, normalize=normalize)
+
+
+def _restore_env_ref_templates(new, raw, _memo=None):
     """Restore raw ``${VAR}`` templates wherever *new* still holds exactly
     their current expansion, so persisting a loaded (expanded) structure never
     writes the plaintext value back. Values the caller changed, added or
     removed are kept as given. Mirrors hermes-agent's
-    ``_preserve_env_ref_templates`` (#8032, #8115)."""
+    ``_preserve_env_ref_templates`` (#8032, #8115).
+
+    Cycle-safe: output containers are registered per ``(new, raw)`` pair before
+    descending, so a recursive YAML alias anywhere in the document terminates.
+    """
     if isinstance(new, str):
         return _preserve_env_ref(raw, new)
     if isinstance(new, dict):
         if not isinstance(raw, dict):
             return new
-        return {
-            key: (_restore_env_ref_templates(value, raw[key]) if key in raw else value)
-            for key, value in new.items()
-        }
-    if isinstance(new, list):
+    elif isinstance(new, list):
         if not isinstance(raw, list):
             return new
-        raw_by_name = _items_by_resolved_name(raw)
-        if raw_by_name is not None and _items_by_resolved_name(new) is not None:
-            # Named entries (custom_providers, ...) match by name, so a
-            # reordered or shortened list keeps each entry's own templates.
-            return [
-                _restore_env_ref_templates(item, raw_by_name.get(item["name"]))
-                for item in new
-            ]
-        # Scalar entries also match by VALUE: a reordered list (e.g. MCP args
-        # ``[--token, ${TOKEN}]`` saved as ``[<token>, --token]``) must still
-        # get its template back. Only a scalar that is not a literal on disk
-        # and equals a template's expansion is restored.
-        templates: dict = {}
-        for item in raw:
+    else:
+        return new
+    if _memo is None:
+        _memo = {}
+    key = (id(new), id(raw))
+    if key in _memo:
+        return _memo[key]
+    if isinstance(new, dict):
+        out: dict = {}
+        _memo[key] = out
+        for k, value in new.items():
+            out[k] = _restore_env_ref_templates(value, raw[k], _memo) if k in raw else value
+        return out
+    out_list: list = []
+    _memo[key] = out_list
+    raw_by_name = _items_by_resolved_name(raw)
+    if raw_by_name is not None and _items_by_resolved_name(new) is not None:
+        # Named entries (custom_providers, ...) match by name, so a reordered
+        # or shortened list keeps each entry's own templates.
+        out_list.extend(
+            _restore_env_ref_templates(item, raw_by_name.get(item["name"]), _memo) for item in new
+        )
+        return out_list
+    out_list.extend(_restore_list_items(new, raw, _memo))
+    return out_list
+
+
+def _restore_list_items(new: list, raw: list, memo: dict) -> list:
+    """List half of :func:`_restore_env_ref_templates`.
+
+    Each on-disk template occurrence is restored at most once, and an on-disk
+    literal is never replaced by a template:
+    1. a template the caller passed verbatim consumes its own occurrence;
+    2. at the same index, an unused template whose expansion equals the value
+       is restored, and an equal on-disk literal is kept;
+    3. a value equal to a remaining on-disk literal is kept;
+    4. otherwise the first unused template with an equal expansion is restored
+       (a reordered list, e.g. MCP args).
+    Containers recurse positionally only when the lengths match.
+    """
+    same_len = len(new) == len(raw)
+    slots = []  # [index, template, expansion, used]
+    for idx, item in enumerate(raw):
+        if isinstance(item, str) and _has_env_ref(item):
+            try:
+                slots.append([idx, item, _expand_env_vars(item), False])
+            except Exception:
+                continue
+    literals = collections.Counter(
+        item for item in raw if isinstance(item, str) and not _has_env_ref(item)
+    )
+    out = list(new)
+    pending = []
+    for i, item in enumerate(new):
+        if isinstance(item, (dict, list)):
+            out[i] = _restore_env_ref_templates(item, raw[i], memo) if same_len else item
+        elif isinstance(item, str):
             if _has_env_ref(item):
-                try:
-                    templates.setdefault(_expand_env_vars(item), item)
-                except Exception:
-                    continue
-        literals = {item for item in raw if isinstance(item, str) and not _has_env_ref(item)}
-
-        def _by_value(item):
-            if isinstance(item, str) and item not in literals and item in templates:
-                return templates[item]
-            return item
-
-        if len(new) == len(raw):
-            restored = []
-            for item, raw_item in zip(new, raw, strict=True):
-                value = _restore_env_ref_templates(item, raw_item)
-                if value is item and isinstance(item, str):
-                    value = _by_value(item)
-                restored.append(value)
-            return restored
-        return [_by_value(item) for item in new]
-    return new
+                for slot in slots:
+                    if not slot[3] and slot[1] == item:
+                        slot[3] = True
+                        break
+            else:
+                pending.append(i)
+    unresolved = []
+    for i in pending:
+        item = out[i]
+        if same_len:
+            slot = next((sl for sl in slots if sl[0] == i and not sl[3] and sl[2] == item), None)
+            if slot is not None:
+                slot[3] = True
+                out[i] = slot[1]
+                continue
+            if raw[i] == item and literals[item] > 0:
+                literals[item] -= 1
+                continue
+        unresolved.append(i)
+    floating = []
+    for i in unresolved:
+        if literals[out[i]] > 0:
+            literals[out[i]] -= 1
+        else:
+            floating.append(i)
+    for i in floating:
+        slot = next((sl for sl in slots if not sl[3] and sl[2] == out[i]), None)
+        if slot is not None:
+            slot[3] = True
+            out[i] = slot[1]
+    return out
 
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
@@ -6704,10 +6782,10 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
 
         if resolved_base_url and not provider_override_won:
             _new_base_url = str(resolved_base_url).strip().rstrip("/")
-            model_cfg["base_url"] = _raw_endpoint_template(config_data, _new_base_url) or _preserve_env_ref(
-                raw_model_cfg.get("base_url"),
+            model_cfg["base_url"] = _endpoint_for_save(
+                _selected_endpoint_source(config_data, resolved_provider),
                 _new_base_url,
-                normalize=_normalize_base_url_for_compare,
+                raw_model_cfg.get("base_url"),
             )
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
@@ -6986,10 +7064,10 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                         resolved_base_url = None
                 if resolved_base_url:
                     _slot_url = str(resolved_base_url).strip().rstrip("/")
-                    slot_cfg["base_url"] = _raw_endpoint_template(config_data, _slot_url) or _preserve_env_ref(
-                        slot_cfg.get("base_url"),
+                    slot_cfg["base_url"] = _endpoint_for_save(
+                        _selected_endpoint_source(config_data, provider),
                         _slot_url,
-                        normalize=_normalize_base_url_for_compare,
+                        slot_cfg.get("base_url"),
                     )
             if advanced is not None:
                 try:

@@ -714,3 +714,138 @@ def test_mcp_update_reordering_an_env_backed_arg_keeps_the_reference(cfg_path):
     assert _raw(cfg_path)["mcp_servers"]["reorder"]["args"] == [TOKEN_REF, "--token"]
     _assert_no_secret(cfg_path, "MCP update (reordered args)")
 
+
+# ── Gate round 2 findings on #8129 (adversarial Codex) ─────────────────
+
+SAME_URL = "https://same.example.test/v1"
+
+
+def _seed(cfg_path, mutate):
+    from api import config as _config
+
+    raw = _raw(cfg_path)
+    mutate(raw)
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    _reset_config_caches()
+    _config.reload_config()
+
+
+def test_main_url_comes_from_the_selected_provider_not_an_equal_template(cfg_path, monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_URL_A", SAME_URL)
+    monkeypatch.setenv("HERMES_TEST_URL_B", SAME_URL)
+
+    def mutate(raw):
+        raw["custom_providers"] = [
+            {"name": "first", "base_url": "${HERMES_TEST_URL_A}"},
+            {"name": "second", "base_url": "${HERMES_TEST_URL_B}"},
+        ]
+
+    _seed(cfg_path, mutate)
+    handler = _post("/api/default-model", {"model": "@custom:second:synthetic-model", "provider": "custom:second"})
+    assert handler.status == 200, handler.json_body()
+    assert _raw(cfg_path)["model"].get("base_url") in (None, "${HERMES_TEST_URL_B}")
+
+
+def test_unnamed_aux_url_comes_from_the_main_block_not_an_equal_template(cfg_path, monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_URL_A", SAME_URL)
+    monkeypatch.setenv("HERMES_TEST_URL_B", SAME_URL)
+
+    def mutate(raw):
+        raw["model"] = {"default": "synthetic-model", "provider": "custom", "base_url": "${HERMES_TEST_URL_B}"}
+        raw["custom_providers"] = [{"name": "unrelated", "base_url": "${HERMES_TEST_URL_A}"}]
+        raw.pop("auxiliary", None)
+
+    _seed(cfg_path, mutate)
+    handler = _post(
+        "/api/model/set",
+        {"scope": "auxiliary", "task": "compression", "provider": "custom", "model": "synthetic-model"},
+    )
+    assert handler.status == 200, handler.json_body()
+    assert _raw(cfg_path)["auxiliary"]["compression"].get("base_url") in (None, "${HERMES_TEST_URL_B}")
+
+
+def test_literal_selected_endpoint_stays_literal(cfg_path, monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_URL_A", SAME_URL)
+
+    def mutate(raw):
+        raw["custom_providers"] = [
+            {"name": "unrelated", "base_url": "${HERMES_TEST_URL_A}"},
+            {"name": "literal", "base_url": SAME_URL},
+        ]
+
+    _seed(cfg_path, mutate)
+    handler = _post(
+        "/api/model/set",
+        {"scope": "auxiliary", "task": "vision", "provider": "custom:literal", "model": "synthetic-model"},
+    )
+    assert handler.status == 200, handler.json_body()
+    assert _raw(cfg_path)["auxiliary"]["vision"].get("base_url") in (None, SAME_URL)
+
+
+def test_keyed_provider_url_is_written_as_its_template(cfg_path, monkeypatch):
+    """Selecting an env-backed ``providers.<id>.base_url`` (pre-existing gap)
+    writes the template, never the expanded URL."""
+    monkeypatch.setenv("HERMES_TEST_CP_URL", CP_URL)
+
+    def mutate(raw):
+        raw["providers"] = {"synthetic": {"base_url": CP_URL_REF, "models": ["synthetic-model"]}}
+
+    _seed(cfg_path, mutate)
+    handler = _post("/api/default-model", {"model": "synthetic-model", "provider": "synthetic"})
+    assert handler.status == 200, handler.json_body()
+    assert _raw(cfg_path)["model"].get("base_url") in (None, CP_URL_REF)
+    _assert_no_secret(cfg_path, "POST /api/default-model (providers.<id> url)")
+
+
+def test_list_restore_keeps_literals_and_uses_each_template_once(cfg_path):
+    from api import config
+
+    # A literal equal to the token's expansion and the reference trade places.
+    assert config._restore_env_ref_templates(
+        {"args": [TOKEN, TOKEN_REF, "--tail"]}, {"args": [TOKEN_REF, TOKEN, "--tail"]}
+    ) == {"args": [TOKEN, TOKEN_REF, "--tail"]}
+    # An unchanged, fully expanded save keeps the on-disk order and kinds.
+    assert config._restore_env_ref_templates(
+        {"args": [TOKEN, TOKEN]}, {"args": [TOKEN_REF, TOKEN]}
+    ) == {"args": [TOKEN_REF, TOKEN]}
+    # One template occurrence is never restored twice.
+    assert config._restore_env_ref_templates({"args": [TOKEN, TOKEN]}, {"args": [TOKEN_REF]}) == {
+        "args": [TOKEN_REF, TOKEN]
+    }
+
+
+def test_mcp_update_literal_and_reference_trade_places(cfg_path):
+    import api.routes as routes
+
+    def mutate(raw):
+        raw.setdefault("mcp_servers", {})["reorder"] = {
+            "command": "synthetic-mcp",
+            "args": [TOKEN_REF, TOKEN, "--tail"],
+        }
+
+    _seed(cfg_path, mutate)
+    handler = _FakeHandler()
+    routes._handle_mcp_server_update(
+        handler, "reorder", {"command": "synthetic-mcp", "args": [TOKEN, TOKEN_REF, "--tail"]}
+    )
+    assert handler.status == 200, handler.json_body()
+    assert _raw(cfg_path)["mcp_servers"]["reorder"]["args"] == [TOKEN, TOKEN_REF, "--tail"]
+
+
+def test_recursive_yaml_elsewhere_does_not_break_a_save(cfg_path):
+    """An unrelated recursive alias must not make the restore guard recurse
+    forever (base returned 200)."""
+    import api.routes as routes
+
+    cfg_path.write_text(
+        cfg_path.read_text(encoding="utf-8")
+        + "metadata: &cycle\n  self: *cycle\n",
+        encoding="utf-8",
+    )
+    _reset_config_caches()
+    handler = _FakeHandler()
+    routes._handle_mcp_server_update(handler, "local", {"command": "synthetic-mcp", "args": ["--new"]})
+    assert handler.status == 200, handler.json_body()
+    assert _raw(cfg_path)["mcp_servers"]["local"]["args"] == ["--new"]
+    _assert_refs_survive(cfg_path, "MCP update (recursive YAML elsewhere)", skip=("mcp.local.args", "mcp.local.env"))
+
