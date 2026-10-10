@@ -2941,7 +2941,12 @@ document.addEventListener('keydown',async e=>{
   // approving the pending action and cancelling the key (#8130).
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
     const card=$('approvalCard');
-    if(card&&card.classList.contains('visible')&&!_enterBelongsToFocusedControl(document.activeElement)){
+    // Judge the element the key was pressed on (e.target), not document.activeElement:
+    // this listener runs after the target's own handlers, and a control that blurs or
+    // removes itself on Enter (queued-message editor, chip rename, "Show earlier steps")
+    // leaves the body focused by now. A handler that already consumed Enter
+    // (defaultPrevented) owns it too.
+    if(card&&card.classList.contains('visible')&&!e.defaultPrevented&&!_enterBelongsToFocusedControl(e.target)){
       e.preventDefault();
       if(typeof respondApproval==='function') respondApproval('once');
       return;

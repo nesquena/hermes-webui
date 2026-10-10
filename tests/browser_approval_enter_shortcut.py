@@ -17,6 +17,8 @@ WHAT IT CHECKS, with the approval card visible and respondApproval recorded
   - Enter on a button outside the card activates that button and approves nothing;
   - Enter on a menu item outside the card (role="menuitem") approves nothing;
   - Enter in the composer approves nothing;
+  - Enter in an editor that blurs itself, or on a control that removes itself,
+    approves nothing (the shortcut judges the key's target, not where focus ended);
   - Space on "Deny" denies (control: Space was never intercepted);
   - with the card hidden, Enter approves nothing.
 
@@ -66,7 +68,25 @@ SETUP_JS = """() => {
     item.tabIndex = 0;
     item.textContent = 'Menu item';
     document.body.appendChild(item);
+    // Like the queued-message editor: Enter commits and blurs the editor, so by the
+    // time the document listener runs, focus is on the body.
+    const editor = document.createElement('div');
+    editor.id = 'approvalEnterSelfBlurEditor';
+    editor.contentEditable = 'true';
+    editor.textContent = 'queued message';
+    editor.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); editor.blur(); } });
+    document.body.appendChild(editor);
   }
+  // Like "Show earlier steps": Enter activates the control and it removes itself.
+  // Rebuilt for every case so each run starts with a fresh control.
+  const old = document.getElementById('approvalEnterSelfRemoving');
+  if (old) old.remove();
+  const pill = document.createElement('button');
+  pill.type = 'button';
+  pill.id = 'approvalEnterSelfRemoving';
+  pill.textContent = 'Show earlier steps';
+  pill.addEventListener('keydown', (e) => { if (e.key === 'Enter') { window.__probeClicks += 1; pill.remove(); } });
+  document.body.appendChild(pill);
   return typeof window.respondApproval === 'function';
 }"""
 
@@ -108,6 +128,8 @@ CASES = [
     ("Enter on a button outside the card", "#approvalEnterProbe", "Enter", True, [], 1),
     ("Enter on a menu item outside the card", "#approvalEnterMenuItem", "Enter", True, [], 0),
     ("Enter in the composer", "#msg", "Enter", True, [], 0),
+    ("Enter in an editor that blurs itself on Enter", "#approvalEnterSelfBlurEditor", "Enter", True, [], 0),
+    ("Enter on a control that removes itself on Enter", "#approvalEnterSelfRemoving", "Enter", True, [], 1),
     ("Space on Deny", "#approvalBtnDeny", "Space", True, ["deny"], 0),
     ("Enter with the card hidden", None, "Enter", False, [], 0),
 ]
@@ -139,6 +161,7 @@ def _check(browser):
         ctx.close()
         return ["  setup: respondApproval could not be recorded"]
     for label, selector, key, visible, want, want_probe in CASES:
+        page.evaluate(SETUP_JS)
         if not page.evaluate(SHOW_CARD_JS, visible):
             failures.append(f"  [{label}] the approval card is missing")
             continue
