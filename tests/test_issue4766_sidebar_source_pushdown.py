@@ -293,7 +293,8 @@ def test_frontend_sends_sidebar_source_param():
 
     assert "function _requestedSessionSidebarSource()" in src
     assert "function _sessionListQueryString()" in src
-    assert "qs.set('sidebar_source', _requestedSessionSidebarSource());" in src
+    assert "const sidebarSource = _requestedSessionSidebarSource();" in src
+    assert "if (sidebarSource) qs.set('sidebar_source', sidebarSource);" in src
     assert "_serverWebuiSessionCount" in src
     assert "_serverCliSessionCount" in src
     assert "function _sessionSourceTabCount(" in src
@@ -342,7 +343,7 @@ console.log(JSON.stringify({{ first, second, searchFiltered, projectFiltered, ca
 """
     body = _run_node(script)
 
-    assert body["first"] == "?sidebar_source=cli&exclude_hidden=1&all_profiles=1"
+    assert body["first"] == "?exclude_hidden=1&all_profiles=1"
     assert body["second"] == "?sidebar_source=webui&exclude_hidden=1&all_profiles=1&include_archived=1&archived_limit=100"
     assert body["searchFiltered"] == "?sidebar_source=webui&exclude_hidden=1&all_profiles=1&include_archived=1"
     assert body["projectFiltered"] == "?sidebar_source=webui&all_profiles=1&include_archived=1"
@@ -754,16 +755,16 @@ async function runCase(requestedSource, cachedSource) {{
     assert body["mismatch"]["scope"] == {
         "profile": "default",
         "allProfiles": False,
-        "sidebarSource": "cli",
+        "sidebarSource": None,
         "excludeHidden": True,
     }
     assert body["mismatch"]["webui"] is None
     assert body["mismatch"]["cli"] is None
     assert body["mismatch"]["skeleton"] is False
     assert body["mismatch"]["render"]["sessions"] == []
-    assert body["mismatch"]["inflightKeys"] == ["webui-live"]
-    assert body["mismatch"]["cleared"] == []
-    assert body["mismatch"]["render"]["inflightKeys"] == ["webui-live"]
+    assert body["mismatch"]["inflightKeys"] == []
+    assert body["mismatch"]["cleared"] == ["webui-live"]
+    assert body["mismatch"]["render"]["inflightKeys"] == []
     assert body["match"]["sessions"] == ["webui-1"]
     assert body["match"]["scope"] == {
         "profile": "default",
