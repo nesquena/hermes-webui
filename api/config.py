@@ -345,7 +345,7 @@ def _thread_local_env_value(name: str, default: str = "") -> str:
 
 # ── Config file (reloadable -- supports profile switching) ──────────────────
 
-def _expand_env_vars(obj):
+def _expand_env_vars(obj, *, env: dict | None = None):
     """Recursively expand ${VAR} references in config values.
 
     Uses the thread-local-first profile env lookup (_thread_local_env_value) so a
@@ -359,13 +359,17 @@ def _expand_env_vars(obj):
     if isinstance(obj, str):
         return re.sub(
             r"\${([^}]+)}",
-            lambda m: _thread_local_env_value(m.group(1), m.group(0)),
+            lambda m: (
+                str(env.get(m.group(1), m.group(0)))
+                if env is not None
+                else _thread_local_env_value(m.group(1), m.group(0))
+            ),
             obj,
         )
     if isinstance(obj, dict):
-        return {k: _expand_env_vars(v) for k, v in obj.items()}
+        return {k: _expand_env_vars(v, env=env) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_expand_env_vars(item) for item in obj]
+        return [_expand_env_vars(item, env=env) for item in obj]
     return obj
 
 
@@ -536,7 +540,35 @@ def get_config_snapshot() -> dict:
             active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
         except NameError:
             active_cfg = _cfg_cache
+        if not _cfg_has_in_memory_overrides() and _profile_config_uses_owned_env(config_path):
+            return _read_profile_config_snapshot(config_path)
         return copy.deepcopy(active_cfg)
+
+
+def _profile_config_uses_owned_env(config_path: Path) -> bool:
+    """Recognize named profile homes, including a symlinked config parent."""
+    try:
+        home = config_path.parent.resolve()
+    except (OSError, RuntimeError):
+        home = config_path.parent
+    return home.parent.name == "profiles"
+
+
+def _read_profile_config_snapshot(config_path: Path) -> dict:
+    """Expand raw YAML against its owner's env without changing cache or TLS."""
+    from api.profiles import filter_runtime_env_for_gateway_parity, get_profile_runtime_env
+
+    home = config_path.parent
+    env = {"HERMES_HOME": str(home)}
+    try:
+        env.update(filter_runtime_env_for_gateway_parity(get_profile_runtime_env(home)))
+    except Exception:
+        # Failed profile env reads must not borrow the server's environment.
+        logger.debug("Failed to load profile env for config snapshot", exc_info=True)
+    raw = _load_yaml_config_file_raw(config_path, _copy=False)
+    snapshot = _expand_env_vars(raw, env=env)
+    _apply_config_defaults(snapshot)
+    return snapshot
 
 
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
@@ -758,6 +790,10 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     isolated: a nonexistent home returns ``{}`` and an existing home without a
     ``config.yaml`` yields defaults — neither ever falls back to the ambient
     config (profiles-are-islands).
+
+    Named-profile reads use raw YAML expanded against the owning home's env,
+    including when the ambient path matches. They return a detached snapshot
+    while preserving in-memory overrides and HERMES_CONFIG_PATH precedence.
     """
     if not profile_home:
         return get_config()
@@ -777,7 +813,11 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
         from api.profiles import get_active_hermes_home
 
         if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
-            return get_config()
+            return (
+                get_config_snapshot()
+                if _profile_config_uses_owned_env(target / "config.yaml")
+                else get_config()
+            )
     except Exception:
         pass
     # If the ambient resolver already points at this profile home, defer to
@@ -787,7 +827,11 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     # cfg) must still resolve through get_config(), not return {} (#4516 gate).
     try:
         if _cfg_safe_resolve(_get_config_path().parent) == target:
-            return get_config()
+            return (
+                get_config_snapshot()
+                if _profile_config_uses_owned_env(target / "config.yaml")
+                else get_config()
+            )
     except Exception:
         pass
     if not target.exists():
@@ -795,6 +839,8 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     # Read the profile file directly and apply documented defaults locally so the
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
+    if _profile_config_uses_owned_env(target / "config.yaml"):
+        return _read_profile_config_snapshot(target / "config.yaml")
     profile_cfg = _load_yaml_config_file(target / "config.yaml")
     _apply_config_defaults(profile_cfg)
     return profile_cfg

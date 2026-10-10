@@ -997,6 +997,18 @@ Return value:
 
 ## 8. Configuration Loading
 
+`api.config.get_config_snapshot()` captures a detached request-owned config
+under `_cfg_lock`. For named profile homes (`profiles/<name>`, including
+symlink aliases), disk-backed reads expand raw YAML against that home's
+filtered runtime environment. Missing values remain `${VAR}`; they cannot
+borrow the process or another request's environment. The explicit
+`get_config_for_profile_home()` read uses the same owner rule. Expansion does
+not mutate thread-local env or publish profile-scoped values into the legacy
+process-expanded `cfg` cache. In-memory overrides remain authoritative, and
+`HERMES_CONFIG_PATH` retains its existing path-selection precedence. Default
+home reads keep their existing process-env behavior. Regression coverage is
+in `tests/test_issue5619_profile_config_isolation.py`.
+
 On startup, server.py reads ~/.hermes/config.yaml:
 
     cfg = yaml.safe_load(CONFIG_PATH.read_text())
