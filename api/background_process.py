@@ -2416,6 +2416,11 @@ def _drain_loop() -> None:
     logger.info("bg_task_complete drain thread started")
     restore_durable_process_completions(process_registry)
     while not _DRAIN_STOP.is_set():
+        try:
+            from api.kanban_chat_updates import drain_kanban_chat_updates
+            drain_kanban_chat_updates()
+        except Exception:
+            logger.warning("Kanban chat receipt drain unavailable", exc_info=True)
         # Read the queue defensively: a rebuilt/partially-initialized registry
         # may not expose ``completion_queue`` (mirrors streaming.py's
         # ``getattr(process_registry, 'completion_queue', None)`` guard). Direct
