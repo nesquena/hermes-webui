@@ -722,6 +722,55 @@ file populated before `get_available_models` returns, and the single-flight rele
 with the queued commit, so ownership still spans the durable write. The out-of-band worker
 commits directly, which is correct because it holds no catalog lock by then.
 
+### 4.12 Insights Period Endpoint (`/api/insights`)
+
+`GET /api/insights` reports usage analytics for one time window. The window is
+selected by query parameters, and the response echoes the window it actually
+served through `mode` (`"trailing"` or `"custom"`). Totals and the daily series
+are always computed over the same resolved interval. Data comes from the WebUI
+session index plus non-WebUI rows in the active profile's `state.db`, when that
+database exists. The optional `sync_to_insights` setting mirrors WebUI usage
+into `state.db`; it does not control whether this endpoint includes CLI rows.
+
+Window selection:
+
+- `days=N` — trailing window of the last `N` days. This is what the panel's
+  7/30/90/365 presets send, and the fallback when no absolute bound is usable.
+- `start=…` / `end=…` — an absolute window. Each bound is either an exact Unix
+  epoch timestamp in seconds or a `YYYY-MM-DD` calendar date. A supplied
+  `start` with no `end` runs to the server clock. A supplied `end` with no
+  `start` back-steps the start by 30 days using the bound's own arithmetic: a
+  `YYYY-MM-DD` end subtracts 30 calendar days (local midnight to local
+  midnight, DST-safe), while a numeric end subtracts exactly `30 * 86400`
+  seconds — so across a daylight-saving change a numeric end's default start can
+  land on a different local date than the calendar one would.
+- The **Custom range…** selection sends the two `<input type=date>` values as
+  raw `YYYY-MM-DD` strings, not epoch seconds, so the server reads them in its
+  own timezone and a browser in another timezone cannot shift the selected
+  calendar day. The panel defaults the inputs to the last 30 calendar days only
+  when no range has been picked yet, so preset → Custom never erases a chosen
+  range.
+
+Bounds and fallbacks:
+
+- A `YYYY-MM-DD` bound selects a whole local calendar day (start = that day's
+  local midnight; an end date's exclusive stop is the next local midnight,
+  except a date equal to today, which clamps to the server clock because that
+  day is not over). An epoch bound keeps its exact `[start, end)` precision.
+  Bounds are swapped if supplied reversed.
+- The window never extends into the future: an `end` beyond the server clock
+  is clamped to `now`.
+- Windows are clamped to five calendar years so the daily series cannot grow
+  unbounded.
+- The request fails closed to the trailing `days` window (`mode: "trailing"`)
+  when an absolute bound cannot be served faithfully: a supplied bound that is
+  unparseable (e.g. `2026-02-31`) or out of the supported epoch range, a
+  pre-epoch date (Chromium's date input accepts `0001-…`, and no session
+  predates 1970), or a strictly-future start. A supplied-but-invalid bound is
+  never treated as an omitted one, so a rejected request cannot fabricate an
+  interval the caller did not ask for. An explicit zero-length window pinned to
+  the clock itself (`start == now`) stays an empty custom interval rather than
+  silently serving the trailing window.
 
 ---
 

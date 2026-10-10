@@ -377,6 +377,7 @@ before the session's named-profile Gateway ownership is known.
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
 - **Todos** -- live task list from the current session
+- **Insights** -- token, cost, and skill-usage analytics; period presets (7/30/90/365 days) plus a **Custom range** with start/end date pickers
 - **Spaces** -- add, rename, remove workspaces; quick-switch from topbar
 
 ### Mobile responsive

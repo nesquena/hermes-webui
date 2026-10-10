@@ -12560,21 +12560,355 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
+    import math as _math
     import time as _time
+    from datetime import datetime as _datetime, timedelta as _timedelta
 
     from api.usage import prompt_cache_hit_percent
 
-    query = parse_qs(parsed.query)
-    try:
-        days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
-    except (ValueError, TypeError):
-        days = 30
+    # keep_blank_values: parse_qs() DROPS empty values by default, so a blank
+    # bound (`start=2026-05-01&end=`) looked ABSENT here and the documented
+    # fail-closed check below never saw it - the request was then served as a
+    # custom [start, now] window (the blank `end` silently defaulted to "now")
+    # instead of the trailing window a malformed input must fall back to.  With
+    # blanks preserved, `_window_ts` rejects them the same way it rejects an
+    # unparseable value, so BOTH bounds fall back together (Greptile P1
+    # 2026-10-10T03:29:18Z: "Blank bounds change the range").
+    query = parse_qs(parsed.query, keep_blank_values=True)
 
+    def _window_ts(vals):
+        # Parse one time-window endpoint.  Returns (kind, ts) where kind is
+        # 'date' (a YYYY-MM-DD calendar string, ts = local midnight of that
+        # day) or 'num' (Unix epoch seconds, ts = the exact float), or None
+        # when absent/invalid.  PROVENANCE MATTERS: a date string selects a
+        # whole calendar day (its bound is a local midnight), while a numeric
+        # endpoint is an EXACT point in time and must keep its precision -
+        # it is never rounded down to the day's midnight nor widened to the
+        # next one (Greptile P1: 'Numeric Unix endpoints retain precision
+        # only on one special date').
+        if not vals:
+            return None
+        v = vals[0]
+        if not isinstance(v, str):
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            try:
+                y, mo, d = map(int, v.split("-"))
+                ts = _time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1))
+                # Reject impossible calendar dates (e.g. 2026-02-31):
+                # mktime silently normalizes them to another day, which
+                # would return analytics for the wrong interval.  A
+                # round-trip must land back on the requested local
+                # midnight, otherwise the value is invalid -> fall back.
+                lt = _time.localtime(ts)
+                if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, mo, d):
+                    return None
+                return ("date", ts)
+            except (OverflowError, ValueError, OSError):
+                return None
+        # Numeric epoch seconds.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not _math.isfinite(f):
+            return None
+        return ("num", f)
+
+    # Absolute time-window mode: start/end Unix timestamps (seconds) or
+    # YYYY-MM-DD date strings.  end defaults to "now"; start defaults to 30
+    # days before end.  Falls back to trailing `days`-window mode when neither
+    # is present.
+    start_meta = _window_ts(query.get("start", []))
+    end_meta = _window_ts(query.get("end", []))
+    # A SUPPLIED-but-invalid endpoint must fail closed to the trailing
+    # window, not masquerade as an OMITTED one: `_window_ts` returns None
+    # for both absent and unparseable values, and the omitted-endpoint
+    # defaults (30 days before end; end = now) would fabricate a custom
+    # interval the caller never requested when the endpoint was actually
+    # supplied but unparseable (e.g. 2026-02-31, rejected by the calendar
+    # round-trip check).  This applies symmetrically to BOTH bounds: an
+    # invalid SUPPLIED start used to invent a 30-days-before-end window,
+    # and an invalid SUPPLIED end still widens a valid start through the
+    # current server time into a fabricated [start, now] interval (Greptile
+    # P1: "Invalid start invents custom range"; 2026-08-17 re-review: a
+    # valid start plus an impossible end).  Reject the whole custom request
+    # so the response reports the trailing window actually served.
+    if ("start" in query and start_meta is None) or ("end" in query and end_meta is None):
+        start_meta = None
+        end_meta = None
+    start_kind = start_meta[0] if start_meta else None
+    end_kind = end_meta[0] if end_meta else None
+    start_ts_v = start_meta[1] if start_meta else None
+    end_ts_v = end_meta[1] if end_meta else None
+    # Platform-range guard for SUPPLIED endpoints, BEFORE any calendar
+    # arithmetic runs.  A pre-epoch calendar date is a perfectly valid
+    # YYYY-MM-DD string (Chromium's <input type=date> submits 0001-01-15
+    # happily) and yields a huge negative epoch.  The end-only default below
+    # then evaluates `date - 30 days` from date.min and raises
+    # `OverflowError: date value out of range` -> HTTP 500.  Reject any
+    # supplied PRE-EPOCH endpoint here (no session predates 1970) and fail
+    # closed to the trailing `days` window - the same fallback an unparseable
+    # endpoint already gets - so no downstream localtime()/mktime()/date
+    # arithmetic can ever see a pre-epoch value.  A supplied endpoint ABOVE
+    # the ceiling is deliberately NOT rejected here: `min(end, now)` clamps a
+    # future end and the post-arithmetic range check below already falls back
+    # for an absurd start, so the documented "valid start + huge end" window
+    # (start..now) keeps working.
+    _PLATFORM_MIN_TS = 0           # 1970-01-01 local (no sessions predate it)
+    # The DERIVED start of an end-only DATE request needs the SAME guard.  An
+    # `end=1970-01-15` is itself >= 0, so the supplied-endpoint check below
+    # cannot see that its implicit `end - 30 calendar days` start lands on
+    # 1969-12-16 - and mktime() on that pre-epoch day raises on Windows BEFORE
+    # the post-arithmetic range check can fall back, so /api/insights answered
+    # HTTP 500 instead of the trailing window (Greptile P1: 'Derived start
+    # bypasses platform guard').  Probe the derivation the same way the real
+    # arithmetic will (a local-midnight mktime) rather than comparing against a
+    # hard-coded 1970-01-01: east-of-UTC zones make even local midnight
+    # 1970-01-01 pre-epoch, so the date comparison alone would still miss
+    # `end=1970-01-31` -> start 1970-01-01.  On any platform failure, fail
+    # closed to the trailing `days` window exactly like a pre-epoch supplied
+    # endpoint does.
+    derived_start_pre_epoch = False
+    if start_ts_v is None and end_kind == "date" and end_ts_v is not None:
+        try:
+            _end_day_v = _datetime.fromtimestamp(
+                min(end_ts_v, 4102444800)).date()
+            _time.mktime((_end_day_v - _timedelta(days=30)).timetuple())
+        except (OverflowError, ValueError, OSError):
+            derived_start_pre_epoch = True
+    if derived_start_pre_epoch \
+            or (start_ts_v is not None and start_ts_v < _PLATFORM_MIN_TS) \
+            or (end_ts_v is not None and end_ts_v < _PLATFORM_MIN_TS):
+        start_meta = None
+        end_meta = None
+        start_kind = None
+        end_kind = None
+        start_ts_v = None
+        end_ts_v = None
     now = _time.time()
-    today = _time.localtime(now)
-    today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
-    day_secs = 86400
-    first_day_ts = today_midnight - ((days - 1) * day_secs)
+    start_ts = None
+    end_ts = None
+
+    # end_from_clock: True when the EFFECTIVE end is the server clock because
+    # the caller did not pin it to a concrete timestamp - an omitted `end`, or
+    # an explicit endpoint the server clamped down to `now`.  An explicitly
+    # supplied numeric end is NOT clock-derived even when its value happens to
+    # equal `now`: the numeric contract is an exact [start, end) interval, so
+    # it must remain an EXCLUSIVE boundary (gate re-gate: 'explicit numeric
+    # boundaries lose provenance').  The flag is tracked through the swap and
+    # the future clamp below.
+    end_from_clock = False
+    if start_ts_v is not None or end_ts_v is not None:
+        if end_ts_v is not None:
+            end_ts = min(end_ts_v, now)
+            end_from_clock = end_ts_v > now
+            if start_ts_v is not None:
+                start_ts = start_ts_v
+            else:
+                # End-only with a calendar-date end: default the start to
+                # 30 calendar days before the end's local midnight (DST-safe).
+                # Using `end_ts - 30*86400` drifts by the DST offset and can
+                # fall on the wrong calendar date (see gate repro:
+                # end=2026-03-10 in America/New_York → elapsed gives 2026-02-07
+                # instead of the calendar 2026-02-08).  `end_ts` is guaranteed
+                # inside the platform window here (the guard above rejected any
+                # pre-epoch / out-of-range supplied endpoint AND any end-only
+                # DATE whose derived start would not survive mktime() on this
+                # platform), so neither fromtimestamp() nor the 30-day
+                # back-step can underflow.
+                if end_kind == "date":
+                    # Derive from the endpoint the CALLER sent, not from the
+                    # end already clamped to `now`: for a future `end` the
+                    # clamp must clamp the INTERVAL only, otherwise the whole
+                    # window shifts backwards and serves days outside the
+                    # requested [end - 30d, end] range (Greptile P1: 'Future
+                    # end shifts start').  The clamps below still keep every
+                    # served boundary at/behind the clock.
+                    end_day_tmp = _datetime.fromtimestamp(
+                        min(end_ts_v, 4102444800)).date()
+                    start_day_tmp = end_day_tmp - _timedelta(days=30)
+                    start_ts = _time.mktime(start_day_tmp.timetuple())
+                    start_kind = "date"
+                else:
+                    start_ts = end_ts_v - 30 * 86400
+        else:
+            start_ts = start_ts_v
+            end_ts = now
+            end_from_clock = True
+        # Reversal test.  A DATE `end` means the WHOLE calendar day and is
+        # served as an exclusive bound at the NEXT local midnight
+        # (``end_cutoff`` below), so the comparison must use that SAME resolved
+        # bound: measured against the date's local MIDNIGHT, a numeric start
+        # later the same day looked reversed and the swap served the day's
+        # EARLIER hours instead of the requested tail (Greptile P1
+        # 2026-10-10T02:20:04Z: start = May 2 noon with end = 2026-05-02
+        # returned midnight..noon).  Equality counts as reversed for a
+        # whole-day end - a start at exactly the end day's exclusive close
+        # means "all of that day", which is what the old swap produced.
+        _cmp_end = end_ts
+        _end_is_whole_day = False
+        if end_kind == "date" and end_ts is not None:
+            try:
+                _cmp_day = _datetime.fromtimestamp(end_ts).date()
+                _cmp_end = _time.mktime((_cmp_day + _timedelta(days=1)).timetuple())
+                _end_is_whole_day = True
+            except (OverflowError, ValueError, OSError):
+                _cmp_end = end_ts
+        if start_ts > _cmp_end or (_end_is_whole_day and start_ts == _cmp_end):
+            start_ts, end_ts = end_ts, start_ts
+            start_kind, end_kind = end_kind, start_kind
+            # The value that lands in the `end` slot is the OLD start, which is
+            # never clock-derived (it is either explicit, or derived from the
+            # end) - so the flag resets and is re-derived by the clamp below.
+            end_from_clock = False
+        # A custom window must never extend into the future.  An explicit
+        # future `end` is already clamped to now via min(end, now) above,
+        # but the swap can re-introduce a future value as the new end - e.g.
+        # a future `start` with no `end` becomes [now, future_start].
+        # Clamp the end to now again.
+        if end_ts > now:
+            end_ts = now
+            end_from_clock = True
+        # STRICT-future detection: a window whose effective START lies at or
+        # after the server clock is wholly in the future (every daily bucket
+        # zero-filled), so it fails closed to the trailing `days` fallback and
+        # the analytics window keeps ending at or before now.  The ONE exempt
+        # case is a zero-length window anchored exactly on the clock that the
+        # caller asked for directly - an explicit `start == now` with no future
+        # endpoint to clamp.  That is not a future request: it stays a custom
+        # (zero-length, therefore empty) interval instead of silently serving
+        # the trailing window (gate re-gate: 'explicit numeric boundaries lose
+        # provenance').  A strictly-future start - including a future start
+        # swapped against the implicit clock end - still falls back.
+        clock_zero_window = (
+            start_ts is not None and end_ts is not None
+            and start_ts >= now and end_ts >= now
+            and not (start_ts_v is not None and start_ts_v > now)
+            and not (end_ts_v is not None and end_ts_v > now)
+        )
+        if start_ts >= now and not clock_zero_window:
+            start_ts = None
+            end_ts = None
+        # Clamp both endpoints into the platform-safe localtime range so an
+        # absurd-but-finite timestamp (e.g. 1e20, -1e20) cannot reach
+        # localtime()/mktime() and return HTTP 500. Windows msvcrt localtime
+        # supports roughly 1970..~3000; 4102444800 = 2100-01-01 is a
+        # conservative upper bound, 0 = 1970-01-01 the lower bound (no
+        # sessions predate the Unix epoch). Out-of-range -> fail closed to
+        # the trailing `days` fallback.
+        if start_ts is not None and (not (0 <= start_ts <= 4102444800) or not (0 <= end_ts <= 4102444800)):
+            start_ts = None
+            end_ts = None
+        if start_ts is not None:
+            # Operate on local calendar dates (DST-safe), not fixed 86400s, so
+            # a spring-forward/fall-back day yields exactly one bucket and the
+            # daily series stays aligned with the filtered totals.
+            start_day = _datetime.fromtimestamp(start_ts).date()
+            end_day = _datetime.fromtimestamp(end_ts).date()
+            now_day = _datetime.fromtimestamp(now).date()
+            # Cap absurd custom windows at 5 CALENDAR years so the daily series
+            # cannot balloon into millions of buckets.  Walk end_day back 5
+            # calendar years instead of subtracting a fixed 5*365*86400 seconds:
+            # a valid five-calendar-year span containing a leap day (e.g.
+            # 2021-05-04..2026-05-04, 1826 days) would exceed the fixed-seconds
+            # cap and silently lose its first requested day (Greptile P1).
+            # The window is clamped BEFORE filtering so totals and the chart
+            # are always computed over the same interval.
+            try:
+                min_start = end_day.replace(year=end_day.year - 5)
+            except ValueError:
+                # Feb 29 in a non-leap target year -> Feb 28
+                min_start = end_day.replace(year=end_day.year - 5, day=28)
+            if start_day < min_start:
+                start_day = min_start
+                start_ts = _time.mktime(start_day.timetuple())
+            today_midnight = _time.mktime((now_day.year, now_day.month, now_day.day, 0, 0, 0, 0, 0, -1))
+            days = max((end_day - start_day).days + 1, 1)
+            # Admission cutoffs, end-exclusivity.  A DATE endpoint uses a
+            # calendar-day bound (local midnight); a NUMERIC endpoint keeps the
+            # exact [start, end) boundary on every date - never a rounded-down
+            # start nor a widened-to-next-midnight end.
+            if start_kind == "date":
+                cutoff = _time.mktime((start_day.year, start_day.month, start_day.day, 0, 0, 0, 0, 0, -1))
+            else:
+                cutoff = start_ts  # exact numeric (or 30-day-derived implicit) start
+            # Whether the effective `end` is the server clock.  PROVENANCE, not
+            # value equality: True only when the caller did NOT pin the end to
+            # a concrete timestamp (an omitted end, or one the server clamped
+            # down to now).  A clock-derived end is an inclusive "up to the
+            # server clock" bound (trailing-like): keep sessions at/behind now,
+            # exclude any stamped after.  An explicit NUMERIC end keeps its
+            # exact [start, end) contract even when its value equals now - a
+            # session stamped exactly at that boundary must stay out.
+            end_is_now = end_from_clock
+            if end_is_now:
+                end_cutoff = now
+                # A zero-length [now, now] window admits nothing (a half-open
+                # interval is empty): explicit `start == now` resolves to an
+                # EMPTY custom interval rather than leaking the trailing-like
+                # inclusive at-now session.
+                end_exclusive = (start_ts is not None and start_ts >= end_ts)
+            elif end_kind == "date":
+                # Whole calendar day: exclusive NEXT local midnight (DST-safe).
+                end_cutoff = _time.mktime((end_day + _timedelta(days=1)).timetuple())
+                end_exclusive = True
+                if end_day == now_day:
+                    # A whole-day "today" DATE selection: that day is not over
+                    # from the server's view, so clamp to now (inclusive) to
+                    # keep sessions stamped after the server clock out.
+                    end_cutoff = min(end_cutoff, now)
+                    end_exclusive = False
+            else:
+                # Exact NUMERIC end: keep the requested boundary as the
+                # exclusive stop.  This includes a numeric end earlier today
+                # (e.g. today 10:00 while now is 14:00 - the old code widened
+                # it to now) and a numeric end on a past date (the old code
+                # widened it to the following local midnight), both of which
+                # leaked sessions after the requested timestamp in.
+                end_cutoff = end_ts
+                end_exclusive = True
+            first_day_ts = cutoff
+            # Effective bounds (server-local calendar days actually queried),
+            # so the client footer always agrees with what was filtered even
+            # after the server clamps/swaps the input range.
+            effective_start = start_day.isoformat()
+            effective_end = end_day.isoformat()
+            mode = "custom"
+    if start_ts is None and end_ts is None:
+        # Trailing-window mode (legacy): last N calendar days up to today.
+        try:
+            days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
+        except (ValueError, TypeError):
+            days = 30
+        end_cutoff = now
+        effective_start = None
+        effective_end = None
+        # Trailing mode: end_cutoff = now is INCLUSIVE - sessions stamped
+        # exactly at "now" belong to the current trailing window.
+        end_exclusive = False
+        # Explicit response mode: the client footer must know whether a
+        # custom-range request RESOLVED to a real custom window ("custom") or
+        # fell back to the trailing window ("trailing") - e.g. an all-future
+        # or fully-invalid custom request.  Without this a "custom" request
+        # that fell back would render the rejected raw inputs instead of the
+        # trailing window the server actually queried (Greptile P1: 'custom
+        # range that normalizes to trailing still displays the raw range').
+        mode = "trailing"
+
+        today = _time.localtime(now)
+        # Walk back by CALENDAR days, not fixed 86400s intervals: across a
+        # DST transition a fixed-step subtraction lands first_day_ts at
+        # 23:00/01:00 instead of local midnight, admitting or dropping the
+        # boundary hour while the daily series still advances by calendar
+        # dates (totals disagree with the series).  The absolute branch
+        # above uses the same calendar-day arithmetic; keep them aligned.
+        today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
+        start_day = _datetime.fromtimestamp(today_midnight).date() - _timedelta(days=days - 1)
+        first_day_ts = _time.mktime(start_day.timetuple())
     cutoff = first_day_ts
 
     def _safe_usage_int(value) -> int:
@@ -12610,10 +12944,20 @@ def _handle_insights(handler, parsed) -> bool:
         idx = []
 
     for entry in idx:
-        created = entry.get("created_at", 0) or 0
-        updated = entry.get("updated_at", 0) or 0
-        # Session is relevant if it was created or updated within the calendar window.
-        if max(created, updated) < cutoff:
+        # One canonical timestamp (updated_at or created_at) drives BOTH
+        # admission and daily attribution, so totals and the daily series
+        # always describe the same window.  Interval-overlap admission
+        # previously let a crossing session into totals while its daily
+        # bucket fell outside the returned series.
+        ts = _session_usage_ts(entry)
+        # Session whose usage ts falls entirely before the window
+        if ts < cutoff:
+            continue
+        # Session whose usage ts falls entirely after the window.
+        # end_cutoff is an exclusive upper bound in absolute mode (next
+        # local midnight) and an inclusive one in trailing mode (now):
+        # equality is only excluded when the bound itself is exclusive.
+        if ts > end_cutoff or (end_exclusive and ts == end_cutoff):
             continue
         sessions_data.append(entry)
 
@@ -12684,31 +13028,37 @@ def _handle_insights(handler, parsed) -> bool:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
+            # end_cutoff is exclusive (absolute mode) or inclusive (trailing).
+            end_cmp = "<" if end_exclusive else "<="
             with closing(open_state_db_readonly(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 # cache_read_tokens may not exist on older agent state DBs;
                 # fall back to a query without it if the column is missing.
                 try:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT id, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                               started_at, ended_at
+                               started_at, ended_at,
+                               COALESCE(ended_at, started_at, 0) AS usage_ts
                         FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
+                        WHERE COALESCE(ended_at, started_at, 0) >= ?
+                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
                           AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
+                    """, (cutoff, end_cutoff))
                 except sqlite3.OperationalError:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT id, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                0 AS cache_read_tokens,
-                               started_at, ended_at
+                               started_at, ended_at,
+                               COALESCE(ended_at, started_at, 0) AS usage_ts
                         FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
+                        WHERE COALESCE(ended_at, started_at, 0) >= ?
+                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
                           AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
+                    """, (cutoff, end_cutoff))
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
@@ -12736,7 +13086,7 @@ def _handle_insights(handler, parsed) -> bool:
                     bucket["cache_read_tokens"] += _cache_read
                     bucket["cost"] += _cost
 
-                    _ts = row["started_at"] or row["ended_at"] or 0
+                    _ts = row["usage_ts"] or 0
                     if _ts:
                         _dt = _time.localtime(_ts)
                         _day_key = _time.strftime("%Y-%m-%d", _dt)
@@ -12789,8 +13139,8 @@ def _handle_insights(handler, parsed) -> bool:
 
     daily_series = []
     for i in range(days):
-        day_ts = first_day_ts + (i * day_secs)
-        day_key = _time.strftime("%Y-%m-%d", _time.localtime(day_ts))
+        day = start_day + _timedelta(days=i)
+        day_key = day.isoformat()
         bucket = daily_tokens.get(day_key, {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -12816,6 +13166,18 @@ def _handle_insights(handler, parsed) -> bool:
 
     return j(handler, {
         "period_days": days,
+        # Explicit response mode: "custom" when a real absolute window was
+        # queried, "trailing" when the request fell back to the trailing
+        # days-window (all-future / fully-invalid custom input).  The client
+        # footer keys off this so a fell-back custom request is rendered as
+        # the trailing window actually served, never the rejected raw inputs.
+        "mode": mode,
+        # Effective server-local calendar range actually queried (after
+        # clamping, swap, and DST alignment).  ISO date strings, or None
+        # in trailing-window mode.  The client footer uses these instead
+        # of raw input values, never disagreeing with the filtered window.
+        "effective_start": effective_start,
+        "effective_end": effective_end,
         "total_sessions": total_sessions,
         "total_messages": total_messages,
         "total_input_tokens": total_input_tokens,
