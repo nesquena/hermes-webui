@@ -6659,15 +6659,32 @@ def _raw_peer_is_trusted_proxy(handler) -> bool:
     return _ip_in_networks(addr, _trusted_proxy_networks())
 
 
-def _forwarded_client_ip_from_trusted_proxy(handler):
+def _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip: bool = True):
     """Resolve the real client IP from a chain fronted by a trusted proxy.
 
     Precondition: the caller has verified the raw socket peer is a trusted proxy.
     Consumes ALL X-Forwarded-For values (across repeated headers), preserves wire
     order, walks RIGHT-TO-LEFT skipping hops that are themselves trusted-proxy
-    addresses, and returns the first non-trusted (i.e. real-client) hop. Falls
-    back to X-Real-IP, then the raw socket peer. Returns None when the chain is
-    present-but-empty / malformed so the caller fails closed.
+    addresses, and returns the first non-trusted (i.e. real-client) hop. Both the
+    XFF walk's final candidate and the raw-peer fallback are validated with
+    ``ipaddress.ip_address`` and returned in canonical string form — never raw
+    header text.
+
+    ``consult_real_ip`` selects the no-XFF fallback:
+      * ``True`` (default, the plain master behaviour) falls back to ``X-Real-IP``
+        and then the raw peer. The local-origin gate, trusted-header SSO and other
+        consumers that predate #7863 keep exactly the resolution they had.
+      * ``False`` never reads ``X-Real-IP`` at all and goes straight to the raw
+        peer. This is the request-log path only: the structured log is a security
+        boundary (its ``forwarded_for`` feed fail2ban), and ``X-Real-IP`` is a
+        second client-writable header (nginx relays client-supplied values through
+        by default instead of overwriting it), so honoring it there would
+        reintroduce #7863 through a different header.
+
+    The XFF walk is identical either way — the right-most hop was appended by the
+    trusted peer itself, so it carries the same guarantee with or without the
+    fallback. Returns None when the chain is present-but-empty / malformed so
+    callers fail closed.
     """
     import ipaddress
 
@@ -6701,22 +6718,220 @@ def _forwarded_client_ip_from_trusted_proxy(handler):
                 # rather than skip past it (an attacker could inject blanks).
                 return None
             try:
-                ipaddress.ip_address(hop)
+                addr = ipaddress.ip_address(hop)
             except ValueError:
                 # Non-IP token in the chain → malformed → fail closed.
                 return None
             if _is_trusted_hop(hop):
                 continue
-            return hop
+            # Final candidate: canonicalize to its validated string form so the
+            # log's forwarded_for is a normalised address, not raw header text.
+            return str(addr)
         # Every hop was a trusted proxy → no distinct client; treat as the proxy
         # tier itself (loopback/private), i.e. resolve to the raw peer below.
         return _request_client_ip(handler)
 
-    real_ip = handler.headers.get("X-Real-IP", "").strip()
-    if real_ip:
-        return real_ip
-    # No forwarded header at all → the trusted proxy is speaking for itself.
+    # No X-Forwarded-For at all.
+    if consult_real_ip:
+        # Master behaviour, kept for the pre-#7863 consumers (local-origin
+        # gate, trusted-header SSO): a proxy that asserts X-Real-IP is honoured.
+        real_ip = handler.headers.get("X-Real-IP", "").strip()
+        if real_ip:
+            return real_ip
+    # Without a forwarded chain the trusted proxy is speaking for itself. On the
+    # request-log path (consult_real_ip=False) this is also the fail-closed
+    # fallback: no forwarded chain, no forwarded identity.
     return _request_client_ip(handler)
+
+
+_FORWARDED_HEADER_IGNORED_WARNED = False
+
+
+def _has_forwarded_header(handler) -> bool:
+    """True when the request carries a non-blank ``X-Forwarded-For``.
+
+    #7864 round 4 (nesquena-hermes review): the one-shot operator warning is
+    process-wide, so it must be spent on the case it exists to explain — an
+    ``X-Forwarded-For`` that the request log stopped recording. That is the
+    ONLY header the log ever recorded, so it is the only one whose loss needs
+    announcing. Counting ``X-Real-IP`` here let a stray client, scanner or
+    misconfigured LB carrying only that header burn the single warning (and
+    mislabel it: no X-Forwarded-For was ever sent) while the operator's real
+    proxy request stayed silent. This path resolves with
+    ``consult_real_ip=False`` and never consults ``X-Real-IP`` at all, so the
+    header is not a signal for anything on the log path.
+
+    Repeated ``X-Forwarded-For`` headers all count (``get_all``), matching the
+    consumption in ``_forwarded_client_ip_from_trusted_proxy``: a proxy that
+    splits the chain across two headers has still lost the field, and the
+    resolver reads every one of them.
+
+    Presence check only — the value is never read, returned or logged here:
+    it is attacker-controlled text and this module must stay a
+    non-log-writing consumer of it.
+    """
+    try:
+        values = handler.headers.get_all("X-Forwarded-For") or []
+    except AttributeError:
+        # Test/lightweight handlers expose a plain mapping without get_all.
+        try:
+            single = handler.headers.get("X-Forwarded-For", "")
+        except AttributeError:
+            return False
+        values = [single] if single else []
+    for value in values:
+        if str(value or "").strip():
+            return True
+    return False
+
+
+def _warn_forwarded_header_ignored(handler) -> None:
+    """Emit ONE process-wide warning when an ``X-Forwarded-For`` is ignored.
+
+    #7864 round 3 (nesquena-hermes review): ignoring the untrusted header is
+    the correct security behaviour, but on the default deployment a reverse
+    proxy on a Docker bridge or a LAN address is NOT an allowlisted trusted
+    proxy — so ``forwarded_for`` silently disappears from the request log and a
+    fail2ban jail keyed on it stops matching with nothing in the log saying
+    why. The behaviour change is right; the silence is the bug.
+
+    So warn — but only once per process (rate-limited by construction) and
+    never echo the untrusted header value itself: it is attacker-controlled
+    text, and writing it to the log would be an unbounded log-write vector.
+    Name the peer address and the fix (``HERMES_WEBUI_TRUSTED_PROXY_CIDRS``,
+    plus ``HERMES_WEBUI_TRUST_FORWARDED_FOR`` when unset) instead.
+    """
+    global _FORWARDED_HEADER_IGNORED_WARNED
+    if _FORWARDED_HEADER_IGNORED_WARNED:
+        return
+    _FORWARDED_HEADER_IGNORED_WARNED = True
+    peer = _request_client_ip(handler) or "unknown"
+    trust_forwarded = _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR")
+    cure = "HERMES_WEBUI_TRUSTED_PROXY_CIDRS"
+    if not trust_forwarded:
+        cure = (
+            "HERMES_WEBUI_TRUST_FORWARDED_FOR=1 and "
+            "HERMES_WEBUI_TRUSTED_PROXY_CIDRS"
+        )
+    logger.warning(
+        "[webui] request-log: an X-Forwarded-For header from peer %s was "
+        "ignored (the header is not recorded). The peer is not a trusted "
+        "proxy, so the request log records no forwarded_for field for it. If "
+        "a proxy on this path should supply the client IP, add the peer "
+        "address to %s.",
+        peer,
+        cure,
+    )
+
+
+def request_log_forwarded_fields(handler) -> dict:
+    """Per-request log fields describing what the log did with X-Forwarded-For.
+
+    #7864 round 5 (nesquena-hermes review): the one-shot operator warning is
+    PROCESS-WIDE, so it can only ever explain ONE peer. On an exposed instance
+    any internet client can send its own ``X-Forwarded-For`` and spend it on
+    the first random request; the operator's unallowlisted proxy — the request
+    whose ``forwarded_for`` field actually disappeared — is then never named.
+    One warning line structurally cannot carry that.
+
+    So the warning stays, AND every structured record that dropped an XFF
+    carries ``forwarded_for_ignored: true``. A fail2ban jail or log query can
+    then see exactly which requests lost the field, per request.
+
+    CONTRACT:
+    * the value is a BOOLEAN signal only — the untrusted header text is never
+      read, returned or logged (attacker-controlled, and echoing it would be an
+      unbounded log-write vector). There is deliberately no way to recover the
+      dropped value from this module.
+    * ``forwarded_for`` is present (a validated client address) only when the
+      raw peer is a trusted proxy and the chain resolved; ``forwarded_for_ignored``
+      is present only when a non-blank XFF was seen and NOT recorded. They are
+      mutually exclusive: a resolved field is never also flagged as ignored.
+    * a direct client with no forwarded header gets NEITHER key, so the common
+      case stays byte-identical to master's log line.
+    * the flag is emitted from BOTH branches. Round 6 (nesquena-hermes review,
+      SILENT) covered only the untrusted-peer side; a TRUSTED proxy whose chain
+      does not resolve produced neither key just as silently. See the trusted
+      branch below for the cases.
+
+    Lives here (not inline in server.py) to keep the entrypoint under its
+    760-line guard — see tests/test_sprint10.py.
+    """
+    remote = _request_client_ip(handler)
+    if not _raw_peer_is_trusted_proxy(handler):
+        # #7864 round 3: an untrusted peer's forwarded header is ignored — the
+        # correct fail-closed outcome, but on the default deployment (a proxy
+        # on a Docker bridge / LAN address) it silently drops the log's
+        # forwarded_for field. Warn once per process so an operator whose
+        # fail2ban jail stops matching can see why; flag the record so the
+        # other peers that lose the field are still visible per request.
+        if not _has_forwarded_header(handler):
+            return {}
+        _warn_forwarded_header_ignored(handler)
+        return {"forwarded_for_ignored": True}
+    resolved = _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip=False)
+    if resolved and resolved != remote:
+        return {"forwarded_for": resolved}
+    # #7864 round 6 (nesquena-hermes review, SILENT): the trusted branch used to
+    # return a bare {} here, so a TRUSTED proxy that produced no address emitted
+    # a record with NEITHER key — exactly the silence this function exists to
+    # prevent, one branch over. On master the first row of each pair below still
+    # logged a forwarded_for (master recorded the raw left-most XFF hop for any
+    # peer), so an operator's fail2ban jail keyed on that field silently stopped
+    # matching these requests with nothing to show for it:
+    #
+    #   XFF "198.51.100.23"      -> {'forwarded_for': '198.51.100.23'}   (resolves)
+    #   XFF "198.51.100.23,"     -> {}  -> now {'forwarded_for_ignored': True}
+    #   XFF "," or " , "         -> {}  -> now {'forwarded_for_ignored': True}
+    #   XFF "not-an-ip"          -> {}  -> now {'forwarded_for_ignored': True}
+    #   XFF "198.51.100.23, garbage" -> {} -> now {'forwarded_for_ignored': True}
+    #
+    # A trailing comma is a real-world proxy shape, so this is not a contrived
+    # input. The key is identical in both branches for the same reason: the
+    # BOOLEAN, never the value (it is attacker-controlled text either way — a
+    # trusted peer can relay a client's malformed chain verbatim).
+    if not _has_forwarded_header(handler):
+        # No XFF at all: nothing was dropped, so there is nothing to flag. This
+        # is the plain direct-to-proxy request that master recorded as one peer
+        # address, and it must stay byte-identical to master's line.
+        return {}
+    return {"forwarded_for_ignored": True}
+
+
+def trusted_forwarded_client_ip(handler) -> str | None:
+    """Resolved, validated client IP for the request log, or None.
+
+    Thin wrapper over :func:`request_log_forwarded_fields` for callers that
+    only want the address. ``log_request`` uses the dict form so a dropped
+    XFF is visible per request (#7864 round 5).
+
+    #7863: the structured request log must never record a spoofable client IP.
+    The left-most X-Forwarded-For hop is attacker-controlled, so a forwarded IP
+    is asserted only when the RAW socket peer is a trusted proxy (loopback or
+    allowlisted); the chain then resolves right-to-left. Direct clients fail
+    closed (no field at all), and a resolution that merely echoes the raw peer
+    is suppressed as redundant.
+
+    CONTRACT: the value written to the log's ``forwarded_for`` field is a
+    resolved, validated client address — canonical (``ipaddress.ip_address``
+    string form), NOT the raw left-most header text. It is derived
+    EXCLUSIVELY from the right-to-left X-Forwarded-For resolution: this path
+    resolves with ``consult_real_ip=False``, so the log never reads
+    ``X-Real-IP`` (any client can send it, and nginx relays it through by
+    default), and a trusted peer cannot smuggle an arbitrary address into the
+    log through that header, nor through any header-only path at all.
+    Malformed/incomplete XFF chains yield None (field omitted), so downstream
+    fail2ban-style consumers never see unvalidated or syntactically-invalid data.
+
+    Scope note: the XFF-only rule above is a property of THIS request-log
+    boundary, deliberately narrower than the shared resolver's default. Other
+    consumers (the local-origin gate, trusted-header auth) keep master's
+    ``X-Real-IP`` fallback via the default ``consult_real_ip=True``.
+
+    Kept here (not inline in server.py) so the process entrypoint stays under
+    its line guard — see tests/test_sprint10.py.
+    """
+    return request_log_forwarded_fields(handler).get("forwarded_for")
 
 
 def _onboarding_request_is_local(handler) -> bool:

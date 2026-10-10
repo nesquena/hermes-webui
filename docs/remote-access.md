@@ -107,3 +107,37 @@ or VM host may be needed for longer-running sessions.
 > `HERMES_WEBUI_PASSWORD`.
 
 ---
+
+## Running behind a reverse proxy
+
+A reverse proxy on another host or container (a Docker bridge, a separate
+nginx box, a cloud load balancer) must be allowlisted before WebUI will honor
+any forwarded client-IP header from it. Set `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`
+with the **exact** address(es) of your proxy, comma-separated as CIDRs or bare
+IPs:
+
+```bash
+HERMES_WEBUI_TRUSTED_PROXY_CIDRS=172.17.0.1,10.9.9.0/24 ./start.sh
+```
+
+Loopback (`127.0.0.0/8`, `::1`) is always trusted implicitly, so a proxy on the
+same host needs no configuration. Without a matching allowlist entry the proxy
+is treated as an ordinary client: forwarded headers are ignored, so the
+structured request log records no `forwarded_for` field for requests arriving
+through it and local-origin features (onboarding, passwordless terminal) do not
+treat it as local. That is deliberate — an unallowlisted peer must never be
+able to assert a client identity WebUI then trusts.
+
+The same allowlist governs the trusted identity-header SSO setup
+(`HERMES_WEBUI_TRUSTED_AUTH_HEADER`) described in `.env.example`.
+
+> **Note:** nginx relays client-supplied request headers through by default
+> (`proxy_pass_request_headers on`), which includes `X-Real-IP`. The request
+> log therefore never trusts `X-Real-IP` for its `forwarded_for` field (only
+> the right-to-left `X-Forwarded-For` walk is accepted, and only from an
+> allowlisted peer). The local-origin gate and trusted-header SSO still honor
+> `X-Real-IP` when the peer is trusted, as they did before; configure your
+> proxy to overwrite it (`proxy_set_header X-Real-IP $remote_addr;`) to keep
+> those paths honest, or just for your own logging.
+
+---

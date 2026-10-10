@@ -604,6 +604,7 @@
   accepts either library. A broken Agent bootstrap now logs a warning instead of stopping WebUI.
   The interim workaround `HERMES_DISABLE_LAZY_INSTALLS=1` is no longer needed. Thanks @snoyberg
   (#7876) and @carlotestor (#7875); closes #7831, #7848.
+- **The request log no longer records a spoofable client IP, and says so when it drops the field.** The structured request log took the left-most `X-Forwarded-For` hop at face value, so any client could write a header that a fail2ban jail keyed on the log would act on (ban an arbitrary address). A forwarded IP is now asserted only when the un-spoofable raw socket peer is a trusted proxy (loopback, or an address in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`), the chain is walked right-to-left to the first untrusted hop, and the value is validated with `ipaddress` before it is written; malformed/empty chains and direct clients fail closed. On the default deployment a proxy on a Docker bridge or LAN address is not allowlisted, so its `forwarded_for` silently disappears — the log path now emits a one-time (process-wide) operator warning naming the peer and the env fix instead of changing the output in silence. Other `X-Forwarded-For` consumers (the local-origin gate, trusted-header auth) are unchanged. (#7863, #7864)
 
 - **Gateway-backend turns survive a WebUI restart.** With the Gateway runs API enabled
   (`HERMES_WEBUI_CHAT_BACKEND=gateway` + `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`), the Gateway
