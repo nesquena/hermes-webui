@@ -1389,3 +1389,111 @@ def test_a_model_block_serving_a_keyless_fallback_entry_does_not_read_the_shared
     assert api_key is None, (
         "a fallback route served by the model block must not read the shared convention key"
     )
+
+
+def test_set_default_model_drops_the_previous_routes_key_when_the_endpoint_is_replaced(
+    monkeypatch, tmp_path
+):
+    """Shape K with a CREDENTIALLED entry: the block's key must not follow the pick (r12).
+
+    Greptile's finding on ``68fd668c``: the r11 rule ("two credentialed authorities at
+    one URL are two accounts") let the picker-written copy of a credentialed entry pass
+    for an independent connection. Select a keyed entry at ``U`` while the block serves
+    ``U0`` under its own key, and the block is rewritten to ``U`` with that key still on
+    it — so the entry is shadowed and ``U`` receives the key of a host the block just
+    left. The endpoint the block carried BEFORE the click is the only fact that separates
+    the copy from an independent route at the entry's own URL, and only the save path
+    has it.
+    """
+    U0 = "http://127.0.0.1:8317/v1"
+    U = "http://127.0.0.1:9000/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        f"  base_url: {U0}\n"
+        "  api_key: sk-A\n"
+        "custom_providers:\n"
+        "  - name: 晨光鑫遇专用\n"
+        f"    base_url: {U}\n"
+        "    api_key: sk-B\n"
+        "    model: chat-model\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    result = config.set_hermes_default_model("chat-model", provider="custom:晨光鑫遇专用")
+    assert result["ok"] is True
+
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert not on_disk["model"].get("api_key"), (
+        "a key minted for the endpoint this click replaced must not stay on the block"
+    )
+    assert config._custom_provider_entry_identity(
+        on_disk["custom_providers"][0],
+        on_disk.get("custom_providers"),
+        on_disk.get("providers"),
+        on_disk.get("model"),
+    ) == "custom:晨光鑫遇专用", "the selected entry must not be shadowed by its own copy"
+    assert config.resolve_custom_provider_connection("custom:晨光鑫遇专用") == ("sk-B", U), (
+        "the entry's own key must serve the entry's own endpoint"
+    )
+
+
+def test_an_entry_whose_only_credential_is_a_key_cmd_serves_instead_of_the_block(monkeypatch):
+    """A declared ``key_cmd`` is a credential: the block must not take the route over.
+
+    Senior review, SHOULD-FIX. The preference test in ``_select_custom_provider_record``
+    and the save-path helper both looked only at ``api_key``/``key_env``, so a non-ASCII
+    entry whose only credential was a ``key_cmd`` (or a pool) was judged keyless, the
+    ``model:`` block was returned as its connection, and the WebUI's keyless bundle
+    overrode the Agent-minted token. The ASCII control with the identical shape has always
+    been served by the entry's key.
+    """
+    u = "http://new-endpoint.example/v1"
+    cfg_shape = {
+        "model": {"provider": "custom", "default": "old-model", "base_url": u, "api_key": "sk-A"},
+        "custom_providers": [
+            {"name": "晨光鑫遇专用", "base_url": u, "key_cmd": "printf sk-entry-cmd",
+             "model": "chat-model"}
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    record, source, _, _ = config._select_custom_provider_record(
+        "custom:晨光鑫遇专用", "晨光鑫遇专用", cfg_shape
+    )
+    assert source == "custom_providers", (
+        "an entry that declares a key_cmd is a real authority, not a keyless placeholder"
+    )
+    assert record.get("key_cmd") == "printf sk-entry-cmd"
+
+
+def test_a_key_cmd_entry_is_not_judged_keyless(monkeypatch):
+    """The save-path helper must read every credential source, not just the static two.
+
+    Senior review, SHOULD-FIX, second site: ``_selected_fallback_entry_declares_no_credential``
+    decided the previous route's credentials could be dropped from the block on a test
+    that only saw ``api_key``/``key_env``. A ``key_cmd``/``credential_pool`` entry read as
+    keyless there, so the pick was treated as a keyless switch. Both neighbours are
+    asserted: a truly keyless entry keeps the keyless path.
+    """
+    u = "http://new-endpoint.example/v1"
+    cfg_shape = {
+        "model": {"provider": "custom", "default": "old-model", "base_url": u},
+        "custom_providers": [
+            {"name": "晨光鑫遇专用", "base_url": u, "key_cmd": "printf sk-entry-cmd"},
+            {"name": "晨光", "base_url": u},
+        ],
+    }
+    assert config._selected_fallback_entry_declares_no_credential(
+        "custom:晨光鑫遇专用", cfg_shape
+    ) is False, "a key_cmd entry declares a credential"
+    assert config._selected_fallback_entry_declares_no_credential("custom:晨光", cfg_shape) is True, (
+        "a genuinely keyless entry still takes the keyless path"
+    )
+

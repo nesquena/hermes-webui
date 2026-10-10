@@ -4292,9 +4292,7 @@ def _select_custom_provider_record(
             # block's endpoint here would leave the route with none at all
             # (``custom_provider_endpoint_unresolved``) (r9 CORE, 4223).
             return model_cfg_for_conn, "model", False, CUSTOM_SELECTION_KEYED
-        if entry_url == model_url and not (
-            matched_entry.get("api_key") or str(matched_entry.get("key_env") or "").strip()
-        ):
+        if entry_url == model_url and not _custom_record_declares_credential_source(matched_entry):
             # Exactly that endpoint AND no credential of its own: the entry adds no
             # authority, so the block is the connection that served this endpoint.
             return model_cfg_for_conn, "model", False, CUSTOM_SELECTION_KEYED
@@ -6942,6 +6940,22 @@ def _model_block_serves_selected_custom_provider(provider: object, config_data: 
     return source == "model"
 
 
+def _selected_fallback_entry(provider: object, config_data: object) -> dict | None:
+    """The fallback-derived ``custom_providers[]`` entry ``provider`` names, or ``None``."""
+    pid = str(provider or "").strip().lower()
+    if not pid.startswith("custom:") or not isinstance(config_data, dict):
+        return None
+    slug = _custom_provider_slug_key(pid)
+    if not slug:
+        return None
+    for entry in _custom_provider_entries(config_data):
+        name = entry.get("name")
+        if not _custom_provider_slug_is_fallback(name) or _custom_provider_slug_key(name) != slug:
+            continue
+        return entry
+    return None
+
+
 def _selected_fallback_entry_declares_no_credential(provider: object, config_data: object) -> bool:
     """True when ``provider`` names a fallback-derived ``custom_providers[]`` entry with no credential.
 
@@ -6951,21 +6965,14 @@ def _selected_fallback_entry_declares_no_credential(provider: object, config_dat
     the previous route, and leaving them in place would send that credential to
     this entry's endpoint. The caller then drops them so the route fails closed
     exactly as an ASCII keyless entry does.
+
+    "No credential" means no credential SOURCE at all, not merely no literal
+    ``api_key``: a ``key_cmd`` mints a live bearer and a pool rotates one, and both
+    the Agent's named-custom resolver and this module's own routing honour them, so
+    an entry carrying one is a real authority (#8026 r12, senior SHOULD-FIX).
     """
-    pid = str(provider or "").strip().lower()
-    if not pid.startswith("custom:") or not isinstance(config_data, dict):
-        return False
-    slug = _custom_provider_slug_key(pid)
-    if not slug:
-        return False
-    for entry in _custom_provider_entries(config_data):
-        name = entry.get("name")
-        if not _custom_provider_slug_is_fallback(name) or _custom_provider_slug_key(name) != slug:
-            continue
-        if entry.get("api_key") or str(entry.get("key_env") or "").strip():
-            return False
-        return True
-    return False
+    entry = _selected_fallback_entry(provider, config_data)
+    return entry is not None and not _custom_record_declares_credential_source(entry)
 
 
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
@@ -7023,6 +7030,12 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             _model_block_serves_selected_custom_provider(persisted_provider, previous_config_data)
         )
 
+        # The endpoint the block carried BEFORE this click. The picker rewrites
+        # ``base_url`` to the selected entry's own endpoint, so only this snapshot
+        # can tell a route that already served that host from one that just left a
+        # different one (#8026 r12).
+        previous_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
+
         model_cfg["default"] = persisted_model
         if persisted_provider:
             model_cfg["provider"] = persisted_provider
@@ -7044,19 +7057,44 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
                 # endpoint at all.
                 model_cfg.pop("base_url", None)
 
+        persisted_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
+        selected_fallback_entry = (
+            _selected_fallback_entry(persisted_provider, config_data)
+            if persisted_provider != previous_provider
+            else None
+        )
+        # A block whose endpoint this click REPLACED cannot hold a credential for the
+        # host it now names: whatever source it still carries was minted for the
+        # endpoint it just left. That holds whatever the selected entry declares — the
+        # picker copies the entry's URL into the block and leaves the block's own key in
+        # place, so a credentialed entry at the new host did not stop the previous
+        # route's key travelling there (#8026 r12, the shape Greptile reproduced). An
+        # independent model route at the entry's own endpoint keeps its key: its URL did
+        # not change.
+        endpoint_replaced = bool(
+            selected_fallback_entry
+            and persisted_base_url
+            and previous_base_url
+            and persisted_base_url != previous_base_url
+        )
         if (
             persisted_provider != previous_provider
             and not block_served_selected
-            and _selected_fallback_entry_declares_no_credential(persisted_provider, config_data)
+            and selected_fallback_entry is not None
+            and (
+                not _custom_record_declares_credential_source(selected_fallback_entry)
+                or endpoint_replaced
+            )
         ):
-            # The block now names a keyless fallback entry it did not serve before
-            # the click, so its credentials are the PREVIOUS route's. The resolver
-            # treats the block as that entry's connection; keeping ANY credential
-            # source here would send it to the new endpoint. Drop them all: a
-            # ``key_cmd`` mints a live bearer and a pool rotates one, so dropping
-            # only ``api_key``/``key_env`` left the old route's token reachable on
-            # the new host. The route then fails closed like an ASCII keyless
-            # entry (an explicit key in ``advanced`` below still wins).
+            # The block now serves a fallback entry it did not serve before the click,
+            # so any credential still on it belongs to the PREVIOUS route. The resolver
+            # treats the block as that entry's connection; keeping ANY credential source
+            # here would send it to the new endpoint. Drop them all: a ``key_cmd`` mints
+            # a live bearer and a pool rotates one, so dropping only
+            # ``api_key``/``key_env`` left the old route's token reachable on the new
+            # host. A keyless entry then fails closed exactly as its ASCII counterpart
+            # does, and a credentialed one serves with its OWN credential (an explicit
+            # key in ``advanced`` below still wins).
             for _cred_field in CUSTOM_CREDENTIAL_SOURCE_FIELDS:
                 model_cfg.pop(_cred_field, None)
 
