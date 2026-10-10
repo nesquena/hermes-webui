@@ -36,7 +36,7 @@ def test_check_repo_still_returns_dict_when_dot_git_exists(tmp_path):
             return '', True  # clean tree
         if args == ['fetch', 'origin', '--tags', '--force']:
             return 'network unreachable', False
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
