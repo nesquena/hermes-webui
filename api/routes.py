@@ -638,7 +638,14 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
 
 
 def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True) -> bool:
-    """Return whether ``sid`` belongs to the active profile.
+    """Return whether ``sid`` belongs to the request's profile.
+
+    The benchmark is ALWAYS the request's ACTIVE profile. A request-body
+    ``profile`` field is untrusted client input (a claim about ownership,
+    never an authorization token), so it must never widen or narrow the
+    visibility benchmark here — #7826 removed that relabel after a
+    default-bound request with ``profile:"work"`` let a foreign row reach
+    the archive route's disk-loading code path.
 
     On a profile mismatch, the helper mirrors the detail-load endpoint's
     contract (#13043, #13493): return ``409 session_profile_mismatch`` for
@@ -729,6 +736,14 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
 
     Covers top-level `session_id` in the query/body. Routes that accept session
     IDs under other keys must enforce their own visibility checks.
+
+    The benchmark is the request's ACTIVE profile and nothing else. A
+    request-body ``profile`` field is untrusted input: #7826 briefly let it
+    relabel the benchmark here, which meant a default-bound request carrying
+    ``profile:"work"`` passed this guard on a ``work``-owned row and reached
+    the archive route's disk-loading path (whose repairs then rewrote the
+    foreign sidecar). The relabel is gone — the archive route enforces
+    owner==bound on its own.
     """
     method = str(method).upper()
     if _request_session_visibility_exempt(method, getattr(parsed, "path", "")):
@@ -8658,6 +8673,99 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
                 return row
     except Exception:
         return {}
+    return {}
+
+
+def _lookup_cli_session_owner_readonly(
+    session_id: str,
+    *,
+    allowed_profiles: "list[str] | None" = None,
+) -> dict:
+    """Exact-owner, read-only cross-profile metadata lookup.
+
+    ``_lookup_cli_session_metadata(all_profiles=True)`` routes through
+    ``get_cli_sessions()``, whose projection reaches ``Session.load`` when a
+    legacy sidecar layout makes ``load_metadata_only`` fall back. That
+    collapse-and-save (with a ``.bak``) is a WRITE, and it fired on the
+    DENIED-archive path: a 409 for a foreign session still rewrote the
+    neighbouring sidecar (#7826 security finding, reproduced with real auth).
+
+    This helper never loads a sidecar. It enumerates each profile's
+    HERMES_HOME, opens that profile's ``state.db`` with
+    ``open_state_db_readonly``, and reads the one row for ``session_id``
+    through a parameterized query. ``allowed_profiles`` restricts the scan to
+    the profiles the caller is authorised for, so a bound user gets no
+    metadata about a foreign owner at all.
+
+    Returns ``{}`` when the id is unknown or lives outside the allowed set —
+    the caller then takes its normal 404 self-heal path.
+    """
+    if not session_id:
+        return {}
+    sid = str(session_id)
+    try:
+        from api.models import (
+            _all_profiles_cli_contexts,
+        )
+        from api.profiles import (
+            get_active_profile_name,
+            get_hermes_home_for_profile,
+        )
+    except Exception:
+        return {}
+
+    allowed = None
+    if allowed_profiles is not None:
+        allowed = {str(p or "default").strip() or "default" for p in allowed_profiles}
+
+    # Reuse the model layer's per-profile context enumeration (home + state.db
+    # path per profile) so this scan and the sidebar agree on what exists.
+    # ``_all_profiles_cli_contexts`` is itself exception-guarded and returns
+    # [] on any failure.
+    try:
+        contexts, _cache_key = _all_profiles_cli_contexts()
+    except Exception:
+        contexts = []
+
+    if not contexts:
+        # Single-profile fallback: the active profile's own store only.
+        try:
+            home = Path(get_hermes_home_for_profile(get_active_profile_name()))
+            db = home / "state.db"
+            contexts = [(home, db, str(get_active_profile_name() or "default"))]
+        except Exception:
+            return {}
+
+    for _home, db_path, profile_value in contexts:
+        profile_name = str(profile_value or "default").strip() or "default"
+        if allowed is not None and profile_name not in allowed:
+            continue
+        try:
+            if not db_path or not db_path.exists():
+                continue
+            with closing(open_state_db_readonly(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, source, started_at, ended_at, message_count "
+                    "FROM sessions WHERE id = ? LIMIT 1",
+                    (sid,),
+                )
+                row = cur.fetchone()
+        except Exception:
+            continue
+        if row is None:
+            continue
+        return {
+            "session_id": sid,
+            "profile": profile_name,
+            "source": (row["source"] if "source" in row.keys() else "") or "",
+            "started_at": (row["started_at"] if "started_at" in row.keys() else None),
+            "ended_at": (row["ended_at"] if "ended_at" in row.keys() else None),
+            "message_count": (
+                row["message_count"] if "message_count" in row.keys() else 0
+            ),
+        }
     return {}
 
 
@@ -18282,6 +18390,14 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        # #7826 round 5: the request-body ``profile`` field is deliberately
+        # NOT read on this route. It was briefly used as the match benchmark,
+        # which let a default-bound request carrying ``profile:"work"`` reach
+        # a ``work``-owned row -- and the load that followed rewrote that
+        # row's sidecar on the way to the 409. A client claim is never an
+        # authorization: ownership is decided from the sidecar's own profile
+        # against the request's ACTIVE profile, below and in the pre-dispatch
+        # visibility guard.
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
         # #7776 Finding 2: capture the CLI source identity BEFORE the lock so
@@ -18289,6 +18405,40 @@ def handle_post(handler, parsed) -> bool:
         # new WebUI session without the pre-lock CLI metadata) cannot drop it
         # on the way back to disk. The materialize path below also uses it.
         _archive_cli_meta = _lookup_cli_session_metadata(sid) or {}
+        # ── #7826 round 5: validate ownership BEFORE any load that writes ──
+        # ``get_session(sid)`` / ``Session.load(sid)`` run the persisted
+        # session repairs (api/models.py), which ``save()`` the sidecar and
+        # drop a ``.bak`` when a repair shrinks the transcript. Validating
+        # after that load meant a DENIED archive still rewrote another
+        # profile's transcript on its way out. The metadata-only probe below
+        # parses only the metadata prefix and cannot trigger a repair, so a
+        # denied archive now leaves the sidecar byte-identical.
+        #
+        # The benchmark is the request's ACTIVE profile. The ``profile`` claim
+        # parsed above is NOT an authorization: it is ignored here, so a forged
+        # claim can neither widen visibility (relabel the benchmark) nor
+        # condemn a row the active profile legitimately owns.
+        try:
+            _owner_probe = get_session(sid, metadata_only=True)
+        except KeyError:
+            _owner_probe = None
+
+        if _owner_probe is not None:
+            _sidecar_profile = getattr(_owner_probe, "profile", None) or None
+            if not _profiles_match(_sidecar_profile, _get_active_profile_name()):
+                if _sidecar_profile:
+                    j(handler, {
+                        "error": "Session belongs to a different profile",
+                        "code": "session_profile_mismatch",
+                        "session_id": sid,
+                        "profile": _sidecar_profile,
+                    }, status=409)
+                else:
+                    # Unknown/legacy None-profile sidecar under a non-default
+                    # active profile mirrors the visibility guard's 404 so the
+                    # frontend's stale-URL self-heal keeps firing.
+                    bad(handler, "Session not found", 404)
+                return None
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -18304,7 +18454,46 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             cli_meta = _archive_cli_meta
             if not cli_meta:
+                # #7549: the active-profile lookup above found nothing, but the
+                # all-profiles sidebar shows this session — retry the CLI
+                # metadata lookup across every profile before declaring 404.
+                # #7826 security: the all-profiles fallback must NOT go
+                # through get_cli_sessions() here. Its projection reaches
+                # Session.load on a legacy sidecar layout, which collapses
+                # duplicate partials and SAVES (with a .bak) — a WRITE that
+                # fired on this DENIED-archive path and rewrote a foreign
+                # sidecar. Use the read-only, exact-owner query instead: it
+                # opens each profile's state.db read-only and never loads a
+                # sidecar. Returns {} for unknown ids, so the 404 self-heal
+                # still fires exactly as before.
+                cli_meta = _lookup_cli_session_owner_readonly(sid)
+            if not cli_meta:
                 return bad(handler, "Session not found", 404)
+            # #7549: the session exists in another profile's store. Mirror the
+            # detail-load endpoint's cross-profile contract (#7710) instead of
+            # a bare 404: a KNOWN other profile gets 409 with its name so the
+            # client can offer a profile switch, while unknown/legacy
+            # None-profile rows keep the 404 self-heal firing.
+            _arch_profile = cli_meta.get("profile") or None
+            if not _arch_profile:
+                # #7826: a profile-less metadata row must stay on the bare-404
+                # path. Materializing it into whichever profile happens to be
+                # active would silently re-parent a foreign session — the 404
+                # keeps the browser's stale-URL self-heal firing instead.
+                return bad(handler, "Session not found", 404)
+            # #7826 round 5: the benchmark is the request's ACTIVE profile.
+            # The claim is never consulted — a forged ``profile`` cannot
+            # rescue (or condemn) a foreign row through this fallback, and a
+            # `work`-bound request against a legacy None-profile row now 409s
+            # (master's behaviour) instead of 404ing.
+            if not _profiles_match(_arch_profile, _get_active_profile_name()):
+                j(handler, {
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": sid,
+                    "profile": _arch_profile,
+                }, status=409)
+                return None
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the
@@ -18315,7 +18504,6 @@ def handle_post(handler, parsed) -> bool:
             if _arch_source_tag == "subagent" or _is_subagent_child_session_id(sid):
                 return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
             if _is_messaging_session_record(cli_meta):
-                _arch_profile = cli_meta.get("profile") or None
                 s = Session(
                     session_id=sid,
                     title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
