@@ -922,6 +922,71 @@ def _active_stream_ids():
     return active_ids
 
 
+# Recovered turns re-projected into model context must not carry full inline
+# base64 image payloads. A re-append (see _append_recovered_context_projection)
+# that duplicated a turn's multi-MB-per-image ``data:`` URIs pushed a single
+# content string past the provider's ~10 MiB per-string limit, bricking every
+# subsequent send in the session with HTTP 400 (#6556). The underlying images
+# are already extracted to disk (and carried structurally via the message's
+# ``attachments``), so an oversized inline copy in the recovery projection is
+# redundant. Strip it to a placeholder ONLY when the inline payload is
+# pathologically large, so normal single images are left completely untouched
+# and the only behavior change is turning an already-bricked session into a
+# recoverable one.
+_RECOVERED_PROJECTION_INLINE_IMAGE_SOFT_CAP = 8 * 1024 * 1024  # bytes
+
+
+def _inline_image_data_url(part) -> str | None:
+    if not isinstance(part, dict):
+        return None
+    if str(part.get('type') or '') not in _SESSION_MESSAGE_IMAGE_PART_TYPES:
+        return None
+    ref = part.get('image_url')
+    if isinstance(ref, dict):
+        url = ref.get('url')
+    elif isinstance(ref, str):
+        url = ref
+    else:
+        url = part.get('url')
+    if isinstance(url, str) and url.startswith('data:'):
+        return url
+    return None
+
+
+def _strip_oversized_inline_images(content):
+    """Return ``(content, changed)``.
+
+    When list content carries more than
+    ``_RECOVERED_PROJECTION_INLINE_IMAGE_SOFT_CAP`` bytes of inline ``data:``
+    image payload, replace each inline image part with a short text placeholder
+    so the recovered projection cannot exceed the provider per-string limit
+    (#6556). Below the cap the content is returned unchanged.
+    """
+    if not isinstance(content, list):
+        return content, False
+    total = 0
+    for part in content:
+        url = _inline_image_data_url(part)
+        if url:
+            total += len(url)
+    if total <= _RECOVERED_PROJECTION_INLINE_IMAGE_SOFT_CAP:
+        return content, False
+    new_parts = []
+    for part in content:
+        if _inline_image_data_url(part):
+            new_parts.append({
+                'type': 'text',
+                'text': (
+                    '[image omitted from recovered context — the turn carried '
+                    'oversized inline images; the originals remain available '
+                    'via attachments]'
+                ),
+            })
+        else:
+            new_parts.append(part)
+    return new_parts, True
+
+
 def _recovered_model_context_projection(message: dict) -> dict | None:
     if not isinstance(message, dict) or message.get('_recovered_display_only') is True:
         return None
@@ -929,6 +994,9 @@ def _recovered_model_context_projection(message: dict) -> dict | None:
     projected.pop('reasoning', None)
     if projected.get('_error'):
         return None
+    stripped_content, stripped = _strip_oversized_inline_images(projected.get('content'))
+    if stripped:
+        projected['content'] = stripped_content
     if _content_has_reasoning_only_parts(projected.get('content')):
         if projected.get('tool_calls'):
             projected['content'] = ''
