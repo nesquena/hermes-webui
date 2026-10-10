@@ -318,3 +318,256 @@ def test_picker_handoff_rebuilds_other_row_menu_and_escape_focus_in_browser(anch
         "escapeFocusesReplacement": True,
         "parentAndNestedChildRemain": True,
     }
+
+
+def _picker_handoff_common_stubs():
+    """Shared stubs for the picker-deferred handoff fixtures below."""
+    return [
+        "let _sessionActionMenu = null;",
+        "let _sessionActionAnchor = null;",
+        "let _sessionActionSessionId = null;",
+        "let _sessionActionPreviousFocus = null;",
+        "let _sessionActionMenuId = 0;",
+        "let _projectPickerTeardown = null;",
+        "let _sessionListRepaintDeferredByPicker = false;",
+        "const esc = value => String(value);",
+        "const ICONS = new Proxy({}, {get: () => ''});",
+        "const t = key => ({session_unpin: 'Unpin conversation', session_pin: 'Pin conversation'}[key] || key);",
+        "const showToast = () => {};",
+        "const setStatus = () => {};",
+        "const syncTopbar = () => {};",
+        "const renderSessionList = async () => {};",
+        "const _isReadOnlySession = () => false;",
+        "const _isMessagingSession = () => false;",
+        "const _isCliSession = () => false;",
+        "const _appendSessionCopyLinkAction = () => {};",
+        "const _appendSessionShareActions = () => {};",
+        "const _appendSessionDuplicateAction = () => {};",
+        "const _appendSessionExportHtmlAction = () => {};",
+        "const _sessionArchiveDescription = () => '';",
+        "const _sessionDeleteDescription = () => '';",
+        "const _manualTitleRegenerateTimeoutMs = async () => 0;",
+        "const _showProjectPicker = () => {};",
+        "const _archiveSession = async () => {};",
+        "const deleteSession = async () => {};",
+        "const removeWorktree = async () => {};",
+        "const cancelSessionStream = async () => true;",
+        "const api = async () => ({});",
+        "function _playSessionActionMenuEntrance(){}",
+    ]
+
+
+def _fork_open_handler_snippet() -> str:
+    """Extract the production one-click open handler of a fork child row.
+
+    The deferred-repaint fixture below runs this exact handler body, including
+    its `_skipNextChildOpen` consumption, so the regression binds to the
+    shipped behavior instead of a re-implementation.
+    """
+    start = SESSIONS_JS.index("mainBtn.onclick=async(e)=>{")
+    end = SESSIONS_JS.index("await openChildSession(child);", start)
+    end = SESSIONS_JS.index("};", end) + 2
+    snippet = SESSIONS_JS[start:end]
+    assert "_skipNextChildOpen" in snippet
+    return snippet
+
+
+def _picker_deferred_new_chat_script() -> str:
+    """Exercise the picker-to-menu handoff for a visible, uncached New Chat.
+
+    The active New Chat has no messages yet, so it lives only in S.session,
+    not in _allSessions. After the deferred repaint replaced its row, the
+    handoff must still resolve the session and open its menu on the click.
+    """
+    return "\n".join(
+        _picker_handoff_common_stubs()
+        + [
+            "const S = {session: {session_id: 'new-chat'}};",
+            "const _allSessions = [{session_id: 'parent', _child_sessions: [{session_id: 'picker-child'}]}, {session_id: 'other-row', pinned: true}];",
+            "let repaintCount = 0;",
+            "function paintRows(){",
+            "  const host = document.getElementById('sessionList');",
+            "  const parent = document.createElement('div'); parent.className = 'session-item'; parent.dataset.sid = 'parent';",
+            "  const newChat = document.createElement('div'); newChat.className = 'session-item active'; newChat.dataset.sid = 'new-chat';",
+            "  newChat.tabIndex = -1; newChat.style.cssText = 'position:fixed;top:120px;left:16px;width:340px;height:48px';",
+            "  const actions = document.createElement('div'); actions.className = 'session-actions';",
+            "  const trigger = document.createElement('button'); trigger.className = 'session-actions-trigger'; trigger.textContent = 'Actions'; trigger.setAttribute('aria-expanded', 'false');",
+            "  actions.appendChild(trigger); newChat.appendChild(actions);",
+            "  const picker = document.createElement('div'); picker.className = 'project-picker'; newChat.appendChild(picker);",
+            "  host.replaceChildren(parent, newChat);",
+            "  return {picker, trigger};",
+            "}",
+            "function renderSessionListFromCache(){ repaintCount += 1; paintRows(); }",
+            _function_source("_positionSessionActionMenu"),
+            _function_source("_focusSessionActionMenuRestoreTarget"),
+            _function_source("closeSessionActionMenu"),
+            _function_source("_buildSessionAction"),
+            _function_source("_mountSessionActionMenu"),
+            _function_source("_findSessionRenameRow"),
+            _function_source("_projectPickerSessionActionHandoff"),
+            _function_source("_openSessionActionMenu"),
+            """
+            window.__pickerDeferredNewChatResult = () => {
+              const first = paintRows();
+              first.trigger.focus();
+              _projectPickerTeardown = () => first.picker.remove();
+              _sessionListRepaintDeferredByPicker = true;
+              _openSessionActionMenu({session_id: 'new-chat'}, first.trigger);
+              const replacement = document.querySelector('.session-item[data-sid="new-chat"] .session-actions-trigger');
+              return {
+                repaintReplacedRow: repaintCount === 1 && !first.trigger.isConnected && Boolean(replacement),
+                menuOpenedOnFirstClick: Boolean(document.querySelector('.session-action-menu')),
+                menuSessionId: _sessionActionSessionId,
+                anchorIsReplacementTrigger: _sessionActionAnchor === replacement,
+                anchorConnected: Boolean(_sessionActionAnchor && _sessionActionAnchor.isConnected),
+              };
+            };
+            """,
+        ]
+    )
+
+
+def _picker_deferred_fork_release_script() -> str:
+    """Exercise the fork long-press release after a picker-deferred repaint.
+
+    The long-press completion (as `_scheduleForkLongPressMenu` performs it)
+    arms `_skipNextChildOpen` on the pressed fork row and opens its action
+    menu; the deferred repaint replaces that row, so the pending suppression
+    must reach the replacement before the browser's release click lands on
+    its main button. The click handler below is the production one.
+    """
+    return "\n".join(
+        _picker_handoff_common_stubs()
+        + [
+            "const S = {session: {session_id: 'parent'}};",
+            "const _allSessions = [{session_id: 'parent', _child_sessions: [{session_id: 'fork-child', session_source: 'fork'}]}, {session_id: 'other-row', pinned: true}];",
+            "const openedChildren = [];",
+            "const openChildSession = async (child) => { openedChildren.push(child.session_id); };",
+            "const _consumeSessionNewTabClick = () => false;",
+            "let repaintCount = 0;",
+            "function paintRows(){",
+            "  const host = document.getElementById('sessionList');",
+            "  const parent = document.createElement('div'); parent.className = 'session-item'; parent.dataset.sid = 'parent';",
+            "  const row = document.createElement('div'); row.className = 'session-child-session session-child-session-fork'; row.dataset.sid = 'fork-child';",
+            "  row.style.cssText = 'position:fixed;top:' + Math.max(120, window.innerHeight - 140) + 'px;left:16px;width:340px;height:48px';",
+            "  const child = {session_id: 'fork-child'};",
+            "  const mainBtn = document.createElement('button'); mainBtn.type = 'button'; mainBtn.className = 'session-child-session-main'; mainBtn.textContent = '-> Forked child';",
+            _fork_open_handler_snippet(),
+            "  row.appendChild(mainBtn);",
+            "  const actions = document.createElement('div'); actions.className = 'session-actions';",
+            "  const trigger = document.createElement('button'); trigger.className = 'session-actions-trigger'; trigger.textContent = 'Actions';",
+            "  actions.appendChild(trigger); row.appendChild(actions);",
+            "  const picker = document.createElement('div'); picker.className = 'project-picker'; row.appendChild(picker);",
+            "  parent.appendChild(row);",
+            "  host.replaceChildren(parent);",
+            "  return {picker, row, mainBtn};",
+            "}",
+            "function renderSessionListFromCache(){ repaintCount += 1; paintRows(); }",
+            _function_source("_positionSessionActionMenu"),
+            _function_source("_focusSessionActionMenuRestoreTarget"),
+            _function_source("closeSessionActionMenu"),
+            _function_source("_buildSessionAction"),
+            _function_source("_mountSessionActionMenu"),
+            _function_source("_findSessionRenameRow"),
+            _function_source("_projectPickerSessionActionHandoff"),
+            _function_source("_openSessionActionMenu"),
+            """
+            window.__pickerForkSetup = () => {
+              const first = paintRows();
+              // Exactly what _scheduleForkLongPressMenu() does when the
+              // long-press fires: arm the one-click suppression, open the menu.
+              first.row._skipNextChildOpen = true;
+              _projectPickerTeardown = () => first.picker.remove();
+              _sessionListRepaintDeferredByPicker = true;
+              _openSessionActionMenu({session_id: 'fork-child'}, first.row);
+              const replacement = document.querySelector('.session-child-session[data-sid="fork-child"]');
+              const btn = replacement && replacement.querySelector('.session-child-session-main');
+              const rect = btn ? btn.getBoundingClientRect() : {x: 0, y: 0, width: 0, height: 0};
+              return {
+                repaintReplacedRow: repaintCount === 1 && !first.row.isConnected && Boolean(replacement),
+                menuOpened: Boolean(document.querySelector('.session-action-menu')),
+                anchorIsPressedRowReplacement: _sessionActionAnchor === replacement,
+                suppressionCarried: Boolean(replacement && replacement._skipNextChildOpen),
+                tapX: rect.x + rect.width / 2,
+                tapY: rect.y + rect.height / 2,
+              };
+            };
+            window.__pickerForkAfterRelease = () => ({
+              releaseClickDidNotOpenChild: openedChildren.length === 0,
+            });
+            window.__pickerForkAfterSecondTap = () => ({
+              nextTapOpensFork: openedChildren.length === 1 && openedChildren[0] === 'fork-child',
+            });
+            """,
+        ]
+    )
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+def test_picker_handoff_opens_menu_for_uncached_new_chat_in_browser(width, height):
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
+        page.add_script_tag(content=_picker_deferred_new_chat_script())
+        result = page.evaluate("window.__pickerDeferredNewChatResult()")
+        browser.close()
+
+    assert result == {
+        "repaintReplacedRow": True,
+        "menuOpenedOnFirstClick": True,
+        "menuSessionId": "new-chat",
+        "anchorIsReplacementTrigger": True,
+        "anchorConnected": True,
+    }
+
+
+@pytest.mark.parametrize("width,height", [(390, 844), (768, 1024)])
+def test_picker_deferred_fork_release_keeps_parent_session_in_browser(width, height):
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": width, "height": height}, has_touch=True)
+        page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
+        page.add_script_tag(content=_picker_deferred_fork_release_script())
+        setup = page.evaluate("window.__pickerForkSetup()")
+        page.touchscreen.tap(setup["tapX"], setup["tapY"])
+        page.wait_for_timeout(50)
+        after_release = page.evaluate("window.__pickerForkAfterRelease()")
+        page.touchscreen.tap(setup["tapX"], setup["tapY"])
+        page.wait_for_timeout(50)
+        after_second = page.evaluate("window.__pickerForkAfterSecondTap()")
+        browser.close()
+
+    assert after_release == {
+        "releaseClickDidNotOpenChild": True,
+    }
+    assert after_second == {
+        "nextTapOpensFork": True,
+    }
+    assert {key: setup[key] for key in (
+        "repaintReplacedRow",
+        "menuOpened",
+        "anchorIsPressedRowReplacement",
+        "suppressionCarried",
+    )} == {
+        "repaintReplacedRow": True,
+        "menuOpened": True,
+        "anchorIsPressedRowReplacement": True,
+        "suppressionCarried": True,
+    }

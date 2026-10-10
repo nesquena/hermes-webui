@@ -5817,7 +5817,18 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
       if(currentSession) break;
     }
   }
+  // A visible New Chat with no messages is rendered from S.session but is not
+  // in that cache yet; resolve it there after the cache lookups. The typeof
+  // guard keeps the extracted-function Node harness self-contained.
+  if(!currentSession&&typeof S!=='undefined'&&S.session&&S.session.session_id===sid) currentSession=S.session;
   const currentRow=_findSessionRenameRow(sid);
+  // A fork long-press arms its one-click open-suppression on the pressed row
+  // (installForkChildSwipe); the repaint above replaced that row, so move the
+  // pending suppression to the replacement the release click will reach.
+  if(anchorEl&&anchorEl._skipNextChildOpen&&currentRow&&currentRow!==anchorEl){
+    currentRow._skipNextChildOpen=true;
+    delete anchorEl._skipNextChildOpen;
+  }
   // Keep the opener's kind: expanded rows contain child triggers before their
   // own, and touch long-press must stay on the visible row, not hidden dots.
   const anchorClasses=anchorEl&&anchorEl.classList;

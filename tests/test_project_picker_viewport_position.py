@@ -1037,6 +1037,69 @@ console.log(JSON.stringify({
     assert data["point"] == {"clientX": 310, "clientY": 420}
 
 
+def test_picker_handoff_resolves_an_uncached_new_chat_from_state():
+    """A visible New Chat with no messages lives only in S.session."""
+    assert NODE is not None
+    script = r"""
+const classes = (...names) => ({contains: name => names.includes(name)});
+const anchor = {isConnected:true, classList:classes('session-actions-trigger')};
+const replacementTrigger = {isConnected:true, owner:'new-chat'};
+const newRow = {
+  isConnected:true,
+  classList:classes('session-item'),
+  querySelector(selector) {
+    return selector === ':scope > .session-actions > .session-actions-trigger'
+      ? replacementTrigger : null;
+  },
+};
+let _projectPickerTeardown = () => {};
+let _sessionListRepaintDeferredByPicker = true;
+const _allSessions = [];
+const S = {session: {session_id: 'new-chat', title: 'New conversation'}};
+function renderSessionListFromCache() { anchor.isConnected = false; }
+function _findSessionRenameRow() { return newRow; }
+""" + _project_picker_session_action_handoff_source() + r"""
+const result = _projectPickerSessionActionHandoff({session_id: 'new-chat'}, anchor);
+console.log(JSON.stringify({
+  resolvedFromState: result && result.session === S.session,
+  anchorReplaced: result && result.anchorEl === replacementTrigger,
+}));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["resolvedFromState"] is True
+    assert data["anchorReplaced"] is True
+
+
+def test_picker_handoff_carries_pending_child_open_suppression_to_the_replacement_row():
+    """A fork long-press arms one-click suppression on the pressed row."""
+    assert NODE is not None
+    script = r"""
+const classes = (...names) => ({contains: name => names.includes(name)});
+const oldRow = {isConnected:true, classList:classes('session-child-session'), _skipNextChildOpen:true};
+const newRow = {isConnected:true, classList:classes('session-child-session')};
+let _projectPickerTeardown = () => {};
+let _sessionListRepaintDeferredByPicker = true;
+const _allSessions = [{session_id:'parent', _child_sessions:[{session_id:'fork-child'}]}];
+function renderSessionListFromCache() { oldRow.isConnected = false; }
+function _findSessionRenameRow() { return newRow; }
+""" + _project_picker_session_action_handoff_source() + r"""
+const result = _projectPickerSessionActionHandoff({session_id:'fork-child'}, oldRow);
+console.log(JSON.stringify({
+  resolved: result && result.anchorEl === newRow,
+  suppressionCarried: newRow._skipNextChildOpen === true,
+  oldCleared: oldRow._skipNextChildOpen !== true,
+}));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["resolved"] is True
+    assert data["suppressionCarried"] is True
+    assert data["oldCleared"] is True
+
+
 def test_closing_the_action_menu_drains_a_picker_deferred_repaint():
     assert NODE is not None
     script = r"""
