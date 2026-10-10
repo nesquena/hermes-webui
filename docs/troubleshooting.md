@@ -518,6 +518,25 @@ Interpret the two together:
 
 ---
 
+## Session-visit model catalog freshness (stale-while-revalidate)
+
+**Symptom.** The model picker shows a catalog that is up to 300 seconds old, or the first picker open after a restart serves the previous list.
+
+**Why.** `/api/models?freshness=session_visit` (the call the session-load path makes) uses **stale-while-revalidate** rather than a fixed-age cache:
+
+- The on-disk catalog file's mtime records the last **successful live rebuild** — it advances only as a side effect of a real rebuild, never as a side effect of a read.
+- While the file is younger than the 300 s horizon, the request is served from memory (or from disk, then memory) with no rebuild.
+- Once the file is at or past the horizon, the request is served the **stale** catalog immediately and a **coalesced background rebuild** is fired for the active profile. The foreground request never waits for that rebuild.
+- Coalescing is per profile: a burst of stale visits on the same profile launches exactly one background rebuild, so a multi-profile alternation cannot fire N parallel probes for the same profile.
+- The background rebuild publishes through the normal `get_available_models(force_refresh=True)` path, which is the only code that writes the on-disk cache — so a *failed* rebuild leaves the mtime alone and the next stale visit retries.
+- If there is no disk catalog at all to serve stale, the request rebuilds in the foreground so the caller still gets something (and the file exists for the next visit).
+
+**Diagnostic.** The horizon is `_SESSION_VISIT_MODELS_FRESHNESS_SECONDS` in `api/config.py`. Set `HERMES_DEBUG_SLOW=1` to emit per-stage timing for the request (`models.session_visit`), which reports the disk age check, cache hit/miss, and whether the stale or foreground path ran. Background rebuild failures and failures to start the rebuild thread are logged at DEBUG on the `api.config` logger.
+
+**When to file a bug.** File a WebUI bug if the picker shows a catalog older than the horizon *and* `HERMES_DEBUG_SLOW=1` shows no background rebuild was started, or if a session-visit request returns HTTP 500 while a previously written catalog exists on disk.
+
+---
+
 ## MCP panel shows another profile's servers, or "Live status for this profile is unavailable"
 
 **Symptom.** With several profiles, the MCP settings panel of profile A shows a server as *Active* with a tool count while the tool inventory is empty (or lists profile B's tools); `/reload-mcp` on one profile stops the other profile's servers; or the MCP panel and the external Notes drawer show the notice *"Live status for this profile is unavailable right now"* and `/reload-mcp` answers *"MCP runtime scope could not be confirmed"*.

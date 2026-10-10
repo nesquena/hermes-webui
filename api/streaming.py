@@ -747,7 +747,8 @@ def _resolve_custom_provider_connection_authority(
 
     from api import profiles as _profiles_api
     with _profiles_api.profile_scope_for_detached_worker(
-        profile_name, "custom provider connection", logger_override=logger
+        profile_name, "custom provider connection", logger_override=logger,
+        bind_root=_profiles_api.detached_worker_bind_root_for_profile(profile_name)
     ):
         return apply_custom_provider_connection_authority(
             resolved_provider,
@@ -814,7 +815,8 @@ def _resolve_runtime_connection_bundle(
     from api import profiles as _profiles_api
 
     with _profiles_api.profile_scope_for_detached_worker(
-        profile_name, "custom provider connection", logger_override=logger
+        profile_name, "custom provider connection", logger_override=logger,
+        bind_root=_profiles_api.detached_worker_bind_root_for_profile(profile_name)
     ):
         return merge_custom_provider_runtime_bundle(
             resolved_provider,
@@ -835,7 +837,8 @@ def _resolve_model_alias_connection_bundle(
     from api import profiles as _profiles_api
 
     with _profiles_api.profile_scope_for_detached_worker(
-        profile_name, "model alias connection", logger_override=logger
+        profile_name, "model alias connection", logger_override=logger,
+        bind_root=_profiles_api.detached_worker_bind_root_for_profile(profile_name)
     ):
         return merge_model_alias_runtime_bundle(
             alias_route,
@@ -12802,7 +12805,8 @@ def _run_agent_streaming(
             # with the DEFAULT profile's API key (finding #3). No-op for the
             # default/root profile.
             with profiles_api.profile_scope_for_detached_worker(
-                _resolved_profile_name, "model + credential resolution", logger_override=logger
+                _resolved_profile_name, "model + credential resolution", logger_override=logger,
+                bind_root=profiles_api.detached_worker_bind_root_for_profile(_resolved_profile_name)
             ):
                 warm_models_catalog_provenance_if_cold()
                 _alias_route = resolve_model_alias_runtime(provider_context, expected_model=model)
@@ -14005,7 +14009,8 @@ def _run_agent_streaming(
                         # profile's endpoint pairs with the default profile's key.
                         from api import profiles as _profiles_api
                         with _profiles_api.profile_scope_for_detached_worker(
-                            _resolved_profile_name, "credential self-heal", logger_override=logger
+                            _resolved_profile_name, "credential self-heal", logger_override=logger,
+                            bind_root=_profiles_api.detached_worker_bind_root_for_profile(_resolved_profile_name)
                         ):
                             if _alias_route is not None:
                                 # Re-read the alias's own credential source: the
