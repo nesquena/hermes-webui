@@ -1836,6 +1836,8 @@ def _provider_error_probe_text(value) -> tuple[str, int | None]:
             for _key, _val in node.items():
                 if _key in ('type', 'code', 'message', 'detail', 'details', 'name', 'status', 'status_code'):
                     continue
+                if _key in ('session', 'messages', 'transcript', 'history', 'turns', 'raw_response'):
+                    continue
                 _walk(_val)
             return
         if isinstance(node, (list, tuple, set)):
@@ -11000,31 +11002,63 @@ def _compute_agent_cache_signature(
     return _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
 
-def _lifecycle_commit_session_memory(session_id: str, *, agent=None, wait: bool = False) -> bool:
+def _lifecycle_commit_session_memory(session_id: str, *, agent=None, wait: bool = False, timeout: float | None = None) -> bool:
     from api.session_lifecycle import commit_session_memory
 
-    return commit_session_memory(session_id, agent=agent, wait=wait)
+    return commit_session_memory(session_id, agent=agent, wait=wait, timeout=timeout)
 
 
-def _lifecycle_has_uncommitted_work(session_id: str) -> bool:
+def _lifecycle_has_uncommitted_work(session_id: str, *, agent=None) -> bool:
     from api.session_lifecycle import has_uncommitted_work
 
-    return has_uncommitted_work(session_id)
+    return has_uncommitted_work(session_id, agent=agent)
 
 
-def _lifecycle_unregister_agent(session_id: str) -> None:
+def _lifecycle_unregister_agent(session_id: str, *, agent=None) -> None:
     from api.session_lifecycle import unregister_agent
 
-    unregister_agent(session_id)
+    unregister_agent(session_id, agent=agent)
 
 
-def _lifecycle_discard_session(session_id: str) -> bool:
+def _lifecycle_discard_session(session_id: str, *, agent=None) -> bool:
     from api.session_lifecycle import discard_session
 
-    return discard_session(session_id)
+    return discard_session(session_id, agent=agent)
 
 
-def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
+def _schedule_evicted_agent_deferred_close(session_id: str, agent) -> None:
+    """Schedule a tracked background retry to commit and close an evicted agent
+    when bounded synchronous teardown timed out (e.g. terminal SSE path).
+    """
+    if agent is None:
+        return
+
+    def _deferred_close():
+        try:
+            _close_evicted_agent_at_session_boundary(session_id, agent, timeout=None)
+        except Exception:
+            logger.debug("Tracked retry of evicted agent teardown failed for %s", session_id, exc_info=True)
+        finally:
+            try:
+                from api.session_lifecycle import _unregister_background_commit_thread
+                _unregister_background_commit_thread(threading.current_thread())
+            except Exception:
+                pass
+
+    t = threading.Thread(
+        target=_deferred_close,
+        daemon=True,
+        name=f"deferred-close-evicted-{session_id}",
+    )
+    try:
+        from api.session_lifecycle import _register_background_commit_thread
+        if _register_background_commit_thread(t):
+            t.start()
+    except Exception:
+        logger.debug("Failed to schedule background teardown retry for %s", session_id, exc_info=True)
+
+
+def _close_evicted_agent_at_session_boundary(session_id: str, agent, *, timeout: float | None = None) -> bool:
     """Commit and tear down an evicted cached agent at a WebUI session boundary.
 
     WebUI keeps AIAgent instances in an LRU cache so memory providers can carry
@@ -11040,13 +11074,14 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
 
     should_close_evicted_agent = True
     try:
-        _lifecycle_commit_session_memory(session_id, agent=agent, wait=True)
-        if not _lifecycle_has_uncommitted_work(session_id):
-            _lifecycle_unregister_agent(session_id)
+        if _lifecycle_has_uncommitted_work(session_id, agent=agent):
+            _lifecycle_commit_session_memory(session_id, agent=agent, wait=True, timeout=timeout)
+        if not _lifecycle_has_uncommitted_work(session_id, agent=agent):
+            _lifecycle_unregister_agent(session_id, agent=agent)
             # Drop the lifecycle dict entry now that the LRU-evicted agent is
-            # gone and no uncommitted work remains, so the dict tracks only live
-            # sessions instead of growing unbounded (issue #3506).
-            _lifecycle_discard_session(session_id)
+            # gone and no uncommitted work remains for it, provided the active
+            # registered agent has not been replaced by a successor turn.
+            _lifecycle_discard_session(session_id, agent=agent)
         else:
             should_close_evicted_agent = False
     except Exception:
@@ -11054,6 +11089,8 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
         logger.debug("Lifecycle commit on eviction failed for %s", session_id, exc_info=True)
 
     if not should_close_evicted_agent:
+        if timeout is not None:
+            _schedule_evicted_agent_deferred_close(session_id, agent)
         return False
 
     try:
@@ -11073,10 +11110,133 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
     return True
 
 
-def _close_cached_agent_entry_at_session_boundary(session_id: str, cache_entry) -> bool:
+def _close_cached_agent_entry_at_session_boundary(session_id: str, cache_entry, *, timeout: float | None = None) -> bool:
     """Commit and tear down a popped SESSION_AGENT_CACHE entry outside the cache lock."""
     agent = cache_entry[0] if isinstance(cache_entry, tuple) else None
-    return _close_evicted_agent_at_session_boundary(session_id, agent)
+    return _close_evicted_agent_at_session_boundary(session_id, agent, timeout=timeout)
+
+
+# #6625: affirmative non-retryable provider error types that poison reusable AIAgent state.
+# Transient errors (timeouts, network resets, 429 rate limits), user stops (cancelled,
+# interrupted), iteration budgets (tool_limit_reached), compression recovery issues,
+# generic 'error', and empty responses ('no_response') must NOT evict the cached agent —
+# preserving them avoids costly full rebuilds and system-prompt cache thrashing on healthy agents.
+_CACHE_POISONING_AFFIRMATIVE_ERR_TYPES = frozenset({
+    'model_not_found',
+    'auth_mismatch',
+    'provider_unroutable',
+    'bad_request',
+    'invalid_request',
+    'http_400',
+})
+
+
+def _is_cache_poisoning_terminal_error(
+    err_type: str,
+    *,
+    error_payload: dict | None = None,
+    exc: Exception | None = None,
+) -> bool:
+    """True only when there is affirmative evidence that the provider/agent is poisoned.
+
+    Preserves generic errors ('error'), empty responses ('no_response'), timeouts,
+    connection failures, user cancellations, and transient rate/quota/turn limits.
+    """
+    if not err_type:
+        return False
+    norm_type = str(err_type).strip().lower()
+    if norm_type in _CACHE_POISONING_AFFIRMATIVE_ERR_TYPES:
+        return True
+
+    # Fast-reject known transient timeout / network exception types
+    if exc is not None:
+        _exc_name = type(exc).__name__.lower()
+        if any(tok in _exc_name for tok in ('timeout', 'connection', 'network', 'brokenpipe')):
+            return False
+
+    # Fast-reject known transient / non-cache-poisoning error types
+    if norm_type in ('rate_limit', 'quota_exhausted', 'tool_limit_reached', 'cancelled', 'interrupted'):
+        return False
+
+    # Check for affirmative provider signal/status (e.g. HTTP 400 / non-retryable status)
+    candidates = []
+    if error_payload:
+        if isinstance(error_payload, dict):
+            # Classify only current error fields (type, message, details, the exception);
+            # strip session/transcript keys so past turns mentioning "HTTP 400" are not scanned.
+            candidates.append({
+                k: v for k, v in error_payload.items()
+                if k not in ('session', 'messages', 'transcript', 'history', 'turns', 'raw_response')
+            })
+        else:
+            candidates.append(error_payload)
+    if exc is not None:
+        candidates.append(exc)
+
+    for item in candidates:
+        text, status_code = _provider_error_probe_text(item)
+        if status_code in (400, 401, 403, 404):
+            return True
+        text_lower = text.lower()
+        if 'http 400' in text_lower or 'non-retryable error' in text_lower or 'status code 400' in text_lower:
+            return True
+
+    return False
+
+
+def _is_cache_poisoning_terminal_err_type(err_type: str) -> bool:
+    """Backward-compatible helper: checks affirmative error type set."""
+    return _is_cache_poisoning_terminal_error(err_type)
+
+
+def _invalidate_cached_agent_on_terminal_error(
+    session_id: str,
+    err_type: str,
+    agent=None,
+    *,
+    error_payload: dict | None = None,
+    exc: Exception | None = None,
+    close: bool = True,
+    timeout: float | None = None,
+):
+    """#6625: atomically pop the matching cached agent entry when affirmative
+    evidence proves non-retryable cache-poisoning (HTTP 400, invalid model, etc.).
+
+    When ``close=True``, synchronously performs bounded teardown outside the cache lock.
+    When ``close=False``, returns the popped cache entry so the caller can emit
+    terminal SSE ('apperror') and unregister active runs BEFORE tearing down outside
+    all locks.
+    """
+    if not _is_cache_poisoning_terminal_error(err_type, error_payload=error_payload, exc=exc):
+        return None
+    if agent is None:
+        # No agent was used this turn — any cached entry belongs to a previous
+        # healthy turn and was not poisoned by this failure.
+        return None
+    _evicted = None
+    try:
+        from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SACL
+        with _SACL:
+            _cached = _SAC.get(session_id)
+            if _cached is None:
+                return None
+            _cached_agent = _cached[0] if isinstance(_cached, tuple) else _cached
+            if _cached_agent is not agent:
+                # A concurrent turn replaced the entry — never evict a healthy
+                # replacement.
+                return None
+            _evicted = _SAC.pop(session_id, None)
+        if _evicted is not None:
+            logger.debug(
+                '[webui] Invalidated cached agent for session %s on non-retryable terminal failure %s',
+                session_id,
+                err_type,
+            )
+            if close:
+                _close_cached_agent_entry_at_session_boundary(session_id, _evicted, timeout=timeout)
+    except Exception:
+        logger.debug('[webui] Failed to invalidate cached agent for session %s', session_id, exc_info=True)
+    return _evicted
 
 
 def _refresh_cached_agent_runtime(agent, agent_kwargs: dict) -> bool:
@@ -11866,6 +12026,8 @@ def _run_agent_streaming(
     _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
+    _terminal_evicted_entry = None
+    _terminal_evicted_sid = None
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
         # metering ticker. Kept INSIDE the outer try so the outer `finally`'s
@@ -14379,6 +14541,19 @@ def _run_agent_streaming(
                             s.save()
                         except Exception:
                             pass
+                        # #6625: Invalidate SESSION_AGENT_CACHE only when affirmative
+                        # evidence proves non-retryable provider error (HTTP 400).
+                        # Evaluated BEFORE attaching the session transcript so prior turns
+                        # mentioning 400 are never scanned. Key off the same session id
+                        # reported in the error payload (s.session_id).
+                        _terminal_evicted_entry = _invalidate_cached_agent_on_terminal_error(
+                            getattr(s, 'session_id', session_id),
+                            _err_type,
+                            agent=agent,
+                            error_payload=_error_payload,
+                            close=False,
+                        )
+                        _terminal_evicted_sid = getattr(s, 'session_id', session_id)
                         _error_payload['session'] = redact_session_data(
                             _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
                         )
@@ -15812,6 +15987,18 @@ def _run_agent_streaming(
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)
             _error_payload['session_id'] = getattr(s, 'session_id', session_id)
             _error_payload['old_session_id'] = session_id
+            # #6625: same cache-poisoning guard as the captured-terminal-error path.
+            # Atomically pop matching entry, emit apperror immediately, and defer
+            # bounded teardown outside all locks after active run unregistration in finally.
+            _terminal_evicted_entry = _invalidate_cached_agent_on_terminal_error(
+                getattr(s, 'session_id', session_id),
+                _exc_type,
+                agent=agent,
+                error_payload=_error_payload,
+                exc=e,
+                close=False,
+            )
+            _terminal_evicted_sid = getattr(s, 'session_id', session_id)
         put('apperror', _error_payload)
     finally:
         _settle_pending_steer()
@@ -15915,6 +16102,19 @@ def _run_agent_streaming(
                     "Failed to clear session writeback owner for stream %s", stream_id,
                     exc_info=True,
                 )
+
+        # #6625 review: perform bounded teardown of evicted agent OUTSIDE session/cache/stream locks
+        # and after active run is unregistered and terminal apperror has been emitted.
+        if _terminal_evicted_entry is not None:
+            try:
+                _close_cached_agent_entry_at_session_boundary(
+                    _terminal_evicted_sid or session_id,
+                    _terminal_evicted_entry,
+                    timeout=5.0,
+                )
+            except Exception:
+                logger.debug("Failed bounded teardown of evicted agent", exc_info=True)
+            _terminal_evicted_entry = None
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
             # call and consumed atomically by `_start_chat_stream_for_session`

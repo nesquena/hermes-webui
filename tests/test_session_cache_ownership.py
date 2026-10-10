@@ -2,6 +2,8 @@ import json
 from io import BytesIO
 from types import SimpleNamespace
 
+import pytest
+
 import api.config as config
 import api.models as models
 from api.models import Session, get_session
@@ -127,3 +129,292 @@ def test_handle_chat_steer_leaves_mismatched_cached_agent_untouched(monkeypatch)
     assert config.SESSION_AGENT_CACHE["requested"] == (wrong_agent, "sig")
     assert closed_entries == []
     assert steered == []
+
+    config.SESSION_AGENT_CACHE.clear()
+
+
+# ── #6625: cache-poisoning eviction guard on terminal errors ──────────────
+
+
+def _make_cached_agent(sid="session-1"):
+    return SimpleNamespace(session_id=sid)
+
+
+@pytest.mark.parametrize(
+    "err_type",
+    [
+        "cancelled",
+        "interrupted",
+        "quota_exhausted",
+        "rate_limit",
+        "tool_limit_reached",
+        "compression_exhausted",
+        "no_response",
+        "error",
+    ],
+)
+def test_terminal_eviction_preserves_cached_agent_on_non_poisoning_err_types(monkeypatch, err_type):
+    """#6625 review: user Stop, transient rate/quota, iteration budgets,
+    compression exhaustion, generic error, and no_response must NOT evict the cached agent —
+    evicting there would force a costly system-prompt rebuild on the next turn."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    _invalidate_cached_agent_on_terminal_error("session-1", err_type, agent=agent)
+
+    assert "session-1" in config.SESSION_AGENT_CACHE
+    assert closed_entries == []
+
+
+def test_terminal_eviction_preserves_cached_agent_on_transient_timeout(monkeypatch):
+    """#6625 review: temporary TimeoutError, connection blip, or socket error must NOT evict."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    _invalidate_cached_agent_on_terminal_error(
+        "session-1",
+        "error",
+        agent=agent,
+        exc=TimeoutError("Request timed out"),
+    )
+
+    assert "session-1" in config.SESSION_AGENT_CACHE
+    assert closed_entries == []
+
+
+def test_terminal_eviction_evicts_on_affirmative_http_400_payload(monkeypatch):
+    """#6625 review: affirmative HTTP 400 provider error signal evicts and closes."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    _invalidate_cached_agent_on_terminal_error(
+        "session-1",
+        "error",
+        agent=agent,
+        error_payload={"details": "❌ Non-retryable error (HTTP 400): invalid model"},
+    )
+
+    assert "session-1" not in config.SESSION_AGENT_CACHE
+    assert closed_entries == [("session-1", (agent, "sig"))]
+
+
+def test_terminal_eviction_deferred_teardown_outside_locks(monkeypatch):
+    """#6625 review: close=False pops the entry but defers teardown outside locks."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    popped = _invalidate_cached_agent_on_terminal_error(
+        "session-1",
+        "model_not_found",
+        agent=agent,
+        close=False,
+    )
+
+    assert "session-1" not in config.SESSION_AGENT_CACHE
+    assert popped == (agent, "sig")
+    assert closed_entries == []  # Not closed yet, teardown deferred!
+
+
+def test_terminal_eviction_evicts_cached_agent_on_non_retryable_400(monkeypatch):
+    """#6625 review: a genuinely non-retryable provider error (HTTP 400) must
+    evict and close the poisoned cached agent so the next turn rebuilds fresh."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    _invalidate_cached_agent_on_terminal_error("session-1", "model_not_found", agent=agent)
+
+    assert "session-1" not in config.SESSION_AGENT_CACHE
+    assert closed_entries == [("session-1", (agent, "sig"))]
+
+
+def test_terminal_eviction_skips_replaced_cache_entry(monkeypatch):
+    """#6625 review: if a concurrent turn replaced the cached entry, never
+    evict the healthy replacement — only evict when the entry still IS the
+    agent used by this failing turn."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    turn_agent = _make_cached_agent("turn-agent")
+    replacement = _make_cached_agent("replacement")
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (replacement, "new-sig")
+
+    _invalidate_cached_agent_on_terminal_error("session-1", "model_not_found", agent=turn_agent)
+
+    assert "session-1" in config.SESSION_AGENT_CACHE
+    assert closed_entries == []
+
+
+def test_terminal_eviction_keys_pop_off_payload_session_id(monkeypatch):
+    """#6625 review: the pop must be keyed off the same session id reported in
+    the error payload (s.session_id), not the local session_id variable — on
+    the compression-continuation path the live agent is migrated under new_sid
+    while the local variable still holds old_sid."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent("new_sid")
+    config.SESSION_AGENT_CACHE.clear()
+    # Live agent was migrated under new_sid (= payload/s.session_id).
+    config.SESSION_AGENT_CACHE["new_sid"] = (agent, "sig")
+
+    _invalidate_cached_agent_on_terminal_error("new_sid", "model_not_found", agent=agent)
+
+    assert "new_sid" not in config.SESSION_AGENT_CACHE
+    assert closed_entries == [("new_sid", (agent, "sig"))]
+
+
+def test_terminal_eviction_noop_when_no_agent_used_this_turn(monkeypatch):
+    """#6625 review: when no agent was used this turn (agent is None), any
+    cached entry belongs to a previous healthy turn and must be preserved."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (_make_cached_agent(), "sig")
+
+    _invalidate_cached_agent_on_terminal_error("session-1", "model_not_found", agent=None)
+
+    assert "session-1" in config.SESSION_AGENT_CACHE
+    assert closed_entries == []
+
+
+def test_rate_limit_error_with_persisted_prior_400_preserves_cached_agent(monkeypatch):
+    """Review item: a transient rate_limit error must NOT evict a healthy agent, even if
+    the session transcript in error_payload contains a previous turn mentioning 'HTTP 400'."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    payload_with_history = {
+        "type": "rate_limit",
+        "message": "Rate limit reached. Please wait a moment.",
+        "session": {
+            "session_id": "session-1",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "**Error:** ❌ Non-retryable error (HTTP 400): Bad Request",
+                    "_error": True,
+                },
+                {
+                    "role": "user",
+                    "content": "Why did HTTP 400 happen?",
+                },
+            ],
+        },
+    }
+
+    _invalidate_cached_agent_on_terminal_error(
+        "session-1",
+        "rate_limit",
+        agent=agent,
+        error_payload=payload_with_history,
+    )
+
+    assert "session-1" in config.SESSION_AGENT_CACHE
+    assert closed_entries == []
+
+
+def test_unregister_and_discard_session_guard_successor_turn():
+    """Review item: teardown of an evicted agent must not unregister or discard a
+    successor agent that has already registered in the session lifecycle."""
+    import api.session_lifecycle as lifecycle
+
+    evicted_agent = SimpleNamespace(session_id="session-1")
+    successor_agent = SimpleNamespace(session_id="session-1")
+
+    # Successor agent registers
+    lifecycle.register_agent("session-1", successor_agent)
+
+    # Evicted agent's unregister/discard must not touch the successor's registration
+    assert lifecycle.unregister_agent("session-1", agent=evicted_agent) is False
+    assert lifecycle._sessions["session-1"]["agent"] is successor_agent
+
+    assert lifecycle.discard_session("session-1", agent=evicted_agent) is False
+    assert "session-1" in lifecycle._sessions
+    assert lifecycle._sessions["session-1"]["agent"] is successor_agent
+
+    # Successor unregisters cleanly
+    assert lifecycle.unregister_agent("session-1", agent=successor_agent) is True
+    assert lifecycle._sessions["session-1"]["agent"] is None
+    assert lifecycle.discard_session("session-1", agent=successor_agent) is True
+    assert "session-1" not in lifecycle._sessions
+
