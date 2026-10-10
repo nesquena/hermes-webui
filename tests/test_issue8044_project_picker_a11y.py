@@ -495,9 +495,11 @@ def test_on_a_light_theme_the_ring_is_the_accent_and_the_pointer_has_a_wash():
         ":root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent);}"
         in STYLE_CSS
     )
-    assert (
-        ":root:not(.dark) .project-picker-item:hover{background:rgba(0,0,0,.05);}" in STYLE_CSS
-    )
+    assert ":root:not(.dark) .project-picker-item:hover{background:var(--hover-bg);}" in STYLE_CSS
+    # That rule outranks ".project-picker-create:hover", so the row's accent
+    # tint is restated right after it.
+    create = ":root:not(.dark) .project-picker-create:hover{background:var(--accent-bg);}"
+    assert STYLE_CSS.index(":root:not(.dark) .project-picker-item:hover{") < STYLE_CSS.index(create)
 
 
 def test_the_menu_that_opens_the_picker_has_finger_tall_rows_on_touch():

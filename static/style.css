@@ -5867,9 +5867,11 @@ main.main > #mainPlugin{display:none;}
 .project-picker-item:focus-visible{background:rgba(255,255,255,.08);color:var(--text);outline:2px solid var(--focus-ring);outline-offset:-2px;}
 .project-picker-item.active:focus-visible{color:var(--blue);}
 /* On a light theme the white wash above is invisible and the translucent
-   --focus-ring is about 1.5:1 on the picker: a dark wash under the pointer, and
-   the accent as the focus ring (as .session-search-clear has). */
-:root:not(.dark) .project-picker-item:hover{background:rgba(0,0,0,.05);}
+   --focus-ring is about 1.5:1 on the picker: the theme's own hover wash under
+   the pointer, and the accent as the focus ring (as .session-search-clear has).
+   "+ New project" keeps its accent tint: the first rule outranks its own hover. */
+:root:not(.dark) .project-picker-item:hover{background:var(--hover-bg);}
+:root:not(.dark) .project-picker-create:hover{background:var(--accent-bg);}
 :root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent);}
 @media (pointer:coarse){.project-picker-item{min-height:44px;padding-top:8px;padding-bottom:8px;font-size:13px;}}
 .project-picker:not(.batch-project-picker){max-height:calc(100dvh - 16px);overflow-y:auto;overscroll-behavior:contain;}

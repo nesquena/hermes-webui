@@ -49,8 +49,9 @@ WHAT IT CHECKS
   the focus cue, on the dark and on the light theme
   - on the light theme the focused row's ring is the skin's accent, solid, at
     least 3:1 against the picker (the translucent --focus-ring was 1.4:1), and
-    a row under the pointer has a dark wash (the white one cannot be seen
-    there); on the dark theme the ring and the wash are what they were.
+    a row under the pointer has the theme's --hover-bg wash (the white one
+    cannot be seen there); on the dark theme the ring and the wash are what
+    they were; on both, "+ New project" keeps its accent tint under the pointer.
   a long list of conversations (forty more), still three projects
   - on a phone upright (390x844, 375x667, touch) the five rows show whole, below
     their anchor, and above it from the last conversation on screen;
@@ -742,9 +743,23 @@ FOCUS_CUE_JS = """() => {
   };
 }"""
 
+# The row under the pointer, and the two custom properties its wash can come
+# from, resolved to colours.
 HOVER_WASH_JS = """() => {
+  const resolved = name => {
+    const probe = document.createElement('span');
+    probe.style.backgroundColor = 'var(' + name + ')';
+    document.body.appendChild(probe);
+    const colour = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return colour;
+  };
   const row = document.querySelector('.project-picker:not(.batch-project-picker) .project-picker-item:hover');
-  return row ? getComputedStyle(row).backgroundColor : null;
+  return {
+    wash: row ? getComputedStyle(row).backgroundColor : null,
+    create: !!row && row.classList.contains('project-picker-create'),
+    hoverBg: resolved('--hover-bg'), accentBg: resolved('--accent-bg'),
+  };
 }"""
 
 # WCAG 2.2 SC 1.4.11: a focus indicator needs 3:1 against what is next to it.
@@ -756,7 +771,6 @@ def _check_focus_cue(page, seed):
     translucent --focus-ring, and a hovered row shows a wash; a dark theme keeps
     the ring and the wash it had."""
     failures = []
-    hover = {"dark": "rgba(255, 255, 255, 0.08)", "light": "rgba(0, 0, 0, 0.05)"}
     try:
         for theme in ("dark", "light"):
             page.evaluate("(name) => _applyTheme(name)", theme)
@@ -788,17 +802,54 @@ def _check_focus_cue(page, seed):
                         f"  [focus cue, light] the ring is {cue['contrast']}:1 on the picker,"
                         f" under {MIN_RING_CONTRAST}:1"
                     )
-            # The pointer on another row: the wash under it.
+            # The pointer on another row: the wash under it. On light it is the
+            # theme's own --hover-bg, on dark the white wash the rows always had.
             page.hover(f"{SINGLE} .project-picker-item >> nth=0")
             page.wait_for_timeout(250)
-            wash = page.evaluate(HOVER_WASH_JS)
-            if wash != hover[theme]:
-                failures.append(f"  [focus cue, {theme}] a hovered row's background is {wash}, expected {hover[theme]}")
+            hovered = page.evaluate(HOVER_WASH_JS)
+            wanted = "rgba(255, 255, 255, 0.08)" if theme == "dark" else hovered["hoverBg"]
+            if hovered["create"] or hovered["wash"] != wanted:
+                failures.append(
+                    f"  [focus cue, {theme}] a hovered row's background is {hovered['wash']}, expected {wanted}"
+                )
+            if theme == "light" and hovered["hoverBg"] != "rgba(0, 0, 0, 0.05)":
+                failures.append(f"  [focus cue, light] --hover-bg is {hovered['hoverBg']} on the default skin")
+            # "+ New project" keeps its own accent tint under the pointer, on
+            # both themes: the rows' wash must not take it over.
+            page.hover(f"{SINGLE} .project-picker-create")
+            page.wait_for_timeout(250)
+            hovered = page.evaluate(HOVER_WASH_JS)
+            if not hovered["create"] or hovered["wash"] != hovered["accentBg"]:
+                failures.append(
+                    f"  [focus cue, {theme}] '+ New project' under the pointer is {hovered['wash']},"
+                    f" expected --accent-bg ({hovered['accentBg']})"
+                )
+            page.mouse.move(700, 450)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(150)
+        # A skin with a hover wash of its own (Codex: 4% black, not 5%): the
+        # rows follow the skin, they do not carry a colour of their own.
+        page.evaluate("() => { _applySkin('codex'); _applyTheme('light'); }")
+        page.wait_for_timeout(250)
+        problem = _open_single_picker(page, seed["alpha"])
+        if problem:
+            failures.append(f"  [focus cue, codex light] {problem}")
+        else:
+            page.hover(f"{SINGLE} .project-picker-item >> nth=0")
+            page.wait_for_timeout(250)
+            hovered = page.evaluate(HOVER_WASH_JS)
+            if hovered["hoverBg"] == "rgba(0, 0, 0, 0.05)":
+                failures.append("  [focus cue, codex light] the skin's --hover-bg is the default one: nothing is tested")
+            if hovered["wash"] != hovered["hoverBg"]:
+                failures.append(
+                    f"  [focus cue, codex light] a hovered row's background is {hovered['wash']},"
+                    f" expected the skin's --hover-bg ({hovered['hoverBg']})"
+                )
             page.mouse.move(700, 450)
             page.keyboard.press("Escape")
             page.wait_for_timeout(150)
     finally:
-        page.evaluate("() => _applyTheme('dark')")
+        page.evaluate("() => { _applySkin('default'); _applyTheme('dark'); }")
         page.wait_for_timeout(200)
     return failures
 
