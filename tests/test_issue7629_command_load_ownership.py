@@ -117,13 +117,21 @@ def _run_node(scenario: str, branch: str) -> dict:
         let _msgLimitMax=500;
         let _messageRenderWindowSize=0;
         const _MSG_LIMIT_MAX=500;
-        let _metadataResolve=null, _messagesResolve=null, _messagesReject=null;
-        let metadataRequested=false, messagesRequested=false;
+        let _metadataResolve=null, _continuationMetadataResolve=null;
+        let _messagesResolve=null, _messagesReject=null;
+        let metadataRequested=false, continuationMetadataRequested=false, messagesRequested=false;
+        let metadataRequestCount=0, messagesRequestCount=0;
+        let continuationDuringLoad=null;
+        const apiCalls=[];
         let renderCalls=0, clearLiveCalls=0, rearmCalls=0;
         const composer={value:'/reload-skills'};
-        const $=(id)=>id==='msg'?composer:(id==='msgInner'?{innerHTML:''}:null);
+        const msgInner={innerHTML:''};
+        const $=(id)=>id==='msg'?composer:(id==='msgInner'?msgInner:null);
         const showToast=()=>{};
-        const renderMessages=()=>{renderCalls++;};
+        const renderMessages=()=>{
+          renderCalls++;
+          if(Array.isArray(S.messages)&&S.messages.length) msgInner.innerHTML='';
+        };
         const renderSessionList=async()=>{};
         const autoResize=()=>{};
         const hideCmdDropdown=()=>{};
@@ -132,6 +140,7 @@ def _run_node(scenario: str, branch: str) -> dict:
         const _rawComposerText='/reload-skills';
         const _approvalCommandMutationGeneration=()=>0;
         const _clearComposerDraft=()=>Promise.resolve(true);
+        const _saveComposerDraftNow=()=>Promise.resolve(true);
         const _clearApprovalCommandRetry=()=>{};
         const _rememberApprovalCommandRetry=()=>{};
         const _cronProfileNameIsRootAlias=()=>false;
@@ -216,13 +225,22 @@ def _run_node(scenario: str, branch: str) -> dict:
         const _appRootPath=()=>'/';
         const api=async(url)=>{
           const target=String(url);
+          apiCalls.push(target);
           if(target==='/api/commands/exec')
             return {command_id:'command-old',output:'command complete'};
           if(target.includes('messages=0')){
+            metadataRequestCount++;
             metadataRequested=true;
-            return new Promise((resolve)=>{_metadataResolve=resolve;});
+            return new Promise((resolve)=>{
+              if(metadataRequestCount===1) _metadataResolve=resolve;
+              else{
+                continuationMetadataRequested=true;
+                _continuationMetadataResolve=resolve;
+              }
+            });
           }
           if(target.includes('messages=1')){
+            messagesRequestCount++;
             messagesRequested=true;
             return new Promise((resolve,reject)=>{_messagesResolve=resolve;_messagesReject=reject;});
           }
@@ -248,9 +266,20 @@ def _run_node(scenario: str, branch: str) -> dict:
           const callerDone=runCaller();
           for(let i=0;i<10000&&!metadataRequested;i++) await Promise.resolve();
           if(!metadataRequested) throw new Error('metadata request was not reached');
-          _metadataResolve({session:{session_id:'sid-old',message_count:4,active_stream_id:%(stream)s}});
+          if(%(scenario_json)s==='continuation'){
+            _metadataResolve({session:{
+              session_id:'sid-old',message_count:4,active_stream_id:null,
+              continuation_session_id:'sid-child'
+            }});
+            for(let i=0;i<10000&&!continuationMetadataRequested;i++) await Promise.resolve();
+            if(!continuationMetadataRequested) throw new Error('continuation metadata request was not reached');
+            _continuationMetadataResolve({session:{session_id:'sid-child',message_count:5,active_stream_id:null}});
+          }else{
+            _metadataResolve({session:{session_id:'sid-old',message_count:4,active_stream_id:%(stream)s}});
+          }
           for(let i=0;i<10000&&!messagesRequested;i++) await Promise.resolve();
           if(!messagesRequested) throw new Error('message request was not reached');
+          continuationDuringLoad={loading:_loadingSessionId,msgInner:msgInner.innerHTML};
           // This is the review reproduction: the actual command's reconciliation
           // is waiting for the old message response while the user opens New Chat
           // or switches profile.
@@ -264,6 +293,12 @@ def _run_node(scenario: str, branch: str) -> dict:
           }
           if(%(scenario_json)s==='new-chat-reject'||%(scenario_json)s==='profile-switch-reject'){
             _messagesReject(new Error('old message response rejected after ownership change'));
+          }else if(%(scenario_json)s==='continuation'){
+            _messagesResolve({session:{
+              session_id:'sid-child',_messages_truncated:false,_messages_offset:0,
+              messages:[{role:'assistant',content:'child-command-transcript',_webui_command_id:'command-old'}],
+              message_count:5,tool_calls:[]
+            }});
           }else{
             _messagesResolve({session:{
               session_id:'sid-old',_messages_truncated:false,_messages_offset:0,
@@ -278,6 +313,9 @@ def _run_node(scenario: str, branch: str) -> dict:
             sid:S.session&&S.session.session_id,profile:S.activeProfile,
             messages:S.messages,metadataRequested,messagesRequested,
             renderCalls,clearLiveCalls,rearmCalls,
+            metadataRequestCount,messagesRequestCount,apiCalls,
+            loadingSessionId:_loadingSessionId,msgInner:msgInner.innerHTML,
+            continuationDuringLoad,
           }));
         })().catch((error)=>{console.error(error&&error.stack||error);process.exit(1);});
         """
@@ -332,6 +370,26 @@ def test_owner_scoped_command_load_still_reloads_on_normal_completion():
     assert [m["content"] for m in out["messages"]] == ["old-late-transcript"]
     assert out["metadataRequested"] is True
     assert out["messagesRequested"] is True
+
+
+def test_owner_scoped_command_load_adopts_canonical_continuation():
+    """A verified parent-to-child handoff must load and render the child transcript."""
+    out = _run_node("continuation", "idle")
+
+    assert out["apiCalls"] == [
+        "/api/commands/exec",
+        "/api/session?session_id=sid-old&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-child&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-child&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1",
+    ]
+    assert out["metadataRequestCount"] == 2
+    assert out["messagesRequestCount"] == 1
+    assert out["continuationDuringLoad"]["loading"] == "sid-child"
+    assert "Loading conversation" in out["continuationDuringLoad"]["msgInner"]
+    assert out["sid"] == "sid-child"
+    assert [m["content"] for m in out["messages"]] == ["child-command-transcript"]
+    assert out["loadingSessionId"] is None
+    assert out["msgInner"] == ""
 
 
 def test_loader_threads_owner_identity_to_both_calls_and_checks_each_await():

@@ -2550,15 +2550,23 @@ async function loadSession(sid){
   const _expectedLoadProfile = Object.prototype.hasOwnProperty.call(opts,'ownerProfile')
     ? String(opts.ownerProfile||'default')
     : null;
-  const _expectedLoadSessionId = Object.prototype.hasOwnProperty.call(opts,'ownerSessionId')
+  let _expectedLoadSessionId = Object.prototype.hasOwnProperty.call(opts,'ownerSessionId')
     ? String(opts.ownerSessionId||'')
     : null;
   const _loadProfileIsCurrent = () => !_expectedLoadProfile
     || (typeof _profileMatchesActiveProfile==='function'
       && _profileMatchesActiveProfile(_expectedLoadProfile,S.activeProfile||'default'));
-  const _loadOwnerIsCurrent = () => _loadProfileIsCurrent()
-    && (!_expectedLoadSessionId
-      || !!(S&&S.session&&S.session.session_id===_expectedLoadSessionId));
+  const _loadOwnerIsCurrent = () => {
+    if(!_loadProfileIsCurrent())return false;
+    if(!_expectedLoadSessionId)return true;
+    const activeSid=(S&&S.session&&S.session.session_id)||'';
+    if(activeSid===_expectedLoadSessionId)return true;
+    // Canonical lineage/continuation resolution is an explicit one-hop owner
+    // handoff. Before the child metadata is installed, the verified parent is
+    // still foreground; after installation the ordinary exact-owner check wins.
+    const parentSid=String(opts._continuationParentSid||'');
+    return !!(parentSid&&activeSid===parentSid&&sid===_expectedLoadSessionId);
+  };
   // An owner-scoped reconciliation must fail closed before any stream teardown,
   // draft save, transcript clear, or loading placeholder can affect another
   // session/profile's visible conversation.
@@ -2569,7 +2577,12 @@ async function loadSession(sid){
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid){
-      if(!opts._continuationParentSid) opts={...opts,_continuationParentSid:sid};
+      const parentSid=sid;
+      if(!opts._continuationParentSid) opts={...opts,_continuationParentSid:parentSid};
+      if(_expectedLoadSessionId===parentSid){
+        _expectedLoadSessionId=resolvedSid;
+        opts={...opts,ownerSessionId:resolvedSid};
+      }
       sid=resolvedSid;
     }
   }
@@ -2779,7 +2792,7 @@ async function loadSession(sid){
       const parentSid=opts._continuationParentSid;
       _clearSameSessionForceReloadHint(sid);
       if(_isCurrentLoad()) _loadingSessionId=null;
-      return loadSession(parentSid,{
+      const parentOpts={
         ...opts,
         _continuationParentSid:null,
         skipLineageResolve:true,
@@ -2787,7 +2800,9 @@ async function loadSession(sid){
         skipProfileResolve:false,
         force:true,
         _preloadNotified:true
-      });
+      };
+      if(_expectedLoadSessionId===sid) parentOpts.ownerSessionId=parentSid;
+      return loadSession(parentSid,parentOpts);
     }
     if(_msgInner){
       if(e.status===404){
@@ -2880,7 +2895,9 @@ async function loadSession(sid){
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
     _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
+    const continuationOpts={...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true};
+    if(_expectedLoadSessionId===sid) continuationOpts.ownerSessionId=continuationSid;
+    return loadSession(continuationSid,continuationOpts);
   }
   S.session=data.session;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
