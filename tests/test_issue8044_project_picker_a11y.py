@@ -488,12 +488,17 @@ def test_a_focused_row_can_be_seen():
     assert ".project-picker-item.active:focus-visible{color:var(--blue);}" in STYLE_CSS
 
 
-def test_on_a_light_theme_the_ring_is_the_accent_and_the_pointer_has_a_wash():
+def test_on_a_light_theme_the_ring_is_the_text_accent_and_the_pointer_has_a_wash():
     """The white wash and the translucent --focus-ring are both near invisible
-    on a light picker. Scoped to :root:not(.dark), so a dark theme keeps both."""
+    on a light picker. Scoped to :root:not(.dark), so a dark theme keeps both.
+    The ring is --accent-text, not --accent, which is under 3:1 against the
+    picker on the palest skins; the numbers are the browser gate's."""
     assert (
-        ":root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent);}"
+        ":root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent-text);}"
         in STYLE_CSS
+    )
+    assert "outline-color:var(--accent);}" not in _between(
+        STYLE_CSS, ":root:not(.dark) .project-picker-item:hover{", "@media (pointer:coarse){.project-picker-item{"
     )
     assert ":root:not(.dark) .project-picker-item:hover{background:var(--hover-bg);}" in STYLE_CSS
     # That rule outranks ".project-picker-create:hover", so the row's accent

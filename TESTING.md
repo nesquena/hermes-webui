@@ -174,10 +174,15 @@ bar's Move button. "No project" and "+ New project" must follow the interface
 language; in a touch context, with the drawer open, every row must be at least
 44px tall, and so must every row of the ⋮ menu that opens the picker, which on
 a phone on its side must stay on the screen, scroll to its last row, and reveal
-the row a key moves focus to; on the
-light theme the focused row's ring must be the skin's accent at 3:1 or more
-against the picker, and a row under the pointer must show a wash; and in a long list the focused row must be inside the picker's box,
-or, in the batch picker, scrolled onto the screen by the conversation list.
+the row a key moves focus to; and in a long list the focused row must be inside
+the picker's box, or, in the batch picker, scrolled onto the screen by the
+conversation list. With a mouse on the light theme, a keyboard-focused row's
+ring must be the skin's `--accent-text` at 3:1 or more against the picker
+(checked for the single picker on the default skin and on the three skins with
+the palest accents, Terracotta, Sienna and Neon Paint, and for the batch picker
+on the default skin; other skins are not checked), a row under the pointer must
+show the skin's hover wash, and "+ New project" must keep its accent tint; the
+dark theme must keep the ring and wash it had.
 With forty more conversations and fifteen projects, a mouse wheel over the open
 batch picker must still scroll the conversation list, and on four phone sizes
 every row of the single picker must be tappable wherever in the list it was

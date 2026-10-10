@@ -732,13 +732,21 @@ FOCUS_CUE_JS = """() => {
   const channel = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
   const luminance = c => 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
   const style = getComputedStyle(row);
-  const picker = parse(getComputedStyle(row.closest('.project-picker')).backgroundColor);
+  // What the ring is seen against: the picker's background over whatever is
+  // behind it. The batch picker's own background is a 3% tint, not a colour.
+  const chain = [];
+  for (let node = row.closest('.project-picker'); node; node = node.parentElement) chain.unshift(node);
+  let picker = {r: 255, g: 255, b: 255, a: 1};
+  for (const node of chain) {
+    const colour = parse(getComputedStyle(node).backgroundColor);
+    if (colour.a > 0) picker = over(colour, picker);
+  }
   const ring = over(parse(style.outlineColor), picker);
   const light = luminance(ring), dark = luminance(picker);
   return {
     dark: document.documentElement.classList.contains('dark'),
     ring: style.outlineColor, ringStyle: style.outlineStyle, ringWidth: style.outlineWidth,
-    accent: resolved('--accent'), focusRing: resolved('--focus-ring'),
+    accent: resolved('--accent'), accentText: resolved('--accent-text'), focusRing: resolved('--focus-ring'),
     contrast: Math.round((Math.max(light, dark) + 0.05) / (Math.min(light, dark) + 0.05) * 100) / 100,
   };
 }"""
@@ -764,12 +772,34 @@ HOVER_WASH_JS = """() => {
 
 # WCAG 2.2 SC 1.4.11: a focus indicator needs 3:1 against what is next to it.
 MIN_RING_CONTRAST = 3.0
+# The light skins whose accent is palest: with --accent as the ring they are
+# 2.69:1, 2.69:1 and 2.85:1 against the picker.
+PALE_ACCENT_SKINS = ("terracotta", "sienna", "neon-paint")
+
+
+def _light_ring_problems(cue, label):
+    """A focused row on a light theme: the ring is the skin's --accent-text and
+    reads at 3:1 or more against the picker."""
+    if cue.get("problem"):
+        return [f"  [focus cue, {label}] {cue['problem']}"]
+    problems = []
+    if cue["dark"]:
+        problems.append(f"  [focus cue, {label}] the page is not on the light theme")
+    if cue["ring"] != cue["accentText"]:
+        problems.append(
+            f"  [focus cue, {label}] the ring is {cue['ring']}, expected --accent-text ({cue['accentText']})"
+        )
+    if cue["contrast"] < MIN_RING_CONTRAST:
+        problems.append(
+            f"  [focus cue, {label}] the ring is {cue['contrast']}:1 on the picker, under {MIN_RING_CONTRAST}:1"
+        )
+    return problems
 
 
 def _check_focus_cue(page, seed):
-    """On a light theme the focused row's ring is the skin's accent, not the
-    translucent --focus-ring, and a hovered row shows a wash; a dark theme keeps
-    the ring and the wash it had."""
+    """On a light theme the focused row's ring is the skin's --accent-text, not
+    the translucent --focus-ring, and a hovered row shows a wash; a dark theme
+    keeps the ring and the wash it had."""
     failures = []
     try:
         for theme in ("dark", "light"):
@@ -791,17 +821,17 @@ def _check_focus_cue(page, seed):
                     failures.append(
                         f"  [focus cue, {theme}] the ring is {cue['ringStyle']} {cue['ringWidth']}, expected solid 2px"
                     )
-                wanted = cue["focusRing"] if theme == "dark" else cue["accent"]
-                if cue["ring"] != wanted:
-                    name = "--focus-ring" if theme == "dark" else "--accent"
+                if theme == "dark" and cue["ring"] != cue["focusRing"]:
                     failures.append(
-                        f"  [focus cue, {theme}] the ring is {cue['ring']}, expected {name} ({wanted})"
+                        f"  [focus cue, dark] the ring is {cue['ring']}, expected --focus-ring ({cue['focusRing']})"
                     )
-                if theme == "light" and cue["contrast"] < MIN_RING_CONTRAST:
-                    failures.append(
-                        f"  [focus cue, light] the ring is {cue['contrast']}:1 on the picker,"
-                        f" under {MIN_RING_CONTRAST}:1"
-                    )
+                if theme == "light":
+                    failures += _light_ring_problems(cue, "light")
+                    if cue["accentText"] == cue["accent"]:
+                        failures.append(
+                            "  [focus cue, light] --accent-text equals --accent on the default skin:"
+                            " the ring's colour is not told apart"
+                        )
             # The pointer on another row: the wash under it. On light it is the
             # theme's own --hover-bg, on dark the white wash the rows always had.
             page.hover(f"{SINGLE} .project-picker-item >> nth=0")
@@ -848,6 +878,34 @@ def _check_focus_cue(page, seed):
             page.mouse.move(700, 450)
             page.keyboard.press("Escape")
             page.wait_for_timeout(150)
+        # The skins with the palest accents, where the accent itself is under
+        # 3:1 as a ring.
+        for skin in PALE_ACCENT_SKINS:
+            page.evaluate("(name) => { _applySkin(name); _applyTheme('light'); }", skin)
+            page.wait_for_timeout(250)
+            problem = _open_single_picker(page, seed["alpha"])
+            if problem:
+                failures.append(f"  [focus cue, {skin} light] {problem}")
+                continue
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(150)
+            failures += _light_ring_problems(page.evaluate(FOCUS_CUE_JS), f"{skin} light")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(150)
+        # The batch picker sits on the selection bar, a darker ground than the
+        # single picker's: with --accent the default skin's ring is 2.64:1 there.
+        page.evaluate("() => { _applySkin('default'); _applyTheme('light'); }")
+        page.wait_for_timeout(250)
+        problem = _open_batch_picker(page, seed)
+        if problem:
+            failures.append(f"  [focus cue, batch light] {problem}")
+        else:
+            page.wait_for_timeout(150)
+            failures += _light_ring_problems(page.evaluate(FOCUS_CUE_JS), "batch light")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(150)
+        page.evaluate("() => exitSessionSelectMode()")
+        page.wait_for_timeout(150)
     finally:
         page.evaluate("() => { _applySkin('default'); _applyTheme('dark'); }")
         page.wait_for_timeout(200)
@@ -1664,7 +1722,7 @@ def main():
             found = _check_focus_cue(page, seed)
             failures.extend(found)
             if not found:
-                print("OK  focus cue — the accent as ring and a wash under the pointer on the light theme, the dark theme as it was")
+                print("OK  focus cue — --accent-text as the ring on the light theme (default and the three palest skins, single and batch picker) and a wash under the pointer, the dark theme as it was")
             found = _check_fork_parent(page, seed)
             failures.extend(found)
             if not found:
