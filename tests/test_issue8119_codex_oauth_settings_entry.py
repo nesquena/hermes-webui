@@ -53,13 +53,14 @@ globalThis.$ = (id) => (id === 'codexOAuthFlow' ? wizardFlow : id === 'codexOAut
 
 const calls = [];
 let pollStatus = 'pending';
+const startResponse = Object.assign({
+  flow_id: 'f1', user_code: 'ABCD-1234', verification_uri: 'https://auth.openai.com/codex/device', poll_interval_seconds: 1,
+}, scenario.startExtra || {});
 globalThis.api = async (url, opts) => {
   calls.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
-  if (url === '/api/onboarding/oauth/start') {
-    return { flow_id: 'f1', user_code: 'ABCD-1234', verification_uri: 'https://auth.openai.com/codex/device', poll_interval_seconds: 1 };
-  }
+  if (url === '/api/onboarding/oauth/start') return startResponse;
   if (url.startsWith('/api/onboarding/oauth/poll')) return { status: pollStatus };
-  return {};
+  return { ok: true };
 };
 const timers = [];
 globalThis.setTimeout = (fn) => { timers.push(fn); return timers.length; };
@@ -89,13 +90,28 @@ eval(src);
     const card = _buildProviderCard(scenario.providers.find((p) => p.id === 'openai-codex'));
     const login = walk(card).find((el) => el.dataset.codexOauthLogin === '1');
     const btn = walk(login).find((el) => el.tag === 'button');
+    const note = walk(login).find((el) => el.className === 'provider-card-hint');
+    if (scenario.profileAtClick) S.activeProfile = scenario.profileAtClick;
     await btn.listeners.click();
     const flow = login.children[login.children.length - 1];
+    result.noteAtClick = note.textContent;
     result.flowShowsCode = flow.innerHTML.includes('ABCD-1234');
     result.wizardFlowTouched = wizardFlow.innerHTML !== '';
-    pollStatus = 'success';
-    await timers.shift()();
-    result.flowShowsSuccess = flow.innerHTML.includes('oauth_codex_success');
+    result.btnDisabledWhilePending = btn.disabled;
+    if (scenario.cancel) {
+      await cancelCodexOAuth();
+      result.pendingTimersAfterCancel = timers.length;
+      // A poll tick already scheduled before cancel must not resume the flow.
+      while (timers.length) await timers.shift()();
+      result.flowShowsCancelled = flow.innerHTML.includes('cancelled');
+    } else {
+      pollStatus = scenario.pollStatus || 'success';
+      await timers.shift()();
+      result.flowHtml = flow.innerHTML;
+    }
+    result.btnLabelAfter = btn.textContent;
+    result.btnDisabledAfter = btn.disabled;
+    result.domText = walk(card).map((el) => el.innerHTML + '|' + el.textContent).join('\n');
   }
 
   if (scenario.wizard) {
@@ -186,7 +202,7 @@ def test_settings_login_runs_device_flow_and_refreshes_providers_not_wizard(tmp_
     assert result["calls"][1]["url"] == "/api/onboarding/oauth/poll?flow_id=f1"
     assert result["flowShowsCode"] is True
     assert result["wizardFlowTouched"] is False
-    assert result["flowShowsSuccess"] is True
+    assert "oauth_codex_success" in result["flowHtml"]
     assert result["providersReloads"] == 1
     assert result["wizardReloads"] == 0
 
@@ -196,3 +212,114 @@ def test_wizard_login_still_renders_in_wizard_and_reloads_it(tmp_path):
     assert result["wizardShowsCode"] is True
     assert result["wizardReloads"] == 1
     assert result["providersReloads"] == 0
+
+
+def test_profile_note_is_refreshed_when_the_flow_starts(tmp_path):
+    # The card was built while "default" was active; the user switched to "work"
+    # before clicking. The note must name the profile the flow is bound to.
+    result = _run(tmp_path, {
+        "clickCodex": True,
+        "profileAtClick": "work",
+        "providers": [_oauth_provider("openai-codex", auth_error="No Codex credentials stored.")],
+    })
+    assert result["cards"]["openai-codex"]["note"] == "providers_codex_profile_note:default"
+    assert result["noteAtClick"] == "providers_codex_profile_note:work"
+
+
+def test_cancel_from_settings_cancels_server_flow_and_stops_polling(tmp_path):
+    result = _run(tmp_path, {
+        "clickCodex": True,
+        "cancel": True,
+        "providers": [_oauth_provider("openai-codex", auth_error="No Codex credentials stored.")],
+    })
+    assert result["btnDisabledWhilePending"] is True
+    urls = [c["url"] for c in result["calls"]]
+    assert urls[0] == "/api/onboarding/oauth/start"
+    assert {"url": "/api/onboarding/oauth/cancel", "body": {"flow_id": "f1"}} in result["calls"]
+    # The poll tick scheduled by start ran after cancel and must not have polled.
+    assert not any(u.startswith("/api/onboarding/oauth/poll") for u in urls)
+    assert result["flowShowsCancelled"] is True
+    assert result["btnDisabledAfter"] is False
+    assert result["btnLabelAfter"] == "oauth_login_codex"
+    assert result["providersReloads"] == 0
+    assert result["wizardReloads"] == 0
+
+
+@pytest.mark.parametrize("status,marker", [("expired", "oauth_codex_expired"), ("error", "oauth_codex_error")])
+def test_expired_or_failed_flow_re_enables_the_button_without_refreshing(tmp_path, status, marker):
+    result = _run(tmp_path, {
+        "clickCodex": True,
+        "pollStatus": status,
+        "providers": [_oauth_provider("openai-codex", has_key=True, key_source="oauth")],
+    })
+    assert marker in result["flowHtml"]
+    assert result["btnDisabledAfter"] is False
+    assert result["btnLabelAfter"] == "providers_codex_reconnect"
+    assert result["providersReloads"] == 0
+    assert result["wizardReloads"] == 0
+
+
+def test_settings_flow_never_renders_or_sends_fields_beyond_the_public_payload(tmp_path):
+    # Even if a start response carried provider-owned secrets, the card must only
+    # use flow_id / user_code / verification_uri and poll by flow_id alone.
+    result = _run(tmp_path, {
+        "clickCodex": True,
+        "startExtra": {"device_auth_id": "DEVICE-SECRET", "code_verifier": "VERIFIER-SECRET"},
+        "providers": [_oauth_provider("openai-codex", auth_error="No Codex credentials stored.")],
+    })
+    assert "DEVICE-SECRET" not in result["domText"]
+    assert "VERIFIER-SECRET" not in result["domText"]
+    for call in result["calls"]:
+        assert "SECRET" not in call["url"]
+        assert "SECRET" not in json.dumps(call["body"])
+    assert result["calls"][1]["url"] == "/api/onboarding/oauth/poll?flow_id=f1"
+
+
+def test_flow_started_under_one_profile_persists_there_after_a_profile_switch(monkeypatch, tmp_path):
+    """The server binds the flow to the profile active at start; switching profiles
+    while the user authorizes must not redirect the credential."""
+    import threading
+    import time
+
+    import api.oauth as oauth
+
+    home_a = tmp_path / "profile-a"
+    home_b = tmp_path / "profile-b"
+    home_a.mkdir()
+    home_b.mkdir()
+    oauth._OAUTH_FLOWS.clear()
+
+    active = {"home": home_a}
+    monkeypatch.setattr(oauth, "_get_active_hermes_home", lambda: active["home"])
+    monkeypatch.setattr(oauth, "_request_codex_user_code", lambda: {
+        "user_code": "ABCD-1234", "device_auth_id": "device-secret", "interval": 1, "expires_in": 600,
+    })
+    monkeypatch.setattr(oauth, "_spawn_codex_oauth_worker", lambda flow_id: None)
+
+    authorized = threading.Event()
+
+    def _poll(device_auth_id, user_code):
+        assert authorized.wait(timeout=5)
+        return {"authorization_code": "auth-code", "code_verifier": "verifier"}
+
+    monkeypatch.setattr(oauth, "_poll_codex_authorization", _poll)
+    monkeypatch.setattr(oauth, "_exchange_codex_authorization", lambda code, verifier: {
+        "access_token": "ACCESS", "refresh_token": "REFRESH",
+    })
+    monkeypatch.setattr(oauth.time, "sleep", lambda _s: None)
+
+    payload = oauth.start_onboarding_oauth_flow({"provider": "openai-codex"})
+    flow_id = payload["flow_id"]
+
+    worker = threading.Thread(target=oauth._run_codex_oauth_worker, args=(flow_id,), daemon=True)
+    worker.start()
+    active["home"] = home_b  # user switches profile while the code is being entered
+    authorized.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+
+    assert oauth.poll_onboarding_oauth_flow(flow_id)["status"] == "success"
+    assert (home_a / "auth.json").exists()
+    assert not (home_b / "auth.json").exists()
+    stored = json.loads((home_a / "auth.json").read_text(encoding="utf-8"))
+    assert stored["credential_pool"]["openai-codex"][0]["access_token"] == "ACCESS"

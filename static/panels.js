@@ -11588,20 +11588,27 @@ function _buildCodexOAuthLogin(p){
   btn.textContent=label;
   row.appendChild(btn);
   wrap.appendChild(row);
-  // The backend writes to the profile active when the flow starts.
+  // The backend binds the flow to the profile active when it starts, so the
+  // note is refreshed on click rather than trusted from when the card was built.
   const profileNote=document.createElement('div');
   profileNote.className='provider-card-hint';
-  profileNote.textContent=t('providers_codex_profile_note',(typeof S!=='undefined'&&S.activeProfile)||'default');
+  const showProfile=()=>{
+    profileNote.textContent=t('providers_codex_profile_note',(typeof S!=='undefined'&&S.activeProfile)||'default');
+  };
+  showProfile();
   wrap.appendChild(profileNote);
   const flow=document.createElement('div');
   flow.style.display='none';
   wrap.appendChild(flow);
-  btn.addEventListener('click',()=>startCodexOAuth({
-    flow:()=>flow,
-    btn:()=>btn,
-    label:()=>label,
-    onSuccess:()=>loadProvidersPanel(),
-  }));
+  btn.addEventListener('click',()=>{
+    showProfile();
+    return startCodexOAuth({
+      flow:()=>flow,
+      btn:()=>btn,
+      label:()=>label,
+      onSuccess:()=>loadProvidersPanel(),
+    });
+  });
   return wrap;
 }
 
