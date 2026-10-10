@@ -266,6 +266,68 @@ def test_highlighted_option_is_exposed_as_the_active_descendant(tmp_path):
     assert _run_node(tmp_path, "combo_aria.js", _ARIA_PROBE).strip().endswith("ok")
 
 
+# --- the dialog's Escape path must go through the component ------------------
+_CLOSE_FROM_OUTSIDE_PROBE = (
+    _DOM_STUB
+    + _combo_fn()
+    + r"""
+const combo = _makeBindingsCombo({ value: '', options: [{ value: '/ws/a', name: 'a' }, { value: '/ws/b', name: 'b' }] });
+const trig = combo.el.children[0];
+const menu = combo.el.children[1];
+trig.onkeydown({ key: 'ArrowDown', preventDefault() {} });
+trig.onkeydown({ key: 'ArrowDown', preventDefault() {} });
+assert(menu.classList.contains('open'), 'the menu is open');
+assert(trig.getAttribute('aria-activedescendant'), 'a row is highlighted');
+assert(_openBindingsCombo === combo, 'the combo owns the shared open slot');
+
+// The dialog's capture-phase Escape handler only has the DOM node.
+assert(typeof _closeBindingsComboMenu === 'function', '_closeBindingsComboMenu must exist');
+assert(_closeBindingsComboMenu(menu) === true, 'closing reports that it closed something');
+assert(!menu.classList.contains('open'), 'the class is gone');
+assert(trig.getAttribute('aria-expanded') === 'false', 'aria-expanded is cleared');
+assert(!trig.getAttribute('aria-activedescendant'),
+  'aria-activedescendant must NOT keep pointing at a hidden option, got ' + trig.getAttribute('aria-activedescendant'));
+assert(_openBindingsCombo === null, 'the shared open slot must be released');
+assert(_closeBindingsComboMenu(menu) === true, 'a second call is still a no-op close');
+
+// Fallback: a node whose owner is gone is still closed by class + aria-expanded.
+const orphan = makeElement('div');
+const staleTrigger = makeElement('div');
+staleTrigger.className = 'project-bindings-combo-trigger';
+staleTrigger.setAttribute('aria-expanded', 'true');
+const staleWrap = makeElement('div');
+staleWrap.className = 'project-bindings-combo';
+staleWrap.appendChild(staleTrigger);
+staleWrap.appendChild(orphan);
+orphan.className = 'project-bindings-combo-menu open';
+assert(_closeBindingsComboMenu(orphan) === true, 'the fallback closes the orphan menu');
+assert(!orphan.classList.contains('open'), 'the orphan class is gone');
+assert(staleTrigger.getAttribute('aria-expanded') === 'false', 'the orphan trigger is collapsed');
+
+console.log('ok');
+"""
+)
+
+
+def test_dialog_escape_closes_through_the_component(tmp_path):
+    """Greptile P2 2026-10-10T04:21:38Z: the dialog's Escape path closed the menu
+    by dropping the CSS class alone, so aria-activedescendant kept naming a hidden
+    option and the shared open-combo slot was never released."""
+    assert _run_node(tmp_path, "combo_close_outside.js", _CLOSE_FROM_OUTSIDE_PROBE).strip().endswith("ok")
+
+
+def test_close_open_combo_delegates_to_the_component():
+    """Source guard: the dialog's helper must not hand-roll the DOM teardown."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.index("function _closeOpenCombo(")
+    end = src.index("\n  }", start)
+    body = src[start:end]
+    assert "_closeBindingsComboMenu(menu)" in body, body
+    # the hand-rolled teardown must be gone from the dialog helper
+    assert "classList.remove('open')" not in body, body
+    assert "aria-expanded" not in body, body
+
+
 def test_dropdown_geometry_and_aria_wiring_are_in_the_shipped_component():
     """Source guard for the two dropdown fixes."""
     fn = _combo_fn()

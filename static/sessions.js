@@ -10964,6 +10964,27 @@ function _makeBindingsCombo(o){
   return api;
 }
 
+// Close whichever bindings dropdown owns `menu` from OUTSIDE the component — the
+// dialog's capture-phase Escape handler only has the DOM node. Prefer the
+// component's own close when the node belongs to the current open-combo slot:
+// that releases the shared slot AND clears the a11y state (aria-expanded /
+// aria-activedescendant) instead of only dropping the CSS class, which left
+// aria-activedescendant pointing at a now-hidden option (Greptile P2
+// 2026-10-10T04:21:38Z). The DOM fallback stays for a node whose owner is gone.
+function _closeBindingsComboMenu(menu){
+  if(!menu) return false;
+  const owner=_openBindingsCombo;
+  if(owner&&owner.el&&typeof owner.el.contains==='function'&&owner.el.contains(menu)){
+    try{ owner.close(); return true; }catch(_){ _openBindingsCombo=null; }
+  }
+  menu.classList.remove('open');
+  const wrap=menu.closest('.project-bindings-combo');
+  const triggers=wrap?wrap.querySelectorAll('.project-bindings-combo-trigger'):[];
+  const trigger=(triggers&&triggers.length)?triggers[0]:null;
+  if(trigger){trigger.classList.remove('open');trigger.setAttribute('aria-expanded','false');}
+  return true;
+}
+
 // Modal dialog for editing a project's bindings (workspace / model / effort).
 // All three fields use the SAME custom combobox component so the dropdowns
 // look identical; workspace options show name-first with the path as the
@@ -11601,11 +11622,10 @@ function _showProjectBindingsDialog(proj){
   function _closeOpenCombo(){
     const menu=overlay.querySelector('.project-bindings-combo-menu.open');
     if(!menu) return false;
-    menu.classList.remove('open');
-    const wrap=menu.closest('.project-bindings-combo');
-    const trigger=wrap&&wrap.querySelector('.project-bindings-combo-trigger');
-    if(trigger){trigger.classList.remove('open');trigger.setAttribute('aria-expanded','false');}
-    return true;
+    // Delegate to the component's close so the shared open-combo slot is
+    // released and the a11y state is cleared with the class (Greptile P2
+    // 2026-10-10T04:21:38Z).
+    return _closeBindingsComboMenu(menu);
   }
   closeBtn.onclick=()=>{ _closeBindingsDialog(); };
   overlay.appendChild(dialog);

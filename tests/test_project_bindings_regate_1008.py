@@ -110,20 +110,33 @@ def test_escape_with_an_open_combobox_closes_only_the_dropdown():
     # The key is CONSUMED: the dialog-close path must not run as well.
     assert "e.preventDefault();e.stopPropagation();return;" in seg[combo_branch:dialog_close]
 
-    # The helper closes exactly what the combo's own _close() closes, and only
-    # reports True when a dropdown was actually open.
+    # The helper still closes what the combo's own _close() closes and only
+    # reports True when a dropdown was actually open — but it now DELEGATES to the
+    # shared closer instead of hand-rolling the teardown, so the shared
+    # open-combo slot and the a11y state (aria-activedescendant) are released with
+    # the CSS class (Greptile P2 2026-10-10T04:21:38Z).
     helper = seg.index("function _closeOpenCombo(){")
     helper_seg = seg[helper:seg.index("closeBtn.onclick=", helper)]
     assert "overlay.querySelector('.project-bindings-combo-menu.open')" in helper_seg
     assert "if(!menu) return false;" in helper_seg
-    assert "menu.classList.remove('open')" in helper_seg
-    assert "trigger.classList.remove('open')" in helper_seg
-    assert "trigger.setAttribute('aria-expanded','false')" in helper_seg
-    assert "return true;" in helper_seg
+    assert "return _closeBindingsComboMenu(menu);" in helper_seg
+
+    # ...and the teardown that closes exactly what the combo's _close() closes now
+    # lives in that shared module-level helper (prefer the component, keep a DOM
+    # fallback for a menu whose owner is gone).
+    js = _read_sessions_js()
+    closer_start = js.index("function _closeBindingsComboMenu(menu){")
+    closer = js[closer_start:js.index("\n}\n", closer_start) + 3]
+    assert "_openBindingsCombo" in closer
+    assert "owner.close()" in closer
+    assert "if(!menu) return false;" in closer
+    assert "menu.classList.remove('open')" in closer
+    assert "trigger.classList.remove('open')" in closer
+    assert "trigger.setAttribute('aria-expanded','false')" in closer
+    assert "return true;" in closer
 
     # ...the combo really does mark an open dropdown with those exact classes,
     # so the selector above matches a live dropdown (and nothing else).
-    js = _read_sessions_js()
     assert "menu.classList.add('open');" in js
     assert "trigger.classList.add('open');" in js
 
