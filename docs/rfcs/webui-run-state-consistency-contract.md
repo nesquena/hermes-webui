@@ -437,6 +437,12 @@ and 5; it does not mark every run-state boundary implemented.
 2. **Active turn UI keeps its owner.** The user turn that started active work
    must remain visible before assistant text, thinking cards, tool cards, or
    activity groups that belong to that work.
+   Sidebar cancellation captures both session ID and stream ID before awaiting
+   the response. Its later cleanup must not clear a replacement stream's active
+   pane, busy state, in-memory recovery, prompts, or approval/clarification
+   polling. Browser recovery entries may be removed only when their stored
+   identity matches the cancelled owner; unknown identity does not authorize
+   deletion. HTTP success alone does not establish ownership of current UI state.
 3. **Reattach preserves order or degrades clearly.** Refresh, reconnect, and
    session switch must preserve chronological live-scene order. If WebUI cannot
    restore the exact live scene, it should downgrade to an explicit structured
