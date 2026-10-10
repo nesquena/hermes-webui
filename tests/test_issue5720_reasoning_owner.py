@@ -529,7 +529,7 @@ class FakeEventSource {
 global.EventSource=FakeEventSource;
 
 const attachStart=messagesSrc.indexOf('function attachLiveStream(');
-const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);
+const attachEnd=messagesSrc.indexOf('\nfunction transcript(',attachStart);
 if(attachStart<0||attachEnd<0) throw new Error('attachLiveStream source boundary not found');
 eval(extractFunc(messagesSrc,'_dispatchExtensionTurnLifecycle'));
 eval(messagesSrc.slice(attachStart,attachEnd));
