@@ -5797,6 +5797,18 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
   retireProjectPicker();
   if(!_sessionListRepaintDeferredByPicker) return {session,anchorEl};
 
+  // A fork long-press opens its menu while the finger is still down and arms
+  // its one-click open-suppression on the pressed row. Chromium dispatches the
+  // release click at the physical release point, so replacing the rows now can
+  // move that point off the suppressed row (a peer message plus the refresh it
+  // triggered were accepted while the picker held the old layout), strand the
+  // suppression and let the stray click close the menu. Postpone the
+  // destructive replacement until the gesture, its compatibility click and
+  // this menu are finished: closing the menu drains the deferral like any
+  // other blocked render, and the menu stays anchored on the live row the
+  // suppression is armed on.
+  if(anchorEl&&anchorEl._skipNextChildOpen) return {session,anchorEl};
+
   // A list refresh may have already replaced this session's canonical fields
   // while the picker kept the old row DOM alive. Paint that state before the
   // action menu captures either the row closure or its focus-return anchor.
@@ -5821,14 +5833,14 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
   // in that cache yet; resolve it there after the cache lookups. The typeof
   // guard keeps the extracted-function Node harness self-contained.
   if(!currentSession&&typeof S!=='undefined'&&S.session&&S.session.session_id===sid) currentSession=S.session;
-  const currentRow=_findSessionRenameRow(sid);
-  // A fork long-press arms its one-click open-suppression on the pressed row
-  // (installForkChildSwipe); the repaint above replaced that row, so move the
-  // pending suppression to the replacement the release click will reach.
-  if(anchorEl&&anchorEl._skipNextChildOpen&&currentRow&&currentRow!==anchorEl){
-    currentRow._skipNextChildOpen=true;
-    delete anchorEl._skipNextChildOpen;
+  // Content-search-only results render in the sidebar from _contentSearchResults
+  // (see _sessionSearchMergeMatches) even though they are absent from the list
+  // cache, so the action owner resolves there too, after every cache-level
+  // lookup and with the same exact-id test.
+  if(!currentSession&&typeof _contentSearchResults!=='undefined'&&Array.isArray(_contentSearchResults)){
+    currentSession=_contentSearchResults.find(item=>item&&item.session_id===sid)||null;
   }
+  const currentRow=_findSessionRenameRow(sid);
   // Keep the opener's kind: expanded rows contain child triggers before their
   // own, and touch long-press must stay on the visible row, not hidden dots.
   const anchorClasses=anchorEl&&anchorEl.classList;
@@ -9423,6 +9435,9 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click'].forEach(ev=>childCountEl.addEventListener(ev,e=>e.stopPropagation()));
       childCountEl.onclick=(e)=>{
         e.stopPropagation();
+        // Explicit user intent: the toggle must paint now, not be swallowed by
+        // the picker's background-repaint deferral.
+        _retireProjectPickerForExplicitRepaint();
         const key=_sidebarLineageKeyForRow(s);
         if(_expandedChildSessionKeys.has(key)) _expandedChildSessionKeys.delete(key);
         else _expandedChildSessionKeys.add(key);
@@ -9817,6 +9832,9 @@ function renderSessionListFromCache(){
       chip.title='Click to filter by '+tag;
       chip.onclick=(e)=>{
         e.stopPropagation();
+        // Explicit user intent: the filter must paint now, not be swallowed by
+        // the picker's background-repaint deferral.
+        _retireProjectPickerForExplicitRepaint();
         const searchBox=$('sessionSearch');
         if(searchBox){searchBox.value=tag;filterSessions();}
       };
@@ -10454,6 +10472,20 @@ let _projectPickerTeardown=null;
 // picker's teardown can replay it (same contract as the ⋮ menu guard, minus the lost repaint).
 let _sessionListRepaintDeferredByPicker=false;
 
+// Retire the picker ahead of an explicit repaint the user just asked for
+// (child-count toggle, tag filter, inline project create). The deferral guard
+// in renderSessionListFromCache exists for background churn; an explicit
+// transition must complete instead. Callers repaint immediately after, so a
+// pending deferral folds into that repaint instead of replaying later.
+function _retireProjectPickerForExplicitRepaint(){
+  if(typeof _projectPickerTeardown==='undefined'||!_projectPickerTeardown) return false;
+  const retire=_projectPickerTeardown;
+  _projectPickerTeardown=null;
+  if(typeof _sessionListRepaintDeferredByPicker!=='undefined') _sessionListRepaintDeferredByPicker=false;
+  try{ retire(); }catch(_){}
+  return true;
+}
+
 function _showProjectPicker(session, anchorEl){
   // Close any existing picker. Its teardown, not just element removal, has to
   // run so no resize/click listener outlives the element it was bound for.
@@ -11028,6 +11060,9 @@ function _startProjectCreate(bar, addBtn){
         showToast('Project create failed: '+(e.message||e));
         return;
       }
+      // The API-success transition (editor -> chip) must paint now: retire the
+      // picker first so this repaint is not swallowed by its deferral.
+      _retireProjectPickerForExplicitRepaint();
       await renderSessionList();
       showToast('Project created');
     }else{

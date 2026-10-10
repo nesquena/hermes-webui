@@ -986,6 +986,14 @@ def _project_picker_session_action_handoff_source() -> str:
     return SESSIONS_JS[start:end]
 
 
+def _retire_project_picker_for_explicit_repaint_source() -> str:
+    start = SESSIONS_JS.find("function _retireProjectPickerForExplicitRepaint(")
+    assert start >= 0, "_retireProjectPickerForExplicitRepaint not found in static/sessions.js"
+    end = SESSIONS_JS.find("\nfunction ", start + 1)
+    assert end > start
+    return SESSIONS_JS[start:end]
+
+
 @pytest.mark.parametrize("kind", ["trigger", "row", "actions", "topbar"])
 def test_picker_handoff_preserves_anchor_kind_and_parent_scope(kind):
     """A child trigger appears before the parent's own trigger in DOM order."""
@@ -1072,32 +1080,97 @@ console.log(JSON.stringify({
     assert data["anchorReplaced"] is True
 
 
-def test_picker_handoff_carries_pending_child_open_suppression_to_the_replacement_row():
-    """A fork long-press arms one-click suppression on the pressed row."""
+def test_picker_handoff_postpones_the_repaint_while_fork_release_is_pending():
+    """A fork long-press owns its one-click suppression until the release click.
+
+    Rebuilding the rows during that window can move the release target out
+    from under the finger, so the handoff must keep the live row (and the
+    deferred repaint) in place for the menu-close drain instead.
+    """
     assert NODE is not None
     script = r"""
 const classes = (...names) => ({contains: name => names.includes(name)});
 const oldRow = {isConnected:true, classList:classes('session-child-session'), _skipNextChildOpen:true};
 const newRow = {isConnected:true, classList:classes('session-child-session')};
+let repaints = 0;
 let _projectPickerTeardown = () => {};
 let _sessionListRepaintDeferredByPicker = true;
 const _allSessions = [{session_id:'parent', _child_sessions:[{session_id:'fork-child'}]}];
-function renderSessionListFromCache() { oldRow.isConnected = false; }
+function renderSessionListFromCache() { repaints += 1; oldRow.isConnected = false; }
 function _findSessionRenameRow() { return newRow; }
 """ + _project_picker_session_action_handoff_source() + r"""
-const result = _projectPickerSessionActionHandoff({session_id:'fork-child'}, oldRow);
+const input = {session_id:'fork-child'};
+const result = _projectPickerSessionActionHandoff(input, oldRow);
 console.log(JSON.stringify({
-  resolved: result && result.anchorEl === newRow,
-  suppressionCarried: newRow._skipNextChildOpen === true,
-  oldCleared: oldRow._skipNextChildOpen !== true,
+  repaints,
+  keptSession: result && result.session === input,
+  keptAnchor: result && result.anchorEl === oldRow,
+  keptSuppression: oldRow._skipNextChildOpen === true,
+  stillDeferred: _sessionListRepaintDeferredByPicker === true,
 }));
 """
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
-    assert data["resolved"] is True
-    assert data["suppressionCarried"] is True
-    assert data["oldCleared"] is True
+    assert data == {
+        "repaints": 0,
+        "keptSession": True,
+        "keptAnchor": True,
+        "keptSuppression": True,
+        "stillDeferred": True,
+    }
+
+
+def test_picker_handoff_resolves_a_content_search_only_session_and_keeps_cache_precedence():
+    """An older session returned by content search lives only in _contentSearchResults."""
+    assert NODE is not None
+    script = r"""
+const classes = (...names) => ({contains: name => names.includes(name)});
+const makeRow = (trigger) => ({
+  isConnected: true,
+  classList: classes('session-item'),
+  querySelector(selector) {
+    return selector === ':scope > .session-actions > .session-actions-trigger' ? trigger : null;
+  },
+});
+const makeTrigger = (owner) => ({isConnected: true, owner});
+let _projectPickerTeardown = () => {};
+let _sessionListRepaintDeferredByPicker = true;
+let _allSessions = [{session_id: 'other-row'}];
+const S = {session: null};
+const searchHit = {session_id: 'tg-search-hit', match_type: 'content', match_preview: 'older Telegram chat'};
+const _contentSearchResults = [searchHit];
+let rowTrigger = makeTrigger('search-trigger');
+function renderSessionListFromCache() {}
+function _findSessionRenameRow(sessionId) {
+  return sessionId === 'tg-search-hit' ? makeRow(rowTrigger) : null;
+}
+""" + _project_picker_session_action_handoff_source() + r"""
+const firstAnchor = {isConnected: true, classList: classes('session-actions-trigger')};
+const first = _projectPickerSessionActionHandoff({session_id: 'tg-search-hit'}, firstAnchor);
+const firstTrigger = rowTrigger;
+// The same id present in the list cache keeps cache precedence over search.
+const cachedHit = {session_id: 'tg-search-hit', fromCache: true};
+_allSessions = [cachedHit];
+rowTrigger = makeTrigger('cached-trigger');
+_projectPickerTeardown = () => {};
+_sessionListRepaintDeferredByPicker = true;
+const secondAnchor = {isConnected: true, classList: classes('session-actions-trigger')};
+const second = _projectPickerSessionActionHandoff({session_id: 'tg-search-hit'}, secondAnchor);
+console.log(JSON.stringify({
+  resolvedFromSearchResults: Boolean(first) && first.session === searchHit,
+  firstAnchorReplaced: Boolean(first) && first.anchorEl === firstTrigger,
+  cacheKeepsPrecedence: Boolean(second) && second.session === cachedHit,
+}));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data == {
+        "resolvedFromSearchResults": True,
+        "firstAnchorReplaced": True,
+        "cacheKeepsPrecedence": True,
+    }
 
 
 def test_closing_the_action_menu_drains_a_picker_deferred_repaint():
@@ -1136,6 +1209,43 @@ console.log(JSON.stringify({drained, repaintsAfterNoop: repaints,
     assert data["drained"] == {"repaints": 1, "flagCleared": True}
     assert data["repaintsAfterNoop"] == 1
     assert data["keptForPicker"] is True
+
+
+def test_explicit_repaint_retires_the_open_picker_and_folds_its_deferral():
+    # An explicit control (child-count toggle, tag filter, inline project
+    # create) retires the picker first so its repaint is not swallowed by the
+    # picker's background-repaint deferral. The deferred flag folds into the
+    # caller's repaint: the teardown replay stays silent and the picker's
+    # listeners and observer are all released.
+    data = _run_picker_cases(
+        _REPAINT_REPLAY_PREFIX
+        + _retire_project_picker_for_explicit_repaint_source()
+        + """
+openPicker(260);
+_sessionListRepaintDeferredByPicker = true;
+const retired = _retireProjectPickerForExplicitRepaint();
+const closed = placement();
+flushTimers();
+console.log(JSON.stringify({
+  retired,
+  removed: closed.removed,
+  observers: closed.observers,
+  listenerCounts: closed.listenerCounts,
+  flagCleared: _sessionListRepaintDeferredByPicker === false,
+  repaints,
+  retiredAgain: _retireProjectPickerForExplicitRepaint(),
+}));
+"""
+    )
+    assert data == {
+        "retired": True,
+        "removed": True,
+        "observers": 0,
+        "listenerCounts": {"window": 1, "visualViewport": 0, "document": 0},
+        "flagCleared": True,
+        "repaints": 0,
+        "retiredAgain": False,
+    }
 
 
 def test_another_rows_real_action_menu_retires_picker_and_repaints_nested_rows():
