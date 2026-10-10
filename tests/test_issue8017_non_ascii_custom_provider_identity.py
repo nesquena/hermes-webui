@@ -702,6 +702,49 @@ def test_resolution_does_not_raise_when_a_legacy_entry_owns_the_identity(monkeyp
     assert api_key == "sk-keyed"
 
 
+def test_a_keyless_legacy_entry_cannot_hijack_a_keyed_record_to_the_model_block(monkeypatch):
+    """A keyless legacy entry must not hand a keyed record's slug to the model block.
+
+    r9 CORE, ``api/config.py:4213``. The model-block preference used to scan the list
+    on its own, before ownership was decided, so a keyless ``晨光`` entry matched the
+    slug first and the whole route was redirected to the block's endpoint and
+    credential: an existing provider that master completed returned ``auth_mismatch``
+    after HTTP 401. Ownership must be settled first, and here the keyed
+    ``providers`` record owns ``custom:晨光``.
+    """
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "model": {
+                "provider": "custom",
+                "default": "chat-model",
+                "base_url": "http://127.0.0.1:9000/v1",
+                "api_key": "sk-model",
+            },
+            "providers": {
+                "custom:晨光": {
+                    "base_url": "http://127.0.0.1:8317/v1",
+                    "api_key": "sk-keyed",
+                }
+            },
+            "custom_providers": [
+                {
+                    "name": "晨光",
+                    "model": "chat-model",
+                    # Keyless and endpoint-less: the exact shape the preference loop
+                    # matched before ownership filtering ran.
+                }
+            ],
+        },
+    )
+
+    assert config.resolve_custom_provider_connection("custom:晨光") == (
+        "sk-keyed",
+        "http://127.0.0.1:8317/v1",
+    ), "the keyed record owns the slug, so the model block must not take it over"
+
+
 def test_keyed_providers_record_is_not_shadowed_by_a_legacy_list_entry(monkeypatch):
     """An existing `providers: {"custom:晨光": ...}` route keeps its endpoint and key.
 
@@ -1132,3 +1175,85 @@ def test_set_default_model_keeps_the_base_url_for_an_endpointless_entry(monkeypa
         on_disk.get("providers"),
         on_disk.get("model"),
     ) == "custom:晨光鑫遇专用", "the entry stays catalogued"
+
+
+def test_set_default_model_drops_the_previous_routes_key_for_a_keyless_entry(monkeypatch, tmp_path):
+    """Shape K: the model block's key must not follow the pick to another host (r9 MUST-FIX).
+
+    The picker copies the selected entry's URL into the block, so AFTER the click the
+    on-disk "same URL" test can no longer separate shape A (the block served that URL,
+    correct) from shape K (the block served a different host, a leak). Only the
+    pre-click snapshot can. Here the block served ``U0`` under its own key and the
+    selected keyless entry lives at ``U``, so the key belongs to the previous route.
+    The route must fail closed exactly as an ASCII keyless entry does, instead of
+    sending ``sk-previous-route`` to ``U`` (master and ``f1c2afc`` send no key).
+    """
+    U0 = "http://127.0.0.1:8317/v1"
+    U = "http://127.0.0.1:9000/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        f"  base_url: {U0}\n"
+        "  api_key: sk-previous-route\n"
+        "custom_providers:\n"
+        "  - name: 晨光鑫遇专用\n"
+        f"    base_url: {U}\n"
+        "    model: chat-model\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    result = config.set_hermes_default_model("chat-model", provider="custom:晨光鑫遇专用")
+    assert result["ok"] is True
+
+    assert config.resolve_custom_provider_connection("custom:晨光鑫遇专用") == (None, U), (
+        "the previous route's key must not be sent to the newly selected entry's host"
+    )
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert not on_disk["model"].get("api_key"), (
+        "the stranded previous-route key must be absent from the block on disk"
+    )
+    assert not on_disk["model"].get("key_env"), "and so must any key_env form of it"
+
+
+def test_endpointless_entry_with_a_key_inherits_the_model_connection(monkeypatch, tmp_path):
+    """An endpoint-less entry that declares a key still inherits the model connection.
+
+    r9 CORE, ``api/config.py:4223``. Declaring ``api_key`` made the entry look like a
+    real authority, so it skipped the inheritance and the newly named route had no
+    endpoint at all: a turn that master completed through the model block failed with
+    ``custom_provider_endpoint_unresolved``. Without an endpoint of its own the
+    declared key has nowhere of its own to go, so the model block stays the authority.
+    """
+    U = "http://127.0.0.1:8317/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: chat-model\n"
+        f"  base_url: {U}\n"
+        "  api_key: sk-model\n"
+        "custom_providers:\n"
+        "  - name: 晨光鑫遇专用\n"
+        "    model: chat-model\n"
+        "    api_key: sk-entry\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    _entry, source, _is_exact, _status = config._select_custom_provider_record(
+        "custom:晨光鑫遇专用", "晨光鑫遇专用", config.cfg
+    )
+    assert source == "model", (
+        "an endpoint-less entry inherits the model block even when it declares its own key, "
+        f"so the route has an endpoint at all (got source={source!r})"
+    )
+
+    connection = config.resolve_custom_provider_connection("custom:晨光鑫遇专用")
+    assert connection[1] == U, f"the endpoint-less entry must inherit the model endpoint: {connection}"

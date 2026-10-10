@@ -1586,10 +1586,14 @@ def _model_block_mirrors_fallback_entry(
         entry_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_url == model_url:
             return True
-        if not entry_url and not (entry.get("api_key") or str(entry.get("key_env") or "").strip()):
-            # No endpoint and no credential of its own: the entry inherits the
-            # model connection (see ``_select_custom_provider_record``), so the
-            # block IS that entry's connection rather than a second authority.
+        if not entry_url:
+            # No endpoint of its own: the entry inherits the model connection (see
+            # ``_select_custom_provider_record``), so the block IS that entry's
+            # connection rather than a second authority. That holds whatever
+            # credential the entry declares: without an endpoint of its own the
+            # declared key has nowhere of its own to go, and refusing the
+            # inheritance left the newly named route with no endpoint at all
+            # (r9 CORE, 4223).
             return True
     return False
 
@@ -4198,9 +4202,24 @@ def _select_custom_provider_record(
     # which is the connection that actually served this endpoint. A same-endpoint
     # entry that declares its OWN credential is a real authority and is left
     # untouched.
+    # Ownership is decided FIRST (r9 CORE, 4213). The model preference below must
+    # apply only when the slug's own authority IS this keyless / endpoint-less
+    # fallback entry. Scanning the list independently let a keyless entry hijack a
+    # slug that a prefixed entry or a keyed ``providers`` record already owned, so
+    # an existing provider was redirected to the block's endpoint and credential: a
+    # real chat that master completed returned ``auth_mismatch`` after HTTP 401.
+    #
+    # Fail closed when the slug maps to multiple entries (raises); otherwise use
+    # the single matching entry. Shared with resolve_model_provider so endpoint
+    # and credential are always resolved from the SAME entry.
+    matched_entry = _unique_custom_provider_entry(
+        custom_providers, slug, cfg_data.get("providers"), cfg_data.get("model")
+    )
+
     model_cfg_for_conn = cfg_data.get("model")
     if (
         isinstance(model_cfg_for_conn, dict)
+        and isinstance(matched_entry, dict)
         # Bare ``custom`` OR a block that names THIS slug: the default-model
         # picker rewrites ``model.provider`` to ``custom:<slug>`` on selection
         # and leaves the block's own ``api_key``/``key_env`` in place, so the
@@ -4208,33 +4227,25 @@ def _select_custom_provider_record(
         and str(model_cfg_for_conn.get("provider") or "").strip().lower() in {"custom", pid}
         and _raw_provider_record_enabled(model_cfg_for_conn)
         and _custom_record_owns_connection(model_cfg_for_conn, pid)
+        and _custom_provider_slug_is_fallback(matched_entry.get("name"))
+        and _custom_provider_slug_key(matched_entry.get("name")) == slug
     ):
+        entry_url = _normalize_base_url_for_match(matched_entry.get("base_url"))
         model_url = _normalize_base_url_for_match(model_cfg_for_conn.get("base_url"))
-        for entry in custom_providers:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            if (
-                not str(name or "").strip()
-                or not _custom_provider_slug_is_fallback(name)
-                or _custom_provider_slug_key(name) != slug
-            ):
-                continue
-            if entry.get("api_key") or str(entry.get("key_env") or "").strip():
-                # The entry declares its own credential -> a real authority.
-                break
-            entry_url = _normalize_base_url_for_match(entry.get("base_url"))
-            # No endpoint of its own (inherits the model connection), or exactly
-            # that endpoint: either way the model block is the authority.
-            if not entry_url or entry_url == model_url:
-                return model_cfg_for_conn, "model", False, CUSTOM_SELECTION_KEYED
+        if not entry_url:
+            # No endpoint of its own: it inherits the model connection, and a
+            # declared credential has nowhere of its own to go, so the block is the
+            # authority whatever the entry's static key fields say. Popping the
+            # block's endpoint here would leave the route with none at all
+            # (``custom_provider_endpoint_unresolved``) (r9 CORE, 4223).
+            return model_cfg_for_conn, "model", False, CUSTOM_SELECTION_KEYED
+        if entry_url == model_url and not (
+            matched_entry.get("api_key") or str(matched_entry.get("key_env") or "").strip()
+        ):
+            # Exactly that endpoint AND no credential of its own: the entry adds no
+            # authority, so the block is the connection that served this endpoint.
+            return model_cfg_for_conn, "model", False, CUSTOM_SELECTION_KEYED
 
-    # Fail closed when the slug maps to multiple entries (raises); otherwise use
-    # the single matching entry. Shared with resolve_model_provider so endpoint
-    # and credential are always resolved from the SAME entry.
-    matched_entry = _unique_custom_provider_entry(
-        custom_providers, slug, cfg_data.get("providers"), cfg_data.get("model")
-    )
     if matched_entry is not None:
         return matched_entry, "custom_providers", True, CUSTOM_SELECTION_EXACT
 
@@ -6868,6 +6879,32 @@ def _model_block_serves_selected_custom_provider(provider: object, config_data: 
     return source == "model"
 
 
+def _selected_fallback_entry_declares_no_credential(provider: object, config_data: object) -> bool:
+    """True when ``provider`` names a fallback-derived ``custom_providers[]`` entry with no credential.
+
+    Such an entry is served by the ``model:`` block after the picker names its slug
+    (``_select_custom_provider_record``'s preference block). When the block did NOT
+    serve that entry before the click, the block's ``api_key``/``key_env`` belong to
+    the previous route, and leaving them in place would send that credential to
+    this entry's endpoint. The caller then drops them so the route fails closed
+    exactly as an ASCII keyless entry does.
+    """
+    pid = str(provider or "").strip().lower()
+    if not pid.startswith("custom:") or not isinstance(config_data, dict):
+        return False
+    slug = _custom_provider_slug_key(pid)
+    if not slug:
+        return False
+    for entry in _custom_provider_entries(config_data):
+        name = entry.get("name")
+        if not _custom_provider_slug_is_fallback(name) or _custom_provider_slug_key(name) != slug:
+            continue
+        if entry.get("api_key") or str(entry.get("key_env") or "").strip():
+            return False
+        return True
+    return False
+
+
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
@@ -6914,6 +6951,14 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         # previous provider, not against a block that already names the new one.
         previous_config_data = dict(config_data)
         previous_config_data["model"] = dict(model_cfg)
+        # Judge "the block served the selected entry" against the PRE-CLICK snapshot
+        # once and reuse it: the picker copies the selected entry's own URL into the
+        # block, so after the click the on-disk "same URL" test can no longer tell
+        # shape A (the block served that URL, correct) from shape K (the block served
+        # a different host, a credential leak).
+        block_served_selected = persisted_provider != previous_provider and (
+            _model_block_serves_selected_custom_provider(persisted_provider, previous_config_data)
+        )
 
         model_cfg["default"] = persisted_model
         if persisted_provider:
@@ -6924,7 +6969,7 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
-            elif not _model_block_serves_selected_custom_provider(persisted_provider, previous_config_data):
+            elif not block_served_selected:
                 # Provider changed and we have no resolved URL for the new one.
                 # Drop the previous provider's base_url so New Chat doesn't route
                 # to the old endpoint — this MUST also cover custom:* providers
@@ -6935,6 +6980,20 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
                 # ``model.base_url``): popping it would leave that route with no
                 # endpoint at all.
                 model_cfg.pop("base_url", None)
+
+        if (
+            persisted_provider != previous_provider
+            and not block_served_selected
+            and _selected_fallback_entry_declares_no_credential(persisted_provider, config_data)
+        ):
+            # The block now names a keyless fallback entry it did not serve before
+            # the click, so its credential is the PREVIOUS route's. The resolver
+            # treats the block as that entry's connection; keeping the key here
+            # would send it to the new endpoint. Drop it so the route fails closed
+            # like an ASCII keyless entry (an explicit key in ``advanced`` below
+            # still wins).
+            model_cfg.pop("api_key", None)
+            model_cfg.pop("key_env", None)
 
         _apply_advanced_model_options(model_cfg, advanced)
         if not _main_model_supports_service_tier(persisted_model, persisted_provider):
