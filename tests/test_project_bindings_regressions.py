@@ -59,6 +59,10 @@ def test_auto_assign_does_not_steal_session_claimed_between_snapshot_and_write(t
         {"session_id": "sess_a", "workspace": ws_str, "profile": "default", "project_id": None},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
 
     # Authoritative disk says sess_a is already filed elsewhere (concurrent move won).
@@ -102,6 +106,10 @@ def test_auto_assign_non_streaming_rechecks_under_agent_lock_and_skips_claimed(t
         {"session_id": "sess_b", "workspace": ws_str, "profile": "default", "project_id": None},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
 
     class _FullOwned:
@@ -145,6 +153,10 @@ def test_auto_assign_streaming_branch_skips_when_cached_already_owned(tmp_path, 
         {"session_id": sid, "workspace": ws_str, "profile": "default", "project_id": None, "active_stream_id": active},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: {active})
 
     # Put a live cached session already owned by another project; streaming path
@@ -185,6 +197,10 @@ def test_auto_assign_streaming_branch_files_unowned_when_idle(tmp_path, monkeypa
         {"session_id": sid, "workspace": ws_str, "profile": "default", "project_id": None, "active_stream_id": active},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: {active})
 
     class _Cached:
@@ -372,6 +388,10 @@ def test_auto_assign_non_streaming_load_under_lock_survives_concurrent_move(tmp_
         {"session_id": sid, "workspace": ws_str, "profile": "default", "project_id": None},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
 
     winner, target = "manual-winner", "proj_target"
@@ -445,6 +465,10 @@ def test_auto_assign_active_stream_respects_session_lock_first_ordering(tmp_path
         {"session_id": sid, "workspace": ws_str, "profile": "default", "project_id": None, "active_stream_id": active},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: {active})
 
     class _Cached:
@@ -520,6 +544,10 @@ def test_auto_assign_stale_active_snapshot_missing_cache_falls_through(tmp_path,
          "active_stream_id": active},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: {active})
     with LOCK:
         SESSIONS.pop(sid, None)
@@ -568,6 +596,10 @@ def test_auto_assign_stale_active_snapshot_ended_stream_falls_through(tmp_path, 
          "active_stream_id": stale_active},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: {stale_active})
 
     class _CachedStale:

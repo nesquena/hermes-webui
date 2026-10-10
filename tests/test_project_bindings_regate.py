@@ -270,6 +270,10 @@ def test_apply_project_auto_assign_preserves_updated_at(tmp_path, monkeypatch):
         {"session_id": "s_touch", "workspace": ws_str, "profile": "default", "project_id": None},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
 
     calls = []
@@ -343,6 +347,10 @@ def test_apply_project_auto_assign_refuses_while_project_deleting(tmp_path, monk
         {"session_id": "s_refuse", "workspace": ws_str, "profile": "default", "project_id": None},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
 
     def _boom(*a, **k):
@@ -371,6 +379,10 @@ def test_auto_assign_sweep_stops_when_cancelled_midway(tmp_path, monkeypatch):
         for i in range(5)
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
 
     pid = "proj_delete_serial_3"
@@ -1275,6 +1287,10 @@ def test_auto_assign_sweep_skips_a_view_only_session_in_the_live_cache(tmp_path,
             "active_stream_id": "st_ro",
         },
     ]))
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"st_ro"})
 
     class _Cached:

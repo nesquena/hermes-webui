@@ -329,6 +329,10 @@ def test_apply_project_auto_assign_files_existing_sessions(tmp_path, monkeypatch
          "project_id": None, "message_count": 4},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
 
     saved = {}
     class _FakeSession:
@@ -384,6 +388,10 @@ def test_apply_project_auto_assign_named_profile_never_sweeps_default(tmp_path, 
          "project_id": None, "message_count": 1},
     ]))
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    # Deterministic ownership probe: "" = state.db is readable and holds no
+    # such row. Without this stub the sweep fails closed whenever the machine
+    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
+    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
 
     saved = {}
     class _FakeSession:
