@@ -32,7 +32,12 @@ def _send_body():
 def test_the_send_path_creates_the_session_without_awaiting_a_list_render():
     body = _send_body()
     assert not AWAITED_RENDER_AFTER_NEW_SESSION.search(body)
-    assert len(NO_SESSION_GUARD.findall(body)) >= 9
+    # The composer ownership helper also rejects failed/superseded creates.
+    assert body.count("if(!S.session&&!(await _ensureSessionForComposerAction())) return;") >= 9
+    start = MESSAGES_JS.index("async function _ensureSessionForComposerAction(){")
+    helper = MESSAGES_JS[start:MESSAGES_JS.index("\n}\n", start)]
+    assert "await newSession()" in helper
+    assert "renderSessionList" not in helper
 
 
 @pytest.mark.parametrize("source", [

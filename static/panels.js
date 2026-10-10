@@ -6462,53 +6462,71 @@ async function removeWorkspace(path){
 }
 
 async function promptWorkspacePath(){
-  // Opus review Q6: if called from blank page (no session), auto-create one first.
-  if(!S.session){
-    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
-    if(!ws)return;
-    try{
-      // System-minted session (#6022): worktree:false is explicit so a config
-      // worktree default can't leak a worktree from a workspace prompt.
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
-    }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
-    if(!S.session)return;
-  }
-  const value=await showPromptDialog({
-    title:t('workspace_switch_prompt_title'),
-    message:t('workspace_switch_prompt_message'),
-    confirmLabel:t('workspace_switch_prompt_confirm'),
-    placeholder:t('workspace_switch_prompt_placeholder'),
-    value:S.session.workspace||''
-  });
-  const path=(value||'').trim();
-  if(!path)return;
-  try{
-    const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path})});
-    _workspaceList=data.workspaces||[];
-    const target=_workspaceList[_workspaceList.length-1];
-    if(!target) throw new Error(t('workspace_not_added'));
-    await switchToWorkspace(target.path,target.name);
-  }catch(e){
-    if(String(e.message||'').includes('Workspace already in list')){
-      showToast(t('workspace_already_saved'));
-      return;
+  const contextIntent=arguments[0];
+  return _runContextTransition('workspace-path',contextIntent,async intent=>{
+    // Opus review Q6: if called from blank page (no session), auto-create one first.
+    if(!S.session){
+      const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+      if(!ws)return;
+      try{
+        await _ensureBlankPageSession(ws,intent);
+      }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
+      if(!S.session)return;
     }
-    showToast(t('workspace_switch_failed')+e.message);
-  }
+    const value=await showPromptDialog({
+      title:t('workspace_switch_prompt_title'),
+      message:t('workspace_switch_prompt_message'),
+      confirmLabel:t('workspace_switch_prompt_confirm'),
+      placeholder:t('workspace_switch_prompt_placeholder'),
+      value:S.session.workspace||''
+    });
+    const path=(value||'').trim();
+    if(!path)return;
+    const owner=_captureContextTransitionOwner();
+    if(!_contextTransitionOwnerIsCurrent(owner))return;
+    try{
+      const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path})});
+      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      _workspaceList=data.workspaces||[];
+      const target=_workspaceList[_workspaceList.length-1];
+      if(!target) throw new Error(t('workspace_not_added'));
+      await switchToWorkspace(target.path,target.name,intent);
+    }catch(e){
+      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      if(String(e.message||'').includes('Workspace already in list')){
+        showToast(t('workspace_already_saved'));
+        return;
+      }
+      showToast(t('workspace_switch_failed')+e.message);
+    }
+  });
 }
 
 async function switchToWorkspace(path,name){
+  const contextIntent=arguments[2];
+  const startsNewChatBoundary=typeof window!=='undefined'
+    &&window._newChatOnWorkspaceSwitch===true
+    &&S.session&&S.session.workspace&&path&&path!==S.session.workspace
+    &&Array.isArray(S.messages)&&S.messages.length>0;
+  let paneNavigationGeneration=arguments[3]!=null?arguments[3]
+    :(typeof _paneNavigationGeneration==='number'?_paneNavigationGeneration:null);
+  // A direct workspace choice owns the pane from click time. Its serialized
+  // context transition may wait behind New Chat, but queue admission must not
+  // let it overwrite a newer sidebar navigation.
+  if(!contextIntent&&startsNewChatBoundary&&typeof _claimPaneNavigation==='function'){
+    paneNavigationGeneration=_claimPaneNavigation();
+  }
+  const ownsPane=()=>paneNavigationGeneration===null
+    ||_paneNavigationClaimIsCurrent(paneNavigationGeneration);
+  return _runContextTransition('workspace-switch',contextIntent,async intent=>{
+  if(!ownsPane())return;
   // Opus review Q6: if called from blank page, auto-create a session bound to
   // the requested workspace so the switch doesn't silently no-op.
   if(!S.session){
     const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
-      // System-minted session (#6022): explicit worktree:false — a workspace
-      // switch from a blank page is not deliberate New Chat intent.
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      await _ensureBlankPageSession(ws,intent);
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6524,11 +6542,7 @@ async function switchToWorkspace(path,name){
   // when: the setting is on, the target workspace actually differs from the
   // current one, and the current conversation has real messages worth keeping on
   // its original workspace. Same-workspace selection stays an in-place refresh.
-  if(
-    window._newChatOnWorkspaceSwitch===true &&
-    S.session && S.session.workspace && path && path!==S.session.workspace &&
-    Array.isArray(S.messages) && S.messages.length>0
-  ){
+  if(startsNewChatBoundary){
     if(typeof _previewDirty!=='undefined'&&_previewDirty){
       const discard=await showConfirmDialog({
         title:t('discard_file_edits_title'),
@@ -6536,6 +6550,7 @@ async function switchToWorkspace(path,name){
         confirmLabel:t('discard'),
         danger:true
       });
+      if(!ownsPane())return;
       if(!discard)return;
       if(typeof cancelEditMode==='function')cancelEditMode();
       if(typeof clearPreview==='function')clearPreview();
@@ -6543,8 +6558,12 @@ async function switchToWorkspace(path,name){
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
-    if(typeof newSession==='function') await newSession(false);
-    showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
+    if(typeof newSession==='function') await newSession(false,{
+      contextTransition:intent,
+      _paneNavigationGeneration:paneNavigationGeneration,
+    });
+    if(!ownsPane())return;
+    if(S.session)showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
   if(typeof _previewDirty!=='undefined'&&_previewDirty){
@@ -6554,6 +6573,7 @@ async function switchToWorkspace(path,name){
       confirmLabel:t('discard'),
       danger:true
     });
+    if(!ownsPane())return;
     if(!discard)return;
     if(typeof cancelEditMode==='function')cancelEditMode();
     if(typeof clearPreview==='function')clearPreview();
@@ -6562,6 +6582,8 @@ async function switchToWorkspace(path,name){
   const restoreComposerFocusTarget=(composerDd&&composerDd.classList.contains('open')&&typeof _getComposerWorkspaceFocusTarget==='function')
     ? _getComposerWorkspaceFocusTarget()
     : null;
+  const owner=_captureContextTransitionOwner();
+  if(!_contextTransitionOwnerIsCurrent(owner)||!ownsPane())return;
   try{
     closeWsDropdown();
     // Invalidate any older /api/list response before the explicit workspace
@@ -6569,9 +6591,10 @@ async function switchToWorkspace(path,name){
     // overwrite the user's newer selection and reject this switch's fresh tree.
     if(typeof bumpWorkspaceTreeGen==='function')bumpWorkspaceTreeGen();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
-      session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
+      session_id:owner.sid, workspace:path, model:owner.session.model, model_provider:owner.session.model_provider||null
     })});
-    S.session.workspace=path;
+    if(!_contextTransitionOwnerIsCurrent(owner)||!ownsPane())return;
+    owner.session.workspace=path;
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -6579,14 +6602,18 @@ async function switchToWorkspace(path,name){
     syncTopbar();
     if(
       restoreComposerFocusTarget&&
+      _contextTransitionOwnerIsCurrent(owner)&&
       typeof _shouldRestoreComposerWorkspaceFocus==='function'&&
       _shouldRestoreComposerWorkspaceFocus(composerDd)&&
       typeof _focusComposerWorkspaceTarget==='function'
     ) _focusComposerWorkspaceTarget(restoreComposerFocusTarget);
     await loadDir('.');
+    if(!_contextTransitionOwnerIsCurrent(owner)||!ownsPane())return;
     if (_currentPanel === 'memory') await loadMemory(true);
+    if(!_contextTransitionOwnerIsCurrent(owner)||!ownsPane())return;
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
-  }catch(e){setStatus(t('switch_failed')+e.message);}
+  }catch(e){if(_contextTransitionOwnerIsCurrent(owner))setStatus(t('switch_failed')+e.message);}
+  });
 }
 
 // ── Profile panel + dropdown ──
@@ -7072,6 +7099,39 @@ function _openProfileSwitchSessionBrowser(){
 }
 
 async function switchToProfile(name) {
+  const contextIntent=arguments[1];
+  let paneNavigationGeneration=arguments[2]!=null?arguments[2]
+    :(typeof _paneNavigationGeneration==='number'?_paneNavigationGeneration:null);
+  // A direct profile choice claims the pane when requested, even if its
+  // serialized context work must wait for an older New Chat to settle.
+  // Sidebar opens already carry their own pane claim into the profile switch.
+  if(!contextIntent
+    &&!(typeof _profileSwitchOpeningExistingSession!=='undefined'&&_profileSwitchOpeningExistingSession)
+    &&name&&name!==S.activeProfile&&typeof _claimPaneNavigation==='function'){
+    paneNavigationGeneration=_claimPaneNavigation();
+  }
+  const ownsPane=()=>paneNavigationGeneration===null
+    ||_paneNavigationClaimIsCurrent(paneNavigationGeneration);
+  const setProfileSwitchComposerPending=pending=>{
+    const composerIds=['msg','fileInput','btnAttach','btnSavedPrompts','btnMic','btnVoiceMode'];
+    for(const id of composerIds){
+      const control=$(id);
+      if(!control)continue;
+      if(typeof _composerControlSetDisabledReason==='function'){
+        _composerControlSetDisabledReason(control,'profile-switch',!!pending);
+      }else control.disabled=!!pending;
+    }
+    if(typeof document!=='undefined'&&document.querySelectorAll){
+      document.querySelectorAll('#attachTray button').forEach(control=>{
+        if(typeof _composerControlSetDisabledReason==='function'){
+          _composerControlSetDisabledReason(control,'profile-switch',!!pending);
+        }else control.disabled=!!pending;
+      });
+    }
+  };
+  return _runContextTransition('profile-switch',contextIntent,async intent=>{
+  // Keep the authority captured at click time; queue admission cannot renew it.
+  if(!ownsPane()) return false;
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -7096,6 +7156,32 @@ async function switchToProfile(name) {
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
   if (name && name === S.activeProfile) return true;
+  // Defaults and one-shot overrides belong to the committed profile. Keep their
+  // pre-switch authority until the replacement session has settled successfully.
+  const _previousProfileDefaults = {
+    model: window._defaultModel, provider: window._activeProvider,
+    workspace: S._profileDefaultWorkspace,
+    workspaceOverride: S._profileSwitchWorkspace,
+    pendingModel: S._pendingProfileModel,
+    pendingProvider: S._pendingProfileModelProvider,
+    toolsets: S._pendingSessionToolsets,
+  };
+  const _restoreProfileDefaults = () => {
+    window._defaultModel = _previousProfileDefaults.model;
+    window._activeProvider = _previousProfileDefaults.provider;
+    S._profileDefaultWorkspace = _previousProfileDefaults.workspace;
+    S._profileSwitchWorkspace = _previousProfileDefaults.workspaceOverride;
+    S._pendingProfileModel = _previousProfileDefaults.pendingModel;
+    S._pendingProfileModelProvider = _previousProfileDefaults.pendingProvider;
+    S._pendingSessionToolsets = _previousProfileDefaults.toolsets;
+    const model = S._pendingProfileModel || (S.session && S.session.model) || window._defaultModel;
+    const provider = S._pendingProfileModelProvider
+      || (S.session && S.session.model_provider) || window._activeProvider;
+    if (typeof _applyModelToDropdown === 'function') _applyModelToDropdown(model, $('modelSelect'), provider);
+    if (typeof refreshProfileTransitionReasoningChip === 'function') {
+      refreshProfileTransitionReasoningChip(model, provider);
+    }
+  };
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -7109,6 +7195,10 @@ async function switchToProfile(name) {
   const _titlebarBtn = $('titlebarProfileBtn');
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
+  const _prevProfileIsDefault = !!S.activeProfileIsDefault;
+  let _serverProfileSwitched = false;
+  let _replacementSessionPending = false;
+  let _profileRollbackFailed = false;
   const _switchGen = ++_profileSwitchGeneration;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
@@ -7148,11 +7238,64 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  let _savedSourceDraftForReplacement = null;
+  const _profileSwitchComposer = $('msg');
+  const _restoreComposerFocus = !!(
+    _profileSwitchComposer && typeof document !== 'undefined'
+    && document.activeElement === _profileSwitchComposer
+  );
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
   // setup can't leak the embargo and freeze the sidebar (Codex re-gate 4).
   try {
+    // Freeze native composer producers for the whole profile transition. Voice
+    // dictation may still be committing a final browser result or awaiting
+    // server transcription, so settle it before snapshotting the source draft
+    // and before changing the profile cookie.
+    setProfileSwitchComposerPending(true);
+    const _sendInProgressAtSettle=typeof _sendInProgress!=='undefined'&&_sendInProgress;
+    if(typeof window!=='undefined'
+      &&typeof window._stopAndSettleComposerDictation==='function'){
+      let _dictationSettlementTimeout=null;
+      try{
+        await Promise.race([
+          window._stopAndSettleComposerDictation(),
+          new Promise((_resolve,reject)=>{
+            _dictationSettlementTimeout=setTimeout(()=>{
+              // A settlement that outruns the bound must abort the switch with a
+              // visible error: changing the profile cookie under a still-pending
+              // transcription drops the source draft (409). The finally below
+              // restores the frozen composer and its prior focus.
+              reject(new Error(t('profile_switch_dictation_pending')));
+            },10000);
+          }),
+        ]);
+      }finally{
+        if(_dictationSettlementTimeout!==null)clearTimeout(_dictationSettlementTimeout);
+      }
+    }
+    if(typeof _sendInProgress!=='undefined'&&_sendInProgress&&!_sendInProgressAtSettle){
+      // A dictation-owned send started while the composer was frozen. That turn
+      // belongs to the outgoing profile's session, so committing this switch would
+      // leave its stream unattached — surface it instead of moving the pane.
+      throw new Error(t('profile_switch_dictation_pending'));
+    }
+    if(!ownsPane())return false;
+    // A replacement New Chat runs after the profile cookie changes. Persist the
+    // source owner's draft while the old profile still owns the cookie, then
+    // hand that exact owner to newSession() so it does not repeat a cross-profile
+    // draft write that the backend correctly rejects with 409.
+    if (S.session
+        && typeof _saveComposerDraftNow === 'function'
+        && !(typeof _isReadOnlySession === 'function' && _isReadOnlySession(S.session))) {
+      const sourceSid = S.session.session_id;
+      const sourceProfile = String(S.session.profile || _prevProfileName || 'default').trim() || 'default';
+      const sourceText = ($('msg') || {}).value || '';
+      const sourceFiles = Array.isArray(S.pendingFiles) ? [...S.pendingFiles] : [];
+      await _saveComposerDraftNow(sourceSid, sourceText, sourceFiles, sourceProfile, {rejectOnError:true});
+      _savedSourceDraftForReplacement = {session_id:sourceSid, profile:sourceProfile};
+    }
     // Invalidate any in-flight/queued session-list render BEFORE showing the skeleton,
     // so a pre-switch /api/sessions response (old profile's rows, issued before the
     // switch) can't resolve, pass the generation guard, clear the skeleton flag, and
@@ -7176,9 +7319,42 @@ async function switchToProfile(name) {
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
+    _serverProfileSwitched = true;
     if (_switchGen !== _profileSwitchGeneration) return false;
+    // The profile cookie already changed, but a newer pane action now owns the
+    // next serialized transition. Restore both server and client profile
+    // authority before releasing the queue so that action cannot create under
+    // the abandoned profile.
+    if(!ownsPane()){
+      try{
+        const rollback=await api('/api/profile/switch',{
+          method:'POST',body:JSON.stringify({name:_prevProfileName}),timeoutToast:false,
+        });
+        S.activeProfile=rollback.active||_prevProfileName;
+        S.activeProfileIsDefault=typeof rollback.is_default==='boolean'
+          ?rollback.is_default:_prevProfileIsDefault;
+        _restoreProfileDefaults();
+      }catch(rollbackError){
+        _profileRollbackFailed=true;
+        S.activeProfile=data.active||name;
+        S.activeProfileIsDefault=!!data.is_default;
+        if(_switchGen===_profileSwitchGeneration){
+          showToast(t('switch_failed')+(rollbackError.message||String(rollbackError)));
+        }
+      }
+      if(typeof startGatewaySSE==='function')startGatewaySSE();
+      if(typeof applyBotName==='function')applyBotName();
+      // The waiting same-profile navigation uses cached rows; release the
+      // skeleton before it runs so renderSessionListFromCache can paint them.
+      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+      _sessionListSkeletonActive = false;
+      if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+      if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
+      return false;
+    }
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if(!ownsPane()) return false;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7289,8 +7465,10 @@ async function switchToProfile(name) {
             model: S.session.model,
             model_provider: S.session.model_provider||null,
           })});
+          if(!ownsPane()) return false;
           S.session.workspace = data.default_workspace;
         } catch (_) {}
+        if(!ownsPane()) return false;
       }
     }
 
@@ -7306,14 +7484,22 @@ async function switchToProfile(name) {
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!ownsPane()) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
-      if (_switchGen !== _profileSwitchGeneration) return false;
+      _replacementSessionPending = true;
+      const newSessionResult=await newSession(false, {
+        awaitWorkspaceLoad: workspaceVisible, worktree:false, contextTransition:intent,
+        _paneNavigationGeneration:paneNavigationGeneration,
+        savedSourceDraft:_savedSourceDraftForReplacement,
+      });
+      _replacementSessionPending = false;
+      if(_newSessionResultWasSuperseded(newSessionResult)
+        ||_switchGen!==_profileSwitchGeneration||!ownsPane()) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -7328,6 +7514,7 @@ async function switchToProfile(name) {
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!ownsPane()) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7350,7 +7537,8 @@ async function switchToProfile(name) {
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!ownsPane()) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
@@ -7358,6 +7546,7 @@ async function switchToProfile(name) {
       if (S.session && S.session.workspace) {
         const dirLoad = loadDir('.');
         if (workspaceVisible) await dirLoad;
+        if(!ownsPane()) return false;
       } else if (typeof clearWorkspaceTreeSkeleton === 'function') {
         // New profile has no bound workspace — clear the up-front skeleton so it
         // doesn't strand (#4662 Opus gate).
@@ -7367,17 +7556,51 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
+    if(!ownsPane()) return false;
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 
   } catch (e) {
+    // A replacement New Chat can fail after the profile cookie was committed
+    // (for example, a source-draft precondition). Restore the server profile
+    // before releasing this serialized context intent. A newer pane navigation
+    // keeps authority over its eventual visible session, but profile identity
+    // is different: the cookie and S.activeProfile are one
+    // serialized authority, so a successful rollback must update both even if
+    // a newer pane navigation is waiting to run next.
+    if (_serverProfileSwitched && _replacementSessionPending) {
+      try {
+        const rollback = await api('/api/profile/switch', {
+          method:'POST', body:JSON.stringify({name:_prevProfileName}), timeoutToast:false,
+        });
+        S.activeProfile = rollback.active || _prevProfileName;
+        S.activeProfileIsDefault = typeof rollback.is_default === 'boolean'
+          ? rollback.is_default : _prevProfileIsDefault;
+        _restoreProfileDefaults();
+        if (_switchGen === _profileSwitchGeneration) {
+          if (typeof startGatewaySSE === 'function') startGatewaySSE();
+          if (typeof applyBotName === 'function') applyBotName();
+        }
+      } catch (rollbackError) {
+        // The original switch already committed. If rollback fails, retain the
+        // committed target in both client and server authority and surface the
+        // additional failure instead of silently pretending the previous
+        // profile was restored.
+        _profileRollbackFailed = true;
+        if (_switchGen === _profileSwitchGeneration) {
+          showToast(t('switch_failed') + (rollbackError.message || String(rollbackError)));
+        }
+      }
+    }
     // Revert the optimistic name update on error
-    if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
+    const _failureProfileName = _profileRollbackFailed
+      ? (S.activeProfile || name) : _prevProfileName;
+    if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _failureProfileName;
+    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _failureProfileName;
     if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
-    // The switch failed, so we're still on the previous profile and its caches
-    // are intact — restore the real list/tree so the loading skeletons we showed
-    // up front don't strand. (#4662)
+    // Restore the real list/tree so the loading skeletons we showed up front
+    // don't strand. A failed rollback keeps the committed target profile; its
+    // next authoritative fetch replaces any cached rows rendered here. (#4662)
     if (_switchGen === _profileSwitchGeneration) {
       // The switch failed; _allSessions still holds the (still-current) previous
       // profile, so clear the skeleton flag and re-render to restore the real list
@@ -7385,8 +7608,13 @@ async function switchToProfile(name) {
       // restore render (and subsequent normal renders) can paint.
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       _sessionListSkeletonActive = false;
-      if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
-      if (_workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
+      if (_profileRollbackFailed && typeof renderSessionList === 'function') {
+        await renderSessionList();
+      } else if (typeof renderSessionListFromCache === 'function') {
+        renderSessionListFromCache();
+      }
+      if (!_profileRollbackFailed && _workspaceVisibleAtStart
+          && S.session && S.session.workspace && typeof loadDir === 'function') {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
         // No workspace to restore on the (still-current) previous profile —
@@ -7407,7 +7635,21 @@ async function switchToProfile(name) {
     if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
+    if(_switchGen===_profileSwitchGeneration){
+      setProfileSwitchComposerPending(false);
+      if(typeof updateSendBtn==='function')updateSendBtn();
+      // Only hand focus back when nothing else claimed it meanwhile: freezing the
+      // composer blurred #msg (activeElement falls back to body/null), but a user
+      // who moved to another input during the switch must keep that focus.
+      const _focusIsFree=typeof document==='undefined'||!document.activeElement
+        ||document.activeElement===document.body;
+      if(_restoreComposerFocus&&_focusIsFree&&_profileSwitchComposer&&!_profileSwitchComposer.disabled
+        &&typeof _profileSwitchComposer.focus==='function'){
+        _profileSwitchComposer.focus();
+      }
+    }
   }
+  });
 }
 
 function openProfileCreate(){

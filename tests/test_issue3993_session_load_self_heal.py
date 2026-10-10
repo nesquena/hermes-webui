@@ -33,7 +33,7 @@ def _run_load_session_failures(*, statuses, sid, route, saved, current_sid=None,
     catch_open = boot.index("{", catch_start)
     catch_close = boot.index("}", catch_open)
     spec = json.dumps({
-        "load": js[load_start:load_end],
+        "load": js[js.index("let _contextTransitionGeneration=0;"):js.index("const _newSessionPendingText")] + "\n" + js[load_start:load_end],
         "routeParser": js[route_start:route_end],
         "profileMismatchParser": js[mismatch_start:mismatch_end],
         "bootCatch": boot[catch_open + 1:catch_close],
@@ -134,7 +134,7 @@ def _run_continuation_restore(responses, *, attempts=1, current_sid=None,
     draft_start = js.index("function _restoreComposerDraft(draft, targetSid, opts={}) {")
     draft_end = js.index("\n}\n\n// Clear the saved draft", draft_start) + 2
     spec = json.dumps({
-        "load": js[load_start:load_end],
+        "load": js[js.index("let _contextTransitionGeneration=0;"):js.index("const _newSessionPendingText")] + "\n" + js[load_start:load_end],
         "routeParser": js[route_start:route_end],
         "profileMismatchParser": js[mismatch_start:mismatch_end],
         "draftRestore": js[draft_start:draft_end],
@@ -177,6 +177,7 @@ const context=vm.createContext({{
   _ensureMessagesLoaded:async(sid)=>{{context.S.messages=[{{role:'assistant',content:`loaded ${{sid}}`}}];}},
   _composerDraftHasPayload:(text,files)=>!!String(text||'').trim()||(Array.isArray(files)&&files.length>0),
   _isComposerDraftRestoreSuppressed:()=>false,
+  _restoreComposerPendingFiles:noop,
   _clearComposerDraftRestoreSuppression:noop,
   _rearmActiveSessionStream:noop,_updateYoloPill:noop,
   stopApprovalPolling:noop,hideApprovalCard:noop,stopSessionStream:noop,
