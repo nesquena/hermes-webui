@@ -1338,8 +1338,26 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   _sessionStreamingById.set(sid, false);
   _forgetObservedStreamingSession(sid);
   if (typeof hideApprovalCard==='function') hideApprovalCard(true);
-  if (typeof hideLiveRunStatus==='function') hideLiveRunStatus(sid);
-  if (typeof clearLiveToolCards==='function') clearLiveToolCards();
+  // Previously this called hideLiveRunStatus(sid), which empties and hides #liveRunStatus.
+  // The settled "Done" footer only appears after the reload + render (its duration and token
+  // numbers come from server-written metadata), so the user sees Running disappear, a gap, and
+  // then Done. hideLiveRunStatus has just two call sites repo-wide (the normal done path in
+  // messages.js and this idle-reconcile path), so this one is redundant: skipping it lets
+  // Running stay until the Done footer replaces it.
+  // Opt-out: window.__vmKeepLive=false restores the previous behavior (shared with the change below).
+  if (typeof hideLiveRunStatus==='function' && typeof window!=='undefined' && window.__vmKeepLive===false) hideLiveRunStatus(sid);
+  // Previously this called clearLiveToolCards() with no argument, which removes the live
+  // assistant segments and tool cards. The very next statement only schedules the fetch of
+  // fresh data, so "wipe first, then wait for the network" is what produces the end-of-turn
+  // blank window. The done path in messages.js already uses
+  // clearLiveToolCards({preserveDom:true}); align this call site with it: keep the DOM and let
+  // the done/render flow clean up. The live elapsed timer and the user's expand intent are
+  // still reset as before.
+  // Opt-out: window.__vmKeepLive=false restores the previous behavior.
+  if (typeof clearLiveToolCards==='function'){
+    if(typeof window!=='undefined'&&window.__vmKeepLive===false) clearLiveToolCards();
+    else clearLiveToolCards({preserveDom:true});
+  }
   if (changed&&typeof updateSendBtn==='function') updateSendBtn();
   if (changed&&typeof _scheduleActiveSessionIdleReload==='function') _scheduleActiveSessionIdleReload(sid);
   return changed;
