@@ -12444,6 +12444,11 @@ async function checkUpdatesNow(channelOverride){
   // slower, older check that resolves AFTER a newer one never overwrites the
   // banner/status the newer check published (owner guard).
   const epoch=(typeof _beginUpdateCheck==='function')?_beginUpdateCheck():null;
+  // #7679 finding 1 (round 3): declared at function scope, not inside the try.
+  // The rejection path needs the generation this check captured (it is what
+  // tells the reconciler whether a recovery control predates or postdates the
+  // failure), and a try-block-scoped const is not visible from the catch.
+  let _recoveryGenerationAtCheck=0;
   // Disable button, show spinner
   btn.disabled=true;
   if(spinner) spinner.style.display='';
@@ -12457,7 +12462,7 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
-    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
+    _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     // #7679 finding 2: an older check resolving after a newer one began must
     // not publish — it would overwrite the newer banner/status and re-arm
@@ -12556,6 +12561,33 @@ async function checkUpdatesNow(channelOverride){
       }catch(_){}
     }
     if(status){status.textContent=userMsg;status.style.color='var(--error)';}
+    // #7679 finding 1 (round 3): a CURRENT rejection is a terminal state, and
+    // the previous render's Force is now inert — the check it was armed by no
+    // longer describes a forceable target, so the grant this failure just
+    // invalidated must go with it. Leaving the button visible and enabled
+    // while its grant is null makes it a decoy: forceUpdate() finds no grant,
+    // opens zero confirmations and sends zero POSTs.
+    //
+    // Retire the OWNED control (target + grant) rather than rendering an empty
+    // payload: _showUpdateBanner would also hide independently newer recovery
+    // controls, which finding 2 is about. A dirty install keeps its recovery
+    // path — the error state itself does not clear a lock or a conflict that
+    // the user still needs a button for.
+    //
+    // NOTE: `data` is block-scoped to the try above and is NOT visible here —
+    // the request failed, so there is no payload to hand the reconciler. The
+    // catch therefore reconciles with a null payload, which is exactly the
+    // "no authoritative recovery state" case: it may retire the control the
+    // failing check owned, and nothing else.
+    if(typeof _retireForceUpdate==='function') _retireForceUpdate();
+    if(typeof _reconcileObsoleteUpdateControls==='function'){
+      _reconcileObsoleteUpdateControls(null, _recoveryGenerationAtCheck);
+    }else{
+      const _forceBtn=$('btnForceUpdate');
+      if(_forceBtn&&_forceBtn.dataset.target!=='agent'){_forceBtn.disabled=true;_forceBtn.style.display='none';_forceBtn.dataset.target='';}
+      const _lockBtn=$('btnClearUpdateLock');
+      if(_lockBtn&&_lockBtn.dataset.target!=='agent'){_lockBtn.disabled=true;_lockBtn.style.display='none';_lockBtn.dataset.target='';}
+    }
   } finally {
     // #7679 finding 2 (round 2): the SAME ownership question applies to the
     // control restoration. A stale request's finally re-enabled Check, cleared

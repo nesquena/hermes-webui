@@ -11997,6 +11997,82 @@ function _grantForceUpdate(target, channel){
     epoch: _updateCheckEpoch,
   };
 }
+// #7679 finding 2 (round 3): separate CHECK-STATUS ownership from RECOVERY
+// ownership. _showUpdateBanner starts by retiring every grant and then re-arms
+// only what its payload validates, so an observation that carries no
+// authoritative recovery state (an error-only, no-git-only or disabled payload)
+// erases a recovery that a NEWER observation established. The reviewer's
+// schedule: a valid manual-WebUI + updatable-Agent check completes; a second
+// Check starts and captures recovery generation 0; applyUpdates() then
+// publishes generation 1 with a live Agent/stable Force grant; and the
+// already-pending Check finally returns one of those three payloads — each of
+// which hid, disabled or detargeted Force and cleared that newer grant.
+//
+// Two different clocks are in play and they must not be collapsed:
+//   epoch                  — advanced by _beginUpdateCheck(). Answers "may this
+//                            payload publish at all?"
+//   _updateRecoveryGeneration — advanced only when a recovery is actually
+//                            established. Answers "is the recovery authority
+//                            this payload carries still current?"
+//
+// An observation captured BEFORE a newer recovery, carrying no authoritative
+// recovery state, must not retire it. Only an equally current recovery
+// observation that explicitly proves the condition gone (recovery[kind]===false)
+// may retire that owner. This predicate is the single place that rule lives.
+function _recoveryObservationMayRetire(data, recoveryGenerationAtCheck){
+  if(!data||typeof data!=='object') return false;
+  const recovery=(data.agent&&data.agent.recovery)||null;
+  if(!recovery) return false; // no authoritative recovery state -> may not retire
+  const captured=recoveryGenerationAtCheck===null||recoveryGenerationAtCheck===undefined
+    ? null
+    : Number(recoveryGenerationAtCheck);
+  const current=Number(window._updateRecoveryGeneration)||0;
+  if(captured!==null&&captured!==current) return false; // older observation
+  if(data.cached) return false; // a cache hit predates the recovery it would judge
+  const explicitlyGone=recovery.force===false||recovery.clear_lock===false;
+  return !!explicitlyGone;
+}
+// Retire the controls a terminal CHECK-OUTCOME invalidates, while preserving
+// independently newer recovery. `data` may be the failed payload (or null when
+// the request never produced one); `recoveryGenerationAtCheck` is the
+// generation the failing request captured when it started.
+function _reconcileObsoleteUpdateControls(data, recoveryGenerationAtCheck){
+  if(typeof _retireForceUpdate!=='function') return;
+  const mayRetire=_recoveryObservationMayRetire(data, recoveryGenerationAtCheck);
+  const forceBtn=(typeof $==='function')?$('btnForceUpdate'):null;
+  const clearLockBtn=(typeof $==='function')?$('btnClearUpdateLock'):null;
+  const keepAgent=(btn)=>{
+    // Preserve an Agent recovery control a newer observation established: a
+    // live target plus a recovery state that has not been proven gone.
+    if(!btn||btn.dataset.target!=='agent') return false;
+    if(btn.style.display!=='inline-block'||btn.disabled) return false;
+    return !mayRetire;
+  };
+  const keepForce=keepAgent(forceBtn);
+  const keepLock=keepAgent(clearLockBtn);
+  if(!keepForce){
+    _retireForceUpdate();
+  }
+  if(forceBtn&&!keepForce){
+    forceBtn.disabled=true;
+    forceBtn.style.display='none';
+    forceBtn.dataset.target='';
+  }
+  if(clearLockBtn&&!keepLock){
+    clearLockBtn.disabled=true;
+    clearLockBtn.style.display='none';
+    clearLockBtn.dataset.target='';
+  }
+  // A preserved control must stay armed: retiring the grant above would have
+  // left it a decoy, and a preserved lock without its target is inert too.
+  if(keepForce&&typeof _grantForceUpdate==='function'){
+    const recovery=(data&&data.agent&&data.agent.recovery)||null;
+    if(!mayRetire&&recovery&&(recovery.force===true||recovery.force===null||recovery.force===undefined)){
+      _grantForceUpdate('agent', data&&data.agent?data.agent.channel:null);
+    }
+  }
+  return {keepForce:!!keepForce,keepLock:!!keepLock};
+}
 // #7679: two independent staleness counters meet at this call, and they are
 // NOT the same clock — collapsing them into one parameter is what made the
 // round-3 patch look right while disabling #8040's authority guard:
@@ -12020,7 +12096,24 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   if(epoch!==null&&epoch!==undefined&&typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
   // A fresh render supersedes any in-flight force grant; it is re-armed below
   // only if this payload is still forceable.
+  //
+  // #7679 finding 2 (round 3): snapshot the recovery authority FIRST. An
+  // observation captured before a newer recovery established one — and which
+  // carries no authoritative recovery state of its own — must not erase it.
+  // The unconditional retire below is what did; the snapshot is restored right
+  // after, so a preserved recovery stays armed instead of becoming a decoy.
+  // Only an equally current observation that explicitly proves the condition
+  // gone may drop it, which is exactly what _recoveryObservationMayRetire says.
+  const _recoveryMayRetire=typeof _recoveryObservationMayRetire==='function'
+    ? _recoveryObservationMayRetire(data, recoveryGenerationAtCheck)
+    : false;
+  const _preservedRecoveryTarget=(typeof _forceUpdateGrant!=='undefined'&&_forceUpdateGrant&&_forceUpdateGrant.target==='agent')
+    ? _forceUpdateGrant
+    : null;
   if(typeof _retireForceUpdate==='function') _retireForceUpdate();
+  if(_preservedRecoveryTarget&&!_recoveryMayRetire&&typeof _grantForceUpdate==='function'){
+    _grantForceUpdate('agent', _preservedRecoveryTarget.channel);
+  }
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
@@ -12090,10 +12183,16 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
       const _currentRecoveryGeneration=Number(window._updateRecoveryGeneration)||0;
       const _recoveryGenerationIsCurrent=recoveryGenerationAtCheck===null||Number(recoveryGenerationAtCheck)===_currentRecoveryGeneration;
       const _recoveryGone=(kind)=>!!(!data.cached&&_recoveryGenerationIsCurrent&&_agentRecovery&&_agentRecovery[kind]===false);
+      // #7679 finding 2 (round 3): an independently newer Agent recovery
+      // survives an observation that never saw it. Without this carve-out the
+      // hide below fires whenever `agentUpdatable` is false — which is exactly
+      // the shape of an error-only / no-git-only / disabled payload — and the
+      // reviewer's schedule loses a live recovery button on all three.
+      const _preserveAgentRecovery=!!(_preservedRecoveryTarget&&!_recoveryMayRetire&&!_recoveryGone('force'));
       const forceBtn=$('btnForceUpdate');
-      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent'&&!_recoveryGone('force'))){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
+      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent'&&!_recoveryGone('force'))&&!_preserveAgentRecovery){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
       const clearLockBtn=$('btnClearUpdateLock');
-      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent'&&!_recoveryGone('clear_lock'))){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent'&&!_recoveryGone('clear_lock'))&&!_preserveAgentRecovery){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
     }
   }
   // #4085: when a dirty install is the only signal, surface
@@ -12119,7 +12218,12 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   // owns the *dirty* affordance, and "not forceable for a dirty reset" must
   // not silently retire an unrelated, still-valid Agent recovery.
   const _forceBtnManualAgentKeep=(webuiManual&&forceBtn&&forceBtn.dataset.target==='agent'&&forceBtn.style.display==='inline-block'&&!forceBtn.disabled);
-  if(forceBtn&&!_forceBtnManualAgentKeep){
+  // #7679 finding 2 (round 3): the same preserved-recovery carve-out for the
+  // dirty-affordance reset. A payload that is not forceable for a dirty reset
+  // must not silently retire an unrelated, still-valid Agent recovery that a
+  // newer observation established.
+  const _forceBtnPreservedRecoveryKeep=!!(_preservedRecoveryTarget&&!_recoveryMayRetire&&forceBtn&&forceBtn.dataset.target==='agent'&&forceBtn.style.display==='inline-block'&&!forceBtn.disabled);
+  if(forceBtn&&!_forceBtnManualAgentKeep&&!_forceBtnPreservedRecoveryKeep){
     if(forceable){
       forceBtn.dataset.target=forceTarget;
       forceBtn.style.display='inline-block';
@@ -12183,7 +12287,22 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   const msg=$('updateMsg');
   if(msg){
     const manualInstruction=_formatManualUpdateInstruction(data&&data.webui);
-    msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'');
+    // #7679 finding 4 (round 3): "available" belongs to real upstream updates
+    // only. The banner rendered `WebUI: Local changes detected available` for
+    // a dirty-only install — there is nothing to download, the checkout is
+    // merely dirty — and Settings one line below already says "Local changes
+    // detected". Split the parts: the upstream ones (behind>0) keep the word,
+    // the dirty-only ones do not, and a mixed install lists both accurately.
+    const _upstreamParts=[];
+    const _dirtyOnlyParts=[];
+    for(const _p of parts){
+      if(String(_p).indexOf(t('update_dirty_local_changes','Local changes detected'))!==-1) _dirtyOnlyParts.push(_p);
+      else _upstreamParts.push(_p);
+    }
+    const _segments=[];
+    if(_upstreamParts.length) _segments.push(_upstreamParts.join(', ')+' available');
+    if(_dirtyOnlyParts.length) _segments.push(_dirtyOnlyParts.join(', '));
+    msg.textContent='\u2B06 '+_segments.join(' \u00B7 ')+(manualInstruction?' \u00B7 '+manualInstruction:'');
   }
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');

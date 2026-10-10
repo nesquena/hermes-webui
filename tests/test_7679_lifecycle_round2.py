@@ -130,10 +130,24 @@ for (const line of __enBody.split('\n')) {
 }
 // The production contract: a known key returns its text, an unknown key returns
 // the KEY (which is what the user saw before this round).
-function t(key, fallback) {
-  if (Object.prototype.hasOwnProperty.call(__enEntries, key)) return __enEntries[key];
-  if (fallback !== undefined && fallback !== null && fallback !== '') return String(fallback);
-  return String(key);
+// finding 3 (round 3): the extra arguments of the REAL t() are interpolation
+// VALUES, not fallback text. The copied version above treated the second
+// argument as an English fallback, so `t('update_dirty_local_changes','Local
+// changes detected')` produced "Local changes detected" for a key that exists
+// and produced "…detected" substituted into the placeholder in production —
+// the test asserted a string the runtime never emits. Reproduce the real
+// signature: fallback only when the key is absent, then {name} substitution
+// from the remaining arguments.
+function t(key, ...args) {
+  let text;
+  if (Object.prototype.hasOwnProperty.call(__enEntries, key)) text = __enEntries[key];
+  else if (args.length && args[0] !== undefined && args[0] !== null && args[0] !== '') text = String(args[0]);
+  else return String(key);
+  let argIndex = 0;
+  return String(text).replace(/\{(\w+)\}/g, (m, name) => {
+    if (argIndex < args.length) return String(args[argIndex++]);
+    return m;
+  });
 }
 """
 
@@ -426,7 +440,17 @@ _F3 = r"""
     global.__state.btnForceUpdate.style.display = 'inline-block';
     global.__state.btnForceUpdate.disabled = false;
     global.__state.btnForceUpdate.dataset.target = 'agent';
-    global._forceUpdateGrant = { target: 'agent', channel: 'stable', epoch: 1 };
+    // finding 3 (round 3): establish the grant through the PRODUCTION path.
+    // Writing `global._forceUpdateGrant = ...` only created a property on the
+    // sandbox object — the production `let _forceUpdateGrant` is a separate
+    // lexical binding, so the grant the scenario claims to set was never seen
+    // by forceUpdate()/applyUpdates() and every assertion below it was vacuous.
+    // _showUpdateBanner is the real arming path and it re-derives the grant
+    // from the payload, so use it.
+    _showUpdateBanner({
+      webui: { behind: 3, manual_update: true, dirty: false },
+      agent: { behind: 1, channel: 'stable', recovery: { force: true } },
+    }, null, 0);
 
     global.__nextApiResponse = payload;
     global.__posted.length = 0;
@@ -465,7 +489,12 @@ _F4 = r"""
   // the newer check at each point where the handler is waiting on real work.
   let releaseConfirm;
   const confirmGate = new Promise((res) => { releaseConfirm = res; });
-  global.showConfirmDialog = () => confirmGate;
+  // finding 3 (round 3): resolve with a TRUE confirmation. Resolving with
+  // nothing made forceUpdate() return at `if(!confirmed) return` before it
+  // ever read health, so the scenario asserted health_reads:0 and never
+  // exercised the contract it claims to test. A confirmed dialog is what puts
+  // the handler past the confirm and onto the health await.
+  global.showConfirmDialog = async () => { await confirmGate; return true; };
 
   let releaseHealth;
   const healthGate = new Promise((res) => { releaseHealth = res; });
@@ -489,7 +518,11 @@ _F4 = r"""
   const clickPromise = forceUpdate(btn);
 
   // 1) While the confirm is open, a newer clean check retires the grant.
-  global._forceUpdateGrant = null;
+  // finding 3 (round 3): retire through the production setter. Writing
+  // `global._forceUpdateGrant = null` only shadowed the sandbox property and
+  // left the real lexical grant in place, so this scenario was testing a
+  // supersession that never happened.
+  _retireForceUpdate();
   global.__state.btnForceUpdate.style.display = 'none';
   releaseConfirm();
   await new Promise((r) => setTimeout(r, 0));
