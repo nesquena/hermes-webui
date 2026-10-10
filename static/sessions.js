@@ -10640,9 +10640,12 @@ function _showProjectPicker(session, anchorEl){
   });
   anchorObserver.observe(document.body,{childList:true,subtree:true});
   _projectPickerTeardown=teardown;
-  const initialBounds=_projectPickerVisibleBounds();
-  if(_projectPickerAnchorAway(anchorEl,_projectPickerAnchorRect(anchorEl,initialBounds),initialBounds)) teardown();
-  else _positionProjectPicker(picker,anchorEl);
+  // Open even when the anchor is already stale, clipped or replaced by an
+  // earlier sidebar render: callers may open first and repaint their rows
+  // afterwards, and a picker anchored on a disconnected row is still fine to
+  // show. Its lifecycle stays owned by the observer and the scroll/resize
+  // listeners above, which retire it on the next repaint or sighting change.
+  _positionProjectPicker(picker,anchorEl);
   // Registered on the next tick so the click that opened the picker cannot close
   // it; skip if the picker was already retired by then.
   if(_projectPickerTeardown===teardown){
@@ -10657,6 +10660,19 @@ function _showProjectPicker(session, anchorEl){
   const dismiss=(opts)=>{
     document.removeEventListener('click',close);
     teardown();
+    // Paint a sidebar repaint that was skipped while this picker was open now,
+    // before focus returns: the repaint replaces the row and its trigger, so
+    // restoring first would hand focus to the element the repaint is about to
+    // remove. Same guards as the deferred replay: no other picker may own the
+    // deferral, and an open ⋮ menu blocks renders (closeSessionActionMenu
+    // drains it instead).
+    if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker
+       &&_projectPickerTeardown===null
+       &&!(typeof _sessionActionMenu!=='undefined'&&_sessionActionMenu)
+       &&typeof renderSessionListFromCache==='function'){
+      _sessionListRepaintDeferredByPicker=false;
+      try{ renderSessionListFromCache(); }catch(_){ _sessionListRepaintDeferredByPicker=true; }
+    }
     // Not to a row that is going out of sight with its sidebar.
     if(opts&&opts.restoreFocus===false) return;
     _focusSessionActionMenuRestoreTarget(_projectPickerFocusReturnTarget(session,anchorEl));

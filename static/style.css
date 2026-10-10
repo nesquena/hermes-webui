@@ -5868,7 +5868,7 @@ main.main > #mainPlugin{display:none;}
 .project-picker-item:focus-visible{background:rgba(255,255,255,.08);color:var(--text);outline:2px solid var(--focus-ring);outline-offset:-2px;}
 .project-picker-item.active:focus-visible{color:var(--blue);}
 @media (pointer:coarse){.project-picker-item{min-height:44px;padding-top:8px;padding-bottom:8px;font-size:13px;}}
-.project-picker:not(.batch-project-picker){max-height:calc(100dvh - 16px);overflow-y:auto;overscroll-behavior:contain;}
+.project-picker:not(.batch-project-picker){max-height:calc(100dvh - 16px);overflow-y:auto;overscroll-behavior:contain;scroll-padding-bottom:52px;}
 /* The batch picker renders inline in the selection bar, so on touch its 44px rows would push the
    checked conversations off screen while you choose a project: cap it at about five and a half rows. */
 @media (pointer:coarse){.batch-action-bar .batch-project-picker{max-height:250px;overflow-y:auto;}}
