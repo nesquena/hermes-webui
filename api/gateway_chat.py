@@ -2578,6 +2578,12 @@ def _run_gateway_chat_streaming(
         from api.streaming import _session_payload_with_full_messages
         gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
+        try:
+            from api.web_push import notify_session_done
+
+            notify_session_done(session_id, gateway_session_payload.get("messages"))
+        except Exception:
+            logger.debug("Web Push completion fanout failed", exc_info=True)
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:
         try:
