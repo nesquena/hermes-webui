@@ -152,16 +152,18 @@ The three font tokens are declared in `static/style.css`:
   ordinary non-code UI text
 - `--font-conversation`: user/assistant message prose
 - `--font-mono`: code, tool details, logs, identifiers, and terminal text
+- `--font-emoji`: color emoji fallback layered into the UI and mono stacks
 
 By default:
 
 ```css
+--font-emoji: "Apple Color Emoji","Noto Color Emoji","Segoe UI Emoji","Segoe UI Symbol";
 --font-conversation: var(--font-ui);
---font-mono: ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+--font-mono: ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",var(--font-emoji),monospace;
 ```
 
-For CSS-based custom skins and extension stylesheets/scripts, override the three
-font tokens directly (`--font-ui`, `--font-conversation`, `--font-mono`) on the
+For CSS-based custom skins and extension stylesheets/scripts, override the typography
+font tokens directly (`--font-ui`, `--font-conversation`, `--font-mono`, `--font-emoji`) on the
 skin root (`:root[data-skin="..."]`), including any mode-specific variant.
 `window.registerHermesSkin()` currently accepts only the documented design-token
 allowlist (no `--font-*` tokens), so custom font families should be supplied via

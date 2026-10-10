@@ -64,9 +64,10 @@ def _font_stack_offenders(css):
 
 
 def test_typography_root_tokens_are_defined():
-    assert '--font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;' in CSS
+    assert '--font-emoji:"Apple Color Emoji","Noto Color Emoji","Segoe UI Emoji","Segoe UI Symbol";' in CSS
+    assert '--font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,var(--font-emoji),sans-serif;' in CSS
     assert '--font-conversation:var(--font-ui);' in CSS
-    assert '--font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;' in CSS
+    assert '--font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",var(--font-emoji),monospace;' in CSS
 
 
 def test_msg_body_uses_conversation_font():
@@ -98,21 +99,17 @@ def test_no_skin_redefines_font_conversation():
 
 def test_nous_skin_keeps_monospace_ui_default():
     assert _get_root_skin_block(CSS, "nous")
-    assert re.search(
-        r'--font-ui:"SF Mono","Roboto Mono","Courier New",monospace;',
-        _get_root_skin_block(CSS, "nous"),
-        re.S,
-    )
+    assert '--font-ui:"SF Mono","Roboto Mono","Courier New",var(--font-emoji),monospace;' in _get_root_skin_block(CSS, "nous")
 
 
 def test_geist_and_neon_skins_set_expected_font_ui_tokens():
     geist_block = _get_root_skin_block(CSS, "geist-contrast")
     assert geist_block
-    assert "--font-ui:\"Geist\",\"Geist Sans\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",Helvetica,Arial,sans-serif;" in geist_block
+    assert "--font-ui:\"Geist\",\"Geist Sans\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",Helvetica,Arial,var(--font-emoji),sans-serif;" in geist_block
     for skin in ("neon", "neon-soft", "neon-paint"):
         block = _get_root_skin_block(CSS, skin)
         assert block, f"Missing {skin} root skin block"
-        assert "--font-ui:system-ui,-apple-system,sans-serif;" in block
+        assert "--font-ui:system-ui,-apple-system,var(--font-emoji),sans-serif;" in block
 
 
 def test_no_stale_var_mono_usage_or_literal_monospace_font_family_stacks():
@@ -879,7 +876,7 @@ process.stdout.write(JSON.stringify({
 
 def test_first_party_technical_js_uses_font_mono_contract():
     assert 'function _terminalMonoFont()' in TERMINAL_JS
-    assert "'ui-monospace,\"SFMono-Regular\",\"SF Mono\",Menlo,Consolas,\"Liberation Mono\",monospace'" in TERMINAL_JS
+    assert "'ui-monospace,\"SFMono-Regular\",\"SF Mono\",Menlo,Consolas,\"Liberation Mono\",\"Apple Color Emoji\",\"Noto Color Emoji\",\"Segoe UI Emoji\",\"Segoe UI Symbol\",monospace'" in TERMINAL_JS
     assert 'font-family:var(--font-mono)' in PANEL_JS
     assert "fontFamily='var(--font-mono)'" in UI_JS
     assert "font-family:var(--font-ui)" in BOOT_JS
