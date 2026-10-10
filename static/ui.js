@@ -9354,7 +9354,9 @@ function setBusy(v){
         }
         autoResize();
         renderTray();
-        send();
+        // #7862: pass the continuation token from the queue entry so a goal
+        // continuation drained after the goal turn can be matched by identity.
+        send(next.goal_continuation_id?{goal_continuation_id:next.goal_continuation_id}:undefined);
       },120);
     }
   }

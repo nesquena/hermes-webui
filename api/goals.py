@@ -595,6 +595,36 @@ def goal_command_payload(
     if lower in ("clear", "stop", "done"):
         had = bool(mgr.has_goal())
         mgr.clear()
+        # #6885 slice 2a: clearing the goal must also retire any pending
+        # durable continuation intent so it cannot be re-armed on restart.
+        #
+        # #7862 round 7 (CORE): the retirement must be DURABLE before the clear
+        # is acknowledged. ``retire_pending_goal_continuation`` never raises, so
+        # the old bare ``except: pass`` swallowed the only signal there is: a
+        # ``False`` return means the record is gone from memory but its old
+        # bytes are still the claimable registry, so a restart would re-arm a
+        # continuation on a goal the user just cleared. Report the clear as
+        # failed instead of claiming it succeeded.
+        try:
+            from api.goal_continuation_store import retire_pending_goal_continuation
+
+            continuation_retired = retire_pending_goal_continuation(sid, reason="cleared")
+        except Exception:
+            continuation_retired = False
+            logger.warning(
+                "Failed to retire the pending goal continuation for session %s", sid, exc_info=True
+            )
+        if not continuation_retired:
+            return _payload(
+                ok=False,
+                action="clear",
+                error="continuation_retire_failed",
+                message=(
+                    "Goal cleared, but its pending continuation could not be removed "
+                    "from the durable registry, so it may resume after a restart. "
+                    "Retry /goal clear."
+                ),
+            )
         return _payload(
             action="clear",
             message="Goal cleared." if had else "No active goal.",

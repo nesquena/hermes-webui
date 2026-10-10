@@ -579,12 +579,9 @@ def main() -> None:
 
     try:
         from api.models import _active_state_db_path
-        from api.session_recovery import recover_all_sessions_on_startup
-        result = recover_all_sessions_on_startup(
-            SESSION_DIR,
-            rebuild_index=True,
-            state_db_path=_active_state_db_path(),
-        )
+        from api.session_recovery import recover_all_sessions_on_startup, restore_goal_continuations_on_startup
+        restore_goal_continuations_on_startup(SESSION_DIR)
+        result = recover_all_sessions_on_startup(SESSION_DIR, rebuild_index=True, state_db_path=_active_state_db_path())
         if result.get("restored"):
             print(f"[recovery] Restored {result['restored']}/{result['scanned']} sessions from .bak (see #1558).", flush=True)
     except Exception as exc:

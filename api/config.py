@@ -12338,6 +12338,10 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+# #6885 slice 2a: per-session durable goal-continuation intent (prompt +
+# generation), the authoritative in-memory mirror of the on-disk registry.
+# Arm/retire only through api.goal_continuation_store's locked mutators.
+PENDING_GOAL_CONTINUATION_RECORDS: dict = {}
 
 # ── THE list of per-stream registries (#7302 re-gate) ───────────────────────
 # Every registry a stream owns. Both the local worker teardown (api/streaming.py)

@@ -23,6 +23,7 @@ import traceback
 import unicodedata
 import copy
 import inspect
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -67,6 +68,8 @@ from api.config import (
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
+from api.goal_continuation_store import arm_pending_goal_continuation
+
 from api.helpers import (
     redact_session_data,
     scrub_internal_replay_fields,
@@ -15136,15 +15139,29 @@ def _run_agent_streaming(
                         'message_args': decision.get('message_args') or [],
                         'decision': decision,
                     })
-                if decision.get('should_continue'):
-                    continuation_prompt = str(decision.get('continuation_prompt') or '').strip()
+                if decision.get("should_continue"):
+                    continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
                     if continuation_prompt:
                         # #1932: mark this session as pending a goal continuation
                         # so the next /chat/start creates a goal-related stream.
                         PENDING_GOAL_CONTINUATION.add(session_id)
+                        # #7862: mint the continuation token so the browser's
+                        # queued automatic send can be matched by IDENTITY
+                        # instead of text — a `/use` skill directive can wrap
+                        # the queued text and break a text-only comparison.
+                        continuation_id = (
+                            f"gc-{session_id[:8]}-{uuid.uuid4().hex[:12]}"
+                        )
+                        arm_pending_goal_continuation(
+                            session_id,
+                            continuation_prompt,
+                            reason="goal_continue",
+                            continuation_id=continuation_id,
+                        )
                         put('goal_continue', {
                             'session_id': session_id,
                             'continuation_prompt': continuation_prompt,
+                            'continuation_id': continuation_id,
                             'text': continuation_prompt,
                             'message': _goal_message,
                             'message_key': decision.get('message_key') or 'goal_continuing',
